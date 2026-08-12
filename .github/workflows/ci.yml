@@ -1,0 +1,137 @@
+name: CI
+
+# La matriz es la definición operativa de "portable" (design D5): la portabilidad
+# se considera no verificada hasta que estos jobs estén en verde.
+# Ver docs/decisions/ADR-004-portabilidad.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Version mayor de LLVM pineada. Debe coincidir con la feature `llvm20-1` de
+  # inkwell y con la constante LLVM_MAJOR del build script.
+  # Ver docs/decisions/ADR-001-pin-llvm.md
+  LLVM_VERSION: "20"
+  LLVM_FULL_VERSION: "20.1.8"
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Un fallo en una plataforma no debe ocultar el estado de las demas:
+      # necesitamos saber si el problema es de una o de todas.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: macos-aarch64
+            runner: macos-14
+          - name: macos-x86_64
+            runner: macos-13
+          - name: windows-x86_64
+            runner: windows-latest
+          # aarch64-windows queda fuera de la matriz inicial a proposito: el
+          # tarball oficial de LLVM existe para esa arquitectura, pero apila un
+          # riesgo nuevo sobre la plataforma que ya es la mas fragil para
+          # llvm-sys. Se incorpora cuando windows-x86_64 este estable.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- LLVM: Linux -----------------------------------------------------
+      # apt.llvm.org publica las bibliotecas estaticas en el paquete -dev, que
+      # es lo que llvm-sys necesita para enlazar.
+      - name: Instalar LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "${LLVM_VERSION}"
+          sudo apt-get install -y \
+            "llvm-${LLVM_VERSION}-dev" \
+            "libpolly-${LLVM_VERSION}-dev" \
+            "lld-${LLVM_VERSION}"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+      # --- LLVM: macOS -----------------------------------------------------
+      - name: Instalar LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install "llvm@${LLVM_VERSION}" "lld@${LLVM_VERSION}"
+          echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@${LLVM_VERSION})" >> "$GITHUB_ENV"
+
+      # --- LLVM: Windows ---------------------------------------------------
+      # El instalador .exe oficial NO incluye las bibliotecas estaticas ni las
+      # cabeceras que llvm-sys necesita: hay que usar el tarball de desarrollo.
+      # Es la causa mas comun de fallos de build en Windows.
+      # Ver docs/TOOLCHAIN.md
+      - name: Cachear LLVM (Windows)
+        if: runner.os == 'Windows'
+        id: cache-llvm-windows
+        uses: actions/cache@v4
+        with:
+          path: C:\LLVM
+          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64
+
+      - name: Instalar LLVM (Windows)
+        if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "clang+llvm-$env:LLVM_FULL_VERSION-x86_64-pc-windows-msvc"
+          $url  = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_FULL_VERSION/$name.tar.xz"
+
+          Write-Host "Descargando $url"
+          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+
+          # 7z viene preinstalado en los runners de Windows y maneja xz de forma
+          # confiable, a diferencia del tar.exe del sistema.
+          7z x llvm.tar.xz -o. -y
+          7z x llvm.tar -oC:\extracted -y
+
+          New-Item -ItemType Directory -Force -Path C:\LLVM | Out-Null
+          Move-Item -Path "C:\extracted\$name\*" -Destination C:\LLVM -Force
+
+      - name: Declarar prefijo de LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "LLVM_SYS_201_PREFIX=C:/LLVM" >> $env:GITHUB_ENV
+
+      # --- Verificacion del toolchain --------------------------------------
+      - name: Verificar LLVM
+        shell: bash
+        run: |
+          "$LLVM_SYS_201_PREFIX/bin/llvm-config" --version
+          test -d "$LLVM_SYS_201_PREFIX/lib" || { echo "falta el directorio lib"; exit 1; }
+
+      # --- Rust ------------------------------------------------------------
+      # La version sale de rust-toolchain.toml; rustup la instala solo.
+      - name: Mostrar toolchain de Rust
+        run: |
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      # --- Build y verificacion --------------------------------------------
+      - name: Formato
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Tests
+        run: cargo test --workspace

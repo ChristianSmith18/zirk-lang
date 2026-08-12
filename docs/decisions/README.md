@@ -12,7 +12,9 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-004](./ADR-004-portabilidad.md) | Estrategia de portabilidad (construir vs producir) | aceptada |
 | [ADR-005](./ADR-005-representacion-string.md) | `String` opaco tras la frontera del runtime | aceptada |
 
-## Pendientes de Fase 0
+## Estado de los pendientes de Fase 0
 
-- **Layout del workspace** — los ocho crates que propone el roadmap más `zirk-runtime` (ADR-002). Se resuelve al crear el workspace.
-- **Formato de diagnósticos** — `zirk-diagnostics` como crate propio desde el día uno, según `ZIRK_COMPILER_SPEC.md` sección 8.
+- **Layout del workspace** — ✅ resuelto. Nueve crates en `crates/`: los ocho del roadmap más `zirk-runtime` (ADR-002). La dirección única de dependencias a lo largo del pipeline está documentada en el `lib.rs` de cada crate.
+- **Formato de diagnósticos** — ✅ resuelto. `zirk-diagnostics` implementa el formato de `ZIRK_COMPILER_SPEC.md` sección 8 con renderizado humano y estructurado, y ya lo usa `zirk-codegen-llvm`.
+- **Sanity check de LLVM** — ✅ resuelto. Vive como test permanente en `zirk-codegen-llvm`, no como spike desechable.
+- **Verificación de portabilidad en CI** — ⏳ pendiente. El workflow existe; falta ejecutarlo. Ver ADR-004.

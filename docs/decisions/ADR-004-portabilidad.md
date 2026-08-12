@@ -59,3 +59,16 @@ No bloquea Fase 1, que solo compila para el host. Se registra acá para que no s
 - CI debe cubrir la matriz `{windows, linux, macos} × {x86_64, aarch64}` desde Fase 0.
 - Ningún desarrollo puede depender de una ruta absoluta específica de una máquina. En particular, `LLVM_SYS_201_PREFIX` se resuelve por entorno y **no** se versiona en `.cargo/config.toml`.
 - Windows es la plataforma de mayor fricción para la portabilidad A; ver [ADR-001](./ADR-001-pin-llvm.md) para la fuente de LLVM que sí funciona ahí.
+
+## Estado de la verificación
+
+| Portabilidad | Estado | Evidencia |
+|---|---|---|
+| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix` de `zirk-codegen-llvm`: emite y valida contenedor y arquitectura de los nueve targets. Ejecutado en `aarch64-macos`. |
+| **A** — construcción en macOS aarch64 | ✅ verificada | `cargo build`, `cargo test` (23 tests), `cargo clippy` y `cargo fmt --check` en verde. |
+| **A** — construcción en Linux (x86_64, aarch64) | ⏳ no verificada | Workflow escrito, sin ejecutar. |
+| **A** — construcción en macOS x86_64 | ⏳ no verificada | Workflow escrito, sin ejecutar. |
+| **A** — construcción en Windows x86_64 | ⏳ **no verificada — riesgo principal** | Workflow escrito, sin ejecutar. Es el punto donde `llvm-sys` puede fallar. |
+| **A** — construcción en Windows aarch64 | 🚫 fuera de la matriz inicial | Decisión deliberada: apila riesgo sobre la plataforma ya más frágil. Se incorpora cuando `windows-x86_64` esté estable. |
+
+**Hasta que CI corra en verde en las tres plataformas, la portabilidad A se considera no verificada.** Que el workflow exista no es evidencia de que funcione.

@@ -1,0 +1,13 @@
+[package]
+name = "zirk-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# staticlib produce el artefacto que se enlaza en los binarios que Zirk genera.
+# rlib existe solo para poder testear el crate desde Cargo.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
