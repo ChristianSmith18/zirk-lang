@@ -153,7 +153,9 @@ jobs:
           $stubDir = "C:\llvm-stubs"
           New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
 
-          & "C:\LLVM\bin\llvm-lib.exe" "/OUT:$stubDir\libxml2s.lib"
+          # /llvmlibempty es necesario: sin el, llvm-lib no escribe nada cuando
+          # no hay objetos de entrada y solo emite un warning.
+          & "C:\LLVM\bin\llvm-lib.exe" "/OUT:$stubDir\libxml2s.lib" /llvmlibempty
           if (-not (Test-Path "$stubDir\libxml2s.lib")) {
             throw "no se pudo generar el stub libxml2s.lib con llvm-lib"
           }
