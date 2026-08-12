@@ -1,0 +1,18 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Artefactos de compilación de Zirk
+*.o
+*.obj
+*.ll
+*.bc
+/out/
+
+# macOS
+.DS_Store
+
+# Editores
+.idea/
+*.swp
