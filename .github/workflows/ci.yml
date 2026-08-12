@@ -4,11 +4,22 @@ name: CI
 # se considera no verificada hasta que estos jobs estén en verde.
 # Ver docs/decisions/ADR-004-portabilidad.md
 
+# Modelo de ramas: git flow.
+#   feature/* ──▶ develop ──▶ release/* ──▶ main
+#   hotfix/*  ──▶ main + develop
+# CI corre en las dos ramas de larga vida y en toda PR que apunte a ellas.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
+    branches: [main, develop]
   workflow_dispatch:
+
+# Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
+# matriz es cara y solo importa el ultimo commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
