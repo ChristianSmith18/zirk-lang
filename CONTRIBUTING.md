@@ -65,15 +65,24 @@ chore(ci): cachear la instalación de LLVM en Windows
 
 ## Antes de abrir una PR
 
-Lo mismo que corre CI, para no descubrirlo en el runner:
-
 ```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+./scripts/check-local.sh
 ```
 
-CI ejecuta esto sobre `{linux, macos, windows} × {x86_64, aarch64}`. **Que funcione en tu máquina no es evidencia de que funcione.**
+Ejecuta lo mismo que CI —formato, clippy y tests— detectando `LLVM_SYS_201_PREFIX` y validando la versión de LLVM antes de empezar.
+
+### Dónde se verifica cada plataforma
+
+```
+   macOS aarch64  ──▶  ./scripts/check-local.sh   (tu máquina)
+   Linux x86_64   ──┐
+   Linux aarch64  ──┼─▶  GitHub Actions
+   Windows x86_64 ──┘
+```
+
+**macOS no está en CI**: los runners cuestan 10x en repositorios privados y no aportan información que tu máquina no dé. La consecuencia es que **una regresión específica de macOS no la detecta ninguna PR** — solo la detecta quien corra el script. Si trabajás en macOS, corrélo antes de abrir la PR. El razonamiento completo está en [ADR-004](docs/decisions/ADR-004-portabilidad.md).
+
+Que funcione en tu máquina no es evidencia de que funcione en Linux ni en Windows: para eso está CI.
 
 ## Qué acompaña a cada feature
 
