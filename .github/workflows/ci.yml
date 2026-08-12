@@ -105,11 +105,28 @@ jobs:
 
           # 7z viene preinstalado en los runners de Windows y maneja xz de forma
           # confiable, a diferencia del tar.exe del sistema.
-          7z x llvm.tar.xz -o. -y
+          #
+          # El switch -o de 7-Zip exige la ruta pegada y rechaza `-o.` como
+          # "too short switch". Sin -o extrae al directorio actual, que es lo
+          # que se necesita para el primer paso.
+          7z x llvm.tar.xz -y
           7z x llvm.tar -oC:\extracted -y
 
+          # El tarball trae un unico directorio raiz con el nombre del release.
+          # Se resuelve en vez de asumirlo: si upstream lo cambia, conviene
+          # fallar con un mensaje claro y no con un path inexistente.
+          $root = Get-ChildItem -Path C:\extracted -Directory | Select-Object -First 1
+          if (-not $root) {
+            throw "el tarball de LLVM no contiene un directorio raiz en C:\extracted"
+          }
+          Write-Host "Directorio raiz extraido: $($root.Name)"
+
           New-Item -ItemType Directory -Force -Path C:\LLVM | Out-Null
-          Move-Item -Path "C:\extracted\$name\*" -Destination C:\LLVM -Force
+          Move-Item -Path "$($root.FullName)\*" -Destination C:\LLVM -Force
+
+          if (-not (Test-Path C:\LLVM\bin\llvm-config.exe)) {
+            throw "falta llvm-config.exe: la instalacion de LLVM quedo incompleta"
+          }
 
       - name: Declarar prefijo de LLVM (Windows)
         if: runner.os == 'Windows'
