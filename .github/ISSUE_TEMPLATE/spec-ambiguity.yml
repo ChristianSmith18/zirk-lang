@@ -1,0 +1,42 @@
+name: Ambigüedad en el spec
+description: El spec no cubre un caso, o dos documentos se contradicen
+labels: [spec]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Regla explícita del propio spec: **toda ambigüedad debe producir una
+        pregunta o quedar documentada — nunca resolverse en silencio
+        inventando comportamiento no especificado.**
+
+        Este template es ese canal.
+
+  - type: input
+    id: documento
+    attributes:
+      label: Documento y sección
+      placeholder: "ZIRK_LANGUAGE_SPEC.md sección 4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: ambiguedad
+    attributes:
+      label: Qué queda sin definir
+      description: Citá el texto y explicá qué caso concreto no resuelve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: interpretaciones
+    attributes:
+      label: Interpretaciones posibles
+      description: Las lecturas razonables del texto actual y en qué difieren observablemente.
+    validations:
+      required: true
+
+  - type: textarea
+    id: bloquea
+    attributes:
+      label: Qué bloquea
+      description: ¿Impide avanzar en la fase actual, o se puede posponer?
