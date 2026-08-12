@@ -56,19 +56,37 @@ No bloquea Fase 1, que solo compila para el host. Se registra acá para que no s
 
 ## Consecuencias
 
-- CI debe cubrir la matriz `{windows, linux, macos} × {x86_64, aarch64}` desde Fase 0.
+- La verificación debe cubrir `{windows, linux, macos}` desde Fase 0, repartida entre CI y la máquina de desarrollo (ver "Reparto de la verificación").
 - Ningún desarrollo puede depender de una ruta absoluta específica de una máquina. En particular, `LLVM_SYS_201_PREFIX` se resuelve por entorno y **no** se versiona en `.cargo/config.toml`.
 - Windows es la plataforma de mayor fricción para la portabilidad A; ver [ADR-001](./ADR-001-pin-llvm.md) para la fuente de LLVM que sí funciona ahí.
+
+## Reparto de la verificación
+
+**macOS se verifica localmente; Linux y Windows en CI.**
+
+No es una concesión de comodidad. Los runners de macOS consumen minutos a 10x en repositorios privados, y `macos-13` (Intel) además rara vez consigue runner: en las primeras ejecuciones quedó encolado indefinidamente mientras el resto de la matriz completaba. Ejecutar en un runner de macOS lo mismo que ya se ejecuta en el escritorio de desarrollo —también `aarch64-macos`— no aporta información nueva y es, con diferencia, la parte más cara de la matriz.
+
+Linux y Windows sí aportan información que la máquina de desarrollo no puede dar, y por eso están en CI.
+
+```
+   macOS aarch64  ──▶  ./scripts/check-local.sh   (máquina de desarrollo)
+   Linux x86_64   ──┐
+   Linux aarch64  ──┼─▶  GitHub Actions
+   Windows x86_64 ──┘
+```
+
+La contrapartida honesta: **una regresión específica de macOS no la detecta una PR**, solo la detecta quien corra el script. Es un riesgo aceptado a cambio del costo, y se revierte haciendo el repositorio público, donde Actions es gratis e ilimitado.
 
 ## Estado de la verificación
 
 | Portabilidad | Estado | Evidencia |
 |---|---|---|
-| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix` de `zirk-codegen-llvm`: emite y valida contenedor y arquitectura de los nueve targets. Ejecutado en `aarch64-macos`. |
-| **A** — construcción en macOS aarch64 | ✅ verificada | `cargo build`, `cargo test` (23 tests), `cargo clippy` y `cargo fmt --check` en verde. |
-| **A** — construcción en Linux (x86_64, aarch64) | ⏳ no verificada | Workflow escrito, sin ejecutar. |
-| **A** — construcción en macOS x86_64 | ⏳ no verificada | Workflow escrito, sin ejecutar. |
-| **A** — construcción en Windows x86_64 | ⏳ **no verificada — riesgo principal** | Workflow escrito, sin ejecutar. Es el punto donde `llvm-sys` puede fallar. |
-| **A** — construcción en Windows aarch64 | 🚫 fuera de la matriz inicial | Decisión deliberada: apila riesgo sobre la plataforma ya más frágil. Se incorpora cuando `windows-x86_64` esté estable. |
+| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix`: emite y valida contenedor y arquitectura de los nueve targets. |
+| **A** — macOS aarch64 | ✅ verificada | `./scripts/check-local.sh` en verde sobre `Darwin arm64`: fmt, clippy y 23 tests. |
+| **A** — Linux x86_64 | ✅ verificada | CI en verde. |
+| **A** — Linux aarch64 | ✅ verificada | CI en verde. |
+| **A** — Windows x86_64 | ⏳ **en curso — riesgo principal** | Resueltos dos fallos (switch de 7-Zip, extracción del tarball). Pendiente: `LNK1181` por `libxml2s.lib`, que LLVM declara como dependencia del sistema en Windows pero su distribución oficial no incluye. |
+| **A** — macOS x86_64 | 🚫 fuera de alcance | Intel es plataforma en retirada y sus runners son escasos. |
+| **A** — Windows aarch64 | 🚫 fuera de la matriz inicial | Apila riesgo sobre la plataforma ya más frágil. Se incorpora cuando `windows-x86_64` esté estable. |
 
-**Hasta que CI corra en verde en las tres plataformas, la portabilidad A se considera no verificada.** Que el workflow exista no es evidencia de que funcione.
+**Windows sigue siendo el único punto no verificado**, tal como este ADR anticipó desde el principio.
