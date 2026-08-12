@@ -1,0 +1,10 @@
+[package]
+name = "zirk-sema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zirk-diagnostics.workspace = true
+zirk-ast.workspace = true

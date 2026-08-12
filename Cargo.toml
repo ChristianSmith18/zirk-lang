@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+# Crates internos. Las dependencias entre etapas fluyen en un solo sentido
+# a lo largo del pipeline; zirk-diagnostics es la unica transversal permitida.
+zirk-ast = { path = "crates/zirk-ast" }
+zirk-codegen-llvm = { path = "crates/zirk-codegen-llvm" }
+zirk-diagnostics = { path = "crates/zirk-diagnostics" }
+zirk-ir = { path = "crates/zirk-ir" }
+zirk-lexer = { path = "crates/zirk-lexer" }
+zirk-parser = { path = "crates/zirk-parser" }
+zirk-sema = { path = "crates/zirk-sema" }
+
+# Externas
+inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -1,0 +1,5 @@
+# Version exacta, no minima: el proyecto aplica la misma disciplina de pin que
+# usa para LLVM (ADR-001). Builds reproducibles, segun COMPILER_SPEC seccion 7.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

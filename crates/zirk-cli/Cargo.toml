@@ -1,0 +1,17 @@
+[package]
+name = "zirk-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zirk"
+path = "src/main.rs"
+
+[dependencies]
+zirk-diagnostics.workspace = true
+zirk-codegen-llvm.workspace = true
+zirk-parser.workspace = true
+zirk-sema.workspace = true
+zirk-ir.workspace = true

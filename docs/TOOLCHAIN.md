@@ -92,4 +92,18 @@ rustc --version                 # 1.94+
 $LLVM_SYS_201_PREFIX/bin/llvm-config --version   # 20.1.x
 ```
 
-La comprobación real es que el sanity check de LLVM compile, enlace y ejecute un binario nativo. Ver [ADR-001](./decisions/ADR-001-pin-llvm.md).
+La comprobación real es la suite del workspace, que incluye el sanity check de LLVM (genera IR, emite objeto, enlaza y ejecuta un binario nativo):
+
+```sh
+cargo test --workspace
+```
+
+Si el pin de LLVM está mal, el build falla antes de compilar, con un diagnóstico que nombra la versión encontrada y la esperada. No hace falta interpretar errores de enlace.
+
+## Notas de plataforma
+
+- **Windows:** el prefijo se declara con barras normales (`C:/LLVM`, no `C:\LLVM`). Evita problemas de escape al pasar por shells tipo bash, y las APIs de Windows aceptan ambos separadores.
+- **macOS:** `llvm@20` y `lld@20` son formulae separadas desde LLVM 20; instalar solo `llvm@20` deja el sistema sin `lld`.
+- **Linux:** el paquete necesario es `llvm-20-dev`, no `llvm-20`. El primero incluye las bibliotecas estáticas; el segundo solo los binarios.
+
+La instalación por plataforma está automatizada en `.github/workflows/ci.yml`, que es la referencia ejecutable de este documento.
