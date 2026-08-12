@@ -128,6 +128,29 @@ jobs:
             throw "falta llvm-config.exe: la instalacion de LLVM quedo incompleta"
           }
 
+      # Desde LLVM 14, la build de Windows se compila con soporte de libxml2 y
+      # `llvm-config --system-libs` la declara como dependencia del sistema.
+      # El tarball oficial no incluye libxml2s.lib, asi que sin esto el enlace
+      # falla con LNK1181. En Linux y macOS libxml2 esta deshabilitada y el
+      # problema no existe.
+      - name: Proveer libxml2 estatica (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          vcpkg install libxml2:x64-windows-static
+
+          $libDir = "C:\vcpkg\installed\x64-windows-static\lib"
+          if (-not (Test-Path "$libDir\libxml2.lib")) {
+            throw "vcpkg no produjo libxml2.lib en $libDir"
+          }
+
+          # LLVM referencia el nombre con sufijo `s`, que es el que genera el
+          # CMake propio de libxml2 para builds estaticas.
+          Copy-Item "$libDir\libxml2.lib" "$libDir\libxml2s.lib" -Force
+
+          echo "LIB=$libDir;$env:LIB" >> $env:GITHUB_ENV
+
       - name: Declarar prefijo de LLVM (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
