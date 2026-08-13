@@ -121,13 +121,16 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
         .boxed()
     })?;
 
+    // RelocMode::Default deja que LLVM elija el modelo correcto para cada
+    // target. Forzar PIC es un concepto de Unix que no corresponde a COFF y
+    // provocaba una violación de acceso al emitir para Windows.
     target
         .create_target_machine(
             &target_triple,
             "generic",
             "",
             OptimizationLevel::None,
-            RelocMode::PIC,
+            RelocMode::Default,
             CodeModel::Default,
         )
         .ok_or_else(|| {

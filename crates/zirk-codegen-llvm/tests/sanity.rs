@@ -26,6 +26,7 @@ const MENSAJE: &str = "sanity check de zirk";
 fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
     let _llvm = common::llvm_lock();
 
+    eprintln!("[sanity] creando contexto LLVM");
     let context = Context::create();
     let module = context.create_module("sanity");
     let builder = context.create_builder();
@@ -50,6 +51,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         .build_return(Some(&i32_type.const_int(0, false)))
         .expect("no se pudo construir el return");
 
+    eprintln!("[sanity] verificando modulo");
     module
         .verify()
         .expect("el módulo LLVM generado no verifica");
@@ -60,6 +62,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         "sanity{}",
         if cfg!(windows) { ".obj" } else { ".o" }
     ));
+    eprintln!("[sanity] emitiendo objeto para el host");
     emit_object_for_host(&module, &objeto)
         .unwrap_or_else(|d| panic!("fallo al emitir el objeto:\n{}", d.render()));
 
@@ -67,6 +70,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
 
     // Enlace.
     let binario = dir.join(common::exe("sanity"));
+    eprintln!("[sanity] enlazando");
     let linker = common::linker_driver();
     let salida_enlace = Command::new(&linker)
         .arg(&objeto)
@@ -82,6 +86,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
     );
 
     // Ejecución.
+    eprintln!("[sanity] ejecutando binario");
     let salida = Command::new(&binario)
         .output()
         .expect("no se pudo ejecutar el binario producido");
