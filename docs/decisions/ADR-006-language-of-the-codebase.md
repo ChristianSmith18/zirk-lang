@@ -1,4 +1,4 @@
-# ADR-006 — El código y los diagnósticos van en inglés
+# ADR-006 — El proyecto se escribe en inglés
 
 - **Estado:** aceptada
 - **Fecha:** 13 de agosto de 2026
@@ -32,11 +32,13 @@ Las etiquetas aparecen en español. Caben dos lecturas:
 
 ## Decisión
 
-**Todo el código y toda la salida del compilador van en inglés.** Esto cubre:
+**El proyecto se escribe en inglés.** Esto cubre:
 
-- mensajes, causas, ayudas, las etiquetas del formato y la salida de la CLI;
+- las **cinco specs normativas** de `docs/`;
+- el **roadmap** y el **prompt de arranque** de `docs/init/`;
 - **identificadores de código**: funciones, variables, tipos, constantes y nombres de test;
 - **comentarios y documentación de código** (`//`, `///`, `//!`);
+- mensajes, causas, ayudas, las etiquetas del formato y la salida de la CLI;
 - los scripts del repositorio.
 
 Se adopta la **segunda lectura** del spec: el ejemplo es ilustrativo. Lo normativo es que existan una causa y una ayuda, no las palabras con las que se rotulan. El resto del documento está en español porque el documento está en español, no porque el compilador deba hablar español.
@@ -56,16 +58,21 @@ error[E0308]: incompatible types
 
 ### Qué **no** cambia
 
-Sigue en español la documentación del proyecto que se lee como prosa, no como código:
+Sigue en español la documentación de trabajo *alrededor* del proyecto, la que registra cómo se construye y por qué, y no lo que Zirk es:
 
-- las cinco specs normativas de `docs/`;
 - los ADRs, incluido este;
 - `README.md`, `CONTRIBUTING.md` y `docs/TOOLCHAIN.md`;
 - los artefactos de OpenSpec y los mensajes de commit.
 
-La frontera quedó donde estaba el problema real: **todo lo que se lee como código va en inglés; lo que se lee como documento del proyecto sigue en español.**
+La frontera: **lo que define Zirk va en inglés; lo que registra cómo lo estamos construyendo va en español.**
 
-Una primera versión de este ADR trazaba la frontera en "lo que ve quien usa Zirk contra lo que ve quien lo construye", y dejaba los identificadores en español. Se corrigió: un contribuyente externo lee el código antes que cualquier documento, y `sincronizar()` o `esperar_identificador()` son una barrera de entrada tan real como un mensaje de error traducido.
+### Cómo llegamos acá
+
+Este ADR se corrigió dos veces, y las dos correcciones vale dejarlas escritas porque muestran dónde estaba mal puesta la frontera:
+
+1. **Primera versión:** solo los diagnósticos en inglés, con la frontera en "lo que ve quien usa Zirk contra lo que ve quien lo construye". Falló porque un contribuyente externo lee el código antes que cualquier documento: `sincronizar()` es una barrera de entrada tan real como un mensaje de error traducido.
+
+2. **Segunda versión:** además el código, con la frontera en "código contra documento". Falló porque las specs normativas **no son documentación del proyecto: son la definición del lenguaje**. Alguien que quiera entender Zirk las lee antes que el código, y son el artefacto más público que el proyecto tiene.
 
 ## Motivo
 
@@ -88,4 +95,5 @@ También afecta al futuro del proyecto:
 - Las etiquetas de `zirk-diagnostics` pasan a `cause:` y `help:`.
 - Los códigos de diagnóstico se renombran a inglés: `TOKEN_INESPERADO` → `UNEXPECTED_TOKEN`, `CADENA_SIN_CERRAR` → `UNTERMINATED_STRING`, etc. Los **códigos estables** (`E0301`, `E0202`) no cambian: son el contrato con herramientas y documentación.
 - Los archivos de test se renombran: `lexico.rs` → `lexical.rs`, `gramatica.rs` → `grammar.rs`.
-- **Conviene corregir `ZIRK_COMPILER_SPEC.md` sección 8** para que su ejemplo use las etiquetas reales y la ambigüedad no reaparezca. Es un cambio al spec normativo y corresponde al autor decidirlo.
+- `ZIRK_COMPILER_SPEC.md` sección 8 ya usa las etiquetas reales `cause:` y `help:`, así que la ambigüedad que originó este ADR desapareció.
+- `docs/init/ZIRK_AGENT_PROMPT.md` abre declarando esta regla, para que cualquier agente que retome el proyecto la lea antes que cualquier otra cosa.

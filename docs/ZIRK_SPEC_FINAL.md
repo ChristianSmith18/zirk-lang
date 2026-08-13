@@ -1,68 +1,90 @@
-# Zirk — Especificación maestra
+# Zirk — Master specification
 
-Estado: diseño normativo inicial  
-Fecha: 12 de agosto de 2026  
-Extensión fuente: `.zrk`  
-CLI: `zirk`  
-Manifiesto: `init.zrk`  
-Lockfile: `zirk.lock`  
-Paquete distribuible: `.zpkg`
+Status: initial normative design
+Date: 12 August 2026
+Source extension: `.zrk`
+CLI: `zirk`
+Manifest: `init.zrk`
+Lockfile: `zirk.lock`
+Distributable package: `.zpkg`
 
-## 1. Identidad
+> **Language of this document.** Every normative specification, and the codebase
+> itself, is written in English. See
+> [decisions/ADR-006-language-of-the-codebase.md](./decisions/ADR-006-language-of-the-codebase.md).
 
-Zirk es un lenguaje compilado de propósito general, orientado a objetos, estáticamente tipado con inferencia, de alto nivel por defecto y con acceso opcional a bajo nivel. Compila a binarios nativos e incorpora concurrencia explícita y paralelismo multinúcleo como características de primera clase.
+## 1. Identity
 
-Su filosofía es:
+Zirk is a compiled, general-purpose, object-oriented language, statically typed
+with inference, high level by default and with optional low-level access. It
+compiles to native binaries and treats explicit concurrency and multicore
+parallelism as first-class features.
 
-> Fácil por defecto, explícito cuando necesitas control.
+Its philosophy is:
 
-El nombre nace de transformar el nombre *Crist*: al invertir su sonido se obtiene *Sirc* y después se modifican sus letras hasta obtener **Zirk**, conservando esa sonoridad con una identidad propia.
+> Easy by default, explicit when you need control.
 
-## 2. Alcance inicial
+The name comes from transforming the name *Crist*: reversing its sound yields
+*Sirc*, and its letters are then modified until reaching **Zirk**, preserving
+that sound with an identity of its own.
 
-Zirk 1.x estará orientado a aplicaciones backend, CLI, desktop, sistemas y librerías nativas. Los binarios serán standalone y no necesitarán Node.js, Python, Java ni otra instalación de lenguaje.
+## 2. Initial scope
 
-Targets iniciales, cuando la combinación sea soportada por LLVM, el linker y las dependencias:
+Zirk 1.x targets backend applications, CLIs, desktop, systems and native
+libraries. Binaries are standalone and require no installation of Node.js,
+Python, Java or any other language.
 
-- Windows, Linux y macOS.
-- `x86`, `x86_64`, `armv7` y `aarch64`.
-- Mach-O, ELF y PE.
-- compilación cruzada mediante `zirk build --target <target>`.
+Initial targets, where the combination is supported by LLVM, the linker and the
+dependencies:
 
-`build_targets` en `init.zrk` permite producir varios targets. Un `--target` explícito tiene prioridad. Sin ambos, se detecta el host.
+- Windows, Linux and macOS.
+- `x86`, `x86_64`, `armv7` and `aarch64`.
+- Mach-O, ELF and PE.
+- cross-compilation through `zirk build --target <target>`.
 
-## 3. Fuera del alcance inicial
+`build_targets` in `init.zrk` allows producing several targets. An explicit
+`--target` takes precedence. With neither, the host is detected.
 
-No forman parte de Zirk 1.x:
+## 3. Outside the initial scope
 
-- target WebAssembly o integración nativa con navegador/DOM;
-- directivas `@runtime`, `@target`, `@host` o `@platform`;
-- un `worker` como primitiva independiente: se compone con `task`, `thread` y `Channel<T>`;
-- `async fn`: `task` y `await` expresan la asincronía;
-- un event loop público o administrado manualmente;
-- assembly textual inline;
-- `comptime {}` general;
-- `defer` general;
-- herencia múltiple de clases;
-- sobrecarga tradicional de funciones;
-- operador de propagación `?` para `Result`;
-- ownership o reference counting como semántica pública;
-- backend propio o varios backends iniciales.
+The following are not part of Zirk 1.x:
 
-Estas exclusiones no deben reinterpretarse como huecos que una implementación pueda completar libremente.
+- a WebAssembly target or native browser/DOM integration;
+- `@runtime`, `@target`, `@host` or `@platform` directives;
+- a `worker` as an independent primitive: it is composed from `task`, `thread`
+  and `Channel<T>`;
+- `async fn`: `task` and `await` express asynchrony;
+- a public or manually managed event loop;
+- inline textual assembly;
+- general `comptime {}`;
+- general `defer`;
+- multiple class inheritance;
+- traditional function overloading;
+- the `?` propagation operator for `Result`;
+- ownership or reference counting as public semantics;
+- a custom backend, or several backends up front.
 
-## 4. Documentos normativos
+These exclusions must not be reinterpreted as gaps an implementation is free to
+fill in.
 
-Esta especificación se divide en:
+## 4. Normative documents
 
-- [ZIRK_LANGUAGE_SPEC.md](./ZIRK_LANGUAGE_SPEC.md): sintaxis, tipos, objetos, control de flujo, errores, módulos, metaprogramación y seguridad.
-- [ZIRK_COMPILER_SPEC.md](./ZIRK_COMPILER_SPEC.md): frontend, Syntax API, IR, LLVM, targets, diagnósticos y tooling.
-- [ZIRK_RUNTIME_SPEC.md](./ZIRK_RUNTIME_SPEC.md): memoria, ejecución, tasks, scheduler, I/O, threads, recursos, cancelación y cierre.
-- [ZIRK_STDLIB_SPEC.md](./ZIRK_STDLIB_SPEC.md): módulos y contratos mínimos de la biblioteca estándar.
+This specification is split into:
 
-Si dos documentos se contradicen, esta especificación maestra define el alcance y las exclusiones; el documento especializado define la semántica de su área. Toda ambigüedad restante debe producir un diagnóstico o quedar documentada antes de implementarse, nunca resolverse silenciosamente.
+- [ZIRK_LANGUAGE_SPEC.md](./ZIRK_LANGUAGE_SPEC.md): syntax, types, objects,
+  control flow, errors, modules, metaprogramming and safety.
+- [ZIRK_COMPILER_SPEC.md](./ZIRK_COMPILER_SPEC.md): frontend, Syntax API, IR,
+  LLVM, targets, diagnostics and tooling.
+- [ZIRK_RUNTIME_SPEC.md](./ZIRK_RUNTIME_SPEC.md): memory, execution, tasks,
+  scheduler, I/O, threads, resources, cancellation and shutdown.
+- [ZIRK_STDLIB_SPEC.md](./ZIRK_STDLIB_SPEC.md): modules and minimum contracts of
+  the standard library.
 
-## 5. Proyecto mínimo
+If two documents contradict each other, this master specification defines scope
+and exclusions; the specialized document defines the semantics of its own area.
+Any remaining ambiguity must produce a diagnostic or be documented before being
+implemented, never resolved silently.
+
+## 5. Minimal project
 
 ```text
 my_app/
@@ -90,37 +112,53 @@ fn main(): Void {
 }
 ```
 
-## 6. Contratos fundacionales
+## 6. Foundational contracts
 
-- Todo valor pertenece semánticamente a una clase; los valores simples pueden representarse inline.
-- `mut` permite reasignación; `inmut` impide reasignar la referencia; `inmut::strict` exige inmutabilidad profunda.
-- `null` solo habita tipos `T?`; no existe `undefined`.
-- `==` compara estructuralmente y `is` comprueba identidad en tipos de referencia.
-- `Result<T, E>` representa fallos esperables; exceptions representan situaciones excepcionales recuperables; `fatalError` termina ante estados irreparables.
-- La memoria es automática. Stack, heap, escape analysis, movimientos y RC son decisiones internas.
-- El código seguro no admite use-after-free, null dereference, data races ni comportamiento indefinido.
-- Los punteros y casts inseguros requieren `unsafe {}`.
-- Las tasks usan concurrencia estructurada; `parallel` solicita trabajo CPU multinúcleo; `thread` representa un thread real del sistema operativo.
-- El runtime puede usar un reactor de eventos internamente, pero Zirk no expone un event loop global.
-- `share` publica declaraciones, `import` las incorpora y `use` habilita globals de `init.zrk`.
+- Every value semantically belongs to a class; simple values may be represented
+  inline.
+- `mut` allows reassignment, `inmut` prevents reassigning the reference, and
+  `inmut::strict` requires deep immutability.
+- `null` inhabits only `T?` types; there is no `undefined`.
+- `==` compares structurally and `is` checks identity on reference types.
+- `Result<T, E>` represents expected failures; exceptions represent recoverable
+  exceptional situations; `fatalError` terminates on unrecoverable state.
+- Memory is automatic. Stack, heap, escape analysis, moves and RC are internal
+  decisions.
+- Safe code admits no use-after-free, null dereference, data races or undefined
+  behaviour.
+- Pointers and unsafe casts require `unsafe {}`.
+- Tasks use structured concurrency; `parallel` requests multicore CPU work;
+  `thread` represents a real operating-system thread.
+- The runtime may use an event reactor internally, but Zirk exposes no global
+  event loop.
+- `share` publishes declarations, `import` brings them in, and `use` enables
+  globals from `init.zrk`.
 
-## 7. Distribución y seguridad
+## 7. Distribution and security
 
-Una `application` puede declarar globals y concede los permisos finales. Una `library` no puede declarar globals; declara `requires` y `compile_permissions`. Los paquetes incluyen API pública tipada, representación intermedia portable, manifiesto, documentación y licencia. En el build final, todas las piezas se compilan para el mismo target.
+An `application` may declare globals and grants the final permissions. A
+`library` cannot declare globals; it declares `requires` and
+`compile_permissions`. Packages include a typed public API, a portable
+intermediate representation, a manifest, documentation and a license. In the
+final build, every piece is compiled for the same target.
 
-Los permisos son capacidades finitas declaradas en `init.zrk`. `zirk prepare` audita y puede proponer cambios; `zirk build` es estricto y no concede permisos de forma interactiva. Tokens y secretos nunca se almacenan en `init.zrk` ni en `zirk.lock`.
+Permissions are finite capabilities declared in `init.zrk`. `zirk prepare`
+audits and may propose changes; `zirk build` is strict and grants no permissions
+interactively. Tokens and secrets are never stored in `init.zrk` or in
+`zirk.lock`.
 
-## 8. Criterio de completitud
+## 8. Completeness criterion
 
-Una implementación compatible debe acompañar cada característica con:
+A conforming implementation must accompany every feature with:
 
-1. gramática;
-2. reglas de tipos;
-3. semántica observable;
-4. diagnósticos de compilación;
-5. errores de runtime;
-6. ejemplos válidos e inválidos;
-7. interacción con mutabilidad, concurrencia y targets;
-8. pruebas de conformidad.
+1. a grammar;
+2. typing rules;
+3. observable semantics;
+4. compile-time diagnostics;
+5. runtime errors;
+6. valid and invalid examples;
+7. interaction with mutability, concurrency and targets;
+8. conformance tests.
 
-El checkpoint histórico de diseño no es normativo cuando contiene preguntas, alternativas o texto marcado como pendiente.
+The historical design checkpoint is not normative where it contains questions,
+alternatives or text marked as pending.
