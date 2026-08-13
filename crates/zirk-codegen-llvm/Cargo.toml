@@ -9,4 +9,22 @@ build = "build.rs"
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-ir.workspace = true
-inkwell.workspace = true
+
+# En Unix se enlaza LLVM estaticamente: es lo mas simple y no hay conflicto de
+# runtime de C.
+[target.'cfg(not(windows))'.dependencies]
+inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
+
+# En Windows se enlaza contra LLVM-C.dll. El tarball oficial de LLVM se compila
+# con la CRT estatica y Rust usa la dinamica; enlazar estaticamente pone dos
+# heaps en el mismo proceso y el codegen muere con STATUS_ACCESS_VIOLATION.
+#
+# Con el DLL, la CRT queda encapsulada dentro de LLVM y la frontera pasa a ser
+# la API C, que esta disenada para cruzarse: lo que reserva el DLL lo libera el
+# DLL. Ver el issue #2.
+#
+# Activar crt-static en Rust no es alternativa: llvm-sys fuerza entonces todas
+# las bibliotecas del sistema a estaticas, y psapi solo existe como import
+# library en Windows.
+[target.'cfg(windows)'.dependencies]
+inkwell = { version = "0.10", default-features = false, features = ["llvm20-1-prefer-dynamic"] }
