@@ -37,6 +37,8 @@ pub mod codes {
     pub const COMENTARIO_SIN_CERRAR: Code = Code::new("E0204");
     /// Separador `_` en una posición inválida de un literal numérico.
     pub const SEPARADOR_INVALIDO: Code = Code::new("E0205");
+    /// Caracteres alfabéticos pegados a un literal numérico.
+    pub const SUFIJO_NUMERICO_INVALIDO: Code = Code::new("E0207");
     /// Literal entero que excede la representación interna.
     pub const ENTERO_DEMASIADO_GRANDE: Code = Code::new("E0206");
 }
@@ -51,6 +53,11 @@ struct Lexer<'a> {
     sink: &'a mut DiagnosticSink,
     /// Texto como vector de caracteres con su offset de byte, para poder
     /// avanzar por caracteres Unicode sin perder la posición en bytes.
+    ///
+    /// Cuesta unas ocho veces el tamaño del source en memoria. Es aceptable
+    /// para archivos únicos y se revisará cuando exista compilación
+    /// incremental, donde el objetivo de latencia de `COMPILER_SPEC` sección 1
+    /// vuelve el costo relevante.
     chars: Vec<(u32, char)>,
     pos: usize,
 }
@@ -173,6 +180,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Comentario de bloque.
+    ///
+    /// **No anidan**: `/* /* */` cierra en el primer `*/`, como en C. El spec
+    /// no lo define, así que se elige la convención más difundida y se fija con
+    /// un test para que no cambie por accidente.
     fn block_comment(&mut self) {
         let inicio = self.offset();
         self.pos += 2; // `/*`
@@ -235,6 +247,7 @@ impl<'a> Lexer<'a> {
         let mut digitos = String::new();
         let mut ultimo_fue_separador = false;
         let mut separador_invalido: Option<Span> = None;
+        let mut sufijo_invalido: Option<Span> = None;
 
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
@@ -249,9 +262,14 @@ impl<'a> Lexer<'a> {
                 ultimo_fue_separador = true;
                 self.pos += 1;
             } else if c.is_alphanumeric() {
-                // `123abc`: se consume para no volver a fallar en el mismo punto.
-                separador_invalido.get_or_insert(Span::new(self.offset(), self.offset() + 1));
-                self.pos += 1;
+                // `123abc`: se consume el sufijo entero para no volver a fallar
+                // en cada carácter, y se reporta como problema propio — la causa
+                // del separador no aplica acá.
+                let inicio_sufijo = self.offset();
+                while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    self.pos += 1;
+                }
+                sufijo_invalido.get_or_insert(Span::new(inicio_sufijo, self.offset()));
             } else {
                 break;
             }
@@ -263,6 +281,20 @@ impl<'a> Lexer<'a> {
         }
 
         let span = Span::new(inicio_offset, self.offset());
+
+        if let Some(span_sufijo) = sufijo_invalido {
+            let texto: String = self.source.slice(span_sufijo).to_string();
+            let d = self.error(
+                codes::SUFIJO_NUMERICO_INVALIDO,
+                span_sufijo,
+                format!("sufijo inválido en literal numérico: `{texto}`"),
+            );
+            self.emitir(
+                d.con_causa("un literal entero solo admite dígitos y el separador `_`")
+                    .con_ayuda("separá el número del identificador con un espacio o un operador"),
+            );
+            return None;
+        }
 
         if let Some(span_invalido) = separador_invalido {
             let d = self.error(
@@ -360,23 +392,34 @@ impl<'a> Lexer<'a> {
         let c = self.advance()?;
 
         let kind = match c {
+            '+' if self.eat('=') => PlusEq,
+            '+' if self.eat('+') => PlusPlus,
             '+' => Plus,
             '-' if self.eat('>') => Arrow,
+            '-' if self.eat('=') => MinusEq,
+            '-' if self.eat('-') => MinusMinus,
             '-' => Minus,
+            '*' if self.eat('=') => StarEq,
             '*' => Star,
+            '/' if self.eat('=') => SlashEq,
             '/' => Slash,
+            '%' if self.eat('=') => PercentEq,
             '%' => Percent,
             '=' if self.eat('=') => Eq,
             '=' if self.eat('>') => FatArrow,
             '=' => Assign,
             '!' if self.eat('=') => NotEq,
             '!' => Not,
+            '?' if self.eat('?') => QuestionQuestion,
+            '?' if self.eat('.') => QuestionDot,
+            '?' => Question,
             '<' if self.eat('=') => LtEq,
             '<' => Lt,
             '>' if self.eat('=') => GtEq,
             '>' => Gt,
             '&' if self.eat('&') => AndAnd,
             '|' if self.eat('|') => OrOr,
+            '|' if self.eat('>') => PipeGt,
             '(' => LParen,
             ')' => RParen,
             '{' => LBrace,
