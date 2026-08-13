@@ -2,7 +2,7 @@
 
 ## La regla que manda sobre todas
 
-**Las specs de `docs/` son normativas.** Ante cualquier duda de sintaxis, semántica o alcance, mandan sobre criterio propio, memoria de otros lenguajes o "lo que suena razonable".
+**Las specs de `docs/` son normativas y están en inglés.** Ante cualquier duda de sintaxis, semántica o alcance, mandan sobre criterio propio, memoria de otros lenguajes o "lo que suena razonable".
 
 Y su corolario, que es regla explícita del propio spec:
 
@@ -104,11 +104,11 @@ error[E0308]: incompatible types
 
 ### Idioma
 
-**Todo el código va en inglés**: identificadores, comentarios, documentación de código, mensajes de diagnóstico y nombres de test.
+**En inglés**: las specs normativas, el roadmap, el prompt de arranque, el código, sus comentarios, los mensajes de diagnóstico y los nombres de test.
 
-**La documentación del proyecto va en español**: specs, ADRs, este archivo, el README y los mensajes de commit.
+**En español**: los ADRs, este archivo, el README, `docs/TOOLCHAIN.md`, los artefactos de OpenSpec y los mensajes de commit.
 
-La frontera: lo que se lee como **código** va en inglés; lo que se lee como **documento del proyecto** va en español. El razonamiento está en [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
+La frontera: **lo que define Zirk va en inglés; lo que registra cómo lo estamos construyendo va en español.** El razonamiento, y las dos veces que esta frontera estuvo mal puesta, están en [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
 
 Se construye con `zirk-diagnostics`. Los códigos son **estables**: uno publicado no se reutiliza para un error semánticamente distinto.
 

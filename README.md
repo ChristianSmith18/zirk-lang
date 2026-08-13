@@ -81,6 +81,10 @@ cargo test --workspace
 - [docs/decisions/](docs/decisions/) — ADRs: decisiones que cascadean al resto del proyecto
 - [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md) — instalación del toolchain
 
+## Idioma
+
+Las specs, el roadmap y el código están **en inglés**. Los ADRs, esta guía y el resto de la documentación de trabajo están en español. Ver [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
+
 ## Contribuir
 
 Ver [CONTRIBUTING.md](CONTRIBUTING.md). El proyecto usa git flow y avanza por fases: no se implementan features de fases futuras aunque estén especificadas.
