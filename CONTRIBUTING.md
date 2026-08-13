@@ -22,7 +22,7 @@ Una fase se da por completa cuando su "Salida" corre con tests reales, no cuando
 
 Ver [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md). Resumen: Rust 1.94+ (lo fija `rust-toolchain.toml`) y LLVM **20.1** con bibliotecas estáticas, con `LLVM_SYS_201_PREFIX` apuntando a su prefijo.
 
-En Windows, el instalador `.exe` oficial de LLVM no incluye las bibliotecas estáticas. Hay que usar el tarball de desarrollo.
+En Windows, **ninguna** distribución oficial de LLVM funciona con `llvm-sys`: el instalador `.exe` no trae bibliotecas estáticas, y el tarball de desarrollo está compilado contra una CRT distinta de la que usa Rust. Ver [TOOLCHAIN.md](docs/TOOLCHAIN.md) para la fuente que sí funciona.
 
 ## Modelo de ramas: git flow
 
