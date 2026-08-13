@@ -16,8 +16,10 @@
 //! del pipeline puede depender de él, independientemente de su posición.
 
 mod render;
+mod source;
 
 pub use render::RenderStyle;
+pub use source::{SourceFile, Span};
 
 /// Severidad de un diagnóstico.
 ///
