@@ -56,7 +56,7 @@ verde "  ok"
 echo
 
 azul "== tests =="
-cargo test --workspace
+cargo test --workspace -- --test-threads=1
 echo
 
 verde "== todo en verde en $(uname -sm) =="
