@@ -3,14 +3,18 @@
 //! El formato legible reproduce `ZIRK_COMPILER_SPEC.md` sección 8:
 //!
 //! ```text
-//! error[E1234]: descripción precisa
+//! error[E1234]: precise description
 //!   src/users.zrk:18:12
 //!    |
-//! 18 |     expresión problemática
-//!    |            ^ explicación localizada
+//! 18 |     problematic expression
+//!    |            ^ localized explanation
 //!    |
-//!    = causa: motivo semántico
-//!    = ayuda: acción concreta
+//!    = cause: semantic reason
+//!    = help: concrete action
+//!
+//! Las etiquetas van en inglés: el spec las ilustra en español porque el
+//! documento está en español, pero la salida del compilador se dirige a quien
+//! usa Zirk. Ver `docs/decisions/ADR-006-idioma-de-diagnosticos.md`.
 //! ```
 
 use crate::Diagnostic;
@@ -73,10 +77,10 @@ pub(crate) fn human(diagnostic: &Diagnostic) -> String {
     }
 
     if let Some(cause) = &diagnostic.cause {
-        let _ = writeln!(out, "{pad} = causa: {cause}");
+        let _ = writeln!(out, "{pad} = cause: {cause}");
     }
     if let Some(help) = &diagnostic.help {
-        let _ = writeln!(out, "{pad} = ayuda: {help}");
+        let _ = writeln!(out, "{pad} = help: {help}");
     }
 
     out
@@ -121,12 +125,39 @@ pub(crate) fn json(diagnostic: &Diagnostic) -> String {
 }
 
 pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle) -> String {
+    // Se ordenan por ubicación antes de renderizar. Las etapas del pipeline
+    // emiten en el orden en que trabajan —primero todo el léxico, después toda
+    // la gramática—, así que sin esto un error de la línea 3 puede aparecer
+    // antes que uno de la línea 2. Quien lee espera recorrer su archivo de
+    // arriba hacia abajo.
+    let mut ordenados: Vec<&Diagnostic> = diagnostics.iter().collect();
+    ordenados.sort_by_key(|d| clave(d));
+
     match style {
-        RenderStyle::Human => diagnostics.iter().map(human).collect::<Vec<_>>().join("\n"),
+        RenderStyle::Human => ordenados
+            .into_iter()
+            .map(human)
+            .collect::<Vec<_>>()
+            .join("\n"),
         RenderStyle::Json => {
-            let items = diagnostics.iter().map(json).collect::<Vec<_>>().join(",");
+            let items = ordenados
+                .into_iter()
+                .map(json)
+                .collect::<Vec<_>>()
+                .join(",");
             format!("[{items}]")
         }
+    }
+}
+
+/// Clave de ordenamiento de un diagnóstico: archivo, línea y columna.
+///
+/// Los diagnósticos sin ubicación van al final: no pertenecen a ningún punto
+/// del archivo y anteponerlos desplazaría a los que sí.
+fn clave(d: &Diagnostic) -> (bool, String, u32, u32) {
+    match &d.location {
+        Some(l) => (false, l.file.clone(), l.line, l.column),
+        None => (true, String::new(), 0, 0),
     }
 }
 
@@ -156,58 +187,58 @@ mod tests {
     use crate::{Code, Diagnostic, DiagnosticSink, Location, RenderStyle, Snippet};
 
     fn diagnostico_completo() -> Diagnostic {
-        Diagnostic::error(Code::new("E1234"), "descripción precisa")
+        Diagnostic::error(Code::new("E1234"), "precise description")
             .at(Location::new("src/users.zrk", 18, 12))
             .with_snippet(
-                Snippet::new("    expresión problemática", 1).with_label("explicación localizada"),
+                Snippet::new("    problematic expression", 1).with_label("localized explanation"),
             )
-            .with_cause("motivo semántico")
-            .with_help("acción concreta")
+            .with_cause("semantic reason")
+            .with_help("concrete action")
     }
 
     #[test]
     fn formato_humano_reproduce_el_spec() {
         let esperado = "\
-error[E1234]: descripción precisa
+error[E1234]: precise description
    src/users.zrk:18:12
    |
-18 |     expresión problemática
-   |            ^ explicación localizada
+18 |     problematic expression
+   |            ^ localized explanation
    |
-   = causa: motivo semántico
-   = ayuda: acción concreta
+   = cause: semantic reason
+   = help: concrete action
 ";
         assert_eq!(diagnostico_completo().render(), esperado);
     }
 
     #[test]
     fn sin_fragmento_conserva_el_resto_de_la_informacion() {
-        let rendered = Diagnostic::error(Code::new("E0002"), "sin source disponible")
+        let rendered = Diagnostic::error(Code::new("E0002"), "no source available")
             .at(Location::new("src/main.zrk", 3, 5))
-            .with_cause("el archivo no pudo leerse")
-            .with_help("verificá los permisos del archivo")
+            .with_cause("the file could not be read")
+            .with_help("check the file permissions")
             .render();
 
-        assert!(rendered.contains("error[E0002]: sin source disponible"));
+        assert!(rendered.contains("error[E0002]: no source available"));
         assert!(rendered.contains("src/main.zrk:3:5"));
-        assert!(rendered.contains("= causa: el archivo no pudo leerse"));
-        assert!(rendered.contains("= ayuda: verificá los permisos del archivo"));
+        assert!(rendered.contains("= cause: the file could not be read"));
+        assert!(rendered.contains("= help: check the file permissions"));
         // Sin fragmento no debe aparecer el canal de source ni el marcador.
         assert!(!rendered.contains('^'));
     }
 
     #[test]
     fn sin_ayuda_no_se_inventa_una_generica() {
-        let rendered = Diagnostic::error(Code::new("E0003"), "error sin reparación clara")
-            .with_cause("estado no representable")
+        let rendered = Diagnostic::error(Code::new("E0003"), "error with no clear fix")
+            .with_cause("state is not representable")
             .render();
 
-        assert!(!rendered.contains("ayuda"));
+        assert!(!rendered.contains("help"));
     }
 
     #[test]
     fn el_marcador_se_alinea_con_la_columna() {
-        let rendered = Diagnostic::error(Code::new("E0004"), "token inesperado")
+        let rendered = Diagnostic::error(Code::new("E0004"), "unexpected token")
             .at(Location::new("a.zrk", 1, 5))
             .with_snippet(Snippet::new("abcdefgh", 3))
             .render();
@@ -224,9 +255,9 @@ error[E1234]: descripción precisa
     #[test]
     fn json_escapa_comillas_y_saltos_de_linea() {
         let rendered =
-            Diagnostic::error(Code::new("E0005"), "dijo \"hola\"\ny se fue").render_json();
+            Diagnostic::error(Code::new("E0005"), "said \"hello\"\nand left").render_json();
 
-        assert!(rendered.contains(r#""message":"dijo \"hola\"\ny se fue""#));
+        assert!(rendered.contains(r#""message":"said \"hello\"\nand left""#));
     }
 
     #[test]
@@ -237,8 +268,8 @@ error[E1234]: descripción precisa
         assert!(rendered.contains(r#""code":"E1234""#));
         assert!(rendered.contains(r#""line":18"#));
         assert!(rendered.contains(r#""column":12"#));
-        assert!(rendered.contains(r#""cause":"motivo semántico""#));
-        assert!(rendered.contains(r#""help":"acción concreta""#));
+        assert!(rendered.contains(r#""cause":"semantic reason""#));
+        assert!(rendered.contains(r#""help":"concrete action""#));
     }
 
     #[test]

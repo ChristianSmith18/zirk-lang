@@ -293,11 +293,11 @@ impl TokenKind {
     pub fn descripcion(&self) -> String {
         use TokenKind::*;
         match self {
-            Identifier(nombre) => format!("identificador `{nombre}`"),
-            Keyword(k) => format!("palabra clave `{}`", k.as_str()),
-            Integer(v) => format!("literal entero `{v}`"),
-            Str(_) => "literal de cadena".to_string(),
-            Eof => "fin de archivo".to_string(),
+            Identifier(nombre) => format!("identifier `{nombre}`"),
+            Keyword(k) => format!("keyword `{}`", k.as_str()),
+            Integer(v) => format!("integer literal `{v}`"),
+            Str(_) => "a string literal".to_string(),
+            Eof => "end of file".to_string(),
             otro => format!("`{}`", otro.simbolo()),
         }
     }

@@ -101,7 +101,7 @@ fn valido_varias_funciones_en_un_archivo() {
 fn invalido_funcion_sin_tipo_de_retorno() {
     let salida = errores("fn main() { }");
     assert!(salida.contains(codes::FALTA_TIPO_RETORNO.as_str()));
-    assert!(salida.contains("= ayuda:"));
+    assert!(salida.contains("= help:"));
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn valido_variable_inmutable() {
 fn invalido_declaracion_sin_tipo_ni_inicializador() {
     let salida = errores("fn main(): Void { mut count; }");
     assert!(salida.contains(codes::DECLARACION_SIN_TIPO.as_str()));
-    assert!(salida.contains("= ayuda:"));
+    assert!(salida.contains("= help:"));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn valido_condicional_encadenado() {
 fn invalido_cuerpo_de_condicional_sin_llaves() {
     let salida = errores("fn main(): Void { if x return; }");
     assert!(salida.contains(codes::FALTAN_LLAVES.as_str()));
-    assert!(salida.contains("= ayuda:"));
+    assert!(salida.contains("= help:"));
 }
 
 // --- Llamadas y retorno -----------------------------------------------------
@@ -324,7 +324,7 @@ fn valido_println_con_expresion() {
 fn invalido_otro_metodo_de_stdout() {
     let salida = errores("fn main(): Void { stdout.write(\"x\"); }");
     assert!(salida.contains(codes::NO_IMPLEMENTADO.as_str()));
-    assert!(salida.contains("Fase 7"));
+    assert!(salida.contains("Phase 7"));
 }
 
 // --- Construcciones de fases posteriores ------------------------------------
@@ -332,13 +332,13 @@ fn invalido_otro_metodo_de_stdout() {
 #[test]
 fn invalido_construcciones_de_otras_fases_dicen_cual() {
     for (fuente, texto, fase) in [
-        ("fn main(): Void { for x in y { } }", "for", "Fase 2"),
-        ("fn main(): Void { while a { } }", "while", "Fase 2"),
-        ("fn main(): Void { match x { } }", "match", "Fase 2"),
-        ("class User { }", "class", "Fase 3"),
-        ("fn main(): Void { try { } }", "try", "Fase 4"),
-        ("fn main(): Void { task { } }", "task", "Fase 5"),
-        ("fn main(): Void { parallel { } }", "parallel", "Fase 5"),
+        ("fn main(): Void { for x in y { } }", "for", "Phase 2"),
+        ("fn main(): Void { while a { } }", "while", "Phase 2"),
+        ("fn main(): Void { match x { } }", "match", "Phase 2"),
+        ("class User { }", "class", "Phase 3"),
+        ("fn main(): Void { try { } }", "try", "Phase 4"),
+        ("fn main(): Void { task { } }", "task", "Phase 5"),
+        ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
     ] {
         let salida = errores(fuente);
         assert!(
@@ -369,7 +369,7 @@ fn invalido_construcciones_de_otras_fases_no_son_token_inesperado() {
 fn invalido_import_tiene_su_propio_diagnostico() {
     let salida = errores("import { stdout } from std.io;\nfn main(): Void { }");
     assert!(salida.contains(codes::MODULOS_NO_DISPONIBLES.as_str()));
-    assert!(salida.contains("Fase 2"));
+    assert!(salida.contains("Phase 2"));
 }
 
 #[test]
@@ -424,4 +424,53 @@ fn invalido_el_parser_siempre_termina() {
         let tokens = tokenize(&source, &mut sink);
         parse(&source, &tokens, &mut sink);
     }
+}
+
+// --- Sin errores duplicados -------------------------------------------------
+
+#[test]
+fn invalido_un_token_que_no_inicia_expresion_se_reporta_una_sola_vez() {
+    let source = SourceFile::new("test.zrk", "fn main(): Void { mut x = ; }");
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(&source, &mut sink);
+    parse(&source, &tokens, &mut sink);
+
+    let esperados = sink
+        .diagnostics()
+        .iter()
+        .filter(|d| d.message.contains("expected an expression"))
+        .count();
+
+    assert_eq!(
+        esperados,
+        1,
+        "el mismo token no debe reportarse dos veces:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+}
+
+// --- Orden de los diagnósticos ----------------------------------------------
+
+#[test]
+fn invalido_los_diagnosticos_salen_en_orden_de_aparicion() {
+    // El error léxico está en la línea 3 y el sintáctico en la 2. Las etapas
+    // emiten primero todo el léxico, así que sin ordenamiento saldrían al revés.
+    let fuente = "fn main(): Void {\n    class User { }\n    mut x = 123abc;\n}\n";
+    let source = SourceFile::new("test.zrk", fuente);
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(&source, &mut sink);
+    parse(&source, &tokens, &mut sink);
+
+    let salida = sink.render(RenderStyle::Human);
+    let linea_2 = salida
+        .find(":2:")
+        .expect("debe haber un error en la línea 2");
+    let linea_3 = salida
+        .find(":3:")
+        .expect("debe haber un error en la línea 3");
+
+    assert!(
+        linea_2 < linea_3,
+        "los diagnósticos deben salir de arriba hacia abajo:\n{salida}"
+    );
 }

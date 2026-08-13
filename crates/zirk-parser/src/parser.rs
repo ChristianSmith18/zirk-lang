@@ -113,10 +113,10 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::MODULOS_NO_DISPONIBLES,
                 span,
-                "los módulos multi-archivo todavía no están disponibles",
-                "esta versión del compilador procesa un único archivo",
+                "multi-file modules are not available yet",
+                "this version of the compiler processes a single file",
                 Some(
-                    "escribí todo en un archivo por ahora; `import` y `share` llegan en la Fase 2"
+                    "put everything in one file for now; `import` and `share` arrive in Phase 2"
                         .into(),
                 ),
             );
@@ -136,9 +136,9 @@ impl<'a> Parser<'a> {
         self.error_con(
             codes::NO_IMPLEMENTADO,
             span,
-            format!("`{texto}` todavía no está implementado"),
-            format!("la construcción existe en el lenguaje pero llega en la Fase {fase}"),
-            Some("consultá docs/init/ZIRK_ROADMAP.md para ver el alcance de cada fase".into()),
+            format!("`{texto}` is not implemented yet"),
+            format!("the construct exists in the language but arrives in Phase {fase}"),
+            Some("see docs/init/ZIRK_ROADMAP.md for the scope of each phase".into()),
         );
         self.sincronizar();
         true
@@ -151,7 +151,7 @@ impl<'a> Parser<'a> {
     fn sincronizar(&mut self) {
         // Se saltan los bloques balanceados enteros. Sin esto, reportar `class`
         // dejaba el `}` de su cuerpo suelto, y ese `}` producía un segundo
-        // diagnóstico —"se esperaba una declaración de función"— que no
+        // diagnóstico —"expected a function declaration"— que no
         // corresponde a ningún error del usuario.
         let mut profundidad = 0usize;
 
@@ -193,8 +193,8 @@ impl<'a> Parser<'a> {
         self.error_con(
             codes::TOKEN_INESPERADO,
             span,
-            format!("se esperaba `{}` {contexto}", esperado.simbolo()),
-            format!("se encontró {encontrado}"),
+            format!("expected `{}` {contexto}", esperado.simbolo()),
+            format!("found {encontrado}"),
             None,
         );
         false
@@ -211,8 +211,8 @@ impl<'a> Parser<'a> {
         self.error_con(
             codes::TOKEN_INESPERADO,
             span,
-            format!("se esperaba un identificador {contexto}"),
-            format!("se encontró {encontrado}"),
+            format!("expected an identifier {contexto}"),
+            format!("found {encontrado}"),
             None,
         );
         None
@@ -241,9 +241,9 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::TOKEN_INESPERADO,
                 span,
-                "se esperaba una declaración de función",
-                format!("se encontró {encontrado} en el nivel superior del archivo"),
-                Some("en esta fase un archivo solo contiene funciones".into()),
+                "expected a function declaration",
+                format!("found {encontrado} at the top level of the file"),
+                Some("in this phase a file contains only functions".into()),
             );
             self.sincronizar();
             if !self.check_keyword(Keyword::Fn) && !self.at_eof() {
@@ -262,11 +262,11 @@ impl<'a> Parser<'a> {
         let inicio = self.peek_span();
         self.eat_keyword(Keyword::Fn);
 
-        let name = self.esperar_identificador("después de `fn`")?;
+        let name = self.esperar_identificador("after `fn`")?;
 
-        self.esperar(&TokenKind::LParen, "después del nombre de la función");
+        self.esperar(&TokenKind::LParen, "after the function name");
         let params = self.parse_params();
-        self.esperar(&TokenKind::RParen, "para cerrar los parámetros");
+        self.esperar(&TokenKind::RParen, "to close the parameter list");
 
         // El tipo de retorno es obligatorio en esta fase.
         let return_type = if self.eat(&TokenKind::Colon) {
@@ -276,10 +276,10 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::FALTA_TIPO_RETORNO,
                 span,
-                "falta el tipo de retorno de la función",
-                "toda función declara su tipo de retorno",
+                "missing return type on function",
+                "every function declares its return type",
                 Some(format!(
-                    "escribí `fn {}(...): Void` si la función no devuelve nada",
+                    "write `fn {}(...): Void` if the function returns nothing",
                     name.name
                 )),
             );
@@ -305,10 +305,10 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RParen) && !self.at_eof() {
             let inicio = self.peek_span();
 
-            let Some(name) = self.esperar_identificador("como nombre de parámetro") else {
+            let Some(name) = self.esperar_identificador("as a parameter name") else {
                 break;
             };
-            if !self.esperar(&TokenKind::Colon, "después del nombre del parámetro") {
+            if !self.esperar(&TokenKind::Colon, "after the parameter name") {
                 break;
             }
             let Some(ty) = self.parse_type() else { break };
@@ -335,9 +335,9 @@ impl<'a> Parser<'a> {
         self.error_con(
             codes::TOKEN_INESPERADO,
             span,
-            "se esperaba un tipo",
-            format!("se encontró {encontrado}"),
-            Some("los tipos disponibles son Void, Int32, Boolean y String".into()),
+            "expected a type",
+            format!("found {encontrado}"),
+            Some("the available types are Void, Int32, Boolean and String".into()),
         );
         None
     }
@@ -352,9 +352,9 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::FALTAN_LLAVES,
                 inicio,
-                "se esperaba un bloque entre llaves",
-                format!("se encontró {encontrado}"),
-                Some("los cuerpos siempre van entre `{` y `}`".into()),
+                "expected a block enclosed in braces",
+                format!("found {encontrado}"),
+                Some("bodies always go between `{` and `}`".into()),
             );
             return None;
         }
@@ -375,7 +375,7 @@ impl<'a> Parser<'a> {
         }
 
         let fin = self.peek_span();
-        self.esperar(&TokenKind::RBrace, "para cerrar el bloque");
+        self.esperar(&TokenKind::RBrace, "to close the block");
 
         Some(Block {
             statements,
@@ -418,15 +418,15 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::NO_IMPLEMENTADO,
                 span,
-                "`inmut::strict` todavía no está implementado",
-                "la inmutabilidad profunda llega en una fase posterior",
-                Some("usá `inmut` por ahora".into()),
+                "`inmut::strict` is not implemented yet",
+                "deep immutability arrives in a later phase",
+                Some("use `inmut` for now".into()),
             );
             self.sincronizar();
             return None;
         }
 
-        let name = self.esperar_identificador("después de `mut` o `inmut`")?;
+        let name = self.esperar_identificador("after `mut` or `inmut`")?;
 
         let ty = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type()?)
@@ -446,10 +446,10 @@ impl<'a> Parser<'a> {
             self.error_con(
                 codes::DECLARACION_SIN_TIPO,
                 span,
-                format!("no se puede determinar el tipo de `{}`", name.name),
-                "la declaración no tiene anotación de tipo ni valor inicial",
+                format!("cannot determine the type of `{}`", name.name),
+                "the declaration has neither a type annotation nor an initial value",
                 Some(format!(
-                    "escribí `{}: Int32` o dale un valor inicial",
+                    "write `{}: Int32` or give it an initial value",
                     name.name
                 )),
             );
@@ -532,8 +532,8 @@ impl<'a> Parser<'a> {
                 self.error_con(
                     codes::TOKEN_INESPERADO,
                     inicio,
-                    "el lado izquierdo de una asignación debe ser una variable",
-                    "solo se puede asignar a un nombre",
+                    "the left-hand side of an assignment must be a variable",
+                    "only a name can be assigned to",
                     None,
                 );
                 return None;
@@ -640,7 +640,7 @@ impl<'a> Parser<'a> {
             TokenKind::LParen => {
                 self.pos += 1;
                 let expr = self.parse_expr()?;
-                self.esperar(&TokenKind::RParen, "para cerrar el paréntesis");
+                self.esperar(&TokenKind::RParen, "to close the parenthesis");
                 Some(expr)
             }
             TokenKind::Identifier(nombre) => {
@@ -655,10 +655,21 @@ impl<'a> Parser<'a> {
                 self.error_con(
                     codes::TOKEN_INESPERADO,
                     span,
-                    "se esperaba una expresión",
-                    format!("se encontró {encontrado}"),
+                    "expected an expression",
+                    format!("found {encontrado}"),
                     None,
                 );
+
+                // Se consume el token que no puede iniciar una expresión.
+                // Dejarlo hace que la siguiente vuelta del bloque lo vuelva a
+                // encontrar y emita el mismo error otra vez. Los cierres se
+                // respetan: pertenecen a quien nos llamó.
+                if !matches!(
+                    self.peek(),
+                    TokenKind::RBrace | TokenKind::RParen | TokenKind::Eof
+                ) {
+                    self.pos += 1;
+                }
                 None
             }
         }
@@ -672,23 +683,23 @@ impl<'a> Parser<'a> {
         if ident.name == "stdout" && matches!(self.peek(), TokenKind::Dot) {
             self.pos += 1;
             let metodo_span = self.peek_span();
-            let metodo = self.esperar_identificador("después de `stdout.`")?;
+            let metodo = self.esperar_identificador("after `stdout.`")?;
 
             if metodo.name != "println" {
                 self.error_con(
                     codes::NO_IMPLEMENTADO,
                     metodo_span,
-                    format!("`stdout.{}` todavía no está disponible", metodo.name),
-                    "en esta fase solo existe `stdout.println`",
-                    Some("la biblioteca estándar completa llega en la Fase 7".into()),
+                    format!("`stdout.{}` is not available yet", metodo.name),
+                    "only `stdout.println` exists in this phase",
+                    Some("the full standard library arrives in Phase 7".into()),
                 );
                 return None;
             }
 
-            self.esperar(&TokenKind::LParen, "después de `println`");
+            self.esperar(&TokenKind::LParen, "after `println`");
             let arg = self.parse_expr()?;
             let fin = self.peek_span();
-            self.esperar(&TokenKind::RParen, "para cerrar la llamada");
+            self.esperar(&TokenKind::RParen, "to close the call");
 
             return Some(Expr::Println(PrintlnExpr {
                 arg: Box::new(arg),
@@ -708,7 +719,7 @@ impl<'a> Parser<'a> {
             }
 
             let fin = self.peek_span();
-            self.esperar(&TokenKind::RParen, "para cerrar los argumentos");
+            self.esperar(&TokenKind::RParen, "to close the argument list");
 
             return Some(Expr::Call(CallExpr {
                 span: ident.span.to(fin),

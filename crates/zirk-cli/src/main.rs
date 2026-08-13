@@ -25,9 +25,9 @@ fn main() {
         Some("--list-targets") => list_targets(),
         Some("--help" | "-h") | None => help(),
         Some(other) => {
-            eprintln!("error[E0000]: subcomando desconocido: `{other}`");
-            eprintln!("  = causa: la CLI de Fase 0 no implementa subcomandos de compilación");
-            eprintln!("  = ayuda: ejecutá `zirk --help` para ver lo disponible");
+            eprintln!("error[E0000]: unknown subcommand: `{other}`");
+            eprintln!("  = cause: the Phase 0 CLI implements no compilation subcommands");
+            eprintln!("  = help: run `zirk --help` to see what is available");
             std::process::exit(1);
         }
     }
@@ -36,14 +36,14 @@ fn main() {
 fn help() {
     println!("zirk {VERSION}");
     println!();
-    println!("Uso: zirk <opción>");
+    println!("Usage: zirk <option>");
     println!();
-    println!("Opciones:");
-    println!("  -V, --version      muestra la versión");
-    println!("      --list-targets lista los targets soportados");
-    println!("  -h, --help         muestra esta ayuda");
+    println!("Options:");
+    println!("  -V, --version      show the version");
+    println!("      --list-targets list the supported targets");
+    println!("  -h, --help         show this help");
     println!();
-    println!("Los subcomandos de compilación (run, build, check, test) llegan en Fase 1.");
+    println!("Compilation subcommands (run, build, check, test) arrive in Phase 1.");
 }
 
 fn list_targets() {

@@ -137,8 +137,8 @@ fn un_triple_desconocido_falla_con_diagnostico() {
         rendered.contains("arquitectura-que-no-existe"),
         "el diagnóstico debe nombrar el target solicitado:\n{rendered}"
     );
-    assert!(rendered.contains("= causa:"), "falta la causa:\n{rendered}");
-    assert!(rendered.contains("= ayuda:"), "falta la ayuda:\n{rendered}");
+    assert!(rendered.contains("= cause:"), "missing cause:\n{rendered}");
+    assert!(rendered.contains("= help:"), "missing help:\n{rendered}");
     assert!(
         !dir.join("nunca.o").exists(),
         "no debe producirse un objeto inválido"
