@@ -7,6 +7,10 @@
   "engines": {
     "vscode": "^1.75.0"
   },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:zirk"
+  ],
   "categories": [
     "Programming Languages"
   ],
