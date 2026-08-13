@@ -10,21 +10,21 @@
 
 ## 2. Árbol de sintaxis
 
-- [ ] 2.1 Definir los nodos del subset en `zirk-ast`, cada uno con su span (D1)
-- [ ] 2.2 Definir la representación de tipos sintácticos (`Void`, `Int32`, `Boolean`, `String`)
-- [ ] 2.3 Documentar en `lib.rs` que la AST es privada y que la Syntax API pública es de Fase 10
+- [x] 2.1 Definir los nodos del subset en `zirk-ast`, cada uno con su span (D1)
+- [x] 2.2 Definir la representación de tipos sintácticos (`Void`, `Int32`, `Boolean`, `String`)
+- [x] 2.3 Documentar en `lib.rs` que la AST es privada y que la Syntax API pública es de Fase 10
 
 ## 3. Gramática
 
-- [ ] 3.1 Implementar el parseo de declaraciones de función con parámetros y tipo de retorno
-- [ ] 3.2 Implementar declaraciones `mut` e `inmut`, con tipo explícito o inferido
-- [ ] 3.3 Implementar expresiones con la precedencia y asociatividad del spec
-- [ ] 3.4 Implementar `if`/`else` como sentencia, con cuerpos siempre entre llaves
-- [ ] 3.5 Implementar llamadas a función, asignación y `return`
-- [ ] 3.6 Admitir la omisión del punto y coma cuando no hay ambigüedad
-- [ ] 3.7 Emitir diagnósticos específicos para construcciones de fases posteriores (D6)
-- [ ] 3.8 Emitir un diagnóstico propio para `import`, indicando que los módulos llegan después
-- [ ] 3.9 Tests: un caso válido y uno inválido por cada regla gramatical
+- [x] 3.1 Implementar el parseo de declaraciones de función con parámetros y tipo de retorno
+- [x] 3.2 Implementar declaraciones `mut` e `inmut`, con tipo explícito o inferido
+- [x] 3.3 Implementar expresiones con la precedencia y asociatividad del spec
+- [x] 3.4 Implementar `if`/`else` como sentencia, con cuerpos siempre entre llaves
+- [x] 3.5 Implementar llamadas a función, asignación y `return`
+- [x] 3.6 Admitir la omisión del punto y coma cuando no hay ambigüedad
+- [x] 3.7 Emitir diagnósticos específicos para construcciones de fases posteriores (D6)
+- [x] 3.8 Emitir un diagnóstico propio para `import`, indicando que los módulos llegan después
+- [x] 3.9 Tests: un caso válido y uno inválido por cada regla gramatical
 
 ## 4. Nombres, tipos y flujo
 
