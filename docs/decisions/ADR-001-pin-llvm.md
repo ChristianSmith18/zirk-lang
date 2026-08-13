@@ -20,7 +20,7 @@ LLVM 20.1 está disponible como paquete de desarrollo con bibliotecas estáticas
 
 - macOS — `brew install llvm@20`
 - Linux — `apt.llvm.org`, paquete `llvm-20-dev`
-- Windows — tarball oficial `clang+llvm-20.1.8-*-pc-windows-msvc.tar.xz` (x86_64 y aarch64)
+- Windows — **no** la distribución oficial. Ver abajo.
 
 ## Verificación
 
@@ -38,4 +38,8 @@ Instalación local verificada: LLVM 20.1.8 con 203 bibliotecas estáticas presen
 
 - Toda máquina de desarrollo y todo runner de CI debe proveer LLVM 20.1 con bibliotecas estáticas y exponer `LLVM_SYS_201_PREFIX`. Ver [TOOLCHAIN.md](../TOOLCHAIN.md).
 - Subir de versión mayor de LLVM es un cambio deliberado con su propio ADR, no una actualización de rutina.
-- En Windows, el instalador `.exe` oficial **no sirve**: no incluye las bibliotecas estáticas. Debe usarse el tarball de desarrollo.
+- En Windows, **ninguna** distribución oficial de LLVM funciona con `llvm-sys`. El instalador `.exe` no incluye bibliotecas estáticas, y el tarball de desarrollo, que sí las incluye, está compilado contra la CRT estática mientras que Rust usa la dinámica: el proceso aborta con `STATUS_ACCESS_VIOLATION` en la primera llamada a LLVM que devuelva una cadena.
+
+  Se usa `TyrsDev/llvm-package-windows`, un build mantenido específicamente para que `inkwell` funcione en Windows, en la misma versión del pin. Es una dependencia de un solo mantenedor y constituye un riesgo de cadena de suministro asumido conscientemente; la alternativa es compilar LLVM desde fuente con `LLVM_USE_CRT_RELEASE=MD`, que son horas por build.
+
+  Las cuatro combinaciones descartadas y su razón están en el issue #2.
