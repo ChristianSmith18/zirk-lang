@@ -176,8 +176,12 @@ name = "zirk-codegen-llvm"
 version = "0.0.0"
 dependencies = [
  "inkwell",
+ "zirk-ast",
  "zirk-diagnostics",
  "zirk-ir",
+ "zirk-lexer",
+ "zirk-parser",
+ "zirk-sema",
 ]
 
 [[package]]

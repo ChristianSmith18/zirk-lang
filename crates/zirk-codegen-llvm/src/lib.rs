@@ -15,6 +15,12 @@
 //! Phase 0 provides the target and emission infrastructure, verified end to
 //! end, but not the translation from `zirk-ir` — that IR is still empty.
 
+mod emit;
+mod runtime;
+
+pub use emit::emit;
+pub use runtime::symbols;
+
 use inkwell::OptimizationLevel;
 use inkwell::module::Module;
 use inkwell::targets::{
