@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn warnings_as_errors_eleva_la_severidad() {
         let mut sink = DiagnosticSink::new().warnings_as_errors(true);
-        sink.emit(Diagnostic::warning(Code::new("W0001"), "símbolo sin uso"));
+        sink.emit(Diagnostic::warning(Code::new("W0001"), "unused symbol"));
 
         assert_eq!(sink.diagnostics()[0].severity, Severity::Error);
         assert!(sink.has_errors());
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn sin_la_bandera_un_warning_no_frena_la_compilacion() {
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::warning(Code::new("W0001"), "símbolo sin uso"));
+        sink.emit(Diagnostic::warning(Code::new("W0001"), "unused symbol"));
 
         assert_eq!(sink.diagnostics()[0].severity, Severity::Warning);
         assert!(!sink.has_errors());
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn los_errores_siempre_frenan_la_compilacion() {
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::error(Code::new("E0001"), "tipo incompatible"));
+        sink.emit(Diagnostic::error(Code::new("E0001"), "incompatible type"));
 
         assert!(sink.has_errors());
     }

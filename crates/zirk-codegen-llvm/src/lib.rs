@@ -129,10 +129,10 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
     let target = Target::from_triple(&target_triple).map_err(|error| {
         Diagnostic::error(
             codes::TARGET_DESCONOCIDO,
-            format!("target no soportado: `{triple}`"),
+            format!("unsupported target: `{triple}`"),
         )
-        .with_cause(format!("LLVM no reconoce el triple: {error}"))
-        .with_help("consultá `zirk build --list-targets` para ver los targets disponibles")
+        .with_cause(format!("LLVM does not recognize the triple: {error}"))
+        .with_help("run `zirk build --list-targets` to see the available targets")
         .boxed()
     })?;
 
@@ -152,10 +152,10 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
         .ok_or_else(|| {
             Diagnostic::error(
                 codes::TARGET_MACHINE_NO_DISPONIBLE,
-                format!("no se pudo construir la máquina de destino para `{triple}`"),
+                format!("could not build the target machine for `{triple}`"),
             )
-            .with_cause("el LLVM enlazado no incluye soporte para esta arquitectura")
-            .with_help("verificá que la instalación de LLVM incluya el backend correspondiente")
+            .with_cause("the linked LLVM does not include support for this architecture")
+            .with_help("check that the LLVM installation includes the corresponding backend")
             .boxed()
         })
 }
@@ -174,10 +174,10 @@ pub fn emit_object_for_triple(
         .map_err(|error| {
             Diagnostic::error(
                 codes::EMISION_FALLIDA,
-                format!("no se pudo emitir el objeto en `{}`", output.display()),
+                format!("could not emit the object file at `{}`", output.display()),
             )
             .with_cause(error.to_string())
-            .with_help("verificá permisos de escritura sobre el directorio de salida")
+            .with_help("check write permissions on the output directory")
             .boxed()
         })
 }

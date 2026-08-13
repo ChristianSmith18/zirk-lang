@@ -67,7 +67,7 @@ fn invalido_caracter_no_reconocido() {
     let salida = errores("fn main() @ { }");
     assert!(salida.contains(codes::CARACTER_NO_RECONOCIDO.as_str()));
     assert!(salida.contains('@'));
-    assert!(salida.contains("= causa:"));
+    assert!(salida.contains("= cause:"));
 }
 
 // --- Ubicación --------------------------------------------------------------
@@ -107,7 +107,7 @@ fn invalido_separador_al_inicio_del_numero() {
     // separador inicial dentro de un contexto numérico.
     let salida = errores("mut x = 1__000;");
     assert!(salida.contains(codes::SEPARADOR_INVALIDO.as_str()));
-    assert!(salida.contains("= ayuda:"));
+    assert!(salida.contains("= help:"));
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn valido_cadena_vacia() {
 fn invalido_cadena_sin_cerrar() {
     let salida = errores("mut x = \"sin cerrar;\n");
     assert!(salida.contains(codes::CADENA_SIN_CERRAR.as_str()));
-    assert!(salida.contains("= ayuda:"));
+    assert!(salida.contains("= help:"));
 }
 
 #[test]
@@ -373,8 +373,8 @@ fn invalido_sufijo_pegado_a_un_numero() {
     assert!(salida.contains("123abc") || salida.contains("abc"));
     // La causa debe hablar del sufijo, no del separador `_`, que no aparece.
     assert!(
-        !salida.contains("`_` solo puede aparecer"),
-        "la causa no debe mencionar el separador:\n{salida}"
+        !salida.contains("`_` may only appear"),
+        "the cause must not mention the separator:\n{salida}"
     );
 }
 

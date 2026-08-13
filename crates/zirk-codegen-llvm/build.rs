@@ -21,20 +21,18 @@ fn main() {
     let llvm_config = match locate_llvm_config() {
         Some(path) => path,
         None => fail(
-            "no se encontró una instalación de LLVM",
-            &format!(
-                "no está definida la variable {PREFIX_VAR} y no hay un `llvm-config` en el PATH"
-            ),
-            &format!("instalá LLVM {LLVM_MAJOR}.1 y definí {PREFIX_VAR}; ver docs/TOOLCHAIN.md"),
+            "no LLVM installation was found",
+            &format!("{PREFIX_VAR} is not set and there is no `llvm-config` on PATH"),
+            &format!("install LLVM {LLVM_MAJOR}.1 and set {PREFIX_VAR}; see docs/TOOLCHAIN.md"),
         ),
     };
 
     let version = match llvm_version(&llvm_config) {
         Some(version) => version,
         None => fail(
-            "no se pudo determinar la versión de LLVM",
-            &format!("`{}` no respondió a --version", llvm_config.display()),
-            "verificá que la instalación de LLVM no esté corrupta; ver docs/TOOLCHAIN.md",
+            "could not determine the LLVM version",
+            &format!("`{}` did not respond to --version", llvm_config.display()),
+            "check that the LLVM installation is not corrupted; see docs/TOOLCHAIN.md",
         ),
     };
 
@@ -46,16 +44,14 @@ fn main() {
 
     if major != LLVM_MAJOR {
         fail(
+            &format!("incompatible LLVM major version: found {major}, required {LLVM_MAJOR}"),
             &format!(
-                "versión mayor de LLVM incompatible: se encontró {major}, se requiere {LLVM_MAJOR}"
-            ),
-            &format!(
-                "`llvm-sys` enlaza contra la ABI de C++ de una versión mayor concreta; \
-                 {} reporta {version}",
+                "`llvm-sys` links against the C++ ABI of a specific major version; \
+                 {} reports {version}",
                 llvm_config.display()
             ),
             &format!(
-                "instalá LLVM {LLVM_MAJOR}.1 y apuntá {PREFIX_VAR} a su prefijo; ver docs/TOOLCHAIN.md"
+                "install LLVM {LLVM_MAJOR}.1 and point {PREFIX_VAR} at its prefix; see docs/TOOLCHAIN.md"
             ),
         );
     }
@@ -95,7 +91,7 @@ fn fail(message: &str, cause: &str, help: &str) -> ! {
     // `cargo:warning` es el único canal que Cargo muestra sin truncar desde un
     // build script, así que el diagnóstico se emite línea por línea.
     println!("cargo:warning=error[E0001]: {message}");
-    println!("cargo:warning=  = causa: {cause}");
-    println!("cargo:warning=  = ayuda: {help}");
+    println!("cargo:warning=  = cause: {cause}");
+    println!("cargo:warning=  = help: {help}");
     panic!("{message}");
 }
