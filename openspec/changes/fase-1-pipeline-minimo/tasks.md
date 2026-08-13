@@ -1,12 +1,12 @@
 ## 1. Léxico
 
-- [ ] 1.1 Definir el tipo de token del subset, incluyendo las palabras clave del lenguaje completo (D6)
-- [ ] 1.2 Implementar el escaneo de identificadores, palabras clave y delimitadores, con span por token
-- [ ] 1.3 Implementar literales enteros con separador `_`, rechazando posiciones inválidas
-- [ ] 1.4 Implementar literales de cadena con escapes `\n`, `\t`, `\"` y `\\`
-- [ ] 1.5 Implementar literales booleanos y comentarios de línea y de bloque
-- [ ] 1.6 Emitir diagnósticos léxicos: cadena sin cerrar, comentario sin cerrar, escape desconocido, carácter no reconocido
-- [ ] 1.7 Tests: un caso válido y uno inválido por cada regla léxica
+- [x] 1.1 Definir el tipo de token del subset, incluyendo las palabras clave del lenguaje completo (D6)
+- [x] 1.2 Implementar el escaneo de identificadores, palabras clave y delimitadores, con span por token
+- [x] 1.3 Implementar literales enteros con separador `_`, rechazando posiciones inválidas
+- [x] 1.4 Implementar literales de cadena con escapes `\n`, `\t`, `\"` y `\\`
+- [x] 1.5 Implementar literales booleanos y comentarios de línea y de bloque
+- [x] 1.6 Emitir diagnósticos léxicos: cadena sin cerrar, comentario sin cerrar, escape desconocido, carácter no reconocido
+- [x] 1.7 Tests: un caso válido y uno inválido por cada regla léxica
 
 ## 2. Árbol de sintaxis
 
