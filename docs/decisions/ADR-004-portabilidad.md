@@ -81,12 +81,12 @@ La contrapartida honesta: **una regresión específica de macOS no la detecta un
 
 | Portabilidad | Estado | Evidencia |
 |---|---|---|
-| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix`: emite y valida contenedor y arquitectura de los nueve targets. |
-| **A** — macOS aarch64 | ✅ verificada | `./scripts/check-local.sh` en verde sobre `Darwin arm64`: fmt, clippy y 23 tests. |
+| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix`: emite y valida contenedor y arquitectura de los nueve targets, en las cuatro plataformas de la matriz. |
 | **A** — Linux x86_64 | ✅ verificada | CI en verde. |
 | **A** — Linux aarch64 | ✅ verificada | CI en verde. |
-| **A** — Windows x86_64 | ⏳ **en curso — riesgo principal** | Resueltos dos fallos (switch de 7-Zip, extracción del tarball). Pendiente: `LNK1181` por `libxml2s.lib`, que LLVM declara como dependencia del sistema en Windows pero su distribución oficial no incluye. |
+| **A** — macOS aarch64 | ✅ verificada | CI en verde (volvió a la matriz al hacerse público el repositorio). |
+| **A** — Windows x86_64 | ✅ verificada | CI en verde. Requirió cambiar la fuente de LLVM; ver [ADR-001](./ADR-001-pin-llvm.md) y el issue #2. |
 | **A** — macOS x86_64 | 🚫 fuera de alcance | Intel es plataforma en retirada y sus runners son escasos. |
-| **A** — Windows aarch64 | 🚫 fuera de la matriz inicial | Apila riesgo sobre la plataforma ya más frágil. Se incorpora cuando `windows-x86_64` esté estable. |
+| **A** — Windows aarch64 | 🚫 fuera de la matriz inicial | Se incorpora cuando haya demanda real. |
 
-**Windows sigue siendo el único punto no verificado**, tal como este ADR anticipó desde el principio.
+**La portabilidad quedó verificada.** Fue el punto más caro de la Fase 0 y el que justificó construir los cimientos antes que el lenguaje: Windows requirió diez iteraciones y descubrió tres defectos reales del propio código, que Linux y macOS toleraban por casualidad.
