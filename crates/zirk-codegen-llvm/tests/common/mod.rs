@@ -5,6 +5,24 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// Serializa el acceso a LLVM entre tests del mismo binario.
+///
+/// LLVM mantiene estado global de proceso —registro de targets, manejo de
+/// errores— que no tolera uso concurrente, aunque cada thread tenga su propio
+/// `Context`. El harness de Rust ejecuta los tests en paralelo, y sin esta
+/// serialización el binario aborta con violación de acceso en Windows.
+///
+/// Se recupera del envenenamiento del mutex a propósito: si un test falla
+/// mientras lo sostiene, los demás deben poder seguir y reportar su propio
+/// resultado en vez de fallar en cascada por un panic ajeno.
+pub fn llvm_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|envenenado| envenenado.into_inner())
+}
 
 /// Formato de contenedor detectado a partir de los bytes del archivo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
