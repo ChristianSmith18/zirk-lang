@@ -134,6 +134,7 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
     let output = Command::new(&driver)
         .arg(object)
         .arg(&runtime)
+        .args(system_libraries())
         .arg("-o")
         .arg(executable)
         .output()
@@ -145,13 +146,58 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
         })?;
 
     if !output.status.success() {
+        // Both streams are included: on Windows the linker writes the
+        // unresolved symbols to stdout and only the summary to stderr, and
+        // without them the diagnostic says nothing actionable.
+        let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let out = String::from_utf8_lossy(&output.stdout);
+        if !out.trim().is_empty() {
+            detail.push('\n');
+            detail.push_str(out.trim());
+        }
+
         return Err(Diagnostic::error(codes::LINK_FAILED, "linking failed")
-            .with_cause(String::from_utf8_lossy(&output.stderr).trim().to_string())
+            .with_cause(detail)
             .with_help("check the LLVM installation; see docs/TOOLCHAIN.md")
             .boxed());
     }
 
     Ok(())
+}
+
+/// System libraries the runtime needs, per platform.
+///
+/// The Zirk runtime uses Rust's `std`, which on Windows depends on system
+/// libraries the linker does not add on its own — on Unix, libc arrives by
+/// default. The list is the one `rustc --print native-static-libs` reports for
+/// the `windows-msvc` target.
+///
+/// Hardcoding it is Phase 1 pragmatism, the same as locating the runtime next
+/// to the executable. Deriving it from the toolchain belongs with proper
+/// distribution in Phase 8.
+fn system_libraries() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+
+    [
+        "advapi32",
+        "bcrypt",
+        "dbghelp",
+        "kernel32",
+        "ntdll",
+        "ole32",
+        "oleaut32",
+        "shell32",
+        "synchronization",
+        "user32",
+        "userenv",
+        "uuid",
+        "ws2_32",
+    ]
+    .iter()
+    .map(|lib| format!("-l{lib}"))
+    .collect()
 }
 
 /// Finds the runtime static library.
