@@ -184,24 +184,22 @@ jobs:
       # para x86_64-pc-windows-msvc, asi que el target funciona y el problema
       # es ejecutar LLVM *sobre* Windows. La hipotesis principal es que la CRT
       # contra la que se compilo LLVM no coincide con la que usa Rust.
-      - name: Diagnostico de CRT de LLVM (Windows)
+      # En Windows se enlaza contra LLVM-C.dll (ver #2 y el Cargo.toml de
+      # zirk-codegen-llvm). El DLL debe estar en el PATH para que los binarios
+      # de test lo encuentren en tiempo de ejecucion, no solo al enlazar.
+      - name: Exponer LLVM-C.dll (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $lib = "C:\LLVM\lib\LLVMSupport.lib"
-          if (-not (Test-Path $lib)) {
-            Write-Host "no se encontro $lib"; exit 0
+          $ErrorActionPreference = "Stop"
+          Write-Host "== DLLs disponibles en C:\LLVM\bin =="
+          Get-ChildItem C:\LLVM\bin -Filter *.dll | ForEach-Object {
+            Write-Host ("  {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB))
           }
-          # Las directivas /DEFAULTLIB quedan como texto plano en el objeto.
-          $texto = [System.Text.Encoding]::ASCII.GetString(
-            [System.IO.File]::ReadAllBytes($lib))
-          Write-Host "== CRT declarada por LLVM =="
-          foreach ($crt in @("LIBCMT", "MSVCRT", "libcmt", "msvcrt")) {
-            $n = ([regex]::Matches($texto, [regex]::Escape($crt))).Count
-            if ($n -gt 0) { Write-Host ("  {0}: {1} coincidencias" -f $crt, $n) }
+          if (-not (Test-Path C:\LLVM\bin\LLVM-C.dll)) {
+            throw "el tarball de LLVM no incluye LLVM-C.dll: el enlace dinamico no es viable"
           }
-          Write-Host "== CRT que usa Rust =="
-          Write-Host "  target-feature=+crt-static activo: $($env:RUSTFLAGS -match 'crt-static')"
+          echo "C:\LLVM\bin" >> $env:GITHUB_PATH
 
       # --- Verificacion del toolchain --------------------------------------
       - name: Verificar LLVM
@@ -239,9 +237,3 @@ jobs:
         run: cargo test --workspace -- --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: "1"
-          # El codegen de LLVM recurre en profundidad. El stack por defecto de
-          # los threads de Rust (2 MB) es holgado en Linux y macOS, pero en
-          # Windows un desborde en la pagina de guarda se reporta como
-          # STATUS_ACCESS_VIOLATION y no como desborde de pila. Segunda
-          # hipotesis de #2, barata de descartar.
-          RUST_MIN_STACK: "33554432"
