@@ -44,15 +44,15 @@
 
 ## 5. Representación intermedia
 
-- [ ] 5.1 Definir los tipos de la IR y su representación de valores tipados
-- [ ] 5.2 Definir bloques básicos con terminador único (D2)
-- [ ] 5.3 Definir el conjunto de instrucciones: aritméticas, comparación, lógicas, llamada, carga, almacenamiento, salto, salto condicional, retorno
-- [ ] 5.4 Definir la operación abstracta de alocación, sin nombrar estrategia de memoria (D3, ADR-003)
-- [ ] 5.5 Conservar la ubicación del source en cada instrucción
-- [ ] 5.6 Implementar el lowering desde el árbol verificado, con locales como slots (D2)
-- [ ] 5.7 Lowering de `if`/`else` a bloques con salto condicional
-- [ ] 5.8 Verificador de IR bien formada, usado en tests
-- [ ] 5.9 Tests: IR esperada para cada construcción del subset
+- [x] 5.1 Definir los tipos de la IR y su representación de valores tipados
+- [x] 5.2 Definir bloques básicos con terminador único (D2)
+- [x] 5.3 Definir el conjunto de instrucciones: aritméticas, comparación, lógicas, llamada, carga, almacenamiento, salto, salto condicional, retorno
+- [x] 5.4 Definir la operación abstracta de alocación, sin nombrar estrategia de memoria (D3, ADR-003)
+- [x] 5.5 Conservar la ubicación del source en cada instrucción
+- [x] 5.6 Implementar el lowering desde el árbol verificado, con locales como slots (D2)
+- [x] 5.7 Lowering de `if`/`else` a bloques con salto condicional
+- [x] 5.8 Verificador de IR bien formada, usado en tests
+- [x] 5.9 Tests: IR esperada para cada construcción del subset
 
 ## 6. Backend
 

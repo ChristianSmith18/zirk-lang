@@ -8,3 +8,8 @@ license.workspace = true
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-sema.workspace = true
+zirk-ast.workspace = true
+
+[dev-dependencies]
+zirk-lexer.workspace = true
+zirk-parser.workspace = true

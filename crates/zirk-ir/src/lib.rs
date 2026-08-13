@@ -18,7 +18,19 @@
 //! decided in Phase 4 (see `docs/decisions/ADR-003-memoria.md`) and the IR must
 //! not anticipate it with tacit assumptions.
 //!
-//! # State
+//! # Form
 //!
-//! Empty by design. Phase 0 set up the workspace skeleton without implementing
-//! Zirk syntax; the minimal IR arrives in Phase 1.
+//! Typed three-address code over basic blocks, with locals as slots and no SSA
+//! of our own. The decision and its alternative are in decision D2 of the
+//! Phase 1 design.
+
+mod ir;
+mod lower;
+mod verify;
+
+pub use ir::{
+    BinaryOp, Block, BlockId, Function, InstKind, Instruction, IrType, Module, Operand, Slot,
+    SlotId, StringId, Terminator, UnaryOp, ValueId,
+};
+pub use lower::lower;
+pub use verify::{IrError, verify};
