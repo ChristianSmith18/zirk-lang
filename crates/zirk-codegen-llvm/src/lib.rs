@@ -21,6 +21,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use std::path::Path;
+use std::sync::Once;
 use zirk_diagnostics::{Diagnostic, DiagnosticResult};
 
 /// Códigos de diagnóstico de este crate.
@@ -80,9 +81,17 @@ pub fn target_by_name(name: &str) -> Option<&'static ZirkTarget> {
     TARGETS.iter().find(|t| t.name == name)
 }
 
-/// Inicializa los targets de LLVM. Idempotente.
+/// Inicializa los targets de LLVM. Idempotente y seguro entre threads.
+///
+/// La inicialización de targets de LLVM **no** es thread-safe: registra
+/// estructuras globales del proceso. Sin esta guarda, dos llamadas simultáneas
+/// corrompen ese estado. El harness de tests de Rust ejecuta en paralelo, así
+/// que la condición se da con facilidad.
 pub fn initialize_targets() {
-    Target::initialize_all(&InitializationConfig::default());
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        Target::initialize_all(&InitializationConfig::default());
+    });
 }
 
 /// Triple del host donde corre el compilador.
@@ -163,17 +172,11 @@ pub fn emit_object(
 }
 
 /// Emite un archivo objeto para el host.
+///
+/// No inicializa el target nativo por separado: `initialize_targets` ya
+/// registra todos los targets, incluido el del host, y hacerlo por dos caminos
+/// distintos reintroduce la condición de carrera que la guarda evita.
 pub fn emit_object_for_host(module: &Module<'_>, output: &Path) -> DiagnosticResult<()> {
-    Target::initialize_native(&InitializationConfig::default()).map_err(|error| {
-        Diagnostic::error(
-            codes::TARGET_MACHINE_NO_DISPONIBLE,
-            "no se pudo inicializar el target nativo",
-        )
-        .with_cause(error)
-        .with_help("verificá la instalación de LLVM; ver docs/TOOLCHAIN.md")
-        .boxed()
-    })?;
-
     emit_object_for_triple(module, &host_triple(), output)
 }
 
