@@ -2,7 +2,7 @@
 
 ## La regla que manda sobre todas
 
-**Las specs de `docs/` son normativas.** Ante cualquier duda de sintaxis, semántica o alcance, mandan sobre criterio propio, memoria de otros lenguajes o "lo que suena razonable".
+**Las specs de `docs/` son normativas y están en inglés.** Ante cualquier duda de sintaxis, semántica o alcance, mandan sobre criterio propio, memoria de otros lenguajes o "lo que suena razonable".
 
 Y su corolario, que es regla explícita del propio spec:
 
@@ -92,15 +92,23 @@ En la práctica, y como mínimo:
 Todo error del compilador sigue el formato de `ZIRK_COMPILER_SPEC.md` sección 8:
 
 ```text
-error[E0308]: tipos incompatibles
+error[E0308]: incompatible types
   src/main.zrk:4:24
   |
 4 |     mut total: Int32 = "cuarenta";
-  |                        ^^^^^^^^^^ se esperaba Int32, se encontró String
+  |                        ^^^^^^^^^^ expected Int32, found String
   |
-  = causa: no hay conversión implícita de String a Int32
-  = ayuda: usá Int32.parse("cuarenta") si querés convertir en runtime
+  = cause: there is no implicit conversion from String to Int32
+  = help: use Int32.parse("cuarenta") to convert at runtime
 ```
+
+### Idioma
+
+**En inglés**: las specs normativas, el roadmap, el prompt de arranque, el código, sus comentarios, los mensajes de diagnóstico y los nombres de test.
+
+**En español**: los ADRs, este archivo, el README, `docs/TOOLCHAIN.md`, los artefactos de OpenSpec y los mensajes de commit.
+
+La frontera: **lo que define Zirk va en inglés; lo que registra cómo lo estamos construyendo va en español.** El razonamiento, y las dos veces que esta frontera estuvo mal puesta, están en [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
 
 Se construye con `zirk-diagnostics`. Los códigos son **estables**: uno publicado no se reutiliza para un error semánticamente distinto.
 

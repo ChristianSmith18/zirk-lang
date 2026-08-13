@@ -1,0 +1,5 @@
+fn main(): Void {
+    if 1 {
+        stdout.println("nope");
+    }
+}

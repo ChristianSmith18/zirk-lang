@@ -117,8 +117,24 @@ Rollback: revertir el merge. La Fase 0 no depende de nada de esta fase.
 
 ## Open Questions
 
-- **¿`zirk run` deja el ejecutable en disco o lo borra?** `ZIRK_COMPILER_SPEC.md` sección 9 dice "compila incrementalmente y ejecuta" sin especificarlo. Inclinación: dejarlo en un directorio de build, que es lo que espera un usuario que después quiera distribuirlo.
+Las tres quedaron resueltas durante la implementación. Se conservan con su resolución en vez de borrarlas: la pregunta explica por qué la respuesta no era obvia.
 
-- **¿Qué exit code produce `main` en esta fase?** `ZIRK_RUNTIME_SPEC.md` sección 2 dice que `main` podrá retornar un código o un `Result` "definido por el contrato de entrypoint", que no está definido. Inclinación: solo `Void` en esta fase, con exit code 0, y dejar la pregunta abierta hasta que exista `Result` en Fase 4.
+- **¿`zirk run` deja el ejecutable en disco o lo borra?** `ZIRK_COMPILER_SPEC.md` sección 9 no lo especifica.
 
-- **¿La inferencia de tipos cubre `mut x = 5`?** El spec la permite "cuando es inequívoca". Con un solo tipo entero en el subset lo es. Inclinación: soportarla, porque prohibirla y después permitirla es un cambio incompatible en los tests.
+  **Resuelto: lo deja, en `build/`.** Quien ejecutó su programa lo más probable es que quiera distribuirlo, y un compilador que esconde su salida obliga a un segundo comando para recuperarla. Hay un test que lo fija.
+
+- **¿Qué exit code produce `main` en esta fase?** `ZIRK_RUNTIME_SPEC.md` sección 2 lo delega a un "contrato de entrypoint" que no está definido.
+
+  **Resuelto: solo `Void`, con exit code 0.** El chequeador rechaza cualquier otra firma de `main` con un diagnóstico que dice cuál se espera. La pregunta de fondo —qué significa que `main` retorne un `Result`— sigue abierta y corresponde a la Fase 4, cuando `Result` exista.
+
+- **¿La inferencia cubre `mut x = 5`?** El spec la permite "cuando es inequívoca".
+
+  **Resuelto: sí.** Con un solo tipo entero en el subset la inferencia es inequívoca. Prohibirla ahora y permitirla después habría sido un cambio incompatible en los tests.
+
+## Decisiones tomadas durante la implementación
+
+Dos que no estaban previstas y quedaron documentadas donde corresponde:
+
+- **La forma de la IR pasó a [ADR-007](../../../docs/decisions/ADR-007-forma-de-la-ir.md).** El `design.md` de un change se archiva; la forma de la IR es un contrato con la Fase 8 y necesitaba un lugar durable.
+
+- **Las funciones de Zirk llevan prefijo `zk_` en el código generado.** Evita que una función Zirk llamada `printf` se convierta en la de C, y deja libre el nombre `main` para el entrypoint que invoca el sistema operativo. El esquema es interno y se revisa cuando lleguen los paquetes en la Fase 8.

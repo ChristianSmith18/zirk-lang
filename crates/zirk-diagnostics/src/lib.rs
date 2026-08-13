@@ -1,28 +1,30 @@
 //! # zirk-diagnostics
 //!
-//! **Responsabilidad:** definir la forma de un diagnóstico del compilador y
-//! renderizarlo, tanto para humanos como para herramientas.
+//! **Responsibility:** define the shape of a compiler diagnostic and render it,
+//! both for humans and for tooling.
 //!
-//! Implementa el contrato de `ZIRK_COMPILER_SPEC.md` sección 8: todo diagnóstico
-//! lleva severidad, código estable, ubicación, causa y —cuando existe una
-//! reparación clara— una ayuda accionable.
+//! Implements the contract of `ZIRK_COMPILER_SPEC.md` section 8: every
+//! diagnostic carries a severity, a stable code, a location, a cause and —when
+//! a clear fix exists— actionable help.
 //!
-//! **Límite:** este crate no conoce la sintaxis de Zirk, no lee archivos y no
-//! decide cuándo emitir un diagnóstico. Solo lo representa y lo formatea. Quien
-//! detecta el error es responsable de construirlo y de proveer el fragmento de
-//! source si lo tiene.
+//! **Boundary:** this crate does not know Zirk syntax, does not read files and
+//! does not decide when to emit a diagnostic. It only represents and formats
+//! one. Whoever detects the error is responsible for building it and for
+//! supplying the source snippet if it has one.
 //!
-//! Es la única dependencia transversal permitida del workspace: cualquier etapa
-//! del pipeline puede depender de él, independientemente de su posición.
+//! It is the one cross-cutting dependency the workspace allows: any pipeline
+//! stage may depend on it, regardless of its position.
 
 mod render;
+mod source;
 
 pub use render::RenderStyle;
+pub use source::{SourceFile, Span};
 
-/// Severidad de un diagnóstico.
+/// Severity of a diagnostic.
 ///
-/// Los warnings nunca alteran la semántica del programa; solo informan. La
-/// elevación a error es una decisión de configuración, no del sitio que emite.
+/// Warnings never alter program semantics; they only inform. Promoting them to
+/// errors is a configuration decision, not one made at the emission site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Severity {
     Error,
@@ -30,7 +32,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// Etiqueta usada en la salida legible y en la estructurada.
+    /// Label used in both the human-readable and the structured output.
     pub const fn as_str(self) -> &'static str {
         match self {
             Severity::Error => "error",
@@ -39,10 +41,10 @@ impl Severity {
     }
 }
 
-/// Código estable de un diagnóstico.
+/// Stable code of a diagnostic.
 ///
-/// Un código publicado no se reutiliza para un error semánticamente distinto:
-/// herramientas, documentación y supresiones dependen de esa estabilidad.
+/// A published code is never reused for a semantically different error: tooling,
+/// documentation and suppressions depend on that stability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Code(&'static str);
 
@@ -62,10 +64,10 @@ impl std::fmt::Display for Code {
     }
 }
 
-/// Ubicación de un diagnóstico en el source.
+/// Location of a diagnostic in the source.
 ///
-/// `line` y `column` son 1-based, como espera cualquier editor. `column` cuenta
-/// caracteres Unicode, no bytes.
+/// `line` and `column` are one-based, as any editor expects. `column` counts
+/// Unicode characters, not bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub file: String,
@@ -83,17 +85,17 @@ impl Location {
     }
 }
 
-/// Fragmento de source que acompaña al diagnóstico.
+/// Source snippet accompanying the diagnostic.
 ///
-/// Es opcional a propósito: un diagnóstico emitido sin acceso al source sigue
-/// siendo válido y debe renderizarse conservando el resto de la información.
+/// It is optional on purpose: a diagnostic emitted without access to the source
+/// is still valid and must render while preserving the rest of its information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snippet {
-    /// Texto completo de la línea señalada, sin el salto de línea final.
+    /// Full text of the reported line, without its trailing newline.
     pub line_text: String,
-    /// Cuántos caracteres abarca el marcador. Siempre al menos 1.
+    /// How many characters the marker spans. Always at least 1.
     pub width: u32,
-    /// Explicación localizada que se imprime junto al marcador.
+    /// Localized explanation printed next to the marker.
     pub label: Option<String>,
 }
 
@@ -112,19 +114,19 @@ impl Snippet {
     }
 }
 
-/// Un diagnóstico del compilador.
+/// A compiler diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub code: Code,
-    /// Descripción precisa, en el encabezado.
+    /// Precise description, shown in the header.
     pub message: String,
     pub location: Option<Location>,
     pub snippet: Option<Snippet>,
-    /// Motivo semántico del error.
+    /// Semantic reason for the error.
     pub cause: Option<String>,
-    /// Acción concreta de reparación. Se omite si no hay una reparación clara:
-    /// una ayuda genérica sin valor accionable es peor que ninguna.
+    /// Concrete fix. Omitted when there is no clear fix: generic help with no
+    /// actionable value is worse than none.
     pub help: Option<String>,
 }
 
@@ -169,33 +171,34 @@ impl Diagnostic {
         self
     }
 
-    /// Renderiza en el formato legible de `COMPILER_SPEC` sección 8.
+    /// Renders in the human-readable format of `COMPILER_SPEC` section 8.
     pub fn render(&self) -> String {
         render::human(self)
     }
 
-    /// Renderiza como objeto JSON para consumo por herramientas.
+    /// Renders as a JSON object for consumption by tooling.
     pub fn render_json(&self) -> String {
         render::json(self)
     }
 
-    /// Mueve el diagnóstico al heap para devolverlo en un [`DiagnosticResult`].
+    /// Moves the diagnostic to the heap so it can be returned in a
+    /// [`DiagnosticResult`].
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
 }
 
-/// Resultado de una operación que puede fallar con un diagnóstico.
+/// Result of an operation that can fail with a diagnostic.
 ///
-/// El error va en el heap a propósito: `Diagnostic` ronda los 200 bytes y este
-/// alias aparece en el retorno de casi toda operación del compilador. Sin el
-/// `Box`, el camino de éxito paga ese tamaño en cada llamada.
+/// The error goes on the heap on purpose: `Diagnostic` is around 200 bytes and
+/// this alias appears in the return type of nearly every compiler operation.
+/// Without the `Box`, the success path pays that size on every call.
 pub type DiagnosticResult<T> = Result<T, Box<Diagnostic>>;
 
-/// Acumula diagnósticos y aplica la política de severidad.
+/// Accumulates diagnostics and applies the severity policy.
 ///
-/// Es el único punto donde un warning puede convertirse en error: los sitios que
-/// emiten declaran la severidad natural del hallazgo y no conocen la política.
+/// This is the only place where a warning can become an error: emission sites
+/// declare the natural severity of the finding and know nothing of the policy.
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticSink {
     diagnostics: Vec<Diagnostic>,
@@ -207,7 +210,7 @@ impl DiagnosticSink {
         Self::default()
     }
 
-    /// Eleva los warnings a errores, según `--warnings-as-errors`.
+    /// Promotes warnings to errors, per `--warnings-as-errors`.
     pub fn warnings_as_errors(mut self, enabled: bool) -> Self {
         self.warnings_as_errors = enabled;
         self
@@ -224,7 +227,7 @@ impl DiagnosticSink {
         &self.diagnostics
     }
 
-    /// Si hay al menos un error, la compilación no puede continuar.
+    /// If there is at least one error, compilation cannot continue.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
@@ -239,7 +242,7 @@ impl DiagnosticSink {
         self.diagnostics.len()
     }
 
-    /// Renderiza todos los diagnósticos acumulados.
+    /// Renders every accumulated diagnostic.
     pub fn render(&self, style: RenderStyle) -> String {
         render::sink(&self.diagnostics, style)
     }
@@ -250,33 +253,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn warnings_as_errors_eleva_la_severidad() {
+    fn warnings_as_errors_promotes_the_severity() {
         let mut sink = DiagnosticSink::new().warnings_as_errors(true);
-        sink.emit(Diagnostic::warning(Code::new("W0001"), "símbolo sin uso"));
+        sink.emit(Diagnostic::warning(Code::new("W0001"), "unused symbol"));
 
         assert_eq!(sink.diagnostics()[0].severity, Severity::Error);
         assert!(sink.has_errors());
     }
 
     #[test]
-    fn sin_la_bandera_un_warning_no_frena_la_compilacion() {
+    fn without_the_flag_a_warning_does_not_stop_compilation() {
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::warning(Code::new("W0001"), "símbolo sin uso"));
+        sink.emit(Diagnostic::warning(Code::new("W0001"), "unused symbol"));
 
         assert_eq!(sink.diagnostics()[0].severity, Severity::Warning);
         assert!(!sink.has_errors());
     }
 
     #[test]
-    fn los_errores_siempre_frenan_la_compilacion() {
+    fn errors_always_stop_compilation() {
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::error(Code::new("E0001"), "tipo incompatible"));
+        sink.emit(Diagnostic::error(Code::new("E0001"), "incompatible type"));
 
         assert!(sink.has_errors());
     }
 
     #[test]
-    fn un_snippet_tiene_marcador_de_al_menos_un_caracter() {
+    fn a_snippet_has_a_marker_of_at_least_one_character() {
         assert_eq!(Snippet::new("texto", 0).width, 1);
     }
 }

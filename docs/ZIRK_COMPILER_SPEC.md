@@ -1,56 +1,71 @@
-# Zirk — Especificación del compilador y tooling
+# Zirk — Compiler and tooling specification
 
-## 1. Objetivos
+## 1. Goals
 
-El compilador debe priorizar diagnósticos seguros, compilación incremental, binarios nativos eficientes y resultados reproducibles. Formatter, linter, `check` y LSP deben operar sobre el frontend incremental sin invocar LLVM.
+The compiler must prioritize safe diagnostics, incremental compilation,
+efficient native binaries and reproducible results. Formatter, linter, `check`
+and LSP must operate on the incremental frontend without invoking LLVM.
 
-Metas de rendimiento como “milisegundos para aproximadamente 100 archivos” son objetivos medidos, no garantías independientes del hardware. El proyecto mantendrá benchmarks públicos de startup, parsing, formatting, análisis incremental, build completo, build sin cambios, LSP, memoria máxima y tamaño de binario.
+Performance goals such as "milliseconds for roughly 100 files" are measured
+targets, not guarantees independent of hardware. The project will maintain
+public benchmarks for startup, parsing, formatting, incremental analysis, full
+build, no-change build, LSP, peak memory and binary size.
 
 ## 2. Pipeline
 
 ```text
 source .zrk
     ↓
-lexer incremental
+incremental lexer
     ↓
-parser con árbol de sintaxis
+parser producing a syntax tree
     ↓
-resolución de módulos y nombres
+module and name resolution
     ↓
-type checker y análisis de flujo
+type checker and flow analysis
     ↓
-expansión validada de decoradores
+validated decorator expansion
     ↓
-IR tipada y portable
+typed, portable IR
     ↓
 LLVM IR
     ↓
-objeto, linker y binario Mach-O / ELF / PE
+object, linker and Mach-O / ELF / PE binary
 ```
 
-El frontend comparte estructuras persistentes, interning de símbolos, cachés por contenido y un grafo fino de dependencias. Solo se invalidan archivos y símbolos afectados.
+The frontend shares persistent structures, symbol interning, content-addressed
+caches and a fine-grained dependency graph. Only affected files and symbols are
+invalidated.
 
-## 3. Árboles y Syntax API
+## 3. Trees and Syntax API
 
-La AST semántica interna es privada y puede evolucionar con el compilador. Herramientas, IDEs y decoradores usan una **Syntax API pública, versionada, inmutable y validada**.
+The internal semantic AST is private and may evolve with the compiler. Tools,
+IDEs and decorators use a **public, versioned, immutable and validated Syntax
+API**.
 
-La API pública permite:
+The public API allows:
 
-- inspeccionar tokens, nodos, tipos, firmas, atributos y ubicaciones;
-- recorrer declaraciones públicas y metadata autorizada;
-- construir transformaciones mediante builders tipados;
-- emitir diagnósticos asociados a source spans;
-- solicitar reflection explícita.
+- inspecting tokens, nodes, types, signatures, attributes and locations;
+- walking public declarations and authorized metadata;
+- building transformations through typed builders;
+- emitting diagnostics attached to source spans;
+- requesting explicit reflection.
 
-No permite mutar memoria interna, fabricar nodos inválidos, omitir el type checker ni acceder al filesystem/red/procesos sin `compile_permissions`.
+It does not allow mutating internal memory, fabricating invalid nodes, bypassing
+the type checker, or reaching the filesystem, network or processes without
+`compile_permissions`.
 
-Las transformaciones se vuelven a parsear, resolver, tipar y validar. El compilador conserva trazabilidad entre código original y generado para diagnósticos y debugging.
+Transformations are re-parsed, re-resolved, re-typed and re-validated. The
+compiler preserves traceability between original and generated code for
+diagnostics and debugging.
 
-## 4. IR y paquetes
+## 4. IR and packages
 
-La IR es tipada, independiente del target y versionada. Conserva suficiente información para especialización de genéricos, devirtualización, escape analysis, comprobaciones de seguridad, vectorización y generación de debug info.
+The IR is typed, target-independent and versioned. It preserves enough
+information for generic specialization, devirtualization, escape analysis,
+safety checks, vectorization and debug info generation.
 
-Un `.zpkg` contiene conceptualmente:
+A `.zpkg` conceptually contains:
 
 ```text
 package.zpkg
@@ -62,20 +77,29 @@ package.zpkg
 └── documentation
 ```
 
-`public.api` expone únicamente tipos, firmas, traits, interfaces, contratos de decoradores y documentación. La implementación portable se transforma al target durante el build de la aplicación. El core, runtime, stdlib, dependencias y código de la aplicación deben alinearse al mismo target y ABI.
+`public.api` exposes only types, signatures, traits, interfaces, decorator
+contracts and documentation. The portable implementation is transformed to the
+target during the application build. Core, runtime, stdlib, dependencies and
+application code must all align to the same target and ABI.
 
 ## 5. Backend
 
-LLVM es el único backend inicial. Una interfaz interna permite añadir otro backend en el futuro sin cambiar la semántica pública, pero no se mantendrán varios inicialmente.
+LLVM is the only initial backend. An internal interface allows adding another
+backend in the future without changing public semantics, but several will not be
+maintained initially.
 
-- Debug: optimización mínima, símbolos completos y correspondencia clara con source.
-- Release: optimización alta, eliminación de código muerto, LTO cuando sea apropiado, vectorización y optimización de tamaño/memoria sin alterar garantías.
+- Debug: minimal optimization, complete symbols and a clear correspondence with
+  source.
+- Release: high optimization, dead-code elimination, LTO where appropriate,
+  vectorization and size/memory optimization without altering guarantees.
 
-No se implementa assembly textual inline. Zirk ofrece intrinsics portables y vectores SIMD; el backend selecciona instrucciones por arquitectura y emite una alternativa segura cuando no exista una instrucción equivalente.
+Inline textual assembly is not implemented. Zirk offers portable intrinsics and
+SIMD vectors; the backend selects instructions per architecture and emits a safe
+fallback when no equivalent instruction exists.
 
-## 6. Targets y cross-compilation
+## 6. Targets and cross-compilation
 
-Formato canónico sugerido:
+Suggested canonical format:
 
 ```text
 x86-windows
@@ -88,82 +112,104 @@ aarch64-macos
 x86_64-macos
 ```
 
-La validez depende del sistema operativo, LLVM, linker, SDK y dependencias nativas. macOS moderno de 32 bits no se promete.
+Validity depends on the operating system, LLVM, the linker, the SDK and native
+dependencies. Modern 32-bit macOS is not promised.
 
-Resolución:
+Resolution:
 
 1. `zirk build --target ...`;
-2. todos los `build_targets` de `init.zrk`;
-3. detección del host.
+2. every `build_targets` entry in `init.zrk`;
+3. host detection.
 
-Un target de CLI reemplaza temporalmente `build_targets`. El compilador verifica temprano bibliotecas nativas incompatibles y explica qué dependencia bloquea el target.
+A CLI target temporarily replaces `build_targets`. The compiler checks early for
+incompatible native libraries and explains which dependency blocks the target.
 
-WebAssembly, browser, DOM y directivas de plataforma están fuera de Zirk 1.x.
+WebAssembly, browser, DOM and platform directives are outside Zirk 1.x.
 
-## 7. Builds incrementales y reproducibles
+## 7. Incremental and reproducible builds
 
-Las claves de caché incluyen contenido, versión de compilador, flags relevantes, target, API de dependencias, versión de IR y configuración. El sistema reutiliza parsing, tipos, IR, objetos y paquetes no invalidados.
+Cache keys include content, compiler version, relevant flags, target, dependency
+API, IR version and configuration. The system reuses parsing, types, IR, objects
+and packages that were not invalidated.
 
-Un build bloqueado por `zirk.lock` debe usar exactamente versiones y hashes registrados. `zirk update` recalcula la resolución. Artefactos release destinados a distribución deben poder reproducirse con el mismo source, lockfile, toolchain y target.
+A build locked by `zirk.lock` must use exactly the recorded versions and hashes.
+`zirk update` recomputes resolution. Release artifacts intended for distribution
+must be reproducible from the same source, lockfile, toolchain and target.
 
-## 8. Diagnósticos
+## 8. Diagnostics
 
-Formato mínimo:
+Minimum format:
 
 ```text
-error[E1234]: descripción precisa
+error[E1234]: precise description
   src/users.zrk:18:12
    |
-18 |     expresión problemática
-   |            ^ explicación localizada
+18 |     problematic expression
+   |            ^ localized explanation
    |
-   = causa: motivo semántico
-   = ayuda: acción concreta
+   = cause: semantic reason
+   = help: concrete action
 ```
 
-Todo diagnóstico debe incluir severidad, código estable, ubicación, causa y ayuda cuando exista una reparación clara. Los errores generados por decoradores muestran tanto el source original como la expansión relevante.
+Every diagnostic must include a severity, a stable code, a location, a cause and
+help where a clear fix exists. Errors produced by decorators show both the
+original source and the relevant expansion.
 
-Los warnings no cambian la semántica. Categorías configurables incluyen código inalcanzable, símbolo sin uso, shadowing confuso, cast redundante, permiso innecesario y operación cuyo resultado se ignora. `--warnings-as-errors` puede elevarlos.
+Warnings do not change semantics. Configurable categories include unreachable
+code, unused symbol, confusing shadowing, redundant cast, unnecessary permission
+and ignored operation result. `--warnings-as-errors` may promote them.
 
-## 9. CLI oficial
+## 9. Official CLI
 
-Comandos mínimos:
+Minimum commands:
 
 ```text
-zirk new <name>       crea un proyecto nuevo
-zirk init             inicializa Zirk en un directorio existente
-zirk run              compila incrementalmente y ejecuta
-zirk build            genera artefactos
-zirk check            analiza sin generar código
-zirk test             ejecuta tests
-zirk bench            ejecuta benchmarks
-zirk format           aplica formato canónico
-zirk lint             ejecuta reglas estáticas
-zirk prepare          audita permisos, targets y publicación
-zirk add/remove       modifica dependencias
-zirk install          resuelve dependencias
-zirk update           actualiza zirk.lock explícitamente
-zirk package          crea .zpkg
-zirk publish          publica un paquete
-zirk doc              genera documentación
+zirk new <name>       create a new project
+zirk init             initialize Zirk in an existing directory
+zirk run              compile incrementally and run
+zirk build            produce artifacts
+zirk check            analyze without generating code
+zirk test             run tests
+zirk bench            run benchmarks
+zirk format           apply canonical formatting
+zirk lint             run static rules
+zirk prepare          audit permissions, targets and publishing
+zirk add/remove       modify dependencies
+zirk install          resolve dependencies
+zirk update           update zirk.lock explicitly
+zirk package          create a .zpkg
+zirk publish          publish a package
+zirk doc              generate documentation
 ```
 
-La CLI debe tener arranque rápido, salida determinista y modo estructurado (`--json`) para herramientas.
+The CLI must start fast, produce deterministic output and offer a structured
+mode (`--json`) for tooling.
 
-## 10. Formatter, linter y LSP
+## 10. Formatter, linter and LSP
 
-El formatter es canónico, idempotente y sin configuración que fragmente el estilo. Agrega `;`, normaliza espacios, llaves, saltos y orden donde sea semánticamente neutro.
+The formatter is canonical, idempotent and free of configuration that would
+fragment style. It adds `;`, and normalizes spacing, braces, line breaks and
+ordering where semantically neutral.
 
-El linter comparte parser, resolución y tipos con el compilador. Las reglas rápidas se ejecutan por defecto; análisis costosos son explícitos. Los fixes automáticos deben ser seguros y revisables.
+The linter shares parser, resolution and types with the compiler. Fast rules run
+by default; expensive analyses are explicit. Automatic fixes must be safe and
+reviewable.
 
-El LSP usa snapshots incrementales, cancelación de solicitudes obsoletas y prioridades interactivas. Ofrece diagnósticos, completion, hover, navegación, referencias, rename, formatting, semantic tokens, firmas y code actions.
+The LSP uses incremental snapshots, cancellation of stale requests and
+interactive priorities. It offers diagnostics, completion, hover, navigation,
+references, rename, formatting, semantic tokens, signatures and code actions.
 
 ## 11. Debugger
 
-El toolchain genera símbolos y mapeo fiel a `.zrk`, incluyendo async/tasks y código decorado. Debe permitir breakpoints, step, inspección de variables, stack traces, threads, tasks y channels. Las optimizaciones release pueden limitar la observabilidad y deben indicarlo.
+The toolchain generates symbols and a faithful mapping to `.zrk`, including
+async/tasks and decorated code. It must support breakpoints, stepping, variable
+inspection, stack traces, threads, tasks and channels. Release optimizations may
+limit observability and must say so.
 
-## 12. Tests del compilador
+## 12. Compiler tests
 
-Se requieren suites de lexer/parser, snapshots de diagnósticos, type checker, seguridad, IR, codegen por target, ABI, incrementalidad, reproducibilidad, formatter idempotente, fuzzing y differential tests entre debug/release cuando proceda.
+Suites are required for lexer/parser, diagnostic snapshots, type checker,
+safety, IR, codegen per target, ABI, incrementality, reproducibility, formatter
+idempotence, fuzzing and differential debug/release tests where applicable.
 
-Cada regla del lenguaje debe tener al menos un caso válido y uno inválido.
+Every rule of the language must have at least one valid and one invalid case.
