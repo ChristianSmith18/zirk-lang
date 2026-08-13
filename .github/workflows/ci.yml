@@ -84,122 +84,65 @@ jobs:
           echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@${LLVM_VERSION})" >> "$GITHUB_ENV"
 
       # --- LLVM: Windows ---------------------------------------------------
-      # El instalador .exe oficial NO incluye las bibliotecas estaticas ni las
-      # cabeceras que llvm-sys necesita: hay que usar el tarball de desarrollo.
-      # Es la causa mas comun de fallos de build en Windows.
-      # Ver docs/TOOLCHAIN.md
+      # NO se usa la distribucion oficial de LLVM para Windows. Se probaron sus
+      # cuatro combinaciones y ninguna funciona con llvm-sys (ver issue #2):
+      #
+      #   - enlace estatico: el tarball se compila con la CRT estatica y Rust
+      #     usa la dinamica; el proceso aborta en LLVMGetDefaultTargetTriple;
+      #   - crt-static en Rust: llvm-sys fuerza entonces todas las bibliotecas
+      #     del sistema a estaticas, y psapi solo existe como import library;
+      #   - force-dynamic: su llvm-config no soporta --link-shared;
+      #   - prefer-dynamic: cae de vuelta al estatico y repite el primer caso.
+      #
+      # Se usa un build de terceros mantenido especificamente para que inkwell
+      # funcione en Windows, compilado con la CRT que corresponde. La version
+      # coincide exactamente con el pin del proyecto.
+      #
+      # Es una dependencia de un solo mantenedor y eso es un riesgo de cadena de
+      # suministro asumido conscientemente: la alternativa es compilar LLVM
+      # desde fuente en CI, que son horas por build. Ver ADR-001.
       - name: Cachear LLVM (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-windows
         uses: actions/cache@v4
         with:
           path: C:\LLVM
-          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64
+          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64-inkwell
 
       - name: Instalar LLVM (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $name = "clang+llvm-$env:LLVM_FULL_VERSION-x86_64-pc-windows-msvc"
-          $url  = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_FULL_VERSION/$name.tar.xz"
+          $archivo = "LLVM-$env:LLVM_FULL_VERSION-win64.7z"
+          $url = "https://github.com/TyrsDev/llvm-package-windows/releases/download/v$env:LLVM_FULL_VERSION/$archivo"
 
           Write-Host "Descargando $url"
-          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+          Invoke-WebRequest -Uri $url -OutFile $archivo
 
-          # 7z viene preinstalado en los runners de Windows y maneja xz de forma
-          # confiable, a diferencia del tar.exe del sistema.
-          #
-          # El switch -o de 7-Zip exige la ruta pegada y rechaza `-o.` como
-          # "too short switch". Sin -o extrae al directorio actual, que es lo
-          # que se necesita para el primer paso.
-          7z x llvm.tar.xz -y
-          7z x llvm.tar -oC:\extracted -y
+          7z x $archivo -oC:\extracted -y | Out-Null
 
-          # El tarball trae un unico directorio raiz con el nombre del release.
-          # Se resuelve en vez de asumirlo: si upstream lo cambia, conviene
-          # fallar con un mensaje claro y no con un path inexistente.
-          $root = Get-ChildItem -Path C:\extracted -Directory | Select-Object -First 1
-          if (-not $root) {
-            throw "el tarball de LLVM no contiene un directorio raiz en C:\extracted"
+          # El paquete puede traer todo en la raiz o dentro de un directorio.
+          # Se resuelve en vez de asumirlo.
+          if (Test-Path C:\extracted\bin\llvm-config.exe) {
+            $origen = "C:\extracted"
+          } else {
+            $sub = Get-ChildItem -Path C:\extracted -Directory | Select-Object -First 1
+            if (-not $sub) { throw "el paquete de LLVM no tiene la estructura esperada" }
+            $origen = $sub.FullName
           }
-          Write-Host "Directorio raiz extraido: $($root.Name)"
 
           New-Item -ItemType Directory -Force -Path C:\LLVM | Out-Null
-          Move-Item -Path "$($root.FullName)\*" -Destination C:\LLVM -Force
+          Move-Item -Path "$origen\*" -Destination C:\LLVM -Force
 
           if (-not (Test-Path C:\LLVM\bin\llvm-config.exe)) {
             throw "falta llvm-config.exe: la instalacion de LLVM quedo incompleta"
           }
 
-      # Desde LLVM 14, la build de Windows se compila con soporte de libxml2 y
-      # `llvm-config --system-libs` la declara como dependencia del sistema.
-      # El tarball oficial no incluye libxml2s.lib, asi que sin esto el enlace
-      # falla con LNK1181. En Linux y macOS libxml2 esta deshabilitada y el
-      # problema no existe.
-      # Se genera un archivo vacio en vez de instalar libxml2 de verdad, y la
-      # razon es que el enlace nunca necesita sus simbolos:
-      #
-      #   - LNK1181 se produce al no *encontrar el archivo*, antes de resolver
-      #     ningun simbolo;
-      #   - el unico componente de LLVM que usa libxml2 es WindowsManifest, y
-      #     el linker solo extrae objetos de un archivo cuando algo referencia
-      #     sus simbolos. Zirk no lo hace.
-      #
-      # Se usa llvm-lib del propio LLVM ya instalado: cero dependencias nuevas
-      # y cero red, a diferencia de vcpkg, que compila zlib y libxml2 desde
-      # fuente en cada ejecucion y falla ante cualquier intermitencia.
-      #
-      # Si en el futuro aparece un LNK2019 por simbolos de libxml2, significa
-      # que algo si los referencia y hay que instalar la biblioteca real.
-      - name: Proveer stub de libxml2 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $stubDir = "C:\llvm-stubs"
-          New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
-
-          # El archivo debe contener al menos un objeto COFF real. Un archivo
-          # vacio (llvm-lib /llvmlibempty) produce LNK1107 en link.exe: le
-          # falta la tabla de simbolos que MSVC exige.
-          Set-Content -Path "$stubDir\stub.c" -Value "" -NoNewline
-          & "C:\LLVM\bin\clang.exe" --target=x86_64-pc-windows-msvc `
-            -c "$stubDir\stub.c" -o "$stubDir\stub.obj"
-          & "C:\LLVM\bin\llvm-lib.exe" "/OUT:$stubDir\libxml2s.lib" "$stubDir\stub.obj"
-
-          if (-not (Test-Path "$stubDir\libxml2s.lib")) {
-            throw "no se pudo generar el stub libxml2s.lib con llvm-lib"
-          }
-
-          echo "LIB=$stubDir;$env:LIB" >> $env:GITHUB_ENV
-
       - name: Declarar prefijo de LLVM (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: echo "LLVM_SYS_201_PREFIX=C:/LLVM" >> $env:GITHUB_ENV
-
-      # Diagnostico de #2: la primera llamada a codegen de LLVM produce
-      # STATUS_ACCESS_VIOLATION en Windows. Desde Linux si se emiten objetos
-      # para x86_64-pc-windows-msvc, asi que el target funciona y el problema
-      # es ejecutar LLVM *sobre* Windows. La hipotesis principal es que la CRT
-      # contra la que se compilo LLVM no coincide con la que usa Rust.
-      # En Windows se enlaza contra LLVM-C.dll (ver #2 y el Cargo.toml de
-      # zirk-codegen-llvm). El DLL debe estar en el PATH para que los binarios
-      # de test lo encuentren en tiempo de ejecucion, no solo al enlazar.
-      - name: Exponer LLVM-C.dll (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Write-Host "== DLLs disponibles en C:\LLVM\bin =="
-          Get-ChildItem C:\LLVM\bin -Filter *.dll | ForEach-Object {
-            Write-Host ("  {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB))
-          }
-          if (-not (Test-Path C:\LLVM\bin\LLVM-C.dll)) {
-            throw "el tarball de LLVM no incluye LLVM-C.dll: el enlace dinamico no es viable"
-          }
-          echo "C:\LLVM\bin" >> $env:GITHUB_PATH
 
       # --- Verificacion del toolchain --------------------------------------
       - name: Verificar LLVM

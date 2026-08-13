@@ -62,26 +62,27 @@ En otras distros, el paquete necesario es el que contiene `llvm-config` **y** lo
 
 ## Windows
 
-> **No uses `LLVM-20.1.8-win64.exe`.** El instalador oficial (367 MB) trae los binarios de clang pero **no** las bibliotecas estáticas ni las cabeceras que `llvm-sys` necesita para enlazar. Es la causa más común de fallos de build en Windows.
+> **La distribución oficial de LLVM no sirve.** Ni el instalador `.exe` —que no trae bibliotecas estáticas— ni el tarball de desarrollo `clang+llvm-*-pc-windows-msvc.tar.xz`, que sí las trae pero está compilado contra la CRT **estática** mientras que Rust usa la dinámica. Mezclarlas pone dos heaps en el mismo proceso y el compilador aborta con `STATUS_ACCESS_VIOLATION` en la primera llamada a LLVM que devuelva una cadena.
+>
+> Se probaron las cuatro combinaciones posibles y ninguna funciona. El detalle está en el issue [#2](https://github.com/ChristianSmith18/zirk-lang/issues/2).
 
-Descargar el tarball de desarrollo desde las releases oficiales de LLVM:
+Se usa un build mantenido específicamente para que `inkwell` funcione en Windows, compilado con la CRT que corresponde:
 
 ```
-https://github.com/llvm/llvm-project/releases/tag/llvmorg-20.1.8
+https://github.com/TyrsDev/llvm-package-windows/releases/tag/v20.1.8
 
-  clang+llvm-20.1.8-x86_64-pc-windows-msvc.tar.xz    (x86_64)
-  clang+llvm-20.1.8-aarch64-pc-windows-msvc.tar.xz   (aarch64)
+  LLVM-20.1.8-win64.7z
 ```
 
-Ambos vienen con firma `.sig` — verificarla antes de extraer.
-
-Extraer, por ejemplo, en `C:\LLVM` y registrar la variable:
+Extraer en `C:\LLVM` y registrar la variable con **barras normales**:
 
 ```powershell
-setx LLVM_SYS_201_PREFIX C:\LLVM
+setx LLVM_SYS_201_PREFIX C:/LLVM
 ```
 
 Requiere **Visual Studio 2022** con las herramientas de C++ (o Build Tools equivalentes), porque `llvm-sys` enlaza contra la runtime de MSVC.
+
+> Esta dependencia es de un solo mantenedor y constituye un riesgo de cadena de suministro asumido conscientemente. La alternativa es compilar LLVM desde fuente con `LLVM_USE_CRT_RELEASE=MD` y `LLVM_ENABLE_LIBXML2=OFF`, que son horas por build.
 
 ---
 
