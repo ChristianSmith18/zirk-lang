@@ -218,4 +218,6 @@ version = "0.0.0"
 dependencies = [
  "zirk-ast",
  "zirk-diagnostics",
+ "zirk-lexer",
+ "zirk-parser",
 ]

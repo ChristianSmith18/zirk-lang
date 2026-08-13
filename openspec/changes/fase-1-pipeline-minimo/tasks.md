@@ -28,19 +28,19 @@
 
 ## 4. Nombres, tipos y flujo
 
-- [ ] 4.1 Construir la tabla de scopes con anidamiento de bloques y sombras
-- [ ] 4.2 Resolver identificadores a su declaración, con diagnóstico si no existe
-- [ ] 4.3 Implementar el chequeo de tipos del subset, sin conversiones implícitas
-- [ ] 4.4 Rechazar truthiness: exigir `Boolean` en toda condición
-- [ ] 4.5 Restringir `&&`, `||` y `!` a operandos booleanos
-- [ ] 4.6 Implementar la inferencia desde el inicializador cuando es inequívoca
-- [ ] 4.7 Verificar mutabilidad: rechazar reasignación de `inmut`
-- [ ] 4.8 Verificar aridad y tipos de los argumentos contra la firma
-- [ ] 4.9 Verificar coherencia del retorno y que toda ruta de una función no `Void` retorne
-- [ ] 4.10 Análisis de flujo para uso antes de disponibilidad
-- [ ] 4.11 Rechazar literales enteros fuera del rango de su tipo
-- [ ] 4.12 Verificar la existencia y firma de `main`
-- [ ] 4.13 Tests: un caso válido y uno inválido por cada regla de tipos
+- [x] 4.1 Construir la tabla de scopes con anidamiento de bloques y sombras
+- [x] 4.2 Resolver identificadores a su declaración, con diagnóstico si no existe
+- [x] 4.3 Implementar el chequeo de tipos del subset, sin conversiones implícitas
+- [x] 4.4 Rechazar truthiness: exigir `Boolean` en toda condición
+- [x] 4.5 Restringir `&&`, `||` y `!` a operandos booleanos
+- [x] 4.6 Implementar la inferencia desde el inicializador cuando es inequívoca
+- [x] 4.7 Verificar mutabilidad: rechazar reasignación de `inmut`
+- [x] 4.8 Verificar aridad y tipos de los argumentos contra la firma
+- [x] 4.9 Verificar coherencia del retorno y que toda ruta de una función no `Void` retorne
+- [x] 4.10 Análisis de flujo para uso antes de disponibilidad
+- [x] 4.11 Rechazar literales enteros fuera del rango de su tipo
+- [x] 4.12 Verificar la existencia y firma de `main`
+- [x] 4.13 Tests: un caso válido y uno inválido por cada regla de tipos
 
 ## 5. Representación intermedia
 
