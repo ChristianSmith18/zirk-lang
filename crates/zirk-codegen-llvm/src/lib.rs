@@ -76,6 +76,17 @@ pub const TARGETS: &[ZirkTarget] = &[
     ZirkTarget { name: "aarch64-macos",   triple: "aarch64-apple-darwin",          container: Container::MachO },
 ];
 
+/// Emite una traza de progreso del backend cuando `ZIRK_TRACE` está definida.
+///
+/// Existe porque un fallo dentro de LLVM puede abortar el proceso sin dejar
+/// mensaje ni backtrace, y en esa situación la única forma de ubicar el punto
+/// exacto es haber impreso antes de llegar. Ver el issue #2.
+fn traza(paso: &str) {
+    if std::env::var_os("ZIRK_TRACE").is_some() {
+        eprintln!("[zirk-codegen] {paso}");
+    }
+}
+
 /// Busca un target por su nombre canónico de Zirk.
 pub fn target_by_name(name: &str) -> Option<&'static ZirkTarget> {
     TARGETS.iter().find(|t| t.name == name)
@@ -96,6 +107,7 @@ pub fn initialize_targets() {
 
 /// Triple del host donde corre el compilador.
 pub fn host_triple() -> String {
+    traza("consultando el triple por defecto");
     TargetMachine::get_default_triple()
         .as_str()
         .to_string_lossy()
@@ -107,10 +119,13 @@ pub fn host_triple() -> String {
 /// Falla con diagnóstico si el triple no es reconocido, en vez de producir un
 /// objeto inválido.
 fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
+    traza("inicializando targets");
     initialize_targets();
 
+    traza("creando triple");
     let target_triple = TargetTriple::create(triple);
 
+    traza("buscando target para el triple");
     let target = Target::from_triple(&target_triple).map_err(|error| {
         Diagnostic::error(
             codes::TARGET_DESCONOCIDO,
@@ -124,6 +139,7 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
     // RelocMode::Default deja que LLVM elija el modelo correcto para cada
     // target. Forzar PIC es un concepto de Unix que no corresponde a COFF y
     // provocaba una violación de acceso al emitir para Windows.
+    traza("creando target machine");
     target
         .create_target_machine(
             &target_triple,
@@ -152,6 +168,7 @@ pub fn emit_object_for_triple(
 ) -> DiagnosticResult<()> {
     let machine = target_machine(triple)?;
 
+    traza("escribiendo el objeto a disco");
     machine
         .write_to_file(module, FileType::Object, output)
         .map_err(|error| {
