@@ -237,3 +237,6 @@ jobs:
         run: cargo test --workspace -- --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: "1"
+          # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
+          # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
+          ZIRK_TRACE: "1"
