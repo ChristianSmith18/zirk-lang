@@ -71,6 +71,12 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         "sanity{}",
         if cfg!(windows) { ".obj" } else { ".o" }
     ));
+    // Se resuelve el triple por separado para que el log distinga entre un
+    // fallo al consultarlo y uno al emitir. Ver #2.
+    eprintln!("[sanity] resolviendo triple del host");
+    let triple = zirk_codegen_llvm::host_triple();
+    eprintln!("[sanity] triple del host: {triple}");
+
     eprintln!("[sanity] emitiendo objeto para el host");
     emit_object_for_host(&module, &objeto)
         .unwrap_or_else(|d| panic!("fallo al emitir el objeto:\n{}", d.render()));
