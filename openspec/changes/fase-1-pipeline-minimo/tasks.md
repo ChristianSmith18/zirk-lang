@@ -56,13 +56,13 @@
 
 ## 6. Backend
 
-- [ ] 6.1 Traducir tipos de la IR a tipos de LLVM
-- [ ] 6.2 Traducir bloques básicos e instrucciones a LLVM IR
-- [ ] 6.3 Implementar aritmética con detección de overflow mediante intrínsecos de LLVM
-- [ ] 6.4 Implementar división con comprobación de divisor cero
-- [ ] 6.5 Generar el entrypoint que invoca `zirk_rt_init` y `zirk_rt_shutdown` alrededor de `main`
-- [ ] 6.6 Materializar literales de cadena como constantes globales más llamada al runtime (D5)
-- [ ] 6.7 Tests: el módulo LLVM generado verifica para cada construcción del subset
+- [x] 6.1 Traducir tipos de la IR a tipos de LLVM
+- [x] 6.2 Traducir bloques básicos e instrucciones a LLVM IR
+- [x] 6.3 Implementar aritmética con detección de overflow mediante intrínsecos de LLVM
+- [x] 6.4 Implementar división con comprobación de divisor cero
+- [x] 6.5 Generar el entrypoint que invoca `zirk_rt_init` y `zirk_rt_shutdown` alrededor de `main`
+- [x] 6.6 Materializar literales de cadena como constantes globales más llamada al runtime (D5)
+- [x] 6.7 Tests: el módulo LLVM generado verifica para cada construcción del subset
 
 ## 7. Runtime
 
