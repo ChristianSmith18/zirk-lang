@@ -42,7 +42,7 @@
 ## 6. Integración continua
 
 - [x] 6.1 Crear `.github/workflows/ci.yml` con la matriz `{linux, macos, windows}`
-- [x] 6.2 Instalar LLVM 20.1 por plataforma: `apt.llvm.org` en Linux, `brew install llvm@20` en macOS, tarball oficial de desarrollo en Windows
+- [x] 6.2 Instalar LLVM 20.1 por plataforma: `apt.llvm.org` en Linux, `brew install llvm@20` en macOS, build compatible con inkwell en Windows (la distribución oficial no sirve, ver #2)
 - [x] 6.3 Definir `LLVM_SYS_201_PREFIX` por plataforma en el workflow, nunca versionado en el repo (D4)
 - [x] 6.4 Cachear la instalación de LLVM y las dependencias de Cargo (D5)
 - [x] 6.5 Ejecutar `cargo build`, `cargo test`, `cargo clippy` y `cargo fmt --check` en cada job

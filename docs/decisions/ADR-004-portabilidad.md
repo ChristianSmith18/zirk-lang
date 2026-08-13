@@ -62,20 +62,18 @@ No bloquea Fase 1, que solo compila para el host. Se registra acá para que no s
 
 ## Reparto de la verificación
 
-**macOS se verifica localmente; Linux y Windows en CI.**
-
-No es una concesión de comodidad. Los runners de macOS consumen minutos a 10x en repositorios privados, y `macos-13` (Intel) además rara vez consigue runner: en las primeras ejecuciones quedó encolado indefinidamente mientras el resto de la matriz completaba. Ejecutar en un runner de macOS lo mismo que ya se ejecuta en el escritorio de desarrollo —también `aarch64-macos`— no aporta información nueva y es, con diferencia, la parte más cara de la matriz.
-
-Linux y Windows sí aportan información que la máquina de desarrollo no puede dar, y por eso están en CI.
+Las cuatro plataformas se verifican en CI:
 
 ```
-   macOS aarch64  ──▶  ./scripts/check-local.sh   (máquina de desarrollo)
    Linux x86_64   ──┐
    Linux aarch64  ──┼─▶  GitHub Actions
+   macOS aarch64  ──┤
    Windows x86_64 ──┘
 ```
 
-La contrapartida honesta: **una regresión específica de macOS no la detecta una PR**, solo la detecta quien corra el script. Es un riesgo aceptado a cambio del costo, y se revierte haciendo el repositorio público, donde Actions es gratis e ilimitado.
+macOS estuvo fuera de la matriz mientras el repositorio fue privado, porque sus runners consumen minutos a 10x y `macos-13` (Intel) rara vez conseguía runner. Al hacerse público, Actions pasó a ser gratis e ilimitado y esa restricción desapareció.
+
+`./scripts/check-local.sh` ejecuta lo mismo que CI y sigue siendo la forma de verificar antes de abrir una PR, pero ya no es la única cobertura de macOS.
 
 ## Estado de la verificación
 
