@@ -45,18 +45,18 @@ jobs:
             runner: ubuntu-24.04-arm
           - name: windows-x86_64
             runner: windows-latest
+          - name: macos-aarch64
+            runner: macos-14
           #
-          # macOS NO esta en la matriz: se verifica localmente en la maquina de
-          # desarrollo, que es un aarch64-macos. Los runners de macOS consumen
-          # minutos a 10x en repositorios privados, y macos-13 (Intel) ademas
-          # rara vez consigue runner. Verificar ahi lo que ya se verifica en el
-          # escritorio no aporta informacion nueva y es la parte mas cara de la
-          # matriz. Ver docs/decisions/ADR-004-portabilidad.md.
+          # macOS volvio a la matriz al hacerse publico el repositorio: Actions
+          # es gratis e ilimitado ahi, y el argumento de costo que lo habia
+          # dejado fuera desaparecio. Ver ADR-004.
           #
-          # aarch64-windows tampoco: el tarball oficial de LLVM existe para esa
-          # arquitectura, pero apila un riesgo nuevo sobre la plataforma que ya
-          # es la mas fragil para llvm-sys. Se incorpora cuando windows-x86_64
-          # este estable.
+          # macos-13 (Intel) sigue fuera: sus runners son escasos y quedaba
+          # encolado indefinidamente mientras el resto de la matriz completaba.
+          #
+          # aarch64-windows tambien sigue fuera: apila un riesgo nuevo sobre la
+          # plataforma que todavia no esta estable.
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +75,13 @@ jobs:
             "libpolly-${LLVM_VERSION}-dev" \
             "lld-${LLVM_VERSION}"
           echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+      # --- LLVM: macOS -----------------------------------------------------
+      - name: Instalar LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install "llvm@${LLVM_VERSION}" "lld@${LLVM_VERSION}"
+          echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@${LLVM_VERSION})" >> "$GITHUB_ENV"
 
       # --- LLVM: Windows ---------------------------------------------------
       # El instalador .exe oficial NO incluye las bibliotecas estaticas ni las
@@ -172,6 +179,30 @@ jobs:
         shell: pwsh
         run: echo "LLVM_SYS_201_PREFIX=C:/LLVM" >> $env:GITHUB_ENV
 
+      # Diagnostico de #2: la primera llamada a codegen de LLVM produce
+      # STATUS_ACCESS_VIOLATION en Windows. Desde Linux si se emiten objetos
+      # para x86_64-pc-windows-msvc, asi que el target funciona y el problema
+      # es ejecutar LLVM *sobre* Windows. La hipotesis principal es que la CRT
+      # contra la que se compilo LLVM no coincide con la que usa Rust.
+      - name: Diagnostico de CRT de LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $lib = "C:\LLVM\lib\LLVMSupport.lib"
+          if (-not (Test-Path $lib)) {
+            Write-Host "no se encontro $lib"; exit 0
+          }
+          # Las directivas /DEFAULTLIB quedan como texto plano en el objeto.
+          $texto = [System.Text.Encoding]::ASCII.GetString(
+            [System.IO.File]::ReadAllBytes($lib))
+          Write-Host "== CRT declarada por LLVM =="
+          foreach ($crt in @("LIBCMT", "MSVCRT", "libcmt", "msvcrt")) {
+            $n = ([regex]::Matches($texto, [regex]::Escape($crt))).Count
+            if ($n -gt 0) { Write-Host ("  {0}: {1} coincidencias" -f $crt, $n) }
+          }
+          Write-Host "== CRT que usa Rust =="
+          Write-Host "  target-feature=+crt-static activo: $($env:RUSTFLAGS -match 'crt-static')"
+
       # --- Verificacion del toolchain --------------------------------------
       - name: Verificar LLVM
         shell: bash
@@ -208,3 +239,9 @@ jobs:
         run: cargo test --workspace -- --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: "1"
+          # El codegen de LLVM recurre en profundidad. El stack por defecto de
+          # los threads de Rust (2 MB) es holgado en Linux y macOS, pero en
+          # Windows un desborde en la pagina de guarda se reporta como
+          # STATUS_ACCESS_VIOLATION y no como desborde de pila. Segunda
+          # hipotesis de #2, barata de descartar.
+          RUST_MIN_STACK: "33554432"
