@@ -24,6 +24,8 @@ const MENSAJE: &str = "sanity check de zirk";
 
 #[test]
 fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
+    let _llvm = common::llvm_lock();
+
     let context = Context::create();
     let module = context.create_module("sanity");
     let builder = context.create_builder();
@@ -97,6 +99,8 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
 
 #[test]
 fn un_triple_desconocido_falla_con_diagnostico() {
+    let _llvm = common::llvm_lock();
+
     let context = Context::create();
     let module = context.create_module("invalido");
     let dir = common::temp_dir();
