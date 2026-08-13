@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Roadmap de construcción
+    url: https://github.com/ChristianSmith18/zirk-lang/blob/main/docs/init/ZIRK_ROADMAP.md
+    about: Las 13 fases del proyecto. Revisá acá antes de pedir una feature.
+  - name: Decisiones de arquitectura (ADRs)
+    url: https://github.com/ChristianSmith18/zirk-lang/blob/main/docs/decisions/README.md
+    about: Por qué el proyecto está hecho así.

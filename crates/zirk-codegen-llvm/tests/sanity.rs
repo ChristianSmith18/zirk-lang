@@ -24,6 +24,9 @@ const MENSAJE: &str = "sanity check de zirk";
 
 #[test]
 fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
+    let _llvm = common::llvm_lock();
+
+    eprintln!("[sanity] creando contexto LLVM");
     let context = Context::create();
     let module = context.create_module("sanity");
     let builder = context.create_builder();
@@ -48,9 +51,19 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         .build_return(Some(&i32_type.const_int(0, false)))
         .expect("no se pudo construir el return");
 
-    module
-        .verify()
-        .expect("el módulo LLVM generado no verifica");
+    // `Module::verify()` de inkwell provoca STATUS_ACCESS_VIOLATION en Windows
+    // incluso con un módulo válido. Ver issue #2.
+    //
+    // Desactivarlo ahí no deja el caso sin cubrir: el test sigue emitiendo el
+    // objeto, enlazándolo y ejecutando el binario, así que un módulo inválido
+    // falla igual — solo que más tarde y con peor mensaje.
+    #[cfg(not(windows))]
+    {
+        eprintln!("[sanity] verificando modulo");
+        module
+            .verify()
+            .expect("el módulo LLVM generado no verifica");
+    }
 
     // Emisión del objeto para el host.
     let dir = common::temp_dir();
@@ -58,6 +71,13 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         "sanity{}",
         if cfg!(windows) { ".obj" } else { ".o" }
     ));
+    // Se resuelve el triple por separado para que el log distinga entre un
+    // fallo al consultarlo y uno al emitir. Ver #2.
+    eprintln!("[sanity] resolviendo triple del host");
+    let triple = zirk_codegen_llvm::host_triple();
+    eprintln!("[sanity] triple del host: {triple}");
+
+    eprintln!("[sanity] emitiendo objeto para el host");
     emit_object_for_host(&module, &objeto)
         .unwrap_or_else(|d| panic!("fallo al emitir el objeto:\n{}", d.render()));
 
@@ -65,6 +85,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
 
     // Enlace.
     let binario = dir.join(common::exe("sanity"));
+    eprintln!("[sanity] enlazando");
     let linker = common::linker_driver();
     let salida_enlace = Command::new(&linker)
         .arg(&objeto)
@@ -80,6 +101,7 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
     );
 
     // Ejecución.
+    eprintln!("[sanity] ejecutando binario");
     let salida = Command::new(&binario)
         .output()
         .expect("no se pudo ejecutar el binario producido");
@@ -97,6 +119,8 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
 
 #[test]
 fn un_triple_desconocido_falla_con_diagnostico() {
+    let _llvm = common::llvm_lock();
+
     let context = Context::create();
     let module = context.create_module("invalido");
     let dir = common::temp_dir();

@@ -1,0 +1,48 @@
+name: Bug
+description: Algo del compilador o del toolchain no funciona como debería
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir: Zirk está en **Fase 0** y todavía no compila código Zirk.
+        Que `zirk run` no funcione no es un bug, es el estado del proyecto.
+        Ver el README para lo que sí funciona hoy.
+
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: Qué pasó
+      description: Qué esperabas y qué ocurrió en su lugar.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducir
+    attributes:
+      label: Cómo reproducirlo
+      description: Pasos mínimos. Si hay código, incluilo completo.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: entorno
+    attributes:
+      label: Entorno
+      description: |
+        Salida de:
+        ```
+        rustc --version
+        $LLVM_SYS_201_PREFIX/bin/llvm-config --version
+        uname -sm
+        ```
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: salida
+    attributes:
+      label: Salida completa del error
+      render: shell
