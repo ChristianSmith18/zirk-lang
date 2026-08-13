@@ -4,11 +4,22 @@ name: CI
 # se considera no verificada hasta que estos jobs estén en verde.
 # Ver docs/decisions/ADR-004-portabilidad.md
 
+# Modelo de ramas: git flow.
+#   feature/* ──▶ develop ──▶ release/* ──▶ main
+#   hotfix/*  ──▶ main + develop
+# CI corre en las dos ramas de larga vida y en toda PR que apunte a ellas.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
+    branches: [main, develop]
   workflow_dispatch:
+
+# Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
+# matriz es cara y solo importa el ultimo commit.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,16 +43,20 @@ jobs:
             runner: ubuntu-latest
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
-          - name: macos-aarch64
-            runner: macos-14
-          - name: macos-x86_64
-            runner: macos-13
           - name: windows-x86_64
             runner: windows-latest
-          # aarch64-windows queda fuera de la matriz inicial a proposito: el
-          # tarball oficial de LLVM existe para esa arquitectura, pero apila un
-          # riesgo nuevo sobre la plataforma que ya es la mas fragil para
-          # llvm-sys. Se incorpora cuando windows-x86_64 este estable.
+          - name: macos-aarch64
+            runner: macos-14
+          #
+          # macOS volvio a la matriz al hacerse publico el repositorio: Actions
+          # es gratis e ilimitado ahi, y el argumento de costo que lo habia
+          # dejado fuera desaparecio. Ver ADR-004.
+          #
+          # macos-13 (Intel) sigue fuera: sus runners son escasos y quedaba
+          # encolado indefinidamente mientras el resto de la matriz completaba.
+          #
+          # aarch64-windows tambien sigue fuera: apila un riesgo nuevo sobre la
+          # plataforma que todavia no esta estable.
 
     steps:
       - uses: actions/checkout@v4
@@ -69,36 +84,60 @@ jobs:
           echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@${LLVM_VERSION})" >> "$GITHUB_ENV"
 
       # --- LLVM: Windows ---------------------------------------------------
-      # El instalador .exe oficial NO incluye las bibliotecas estaticas ni las
-      # cabeceras que llvm-sys necesita: hay que usar el tarball de desarrollo.
-      # Es la causa mas comun de fallos de build en Windows.
-      # Ver docs/TOOLCHAIN.md
+      # NO se usa la distribucion oficial de LLVM para Windows. Se probaron sus
+      # cuatro combinaciones y ninguna funciona con llvm-sys (ver issue #2):
+      #
+      #   - enlace estatico: el tarball se compila con la CRT estatica y Rust
+      #     usa la dinamica; el proceso aborta en LLVMGetDefaultTargetTriple;
+      #   - crt-static en Rust: llvm-sys fuerza entonces todas las bibliotecas
+      #     del sistema a estaticas, y psapi solo existe como import library;
+      #   - force-dynamic: su llvm-config no soporta --link-shared;
+      #   - prefer-dynamic: cae de vuelta al estatico y repite el primer caso.
+      #
+      # Se usa un build de terceros mantenido especificamente para que inkwell
+      # funcione en Windows, compilado con la CRT que corresponde. La version
+      # coincide exactamente con el pin del proyecto.
+      #
+      # Es una dependencia de un solo mantenedor y eso es un riesgo de cadena de
+      # suministro asumido conscientemente: la alternativa es compilar LLVM
+      # desde fuente en CI, que son horas por build. Ver ADR-001.
       - name: Cachear LLVM (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-windows
         uses: actions/cache@v4
         with:
           path: C:\LLVM
-          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64
+          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64-inkwell
 
       - name: Instalar LLVM (Windows)
         if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $name = "clang+llvm-$env:LLVM_FULL_VERSION-x86_64-pc-windows-msvc"
-          $url  = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$env:LLVM_FULL_VERSION/$name.tar.xz"
+          $archivo = "LLVM-$env:LLVM_FULL_VERSION-win64.7z"
+          $url = "https://github.com/TyrsDev/llvm-package-windows/releases/download/v$env:LLVM_FULL_VERSION/$archivo"
 
           Write-Host "Descargando $url"
-          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+          Invoke-WebRequest -Uri $url -OutFile $archivo
 
-          # 7z viene preinstalado en los runners de Windows y maneja xz de forma
-          # confiable, a diferencia del tar.exe del sistema.
-          7z x llvm.tar.xz -o. -y
-          7z x llvm.tar -oC:\extracted -y
+          7z x $archivo -oC:\extracted -y | Out-Null
+
+          # El paquete puede traer todo en la raiz o dentro de un directorio.
+          # Se resuelve en vez de asumirlo.
+          if (Test-Path C:\extracted\bin\llvm-config.exe) {
+            $origen = "C:\extracted"
+          } else {
+            $sub = Get-ChildItem -Path C:\extracted -Directory | Select-Object -First 1
+            if (-not $sub) { throw "el paquete de LLVM no tiene la estructura esperada" }
+            $origen = $sub.FullName
+          }
 
           New-Item -ItemType Directory -Force -Path C:\LLVM | Out-Null
-          Move-Item -Path "C:\extracted\$name\*" -Destination C:\LLVM -Force
+          Move-Item -Path "$origen\*" -Destination C:\LLVM -Force
+
+          if (-not (Test-Path C:\LLVM\bin\llvm-config.exe)) {
+            throw "falta llvm-config.exe: la instalacion de LLVM quedo incompleta"
+          }
 
       - name: Declarar prefijo de LLVM (Windows)
         if: runner.os == 'Windows'
@@ -133,5 +172,14 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
+      # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
+      # intensiva. Ejecutar en serie es la unica garantia real; el costo es
+      # despreciable con esta cantidad de tests.
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: "1"
+          # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
+          # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
+          ZIRK_TRACE: "1"

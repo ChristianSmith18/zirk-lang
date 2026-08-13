@@ -19,8 +19,8 @@ zirk-lexer = { path = "crates/zirk-lexer" }
 zirk-parser = { path = "crates/zirk-parser" }
 zirk-sema = { path = "crates/zirk-sema" }
 
-# Externas
-inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
+# inkwell no se declara acá: su conjunto de features depende del target y se
+# define en crates/zirk-codegen-llvm/Cargo.toml. Ver el issue #2.
 
 [profile.release]
 lto = true

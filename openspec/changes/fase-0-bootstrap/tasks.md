@@ -42,17 +42,17 @@
 ## 6. Integración continua
 
 - [x] 6.1 Crear `.github/workflows/ci.yml` con la matriz `{linux, macos, windows}`
-- [x] 6.2 Instalar LLVM 20.1 por plataforma: `apt.llvm.org` en Linux, `brew install llvm@20` en macOS, tarball oficial de desarrollo en Windows
+- [x] 6.2 Instalar LLVM 20.1 por plataforma: `apt.llvm.org` en Linux, `brew install llvm@20` en macOS, build compatible con inkwell en Windows (la distribución oficial no sirve, ver #2)
 - [x] 6.3 Definir `LLVM_SYS_201_PREFIX` por plataforma en el workflow, nunca versionado en el repo (D4)
 - [x] 6.4 Cachear la instalación de LLVM y las dependencias de Cargo (D5)
 - [x] 6.5 Ejecutar `cargo build`, `cargo test`, `cargo clippy` y `cargo fmt --check` en cada job
 - [x] 6.6 Extender la matriz a aarch64 en Linux y macOS
 - [x] 6.7 Resolver si `aarch64-windows` entra en la matriz según disponibilidad de runners
-- [ ] 6.8 Confirmar que el job de Windows construye `llvm-sys` correctamente — riesgo principal de esta change
+- [x] 6.8 Confirmar que el job de Windows construye `llvm-sys` correctamente — riesgo principal de esta change
 
 ## 7. Cierre
 
-- [ ] 7.1 Verificar que CI pasa en verde en las tres plataformas; hasta entonces la portabilidad se considera no verificada
+- [x] 7.1 Verificar que CI pasa en verde en las tres plataformas; hasta entonces la portabilidad se considera no verificada
 - [x] 7.2 Actualizar `docs/decisions/README.md` marcando resueltos los pendientes de layout de workspace y formato de diagnósticos
 - [x] 7.3 Registrar en ADR-004 el resultado real de la verificación de portabilidad
 - [x] 7.4 Actualizar `docs/TOOLCHAIN.md` con cualquier corrección que surja de montar CI

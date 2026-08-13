@@ -21,6 +21,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
 use std::path::Path;
+use std::sync::Once;
 use zirk_diagnostics::{Diagnostic, DiagnosticResult};
 
 /// Códigos de diagnóstico de este crate.
@@ -75,18 +76,38 @@ pub const TARGETS: &[ZirkTarget] = &[
     ZirkTarget { name: "aarch64-macos",   triple: "aarch64-apple-darwin",          container: Container::MachO },
 ];
 
+/// Emite una traza de progreso del backend cuando `ZIRK_TRACE` está definida.
+///
+/// Existe porque un fallo dentro de LLVM puede abortar el proceso sin dejar
+/// mensaje ni backtrace, y en esa situación la única forma de ubicar el punto
+/// exacto es haber impreso antes de llegar. Ver el issue #2.
+fn traza(paso: &str) {
+    if std::env::var_os("ZIRK_TRACE").is_some() {
+        eprintln!("[zirk-codegen] {paso}");
+    }
+}
+
 /// Busca un target por su nombre canónico de Zirk.
 pub fn target_by_name(name: &str) -> Option<&'static ZirkTarget> {
     TARGETS.iter().find(|t| t.name == name)
 }
 
-/// Inicializa los targets de LLVM. Idempotente.
+/// Inicializa los targets de LLVM. Idempotente y seguro entre threads.
+///
+/// La inicialización de targets de LLVM **no** es thread-safe: registra
+/// estructuras globales del proceso. Sin esta guarda, dos llamadas simultáneas
+/// corrompen ese estado. El harness de tests de Rust ejecuta en paralelo, así
+/// que la condición se da con facilidad.
 pub fn initialize_targets() {
-    Target::initialize_all(&InitializationConfig::default());
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        Target::initialize_all(&InitializationConfig::default());
+    });
 }
 
 /// Triple del host donde corre el compilador.
 pub fn host_triple() -> String {
+    traza("consultando el triple por defecto");
     TargetMachine::get_default_triple()
         .as_str()
         .to_string_lossy()
@@ -98,10 +119,13 @@ pub fn host_triple() -> String {
 /// Falla con diagnóstico si el triple no es reconocido, en vez de producir un
 /// objeto inválido.
 fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
+    traza("inicializando targets");
     initialize_targets();
 
+    traza("creando triple");
     let target_triple = TargetTriple::create(triple);
 
+    traza("buscando target para el triple");
     let target = Target::from_triple(&target_triple).map_err(|error| {
         Diagnostic::error(
             codes::TARGET_DESCONOCIDO,
@@ -112,13 +136,17 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
         .boxed()
     })?;
 
+    // RelocMode::Default deja que LLVM elija el modelo correcto para cada
+    // target. Forzar PIC es un concepto de Unix que no corresponde a COFF y
+    // provocaba una violación de acceso al emitir para Windows.
+    traza("creando target machine");
     target
         .create_target_machine(
             &target_triple,
             "generic",
             "",
             OptimizationLevel::None,
-            RelocMode::PIC,
+            RelocMode::Default,
             CodeModel::Default,
         )
         .ok_or_else(|| {
@@ -140,6 +168,7 @@ pub fn emit_object_for_triple(
 ) -> DiagnosticResult<()> {
     let machine = target_machine(triple)?;
 
+    traza("escribiendo el objeto a disco");
     machine
         .write_to_file(module, FileType::Object, output)
         .map_err(|error| {
@@ -163,17 +192,11 @@ pub fn emit_object(
 }
 
 /// Emite un archivo objeto para el host.
+///
+/// No inicializa el target nativo por separado: `initialize_targets` ya
+/// registra todos los targets, incluido el del host, y hacerlo por dos caminos
+/// distintos reintroduce la condición de carrera que la guarda evita.
 pub fn emit_object_for_host(module: &Module<'_>, output: &Path) -> DiagnosticResult<()> {
-    Target::initialize_native(&InitializationConfig::default()).map_err(|error| {
-        Diagnostic::error(
-            codes::TARGET_MACHINE_NO_DISPONIBLE,
-            "no se pudo inicializar el target nativo",
-        )
-        .with_cause(error)
-        .with_help("verificá la instalación de LLVM; ver docs/TOOLCHAIN.md")
-        .boxed()
-    })?;
-
     emit_object_for_triple(module, &host_triple(), output)
 }
 
