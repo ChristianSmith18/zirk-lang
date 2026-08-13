@@ -1,17 +1,17 @@
 //! # zirk-cli
 //!
-//! **Responsabilidad:** el ejecutable `zirk`. Orquesta las etapas del pipeline,
-//! invoca el linker y presenta los diagnósticos al usuario.
+//! **Responsibility:** the `zirk` executable. It orchestrates the pipeline
+//! stages, invokes the linker and presents diagnostics to the user.
 //!
-//! **Límite:** la CLI no implementa lógica de compilación propia. Cada etapa
-//! vive en su crate; acá solo se las coordina y se traduce el resultado a
-//! salida de terminal y exit codes.
+//! **Boundary:** the CLI implements no compilation logic of its own. Each stage
+//! lives in its crate; here they are merely coordinated and their result is
+//! translated into terminal output and exit codes.
 //!
-//! # Estado
+//! # State
 //!
-//! Los subcomandos de `ZIRK_COMPILER_SPEC.md` sección 9 (`run`, `build`,
-//! `check`, `test`, ...) llegan a partir de Fase 1. En Fase 0 la CLI solo
-//! reporta el estado del toolchain, que es lo único que ya existe.
+//! The subcommands of `ZIRK_COMPILER_SPEC.md` section 9 (`run`, `build`,
+//! `check`, `test`, ...) arrive from Phase 1 onwards. In Phase 0 the CLI only
+//! reports toolchain status, which is all that exists so far.
 
 use zirk_codegen_llvm::{TARGETS, host_triple};
 

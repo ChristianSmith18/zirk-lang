@@ -1,45 +1,45 @@
-//! Utilidades compartidas por los tests de integración del backend.
+//! Helpers shared by the backend integration tests.
 //!
-//! Cargo compila este módulo dentro de cada binario de test por separado, así
-//! que cada uno ve como no usado lo que solo necesita el otro.
+//! Cargo compiles this module into each test binary separately, so each one
+//! sees whatever only the other needs as unused.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// Serializa el acceso a LLVM entre tests del mismo binario.
+/// Serializes access to LLVM across tests in the same binary.
 ///
-/// LLVM mantiene estado global de proceso —registro de targets, manejo de
-/// errores— que no tolera uso concurrente, aunque cada thread tenga su propio
-/// `Context`. El harness de Rust ejecuta los tests en paralelo, y sin esta
-/// serialización el binario aborta con violación de acceso en Windows.
+/// LLVM keeps global process state —target registry, error handling— that does
+/// not tolerate concurrent use, even when each thread has its own `Context`.
+/// The Rust harness runs tests in parallel, and without this serialization the
+/// binary aborts with an access violation on Windows.
 ///
-/// Se recupera del envenenamiento del mutex a propósito: si un test falla
-/// mientras lo sostiene, los demás deben poder seguir y reportar su propio
-/// resultado en vez de fallar en cascada por un panic ajeno.
+/// Mutex poisoning is recovered from on purpose: if a test fails while holding
+/// it, the others must be able to continue and report their own result rather
+/// than failing in cascade over someone else's panic.
 pub fn llvm_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|envenenado| envenenado.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Formato de contenedor detectado a partir de los bytes del archivo.
+/// Container format detected from the bytes of the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetectedContainer {
     MachO,
     Elf,
     Coff,
-    Desconocido,
+    Unknown,
 }
 
-/// Identifica el contenedor leyendo la cabecera del archivo objeto.
+/// Identifies the container by reading the object file header.
 ///
-/// Se inspeccionan los bytes en vez de invocar `file(1)` para que el test
-/// funcione igual en las tres plataformas.
+/// Bytes are inspected rather than invoking `file(1)` so the test behaves the
+/// same on all three platforms.
 pub fn detect_container(bytes: &[u8]) -> DetectedContainer {
     if bytes.len() < 4 {
-        return DetectedContainer::Desconocido;
+        return DetectedContainer::Unknown;
     }
 
     // ELF: 0x7F 'E' 'L' 'F'
@@ -53,18 +53,18 @@ pub fn detect_container(bytes: &[u8]) -> DetectedContainer {
         return DetectedContainer::MachO;
     }
 
-    // COFF no tiene magic: arranca con el tipo de máquina. Se valida contra el
-    // conjunto que produce la matriz de targets de Zirk.
+    // COFF has no magic: it starts with the machine type. It is validated
+    // against the set produced by the Zirk target matrix.
     let machine = u16::from_le_bytes([bytes[0], bytes[1]]);
     if matches!(machine, 0x014C | 0x8664 | 0xAA64) {
         return DetectedContainer::Coff;
     }
 
-    DetectedContainer::Desconocido
+    DetectedContainer::Unknown
 }
 
-/// Arquitectura declarada en la cabecera, para los contenedores que la exponen
-/// en una posición fija.
+/// Architecture declared in the header, for containers that expose it at a
+/// fixed position.
 pub fn detect_machine(bytes: &[u8]) -> Option<u16> {
     if bytes.len() < 2 {
         return None;
@@ -72,18 +72,18 @@ pub fn detect_machine(bytes: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-/// Directorio temporal propio de estos tests, provisto por Cargo.
+/// Temporary directory owned by these tests, provided by Cargo.
 pub fn temp_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    std::fs::create_dir_all(&dir).expect("no se pudo crear el directorio temporal");
+    std::fs::create_dir_all(&dir).expect("could not create the temporary directory");
     dir
 }
 
-/// Ruta a `clang`, usado como driver de enlace.
+/// Path to `clang`, used as the link driver.
 ///
-/// Se prefiere el `clang` de la instalación de LLVM pineada: el proyecto ya
-/// exige esa instalación, y usarla evita depender del compilador de C que haya
-/// en cada host, que es distinto en las tres plataformas.
+/// The `clang` from the pinned LLVM installation is preferred: the project
+/// already requires that installation, and using it avoids depending on
+/// whatever C compiler each host has, which differs across the three platforms.
 pub fn linker_driver() -> PathBuf {
     if let Ok(prefix) = std::env::var("LLVM_SYS_201_PREFIX") {
         let candidate = Path::new(&prefix).join("bin").join(exe("clang"));

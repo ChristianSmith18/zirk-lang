@@ -1,17 +1,17 @@
-//! Verifica el pin de LLVM antes de que `llvm-sys` intente enlazar.
+//! Verifies the LLVM pin before `llvm-sys` attempts to link.
 //!
-//! Sin esta comprobación, una versión mayor equivocada de LLVM se manifiesta
-//! como un error de enlace ilegible con cientos de símbolos no resueltos. El
-//! proyecto exige diagnósticos con causa y ayuda (`ZIRK_COMPILER_SPEC.md`
-//! sección 8); aplicárselo al propio build del compilador es consistente.
+//! Without this check, a wrong LLVM major version shows up as an unreadable
+//! link error with hundreds of unresolved symbols. The project requires
+//! diagnostics with a cause and help (`ZIRK_COMPILER_SPEC.md` section 8);
+//! applying that to the compiler's own build is consistent.
 //!
-//! Ver `docs/decisions/ADR-001-pin-llvm.md` y `docs/TOOLCHAIN.md`.
+//! See `docs/decisions/ADR-001-pin-llvm.md` and `docs/TOOLCHAIN.md`.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Versión mayor de LLVM contra la que se construye el proyecto.
-/// Debe coincidir con la feature `llvm20-1` de inkwell en `Cargo.toml`.
+/// LLVM major version the project builds against.
+/// Must match the `llvm20-1` inkwell feature in `Cargo.toml`.
 const LLVM_MAJOR: u32 = 20;
 const PREFIX_VAR: &str = "LLVM_SYS_201_PREFIX";
 
@@ -57,7 +57,7 @@ fn main() {
     }
 }
 
-/// Busca `llvm-config` primero en el prefijo declarado y después en el `PATH`.
+/// Looks for `llvm-config` first in the declared prefix, then on `PATH`.
 fn locate_llvm_config() -> Option<PathBuf> {
     if let Ok(prefix) = std::env::var(PREFIX_VAR) {
         let candidate = PathBuf::from(prefix).join("bin").join(exe("llvm-config"));
@@ -86,10 +86,11 @@ fn exe(name: &str) -> String {
     }
 }
 
-/// Emite el fallo con el formato de `COMPILER_SPEC` sección 8 y aborta el build.
+/// Emits the failure in the format of `COMPILER_SPEC` section 8 and aborts the
+/// build.
 fn fail(message: &str, cause: &str, help: &str) -> ! {
-    // `cargo:warning` es el único canal que Cargo muestra sin truncar desde un
-    // build script, así que el diagnóstico se emite línea por línea.
+    // `cargo:warning` is the only channel Cargo shows untruncated from a build
+    // script, so the diagnostic is emitted line by line.
     println!("cargo:warning=error[E0001]: {message}");
     println!("cargo:warning=  = cause: {cause}");
     println!("cargo:warning=  = help: {help}");

@@ -1,17 +1,17 @@
 //! # zirk-sema
 //!
-//! **Responsabilidad:** resolución de módulos y nombres, chequeo de tipos y
-//! análisis de flujo sobre el árbol de `zirk-ast`.
+//! **Responsibility:** module and name resolution, type checking and flow
+//! analysis over the `zirk-ast` tree.
 //!
-//! Cubre las etapas 3 y 4 del pipeline de `ZIRK_COMPILER_SPEC.md` sección 2: es
-//! donde se aplican las reglas de `ZIRK_LANGUAGE_SPEC.md` sobre mutabilidad
-//! (`mut` / `inmut` / `inmut::strict`), nullability, e inferencia.
+//! It covers stages 3 and 4 of the pipeline in `ZIRK_COMPILER_SPEC.md` section
+//! 2: this is where the rules of `ZIRK_LANGUAGE_SPEC.md` about mutability
+//! (`mut` / `inmut` / `inmut::strict`), nullability and inference are applied.
 //!
-//! **Límite:** produce un árbol tipado y verificado; no genera código ni decide
-//! representación de datos en memoria. Cómo se materializa un valor es problema
-//! de `zirk-ir` y del runtime.
+//! **Boundary:** it produces a typed, verified tree; it neither generates code
+//! nor decides how data is represented in memory. How a value materializes is
+//! the business of `zirk-ir` and the runtime.
 //!
-//! # Estado
+//! # State
 //!
-//! Vacío por diseño. La Fase 0 monta el esqueleto del workspace sin implementar
-//! sintaxis de Zirk; el chequeo de tipos llega en Fase 1 con un subset mínimo.
+//! Empty by design. Phase 0 set up the workspace skeleton without implementing
+//! Zirk syntax; type checking arrives in Phase 1 with a minimal subset.
