@@ -33,6 +33,8 @@ fn contenedor_esperado(container: Container) -> DetectedContainer {
 
 #[test]
 fn se_emite_un_objeto_valido_para_cada_target_del_spec() {
+    let _llvm = common::llvm_lock();
+
     let dir = common::temp_dir();
 
     for target in TARGETS {

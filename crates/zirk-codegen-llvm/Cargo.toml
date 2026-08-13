@@ -9,4 +9,5 @@ build = "build.rs"
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-ir.workspace = true
-inkwell.workspace = true
+
+inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
