@@ -102,7 +102,13 @@ error[E0308]: incompatible types
   = help: use Int32.parse("cuarenta") to convert at runtime
 ```
 
-**Los diagnósticos van en inglés**, aunque la documentación del proyecto esté en español. La frontera es nítida: lo que ve quien **usa** Zirk va en inglés; lo que ve quien **construye** Zirk va en español. El razonamiento está en [ADR-006](docs/decisions/ADR-006-idioma-de-diagnosticos.md).
+### Idioma
+
+**Todo el código va en inglés**: identificadores, comentarios, documentación de código, mensajes de diagnóstico y nombres de test.
+
+**La documentación del proyecto va en español**: specs, ADRs, este archivo, el README y los mensajes de commit.
+
+La frontera: lo que se lee como **código** va en inglés; lo que se lee como **documento del proyecto** va en español. El razonamiento está en [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
 
 Se construye con `zirk-diagnostics`. Los códigos son **estables**: uno publicado no se reutiliza para un error semánticamente distinto.
 
