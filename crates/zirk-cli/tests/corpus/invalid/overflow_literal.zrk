@@ -1,0 +1,3 @@
+fn main(): Void {
+    mut x: Int32 = 2147483648;
+}

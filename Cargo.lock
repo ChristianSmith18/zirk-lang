@@ -164,9 +164,11 @@ dependencies = [
 name = "zirk-cli"
 version = "0.0.0"
 dependencies = [
+ "zirk-ast",
  "zirk-codegen-llvm",
  "zirk-diagnostics",
  "zirk-ir",
+ "zirk-lexer",
  "zirk-parser",
  "zirk-sema",
 ]

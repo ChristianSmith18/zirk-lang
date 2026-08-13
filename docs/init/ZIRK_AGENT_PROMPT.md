@@ -99,10 +99,10 @@ macOS aarch64 and Windows x86_64:
 Before installing the toolchain, read `docs/TOOLCHAIN.md`. On Windows it is
 mandatory: no official LLVM distribution works with `llvm-sys`.
 
-## Current phase: Zirk 0.1 — minimal end-to-end pipeline
+## Phase 1 — complete
 
-The single goal of this phase: that `zirk run` over this compiles through LLVM
-and runs as a real native binary —
+**Zirk compiles and runs.** This is the reference program of the roadmap,
+compiled to a native binary and executed:
 
 ```zirk
 fn main(): Void {
@@ -110,13 +110,32 @@ fn main(): Void {
 }
 ```
 
-No bridge interpreter, no temporary transpilation. The complete pipeline (lexer
-→ parser → minimal type checking → IR → LLVM IR → binary) must work end to end,
-even if the supported language subset is minimal.
+The whole spine works end to end: lexer → parser → name resolution and type
+checking → typed IR → LLVM → object → link → a process that runs. The
+corresponding decisions live in `docs/decisions/` as ADR-006 and ADR-007.
 
-**Out of scope in this phase** (do not touch it yet, even though it is in the
-spec): generics, classes, concurrency, decorators, `init.zrk`, package manager,
-LSP, formatter, linter, and any stdlib beyond a minimal `println`.
+Implemented subset: `fn`, `Void`, `Int32`, `Boolean`, `String`, `mut`/`inmut`,
+literals, arithmetic with overflow checks, comparison, logic, `if`/`else`,
+calls, `return` and `stdout.println` as an intrinsic.
+
+Available commands: `zirk build <file.zrk>` and `zirk run <file.zrk>`, over a
+single file, with artifacts written to `build/`.
+
+## Next phase: Zirk 0.2 — core language surface
+
+Phase 2 of `docs/init/ZIRK_ROADMAP.md`: complete control flow (`for`, `while`,
+`loop`, `break`, `continue`, `if` as an expression), complete functions
+(optional, named and variadic parameters, closures), `match` with basic
+exhaustiveness, nullability (`T?`, `?.`, `??`) and modules within a single
+crate.
+
+Two things this phase deliberately left pending, and Phase 2 should pick up:
+
+- **`&&` and `||` do not short-circuit.** Both operands are already evaluated
+  when the IR is lowered. Short-circuiting needs its own blocks and goes
+  together with `if` as an expression.
+- **The IR is not versioned.** `ZIRK_COMPILER_SPEC.md` section 4 requires it for
+  `.zpkg`; it is Phase 8 work, noted here so it is not discovered late.
 
 ## Expected working style
 

@@ -32,6 +32,14 @@
 //! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
 //! and Phase 5 (concurrency) hook without refactoring codegen.
 
+mod failure;
+mod io;
+mod string;
+
+pub use failure::{zirk_rt_division_by_zero, zirk_rt_overflow};
+pub use io::zirk_io_println;
+pub use string::zirk_str_from_utf8;
+
 /// Initializes the runtime before running `main`.
 ///
 /// Corresponds to the "load minimal runtime" and "init globals" steps of
@@ -62,7 +70,10 @@ pub unsafe extern "C" fn zirk_rt_init() {
 /// process ends. Using any runtime function after this call is not supported.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_shutdown() {
-    // Phase 0: there are no owned resources, threads or streams to close.
+    // Step 6 of the ordered shutdown in `ZIRK_RUNTIME_SPEC.md` section 11.
+    // There are no resources or managed threads yet, but the streams do have to
+    // be flushed: without this, output redirected into a pipe can be lost.
+    io::flush();
 }
 
 #[cfg(test)]

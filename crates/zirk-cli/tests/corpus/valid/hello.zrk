@@ -1,0 +1,3 @@
+fn main(): Void {
+    stdout.println("Hola desde Zirk");
+}

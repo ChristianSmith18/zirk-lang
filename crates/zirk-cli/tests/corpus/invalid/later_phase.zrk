@@ -1,0 +1,3 @@
+class User { }
+
+fn main(): Void { }

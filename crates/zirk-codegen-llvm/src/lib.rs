@@ -197,6 +197,21 @@ pub fn emit_object(
     emit_object_for_triple(module, target.triple, output)
 }
 
+/// Compiles an IR module into an object file for the host.
+///
+/// This is the entry point the rest of the compiler uses: it keeps `inkwell`
+/// contained in this crate, which is what the workspace requires — no other
+/// crate may know LLVM.
+pub fn compile_to_object(
+    module: &zirk_ir::Module,
+    name: &str,
+    output: &Path,
+) -> DiagnosticResult<()> {
+    let context = inkwell::context::Context::create();
+    let llvm = emit(&context, module, name);
+    emit_object_for_host(&llvm, output)
+}
+
 /// Emits an object file for the host.
 ///
 /// It does not initialize the native target separately: `initialize_targets`

@@ -1,0 +1,15 @@
+fn classify(value: Int32): String {
+    if value > 100 {
+        return "big";
+    } else if value > 10 {
+        return "medium";
+    } else {
+        return "small";
+    }
+}
+
+fn main(): Void {
+    stdout.println(classify(500));
+    stdout.println(classify(50));
+    stdout.println(classify(5));
+}

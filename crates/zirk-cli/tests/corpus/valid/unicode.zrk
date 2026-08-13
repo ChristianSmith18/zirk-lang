@@ -1,0 +1,5 @@
+fn main(): Void {
+    stdout.println("café ñandú 日本");
+    stdout.println("");
+    stdout.println("tab\there");
+}
