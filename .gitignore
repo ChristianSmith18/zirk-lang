@@ -16,3 +16,6 @@
 # Editores
 .idea/
 *.swp
+
+# VS Code packaging
+*.vsix
