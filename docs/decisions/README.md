@@ -11,6 +11,7 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-003](./ADR-003-memoria.md) | Memoria: restricciones ahora, implementación en Fase 4 | aceptada / abierta |
 | [ADR-004](./ADR-004-portabilidad.md) | Estrategia de portabilidad (construir vs producir) | aceptada |
 | [ADR-005](./ADR-005-representacion-string.md) | `String` opaco tras la frontera del runtime | aceptada |
+| [ADR-006](./ADR-006-idioma-de-diagnosticos.md) | Los diagnósticos del compilador van en inglés | aceptada |
 
 ## Estado de los pendientes de Fase 0
 

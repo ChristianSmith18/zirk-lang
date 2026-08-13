@@ -196,13 +196,11 @@ impl<'a> Lexer<'a> {
                     let d = self.error(
                         codes::COMENTARIO_SIN_CERRAR,
                         span,
-                        "comentario de bloque sin cerrar",
+                        "unterminated block comment",
                     );
                     self.emitir(
-                        d.con_causa(
-                            "el comentario se abre acá y el archivo termina antes de cerrarlo",
-                        )
-                        .con_ayuda("agregá `*/` donde deba terminar el comentario"),
+                        d.con_causa("the comment opens here and the file ends before it is closed")
+                            .con_ayuda("add `*/` where the comment should end"),
                     );
                     return;
                 }
@@ -287,11 +285,13 @@ impl<'a> Lexer<'a> {
             let d = self.error(
                 codes::SUFIJO_NUMERICO_INVALIDO,
                 span_sufijo,
-                format!("sufijo inválido en literal numérico: `{texto}`"),
+                format!("invalid suffix on numeric literal: `{texto}`"),
             );
             self.emitir(
-                d.con_causa("un literal entero solo admite dígitos y el separador `_`")
-                    .con_ayuda("separá el número del identificador con un espacio o un operador"),
+                d.con_causa("an integer literal only accepts digits and the `_` separator")
+                    .con_ayuda(
+                        "separate the number from the identifier with a space or an operator",
+                    ),
             );
             return None;
         }
@@ -300,11 +300,11 @@ impl<'a> Lexer<'a> {
             let d = self.error(
                 codes::SEPARADOR_INVALIDO,
                 span_invalido,
-                "literal numérico mal formado",
+                "malformed numeric literal",
             );
             self.emitir(
-                d.con_causa("`_` solo puede aparecer entre dígitos")
-                    .con_ayuda("escribí el número como `1_000_000`"),
+                d.con_causa("`_` may only appear between digits")
+                    .con_ayuda("write the number as `1_000_000`"),
             );
             return None;
         }
@@ -315,11 +315,11 @@ impl<'a> Lexer<'a> {
                 let d = self.error(
                     codes::ENTERO_DEMASIADO_GRANDE,
                     span,
-                    "literal entero demasiado grande",
+                    "integer literal is too large",
                 );
-                self.emitir(d.con_causa(
-                    "el valor excede el mayor entero que el compilador puede representar",
-                ));
+                self.emitir(
+                    d.con_causa("the value exceeds the largest integer the compiler can represent"),
+                );
                 None
             }
         }
@@ -339,11 +339,13 @@ impl<'a> Lexer<'a> {
                     let d = self.error(
                         codes::CADENA_SIN_CERRAR,
                         span,
-                        "literal de cadena sin cerrar",
+                        "unterminated string literal",
                     );
                     self.emitir(
-                        d.con_causa("la cadena se abre acá y no se cierra antes del fin de línea")
-                            .con_ayuda("agregá la comilla `\"` de cierre"),
+                        d.con_causa(
+                            "the string opens here and is not closed before the end of the line",
+                        )
+                        .con_ayuda("add the closing `\"` quote"),
                     );
                     return None;
                 }
@@ -366,10 +368,14 @@ impl<'a> Lexer<'a> {
                             let d = self.error(
                                 codes::ESCAPE_DESCONOCIDO,
                                 span,
-                                format!("secuencia de escape desconocida: `\\{otro}`"),
+                                format!("unknown escape sequence: `\\{otro}`"),
                             );
-                            self.emitir(d.con_causa("no es una secuencia de escape del lenguaje")
-                                .con_ayuda("las secuencias válidas son \\n, \\t, \\r, \\0, \\\" y \\\\"));
+                            self.emitir(
+                                d.con_causa("this is not an escape sequence of the language")
+                                    .con_ayuda(
+                                        "the valid sequences are \\n, \\t, \\r, \\0, \\\" and \\\\",
+                                    ),
+                            );
                             // Se conserva el carácter para seguir tokenizando.
                             valor.push(otro);
                         }
@@ -436,9 +442,9 @@ impl<'a> Lexer<'a> {
                 let d = self.error(
                     codes::CARACTER_NO_RECONOCIDO,
                     span,
-                    format!("carácter no reconocido: `{otro}`"),
+                    format!("unrecognized character: `{otro}`"),
                 );
-                self.emitir(d.con_causa("no inicia ningún token del lenguaje"));
+                self.emitir(d.con_causa("it does not start any token of the language"));
                 return None;
             }
         };
