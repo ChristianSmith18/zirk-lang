@@ -16,27 +16,23 @@ fn main(): Void {
 
 ---
 
-## ⚠️ Estado: Fase 0 — cimientos
+## Estado: Fase 1 completa
 
-**Zirk todavía no compila código Zirk.** El ejemplo de arriba es la meta de la Fase 1, no algo que hoy funcione.
-
-Lo que sí funciona y está verificado con tests:
-
-| Capacidad | Estado |
-|---|---|
-| Generar código máquina y producir un binario nativo que ejecuta | ✅ |
-| Emitir objetos para los 9 targets del spec (Windows/Linux/macOS × x86, x86_64, armv7, aarch64) | ✅ |
-| Diagnósticos con severidad, código estable, ubicación, causa y ayuda | ✅ |
-| Runtime enlazable con frontera ABI C | esqueleto |
-| Léxico, sintaxis, tipos, IR de Zirk | ❌ Fase 1 |
+**El ejemplo de arriba compila y corre.** `zirk run hola.zrk` produce un binario nativo y lo ejecuta.
 
 ```
    .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ binario
-               ↑           ↑           ↑          ↑          ↑
-             Fase 1      Fase 1     Fase 1     Fase 1    ✅ funciona
+               ✅          ✅          ✅         ✅         ✅          ✅
 ```
 
-La Fase 0 construye primero la parte riesgosa —que el backend de LLVM funcione en las tres plataformas— antes que la predecible. Descubrir tarde que el toolchain no compila en Windows costaría meses de trabajo tirado.
+Subset implementado: `fn`, `Void`, `Int32`, `Boolean`, `String`, `mut`/`inmut`, literales, aritmética con comprobación de overflow, comparación, lógica, `if`/`else`, llamadas, `return` y `stdout.println`.
+
+```sh
+zirk build hola.zrk    # compila a un ejecutable nativo
+zirk run hola.zrk      # compila y ejecuta
+```
+
+Los artefactos quedan en `build/`. Todavía **no** existen: genéricos, clases, `Result`, concurrencia, decoradores, módulos multi-archivo, bucles, `match` ni nullability. Llegan por fases según el [roadmap](docs/init/ZIRK_ROADMAP.md).
 
 ## Arquitectura
 
@@ -80,6 +76,10 @@ cargo test --workspace
 - [ZIRK_ROADMAP.md](docs/init/ZIRK_ROADMAP.md) — las 13 fases, de acá al self-hosting
 - [docs/decisions/](docs/decisions/) — ADRs: decisiones que cascadean al resto del proyecto
 - [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md) — instalación del toolchain
+
+## Idioma
+
+Las specs, el roadmap y el código están **en inglés**. Los ADRs, esta guía y el resto de la documentación de trabajo están en español. Ver [ADR-006](docs/decisions/ADR-006-language-of-the-codebase.md).
 
 ## Contribuir
 

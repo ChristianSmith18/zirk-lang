@@ -1,0 +1,8 @@
+# Normalización de finales de línea.
+*                                text=auto
+
+# El corpus de tests es de entrada y salida exactas: git no debe traducir sus
+# finales de línea. Un `.out` convertido a CRLF deja de coincidir con lo que el
+# programa imprime, y un `.zrk` convertido desplaza las columnas que reportan
+# los diagnósticos.
+crates/zirk-cli/tests/corpus/**  -text

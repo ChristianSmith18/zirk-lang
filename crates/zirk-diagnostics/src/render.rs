@@ -1,34 +1,38 @@
-//! Renderizado de diagnósticos.
+//! Diagnostic rendering.
 //!
-//! El formato legible reproduce `ZIRK_COMPILER_SPEC.md` sección 8:
+//! The human-readable format reproduces `ZIRK_COMPILER_SPEC.md` section 8:
 //!
 //! ```text
-//! error[E1234]: descripción precisa
+//! error[E1234]: precise description
 //!   src/users.zrk:18:12
 //!    |
-//! 18 |     expresión problemática
-//!    |            ^ explicación localizada
+//! 18 |     problematic expression
+//!    |            ^ localized explanation
 //!    |
-//!    = causa: motivo semántico
-//!    = ayuda: acción concreta
+//!    = cause: semantic reason
+//!    = help: concrete action
 //! ```
+//!
+//! The labels are in English. The spec illustrates them in Spanish because that
+//! document is written in Spanish, but compiler output is addressed to whoever
+//! uses Zirk. See `docs/decisions/ADR-006-language-of-the-codebase.md`.
 
 use crate::Diagnostic;
 use std::fmt::Write as _;
 
-/// Forma de salida solicitada.
+/// Requested output form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStyle {
-    /// Formato legible por humanos.
+    /// Human-readable format.
     Human,
-    /// Formato estructurado para herramientas (`--json`).
+    /// Structured format for tooling (`--json`).
     Json,
 }
 
 pub(crate) fn human(diagnostic: &Diagnostic) -> String {
     let mut out = String::new();
 
-    // error[E1234]: descripción precisa
+    // error[E1234]: precise description
     let _ = writeln!(
         out,
         "{}[{}]: {}",
@@ -37,7 +41,7 @@ pub(crate) fn human(diagnostic: &Diagnostic) -> String {
         diagnostic.message
     );
 
-    // El ancho del canal izquierdo depende de cuántos dígitos tiene la línea.
+    // The width of the left gutter depends on how many digits the line has.
     let gutter = diagnostic
         .location
         .as_ref()
@@ -52,8 +56,8 @@ pub(crate) fn human(diagnostic: &Diagnostic) -> String {
             location.file, location.line, location.column
         );
 
-        // El fragmento es opcional: sin source, el diagnóstico conserva
-        // encabezado, ubicación, causa y ayuda.
+        // The snippet is optional: without source, the diagnostic keeps its
+        // header, location, cause and help.
         if let Some(snippet) = &diagnostic.snippet {
             let _ = writeln!(out, "{pad} |");
             let _ = writeln!(out, "{} | {}", location.line, snippet.line_text);
@@ -73,10 +77,10 @@ pub(crate) fn human(diagnostic: &Diagnostic) -> String {
     }
 
     if let Some(cause) = &diagnostic.cause {
-        let _ = writeln!(out, "{pad} = causa: {cause}");
+        let _ = writeln!(out, "{pad} = cause: {cause}");
     }
     if let Some(help) = &diagnostic.help {
-        let _ = writeln!(out, "{pad} = ayuda: {help}");
+        let _ = writeln!(out, "{pad} = help: {help}");
     }
 
     out
@@ -121,16 +125,34 @@ pub(crate) fn json(diagnostic: &Diagnostic) -> String {
 }
 
 pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle) -> String {
+    // Diagnostics are sorted by location before rendering. Pipeline stages emit
+    // in the order they work — all of the lexing first, then all of the
+    // parsing — so without this an error on line 3 can appear before one on
+    // line 2. Readers expect to walk their file from top to bottom.
+    let mut sorted: Vec<&Diagnostic> = diagnostics.iter().collect();
+    sorted.sort_by_key(|d| sort_key(d));
+
     match style {
-        RenderStyle::Human => diagnostics.iter().map(human).collect::<Vec<_>>().join("\n"),
+        RenderStyle::Human => sorted.into_iter().map(human).collect::<Vec<_>>().join("\n"),
         RenderStyle::Json => {
-            let items = diagnostics.iter().map(json).collect::<Vec<_>>().join(",");
+            let items = sorted.into_iter().map(json).collect::<Vec<_>>().join(",");
             format!("[{items}]")
         }
     }
 }
 
-/// Serializa una cadena como literal JSON, escapando lo que exige RFC 8259.
+/// Sort key of a diagnostic: file, line and column.
+///
+/// Diagnostics without a location go last: they belong to no point in the file,
+/// and putting them first would displace the ones that do.
+fn sort_key(d: &Diagnostic) -> (bool, String, u32, u32) {
+    match &d.location {
+        Some(l) => (false, l.file.clone(), l.line, l.column),
+        None => (true, String::new(), 0, 0),
+    }
+}
+
+/// Serializes a string as a JSON literal, escaping what RFC 8259 requires.
 fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -155,95 +177,95 @@ fn quote(value: &str) -> String {
 mod tests {
     use crate::{Code, Diagnostic, DiagnosticSink, Location, RenderStyle, Snippet};
 
-    fn diagnostico_completo() -> Diagnostic {
-        Diagnostic::error(Code::new("E1234"), "descripción precisa")
+    fn complete_diagnostic() -> Diagnostic {
+        Diagnostic::error(Code::new("E1234"), "precise description")
             .at(Location::new("src/users.zrk", 18, 12))
             .with_snippet(
-                Snippet::new("    expresión problemática", 1).with_label("explicación localizada"),
+                Snippet::new("    problematic expression", 1).with_label("localized explanation"),
             )
-            .with_cause("motivo semántico")
-            .with_help("acción concreta")
+            .with_cause("semantic reason")
+            .with_help("concrete action")
     }
 
     #[test]
-    fn formato_humano_reproduce_el_spec() {
-        let esperado = "\
-error[E1234]: descripción precisa
+    fn human_format_reproduces_the_spec() {
+        let expected = "\
+error[E1234]: precise description
    src/users.zrk:18:12
    |
-18 |     expresión problemática
-   |            ^ explicación localizada
+18 |     problematic expression
+   |            ^ localized explanation
    |
-   = causa: motivo semántico
-   = ayuda: acción concreta
+   = cause: semantic reason
+   = help: concrete action
 ";
-        assert_eq!(diagnostico_completo().render(), esperado);
+        assert_eq!(complete_diagnostic().render(), expected);
     }
 
     #[test]
-    fn sin_fragmento_conserva_el_resto_de_la_informacion() {
-        let rendered = Diagnostic::error(Code::new("E0002"), "sin source disponible")
+    fn without_a_snippet_the_rest_is_preserved() {
+        let rendered = Diagnostic::error(Code::new("E0002"), "no source available")
             .at(Location::new("src/main.zrk", 3, 5))
-            .with_cause("el archivo no pudo leerse")
-            .with_help("verificá los permisos del archivo")
+            .with_cause("the file could not be read")
+            .with_help("check the file permissions")
             .render();
 
-        assert!(rendered.contains("error[E0002]: sin source disponible"));
+        assert!(rendered.contains("error[E0002]: no source available"));
         assert!(rendered.contains("src/main.zrk:3:5"));
-        assert!(rendered.contains("= causa: el archivo no pudo leerse"));
-        assert!(rendered.contains("= ayuda: verificá los permisos del archivo"));
-        // Sin fragmento no debe aparecer el canal de source ni el marcador.
+        assert!(rendered.contains("= cause: the file could not be read"));
+        assert!(rendered.contains("= help: check the file permissions"));
+        // Without a snippet there must be no source gutter and no marker.
         assert!(!rendered.contains('^'));
     }
 
     #[test]
-    fn sin_ayuda_no_se_inventa_una_generica() {
-        let rendered = Diagnostic::error(Code::new("E0003"), "error sin reparación clara")
-            .with_cause("estado no representable")
+    fn without_help_no_generic_one_is_invented() {
+        let rendered = Diagnostic::error(Code::new("E0003"), "error with no clear fix")
+            .with_cause("state is not representable")
             .render();
 
-        assert!(!rendered.contains("ayuda"));
+        assert!(!rendered.contains("help"));
     }
 
     #[test]
-    fn el_marcador_se_alinea_con_la_columna() {
-        let rendered = Diagnostic::error(Code::new("E0004"), "token inesperado")
+    fn the_marker_lines_up_with_the_column() {
+        let rendered = Diagnostic::error(Code::new("E0004"), "unexpected token")
             .at(Location::new("a.zrk", 1, 5))
             .with_snippet(Snippet::new("abcdefgh", 3))
             .render();
 
-        let linea_marcador = rendered
+        let marker_line = rendered
             .lines()
             .find(|l| l.contains('^'))
-            .expect("debe haber línea de marcador");
+            .expect("there must be a marker line");
 
-        // Canal "1 | " (4 caracteres) + 4 espacios de la columna 5.
-        assert_eq!(linea_marcador, "  |     ^^^");
+        // Gutter "1 | " (4 characters) plus 4 spaces for column 5.
+        assert_eq!(marker_line, "  |     ^^^");
     }
 
     #[test]
-    fn json_escapa_comillas_y_saltos_de_linea() {
+    fn json_escapes_quotes_and_newlines() {
         let rendered =
-            Diagnostic::error(Code::new("E0005"), "dijo \"hola\"\ny se fue").render_json();
+            Diagnostic::error(Code::new("E0005"), "said \"hello\"\nand left").render_json();
 
-        assert!(rendered.contains(r#""message":"dijo \"hola\"\ny se fue""#));
+        assert!(rendered.contains(r#""message":"said \"hello\"\nand left""#));
     }
 
     #[test]
-    fn json_conserva_los_campos_obligatorios() {
-        let rendered = diagnostico_completo().render_json();
+    fn json_keeps_the_required_fields() {
+        let rendered = complete_diagnostic().render_json();
 
         assert!(rendered.contains(r#""severity":"error""#));
         assert!(rendered.contains(r#""code":"E1234""#));
         assert!(rendered.contains(r#""line":18"#));
         assert!(rendered.contains(r#""column":12"#));
-        assert!(rendered.contains(r#""cause":"motivo semántico""#));
-        assert!(rendered.contains(r#""help":"acción concreta""#));
+        assert!(rendered.contains(r#""cause":"semantic reason""#));
+        assert!(rendered.contains(r#""help":"concrete action""#));
     }
 
     #[test]
-    fn json_representa_los_campos_ausentes_como_null() {
-        let rendered = Diagnostic::warning(Code::new("W0001"), "algo").render_json();
+    fn json_represents_missing_fields_as_null() {
+        let rendered = Diagnostic::warning(Code::new("W0001"), "something").render_json();
 
         assert!(rendered.contains(r#""location":null"#));
         assert!(rendered.contains(r#""cause":null"#));
@@ -251,14 +273,24 @@ error[E1234]: descripción precisa
     }
 
     #[test]
-    fn el_sink_json_produce_un_arreglo() {
+    fn the_json_sink_produces_an_array() {
         let mut sink = DiagnosticSink::new();
-        sink.emit(Diagnostic::error(Code::new("E0001"), "uno"));
-        sink.emit(Diagnostic::warning(Code::new("W0001"), "dos"));
+        sink.emit(Diagnostic::error(Code::new("E0001"), "one"));
+        sink.emit(Diagnostic::warning(Code::new("W0001"), "two"));
 
         let rendered = sink.render(RenderStyle::Json);
         assert!(rendered.starts_with('['));
         assert!(rendered.ends_with(']'));
         assert_eq!(rendered.matches(r#""severity""#).count(), 2);
+    }
+
+    #[test]
+    fn diagnostics_are_rendered_in_location_order() {
+        let mut sink = DiagnosticSink::new();
+        sink.emit(Diagnostic::error(Code::new("E0002"), "second").at(Location::new("a.zrk", 9, 1)));
+        sink.emit(Diagnostic::error(Code::new("E0001"), "first").at(Location::new("a.zrk", 2, 1)));
+
+        let rendered = sink.render(RenderStyle::Human);
+        assert!(rendered.find("first").unwrap() < rendered.find("second").unwrap());
     }
 }
