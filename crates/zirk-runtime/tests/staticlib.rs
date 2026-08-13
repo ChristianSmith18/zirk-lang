@@ -54,7 +54,14 @@ fn the_lifecycle_symbols_carry_no_mangling() {
     let lib = staticlib_path();
     let bytes = std::fs::read(&lib).expect("could not read the library");
 
-    for symbol in ["zirk_rt_init", "zirk_rt_shutdown"] {
+    for symbol in [
+        "zirk_rt_init",
+        "zirk_rt_shutdown",
+        "zirk_str_from_utf8",
+        "zirk_io_println",
+        "zirk_rt_overflow",
+        "zirk_rt_division_by_zero",
+    ] {
         assert!(
             contains(&bytes, symbol.as_bytes()),
             "symbol `{symbol}` does not appear unmangled in {}",

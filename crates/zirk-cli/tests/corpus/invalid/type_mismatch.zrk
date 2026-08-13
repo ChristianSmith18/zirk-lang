@@ -1,0 +1,3 @@
+fn main(): Void {
+    mut total: Int32 = "cuarenta";
+}

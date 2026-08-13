@@ -66,31 +66,31 @@
 
 ## 7. Runtime
 
-- [ ] 7.1 Definir la representación interna de `String`, privada del runtime (ADR-005)
-- [ ] 7.2 Implementar `zirk_str_from_utf8` como `extern "C"`
-- [ ] 7.3 Implementar `zirk_io_println` como `extern "C"`, con vaciado antes de terminar
-- [ ] 7.4 Tests: contenido no ASCII se escribe correctamente en UTF-8
-- [ ] 7.5 Tests: los símbolos nuevos aparecen sin mangling en la biblioteca estática
+- [x] 7.1 Definir la representación interna de `String`, privada del runtime (ADR-005)
+- [x] 7.2 Implementar `zirk_str_from_utf8` como `extern "C"`
+- [x] 7.3 Implementar `zirk_io_println` como `extern "C"`, con vaciado antes de terminar
+- [x] 7.4 Tests: contenido no ASCII se escribe correctamente en UTF-8
+- [x] 7.5 Tests: los símbolos nuevos aparecen sin mangling en la biblioteca estática
 
 ## 8. CLI
 
-- [ ] 8.1 Implementar el subcomando de compilación sobre un archivo único
-- [ ] 8.2 Implementar el subcomando de compilar y ejecutar, propagando el código de salida
-- [ ] 8.3 Invocar el linker desde la CLI, usando el toolchain de LLVM pineado (D7)
-- [ ] 8.4 Presentar diagnósticos en la salida de error, en formato legible y estructurado
-- [ ] 8.5 Diagnóstico ante múltiples archivos, indicando que los proyectos llegan después
-- [ ] 8.6 Resolver dónde queda el ejecutable al ejecutar (pregunta abierta del design)
+- [x] 8.1 Implementar el subcomando de compilación sobre un archivo único
+- [x] 8.2 Implementar el subcomando de compilar y ejecutar, propagando el código de salida
+- [x] 8.3 Invocar el linker desde la CLI, usando el toolchain de LLVM pineado (D7)
+- [x] 8.4 Presentar diagnósticos en la salida de error, en formato legible y estructurado
+- [x] 8.5 Diagnóstico ante múltiples archivos, indicando que los proyectos llegan después
+- [x] 8.6 Resolver dónde queda el ejecutable al ejecutar (pregunta abierta del design)
 
 ## 9. Verificación de punta a punta
 
-- [ ] 9.1 Crear el corpus de programas `.zrk` válidos, uno por construcción del subset
-- [ ] 9.2 Crear el corpus de programas inválidos, con snapshots de sus diagnósticos
-- [ ] 9.3 Test de punta a punta: compilar, enlazar, ejecutar y comparar salida y código de salida
-- [ ] 9.4 Verificar el programa de referencia del roadmap: `fn main(): Void { stdout.println("Hola desde Zirk"); }`
+- [x] 9.1 Crear el corpus de programas `.zrk` válidos, uno por construcción del subset
+- [x] 9.2 Crear el corpus de programas inválidos, con snapshots de sus diagnósticos
+- [x] 9.3 Test de punta a punta: compilar, enlazar, ejecutar y comparar salida y código de salida
+- [x] 9.4 Verificar el programa de referencia del roadmap: `fn main(): Void { stdout.println("Hola desde Zirk"); }`
 - [ ] 9.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
 
 ## 10. Cierre
 
-- [ ] 10.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
-- [ ] 10.2 Registrar en ADRs cualquier decisión de arquitectura tomada durante la implementación
-- [ ] 10.3 Resolver o registrar como pendientes las preguntas abiertas del design
+- [x] 10.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
+- [x] 10.2 Registrar en ADRs cualquier decisión de arquitectura tomada durante la implementación
+- [x] 10.3 Resolver o registrar como pendientes las preguntas abiertas del design

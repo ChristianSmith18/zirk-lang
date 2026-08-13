@@ -1,0 +1,7 @@
+fn classify(a: Boolean): Int32 {
+    if a {
+        return 1;
+    }
+}
+
+fn main(): Void { }
