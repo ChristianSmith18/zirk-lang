@@ -53,6 +53,16 @@ struct Output {
     stderr: String,
 }
 
+/// Normalizes line breaks for comparison.
+///
+/// `println` emits the platform line break, as `ZIRK_STDLIB_SPEC.md` section 3
+/// requires, so on Windows the output carries CRLF. A `.out` fixture cannot
+/// encode both, and the interesting property is the content, not which byte
+/// ends each line — that one is already pinned by the runtime tests.
+fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 /// Runs the compiler over a source file, from its own working directory.
 fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
     let dir = workspace(name);
@@ -105,7 +115,8 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
             output.stderr
         );
         assert_eq!(
-            output.stdout, expected,
+            normalize(&output.stdout),
+            normalize(&expected),
             "`{name}` printed something different than expected"
         );
 
@@ -124,7 +135,7 @@ fn the_reference_program_of_the_roadmap_runs() {
     let output = zirk("run", &source, "reference", &[]);
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
-    assert_eq!(output.stdout, "Hola desde Zirk\n");
+    assert_eq!(normalize(&output.stdout), "Hola desde Zirk\n");
 }
 
 #[test]
@@ -157,7 +168,10 @@ fn build_produces_an_executable_that_runs_on_its_own() {
     );
 
     let run = Command::new(&executable).output().expect("run the binary");
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hola desde Zirk\n");
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "Hola desde Zirk\n"
+    );
 }
 
 #[test]
