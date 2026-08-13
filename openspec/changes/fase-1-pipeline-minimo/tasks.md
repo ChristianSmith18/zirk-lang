@@ -87,7 +87,7 @@
 - [x] 9.2 Crear el corpus de programas inválidos, con snapshots de sus diagnósticos
 - [x] 9.3 Test de punta a punta: compilar, enlazar, ejecutar y comparar salida y código de salida
 - [x] 9.4 Verificar el programa de referencia del roadmap: `fn main(): Void { stdout.println("Hola desde Zirk"); }`
-- [ ] 9.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
+- [x] 9.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
 
 ## 10. Cierre
 
