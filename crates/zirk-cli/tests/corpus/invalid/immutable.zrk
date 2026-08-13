@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut NAME: String = "Zirk";
+    NAME = "other";
+}

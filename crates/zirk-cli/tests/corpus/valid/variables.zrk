@@ -1,0 +1,8 @@
+fn main(): Void {
+    mut count: Int32 = 1_000;
+    inmut NAME: String = "Zirk";
+    mut ready: Boolean = true;
+
+    stdout.println(NAME);
+    stdout.println("done");
+}

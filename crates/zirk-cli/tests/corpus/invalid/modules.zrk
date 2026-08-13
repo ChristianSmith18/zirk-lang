@@ -1,0 +1,3 @@
+import { stdout } from std.io;
+
+fn main(): Void { }
