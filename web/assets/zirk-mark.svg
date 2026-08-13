@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Zirk</title>
+  <defs><linearGradient id="g" x1="4" y1="5" x2="44" y2="43" gradientUnits="userSpaceOnUse"><stop stop-color="#8b5cf6"/><stop offset=".48" stop-color="#c084fc"/><stop offset="1" stop-color="#5ee7f7"/></linearGradient></defs>
+  <path fill="none" stroke="url(#g)" stroke-linecap="round" stroke-linejoin="round" stroke-width="5" d="M10 12h25L12 36h26M14 8l20 32"/>
+</svg>

@@ -1,0 +1,13 @@
+[
+  {"title":"Welcome to Zirk","section":"Overview","summary":"Native, statically typed language documentation.","keywords":"home overview native llvm","url":"index.html"},
+  {"title":"Get started","section":"Learn","summary":"Install the toolchain and write a first program.","keywords":"install hello first program tutorial","url":"getting-started.html"},
+  {"title":"Complete Zirk reference","section":"Reference","summary":"All 70 language, runtime, compiler and project design areas.","keywords":"complete template syntax types scope operators classes records memory pointers unsafe task parallel modules ffi simd abi compiler optimization shadowing cloning destructors everything","url":"reference.html"},
+  {"title":"Language fundamentals","section":"Language","summary":"Syntax, variables, control flow, functions, matching and modules.","keywords":"syntax mut inmut if for match functions null operators imports","url":"language.html"},
+  {"title":"Types and objects","section":"Language","summary":"Static types, classes, records, enums, generics and traits.","keywords":"types class record enum union generic trait interface decorator reflection unsafe","url":"types.html"},
+  {"title":"Errors and safety","section":"Language","summary":"Results, exceptions, resources, permissions and interoperability.","keywords":"result error exception resource memory permission ffi c abi unsafe","url":"safety.html"},
+  {"title":"Concurrency and runtime","section":"Runtime","summary":"Tasks, channels, threads, parallelism and cancellation.","keywords":"task await parallel thread channel sync atomic scheduler cancellation","url":"concurrency.html"},
+  {"title":"Standard library","section":"Reference","summary":"Catalog of all initial std modules.","keywords":"stdlib io fs path process net http json crypto time collections testing reflect system","url":"stdlib.html"},
+  {"title":"Projects and packages","section":"Guide","summary":"init.zrk, globals, permissions, targets and packages.","keywords":"project init globals permissions dependencies package target reproducible","url":"projects.html"},
+  {"title":"Compiler and tooling","section":"Tooling","summary":"CLI, pipeline, diagnostics, formatter, linter and LSP.","keywords":"compiler cli build run check test bench format lint lsp debugger package","url":"tooling.html"},
+  {"title":"Implementation status","section":"Project","summary":"What works today and what the specification describes.","keywords":"status roadmap phase implemented specification","url":"status.html"}
+]
