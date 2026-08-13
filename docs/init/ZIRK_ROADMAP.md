@@ -1,148 +1,211 @@
-# Zirk — Roadmap de construcción
+# Zirk — Construction roadmap
 
-Este roadmap traduce las cinco specs normativas (que describen a Zirk maduro) en un orden de construcción real. Cada fase tiene un objetivo verificable — no se avanza a la siguiente hasta que el objetivo de la actual corre de verdad, no solo "está casi listo".
+This roadmap translates the five normative specs — which describe a mature Zirk
+— into a real order of construction. Each phase has a verifiable goal: you do
+not move to the next one until the current goal actually runs, not merely "is
+almost there".
 
-Ningún lenguaje real se construyó implementando su spec completo de una sola vez. Este documento es la disciplina para que a este tampoco le pase.
-
----
-
-## Fase 0 — Decisiones antes de escribir código
-
-No es una fase de código, es una fase de decisiones que cascadean a todo lo demás. Escribirlas como ADRs (architecture decision records) cortos, uno por decisión, en `docs/decisions/`.
-
-- [ ] **Estrategia de memoria.** El spec promete memoria automática sin exponer ownership (`RUNTIME_SPEC.md` sección 9) y ausencia de data races en globals compartidas (`LANGUAGE_SPEC.md` sección 2). Definir explícitamente: ¿GC generacional, reference counting con detección de ciclos, regiones, o un híbrido? Esta es la decisión de mayor apalancamiento del proyecto — determina cómo se comportan closures, `parallel for`, y `Resource<E>` más adelante.
-- [ ] **Layout del workspace.** Crates propuestos: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema` (resolución de nombres + type checker), `zirk-ir`, `zirk-codegen-llvm`, `zirk-diagnostics`, `zirk-cli`.
-- [ ] **Sanity check de LLVM.** Antes de escribir una línea de Zirk, confirmar que `inkwell` genera, linkea y ejecuta un binario nativo trivial desde Rust puro. Este paso no depende de nada del lenguaje — es validar que el toolchain funciona en tu máquina/CI antes de construir sobre él.
-- [ ] **Formato de diagnósticos.** Implementar el formato de `COMPILER_SPEC.md` sección 8 como su propio crate desde el día uno (`zirk-diagnostics`), aunque al principio solo lo use el lexer. Migrar el formato después de que otras 5 capas ya lo usen es mucho más caro que empezar bien.
-
-**Salida de la fase:** ADRs escritos, workspace creado, `cargo build` compila un binario que invoca LLVM y produce un ejecutable "hola mundo" escrito directamente en Rust (sin ningún parser de Zirk todavía).
+No real language was ever built by implementing its full spec in one pass. This
+document is the discipline that keeps this one from trying.
 
 ---
 
-## Fase 1 — Zirk 0.1: pipeline mínimo de punta a punta
+## Phase 0 — Decisions before writing code
 
-**Objetivo:** `zirk run` sobre un `.zrk` con `fn main(): Void { stdout.println("..."); }` compila real vía LLVM y corre como binario nativo.
+This is not a coding phase but a decision phase whose consequences cascade into
+everything else. Write them as short ADRs, one per decision, in
+`docs/decisions/`.
 
-Subset de lenguaje: `fn main`, `Void`, `String`, `Int32`, `Boolean`, literales, aritmética básica, `if`/`else`, variables `mut`/`inmut`, un `println` mínimo hardcodeado (no la stdlib completa todavía).
+- [x] **Memory strategy.** The spec promises automatic memory without exposing
+  ownership (`RUNTIME_SPEC.md` section 9) and the absence of data races on
+  shared globals (`LANGUAGE_SPEC.md` section 2). Define explicitly: generational
+  GC, reference counting with cycle detection, regions, or a hybrid? This is the
+  highest-leverage decision of the project — it determines how closures,
+  `parallel for` and `Resource<E>` behave later on.
+- [x] **Workspace layout.** Proposed crates: `zirk-lexer`, `zirk-parser`,
+  `zirk-ast`, `zirk-sema` (name resolution + type checker), `zirk-ir`,
+  `zirk-codegen-llvm`, `zirk-diagnostics`, `zirk-cli`.
+- [x] **LLVM sanity check.** Before writing a line of Zirk, confirm that
+  `inkwell` generates, links and runs a trivial native binary from pure Rust.
+  This step depends on nothing about the language — it validates that the
+  toolchain works on your machine and in CI before building on top of it.
+- [x] **Diagnostic format.** Implement the format of `COMPILER_SPEC.md`
+  section 8 as its own crate from day one (`zirk-diagnostics`), even if only the
+  lexer uses it at first. Migrating the format after five other layers already
+  use it is far more expensive than starting right.
 
-Explícitamente afuera: genéricos, clases, `Result`, concurrencia, decoradores, módulos multi-archivo, `init.zrk`.
+**Phase output:** ADRs written, workspace created, `cargo build` compiles a
+binary that invokes LLVM and produces a "hello world" executable written
+directly in Rust (with no Zirk parser yet).
 
-**Salida de la fase:** un `.zrk` real, con sintaxis real del spec, compilando a un binario nativo real. Este es el hito que valida que la arquitectura completa (lexer → parser → tipos → IR → LLVM → binario) funciona de punta a punta — todo lo que sigue es extender esta columna vertebral, no construir una nueva.
+**Status: complete.** Verified in CI on Linux (x86_64, aarch64), macOS aarch64
+and Windows x86_64. The decisions live in `docs/decisions/` as ADR-001 to
+ADR-006.
 
 ---
 
-## Fase 2 — Superficie del lenguaje core
+## Phase 1 — Zirk 0.1: minimal end-to-end pipeline
 
-- Control de flujo completo: `for`, `for ... in`, `while`, `loop`, `break`, `continue`, `if` como expresión.
-- Funciones completas: parámetros opcionales, nombrados, variádicos, valores por defecto, closures/lambdas.
-- `match` con exhaustividad básica (sobre enums simples).
+**Goal:** `zirk run` over a `.zrk` containing
+`fn main(): Void { stdout.println("..."); }` really compiles through LLVM and
+runs as a native binary.
+
+Language subset: `fn main`, `Void`, `String`, `Int32`, `Boolean`, literals,
+basic arithmetic, `if`/`else`, `mut`/`inmut` variables, and a minimal hardcoded
+`println` (not the full stdlib yet).
+
+Explicitly out: generics, classes, `Result`, concurrency, decorators,
+multi-file modules, `init.zrk`.
+
+**Phase output:** a real `.zrk`, with real syntax from the spec, compiling to a
+real native binary. This is the milestone that validates that the whole
+architecture (lexer → parser → types → IR → LLVM → binary) works end to end —
+everything that follows extends this backbone rather than building a new one.
+
+---
+
+## Phase 2 — Core language surface
+
+- Complete control flow: `for`, `for ... in`, `while`, `loop`, `break`,
+  `continue`, `if` as an expression.
+- Complete functions: optional, named and variadic parameters, default values,
+  closures/lambdas.
+- `match` with basic exhaustiveness (over simple enums).
 - Nullability: `T?`, `?.`, `??`.
-- Módulos dentro de un mismo crate: `share`/`import` básicos, sin `init.zrk` todavía.
+- Modules within a single crate: basic `share`/`import`, without `init.zrk` yet.
 
-**Salida:** programas con varias funciones, control de flujo real, y closures — todavía sin clases ni concurrencia.
+**Output:** programs with several functions, real control flow and closures —
+still without classes or concurrency.
 
 ---
 
-## Fase 3 — Objetos y sistema de tipos
+## Phase 3 — Objects and the type system
 
-- `class`, `construct`, visibilidad (`public`/`private`/`protected`), herencia simple, interfaces, traits.
-- Genéricos con `from` (restricciones).
-- Records, value classes, enums algebraicos, unions.
+- `class`, `construct`, visibility (`public`/`private`/`protected`), single
+  inheritance, interfaces, traits.
+- Generics with `from` (constraints).
+- Records, value classes, algebraic enums, unions.
 - Casts (`as`, `<T>`, `unsafe` casts).
 
-**Salida:** el subset orientado a objetos del spec funcionando, incluyendo genéricos básicos.
+**Output:** the object-oriented subset of the spec working, including basic
+generics.
 
 ---
 
-## Fase 4 — Errores y memoria
+## Phase 4 — Errors and memory
 
-- `Result<T, E>` con `match` exhaustivo.
+- `Result<T, E>` with exhaustive `match`.
 - `try`/`catch`/`finally`, `fatalError`.
-- Implementación completa de la estrategia de memoria decidida en la Fase 0.
-- `unsafe {}`, `Pointer<T>`, garantías de seguridad de memoria enforced por el compilador.
-- `Resource<E>` y `match with`.
+- Full implementation of the memory strategy decided in Phase 0.
+- `unsafe {}`, `Pointer<T>`, memory-safety guarantees enforced by the compiler.
+- `Resource<E>` and `match with`.
 
-**Salida:** manejo de errores completo y la promesa central del spec — código seguro sin use-after-free, null deref no controlado ni UB — verificable con tests.
+**Output:** complete error handling and the central promise of the spec — safe
+code with no use-after-free, no uncontrolled null deref and no UB — verifiable
+with tests.
 
 ---
 
-## Fase 5 — Concurrencia y paralelismo (la parte más difícil y menos trillada)
+## Phase 5 — Concurrency and parallelism (the hardest and least trodden part)
 
-Esta es la fase de mayor riesgo técnico del proyecto — construirla en sub-pasos, no de una:
+This is the phase of highest technical risk in the project — build it in
+sub-steps, not in one go:
 
-1. `task`/`await` sobre un executor propio single-threaded primero (concurrencia estructurada sin paralelismo real todavía).
+1. `task`/`await` on a custom single-threaded executor first (structured
+   concurrency without real parallelism yet).
 2. `Channel<T>`, `sync`, `Atomic<T>`.
-3. `thread` (threads reales del OS).
-4. `parallel`/`parallel for` sobre un pool multinúcleo.
-5. Análisis estático de capturas mutables inseguras en `parallel`/`thread` (la garantía de data-race freedom del spec, acotada a globals — no es data-race freedom general).
+3. `thread` (real OS threads).
+4. `parallel`/`parallel for` on a multicore pool.
+5. Static analysis of unsafe mutable captures in `parallel`/`thread` (the
+   data-race-freedom guarantee of the spec, bounded to globals — this is not
+   general data-race freedom).
 
-**Salida:** los cinco primitivos de concurrencia del `RUNTIME_SPEC.md` funcionando con las garantías mínimas que promete el spec.
+**Output:** the five concurrency primitives of `RUNTIME_SPEC.md` working with
+the minimum guarantees the spec promises.
 
 ---
 
-## Fase 6 — Sistema de proyecto y CLI
+## Phase 6 — Project system and CLI
 
-- `init.zrk` como DSL declarativa (parser propio, no reutiliza el parser de Zirk).
+- `init.zrk` as a declarative DSL (its own parser, not reusing the Zirk parser).
 - `project`, `build_targets`, `globals`, `permissions`, `compile_permissions`.
 - CLI: `new`, `init`, `run`, `build`, `check`, `test`.
-- Cross-compilation real a los targets del spec (`COMPILER_SPEC.md` sección 6).
+- Real cross-compilation to the targets of the spec (`COMPILER_SPEC.md`
+  section 6).
 
-**Salida:** proyectos multi-archivo reales, con manifiesto y compilación cruzada.
-
----
-
-## Fase 7 — Stdlib
-
-Orden sugerido por dependencia real, no por el orden en que aparecen en el spec:
-
-`std.io` (ya parcialmente cubierto) → `std.collections` → `std.fs`/`std.path` → `std.time` → `std.process` → `std.task`/`std.thread`/`std.sync` (envolviendo la Fase 5) → `std.json` → `std.net`/`std.http` (la más grande de todas) → `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` → `std.system`.
-
-**Salida:** aplicaciones reales no triviales (CLI, backend simple) escribibles en Zirk usando solo stdlib.
+**Output:** real multi-file projects, with a manifest and cross-compilation.
 
 ---
 
-## Fase 8 — Empaquetado y distribución
+## Phase 7 — Stdlib
 
-- `.zpkg`, `zirk.lock`, `zirk add/remove/install/update`, `zirk package`, `zirk publish`.
-- Builds reproducibles (`COMPILER_SPEC.md` sección 7).
+Order suggested by real dependency, not by the order they appear in the spec:
 
----
+`std.io` (already partially covered) → `std.collections` → `std.fs`/`std.path` →
+`std.time` → `std.process` → `std.task`/`std.thread`/`std.sync` (wrapping
+Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
+`std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
+`std.system`.
 
-## Fase 9 — Developer experience
-
-- Formatter canónico e idempotente.
-- Linter compartiendo parser/tipos con el compilador.
-- LSP con snapshots incrementales.
-- Debugger con símbolos y mapeo a `.zrk`.
-
-Esta fase es grande en volumen de trabajo pero baja en riesgo conceptual — nada acá es territorio nuevo, es ingeniería de mucho volumen.
+**Output:** real non-trivial applications (a CLI, a simple backend) writable in
+Zirk using only the stdlib.
 
 ---
 
-## Fase 10 — Metaprogramación
+## Phase 8 — Packaging and distribution
 
-- Decoradores (`fn dec`), Syntax API versionada e inmutable.
-- `std.reflect` avanzado.
-
-Se deja para el final a propósito: depende de que el resto del compiler esté estable, porque los decoradores tocan casi todas las capas (parser, tipos, IR).
-
----
-
-## Fase 11 — Endurecimiento de producción
-
-- Fuzzing, differential testing debug/release, suite de benchmarks públicos (`COMPILER_SPEC.md` sección 1).
-- Cobertura completa de la matriz de targets.
+- `.zpkg`, `zirk.lock`, `zirk add/remove/install/update`, `zirk package`,
+  `zirk publish`.
+- Reproducible builds (`COMPILER_SPEC.md` section 7).
 
 ---
 
-## Fase 12 — Self-hosting (horizonte largo, años)
+## Phase 9 — Developer experience
 
-Reescribir el compilador en Zirk una vez que el lenguaje sea suficientemente maduro y estable. Es el mismo camino que siguieron Rust (rustc empezó en OCaml), Go (el compilador empezó en C) y Zig (empezó en C++). Ningún de estos proyectos self-hosteó desde el día uno, y Zirk tampoco debería intentarlo antes de tiempo.
+- A canonical, idempotent formatter.
+- A linter sharing parser/types with the compiler.
+- An LSP with incremental snapshots.
+- A debugger with symbols and mapping back to `.zrk`.
+
+This phase is large in volume of work but low in conceptual risk — nothing here
+is new territory, it is high-volume engineering.
 
 ---
 
-## Cómo usar este roadmap
+## Phase 10 — Metaprogramming
 
-- Una fase se da por completa cuando su "Salida" corre con tests reales, no cuando el código "está casi".
-- Si en medio de una fase aparece la tentación de adelantar algo de una fase posterior, se anota como nota pendiente y se sigue con la fase actual — no se implementa a mitad de camino.
-- Este documento es vivo: si una fase resulta mal dimensionada (muy grande o con dependencias no previstas), se ajusta acá mismo, no se improvisa en el código.
+- Decorators (`fn dec`), a versioned and immutable Syntax API.
+- Advanced `std.reflect`.
+
+It is left for the end on purpose: it depends on the rest of the compiler being
+stable, because decorators touch nearly every layer (parser, types, IR).
+
+---
+
+## Phase 11 — Production hardening
+
+- Fuzzing, differential debug/release testing, a public benchmark suite
+  (`COMPILER_SPEC.md` section 1).
+- Full coverage of the target matrix.
+
+---
+
+## Phase 12 — Self-hosting (long horizon, years)
+
+Rewrite the compiler in Zirk once the language is mature and stable enough. It
+is the same path Rust followed (rustc started in OCaml), and Go (its compiler
+started in C), and Zig (started in C++). None of these projects self-hosted from
+day one, and Zirk should not attempt it prematurely either.
+
+---
+
+## How to use this roadmap
+
+- A phase counts as complete when its "Output" runs with real tests, not when
+  the code "is almost there".
+- If mid-phase there is a temptation to bring something forward from a later
+  phase, note it as a pending item and continue with the current phase — it is
+  not implemented halfway.
+- This is a living document: if a phase turns out to be badly sized (too large,
+  or with unforeseen dependencies), it is adjusted here rather than improvised
+  in the code.

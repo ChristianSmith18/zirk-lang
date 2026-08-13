@@ -1,71 +1,153 @@
-# Prompt inicial — Zirk
+# Initial prompt — Zirk
 
-Este documento es el prompt de arranque para cualquier sesión de trabajo (agente de código, o vos mismo retomando el proyecto después de un tiempo). Pegalo entero al inicio de cada sesión nueva, o guardalo como instrucción persistente del agente si tu herramienta lo permite.
+This document is the startup prompt for any working session (a coding agent, or
+yourself picking the project back up after a while). Paste it whole at the start
+of a new session, or store it as a persistent agent instruction if your tool
+allows it.
 
 ---
 
-## Contexto del proyecto
+## Language of the project
 
-Estás ayudando a construir **Zirk**, un lenguaje de programación compilado, orientado a objetos, con tipado estático e inferencia, de alto nivel por defecto y con acceso opcional a bajo nivel. Compila a binarios nativos vía LLVM. Concurrencia estructurada (`task`/`await`) y paralelismo multinúcleo (`parallel`/`parallel for`/`thread`) son características de primera clase.
+**Everything is written in English**: the normative specifications, this
+document, the roadmap, the source code, its comments, the diagnostics the
+compiler emits and the test names.
 
-Filosofía: **fácil por defecto, explícito cuando necesitás control.**
+The only Spanish that remains is the working documentation around the project —
+the ADRs in `docs/decisions/`, `README.md`, `CONTRIBUTING.md`, the OpenSpec
+artifacts and the commit messages.
 
-## Fuente de verdad
+If you are an agent working on this repository: **write code, comments and
+diagnostics in English.** The rationale is in
+[ADR-006](../decisions/ADR-006-language-of-the-codebase.md).
 
-Los siguientes documentos, en `docs/`, son la especificación normativa completa del lenguaje. Ante cualquier duda de sintaxis, semántica o alcance, **estos documentos mandan sobre criterio propio, memoria de otros lenguajes, o "lo que suena razonable"**:
+## Project context
 
-- `docs/ZIRK_SPEC_FINAL.md` — alcance, exclusiones explícitas, filosofía general.
-- `docs/ZIRK_LANGUAGE_SPEC.md` — sintaxis, tipos, objetos, control de flujo, errores.
-- `docs/ZIRK_COMPILER_SPEC.md` — pipeline, IR, LLVM, targets, diagnósticos, CLI.
-- `docs/ZIRK_RUNTIME_SPEC.md` — memoria, tasks, scheduler, threads, recursos.
-- `docs/ZIRK_STDLIB_SPEC.md` — módulos y contratos de la biblioteca estándar.
+You are helping build **Zirk**, a compiled, object-oriented programming language
+with static typing and inference, high level by default and with optional
+low-level access. It compiles to native binaries via LLVM. Structured
+concurrency (`task`/`await`) and multicore parallelism
+(`parallel`/`parallel for`/`thread`) are first-class features.
 
-Si dos documentos se contradicen entre sí: `ZIRK_SPEC_FINAL.md` define alcance y exclusiones; el documento especializado define la semántica de su área.
+Philosophy: **easy by default, explicit when you need control.**
 
-**Regla explícita del propio spec, y regla de trabajo acá:** toda ambigüedad debe producir una pregunta o quedar documentada — nunca resolverse en silencio inventando comportamiento no especificado. Si algo hace falta para avanzar y el spec no lo cubre, decilo explícitamente antes de decidir por tu cuenta.
+## Source of truth
 
-## La regla de alcance más importante de este prompt
+The following documents, in `docs/`, are the complete normative specification of
+the language. For any doubt about syntax, semantics or scope, **these documents
+override your own judgement, your memory of other languages, and "whatever
+sounds reasonable"**:
 
-El spec completo describe a Zirk en su versión madura — es el resultado de años de trabajo, no el punto de partida. **No se implementa el spec completo de una.** El trabajo avanza por fases (ver `docs/init/ZIRK_ROADMAP.md`). En cada sesión, el objetivo es avanzar la fase actual — no adelantarse a features de fases futuras aunque estén documentadas, definidas, y sea tentador implementarlas ya que "está todo ahí".
+- `docs/ZIRK_SPEC_FINAL.md` — scope, explicit exclusions, general philosophy.
+- `docs/ZIRK_LANGUAGE_SPEC.md` — syntax, types, objects, control flow, errors.
+- `docs/ZIRK_COMPILER_SPEC.md` — pipeline, IR, LLVM, targets, diagnostics, CLI.
+- `docs/ZIRK_RUNTIME_SPEC.md` — memory, tasks, scheduler, threads, resources.
+- `docs/ZIRK_STDLIB_SPEC.md` — modules and contracts of the standard library.
 
-Si en el camino aparece la necesidad real de algo de una fase posterior para que la fase actual funcione, decilo explícitamente en vez de implementarlo a medias o de forma silenciosa.
+If two documents contradict each other: `ZIRK_SPEC_FINAL.md` defines scope and
+exclusions; the specialized document defines the semantics of its own area.
 
-## Stack de implementación
+**Explicit rule from the spec itself, and a working rule here:** every ambiguity
+must produce a question or be documented — never resolved silently by inventing
+unspecified behaviour. If something is needed to move forward and the spec does
+not cover it, say so explicitly before deciding on your own.
 
-- **Lenguaje del compilador: Rust.** La razón no es estética: la optimización de los binarios que produce Zirk la hace LLVM en el backend, no el lenguaje en el que está escrito el compilador — eso ya lo resuelve `ZIRK_COMPILER_SPEC.md` sección 5. Lo que sí depende del lenguaje del compilador es qué tan rápido y seguro se puede construir y mantener algo de este tamaño; Rust da seguridad de memoria, paralelismo seguro para el propio compilador (relevante para la compilación incremental que pide el spec), y bindings maduros a LLVM.
-- **Backend de codegen: LLVM**, vía `inkwell` (bindings seguros de Rust sobre `llvm-sys`).
-- **Estructura: Cargo workspace**, un crate por etapa del pipeline (lexer, parser, ast, sema/types, ir, codegen, cli) en vez de un binario monolítico — refleja directamente el pipeline de `ZIRK_COMPILER_SPEC.md` sección 2, y permite que cada etapa se testee de forma aislada.
+The architecture decisions in `docs/decisions/` **carry the same weight as the
+specs**. They record what was already decided and why, so it is not re-litigated
+in every session.
 
-## Fase 0 — completa
+## The most important scope rule in this prompt
 
-Los cimientos ya existen y están verificados en CI sobre Linux (x86_64 y aarch64), macOS aarch64 y Windows x86_64:
+The full spec describes Zirk in its mature form — it is the result of years of
+work, not the starting point. **The full spec is not implemented in one go.**
+Work advances in phases (see `docs/init/ZIRK_ROADMAP.md`). In each session the
+goal is to advance the current phase — not to jump ahead to features of later
+phases even though they are documented, defined, and tempting to implement
+because "it is all right there".
 
-- workspace de nueve crates, uno por etapa del pipeline más `zirk-diagnostics` y `zirk-runtime`;
-- `zirk-diagnostics` implementando el formato de `docs/ZIRK_COMPILER_SPEC.md` sección 8;
-- emisión de objetos verificada para los nueve targets del spec;
-- sanity check de LLVM como test permanente: genera IR, emite objeto, enlaza y ejecuta un binario nativo.
+If a genuine need for something from a later phase appears along the way, say so
+explicitly instead of implementing it halfway or silently.
 
-Las decisiones de esa fase están en `docs/decisions/` como ADRs y **mandan igual que las specs**: el pin de LLVM, la frontera ABI C del runtime, las restricciones de la estrategia de memoria, la portabilidad y la representación de `String`.
+## Implementation stack
 
-Antes de instalar el toolchain, leé `docs/TOOLCHAIN.md`. En Windows es obligatorio: ninguna distribución oficial de LLVM funciona con `llvm-sys`.
+- **Compiler language: Rust.** The reason is not aesthetic: the optimization of
+  the binaries Zirk produces is done by LLVM in the backend, not by the language
+  the compiler is written in — `ZIRK_COMPILER_SPEC.md` section 5 already settles
+  that. What does depend on the compiler's language is how fast and how safely
+  something of this size can be built and maintained; Rust gives memory safety,
+  safe parallelism for the compiler itself (relevant for the incremental
+  compilation the spec asks for), and mature LLVM bindings.
+- **Codegen backend: LLVM**, through `inkwell` (safe Rust bindings over
+  `llvm-sys`).
+- **Structure: a Cargo workspace**, one crate per pipeline stage instead of a
+  monolithic binary — it mirrors the pipeline of `ZIRK_COMPILER_SPEC.md`
+  section 2 directly, and lets each stage be tested in isolation.
 
-## Fase actual: Zirk 0.1 — pipeline mínimo de punta a punta
+## Phase 0 — complete
 
-Objetivo único de esta fase: que `zirk run` sobre esto compile vía LLVM y corra como binario nativo real —
+The foundations exist and are verified in CI on Linux (x86_64 and aarch64),
+macOS aarch64 and Windows x86_64:
 
-```
+- a workspace of nine crates, one per pipeline stage plus `zirk-diagnostics` and
+  `zirk-runtime`;
+- `zirk-diagnostics` implementing the format of `ZIRK_COMPILER_SPEC.md`
+  section 8;
+- object emission verified for the nine targets of the spec;
+- the LLVM sanity check as a permanent test: it generates IR, emits an object,
+  links and runs a native binary.
+
+Before installing the toolchain, read `docs/TOOLCHAIN.md`. On Windows it is
+mandatory: no official LLVM distribution works with `llvm-sys`.
+
+## Phase 1 — complete
+
+**Zirk compiles and runs.** This is the reference program of the roadmap,
+compiled to a native binary and executed:
+
+```zirk
 fn main(): Void {
     stdout.println("Hola desde Zirk");
 }
 ```
 
-Nada de intérprete puente ni transpilación temporal. El pipeline completo (lexer → parser → chequeo mínimo de tipos → IR → LLVM IR → binario) tiene que funcionar de punta a punta, aunque el subset de lenguaje soportado sea mínimo.
+The whole spine works end to end: lexer → parser → name resolution and type
+checking → typed IR → LLVM → object → link → a process that runs. The
+corresponding decisions live in `docs/decisions/` as ADR-006 and ADR-007.
 
-**Fuera de alcance en esta fase** (no lo toques todavía, aunque esté en el spec): genéricos, clases, concurrencia, decoradores, `init.zrk`, package manager, LSP, formatter, linter, stdlib más allá de un `println` mínimo.
+Implemented subset: `fn`, `Void`, `Int32`, `Boolean`, `String`, `mut`/`inmut`,
+literals, arithmetic with overflow checks, comparison, logic, `if`/`else`,
+calls, `return` and `stdout.println` as an intrinsic.
 
-## Estilo de trabajo esperado
+Available commands: `zirk build <file.zrk>` and `zirk run <file.zrk>`, over a
+single file, with artifacts written to `build/`.
 
-- Priorizá que algo compile y corra de punta a punta por sobre completitud de una sola capa. Un pipeline flaco pero completo vale más ahora que un parser exhaustivo sin backend conectado.
-- Cada feature nueva debería venir, idealmente, con: gramática mínima, un caso válido de test, un caso inválido de test — como pide el propio spec en `ZIRK_SPEC_FINAL.md` sección 8, aunque en esta fase no hace falta que sea exhaustivo.
-- Los diagnósticos, desde el día uno, deberían apuntar al formato de `ZIRK_COMPILER_SPEC.md` sección 8 (código, ubicación, causa, ayuda) aunque el contenido sea básico — es mucho más fácil mantener el formato desde el principio que migrarlo después.
-- Preguntame antes de tomar decisiones de arquitectura de alto impacto (estrategia de memoria, estructura de crates, formato interno de IR) que no estén ya resueltas en `docs/init/ZIRK_ROADMAP.md` fase 0.
+## Next phase: Zirk 0.2 — core language surface
+
+Phase 2 of `docs/init/ZIRK_ROADMAP.md`: complete control flow (`for`, `while`,
+`loop`, `break`, `continue`, `if` as an expression), complete functions
+(optional, named and variadic parameters, closures), `match` with basic
+exhaustiveness, nullability (`T?`, `?.`, `??`) and modules within a single
+crate.
+
+Two things this phase deliberately left pending, and Phase 2 should pick up:
+
+- **`&&` and `||` do not short-circuit.** Both operands are already evaluated
+  when the IR is lowered. Short-circuiting needs its own blocks and goes
+  together with `if` as an expression.
+- **The IR is not versioned.** `ZIRK_COMPILER_SPEC.md` section 4 requires it for
+  `.zpkg`; it is Phase 8 work, noted here so it is not discovered late.
+
+## Expected working style
+
+- Prefer getting something to compile and run end to end over completeness of a
+  single layer. A thin but complete pipeline is worth more right now than an
+  exhaustive parser with no backend attached.
+- Every new feature should ideally come with a minimal grammar, one valid test
+  case and one invalid test case — as the spec itself requires in
+  `ZIRK_SPEC_FINAL.md` section 8.
+- Diagnostics should aim at the format of `ZIRK_COMPILER_SPEC.md` section 8
+  (code, location, cause, help) from day one, even if the content is basic — it
+  is far easier to keep the format from the start than to migrate it later.
+- Ask before making high-impact architecture decisions (memory strategy, crate
+  structure, internal IR format) that are not already settled in
+  `docs/init/ZIRK_ROADMAP.md` phase 0 or in `docs/decisions/`.

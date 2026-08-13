@@ -1,0 +1,11 @@
+fn main(): Void {
+    mut total: Int32 = 0;
+    total = 10;
+    total = total + 5;
+
+    if total == 15 {
+        stdout.println("fifteen");
+    } else {
+        stdout.println("wrong");
+    }
+}

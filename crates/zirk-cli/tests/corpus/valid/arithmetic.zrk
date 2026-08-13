@@ -1,0 +1,18 @@
+fn describe(a: Int32, b: Int32): String {
+    mut sum: Int32 = a + b;
+    mut product: Int32 = a * b;
+
+    if sum == product {
+        return "equal";
+    }
+    if sum > product {
+        return "sum wins";
+    }
+    return "product wins";
+}
+
+fn main(): Void {
+    stdout.println(describe(2, 2));
+    stdout.println(describe(1, 1));
+    stdout.println(describe(3, 4));
+}

@@ -1,17 +1,17 @@
-//! Sanity check del toolchain de LLVM.
+//! Sanity check of the LLVM toolchain.
 //!
-//! Verifica la cadena completa exigida por `ZIRK_ROADMAP.md` Fase 0:
+//! Verifies the full chain required by `ZIRK_ROADMAP.md` Phase 0:
 //!
 //! ```text
-//! inkwell → LLVM IR → objeto nativo → enlace → binario que ejecuta
+//! inkwell -> LLVM IR -> native object -> link -> a binary that runs
 //! ```
 //!
-//! No involucra sintaxis de Zirk: valida el toolchain, no el lenguaje.
+//! No Zirk syntax is involved: it validates the toolchain, not the language.
 //!
-//! Vive en el repo como test permanente y no como spike desechable (design D2):
-//! su valor no se agota al pasar una vez. Es lo que detecta que alguien tiene la
-//! versión equivocada de LLVM, que un runner de CI perdió `LLVM_SYS_201_PREFIX`,
-//! o que una actualización de inkwell rompió la emisión.
+//! It lives in the repo as a permanent test rather than a throwaway spike
+//! (design D2): its value is not spent by passing once. It is what detects that
+//! someone has the wrong LLVM version, that a CI runner lost
+//! `LLVM_SYS_201_PREFIX`, or that an inkwell update broke emission.
 
 mod common;
 
@@ -20,13 +20,13 @@ use inkwell::context::Context;
 use std::process::Command;
 use zirk_codegen_llvm::emit_object_for_host;
 
-const MENSAJE: &str = "sanity check de zirk";
+const MESSAGE: &str = "zirk sanity check";
 
 #[test]
-fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
+fn the_full_chain_produces_a_native_binary_that_runs() {
     let _llvm = common::llvm_lock();
 
-    eprintln!("[sanity] creando contexto LLVM");
+    eprintln!("[sanity] creating LLVM context");
     let context = Context::create();
     let module = context.create_module("sanity");
     let builder = context.create_builder();
@@ -36,89 +36,89 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
     let ptr_type = context.ptr_type(AddressSpace::default());
     let puts = module.add_function("puts", i32_type.fn_type(&[ptr_type.into()], false), None);
 
-    // define i32 @main() { puts(MENSAJE); ret 0 }
+    // define i32 @main() { puts(MESSAGE); ret 0 }
     let main_fn = module.add_function("main", i32_type.fn_type(&[], false), None);
     let entry = context.append_basic_block(main_fn, "entry");
     builder.position_at_end(entry);
 
     let mensaje = builder
-        .build_global_string_ptr(MENSAJE, "mensaje")
-        .expect("no se pudo construir la constante de string");
+        .build_global_string_ptr(MESSAGE, "mensaje")
+        .expect("could not build the string constant");
     builder
         .build_call(puts, &[mensaje.as_pointer_value().into()], "")
-        .expect("no se pudo construir la llamada a puts");
+        .expect("could not build the call to puts");
     builder
         .build_return(Some(&i32_type.const_int(0, false)))
-        .expect("no se pudo construir el return");
+        .expect("could not build the return");
 
-    // `Module::verify()` de inkwell provoca STATUS_ACCESS_VIOLATION en Windows
-    // incluso con un módulo válido. Ver issue #2.
+    // inkwell's `Module::verify()` triggers STATUS_ACCESS_VIOLATION on Windows
+    // even with a valid module. See issue #2.
     //
-    // Desactivarlo ahí no deja el caso sin cubrir: el test sigue emitiendo el
-    // objeto, enlazándolo y ejecutando el binario, así que un módulo inválido
-    // falla igual — solo que más tarde y con peor mensaje.
+    // Disabling it there leaves nothing uncovered: the test still emits the
+    // object, links it and runs the binary, so an invalid module fails all the
+    // same — only later and with a worse message.
     #[cfg(not(windows))]
     {
-        eprintln!("[sanity] verificando modulo");
+        eprintln!("[sanity] verifying module");
         module
             .verify()
-            .expect("el módulo LLVM generado no verifica");
+            .expect("the generated LLVM module does not verify");
     }
 
-    // Emisión del objeto para el host.
+    // Emit the object for the host.
     let dir = common::temp_dir();
-    let objeto = dir.join(format!(
+    let object = dir.join(format!(
         "sanity{}",
         if cfg!(windows) { ".obj" } else { ".o" }
     ));
-    // Se resuelve el triple por separado para que el log distinga entre un
-    // fallo al consultarlo y uno al emitir. Ver #2.
-    eprintln!("[sanity] resolviendo triple del host");
+    // The triple is resolved separately so the log distinguishes a failure to
+    // query it from a failure to emit. See #2.
+    eprintln!("[sanity] resolving host triple");
     let triple = zirk_codegen_llvm::host_triple();
-    eprintln!("[sanity] triple del host: {triple}");
+    eprintln!("[sanity] host triple: {triple}");
 
-    eprintln!("[sanity] emitiendo objeto para el host");
-    emit_object_for_host(&module, &objeto)
-        .unwrap_or_else(|d| panic!("fallo al emitir el objeto:\n{}", d.render()));
+    eprintln!("[sanity] emitting object for the host");
+    emit_object_for_host(&module, &object)
+        .unwrap_or_else(|d| panic!("failed to emit the object:\n{}", d.render()));
 
-    assert!(objeto.is_file(), "el objeto no se escribió en disco");
+    assert!(object.is_file(), "the object was not written to disk");
 
-    // Enlace.
-    let binario = dir.join(common::exe("sanity"));
+    // Link.
+    let binary = dir.join(common::exe("sanity"));
     eprintln!("[sanity] enlazando");
     let linker = common::linker_driver();
-    let salida_enlace = Command::new(&linker)
-        .arg(&objeto)
+    let link_output = Command::new(&linker)
+        .arg(&object)
         .arg("-o")
-        .arg(&binario)
+        .arg(&binary)
         .output()
-        .unwrap_or_else(|e| panic!("no se pudo invocar el linker `{}`: {e}", linker.display()));
+        .unwrap_or_else(|e| panic!("could not invoke linker `{}`: {e}", linker.display()));
 
     assert!(
-        salida_enlace.status.success(),
-        "el enlace falló:\n{}",
-        String::from_utf8_lossy(&salida_enlace.stderr)
+        link_output.status.success(),
+        "linking failed:\n{}",
+        String::from_utf8_lossy(&link_output.stderr)
     );
 
-    // Ejecución.
-    eprintln!("[sanity] ejecutando binario");
-    let salida = Command::new(&binario)
+    // Run.
+    eprintln!("[sanity] running binary");
+    let output = Command::new(&binary)
         .output()
-        .expect("no se pudo ejecutar el binario producido");
+        .expect("could not run the produced binary");
 
     assert!(
-        salida.status.success(),
-        "el binario terminó con código {:?}",
-        salida.status.code()
+        output.status.success(),
+        "the binary exited with code {:?}",
+        output.status.code()
     );
     assert!(
-        String::from_utf8_lossy(&salida.stdout).contains(MENSAJE),
-        "el binario no imprimió el mensaje esperado"
+        String::from_utf8_lossy(&output.stdout).contains(MESSAGE),
+        "the binary did not print the expected message"
     );
 }
 
 #[test]
-fn un_triple_desconocido_falla_con_diagnostico() {
+fn an_unknown_triple_fails_with_a_diagnostic() {
     let _llvm = common::llvm_lock();
 
     let context = Context::create();
@@ -130,17 +130,17 @@ fn un_triple_desconocido_falla_con_diagnostico() {
         "arquitectura-que-no-existe",
         &dir.join("nunca.o"),
     )
-    .expect_err("un triple inválido no debe emitir un objeto");
+    .expect_err("an invalid triple must not emit an object");
 
     let rendered = error.render();
     assert!(
         rendered.contains("arquitectura-que-no-existe"),
-        "el diagnóstico debe nombrar el target solicitado:\n{rendered}"
+        "the diagnostic must name the requested target:\n{rendered}"
     );
-    assert!(rendered.contains("= causa:"), "falta la causa:\n{rendered}");
-    assert!(rendered.contains("= ayuda:"), "falta la ayuda:\n{rendered}");
+    assert!(rendered.contains("= cause:"), "missing cause:\n{rendered}");
+    assert!(rendered.contains("= help:"), "missing help:\n{rendered}");
     assert!(
         !dir.join("nunca.o").exists(),
-        "no debe producirse un objeto inválido"
+        "no invalid object must be produced"
     );
 }
