@@ -11,7 +11,413 @@
 //! reanalizar solo la región afectada por una edición. Esa capacidad llega
 //! cuando exista compilación incremental, pero la API no debe cerrarse a ella.
 //!
-//! # Estado
+//! # Recuperación de errores
 //!
-//! Vacío por diseño. La Fase 0 monta el esqueleto del workspace sin implementar
-//! sintaxis de Zirk; la tokenización llega en Fase 1.
+//! El lexer **no se detiene en el primer error**. Emite el diagnóstico, avanza
+//! y sigue tokenizando, de modo que una compilación reporte todos los problemas
+//! léxicos de una vez en lugar de uno por ejecución.
+
+mod token;
+
+pub use token::{Keyword, Token, TokenKind};
+
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
+
+/// Códigos de diagnóstico del lexer.
+pub mod codes {
+    use zirk_diagnostics::Code;
+
+    /// Carácter que no inicia ningún token válido.
+    pub const CARACTER_NO_RECONOCIDO: Code = Code::new("E0201");
+    /// Literal de cadena sin comilla de cierre.
+    pub const CADENA_SIN_CERRAR: Code = Code::new("E0202");
+    /// Secuencia de escape no reconocida dentro de una cadena.
+    pub const ESCAPE_DESCONOCIDO: Code = Code::new("E0203");
+    /// Comentario de bloque sin cierre.
+    pub const COMENTARIO_SIN_CERRAR: Code = Code::new("E0204");
+    /// Separador `_` en una posición inválida de un literal numérico.
+    pub const SEPARADOR_INVALIDO: Code = Code::new("E0205");
+    /// Literal entero que excede la representación interna.
+    pub const ENTERO_DEMASIADO_GRANDE: Code = Code::new("E0206");
+}
+
+/// Convierte un archivo fuente en tokens, acumulando los errores encontrados.
+pub fn tokenize(source: &SourceFile, sink: &mut DiagnosticSink) -> Vec<Token> {
+    Lexer::new(source, sink).run()
+}
+
+struct Lexer<'a> {
+    source: &'a SourceFile,
+    sink: &'a mut DiagnosticSink,
+    /// Texto como vector de caracteres con su offset de byte, para poder
+    /// avanzar por caracteres Unicode sin perder la posición en bytes.
+    chars: Vec<(u32, char)>,
+    pos: usize,
+}
+
+impl<'a> Lexer<'a> {
+    fn new(source: &'a SourceFile, sink: &'a mut DiagnosticSink) -> Self {
+        let chars = source
+            .text()
+            .char_indices()
+            .map(|(offset, c)| (offset as u32, c))
+            .collect();
+        Self {
+            source,
+            sink,
+            chars,
+            pos: 0,
+        }
+    }
+
+    // --- Navegación -------------------------------------------------------
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).map(|&(_, c)| c)
+    }
+
+    fn peek_at(&self, adelanto: usize) -> Option<char> {
+        self.chars.get(self.pos + adelanto).map(|&(_, c)| c)
+    }
+
+    /// Offset de byte de la posición actual, o el final del texto.
+    fn offset(&self) -> u32 {
+        self.chars
+            .get(self.pos)
+            .map(|&(o, _)| o)
+            .unwrap_or(self.source.text().len() as u32)
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += 1;
+        Some(c)
+    }
+
+    /// Consume el carácter si coincide con el esperado.
+    fn eat(&mut self, esperado: char) -> bool {
+        if self.peek() == Some(esperado) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    // --- Diagnósticos -----------------------------------------------------
+
+    fn error(&mut self, code: Code, span: Span, mensaje: impl Into<String>) -> DiagnosticoParcial {
+        DiagnosticoParcial {
+            diagnostico: Diagnostic::error(code, mensaje)
+                .at(self.source.location(span))
+                .with_snippet(self.source.snippet(span)),
+        }
+    }
+
+    fn emitir(&mut self, parcial: DiagnosticoParcial) {
+        self.sink.emit(parcial.diagnostico);
+    }
+
+    // --- Bucle principal --------------------------------------------------
+
+    fn run(mut self) -> Vec<Token> {
+        let mut tokens = Vec::new();
+
+        loop {
+            self.skip_trivia();
+            let inicio = self.offset();
+
+            let Some(c) = self.peek() else {
+                tokens.push(Token::new(TokenKind::Eof, Span::empty(inicio)));
+                break;
+            };
+
+            let kind = if c.is_alphabetic() || c == '_' {
+                Some(self.word())
+            } else if c.is_ascii_digit() {
+                self.number()
+            } else if c == '"' {
+                self.string()
+            } else {
+                self.punctuation()
+            };
+
+            if let Some(kind) = kind {
+                tokens.push(Token::new(kind, Span::new(inicio, self.offset())));
+            }
+        }
+
+        tokens
+    }
+
+    /// Descarta espacios y comentarios.
+    fn skip_trivia(&mut self) {
+        loop {
+            match self.peek() {
+                Some(c) if c.is_whitespace() => {
+                    self.pos += 1;
+                }
+                Some('/') if self.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                }
+                Some('/') if self.peek_at(1) == Some('*') => {
+                    self.block_comment();
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn block_comment(&mut self) {
+        let inicio = self.offset();
+        self.pos += 2; // `/*`
+
+        loop {
+            match self.peek() {
+                None => {
+                    let span = Span::new(inicio, inicio + 2);
+                    let d = self.error(
+                        codes::COMENTARIO_SIN_CERRAR,
+                        span,
+                        "comentario de bloque sin cerrar",
+                    );
+                    self.emitir(
+                        d.con_causa(
+                            "el comentario se abre acá y el archivo termina antes de cerrarlo",
+                        )
+                        .con_ayuda("agregá `*/` donde deba terminar el comentario"),
+                    );
+                    return;
+                }
+                Some('*') if self.peek_at(1) == Some('/') => {
+                    self.pos += 2;
+                    return;
+                }
+                Some(_) => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    // --- Reconocedores ----------------------------------------------------
+
+    /// Identificador o palabra clave.
+    fn word(&mut self) -> TokenKind {
+        let inicio = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_alphanumeric() || c == '_' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        let texto: String = self.chars[inicio..self.pos]
+            .iter()
+            .map(|&(_, c)| c)
+            .collect();
+
+        match Keyword::from_text(&texto) {
+            Some(k) => TokenKind::Keyword(k),
+            None => TokenKind::Identifier(texto),
+        }
+    }
+
+    /// Literal entero decimal, admitiendo `_` como separador.
+    fn number(&mut self) -> Option<TokenKind> {
+        let inicio_offset = self.offset();
+        let mut digitos = String::new();
+        let mut ultimo_fue_separador = false;
+        let mut separador_invalido: Option<Span> = None;
+
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                digitos.push(c);
+                ultimo_fue_separador = false;
+                self.pos += 1;
+            } else if c == '_' {
+                // Dos separadores seguidos, o uno inicial, no son válidos.
+                if ultimo_fue_separador || digitos.is_empty() {
+                    separador_invalido.get_or_insert(Span::new(self.offset(), self.offset() + 1));
+                }
+                ultimo_fue_separador = true;
+                self.pos += 1;
+            } else if c.is_alphanumeric() {
+                // `123abc`: se consume para no volver a fallar en el mismo punto.
+                separador_invalido.get_or_insert(Span::new(self.offset(), self.offset() + 1));
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Un separador final tampoco es válido.
+        if ultimo_fue_separador {
+            separador_invalido.get_or_insert(Span::new(self.offset() - 1, self.offset()));
+        }
+
+        let span = Span::new(inicio_offset, self.offset());
+
+        if let Some(span_invalido) = separador_invalido {
+            let d = self.error(
+                codes::SEPARADOR_INVALIDO,
+                span_invalido,
+                "literal numérico mal formado",
+            );
+            self.emitir(
+                d.con_causa("`_` solo puede aparecer entre dígitos")
+                    .con_ayuda("escribí el número como `1_000_000`"),
+            );
+            return None;
+        }
+
+        match digitos.parse::<i128>() {
+            Ok(valor) => Some(TokenKind::Integer(valor)),
+            Err(_) => {
+                let d = self.error(
+                    codes::ENTERO_DEMASIADO_GRANDE,
+                    span,
+                    "literal entero demasiado grande",
+                );
+                self.emitir(d.con_causa(
+                    "el valor excede el mayor entero que el compilador puede representar",
+                ));
+                None
+            }
+        }
+    }
+
+    /// Literal de cadena con escapes.
+    fn string(&mut self) -> Option<TokenKind> {
+        let inicio_offset = self.offset();
+        self.pos += 1; // comilla de apertura
+
+        let mut valor = String::new();
+
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    let span = Span::new(inicio_offset, inicio_offset + 1);
+                    let d = self.error(
+                        codes::CADENA_SIN_CERRAR,
+                        span,
+                        "literal de cadena sin cerrar",
+                    );
+                    self.emitir(
+                        d.con_causa("la cadena se abre acá y no se cierra antes del fin de línea")
+                            .con_ayuda("agregá la comilla `\"` de cierre"),
+                    );
+                    return None;
+                }
+                Some('"') => {
+                    self.pos += 1;
+                    return Some(TokenKind::Str(valor));
+                }
+                Some('\\') => {
+                    let inicio_escape = self.offset();
+                    self.pos += 1;
+                    match self.advance() {
+                        Some('n') => valor.push('\n'),
+                        Some('t') => valor.push('\t'),
+                        Some('r') => valor.push('\r'),
+                        Some('0') => valor.push('\0'),
+                        Some('"') => valor.push('"'),
+                        Some('\\') => valor.push('\\'),
+                        Some(otro) => {
+                            let span = Span::new(inicio_escape, self.offset());
+                            let d = self.error(
+                                codes::ESCAPE_DESCONOCIDO,
+                                span,
+                                format!("secuencia de escape desconocida: `\\{otro}`"),
+                            );
+                            self.emitir(d.con_causa("no es una secuencia de escape del lenguaje")
+                                .con_ayuda("las secuencias válidas son \\n, \\t, \\r, \\0, \\\" y \\\\"));
+                            // Se conserva el carácter para seguir tokenizando.
+                            valor.push(otro);
+                        }
+                        None => continue,
+                    }
+                }
+                Some(c) => {
+                    valor.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Operadores, delimitadores y puntuación.
+    fn punctuation(&mut self) -> Option<TokenKind> {
+        use TokenKind::*;
+
+        let inicio = self.offset();
+        let c = self.advance()?;
+
+        let kind = match c {
+            '+' => Plus,
+            '-' if self.eat('>') => Arrow,
+            '-' => Minus,
+            '*' => Star,
+            '/' => Slash,
+            '%' => Percent,
+            '=' if self.eat('=') => Eq,
+            '=' if self.eat('>') => FatArrow,
+            '=' => Assign,
+            '!' if self.eat('=') => NotEq,
+            '!' => Not,
+            '<' if self.eat('=') => LtEq,
+            '<' => Lt,
+            '>' if self.eat('=') => GtEq,
+            '>' => Gt,
+            '&' if self.eat('&') => AndAnd,
+            '|' if self.eat('|') => OrOr,
+            '(' => LParen,
+            ')' => RParen,
+            '{' => LBrace,
+            '}' => RBrace,
+            '[' => LBracket,
+            ']' => RBracket,
+            ',' => Comma,
+            ';' => Semicolon,
+            ':' if self.eat(':') => ColonColon,
+            ':' => Colon,
+            '.' => Dot,
+            otro => {
+                let span = Span::new(inicio, self.offset());
+                let d = self.error(
+                    codes::CARACTER_NO_RECONOCIDO,
+                    span,
+                    format!("carácter no reconocido: `{otro}`"),
+                );
+                self.emitir(d.con_causa("no inicia ningún token del lenguaje"));
+                return None;
+            }
+        };
+
+        Some(kind)
+    }
+}
+
+/// Diagnóstico en construcción, para encadenar causa y ayuda sin repetir la
+/// ubicación en cada sitio de error.
+struct DiagnosticoParcial {
+    diagnostico: Diagnostic,
+}
+
+impl DiagnosticoParcial {
+    fn con_causa(mut self, causa: impl Into<String>) -> Self {
+        self.diagnostico = self.diagnostico.with_cause(causa);
+        self
+    }
+
+    fn con_ayuda(mut self, ayuda: impl Into<String>) -> Self {
+        self.diagnostico = self.diagnostico.with_help(ayuda);
+        self
+    }
+}
