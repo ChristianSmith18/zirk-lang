@@ -51,10 +51,25 @@ Las dependencias entre crates SHALL fluir en un solo sentido a lo largo del pipe
 - **WHEN** se inspecciona la superficie pública de `zirk-runtime`
 - **THEN** expone `zirk_rt_init` y `zirk_rt_shutdown`, correspondientes al ciclo de vida de `ZIRK_RUNTIME_SPEC.md` sección 2
 
-### Requirement: Ausencia de sintaxis de Zirk en esta fase
+### Requirement: Cobertura del pipeline por crate
 
-El workspace de esta fase NO SHALL implementar análisis léxico, sintáctico ni semántico de código Zirk.
+Cada etapa del pipeline de `ZIRK_COMPILER_SPEC.md` sección 2 SHALL implementarse en el crate que le corresponde, sin que una etapa asuma responsabilidades de otra.
 
-#### Scenario: Intento de compilar un archivo fuente
-- **WHEN** se busca funcionalidad para procesar un archivo `.zrk`
-- **THEN** no existe en el workspace de esta fase
+#### Scenario: El lexer no conoce la gramática
+- **WHEN** se inspecciona `zirk-lexer`
+- **THEN** produce tokens
+- **AND** NO decide si una secuencia de tokens es válida
+
+#### Scenario: El parser no chequea tipos
+- **WHEN** se parsea una expresión con tipos incompatibles pero sintaxis correcta
+- **THEN** el parser produce el árbol sin error
+- **AND** el error de tipos lo emite el chequeador
+
+#### Scenario: El backend es el único que conoce LLVM
+- **WHEN** se inspeccionan los crates del workspace
+- **THEN** solo `zirk-codegen-llvm` depende de `inkwell`
+
+#### Scenario: El enlace no ocurre en el backend
+- **WHEN** se produce un ejecutable
+- **THEN** el backend emite el objeto
+- **AND** la invocación del linker ocurre en la CLI
