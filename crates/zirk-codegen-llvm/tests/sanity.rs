@@ -51,10 +51,19 @@ fn la_cadena_completa_produce_un_binario_nativo_que_ejecuta() {
         .build_return(Some(&i32_type.const_int(0, false)))
         .expect("no se pudo construir el return");
 
-    eprintln!("[sanity] verificando modulo");
-    module
-        .verify()
-        .expect("el módulo LLVM generado no verifica");
+    // `Module::verify()` de inkwell provoca STATUS_ACCESS_VIOLATION en Windows
+    // incluso con un módulo válido. Ver issue #2.
+    //
+    // Desactivarlo ahí no deja el caso sin cubrir: el test sigue emitiendo el
+    // objeto, enlazándolo y ejecutando el binario, así que un módulo inválido
+    // falla igual — solo que más tarde y con peor mensaje.
+    #[cfg(not(windows))]
+    {
+        eprintln!("[sanity] verificando modulo");
+        module
+            .verify()
+            .expect("el módulo LLVM generado no verifica");
+    }
 
     // Emisión del objeto para el host.
     let dir = common::temp_dir();
