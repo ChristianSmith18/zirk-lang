@@ -200,5 +200,11 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
+      # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
+      # intensiva. Ejecutar en serie es la unica garantia real; el costo es
+      # despreciable con esta cantidad de tests.
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: "1"
