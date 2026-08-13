@@ -1,17 +1,20 @@
-# Zirk — Especificación de la biblioteca estándar
+# Zirk — Standard library specification
 
-## 1. Principios
+## 1. Principles
 
-La stdlib debe ser pequeña, coherente, tipada, multiplataforma y explícita en I/O, permisos y errores. No hay funciones globales de impresión o lectura. Los módulos estándar se importan sin comillas:
+The stdlib must be small, coherent, typed, cross-platform and explicit about
+I/O, permissions and errors. There are no global print or read functions.
+Standard modules are imported without quotes:
 
 ```text
 import { stdout } from std.io;
 import { File } from std.fs;
 ```
 
-La primera versión incluye el núcleo necesario para aplicaciones nativas. Funcionalidad especializada puede distribuirse como paquetes oficiales sin ampliar el lenguaje.
+The first version includes the core needed for native applications. Specialized
+functionality may ship as official packages without extending the language.
 
-## 2. Módulos iniciales
+## 2. Initial modules
 
 ```text
 std.io
@@ -32,11 +35,11 @@ std.reflect
 std.system
 ```
 
-Las implementaciones pueden subdividirlos sin cambiar sus imports públicos.
+Implementations may subdivide them without changing their public imports.
 
 ## 3. `std.io`
 
-Expone tres streams:
+Exposes three streams:
 
 ```text
 import { stdin, stdout, stderr } from std.io;
@@ -48,16 +51,21 @@ stderr.println("Diagnóstico");
 mut line = stdin.read_line();
 ```
 
-- `print(value)` escribe sin salto.
-- `println(value)` escribe con el salto de la plataforma.
-- `println()` escribe solo un salto.
-- `stdout` y `stderr` tienen las mismas operaciones de formato, pero destinos diferentes.
-- todo valor imprimible usa `to_string(): String` o el trait de formato correspondiente.
-- se favorece interpolación: `stdout.println("Usuario: {user.name}");`.
+- `print(value)` writes without a line break.
+- `println(value)` writes with the platform line break.
+- `println()` writes just a line break.
+- `stdout` and `stderr` share the same formatting operations but different
+  destinations.
+- every printable value uses `to_string(): String` or the corresponding
+  formatting trait.
+- interpolation is favoured: `stdout.println("User: {user.name}");`.
 
-`stdin` ofrece lectura de línea, char y bytes. EOF no es una exception: se representa mediante `ReadResult<T>` o un resultado algebraico equivalente que distingue `Data`, `Eof` y `Error`. Estados inválidos del stream son errores tipados; fallos excepcionales del sistema pueden convertirse en exceptions según contrato.
+`stdin` offers line, char and byte reads. EOF is not an exception: it is
+represented through `ReadResult<T>` or an equivalent algebraic result that
+distinguishes `Data`, `Eof` and `Error`. Invalid stream states are typed errors;
+exceptional system failures may become exceptions per contract.
 
-Las variantes async suspenden una task sin bloquear un thread.
+The async variants suspend a task without blocking a thread.
 
 ## 4. `std.fs`
 
@@ -70,17 +78,21 @@ mut content: String = match with File.open("data.txt") {
 };
 ```
 
-`File` implementa `Resource<FileError>`. Operaciones mínimas:
+`File` implements `Resource<FileError>`. Minimum operations:
 
-- `open`, `create` y apertura con opciones tipadas;
+- `open`, `create` and opening with typed options;
 - `read_text`, `read_bytes`, `read_line`;
 - `write_text`, `write_bytes`, `append`;
-- `flush`, `metadata` y cierre idempotente administrado;
-- variantes async para operaciones que puedan esperar.
+- `flush`, `metadata` and managed idempotent closing;
+- async variants for operations that may wait.
 
-Los modos no usan strings mágicos: se expresan mediante opciones/enums. Los errores distinguen no encontrado, permiso denegado, ya existe, ruta inválida, tipo incorrecto, EOF cuando corresponda y fallo del sistema.
+Modes do not use magic strings: they are expressed through options/enums. Errors
+distinguish not found, permission denied, already exists, invalid path, wrong
+type, EOF where applicable, and system failure.
 
-Filesystem requiere permisos de lectura/escritura con alcance declarable. El runtime valida rutas reales cuando sea necesario para evitar escapes mediante `..` o symlinks.
+The filesystem requires read/write permissions with a declarable scope. The
+runtime validates real paths where necessary to prevent escapes through `..` or
+symlinks.
 
 ## 5. `std.path`
 
@@ -93,9 +105,14 @@ FILE_PATH.name();
 FILE_PATH.extension();
 ```
 
-`Path` es una representación semántica de rutas, no un `String`. Permite `join`, normalización léxica, componentes, nombre, extensión, parent, absolute/canonical mediante operaciones que acceden al sistema y conversión explícita a string.
+`Path` is a semantic representation of paths, not a `String`. It supports
+`join`, lexical normalization, components, name, extension, parent,
+absolute/canonical through operations that touch the system, and explicit
+conversion to a string.
 
-Debe preservar reglas de la plataforma y evitar concatenación textual insegura. Construir o manipular una ruta no accede al filesystem; canonicalizar sí puede hacerlo y requiere permiso.
+It must preserve platform rules and avoid unsafe textual concatenation. Building
+or manipulating a path does not touch the filesystem; canonicalizing may, and
+requires permission.
 
 ## 6. `std.process`
 
@@ -105,91 +122,110 @@ import { Process } from std.process;
 mut result = await Process.run("git", ["status"]);
 ```
 
-La API separa ejecutable y argumentos; no invoca un shell por defecto. Ofrece:
+The API separates executable from arguments; it does not invoke a shell by
+default. It offers:
 
-- `run` para esperar un resultado;
-- `spawn` para obtener un recurso `ChildProcess`;
-- stdin/stdout/stderr configurables;
-- environment y working directory explícitos;
-- exit code, signal y bytes/text capturados;
-- timeout y cancelación cooperativa.
+- `run` to await a result;
+- `spawn` to obtain a `ChildProcess` resource;
+- configurable stdin/stdout/stderr;
+- explicit environment and working directory;
+- exit code, signal and captured bytes/text;
+- timeout and cooperative cancellation.
 
-La ejecución por shell es una API diferente y visiblemente peligrosa. Requiere permiso de procesos; environment adicional requiere su capacidad correspondiente.
+Shell execution is a different and visibly dangerous API. It requires the
+process permission; extra environment requires its corresponding capability.
 
 ## 7. `std.collections`
 
-Tipos mínimos:
+Minimum types:
 
-- `Array<T>` dinámico de uso general;
-- arrays fijos cuando el tamaño forma parte del tipo;
-- `List<T>` cuando se necesite un contrato de lista explícito;
-- `Map<K,V>` con keys hashable/equatable;
+- `Array<T>`, dynamic and general purpose;
+- fixed arrays where the size is part of the type;
+- `List<T>` where an explicit list contract is needed;
+- `Map<K,V>` with hashable/equatable keys;
 - `Set<T>`;
 - `Range<T>`;
-- iteradores y vistas.
+- iterators and views.
 
-Las colecciones ofrecen `map`, `filter`, `reduce`, búsqueda, ordenamiento y conversión explícita. Las operaciones funcionales no mutan el origen. El acceso por índice comprueba límites; se ofrecen accesos seguros que retornan un tipo opcional.
+Collections offer `map`, `filter`, `reduce`, search, sorting and explicit
+conversion. Functional operations do not mutate the source. Index access is
+bounds-checked; safe accessors returning an optional type are provided.
 
 ## 8. `std.time`
 
-Incluye `Duration`, instantes monotónicos, fecha/hora civil, zonas horarias mediante datos versionados, timers y sleep cancelable.
+Includes `Duration`, monotonic instants, civil date/time, time zones through
+versioned data, timers and cancellable sleep.
 
 ```text
 await task.sleep(500ms);
 await operation timeout 5s;
 ```
 
-Las mediciones de elapsed usan reloj monotónico. Fecha civil y duration son tipos distintos; no se mezclan implícitamente.
+Elapsed measurements use a monotonic clock. Civil date and duration are distinct
+types; they are not implicitly mixed.
 
-## 9. `std.task`, `std.thread` y `std.sync`
+## 9. `std.task`, `std.thread` and `std.sync`
 
-Estos módulos exponen tipos de soporte para las construcciones del lenguaje:
+These modules expose supporting types for the language constructs:
 
-- handles y scopes de `Task<T>`;
-- cancelación y razones de cancelación;
-- `Channel<T>` acotado/no acotado y cierre;
-- `Thread<T>` y `join`;
-- `Mutex<T>`, locks de lectura/escritura, semáforos y barreras cuando se justifiquen;
-- `Atomic<T>` y órdenes de memoria;
-- primitivas de reducción paralela.
+- `Task<T>` handles and scopes;
+- cancellation and cancellation reasons;
+- bounded/unbounded `Channel<T>` and closing;
+- `Thread<T>` and `join`;
+- `Mutex<T>`, read/write locks, semaphores and barriers where justified;
+- `Atomic<T>` and memory orderings;
+- parallel reduction primitives.
 
-La sintaxis `task`, `await`, `parallel` y `thread` pertenece al lenguaje; la stdlib no crea un modelo alternativo.
+The `task`, `await`, `parallel` and `thread` syntax belongs to the language; the
+stdlib does not create an alternative model.
 
-## 10. `std.net` y `std.http`
+## 10. `std.net` and `std.http`
 
-`std.net` proporciona direcciones, DNS, TCP y UDP mediante APIs tipadas, cancelables y compatibles con el reactor. Toda conexión respeta `permissions.network`.
+`std.net` provides addresses, DNS, TCP and UDP through typed, cancellable APIs
+compatible with the reactor. Every connection respects `permissions.network`.
 
-`std.http` incluye inicialmente cliente y servidor nativos básicos, con:
+`std.http` initially includes a basic native client and server, with:
 
-- request/response tipados;
-- headers con validación;
-- streaming y backpressure;
-- timeouts y límites configurables;
-- TLS mediante implementación auditada;
-- cancelación asociada a la desconexión;
-- handlers ejecutados como tasks estructuradas.
+- typed request/response;
+- headers with validation;
+- streaming and backpressure;
+- configurable timeouts and limits;
+- TLS through an audited implementation;
+- cancellation tied to disconnection;
+- handlers executed as structured tasks.
 
-No se crea un thread por request. El reactor maneja I/O y el scheduler ejecuta handlers; trabajo CPU pesado debe pasar a `parallel`.
+No thread is created per request. The reactor handles I/O and the scheduler runs
+handlers; heavy CPU work must move to `parallel`.
 
-Frameworks, routing avanzado, ORM y plantillas quedan en paquetes, no en el núcleo.
+Frameworks, advanced routing, ORM and templating stay in packages, not in the
+core.
 
 ## 11. `std.json`
 
-Ofrece un árbol JSON tipado y encode/decode genérico. La derivación de serializers puede hacerse mediante decoradores o reflection solicitada. Los errores incluyen ubicación, path y expectativa de tipo. Límites de profundidad/tamaño deben prevenir consumo hostil.
+Offers a typed JSON tree and generic encode/decode. Serializer derivation may be
+done through decorators or requested reflection. Errors include location, path
+and expected type. Depth/size limits must prevent hostile consumption.
 
 ## 12. `std.crypto`
 
-Solo algoritmos modernos y auditados, con defaults seguros, comparación constante donde corresponda, CSPRNG del sistema y tipos que dificulten mezclar claves, nonces y hashes. Algoritmos obsoletos no se habilitan por comodidad. Las APIs pueden estar respaldadas por librerías nativas verificadas.
+Only modern, audited algorithms, with safe defaults, constant-time comparison
+where appropriate, the system CSPRNG and types that make it hard to mix keys,
+nonces and hashes. Obsolete algorithms are not enabled for convenience. The APIs
+may be backed by verified native libraries.
 
 ## 13. `std.reflect`
 
-Expone identidad básica de tipos siempre disponible y metadata estructural únicamente cuando fue preservada. No permite romper visibilidad ni mutabilidad. Reflection dinámica que requiera metadata ausente produce un resultado/diagnóstico explícito.
+Exposes basic type identity, always available, and structural metadata only
+where it was preserved. It does not allow breaking visibility or mutability.
+Dynamic reflection requiring absent metadata produces an explicit
+result/diagnostic.
 
-La Syntax API del compilador no pertenece a `std.reflect`; es una API de tooling separada.
+The compiler Syntax API does not belong to `std.reflect`; it is a separate
+tooling API.
 
 ## 14. `std.testing`
 
-Los tests unitarios usan `@test` exclusivamente en `.spec.zrk`:
+Unit tests use `@test` exclusively in `.spec.zrk`:
 
 ```text
 // user_service.spec.zrk
@@ -199,9 +235,10 @@ fn creates_user(): Void {
 }
 ```
 
-Usar `@test` fuera de `.spec.zrk` es error de compilación. Los tests no entran en binarios release ni reciben acceso privado automático.
+Using `@test` outside `.spec.zrk` is a compile error. Tests do not enter release
+binaries and receive no automatic private access.
 
-Los E2E viven en `test/*.e2e.zrk` y usan `@e2e`. Comandos:
+E2E tests live in `test/*.e2e.zrk` and use `@e2e`. Commands:
 
 ```text
 zirk test
@@ -215,30 +252,41 @@ zirk test --jobs <n>
 zirk test --report json
 ```
 
-Assertions mínimas: igualdad, identidad, truth, nullability, resultado, exception, colección y aproximación decimal. Cada failure muestra valores, diff y source location.
+Minimum assertions: equality, identity, truth, nullability, result, exception,
+collection and decimal approximation. Every failure shows values, a diff and the
+source location.
 
-`@bench` define benchmarks ejecutados por `zirk bench`, con warmup, múltiples muestras, estadísticas, prevención de optimización muerta y salida machine-readable.
+`@bench` defines benchmarks run by `zirk bench`, with warmup, multiple samples,
+statistics, dead-code-elimination prevention and machine-readable output.
 
 ## 15. `std.system`
 
-Expone información portable del proceso, target y señales sin convertir detalles internos del runtime en API estable. `exit(code)` es inmediato y debe reservarse para fronteras; el retorno normal desde `main` permite cierre ordenado.
+Exposes portable information about the process, target and signals without
+turning internal runtime details into stable API. `exit(code)` is immediate and
+should be reserved for boundaries; returning normally from `main` allows an
+ordered shutdown.
 
-Variables de entorno, señales y datos sensibles requieren permisos según su capacidad.
+Environment variables, signals and sensitive data require permissions according
+to their capability.
 
-## 16. Contratos comunes
+## 16. Common contracts
 
-Las APIs públicas de stdlib deben:
+Public stdlib APIs must:
 
-- preferir enums/options a strings mágicos;
-- usar `Result` para fallos operacionales esperables;
-- reservar exceptions para fallos excepcionales recuperables;
-- ser cancelables cuando puedan esperar;
-- documentar thread-safety, blocking, allocations y permisos;
-- aceptar `Path` en APIs de filesystem;
-- evitar copias mediante buffers/vistas seguras cuando sea posible;
-- ofrecer límites contra inputs hostiles;
-- mantener comportamiento equivalente entre targets soportados o declarar diferencias explícitas.
+- prefer enums/options over magic strings;
+- use `Result` for expected operational failures;
+- reserve exceptions for recoverable exceptional failures;
+- be cancellable where they may wait;
+- document thread-safety, blocking, allocations and permissions;
+- accept `Path` in filesystem APIs;
+- avoid copies through safe buffers/views where possible;
+- offer limits against hostile inputs;
+- keep equivalent behaviour across supported targets or declare explicit
+  differences.
 
-## 17. Exclusiones
+## 17. Exclusions
 
-No forman parte inicial de la stdlib: DOM/browser, UI framework, ORM, framework web completo, package registry client como API pública, shell implícito, algoritmos criptográficos obsoletos y un event loop controlado por el usuario.
+The following are not initially part of the stdlib: DOM/browser, a UI framework,
+an ORM, a complete web framework, a package registry client as public API, an
+implicit shell, obsolete cryptographic algorithms, and a user-controlled event
+loop.

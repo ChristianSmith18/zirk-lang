@@ -1,20 +1,23 @@
-# Zirk — Especificación del lenguaje
+# Zirk — Language specification
 
-Este documento define la semántica pública del código fuente `.zrk`.
+This document defines the public semantics of `.zrk` source code.
 
-## 1. Léxico y estructura
+## 1. Lexical structure
 
-Zirk distingue mayúsculas de minúsculas. Los bloques usan `{}`. El punto y coma es opcional para el parser cuando no hay ambigüedad, pero el formatter oficial lo agrega. Se admiten `//` y `/* ... */`; la documentación usa comentarios multilínea de documentación.
+Zirk is case-sensitive. Blocks use `{}`. The semicolon is optional for the
+parser where there is no ambiguity, but the official formatter adds it. Both
+`//` and `/* ... */` are supported; documentation uses multi-line documentation
+comments.
 
-Convenciones:
+Conventions:
 
-- variables, funciones, métodos, parámetros y archivos: `snake_case`;
-- clases, interfaces, traits, records y enums: `UpperCamelCase`;
-- constantes y globals: `UPPER_SNAKE_CASE`;
-- parámetros nombrados: `name: value`;
-- aliases en imports y destructuración: `Original -> Alias`.
+- variables, functions, methods, parameters and files: `snake_case`;
+- classes, interfaces, traits, records and enums: `UpperCamelCase`;
+- constants and globals: `UPPER_SNAKE_CASE`;
+- named parameters: `name: value`;
+- aliases in imports and destructuring: `Original -> Alias`.
 
-## 2. Variables, scopes y globals
+## 2. Variables, scopes and globals
 
 ```text
 mut count: Int32 = 0;
@@ -22,13 +25,18 @@ inmut NAME: String = "Zirk";
 inmut::strict CONFIG: Config = Config();
 ```
 
-`mut` permite reasignar. `inmut` inmoviliza la referencia y respeta la mutabilidad del tipo referido. `inmut::strict` impide modificaciones transitivas. Las mayúsculas son una convención, no semántica codificada en el nombre.
+`mut` allows reassignment. `inmut` freezes the reference and respects the
+mutability of the referenced type. `inmut::strict` prevents transitive
+modification. Uppercase is a convention, not semantics encoded in the name.
 
-La inferencia se permite cuando es inequívoca. Cada tipo posee un valor predeterminado; el análisis de flujo impide leer una variable que aún no esté disponible.
+Inference is allowed where it is unambiguous. Every type has a default value;
+flow analysis prevents reading a variable that is not yet available.
 
-Existen scopes de bloque, función, archivo y módulo. Un símbolo de archivo no sale de él salvo que se publique con `share`.
+There are block, function, file and module scopes. A file symbol does not leave
+it unless published with `share`.
 
-Solo una `application` puede declarar globals, exclusivamente en `globals` de `init.zrk`:
+Only an `application` may declare globals, and exclusively in the `globals`
+block of `init.zrk`:
 
 ```text
 globals {
@@ -37,58 +45,76 @@ globals {
 }
 ```
 
-Cada consumidor usa `use APP_NAME;`. Una global mutable accedida desde `parallel` o `thread` debe protegerse con `sync` o `Atomic<T>`; en caso contrario hay error de compilación.
+Each consumer uses `use APP_NAME;`. A mutable global accessed from `parallel` or
+`thread` must be protected with `sync` or `Atomic<T>`; otherwise it is a compile
+error.
 
-## 3. Sistema de tipos
+## 3. Type system
 
-El tipado es estático con inferencia. Todo valor pertenece a una clase semántica, aunque el compilador puede representarlo sin allocation.
+Typing is static with inference. Every value belongs to a semantic class, even
+though the compiler may represent it without allocation.
 
-Familias fundamentales:
+Fundamental families:
 
-- `Int8`, `Int16`, `Int32`, `Int64`, `Int128` y aliases `Int`/`Integer` para el entero firmado predeterminado.
+- `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, plus the aliases `Int`/`Integer`
+  for the default signed integer.
 - `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`.
-- `Decimal16`, `Decimal32`, `Decimal64`, `Decimal128` y aliases `Dec`/`Decimal` para el decimal predeterminado.
-- `Boolean`, exclusivamente `true` o `false`.
-- `Char`, un code point Unicode.
-- `String`, secuencia Unicode indexada semánticamente por graphemes y con índice/cache interno adaptativo.
-- `Void`, `Never`, `Null`, `Object` y tipos de colección.
+- `Decimal16`, `Decimal32`, `Decimal64`, `Decimal128`, plus the aliases
+  `Dec`/`Decimal` for the default decimal.
+- `Boolean`, exclusively `true` or `false`.
+- `Char`, a Unicode code point.
+- `String`, a Unicode sequence indexed semantically by graphemes and with an
+  adaptive internal index/cache.
+- `Void`, `Never`, `Null`, `Object` and the collection types.
 
-No hay truthiness numérico. `Boolean?` admite `null`; `Boolean` no. No existe `undefined`.
+There is no numeric truthiness. `Boolean?` admits `null`; `Boolean` does not.
+There is no `undefined`.
 
-Los literales admiten notación científica (`1e2`) y `_` como separador (`1_000_000`). Las duraciones son literales tipados como `5000ms`, `5s`, `5m` y `5h`; el runtime puede normalizarlas internamente.
+Literals admit scientific notation (`1e2`) and `_` as a separator
+(`1_000_000`). Durations are typed literals such as `5000ms`, `5s`, `5m` and
+`5h`; the runtime may normalize them internally.
 
-El overflow ordinario produce un error controlado; las variantes wrapping, saturating o checked deben ser operaciones explícitas. Las conversiones que puedan perder información no son implícitas.
+Ordinary overflow produces a controlled error; wrapping, saturating and checked
+variants must be explicit operations. Conversions that may lose information are
+not implicit.
 
-## 4. Nullability, igualdad y operadores
+## 4. Nullability, equality and operators
 
-`T?` equivale a `T | Null`. El acceso seguro usa `?.` y el valor alternativo usa `??`.
+`T?` is equivalent to `T | Null`. Safe access uses `?.` and the fallback value
+uses `??`.
 
-- `==` y `!=`: igualdad estructural.
-- `is`: misma instancia, solo para tipos con identidad observable.
-- Comparadores: `<`, `<=`, `>`, `>=` según contratos del tipo.
-- Lógicos: `&&`, `||`, `!`, solo con booleanos.
-- Aritméticos y compuestos: `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=`, `%=`.
-- Incremento: `count++`, `count--`, `++count`, `--count`, conservando semántica postfix/prefix convencional.
-- Ternario: `condition ? when_true : when_false`.
+- `==` and `!=`: structural equality.
+- `is`: same instance, only for types with observable identity.
+- Comparators: `<`, `<=`, `>`, `>=`, per the contracts of the type.
+- Logical: `&&`, `||`, `!`, booleans only.
+- Arithmetic and compound: `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=`, `%=`.
+- Increment: `count++`, `count--`, `++count`, `--count`, preserving conventional
+  postfix/prefix semantics.
+- Ternary: `condition ? when_true : when_false`.
 
-Los operadores solo pueden sobrecargarse mediante contratos definidos por el lenguaje; una sobrecarga no puede alterar precedencia ni aridad.
+Operators may only be overloaded through contracts defined by the language; an
+overload cannot alter precedence or arity.
 
-## 5. Control de flujo y pattern matching
+## 5. Control flow and pattern matching
 
-Se incluyen `if`/`else`, `for`, `for ... in`, `while`, `loop`, `break` y `continue`. `if` puede ser expresión cuando todas las ramas producen tipos compatibles.
+`if`/`else`, `for`, `for ... in`, `while`, `loop`, `break` and `continue` are
+included. `if` may be an expression when every branch produces compatible types.
 
-`match` es exhaustivo cuando se usa como expresión:
+`match` is exhaustive when used as an expression:
 
 ```text
 mut message: String = match result {
-    Ok(value) { "Valor: {value}" }
+    Ok(value) { "Value: {value}" }
     Error(error) { "Error: {error}" }
 };
 ```
 
-Como sentencia, controla flujo y no produce valor. Admite valores, tipos, enums asociados, unions y desestructuración. No existen `capture` ni `yield` especiales para recuperar su resultado.
+As a statement it controls flow and produces no value. It admits values, types,
+associated enums, unions and destructuring. There are no special `capture` or
+`yield` forms for recovering its result.
 
-`match with` adquiere un `Resource<E>` y garantiza su cierre al terminar cualquier rama, incluido error, exception, `return` o cancelación:
+`match with` acquires a `Resource<E>` and guarantees it is closed when any
+branch ends, including error, exception, `return` or cancellation:
 
 ```text
 mut first_line: String = match with File.open("data.txt") {
@@ -97,9 +123,10 @@ mut first_line: String = match with File.open("data.txt") {
 };
 ```
 
-El recurso se cierra antes de entregar el valor y no puede escapar directa ni indirectamente.
+The resource is closed before the value is delivered and cannot escape directly
+or indirectly.
 
-## 6. Funciones y closures
+## 6. Functions and closures
 
 ```text
 fn add(a: Int32, b: Int32): Int32 {
@@ -107,9 +134,12 @@ fn add(a: Int32, b: Int32): Int32 {
 }
 ```
 
-Se admiten inferencia local, parámetros opcionales (`name?`), tipos nullable (`String?`), valores predeterminados, parámetros nombrados y variádicos (`...values`). No existe sobrecarga tradicional; se usan unions, genéricos o nombres diferentes.
+Local inference, optional parameters (`name?`), nullable types (`String?`),
+default values, named parameters and variadics (`...values`) are supported.
+There is no traditional overloading; unions, generics or different names are
+used instead.
 
-Las lambdas son equivalentes a valores función:
+Lambdas are equivalent to function values:
 
 ```text
 inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
@@ -118,9 +148,10 @@ inmut ACTION = (): Void => {
 };
 ```
 
-Una closure captura valores inmutables con seguridad. La captura mutable compartida requiere que el análisis de concurrencia demuestre seguridad o que se use sincronización explícita.
+A closure captures immutable values safely. Shared mutable capture requires that
+concurrency analysis prove it safe, or that explicit synchronization be used.
 
-## 7. Objetos y tipos de datos
+## 7. Objects and data types
 
 ```text
 class User implements Serializable {
@@ -136,40 +167,52 @@ class User implements Serializable {
 mut user = User(1, "Cristian");
 ```
 
-El constructor se llama `construct`; no existe `new`; la instancia actual es `this`. La visibilidad es `public`, `private` o `protected`, con `public` por defecto.
+The constructor is called `construct`; there is no `new`; the current instance
+is `this`. Visibility is `public`, `private` or `protected`, with `public` as
+the default.
 
-Una clase puede extender una clase y combinar múltiples interfaces y traits. Las clases son heredables por defecto; existen clases y métodos `abstract`, pero no `final`. Los traits pueden incluir implementación reutilizable.
+A class may extend one class and combine multiple interfaces and traits. Classes
+are inheritable by default; `abstract` classes and methods exist, but `final`
+does not. Traits may include reusable implementation.
 
-Los genéricos usan `<T>` y restricciones con `from`:
+Generics use `<T>` and constraints use `from`:
 
 ```text
 fn serialize<T from Serializable>(value: T): String { ... }
 ```
 
-Se especializan por tipos concretos cuando sea apropiado.
+They are specialized for concrete types where appropriate.
 
-Tipos de datos adicionales:
+Additional data types:
 
-- enums tradicionales y enums algebraicos con valores asociados;
-- aliases mediante `type`;
+- traditional enums and algebraic enums with associated values;
+- aliases via `type`;
 - unions `A | B`;
-- records inmutables con semántica estructural;
-- value classes sin identidad observable, almacenables inline;
-- arrays dinámicos, arrays fijos, `List<T>`, `Map<K,V>` y `Set<T>`.
+- immutable records with structural semantics;
+- value classes without observable identity, storable inline;
+- dynamic arrays, fixed arrays, `List<T>`, `Map<K,V>` and `Set<T>`.
 
-Una clase normal tiene identidad y estado; un record representa datos; una value class representa un valor compacto. `clone()` solo existe mediante un trait explícito y puede derivarse cuando todos los campos son clonables.
+A normal class has identity and state; a record represents data; a value class
+represents a compact value. `clone()` exists only through an explicit trait and
+may be derived when every field is cloneable.
 
-## 8. Iteración y estilo funcional
+## 8. Iteration and functional style
 
-`Iterable<T>` y `Iterator<T>` definen la iteración. Los generators usan `fn gen` y producen valores de forma suspendible. Las colecciones ofrecen `map`, `filter` y `reduce` sin mutar el origen. El pipe `|>` pasa el resultado izquierdo a la siguiente operación.
+`Iterable<T>` and `Iterator<T>` define iteration. Generators use `fn gen` and
+produce values in a suspendable way. Collections offer `map`, `filter` and
+`reduce` without mutating the source. The pipe `|>` passes the left-hand result
+into the next operation.
 
-`Range<T>` es iterable e independiente del slicing. Se admiten rangos inclusivos/exclusivos definidos por su constructor y slicing `[inicio:fin:paso]`.
+`Range<T>` is iterable and independent of slicing. Inclusive and exclusive
+ranges defined by their constructor are supported, as is `[start:end:step]`
+slicing.
 
-## 9. Errores
+## 9. Errors
 
-`Result<T,E>` es el mecanismo principal para fallos esperables. Se maneja explícitamente con `match`; no existe `?`.
+`Result<T,E>` is the primary mechanism for expected failures. It is handled
+explicitly with `match`; there is no `?`.
 
-Las exceptions son excepcionales pero recuperables:
+Exceptions are exceptional but recoverable:
 
 ```text
 try {
@@ -182,9 +225,12 @@ try {
 }
 ```
 
-`fatalError(message)` representa un estado irreparable y termina el proceso después del diagnóstico y cierre seguro posible. Un error de índice, división por cero, null o estado inválido nunca se convierte en comportamiento indefinido.
+`fatalError(message)` represents an unrecoverable state and terminates the
+process after the diagnostic and whatever safe shutdown is possible. An index
+error, division by zero, null or invalid state never becomes undefined
+behaviour.
 
-## 10. Módulos, proyecto y paquetes
+## 10. Modules, project and packages
 
 ```text
 share class User {}
@@ -192,13 +238,18 @@ import { User, Role -> DomainRole } from "./domain/user";
 import { stdin, stdout, stderr } from std.io;
 ```
 
-Las rutas locales usan comillas y omiten `.zrk`. Los módulos estándar usan nombres sin comillas. `share` publica código; `import` incorpora código; `use` solo habilita globals.
+Local paths use quotes and omit `.zrk`. Standard modules use unquoted names.
+`share` publishes code; `import` brings code in; `use` only enables globals.
 
-`init.zrk` es una DSL declarativa, no código ejecutable. Contiene `project`, `build_targets`, `globals`, `permissions`, `compile_permissions`, `requires` y dependencias según el tipo de proyecto. No contiene imports globales ni configuración arbitraria del compilador/runtime.
+`init.zrk` is a declarative DSL, not executable code. It contains `project`,
+`build_targets`, `globals`, `permissions`, `compile_permissions`, `requires` and
+dependencies according to the project type. It contains no global imports and no
+arbitrary compiler/runtime configuration.
 
-## 11. Conversión y casts
+## 11. Conversion and casts
 
-Las conversiones seguras usan constructores o métodos tipados que pueden retornar `Result`. Los casts explícitos admiten forma postfix y prefix:
+Safe conversions use constructors or typed methods that may return a `Result`.
+Explicit casts admit postfix and prefix forms:
 
 ```text
 mut value = source as String;
@@ -206,31 +257,40 @@ mut value = <String>source;
 mut field = <CustomObject>(obj.field).field;
 ```
 
-Los casts comprobables fallan de forma controlada. Los casts que reinterpretan memoria o eliminan garantías requieren `unsafe {}`.
+Checkable casts fail in a controlled way. Casts that reinterpret memory or
+remove guarantees require `unsafe {}`.
 
-## 12. Decoradores y reflection
+## 12. Decorators and reflection
 
-Un decorador nativo se declara con `fn dec`. Sus parámetros externos configuran el decorador y los bloques internos determinan los targets admitidos:
+A native decorator is declared with `fn dec`. Its outer parameters configure the
+decorator and its inner blocks determine the admissible targets:
 
 ```text
 fn dec route(path: String) {
     class(target) {
-        // lógica para clases
+        // logic for classes
     }
 
     method(target) {
-        // lógica para métodos
+        // logic for methods
     }
 }
 ```
 
-Un mismo decorador puede implementar varios targets. Cada bloque recibe una API contextual fija y tipada. Los decoradores se ejecutan en compilación, pueden leer metadata y realizar transformaciones mediante una Syntax API controlada; no reciben acceso arbitrario a la AST interna ni al sistema.
+One decorator may implement several targets. Each block receives a fixed, typed
+contextual API. Decorators run at compile time, may read metadata and perform
+transformations through a controlled Syntax API; they receive no arbitrary
+access to the internal AST or to the system.
 
-La identidad básica de tipo existe siempre. Reflection estructural avanzada solo se conserva cuando un tipo o decorador la solicita. La compile-time reflection general se realiza dentro de decoradores; no existe `comptime {}` general en 1.x.
+Basic type identity always exists. Advanced structural reflection is preserved
+only when a type or decorator requests it. General compile-time reflection
+happens inside decorators; there is no general `comptime {}` in 1.x.
 
-## 13. Seguridad y bajo nivel
+## 13. Safety and low level
 
-El código seguro garantiza ausencia de use-after-free, null dereference no controlado, data races y undefined behavior. Los índices se verifican salvo optimización demostrablemente segura.
+Safe code guarantees the absence of use-after-free, uncontrolled null
+dereference, data races and undefined behaviour. Indices are checked except
+under provably safe optimization.
 
 ```text
 unsafe {
@@ -239,8 +299,13 @@ unsafe {
 }
 ```
 
-`unsafe` habilita operaciones concretas, no desactiva el type checker, scopes, mutabilidad ni permisos. Las referencias seguras no son null y respetan vidas útiles verificadas. La interoperabilidad nativa usa ABI C como frontera estable; C++ y Rust exponen wrappers `extern "C"`.
+`unsafe` enables specific operations; it does not disable the type checker,
+scopes, mutability or permissions. Safe references are non-null and respect
+verified lifetimes. Native interoperability uses the C ABI as its stable
+boundary; C++ and Rust expose `extern "C"` wrappers.
 
-## 14. Sintaxis reservada a concurrencia
+## 14. Syntax reserved for concurrency
 
-`task`, `await`, `parallel`, `parallel for`, `thread`, `Channel<T>`, `sync` y `Atomic<T>` se definen normativamente en la especificación del runtime. No existe `async fn` ni `worker` independiente.
+`task`, `await`, `parallel`, `parallel for`, `thread`, `Channel<T>`, `sync` and
+`Atomic<T>` are defined normatively in the runtime specification. There is no
+`async fn` and no independent `worker`.

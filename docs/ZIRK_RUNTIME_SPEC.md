@@ -1,52 +1,65 @@
-# Zirk — Especificación del runtime
+# Zirk — Runtime specification
 
-## 1. Principios
+## 1. Principles
 
-El runtime proporciona memoria automática, concurrencia estructurada, paralelismo, I/O no bloqueante, timers, cancelación, recursos y diagnósticos de fallo. Debe ser pequeño, portable y enlazarse en binarios standalone. Los subsistemas se inicializan de manera diferida cuando sea posible.
+The runtime provides automatic memory, structured concurrency, parallelism,
+non-blocking I/O, timers, cancellation, resources and failure diagnostics. It
+must be small, portable and linkable into standalone binaries. Subsystems are
+initialized lazily where possible.
 
-Zirk no expone un event loop global. El runtime puede usar internamente uno o más reactors de eventos.
+Zirk exposes no global event loop. The runtime may internally use one or more
+event reactors.
 
-## 2. Ciclo de vida de una aplicación
+## 2. Application lifecycle
 
-Orden normativo:
+Normative order:
 
 ```text
-validar init.zrk y permisos
+validate init.zrk and permissions
     ↓
-cargar runtime mínimo
+load minimal runtime
     ↓
-inicializar globals en orden determinista
+initialize globals in a deterministic order
     ↓
-invocar main()
+invoke main()
     ↓
-ejecutar scopes de concurrencia estructurada
+run structured concurrency scopes
     ↓
-cierre ordenado de recursos y threads gestionados
+ordered shutdown of resources and managed threads
     ↓
-flush de streams y terminación con exit code
+flush streams and terminate with an exit code
 ```
 
-`main` es el único símbolo ejecutable del archivo `project.entry`:
+`main` is the only executable symbol of the `project.entry` file:
 
 ```text
 fn main(): Void { ... }
 ```
 
-También podrá retornar un código o un `Result` definido por el contrato de entrypoint. Un fallo durante globals impide ejecutar `main` y produce un diagnóstico determinista.
+It may also return a code or a `Result` defined by the entrypoint contract. A
+failure during globals prevents `main` from running and produces a deterministic
+diagnostic.
 
-La finalización normal ocurre cuando `main` termina y todos sus scopes raíz han concluido. No se espera silenciosamente trabajo huérfano.
+Normal termination happens when `main` ends and all of its root scopes have
+concluded. Orphan work is never silently awaited.
 
-## 3. Scheduler y reactor de I/O
+## 3. Scheduler and I/O reactor
 
-El scheduler ejecuta tasks sobre un pool multinúcleo dimensionado según hardware y configuración segura. Puede usar colas locales, work stealing, prioridades internas y afinidad, pero no garantiza que una task permanezca en un thread.
+The scheduler runs tasks on a multicore pool sized from hardware and safe
+configuration. It may use local queues, work stealing, internal priorities and
+affinity, but it does not guarantee that a task stays on one thread.
 
-El reactor integra I/O, timers y señales usando mecanismos nativos como IOCP, `epoll` o `kqueue`. Una task que espera I/O se suspende sin reservar innecesariamente un thread; al completarse la operación vuelve a la cola ejecutable.
+The reactor integrates I/O, timers and signals using native mechanisms such as
+IOCP, `epoll` or `kqueue`. A task waiting on I/O suspends without needlessly
+reserving a thread; when the operation completes it returns to the runnable
+queue.
 
-El scheduler debe evitar starvation, limitar crecimiento de colas y aplicar backpressure donde el contrato lo permita.
+The scheduler must avoid starvation, bound queue growth and apply backpressure
+where the contract permits.
 
-## 4. Tasks y await
+## 4. Tasks and await
 
-`task` crea trabajo concurrente administrado:
+`task` creates managed concurrent work:
 
 ```text
 mut operation = task {
@@ -56,27 +69,38 @@ mut operation = task {
 mut result = await operation;
 ```
 
-`await` suspende la task actual, no un thread del sistema operativo. No existe `async fn`: el tipo de una función describe su valor lógico y `task` hace explícita la ejecución concurrente.
+`await` suspends the current task, not an operating-system thread. There is no
+`async fn`: the type of a function describes its logical value and `task` makes
+concurrent execution explicit.
 
-Las tasks están tipadas, propagan resultado/error y pertenecen a un scope. Al salir del scope, sus hijas deben haber terminado o recibir cancelación cooperativa y ser esperadas. Ninguna task puede quedar huérfana implícitamente.
+Tasks are typed, propagate result/error and belong to a scope. On leaving the
+scope, their children must have finished or must receive cooperative
+cancellation and be awaited. No task may be implicitly orphaned.
 
-Una futura operación detached, si se incorpora, deberá ser explícita y transferir propiedad a un supervisor raíz; no forma parte del contrato inicial.
+A future detached operation, if introduced, must be explicit and transfer
+ownership to a root supervisor; it is not part of the initial contract.
 
-## 5. Cancelación y timeout
+## 5. Cancellation and timeout
 
-La cancelación es cooperativa, idempotente y observable en puntos seguros: `await`, I/O, channels, timers y comprobaciones de loops prolongados. `task.cancel()` solicita cancelación; no destruye ejecución en una instrucción arbitraria.
+Cancellation is cooperative, idempotent and observable at safe points: `await`,
+I/O, channels, timers and checks in long-running loops. `task.cancel()` requests
+cancellation; it does not destroy execution at an arbitrary instruction.
 
-La cancelación se propaga de padre a hijos. La task ejecuta limpieza de recursos y termina con una exception recuperable tipada de cancelación, salvo que su API la convierta explícitamente en `Result`.
+Cancellation propagates from parent to children. The task performs resource
+cleanup and finishes with a typed recoverable cancellation exception, unless its
+API explicitly turns it into a `Result`.
 
 ```text
 await load_data() timeout 5s;
 ```
 
-Un timeout solicita cancelación y produce una exception recuperable de timeout. Las duraciones admiten `ms`, `s`, `m` y `h` y se representan internamente con precisión suficiente, aunque puedan normalizarse.
+A timeout requests cancellation and produces a recoverable timeout exception.
+Durations admit `ms`, `s`, `m` and `h` and are represented internally with
+sufficient precision, even if they may be normalized.
 
 ## 6. Parallel
 
-`parallel` expresa trabajo CPU potencialmente simultáneo:
+`parallel` expresses potentially simultaneous CPU work:
 
 ```text
 parallel {
@@ -85,7 +109,7 @@ parallel {
 }
 ```
 
-`parallel for` distribuye iteraciones independientes en el pool:
+`parallel for` distributes independent iterations across the pool:
 
 ```text
 mut squares = parallel for value in 0..1000 {
@@ -93,13 +117,17 @@ mut squares = parallel for value in 0..1000 {
 };
 ```
 
-El runtime decide partición y cantidad de workers internos. Los resultados conservan un orden definido por el contrato de la operación, no por el orden físico de finalización. Si una iteración retorna `Result`, se conserva el primer error relevante, se cancela cooperativamente el trabajo restante y se espera su cierre.
+The runtime decides partitioning and the number of internal workers. Results
+preserve an order defined by the operation contract, not by physical completion
+order. If an iteration returns a `Result`, the first relevant error is kept,
+remaining work is cancelled cooperatively and its shutdown is awaited.
 
-Capturas mutables inseguras son error de compilación. Reducciones deben usar primitivas explícitas o acumuladores seguros.
+Unsafe mutable captures are a compile error. Reductions must use explicit
+primitives or safe accumulators.
 
 ## 7. Threads
 
-`thread` crea un thread real del OS:
+`thread` creates a real operating-system thread:
 
 ```text
 mut native_thread = thread "worker" {
@@ -109,13 +137,17 @@ mut native_thread = thread "worker" {
 native_thread.join();
 ```
 
-Un thread tiene nombre opcional, resultado, `join` y solicitud cooperativa de cancelación cuando aplique. No puede abandonarse implícitamente al finalizar su scope. Compartir memoria mutable requiere `sync`, mutex o atomics.
+A thread has an optional name, a result, `join` and a cooperative cancellation
+request where applicable. It cannot be implicitly abandoned when its scope ends.
+Sharing mutable memory requires `sync`, a mutex or atomics.
 
-No existe `worker` como entidad del lenguaje. Un worker aislado o dedicado se construye con un thread/task supervisado y uno o más channels.
+There is no `worker` as a language entity. An isolated or dedicated worker is
+built from a supervised thread/task and one or more channels.
 
-## 8. Channels, sincronización y atomics
+## 8. Channels, synchronization and atomics
 
-`Channel<T>` es una cola tipada y thread-safe entre tasks, parallel y threads:
+`Channel<T>` is a typed, thread-safe queue between tasks, parallel work and
+threads:
 
 ```text
 mut messages: Channel<String> = Channel();
@@ -123,53 +155,77 @@ messages.send("ok");
 mut message = await messages.receive();
 ```
 
-`receive` suspende eficientemente en una task. `try_receive` devuelve `Option<T>` o el tipo opcional definido por stdlib. Los channels deben soportar cierre explícito, distinguir cierre de ausencia temporal y aplicar backpressure en canales acotados.
+`receive` suspends efficiently inside a task. `try_receive` returns `Option<T>`
+or the optional type defined by the stdlib. Channels must support explicit
+closing, distinguish closure from temporary absence and apply backpressure on
+bounded channels.
 
-`sync` delimita acceso protegido. Los mutexes no deben mantenerse a través de `await` salvo un tipo diseñado expresamente para ello; el compilador/linter lo diagnostica.
+`sync` delimits protected access. Mutexes must not be held across `await` except
+for a type expressly designed for it; the compiler/linter diagnoses this.
 
-`Atomic<T>` existe solo para tipos y operaciones soportadas. Expone load/store, exchange, compare-exchange y operaciones numéricas como increment. El orden de memoria predeterminado debe ser seguro; órdenes más débiles son explícitos y avanzados.
+`Atomic<T>` exists only for supported types and operations. It exposes
+load/store, exchange, compare-exchange and numeric operations such as increment.
+The default memory ordering must be safe; weaker orderings are explicit and
+advanced.
 
-## 9. Memoria
+## 9. Memory
 
-La administración es automática. Stack/heap, escape analysis, regiones, movimientos, RC o GC son detalles internos combinables. La representación nunca altera igualdad, identidad ni vida observable.
+Management is automatic. Stack/heap, escape analysis, regions, moves, RC or GC
+are internal details that may be combined. The representation never alters
+equality, identity or observable lifetime.
 
-Requisitos:
+Requirements:
 
-- no use-after-free en código seguro;
+- no use-after-free in safe code;
 - no double-free;
-- ciclos y concurrencia deben liberarse correctamente;
-- pausas y consumo deben medirse;
-- los tipos de valor pueden almacenarse inline;
-- objetos con identidad mantienen identidad estable aunque se muevan físicamente.
+- cycles and concurrency must be released correctly;
+- pauses and consumption must be measured;
+- value types may be stored inline;
+- objects with identity keep a stable identity even if physically moved.
 
-No hay destructores de propósito general cuyo momento sea observable. La liberación de memoria no se usa para administrar archivos, sockets, locks o procesos.
+There are no general-purpose destructors whose timing is observable. Memory
+release is not used to manage files, sockets, locks or processes.
 
-## 10. Recursos
+## 10. Resources
 
-Los recursos externos implementan `Resource<E>` y se gestionan con `match with`. El cierre ocurre exactamente una vez al abandonar el bloque por éxito, error, exception, retorno o cancelación. Los errores de apertura se manejan antes de adquirir el recurso; los de cierre siguen el contrato tipado del recurso y no deben ocultar silenciosamente un error principal.
+External resources implement `Resource<E>` and are managed with `match with`.
+Closing happens exactly once when leaving the block through success, error,
+exception, return or cancellation. Errors while opening are handled before
+acquiring the resource; errors while closing follow the typed contract of the
+resource and must not silently hide a primary error.
 
-No existe `defer` en 1.x. El compilador impide que un recurso administrado o una referencia dependiente escape del scope.
+There is no `defer` in 1.x. The compiler prevents a managed resource or a
+dependent reference from escaping the scope.
 
-## 11. Señales y cierre ordenado
+## 11. Signals and ordered shutdown
 
-La stdlib traduce señales soportadas (`SIGINT`, `SIGTERM` o equivalentes) a eventos de shutdown. El supervisor raíz:
+The stdlib translates supported signals (`SIGINT`, `SIGTERM` or equivalents)
+into shutdown events. The root supervisor:
 
-1. marca estado de cierre;
-2. solicita cancelación de scopes raíz;
-3. despierta esperas cancelables;
-4. cierra recursos en orden inverso de adquisición;
-5. une threads gestionados;
-6. vacía `stdout`/`stderr` dentro de un límite;
-7. termina con exit code.
+1. marks the shutdown state;
+2. requests cancellation of root scopes;
+3. wakes cancellable waits;
+4. closes resources in reverse acquisition order;
+5. joins managed threads;
+6. flushes `stdout`/`stderr` within a bound;
+7. terminates with an exit code.
 
-Una segunda señal o un límite agotado puede forzar salida controlada. `fatalError` intenta emitir diagnóstico y realizar solo la limpieza que sea segura; no promete continuar ejecución normal.
+A second signal or an exhausted bound may force a controlled exit. `fatalError`
+attempts to emit a diagnostic and perform only the cleanup that is safe; it does
+not promise to continue normal execution.
 
-## 12. Seguridad y permisos
+## 12. Security and permissions
 
-El runtime aplica permisos declarados para filesystem, red, procesos, entorno y otras capacidades. Una librería declara requisitos; la aplicación concede el conjunto final. La ausencia de permiso produce un error claro, no una concesión automática.
+The runtime enforces declared permissions for filesystem, network, processes,
+environment and other capabilities. A library declares requirements; the
+application grants the final set. The absence of a permission produces a clear
+error, not an automatic grant.
 
-`unsafe` no omite permisos ni validaciones del sistema operativo.
+`unsafe` does not bypass permissions or operating-system validations.
 
-## 13. Observabilidad
+## 13. Observability
 
-Stack traces incluyen funciones, tasks, threads, awaits y expansiones de decoradores cuando hay metadata. El debugger puede enumerar tasks pendientes, timers, channels y threads. Las métricas internas no forman parte de la semántica salvo APIs explícitas.
+Stack traces include functions, tasks, threads, awaits and decorator expansions
+where metadata exists. The debugger may enumerate pending tasks, timers,
+channels and threads. Internal metrics are not part of the semantics except
+through explicit APIs.
