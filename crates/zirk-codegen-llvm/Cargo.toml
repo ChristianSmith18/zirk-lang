@@ -23,8 +23,14 @@ inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] 
 # la API C, que esta disenada para cruzarse: lo que reserva el DLL lo libera el
 # DLL. Ver el issue #2.
 #
+# Se usa force-dynamic y no prefer-dynamic: prefer permite que convivan la
+# version estatica y la dinamica, y entonces LLVMGetDefaultTargetTriple puede
+# reservar en un heap y LLVMDisposeMessage liberar en el otro. Ese era
+# exactamente el punto donde abortaba el proceso. force falla al enlazar si el
+# DLL no esta, que es preferible a fallar en runtime.
+#
 # Activar crt-static en Rust no es alternativa: llvm-sys fuerza entonces todas
 # las bibliotecas del sistema a estaticas, y psapi solo existe como import
 # library en Windows.
 [target.'cfg(windows)'.dependencies]
-inkwell = { version = "0.10", default-features = false, features = ["llvm20-1-prefer-dynamic"] }
+inkwell = { version = "0.10", default-features = false, features = ["llvm20-1-force-dynamic"] }
