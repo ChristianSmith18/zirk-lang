@@ -1,14 +1,13 @@
-//! Tokens del lenguaje.
+//! Tokens of the language.
 //!
-//! Se modelan las palabras clave del **lenguaje completo**, no solo las del
-//! subset implementado. Reconocerlas permite que el parser distinga una
-//! construcción de una fase posterior de un error de sintaxis, y que el
-//! diagnóstico diga "todavía no está implementado" en vez de "token
-//! inesperado".
+//! The keywords of the **whole language** are modelled, not only those of the
+//! implemented subset. Recognizing them lets the parser tell a construct from a
+//! later phase apart from a syntax error, so the diagnostic can say "not
+//! implemented yet" instead of "unexpected token".
 
 use zirk_diagnostics::Span;
 
-/// Un token con su ubicación en el source.
+/// A token together with its location in the source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -21,13 +20,13 @@ impl Token {
     }
 }
 
-/// Palabra clave del lenguaje.
+/// A keyword of the language.
 ///
-/// El campo `en_subset` distingue las que esta fase implementa de las que solo
-/// se reconocen para producir un diagnóstico útil.
+/// [`Keyword::in_subset`] tells the ones this phase implements apart from those
+/// recognized only to produce a useful diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {
-    // --- Subset de la Fase 1 ---
+    // --- Phase 1 subset ---
     Fn,
     Mut,
     Inmut,
@@ -37,7 +36,7 @@ pub enum Keyword {
     True,
     False,
 
-    // --- Lenguaje completo, fases posteriores ---
+    // --- Whole language, later phases ---
     For,
     While,
     Loop,
@@ -79,13 +78,13 @@ pub enum Keyword {
 }
 
 impl Keyword {
-    /// Resuelve una palabra clave a partir de su texto.
+    /// Resolves a keyword from its text.
     ///
-    /// No se llama `from_str` para no confundirse con `std::str::FromStr`,
-    /// que devuelve `Result` y tiene otra semántica.
-    pub fn from_text(texto: &str) -> Option<Self> {
+    /// It is not called `from_str` so it is not confused with
+    /// `std::str::FromStr`, which returns `Result` and has other semantics.
+    pub fn from_text(text: &str) -> Option<Self> {
         use Keyword::*;
-        Some(match texto {
+        Some(match text {
             "fn" => Fn,
             "mut" => Mut,
             "inmut" => Inmut,
@@ -136,7 +135,7 @@ impl Keyword {
         })
     }
 
-    /// Texto canónico de la palabra clave, para diagnósticos.
+    /// Canonical text of the keyword, for diagnostics.
     pub const fn as_str(self) -> &'static str {
         use Keyword::*;
         match self {
@@ -189,16 +188,16 @@ impl Keyword {
         }
     }
 
-    /// Si la palabra clave pertenece al subset que esta fase implementa.
-    pub const fn en_subset(self) -> bool {
+    /// Whether the keyword belongs to the subset this phase implements.
+    pub const fn in_subset(self) -> bool {
         use Keyword::*;
         matches!(self, Fn | Mut | Inmut | If | Else | Return | True | False)
     }
 
-    /// Fase del roadmap en la que llega la construcción, para el diagnóstico.
+    /// Roadmap phase in which the construct arrives, used by the diagnostic.
     ///
-    /// Devuelve `None` para las palabras clave que ya están implementadas.
-    pub const fn fase(self) -> Option<u8> {
+    /// Returns `None` for keywords that are already implemented.
+    pub const fn phase(self) -> Option<u8> {
         use Keyword::*;
         Some(match self {
             For | While | Loop | Break | Continue | Match | Share | Import | Use => 2,
@@ -212,18 +211,18 @@ impl Keyword {
     }
 }
 
-/// Clase de token producida por el lexer.
+/// Class of token produced by the lexer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Identifier(String),
     Keyword(Keyword),
 
-    /// Literal entero ya normalizado, sin separadores.
+    /// Integer literal, already normalized without separators.
     Integer(i128),
-    /// Literal de cadena con los escapes ya resueltos.
+    /// String literal with escapes already resolved.
     Str(String),
 
-    // --- Operadores ---
+    // --- Operators ---
     Plus,
     Minus,
     Star,
@@ -240,10 +239,10 @@ pub enum TokenKind {
     OrOr,
     Not,
 
-    // --- Operadores del lenguaje completo, fases posteriores ---------------
-    // Se reconocen para que el parser pueda decir "todavia no esta
-    // implementado" en vez de "token inesperado", igual que con las palabras
-    // clave. Sin esto, `count += 1` se leeria como `+` seguido de `=`.
+    // --- Whole-language operators, later phases ---------------------------
+    // Recognized so the parser can say "not implemented yet" instead of
+    // "unexpected token", exactly as with keywords. Without these, `count += 1`
+    // would read as `+` followed by `=`.
     PlusEq,
     MinusEq,
     StarEq,
@@ -256,7 +255,7 @@ pub enum TokenKind {
     QuestionDot,
     PipeGt,
 
-    // --- Delimitadores y puntuación ---
+    // --- Delimiters and punctuation ---
     LParen,
     RParen,
     LBrace,
@@ -271,15 +270,15 @@ pub enum TokenKind {
     Arrow,
     FatArrow,
 
-    /// Fin de archivo. Siempre es el último token.
+    /// End of file. Always the last token.
     Eof,
 }
 
 impl TokenKind {
-    /// Fase del roadmap en la que llega el operador, para el diagnóstico.
+    /// Roadmap phase in which the operator arrives, used by the diagnostic.
     ///
-    /// Devuelve `None` para los operadores que el subset ya implementa.
-    pub const fn fase(&self) -> Option<u8> {
+    /// Returns `None` for operators the subset already implements.
+    pub const fn phase(&self) -> Option<u8> {
         use TokenKind::*;
         Some(match self {
             PlusEq | MinusEq | StarEq | SlashEq | PercentEq | PlusPlus | MinusMinus => 2,
@@ -289,21 +288,21 @@ impl TokenKind {
         })
     }
 
-    /// Descripción para diagnósticos.
-    pub fn descripcion(&self) -> String {
+    /// Description used in diagnostics.
+    pub fn description(&self) -> String {
         use TokenKind::*;
         match self {
-            Identifier(nombre) => format!("identifier `{nombre}`"),
+            Identifier(name) => format!("identifier `{name}`"),
             Keyword(k) => format!("keyword `{}`", k.as_str()),
             Integer(v) => format!("integer literal `{v}`"),
             Str(_) => "a string literal".to_string(),
             Eof => "end of file".to_string(),
-            otro => format!("`{}`", otro.simbolo()),
+            other => format!("`{}`", other.symbol()),
         }
     }
 
-    /// Símbolo textual de los tokens de puntuación y operadores.
-    pub fn simbolo(&self) -> &'static str {
+    /// Textual symbol of punctuation and operator tokens.
+    pub fn symbol(&self) -> &'static str {
         use TokenKind::*;
         match self {
             Plus => "+",
@@ -355,36 +354,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn las_palabras_clave_del_subset_no_declaran_fase_pendiente() {
-        assert!(Keyword::Fn.en_subset());
-        assert_eq!(Keyword::Fn.fase(), None);
+    fn subset_keywords_declare_no_pending_phase() {
+        assert!(Keyword::Fn.in_subset());
+        assert_eq!(Keyword::Fn.phase(), None);
     }
 
     #[test]
-    fn las_palabras_clave_de_fases_posteriores_declaran_su_fase() {
-        assert!(!Keyword::Class.en_subset());
-        assert_eq!(Keyword::Class.fase(), Some(3));
-        assert_eq!(Keyword::For.fase(), Some(2));
-        assert_eq!(Keyword::Task.fase(), Some(5));
+    fn later_phase_keywords_declare_their_phase() {
+        assert!(!Keyword::Class.in_subset());
+        assert_eq!(Keyword::Class.phase(), Some(3));
+        assert_eq!(Keyword::For.phase(), Some(2));
+        assert_eq!(Keyword::Task.phase(), Some(5));
     }
 
     #[test]
-    fn el_texto_resuelve_a_la_palabra_clave() {
+    fn text_resolves_to_the_keyword() {
         assert_eq!(Keyword::from_text("fn"), Some(Keyword::Fn));
         assert_eq!(Keyword::from_text("inmut"), Some(Keyword::Inmut));
     }
 
     #[test]
-    fn un_identificador_cualquiera_no_es_palabra_clave() {
+    fn an_ordinary_identifier_is_not_a_keyword() {
         assert_eq!(Keyword::from_text("total"), None);
         assert_eq!(Keyword::from_text("Fn"), None);
     }
 
     #[test]
-    fn el_texto_canonico_es_estable_en_ambos_sentidos() {
-        for texto in ["fn", "class", "parallel", "inmut", "default"] {
-            let k = Keyword::from_text(texto).expect("palabra clave conocida");
-            assert_eq!(k.as_str(), texto);
+    fn the_canonical_text_round_trips() {
+        for text in ["fn", "class", "parallel", "inmut", "default"] {
+            let k = Keyword::from_text(text).expect("known keyword");
+            assert_eq!(k.as_str(), text);
         }
     }
 }

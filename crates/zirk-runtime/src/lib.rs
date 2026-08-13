@@ -1,68 +1,68 @@
 //! # zirk-runtime
 //!
-//! **Responsabilidad:** el runtime que se enlaza en cada binario que Zirk
-//! produce. Provee el ciclo de vida de la aplicación, y más adelante memoria,
-//! scheduler, channels y recursos.
+//! **Responsibility:** the runtime linked into every binary Zirk produces. It
+//! provides the application lifecycle and, later on, memory, scheduler,
+//! channels and resources.
 //!
-//! **Límite:** este crate **no** es parte del compilador y ningún crate del
-//! compilador depende de él. Se compila a `staticlib` para el target del
-//! programa compilado, no para el host donde corre `zirkc`.
+//! **Boundary:** this crate is **not** part of the compiler and no compiler
+//! crate depends on it. It is compiled to a `staticlib` for the target of the
+//! compiled program, not for the host `zirkc` runs on.
 //!
-//! # Frontera ABI C
+//! # C ABI boundary
 //!
-//! Todo símbolo destinado al código generado se declara `extern "C"` sin
-//! mangling. Es la misma frontera que `ZIRK_LANGUAGE_SPEC.md` sección 13 exige
-//! para interoperabilidad nativa: no es andamiaje temporal, es la frontera
-//! definitiva estrenada temprano (ver `docs/decisions/ADR-002-runtime-staticlib.md`).
+//! Every symbol intended for generated code is declared `extern "C"` without
+//! mangling. It is the same boundary `ZIRK_LANGUAGE_SPEC.md` section 13
+//! requires for native interoperability: not temporary scaffolding, but the
+//! final boundary put to use early (see
+//! `docs/decisions/ADR-002-runtime-staticlib.md`).
 //!
-//! Estos símbolos son superficie de compatibilidad: cambiarlos rompe binarios ya
-//! compilados.
+//! These symbols are a compatibility surface: changing them breaks already
+//! compiled binaries.
 //!
-//! # Estado
+//! # State
 //!
-//! El ciclo de vida de `ZIRK_RUNTIME_SPEC.md` sección 2 es:
+//! The lifecycle of `ZIRK_RUNTIME_SPEC.md` section 2 is:
 //!
 //! ```text
-//! validar init.zrk y permisos → cargar runtime mínimo → inicializar globals
-//!   → main() → scopes de concurrencia → cierre de recursos → flush → exit
+//! validate init.zrk and permissions -> load minimal runtime -> init globals
+//!   -> main() -> concurrency scopes -> close resources -> flush -> exit
 //! ```
 //!
-//! En Fase 0 solo existen los extremos de esa secuencia, con cuerpo vacío. Están
-//! definidos ahora a propósito: fijan la forma donde Fase 4 (memoria) y Fase 5
-//! (concurrencia) se cuelgan sin refactorizar el codegen.
+//! In Phase 0 only the ends of that sequence exist, with empty bodies. They
+//! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
+//! and Phase 5 (concurrency) hook without refactoring codegen.
 
-/// Inicializa el runtime antes de ejecutar `main`.
+/// Initializes the runtime before running `main`.
 ///
-/// Corresponde a los pasos "cargar runtime mínimo" e "inicializar globals" de
-/// `ZIRK_RUNTIME_SPEC.md` sección 2.
+/// Corresponds to the "load minimal runtime" and "init globals" steps of
+/// `ZIRK_RUNTIME_SPEC.md` section 2.
 ///
 /// # Safety
 ///
-/// La invoca el código generado por Zirk, una sola vez, antes de cualquier otra
-/// función del runtime. Llamarla más de una vez, o después de
-/// [`zirk_rt_shutdown`], no está soportado.
+/// Invoked by Zirk-generated code exactly once, before any other runtime
+/// function. Calling it more than once, or after [`zirk_rt_shutdown`], is not
+/// supported.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_init() {
-    // Fase 0: sin subsistemas que inicializar.
+    // Phase 0: no subsystems to initialize.
     //
-    // `ZIRK_RUNTIME_SPEC.md` sección 1 pide inicialización diferida de los
-    // subsistemas, así que este punto probablemente nunca haga trabajo pesado:
-    // marca el inicio del ciclo de vida, no construye todo el runtime.
+    // `ZIRK_RUNTIME_SPEC.md` section 1 asks for lazy subsystem initialization,
+    // so this point will likely never do heavy work: it marks the start of the
+    // lifecycle, it does not build the whole runtime.
 }
 
-/// Cierra el runtime después de que `main` retorna.
+/// Shuts the runtime down after `main` returns.
 ///
-/// Corresponde a "cierre ordenado de recursos y threads gestionados" y al
-/// "flush de streams" de `ZIRK_RUNTIME_SPEC.md` sección 2.
+/// Corresponds to the "ordered shutdown of resources and managed threads" and
+/// the "stream flush" of `ZIRK_RUNTIME_SPEC.md` section 2.
 ///
 /// # Safety
 ///
-/// La invoca el código generado por Zirk, una sola vez, después de `main` y
-/// antes de terminar el proceso. Usar cualquier función del runtime luego de
-/// esta llamada no está soportado.
+/// Invoked by Zirk-generated code exactly once, after `main` and before the
+/// process ends. Using any runtime function after this call is not supported.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_shutdown() {
-    // Fase 0: no hay recursos, threads ni streams propios que cerrar.
+    // Phase 0: there are no owned resources, threads or streams to close.
 }
 
 #[cfg(test)]
@@ -70,7 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn el_ciclo_de_vida_minimo_es_invocable() {
+    fn the_minimal_lifecycle_is_callable() {
         unsafe {
             zirk_rt_init();
             zirk_rt_shutdown();

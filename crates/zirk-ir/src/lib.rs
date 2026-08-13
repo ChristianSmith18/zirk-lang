@@ -1,24 +1,24 @@
 //! # zirk-ir
 //!
-//! **Responsabilidad:** la representación intermedia tipada, independiente del
-//! target y versionada que define `ZIRK_COMPILER_SPEC.md` sección 4.
+//! **Responsibility:** the typed, target-independent, versioned intermediate
+//! representation defined by `ZIRK_COMPILER_SPEC.md` section 4.
 //!
-//! Es la frontera entre el frontend y el backend: todo lo que llega a codegen
-//! pasa por acá. También es lo que se distribuye dentro de un `.zpkg` como
-//! `portable.ir`, así que su formato es un contrato, no un detalle interno.
+//! It is the boundary between frontend and backend: everything reaching codegen
+//! passes through here. It is also what ships inside a `.zpkg` as
+//! `portable.ir`, so its format is a contract, not an internal detail.
 //!
-//! **Límite:** la IR no conoce LLVM. Traducirla a LLVM IR es responsabilidad de
-//! `zirk-codegen-llvm`, y esa separación es lo que permite añadir otro backend
-//! sin cambiar la semántica pública.
+//! **Boundary:** the IR knows nothing about LLVM. Translating it to LLVM IR is
+//! the job of `zirk-codegen-llvm`, and that separation is what allows adding
+//! another backend without changing public semantics.
 //!
-//! # Regla de memoria
+//! # Memory rule
 //!
-//! La IR **no asume un modelo de memoria concreto**. Toda alocación se expresa
-//! como una operación abstracta que resuelve el runtime. La estrategia de
-//! memoria se decide en Fase 4 (ver `docs/decisions/ADR-003-memoria.md`) y la IR
-//! no debe adelantarla con asunciones tácitas.
+//! The IR **assumes no concrete memory model**. Every allocation is expressed
+//! as an abstract operation resolved by the runtime. The memory strategy is
+//! decided in Phase 4 (see `docs/decisions/ADR-003-memoria.md`) and the IR must
+//! not anticipate it with tacit assumptions.
 //!
-//! # Estado
+//! # State
 //!
-//! Vacío por diseño. La Fase 0 monta el esqueleto del workspace sin implementar
-//! sintaxis de Zirk; la IR mínima llega en Fase 1.
+//! Empty by design. Phase 0 set up the workspace skeleton without implementing
+//! Zirk syntax; the minimal IR arrives in Phase 1.

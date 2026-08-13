@@ -1,52 +1,54 @@
 //! # zirk-ast
 //!
-//! **Responsabilidad:** definir los nodos del árbol de sintaxis de Zirk y su
-//! correspondencia con ubicaciones del source.
+//! **Responsibility:** define the nodes of the Zirk syntax tree and how they
+//! map back to source locations.
 //!
-//! **Límite:** este crate solo define la *forma* del árbol. No lo construye
-//! (eso es `zirk-parser`), no lo interpreta ni lo valida (eso es `zirk-sema`).
+//! **Boundary:** this crate only defines the *shape* of the tree. It does not
+//! build it (that is `zirk-parser`), nor interpret or validate it (that is
+//! `zirk-sema`).
 //!
-//! Según `ZIRK_COMPILER_SPEC.md` sección 3, la AST semántica interna es privada
-//! y puede evolucionar con el compilador. Las herramientas externas no la
-//! consumen directamente: usan la Syntax API pública, que llega en una fase
-//! posterior y es un contrato distinto de este crate.
+//! Per `ZIRK_COMPILER_SPEC.md` section 3, the internal semantic AST is private
+//! and may evolve with the compiler. External tooling does not consume it
+//! directly: it uses the public Syntax API, which arrives in a later phase and
+//! is a different contract from this crate.
 //!
-//! # Forma del árbol
+//! # Shape of the tree
 //!
-//! Se usa un tipo por construcción en vez de un árbol homogéneo de nodos
-//! genéricos. La decisión y su alternativa están en el `design.md` de
-//! `fase-1-pipeline-minimo`, decisión D1: un árbol homogéneo estilo CST sería
-//! mejor para el LSP de la Fase 9, pero impone complejidad en todas las capas
-//! ocho fases antes de que rinda. Cuando llegue, se introduce como capa
-//! adicional bajo esta AST, no en su lugar.
+//! One type per construct is used instead of a homogeneous tree of generic
+//! nodes. The decision and its alternative live in the `design.md` of
+//! `fase-1-pipeline-minimo`, decision D1: a homogeneous CST-style tree would be
+//! better for the Phase 9 LSP, but it imposes complexity across every layer
+//! eight phases before it pays off. When it arrives it is introduced as an
+//! extra layer beneath this AST, not in its place.
 //!
-//! **Todo nodo lleva su span, sin excepción.** Un nodo sin ubicación no puede
-//! producir el diagnóstico que exige `ZIRK_COMPILER_SPEC.md` sección 8.
+//! **Every node carries its span, without exception.** A node without a
+//! location cannot produce the diagnostic `ZIRK_COMPILER_SPEC.md` section 8
+//! requires.
 
 use zirk_diagnostics::Span;
 
-/// Un archivo fuente parseado.
+/// A parsed source file.
 ///
-/// En esta fase un programa es un único archivo con declaraciones de función:
-/// los módulos multi-archivo llegan en la Fase 2.
+/// In this phase a program is a single file of function declarations:
+/// multi-file modules arrive in Phase 2.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<FnDecl>,
     pub span: Span,
 }
 
-/// Declaración de función.
+/// Function declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: Ident,
     pub params: Vec<Param>,
-    /// Tipo de retorno. Obligatorio en esta fase.
+    /// Return type. Mandatory in this phase.
     pub return_type: TypeRef,
     pub body: Block,
     pub span: Span,
 }
 
-/// Parámetro de una función.
+/// A function parameter.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: Ident,
@@ -54,7 +56,7 @@ pub struct Param {
     pub span: Span,
 }
 
-/// Identificador con su ubicación.
+/// An identifier together with its location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ident {
     pub name: String,
@@ -70,10 +72,10 @@ impl Ident {
     }
 }
 
-/// Referencia sintáctica a un tipo.
+/// A syntactic reference to a type.
 ///
-/// Es lo que el usuario **escribió**, no el tipo resuelto: `zirk-sema` lo
-/// convierte en un tipo del sistema y emite el diagnóstico si no existe.
+/// This is what the user **wrote**, not the resolved type: `zirk-sema` turns it
+/// into a type of the system and emits the diagnostic if it does not exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRef {
     pub name: String,
@@ -89,26 +91,26 @@ impl TypeRef {
     }
 }
 
-/// Bloque de sentencias con su propio scope.
+/// A block of statements with its own scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub statements: Vec<Stmt>,
     pub span: Span,
 }
 
-/// Mutabilidad de una declaración de variable.
+/// Mutability of a variable declaration.
 ///
-/// `inmut::strict` es de una fase posterior: acá solo existen las dos formas
-/// del subset.
+/// `inmut::strict` belongs to a later phase: only the two subset forms exist
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mutability {
-    /// `mut`: permite reasignar.
+    /// `mut`: allows reassignment.
     Mutable,
-    /// `inmut`: inmoviliza la referencia.
+    /// `inmut`: freezes the reference.
     Immutable,
 }
 
-/// Sentencia.
+/// A statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `mut x: Int32 = 0;`
@@ -119,9 +121,9 @@ pub enum Stmt {
     If(IfStmt),
     /// `return expr;`
     Return(ReturnStmt),
-    /// Una expresión evaluada por su efecto, como una llamada.
+    /// An expression evaluated for its effect, such as a call.
     Expr(ExprStmt),
-    /// Un bloque anidado.
+    /// A nested block.
     Block(Block),
 }
 
@@ -138,18 +140,18 @@ impl Stmt {
     }
 }
 
-/// Declaración de variable.
+/// A variable declaration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {
     pub mutability: Mutability,
     pub name: Ident,
-    /// Anotación explícita. Ausente cuando el tipo se infiere.
+    /// Explicit annotation. Absent when the type is inferred.
     pub ty: Option<TypeRef>,
     pub init: Option<Expr>,
     pub span: Span,
 }
 
-/// Reasignación de una variable existente.
+/// Reassignment of an existing variable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignStmt {
     pub target: Ident,
@@ -157,9 +159,9 @@ pub struct AssignStmt {
     pub span: Span,
 }
 
-/// Condicional como sentencia.
+/// Conditional as a statement.
 ///
-/// `if` como expresión es de la Fase 2, aunque el spec lo permita.
+/// `if` as an expression belongs to Phase 2, even though the spec allows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
     pub condition: Expr,
@@ -168,10 +170,10 @@ pub struct IfStmt {
     pub span: Span,
 }
 
-/// Rama alternativa de un condicional.
+/// Alternative branch of a conditional.
 ///
-/// Se distingue el bloque del encadenamiento para que `else if` no pierda su
-/// forma en el árbol.
+/// A block is distinguished from a chain so `else if` does not lose its shape
+/// in the tree.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElseBranch {
     Block(Block),
@@ -190,7 +192,7 @@ pub struct ExprStmt {
     pub span: Span,
 }
 
-/// Expresión.
+/// An expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(IntLit),
@@ -202,9 +204,9 @@ pub enum Expr {
     Call(CallExpr),
     /// `stdout.println(expr)`.
     ///
-    /// Forma sintáctica especial reconocida por el compilador mientras no
-    /// existan módulos ni stdlib. Es deuda deliberada, documentada en la
-    /// decisión D4 del design, que se retira en la Fase 7.
+    /// A special syntactic form recognized by the compiler while neither
+    /// modules nor a standard library exist. Deliberate debt, documented in
+    /// decision D4 of the design, retired in Phase 7.
     Println(PrintlnExpr),
 }
 
@@ -225,16 +227,16 @@ impl Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntLit {
-    /// Valor ya normalizado, sin separadores. Se guarda en `i128` para poder
-    /// detectar el desbordamiento del tipo destino en `zirk-sema` en vez de
-    /// perderlo al parsear.
+    /// Value already normalized, without separators. Stored as `i128` so
+    /// overflow of the destination type can be detected in `zirk-sema` instead
+    /// of being lost while parsing.
     pub value: i128,
     pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrLit {
-    /// Contenido con los escapes ya resueltos.
+    /// Contents with escapes already resolved.
     pub value: String,
     pub span: Span,
 }
@@ -274,7 +276,7 @@ pub struct BinaryExpr {
     pub op: BinaryOp,
     pub left: Box<Expr>,
     pub right: Box<Expr>,
-    /// Ubicación del operador, para señalarlo en los diagnósticos de tipos.
+    /// Location of the operator, so type diagnostics can point at it.
     pub op_span: Span,
     pub span: Span,
 }
@@ -316,9 +318,9 @@ impl BinaryOp {
         }
     }
 
-    /// Si el operador produce un `Boolean` sin importar el tipo de sus
-    /// operandos.
-    pub const fn produce_booleano(self) -> bool {
+    /// Whether the operator produces a `Boolean` regardless of its operand
+    /// types.
+    pub const fn yields_boolean(self) -> bool {
         use BinaryOp::*;
         matches!(self, Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or)
     }
@@ -344,7 +346,7 @@ mod tests {
     const S: Span = Span::new(0, 1);
 
     #[test]
-    fn toda_sentencia_expone_su_span() {
+    fn every_statement_exposes_its_span() {
         let stmts = vec![
             Stmt::Return(ReturnStmt {
                 value: None,
@@ -369,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn toda_expresion_expone_su_span() {
+    fn every_expression_exposes_its_span() {
         let exprs = vec![
             Expr::Int(IntLit { value: 1, span: S }),
             Expr::Str(StrLit {
@@ -389,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn los_comparadores_y_logicos_producen_booleano() {
+    fn comparison_and_logical_operators_yield_boolean() {
         for op in [
             BinaryOp::Eq,
             BinaryOp::Lt,
@@ -397,14 +399,14 @@ mod tests {
             BinaryOp::And,
             BinaryOp::Or,
         ] {
-            assert!(op.produce_booleano(), "para `{}`", op.as_str());
+            assert!(op.yields_boolean(), "for `{}`", op.as_str());
         }
     }
 
     #[test]
-    fn los_aritmeticos_no_producen_booleano() {
+    fn arithmetic_operators_do_not_yield_boolean() {
         for op in [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Rem] {
-            assert!(!op.produce_booleano(), "para `{}`", op.as_str());
+            assert!(!op.yields_boolean(), "for `{}`", op.as_str());
         }
     }
 }
