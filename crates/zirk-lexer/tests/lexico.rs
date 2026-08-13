@@ -318,3 +318,87 @@ fn invalido_tras_un_error_se_siguen_produciendo_tokens() {
     assert!(sink.has_errors());
     assert_eq!(tokens[0].kind, TokenKind::Keyword(Keyword::Fn));
 }
+
+// --- Operadores de fases posteriores ----------------------------------------
+
+#[test]
+fn valido_asignacion_compuesta_se_reconoce_como_un_token() {
+    use TokenKind::*;
+    // Sin esto, `count += 1` lexearía como `+` seguido de `=` y el parser
+    // diría "token inesperado" en vez de "todavía no está implementado".
+    assert_eq!(
+        tokens("+= -= *= /= %="),
+        vec![PlusEq, MinusEq, StarEq, SlashEq, PercentEq, Eof]
+    );
+}
+
+#[test]
+fn valido_incremento_y_decremento_son_un_token() {
+    use TokenKind::*;
+    assert_eq!(tokens("++ --"), vec![PlusPlus, MinusMinus, Eof]);
+}
+
+#[test]
+fn valido_operadores_de_nullability_y_pipe() {
+    use TokenKind::*;
+    assert_eq!(
+        tokens("? ?? ?. |>"),
+        vec![Question, QuestionQuestion, QuestionDot, PipeGt, Eof]
+    );
+}
+
+#[test]
+fn valido_los_operadores_pendientes_declaran_su_fase() {
+    assert_eq!(TokenKind::PlusEq.fase(), Some(2));
+    assert_eq!(TokenKind::PipeGt.fase(), Some(3));
+    // Los del subset no declaran fase pendiente.
+    assert_eq!(TokenKind::Plus.fase(), None);
+    assert_eq!(TokenKind::Eq.fase(), None);
+}
+
+#[test]
+fn valido_el_operador_mas_largo_gana_tambien_en_los_compuestos() {
+    assert_eq!(tokens("+=")[0], TokenKind::PlusEq);
+    assert_eq!(tokens("+")[0], TokenKind::Plus);
+    assert_eq!(tokens("??")[0], TokenKind::QuestionQuestion);
+    assert_eq!(tokens("?")[0], TokenKind::Question);
+}
+
+// --- Sufijo numérico --------------------------------------------------------
+
+#[test]
+fn invalido_sufijo_pegado_a_un_numero() {
+    let salida = errores("mut x = 123abc;");
+    assert!(salida.contains(codes::SUFIJO_NUMERICO_INVALIDO.as_str()));
+    assert!(salida.contains("123abc") || salida.contains("abc"));
+    // La causa debe hablar del sufijo, no del separador `_`, que no aparece.
+    assert!(
+        !salida.contains("`_` solo puede aparecer"),
+        "la causa no debe mencionar el separador:\n{salida}"
+    );
+}
+
+#[test]
+fn invalido_el_sufijo_produce_un_solo_diagnostico() {
+    let source = SourceFile::new("test.zrk", "mut x = 123abc;");
+    let mut sink = DiagnosticSink::new();
+    tokenize(&source, &mut sink);
+    assert_eq!(
+        sink.len(),
+        1,
+        "el sufijo entero debe reportarse una sola vez"
+    );
+}
+
+// --- Comentarios de bloque anidados -----------------------------------------
+
+#[test]
+fn valido_los_comentarios_de_bloque_no_anidan() {
+    use TokenKind::*;
+    // Convención de C: cierra en el primer `*/`. El spec no lo define, así que
+    // el comportamiento queda fijado acá para que no cambie por accidente.
+    assert_eq!(
+        tokens("/* a /* b */ fn"),
+        vec![Keyword(zirk_lexer::Keyword::Fn), Eof]
+    );
+}

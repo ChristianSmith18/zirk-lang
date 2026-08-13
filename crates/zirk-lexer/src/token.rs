@@ -240,6 +240,22 @@ pub enum TokenKind {
     OrOr,
     Not,
 
+    // --- Operadores del lenguaje completo, fases posteriores ---------------
+    // Se reconocen para que el parser pueda decir "todavia no esta
+    // implementado" en vez de "token inesperado", igual que con las palabras
+    // clave. Sin esto, `count += 1` se leeria como `+` seguido de `=`.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    PlusPlus,
+    MinusMinus,
+    Question,
+    QuestionQuestion,
+    QuestionDot,
+    PipeGt,
+
     // --- Delimitadores y puntuación ---
     LParen,
     RParen,
@@ -260,6 +276,19 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
+    /// Fase del roadmap en la que llega el operador, para el diagnóstico.
+    ///
+    /// Devuelve `None` para los operadores que el subset ya implementa.
+    pub const fn fase(&self) -> Option<u8> {
+        use TokenKind::*;
+        Some(match self {
+            PlusEq | MinusEq | StarEq | SlashEq | PercentEq | PlusPlus | MinusMinus => 2,
+            Question | QuestionQuestion | QuestionDot => 2,
+            PipeGt => 3,
+            _ => return None,
+        })
+    }
+
     /// Descripción para diagnósticos.
     pub fn descripcion(&self) -> String {
         use TokenKind::*;
@@ -292,6 +321,17 @@ impl TokenKind {
             AndAnd => "&&",
             OrOr => "||",
             Not => "!",
+            PlusEq => "+=",
+            MinusEq => "-=",
+            StarEq => "*=",
+            SlashEq => "/=",
+            PercentEq => "%=",
+            PlusPlus => "++",
+            MinusMinus => "--",
+            Question => "?",
+            QuestionQuestion => "??",
+            QuestionDot => "?.",
+            PipeGt => "|>",
             LParen => "(",
             RParen => ")",
             LBrace => "{",
