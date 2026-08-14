@@ -70,9 +70,11 @@ La firma siguen siendo posiciones fijas en la IR y en el codegen: `zirk-sema` re
 
 **Alternativa descartada:** ABI variádica real (estilo `printf`). Se descarta porque el spec no pide interoperar con C variádico, y una ABI variádica complica el codegen de todas las llamadas para un beneficio que ningún requisito exige todavía.
 
-### D5 — `T?` es un tipo, no una anotación cosmética; `?.`/`??` bajan a chequeo explícito de nulidad en la IR
+### D5 — `T?` es un tipo, no una anotación cosmética; `??` baja a chequeo explícito de nulidad en la IR
 
-`T | Null` se representa en `zirk-sema` como su propio tipo, distinto de `T`, que participa en el chequeo de asignación y de argumentos como cualquier otro. `zirk-ir` baja `expr?.miembro` a una comprobación explícita de nulidad con dos ramas — igual que un `if` — y `a ?? b` a la misma comprobación con `b` como rama alternativa. No hay una instrucción mágica de "safe navigation": es azúcar que el lowering expande, consistente con D6 de Fase 1 (nada se inventa por debajo del nivel de la IR que el spec no pida).
+`T | Null` se representa en `zirk-sema` como su propio tipo, distinto de `T`, que participa en el chequeo de asignación y de argumentos como cualquier otro. `zirk-ir` baja `a ?? b` a una comprobación explícita de nulidad con dos ramas — igual que un `if` —, con `b` como rama alternativa. No hay una instrucción mágica de coalescencia: es azúcar que el lowering expande, consistente con D6 de Fase 1 (nada se inventa por debajo del nivel de la IR que el spec no pida).
+
+`?.` usaría el mismo mecanismo, pero se difiere por la razón de D8.
 
 ### D6 — Los módulos resuelven nombres entre archivos del mismo crate en una pasada de resolución previa al chequeo de tipos
 
@@ -85,6 +87,28 @@ Se resuelve como una pasada nueva antes del chequeo de tipos existente: dado el 
 ### D7 — `if` como expresión exige compatibilidad de tipos entre ramas; sin ello, sigue siendo sentencia
 
 `if`/`else` con ambas ramas presentes y de tipo compatible es una expresión que produce un valor, según `ZIRK_LANGUAGE_SPEC.md` sección 5. `if` sin `else`, o con ramas de tipos incompatibles, sigue siendo válido pero solo como sentencia: usarlo donde se espera un valor es un error de tipos con un diagnóstico que explica cuál de las dos condiciones falta (rama faltante o tipos distintos).
+### D8 — `?.` se difiere a Fase 3: no hay miembros que acceder todavía
+
+Descubierto al implementar, no al planificar, y vale registrarlo en vez de forzarlo.
+
+`ZIRK_ROADMAP.md` pone `T?`, `?.` y `??` juntos en Fase 2, como si fueran una sola característica. No lo son: `T?` y `??` operan sobre el valor completo y funcionan sin nada más, pero **`?.` es acceso a un miembro**, y en Fase 2 no existe ningún tipo con miembros — las clases, los records y los traits son todos Fase 3. Un `usuario?.nombre` no tiene qué nombrar.
+
+Se implementan entonces `T?`, `null` y `??` de punta a punta, y `?.` emite el diagnóstico de fase que ya usa el resto de construcciones no implementadas, indicando Fase 3. El token ya lo reconoce el lexer desde Fase 1, así que el diagnóstico es preciso y no un "token inesperado".
+
+**Alternativa descartada:** inventar un acceso a miembros acotado solo para que `?.` tenga algo que hacer. Contradice la regla del proyecto de no inventar comportamiento no especificado, y adelantaría a Fase 2 una decisión —qué es un miembro, cómo se resuelve— que pertenece al diseño de objetos de Fase 3.
+
+La nulabilidad que sí se entrega en esta fase no es cosmética: `T?` participa en el chequeo de asignación, de argumentos y de retorno, y `??` baja a comprobación real de nulidad. Lo que espera es el operador de navegación, no el sistema de tipos que lo sostiene.
+
+### D9 — Los operadores compuestos y de incremento entran en esta fase
+
+`+=`, `-=`, `*=`, `/=`, `%=`, `++` y `--` no aparecen en la lista de Fase 2 del roadmap, pero el lexer de Fase 1 ya los reconocía y ya los declaraba como pendientes de **Fase 2** — es decir, la Fase 1 los ubicó aquí y la lista del roadmap simplemente no los enumera.
+
+Además esta fase los necesita: el `for` con tres cláusulas de `ZIRK_LANGUAGE_SPEC.md` sección 5 se escribe `for (mut i = 0; i < 10; i++)`. Dejar `++` fuera obligaría a escribir `i = i + 1` en la construcción más común del lenguaje.
+
+Se implementan como azúcar sintáctica que el parser expande a la asignación equivalente: `i += 1` produce el mismo árbol que `i = i + 1`, y `i++` lo mismo. No llegan a la IR como instrucciones propias.
+
+**Limitación deliberada:** la distinción prefijo/postfijo de `ZIRK_LANGUAGE_SPEC.md` sección 4 —que `x++` valga el valor previo y `++x` el nuevo— solo es observable cuando el incremento se usa *como expresión*. Esta fase los admite únicamente como **sentencia**, donde ambas formas son equivalentes, y rechaza su uso en posición de expresión con un diagnóstico explícito. Admitirlos como expresión exige fijar el orden de evaluación de los efectos secundarios dentro de una expresión, que ningún documento normativo define todavía.
+
 
 ## Risks / Trade-offs
 

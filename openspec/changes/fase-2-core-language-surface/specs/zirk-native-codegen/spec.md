@@ -43,12 +43,12 @@ El backend SHALL traducir el `match` bajado por la IR a una secuencia de compara
 
 ### Requirement: Comprobación de nulidad
 
-El backend SHALL traducir la comprobación explícita de nulidad producida por el lowering de `?.` y `??` a una comparación contra el valor nulo de la representación del tipo, sin costo adicional para valores que el chequeo de tipos ya probó no nulos.
+El backend SHALL traducir la comprobación explícita de nulidad producida por el lowering de `??` a una comparación contra el valor nulo de la representación del tipo, sin costo adicional para valores que el chequeo de tipos ya probó no nulos.
 
-#### Scenario: Acceso seguro traducido
-- **WHEN** se traduce `usuario?.nombre`
-- **THEN** el código generado compara el valor de `usuario` contra nulo antes de acceder al miembro
+#### Scenario: Coalescencia traducida
+- **WHEN** se traduce `nombre ?? "anónimo"`
+- **THEN** el código generado compara el valor de `nombre` contra nulo antes de elegir la rama
 
 #### Scenario: Sin comprobación cuando el tipo no es nulable
-- **WHEN** se traduce un acceso `.` sobre un valor de tipo no nulable
+- **WHEN** se traduce una operación sobre un valor de tipo no nulable
 - **THEN** el código generado no incluye ninguna comparación de nulidad

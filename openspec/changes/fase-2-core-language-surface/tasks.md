@@ -1,6 +1,6 @@
 ## 1. Léxico y gramática — bucles y condicional como expresión
 
-- [ ] 1.1 Reconocer las palabras clave y delimitadores de `for`, `while`, `loop`, `break`, `continue` ya presentes como reservadas desde Fase 1
+- [x] 1.1 Reconocer las palabras clave de esta fase, añadir `in` y los tokens `..`, `..=`, `...`, y retirarlos todos de `phase()`
 - [ ] 1.2 Parsear `for (init; cond; incr) { }`, `for x in expr { }`, `while cond { }`, `loop { }`
 - [ ] 1.3 Parsear `break` y `continue`, sin exigir aún que estén dentro de un bucle (lo valida sema)
 - [ ] 1.4 Extender `if`/`else` para admitirse en posición de expresión (D7)
@@ -24,12 +24,16 @@
 - [ ] 3.4 Emitir diagnóstico específico para `match with` (fuera de alcance, depende de `Resource<E>`)
 - [ ] 3.5 Tests: un caso válido y uno inválido por cada regla nueva
 
-## 4. Gramática — nulabilidad
+## 4. Gramática — nulabilidad y operadores compuestos
 
 - [ ] 4.1 Parsear `T?` en posición de tipo
-- [ ] 4.2 Parsear `?.` como acceso seguro
+- [ ] 4.2 Parsear `null` como literal
 - [ ] 4.3 Parsear `??` con la precedencia correcta respecto al resto de operadores
-- [ ] 4.4 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 4.4 Rechazar `?.` con el diagnóstico de fase, indicando Fase 3 (D8)
+- [ ] 4.5 Expandir `+=`, `-=`, `*=`, `/=`, `%=` a la asignación equivalente, en posición de sentencia (D9)
+- [ ] 4.6 Expandir `++` y `--` prefijo y postfijo a la asignación equivalente, en posición de sentencia (D9)
+- [ ] 4.7 Rechazar incremento y decremento en posición de expresión, con diagnóstico explícito (D9)
+- [ ] 4.8 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 5. Gramática — módulos
 
@@ -87,10 +91,11 @@
 ## 10. Tipos y flujo — nulabilidad
 
 - [ ] 10.1 Representar `T?` como tipo propio, distinto de `T`, en el sistema de tipos (D5)
-- [ ] 10.2 Tipar `?.` como acceso nulable, propagando `?` cuando el receptor es nulable
-- [ ] 10.3 Rechazar `?.` sobre un receptor no nulable, sugiriendo `.`
-- [ ] 10.4 Tipar `??` exigiendo un tipo común entre ambos operandos
-- [ ] 10.5 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 10.2 Admitir `T` donde se espera `T?`, y rechazar la dirección contraria sugiriendo `??`
+- [ ] 10.3 Tipar `null`, rechazándolo donde el tipo no admite ausencia de valor
+- [ ] 10.4 Tipar `??` exigiendo un tipo común, produciendo el tipo no nulable cuando el fallback no lo es
+- [ ] 10.5 Rechazar `??` sobre un operando izquierdo no nulable
+- [ ] 10.6 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 11. IR — bucles, `if`-expresión y `break`/`continue`
 
@@ -108,7 +113,7 @@
 - [ ] 12.3 Bajar la llamada a un valor de closure como llamada indirecta con entorno implícito
 - [ ] 12.4 Bajar `match` a comparaciones sobre el discriminante con salto a cada bloque de brazo
 - [ ] 12.5 Bajar `match`-expresión con bloque de continuación común que recibe el valor del brazo
-- [ ] 12.6 Bajar `?.` y `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
+- [ ] 12.6 Bajar `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
 - [ ] 12.7 Tests: IR esperada para cada construcción nueva
 
 ## 13. Backend LLVM
@@ -118,7 +123,7 @@
 - [ ] 13.3 Traducir llamadas indirectas a closures
 - [ ] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
 - [ ] 13.5 Traducir `match` no exhaustivo o sobre otros tipos a comparaciones encadenadas
-- [ ] 13.6 Traducir la comprobación de nulidad de `?.`/`??`, sin costo para tipos no nulables
+- [ ] 13.6 Traducir la comprobación de nulidad de `??`, sin costo para tipos no nulables
 - [ ] 13.7 Tests: el módulo LLVM generado verifica para cada construcción nueva
 
 ## 14. Verificación de punta a punta
