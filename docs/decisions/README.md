@@ -14,6 +14,7 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-006](./ADR-006-language-of-the-codebase.md) | El proyecto se escribe en inglés | aceptada |
 | [ADR-007](./ADR-007-forma-de-la-ir.md) | Forma de la representación intermedia | aceptada |
 | [ADR-008](./ADR-008-color-en-diagnosticos.md) | Color en los diagnósticos | aceptada |
+| [ADR-009](./ADR-009-eliminacion-de-codigo-muerto-al-enlazar.md) | Eliminación de código muerto al enlazar | aceptada |
 
 ## Estado de los pendientes de Fase 0
 
