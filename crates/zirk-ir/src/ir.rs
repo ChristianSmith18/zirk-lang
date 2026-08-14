@@ -27,6 +27,45 @@ pub enum IrType {
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
     String,
+    /// `T?`: a value that may be absent.
+    ///
+    /// Represented uniformly as a present flag next to the value, rather than
+    /// as a null pointer for `String` and something else for the scalars. A
+    /// per-type trick would be smaller for `String` and would need a separate
+    /// rule for every type added later; one shape needs none.
+    Nullable(Nullable),
+}
+
+/// The types that have a nullable form.
+///
+/// Kept apart from [`IrType`] so a nullable type stays `Copy`: wrapping an
+/// `IrType` would need a box, and `T??` does not exist, so one level is all
+/// there is to express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Nullable {
+    Int32,
+    Boolean,
+    String,
+}
+
+impl Nullable {
+    pub const fn inner(self) -> IrType {
+        match self {
+            Nullable::Int32 => IrType::Int32,
+            Nullable::Boolean => IrType::Boolean,
+            Nullable::String => IrType::String,
+        }
+    }
+
+    /// The nullable form of a type, if it has one.
+    pub const fn of(ty: IrType) -> Option<Self> {
+        Some(match ty {
+            IrType::Int32 => Nullable::Int32,
+            IrType::Boolean => Nullable::Boolean,
+            IrType::String => Nullable::String,
+            _ => return None,
+        })
+    }
 }
 
 impl IrType {
@@ -36,6 +75,19 @@ impl IrType {
             IrType::Int32 => "Int32",
             IrType::Boolean => "Boolean",
             IrType::String => "String",
+            IrType::Nullable(n) => match n {
+                Nullable::Int32 => "Int32?",
+                Nullable::Boolean => "Boolean?",
+                Nullable::String => "String?",
+            },
+        }
+    }
+
+    /// The type inside a nullable one, or the type itself.
+    pub const fn unwrapped(self) -> Self {
+        match self {
+            IrType::Nullable(base) => base.inner(),
+            other => other,
         }
     }
 
@@ -207,6 +259,21 @@ pub enum InstKind {
     /// Its operand is **always** a `String`: the lowering inserts a `ToString`
     /// when it is not, and the verifier enforces it.
     Println(Operand),
+
+    /// The absent value of a nullable type.
+    NullValue(Nullable),
+    /// Widens a value into its nullable form.
+    ///
+    /// `T` is accepted where `T?` is expected, and this is that widening made
+    /// explicit: the IR never has an implicit representation change.
+    Wrap { base: Nullable, value: Operand },
+    /// Whether a nullable value is absent.
+    IsNull(Operand),
+    /// The value inside a nullable one.
+    ///
+    /// Only emitted on a path where an [`InstKind::IsNull`] already proved it
+    /// present, which is what `??` establishes before using it.
+    Unwrap(Operand),
 }
 
 /// An input to an instruction.

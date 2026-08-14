@@ -247,6 +247,52 @@ fn verify_instruction(
                 ));
             }
         }
+
+        InstKind::NullValue(base) => {
+            expect(inst.ty, IrType::Nullable(*base), position, "NullValue", report);
+        }
+
+        InstKind::Wrap { base, value } => {
+            expect(inst.ty, IrType::Nullable(*base), position, "Wrap", report);
+            if let Some(inner) = type_of(value)
+                && inner != base.inner()
+            {
+                report(format!(
+                    "{position}: Wrap receives {}, expected {}",
+                    inner.as_str(),
+                    base.inner().as_str()
+                ));
+            }
+        }
+
+        InstKind::IsNull(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "IsNull", report);
+            if let Some(value) = type_of(operand)
+                && !matches!(value, IrType::Nullable(_))
+            {
+                report(format!(
+                    "{position}: IsNull receives {}, which is never absent",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::Unwrap(operand) => {
+            // Unwrapping must produce exactly the type inside the operand:
+            // that is what makes the representation change checkable rather
+            // than implicit.
+            if let Some(value) = type_of(operand) {
+                match value {
+                    IrType::Nullable(base) => {
+                        expect(inst.ty, base.inner(), position, "Unwrap", report)
+                    }
+                    other => report(format!(
+                        "{position}: Unwrap receives {}, which is not nullable",
+                        other.as_str()
+                    )),
+                }
+            }
+        }
     }
 }
 
@@ -335,5 +381,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
         InstKind::Println(operand) => vec![*operand],
+        InstKind::NullValue(_) => Vec::new(),
+        InstKind::Wrap { value, .. } => vec![*value],
+        InstKind::IsNull(operand) | InstKind::Unwrap(operand) => vec![*operand],
     }
 }
