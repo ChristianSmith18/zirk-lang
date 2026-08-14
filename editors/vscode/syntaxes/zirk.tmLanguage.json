@@ -113,11 +113,11 @@
       "patterns": [
         {
           "name": "keyword.control.zirk",
-          "match": "\\b(if|else|return|match|try|catch|finally|loop|while|for|in|break|continue|task|await|parallel|thread)\\b"
+          "match": "\\b(if|else|return|match|with|default|try|catch|finally|loop|while|for|in|break|continue|task|await|parallel|thread)\\b"
         },
         {
           "name": "storage.modifier.zirk",
-          "match": "\\b(mut|inmut::strict|inmut|public|private|protected|abstract|unsafe|share|import|from|use|type|class|construct|implements|extends|interface|trait|record|dec)\\b"
+          "match": "\\b(mut|inmut::strict|inmut|sync|public|private|protected|abstract|unsafe|share|import|from|use|type|class|construct|implements|extends|interface|trait|record|enum|gen|dec)\\b"
         }
       ]
     },
@@ -126,6 +126,10 @@
         {
           "name": "constant.language.zirk",
           "match": "\\b(true|false|null)\\b"
+        },
+        {
+          "name": "variable.language.zirk",
+          "match": "\\b(this)\\b"
         }
       ]
     },
@@ -141,7 +145,7 @@
       "patterns": [
         {
           "name": "keyword.operator.cast.zirk",
-          "match": "\\bas\\b"
+          "match": "\\b(as|is)\\b"
         },
         {
           "name": "keyword.operator.zirk",
