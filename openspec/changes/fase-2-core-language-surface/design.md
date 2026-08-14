@@ -110,6 +110,30 @@ Se implementan como azúcar sintáctica que el parser expande a la asignación e
 **Limitación deliberada:** la distinción prefijo/postfijo de `ZIRK_LANGUAGE_SPEC.md` sección 4 —que `x++` valga el valor previo y `++x` el nuevo— solo es observable cuando el incremento se usa *como expresión*. Esta fase los admite únicamente como **sentencia**, donde ambas formas son equivalentes, y rechaza su uso en posición de expresión con un diagnóstico explícito. Admitirlos como expresión exige fijar el orden de evaluación de los efectos secundarios dentro de una expresión, que ningún documento normativo define todavía.
 
 
+### D10 — Una closure no puede escapar en esta fase, así que sus capturas viajan dentro del propio valor
+
+Descubierto al implementar D2, y cambia su costo por completo.
+
+D2 decidió capturar por valor a través de un entorno alocado con la operación abstracta de ADR-003. Al ir a implementarlo apareció el problema: el runtime solo sabe alocar `String`, y una alocación general sería la primera del lenguaje — exactamente la decisión que ADR-003 fija en Fase 4.
+
+Pero esa alocación no hace falta, porque **en esta fase una closure no puede escapar de la función que la crea**. No hay sintaxis para escribir un tipo función en una anotación: `(Int32) => Int32` no existe como tipo, así que una closure solo puede vivir en un local inferido. No se puede retornar, ni pasar como parámetro, ni guardar en un campo — los campos son Fase 3.
+
+Entonces el valor de closure lleva **las capturas dentro de sí**, no un puntero a un entorno:
+
+```
+   closure  =  { puntero a función, captura₁, captura₂, … }
+```
+
+y el cuerpo del lambda se eleva a una función de módulo cuyos primeros parámetros son las capturas. Llamarla es extraer el puntero, extraer las capturas y llamar con `(capturas…, argumentos…)`.
+
+Consecuencias:
+
+- **Cero alocación.** El valor vive donde viva su slot, en el marco de pila, y no se toca ADR-003.
+- **Cada lambda tiene su propio tipo de IR**, identificado por el lambda y no por su firma. Es correcto justamente porque no hay forma de escribir un tipo función: en cada sitio de uso el tipo es estáticamente conocido. Dos lambdas de la misma firma no son intercambiables, y como no hay dónde declararlas intercambiables, no se nota.
+- **La captura sigue siendo por valor e inmutable**, tal como D2 lo fijó. Nada de D2 se deshace: cambia solo dónde vive el entorno.
+
+Cuando Fase 3 le dé sintaxis a los tipos función, una closure podrá escapar y ahí sí hará falta decidir dónde vive su entorno. Esa decisión llega junto con la de memoria, que es donde corresponde, y no antes de tiempo.
+
 ## Risks / Trade-offs
 
 - **El enum mínimo de D1 puede quedar como deuda si Fase 3 no lo extiende con cuidado** → Mitigación: se declara sin datos asociados desde el nombre del requisito ("enum simple"), y el requisito de Fase 3 en el roadmap ("algebraic enums") se entiende explícitamente como extensión de esta misma declaración, documentado acá para que Fase 3 lo herede en vez de descubrirlo.

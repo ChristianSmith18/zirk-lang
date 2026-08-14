@@ -27,6 +27,12 @@ pub enum IrType {
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
     String,
+    /// A closure, identified by its layout in the module.
+    ///
+    /// Each lambda has its own type rather than sharing one per signature: a
+    /// closure cannot escape in this phase, so at every use site the type is
+    /// statically known. Decision D10.
+    Closure(u32),
     /// `T?`: a value that may be absent.
     ///
     /// Represented uniformly as a present flag next to the value, rather than
@@ -75,6 +81,7 @@ impl IrType {
             IrType::Int32 => "Int32",
             IrType::Boolean => "Boolean",
             IrType::String => "String",
+            IrType::Closure(_) => "closure",
             IrType::Nullable(n) => match n {
                 Nullable::Int32 => "Int32?",
                 Nullable::Boolean => "Boolean?",
@@ -125,6 +132,22 @@ pub struct Module {
     /// String literals, deduplicated. The backend materializes them as
     /// constants and the runtime turns them into `String` values.
     pub strings: Vec<String>,
+    /// Closure layouts, indexed by the id [`IrType::Closure`] carries.
+    pub closures: Vec<ClosureLayout>,
+}
+
+/// What one closure value holds and what its lifted function expects.
+///
+/// The captures live inside the value, so the lifted function takes them as
+/// its leading parameters: nothing is allocated and nothing is dereferenced.
+/// Decision D10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosureLayout {
+    /// The module function the lambda body was lifted into.
+    pub function: String,
+    pub captures: Vec<IrType>,
+    pub params: Vec<IrType>,
+    pub returns: IrType,
 }
 
 impl Module {
@@ -274,6 +297,18 @@ pub enum InstKind {
     /// Only emitted on a path where an [`InstKind::IsNull`] already proved it
     /// present, which is what `??` establishes before using it.
     Unwrap(Operand),
+
+    /// Builds a closure value from its captures.
+    MakeClosure { id: u32, captures: Vec<Operand> },
+    /// Calls a closure value.
+    ///
+    /// The captures travel inside the operand, so the call passes them ahead of
+    /// the arguments the caller wrote.
+    CallClosure {
+        id: u32,
+        callee: Operand,
+        args: Vec<Operand>,
+    },
 }
 
 /// An input to an instruction.
