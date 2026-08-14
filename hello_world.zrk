@@ -1,0 +1,6 @@
+fn main(): Void {
+    inmut A: Int32 = 10;
+    inmut B: Int32 = 3;
+
+    stdout.println(A / B);
+}
