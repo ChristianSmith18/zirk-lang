@@ -81,6 +81,7 @@ fn shape(e: &Expr) -> String {
         Expr::If(i) => format!("if({})", shape(&i.condition)),
         Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
+        Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
         Expr::Println(p) => format!("println({})", shape(&p.arg)),
     }
 }
@@ -583,6 +584,11 @@ fn valid_enum_declaration() {
     assert_eq!(e.variants.len(), 4);
     assert_eq!(e.variants[0].name, "North");
     assert!(!e.shared);
+}
+
+#[test]
+fn valid_enum_variant_as_a_value() {
+    assert_eq!(shape(&expression("Direction.North")), "Direction.North");
 }
 
 #[test]

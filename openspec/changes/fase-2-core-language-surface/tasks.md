@@ -82,11 +82,11 @@
 
 ## 9. Tipos y flujo — `match`
 
-- [ ] 9.1 Registrar el conjunto de constructores de cada `enum` declarado
-- [ ] 9.2 Verificar exhaustividad de `match` sobre `enum`: todos los constructores o `_`
-- [ ] 9.3 Exigir `_` como brazo final en `match` sobre tipos sin conjunto cerrado
-- [ ] 9.4 Verificar que todos los brazos de un `match`-expresión produzcan un tipo común
-- [ ] 9.5 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 9.1 Registrar el conjunto de constructores de cada `enum` declarado
+- [x] 9.2 Verificar exhaustividad de `match` sobre `enum`: todos los constructores o `_`
+- [x] 9.3 Exigir `_` como brazo final en `match` sobre tipos sin conjunto cerrado
+- [x] 9.4 Verificar que todos los brazos de un `match`-expresión produzcan un tipo común
+- [x] 9.5 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 10. Tipos y flujo — nulabilidad
 
@@ -111,8 +111,8 @@
 - [ ] 12.1 Definir la operación de alocación de entorno de closure, reutilizando la alocación abstracta existente (D2)
 - [ ] 12.2 Bajar la creación de una closure a función independiente más entorno con capturas copiadas
 - [ ] 12.3 Bajar la llamada a un valor de closure como llamada indirecta con entorno implícito
-- [ ] 12.4 Bajar `match` a comparaciones sobre el discriminante con salto a cada bloque de brazo
-- [ ] 12.5 Bajar `match`-expresión con bloque de continuación común que recibe el valor del brazo
+- [x] 12.4 Bajar `match` a comparaciones sobre el discriminante con salto a cada bloque de brazo
+- [x] 12.5 Bajar `match`-expresión con bloque de continuación común que recibe el valor del brazo
 - [ ] 12.6 Bajar `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
 - [ ] 12.7 Tests: IR esperada para cada construcción nueva
 
@@ -121,8 +121,8 @@
 - [x] 13.1 Traducir bloques con ciclos, verificando el módulo LLVM resultante
 - [ ] 13.2 Traducir closures: función LLVM con entorno como primer argumento, valor agregado (función, entorno)
 - [ ] 13.3 Traducir llamadas indirectas a closures
-- [ ] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
-- [ ] 13.5 Traducir `match` no exhaustivo o sobre otros tipos a comparaciones encadenadas
+- [x] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
+- [x] 13.5 Traducir `match` no exhaustivo o sobre otros tipos a comparaciones encadenadas
 - [ ] 13.6 Traducir la comprobación de nulidad de `??`, sin costo para tipos no nulables
 - [ ] 13.7 Tests: el módulo LLVM generado verifica para cada construcción nueva
 

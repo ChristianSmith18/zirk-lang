@@ -377,6 +377,8 @@ pub enum Expr {
     Match(MatchExpr),
     /// `(a: Int32): Int32 => a + 1`
     Lambda(LambdaExpr),
+    /// `Direction.North`, the value of an enum variant.
+    Variant(VariantExpr),
     /// `stdout.println(expr)`.
     ///
     /// A special syntactic form recognized by the compiler while neither
@@ -400,6 +402,7 @@ impl Expr {
             Expr::If(e) => e.span,
             Expr::Match(e) => e.span,
             Expr::Lambda(e) => e.span,
+            Expr::Variant(e) => e.span,
             Expr::Println(e) => e.span,
         }
     }
@@ -487,6 +490,14 @@ impl Pattern {
     pub fn is_irrefutable(&self) -> bool {
         matches!(self, Pattern::Wildcard(_) | Pattern::Binding(_))
     }
+}
+
+/// `Direction.North` in expression position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantExpr {
+    pub enum_name: Ident,
+    pub variant: Ident,
+    pub span: Span,
 }
 
 /// `Direction.North` in pattern position.
