@@ -285,7 +285,7 @@ impl<'a> Checker<'a> {
         let Some(main) = self.functions.get("main").cloned() else {
             self.error(
                 codes::MISSING_ENTRYPOINT,
-                Span::empty(0),
+                self.source.span(0, 0),
                 "the program has no entrypoint",
                 "no `main` function was found in the file",
                 Some("add `fn main(): Void { }`".into()),
