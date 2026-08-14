@@ -267,6 +267,85 @@ fn structured_output_is_available() {
     assert!(output.stderr.contains("\"line\":"));
 }
 
+// --- Colour -----------------------------------------------------------------
+
+#[test]
+fn piped_output_carries_no_colour() {
+    // `ZIRK_COMPILER_SPEC.md` section 9 requires deterministic output. A test,
+    // a pipe or a tool reading the diagnostics must get exactly the text.
+    let source = corpus("invalid").join("type_mismatch.zrk");
+    let output = zirk("run", &source, "no_colour_piped", &[]);
+
+    assert!(
+        !output.stderr.contains('\x1b'),
+        "escape sequences leaked into a redirected output:\n{:?}",
+        output.stderr
+    );
+}
+
+#[test]
+fn colour_can_be_requested_explicitly() {
+    let source = corpus("invalid").join("type_mismatch.zrk");
+    let output = zirk("run", &source, "colour_always", &["--color=always"]);
+
+    assert!(output.stderr.contains('\x1b'), "{:?}", output.stderr);
+}
+
+#[test]
+fn colour_can_be_disabled_explicitly() {
+    let source = corpus("invalid").join("type_mismatch.zrk");
+    let output = zirk("run", &source, "colour_never", &["--color=never"]);
+
+    assert!(!output.stderr.contains('\x1b'));
+}
+
+#[test]
+fn colour_does_not_change_what_the_diagnostic_says() {
+    let source = corpus("invalid").join("type_mismatch.zrk");
+    let plain = zirk("run", &source, "colour_cmp_plain", &["--color=never"]);
+    let colored = zirk("run", &source, "colour_cmp_ansi", &["--color=always"]);
+
+    assert_eq!(
+        strip_ansi(&colored.stderr),
+        plain.stderr,
+        "colour adds emphasis, it must not change the text"
+    );
+}
+
+#[test]
+fn the_structured_form_stays_parseable() {
+    // An escape sequence inside a JSON string would break whoever reads it.
+    let source = corpus("invalid").join("type_mismatch.zrk");
+    let output = zirk(
+        "run",
+        &source,
+        "json_no_colour",
+        &["--json", "--color=always"],
+    );
+
+    assert!(!output.stderr.contains('\x1b'), "{:?}", output.stderr);
+    assert!(output.stderr.starts_with('['));
+}
+
+/// Removes ANSI escape sequences from a text.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        for c in chars.by_ref() {
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
+}
+
 // --- CLI behaviour ----------------------------------------------------------
 
 #[test]

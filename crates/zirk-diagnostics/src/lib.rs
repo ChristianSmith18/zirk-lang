@@ -15,9 +15,11 @@
 //! It is the one cross-cutting dependency the workspace allows: any pipeline
 //! stage may depend on it, regardless of its position.
 
+mod color;
 mod render;
 mod source;
 
+pub use color::Color;
 pub use render::RenderStyle;
 pub use source::{SourceFile, Span};
 
@@ -172,8 +174,16 @@ impl Diagnostic {
     }
 
     /// Renders in the human-readable format of `COMPILER_SPEC` section 8.
+    ///
+    /// Without colour: it is the form tooling and tests read, and the one that
+    /// keeps the output deterministic when it is piped.
     pub fn render(&self) -> String {
-        render::human(self)
+        render::human(self, Color::Never)
+    }
+
+    /// Renders in the human-readable format, with colour.
+    pub fn render_colored(&self, color: Color) -> String {
+        render::human(self, color)
     }
 
     /// Renders as a JSON object for consumption by tooling.
@@ -242,9 +252,21 @@ impl DiagnosticSink {
         self.diagnostics.len()
     }
 
-    /// Renders every accumulated diagnostic.
+    /// Renders every accumulated diagnostic, without colour.
     pub fn render(&self, style: RenderStyle) -> String {
-        render::sink(&self.diagnostics, style)
+        render::sink(&self.diagnostics, style, Color::Never)
+    }
+
+    /// Renders every accumulated diagnostic, with colour.
+    ///
+    /// Colour never reaches the structured form: what a tool consumes must be
+    /// parseable, and an escape sequence inside a JSON string is not.
+    pub fn render_colored(&self, style: RenderStyle, color: Color) -> String {
+        let color = match style {
+            RenderStyle::Human => color,
+            RenderStyle::Json => Color::Never,
+        };
+        render::sink(&self.diagnostics, style, color)
     }
 }
 

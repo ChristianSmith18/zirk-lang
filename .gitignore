@@ -16,3 +16,10 @@
 # Editores
 .idea/
 *.swp
+
+# Artefactos que produce el compilador de Zirk al compilar un programa.
+/build/
+
+# Archivos de prueba sueltos en la raíz. El corpus versionado vive en
+# crates/zirk-cli/tests/corpus/.
+/*.zrk

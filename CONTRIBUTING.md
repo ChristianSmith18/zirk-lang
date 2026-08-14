@@ -112,6 +112,8 @@ La frontera: **lo que define Zirk va en inglés; lo que registra cómo lo estamo
 
 Se construye con `zirk-diagnostics`. Los códigos son **estables**: uno publicado no se reutiliza para un error semánticamente distinto.
 
+En una terminal salen con color —el código en rojo, el fragmento señalado en negrita, la causa en azul y la ayuda en violeta—, y redirigidos salen en texto plano. El razonamiento está en [ADR-008](docs/decisions/ADR-008-color-en-diagnosticos.md).
+
 Si no hay una reparación clara, se omite la ayuda. Una ayuda genérica sin valor accionable es peor que ninguna.
 
 ## Decisiones de arquitectura
