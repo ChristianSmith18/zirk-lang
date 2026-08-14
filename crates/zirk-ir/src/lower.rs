@@ -29,20 +29,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
 /// Converts a frontend type into an IR type.
 fn ir_type(ty: Type) -> IrType {
-    match ty.base {
+    let base = match ty.base {
         Base::Void => IrType::Void,
         Base::Int32 => IrType::Int32,
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
-        // A verified program contains none of these: the checker reports and
-        // the pipeline stops before reaching lowering.
         // An enum without associated data is exactly its discriminant. Phase 3
         // gives it a payload and with it a representation of its own.
         Base::Enum(_) => IrType::Int32,
+        // A verified program contains none of these: the checker reports and
+        // the pipeline stops before reaching lowering.
         Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
+    };
+
+    if !ty.nullable {
+        return base;
     }
+
+    IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
 }
 
 
@@ -179,20 +185,48 @@ impl<'a> FunctionLowering<'a> {
     ///
     /// Enums are not built in, so the name is resolved against the table the
     /// checker produced rather than against a fixed list.
-    fn ir_type_from_name(&self, name: &str) -> IrType {
-        if let Some(ty) = Type::from_name(name) {
-            return ir_type(ty);
+    fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
+        let base = if let Some(ty) = Type::from_name(&reference.name) {
+            ir_type(ty)
+        } else if self.checked.enums.iter().any(|e| e.name == reference.name) {
+            IrType::Int32
+        } else {
+            unreachable!("a verified program only names known types")
+        };
+
+        if !reference.nullable {
+            return base;
         }
-        if self.checked.enums.iter().any(|e| e.name == name) {
-            return IrType::Int32;
+        IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
+    }
+
+    /// Lowers an expression into the type its destination expects.
+    ///
+    /// `T` is accepted where `T?` is expected, and `null` fits any nullable
+    /// type. Neither is a conversion the IR performs implicitly: this is where
+    /// the widening becomes an instruction.
+    fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
+        let IrType::Nullable(base) = expected else {
+            return self.lower_expr(expr);
+        };
+
+        // `null` has no type of its own: the destination supplies it.
+        if matches!(expr, ast::Expr::Null(_)) {
+            return self.emit(InstKind::NullValue(base), expected, expr.span());
         }
-        unreachable!("a verified program only names known types")
+
+        let value = self.lower_expr(expr);
+        if self.type_of(expr, expr.span()) == expected {
+            return value;
+        }
+
+        self.emit(InstKind::Wrap { base, value }, expected, expr.span())
     }
 
     // --- Function ---------------------------------------------------------
 
     fn run(mut self, function: &ast::FnDecl) -> Function {
-        self.return_type = self.ir_type_from_name(&function.return_type.name);
+        self.return_type = self.ir_type_from_ref(&function.return_type);
 
         let entry = self.new_block();
         self.current = entry;
@@ -202,7 +236,7 @@ impl<'a> FunctionLowering<'a> {
             .params
             .iter()
             .map(|p| {
-                let ty = self.ir_type_from_name(&p.ty.name);
+                let ty = self.ir_type_from_ref(&p.ty);
                 self.declare_slot(&p.name.name, ty, p.name.span)
             })
             .collect();
@@ -258,10 +292,18 @@ impl<'a> FunctionLowering<'a> {
         // The value is computed before declaring the slot so that
         // `mut x = x` — with an outer `x` — reads the outer one, as the checker
         // resolved it.
-        let value = stmt.init.as_ref().map(|e| (self.lower_expr(e), e.span()));
+        let annotated = stmt.ty.as_ref().map(|a| self.ir_type_from_ref(a));
 
-        let ty = match &stmt.ty {
-            Some(annotation) => self.ir_type_from_name(&annotation.name),
+        let value = stmt.init.as_ref().map(|e| {
+            let operand = match annotated {
+                Some(expected) => self.lower_expr_as(e, expected),
+                None => self.lower_expr(e),
+            };
+            (operand, e.span())
+        });
+
+        let ty = match annotated {
+            Some(ty) => ty,
             None => {
                 let (_, span) = value.expect("without a type there is always an initializer");
                 self.type_of(stmt.init.as_ref().expect("initializer"), span)
@@ -276,8 +318,8 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
-        let value = self.lower_expr(&stmt.value);
         let slot = self.lookup_slot(&stmt.target.name);
+        let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
         self.emit_effect(InstKind::Store(slot, value), stmt.span);
     }
 
@@ -515,7 +557,8 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_return(&mut self, stmt: &ast::ReturnStmt) {
-        let value = stmt.value.as_ref().map(|e| self.lower_expr(e));
+        let expected = self.return_type;
+        let value = stmt.value.as_ref().map(|e| self.lower_expr_as(e, expected));
         self.terminate(Terminator::Return(value));
     }
 
@@ -551,6 +594,8 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::Unary { op, operand }, ty, span)
             }
 
+            ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => self.lower_coalesce(e, span),
+
             ast::Expr::Binary(e) => {
                 let left = self.lower_expr(&e.left);
                 let right = self.lower_expr(&e.right);
@@ -565,7 +610,7 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Call(e) => {
                 let name = callee_name(e);
-                let args = e.args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                let args = self.lower_args(e);
                 let returns = self.signature_return(name);
                 self.emit(
                     InstKind::Call {
@@ -591,10 +636,75 @@ impl<'a> FunctionLowering<'a> {
 
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
+            // `null` has no type of its own: it only appears where a
+            // destination supplies one, and `lower_expr_as` handles it there.
             ast::Expr::Null(_) | ast::Expr::Range(_) | ast::Expr::Lambda(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
+    }
+
+    /// Lowers `a ?? b` into an explicit null check with two blocks.
+    ///
+    /// ```text
+    ///   is_null(a) ──(yes)──▶ evaluate b ──┐
+    ///        │(no)                         │
+    ///        ▼                             ▼
+    ///   unwrap(a) ────────────────────▶ continue
+    /// ```
+    ///
+    /// The fallback lives in its own block so it is only evaluated when the
+    /// value is absent: `a ?? expensive()` must not call `expensive` when `a`
+    /// holds a value.
+    fn lower_coalesce(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+        let left_type = self.type_of(&expr.left, expr.left.span());
+        let right_type = self.type_of(&expr.right, expr.right.span());
+        // The fallback decides: when it may itself be absent, so may the
+        // result; otherwise the result always holds a value.
+        let result_type = if matches!(right_type, IrType::Nullable(_)) {
+            right_type
+        } else {
+            left_type.unwrapped()
+        };
+        let result = self.declare_slot("<coalesce>", result_type, span);
+
+        let value = self.lower_expr(&expr.left);
+        let test = self.emit(InstKind::IsNull(value), IrType::Boolean, span);
+
+        // The value is needed again in the block that unwraps it, and values do
+        // not cross blocks (ADR-007).
+        let holder = self.declare_slot("<coalesced>", left_type, span);
+        self.emit_effect(InstKind::Store(holder, value), span);
+
+        let absent_block = self.new_block();
+        let present_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Branch {
+            condition: test,
+            then_block: absent_block,
+            else_block: present_block,
+        });
+
+        self.current = absent_block;
+        let fallback = self.lower_expr_as(&expr.right, result_type);
+        self.emit_effect(InstKind::Store(result, fallback), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = present_block;
+        let held = self.emit(InstKind::Load(holder), self.slot_type(holder), span);
+        let inner = self.emit(InstKind::Unwrap(held), self.slot_type(holder).unwrapped(), span);
+        // The result may still be nullable when the fallback is: widening the
+        // unwrapped value back keeps both branches storing the same type.
+        let inner = match result_type {
+            IrType::Nullable(base) => self.emit(InstKind::Wrap { base, value: inner }, result_type, span),
+            _ => inner,
+        };
+        self.emit_effect(InstKind::Store(result, inner), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), result_type, span)
     }
 
     /// The discriminant a variant lowers to.
@@ -847,7 +957,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Call(e) if self.signature_return(callee_name(e)) == IrType::Void => {
                 let name = callee_name(e).to_string();
-                let args = e.args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                let args = self.lower_args(e);
                 self.emit_effect(InstKind::Call { callee: name, args }, expr.span());
             }
             other => {
@@ -873,6 +983,22 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
+    /// Lowers the arguments of a call into the parameter types.
+    fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
+        let expected: Vec<IrType> = self
+            .checked
+            .functions
+            .get(callee_name(call))
+            .map(|s| s.params.iter().map(|p| ir_type(p.ty)).collect())
+            .expect("a verified program only calls declared functions");
+
+        call.args
+            .iter()
+            .zip(expected)
+            .map(|(a, ty)| self.lower_expr_as(&a.value, ty))
+            .collect()
+    }
+
     fn signature_return(&self, name: &str) -> IrType {
         self.checked
             .functions
@@ -895,6 +1021,18 @@ impl<'a> FunctionLowering<'a> {
                 ast::UnaryOp::Neg => IrType::Int32,
                 ast::UnaryOp::Not => IrType::Boolean,
             },
+            // `??` yields its operands' shared type, not a boolean or an
+            // arithmetic result: it is the one binary operator that is not an
+            // operator in the IR at all.
+            ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => {
+                let left = self.type_of(&e.left, e.left.span()).unwrapped();
+                let right = self.type_of(&e.right, e.right.span());
+                if matches!(right, IrType::Nullable(_)) {
+                    right
+                } else {
+                    left
+                }
+            }
             ast::Expr::Binary(e) => {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }

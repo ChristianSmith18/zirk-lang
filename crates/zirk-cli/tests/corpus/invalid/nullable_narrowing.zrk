@@ -1,0 +1,5 @@
+fn main(): Void {
+    mut a: String? = null;
+    mut b: String = a;
+    stdout.println(b);
+}

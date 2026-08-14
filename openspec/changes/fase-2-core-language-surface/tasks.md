@@ -90,12 +90,12 @@
 
 ## 10. Tipos y flujo — nulabilidad
 
-- [ ] 10.1 Representar `T?` como tipo propio, distinto de `T`, en el sistema de tipos (D5)
-- [ ] 10.2 Admitir `T` donde se espera `T?`, y rechazar la dirección contraria sugiriendo `??`
-- [ ] 10.3 Tipar `null`, rechazándolo donde el tipo no admite ausencia de valor
-- [ ] 10.4 Tipar `??` exigiendo un tipo común, produciendo el tipo no nulable cuando el fallback no lo es
-- [ ] 10.5 Rechazar `??` sobre un operando izquierdo no nulable
-- [ ] 10.6 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 10.1 Representar `T?` como tipo propio, distinto de `T`, en el sistema de tipos (D5)
+- [x] 10.2 Admitir `T` donde se espera `T?`, y rechazar la dirección contraria sugiriendo `??`
+- [x] 10.3 Tipar `null`, rechazándolo donde el tipo no admite ausencia de valor
+- [x] 10.4 Tipar `??` exigiendo un tipo común, produciendo el tipo no nulable cuando el fallback no lo es
+- [x] 10.5 Rechazar `??` sobre un operando izquierdo no nulable
+- [x] 10.6 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 11. IR — bucles, `if`-expresión y `break`/`continue`
 
@@ -113,7 +113,7 @@
 - [ ] 12.3 Bajar la llamada a un valor de closure como llamada indirecta con entorno implícito
 - [x] 12.4 Bajar `match` a comparaciones sobre el discriminante con salto a cada bloque de brazo
 - [x] 12.5 Bajar `match`-expresión con bloque de continuación común que recibe el valor del brazo
-- [ ] 12.6 Bajar `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
+- [x] 12.6 Bajar `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
 - [ ] 12.7 Tests: IR esperada para cada construcción nueva
 
 ## 13. Backend LLVM
@@ -123,7 +123,7 @@
 - [ ] 13.3 Traducir llamadas indirectas a closures
 - [x] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
 - [x] 13.5 Traducir `match` no exhaustivo o sobre otros tipos a comparaciones encadenadas
-- [ ] 13.6 Traducir la comprobación de nulidad de `??`, sin costo para tipos no nulables
+- [x] 13.6 Traducir la comprobación de nulidad de `??`, sin costo para tipos no nulables
 - [ ] 13.7 Tests: el módulo LLVM generado verifica para cada construcción nueva
 
 ## 14. Verificación de punta a punta

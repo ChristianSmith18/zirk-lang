@@ -324,16 +324,11 @@ impl<'a> Checker<'a> {
                 return Type::VOID;
             }
 
-            if reference.nullable {
-                self.not_lowered(
-                    reference.span,
-                    "a nullable type",
-                    "drop the `?` and give the variable a value",
-                );
-                return ty.as_nullable();
-            }
-
-            return ty;
+            return if reference.nullable {
+                ty.as_nullable()
+            } else {
+                ty
+            };
         }
 
         match pending_type(&reference.name) {
@@ -753,10 +748,7 @@ impl<'a> Checker<'a> {
             Expr::Int(lit) => self.check_int_literal(lit),
             Expr::Str(_) => Type::STRING,
             Expr::Bool(_) => Type::BOOLEAN,
-            Expr::Null(lit) => {
-                self.not_lowered(lit.span, "`null`", "use a non-nullable type for now");
-                Type::NULL
-            }
+            Expr::Null(_) => Type::NULL,
             Expr::Path(ident) => self.check_path(ident),
             Expr::Unary(e) => self.check_unary(e),
             Expr::Binary(e) => self.check_binary(e),

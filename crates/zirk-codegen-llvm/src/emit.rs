@@ -101,6 +101,14 @@ fn llvm_type<'ctx>(context: &'ctx Context, ty: ir::IrType) -> Option<BasicTypeEn
         ir::IrType::Boolean => context.bool_type().into(),
         // `String` is an opaque pointer. Its layout belongs to the runtime.
         ir::IrType::String => context.ptr_type(AddressSpace::default()).into(),
+        // A present flag next to the value. The flag comes first so the struct
+        // has the same shape whatever the payload is.
+        ir::IrType::Nullable(base) => {
+            let inner = llvm_type(context, base.inner()).expect("a nullable payload is not Void");
+            context
+                .struct_type(&[context.bool_type().into(), inner], false)
+                .into()
+        }
     })
 }
 
@@ -340,6 +348,71 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("call to println");
                 None
             }
+
+            // A nullable value is `{ i1 present, T value }`. The absent form
+            // still carries a payload slot, left undefined: nothing reads it
+            // without checking the flag first, and the verifier enforces that.
+            ir::InstKind::NullValue(base) => {
+                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                    .expect("a nullable type has a representation")
+                    .into_struct_type();
+                Some(ty.get_undef().into()).map(|value: BasicValueEnum| {
+                    self.builder
+                        .build_insert_value(
+                            value.into_struct_value(),
+                            self.context.bool_type().const_zero(),
+                            0,
+                            "absent",
+                        )
+                        .expect("present flag")
+                        .as_basic_value_enum()
+                })
+            }
+
+            ir::InstKind::Wrap { base, value } => {
+                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                    .expect("a nullable type has a representation")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(
+                        ty.get_undef(),
+                        self.context.bool_type().const_int(1, false),
+                        0,
+                        "present",
+                    )
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_insert_value(
+                            with_flag.into_struct_value(),
+                            self.operand(*value),
+                            1,
+                            "wrapped",
+                        )
+                        .expect("payload")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::IsNull(operand) => {
+                let present = self
+                    .builder
+                    .build_extract_value(self.operand(*operand).into_struct_value(), 0, "present")
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_not(present.into_int_value(), "absent")
+                        .expect("negation")
+                        .into(),
+                )
+            }
+
+            ir::InstKind::Unwrap(operand) => Some(
+                self.builder
+                    .build_extract_value(self.operand(*operand).into_struct_value(), 1, "unwrapped")
+                    .expect("payload"),
+            ),
         };
 
         if let (Some(result), Some(value)) = (instruction.result, value) {

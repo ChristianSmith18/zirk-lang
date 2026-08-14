@@ -1,0 +1,20 @@
+fn greet(name: String?): String {
+    return name ?? "anónimo";
+}
+
+fn double(n: Int32?): Int32 {
+    return (n ?? 0) * 2;
+}
+
+fn main(): Void {
+    stdout.println(greet("Ana"));
+    stdout.println(greet(null));
+
+    mut maybe: Int32? = null;
+    stdout.println(double(maybe));
+    maybe = 21;
+    stdout.println(double(maybe));
+
+    inmut FLAG: Boolean? = null;
+    stdout.println(FLAG ?? true);
+}
