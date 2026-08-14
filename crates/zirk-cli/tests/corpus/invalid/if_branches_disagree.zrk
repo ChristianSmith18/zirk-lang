@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut x = if true { 1 } else { "dos" };
+    stdout.println(x);
+}

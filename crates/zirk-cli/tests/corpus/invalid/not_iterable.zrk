@@ -1,0 +1,5 @@
+fn main(): Void {
+    for x in 42 {
+        stdout.println(x);
+    }
+}

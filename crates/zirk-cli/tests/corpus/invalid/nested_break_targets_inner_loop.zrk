@@ -1,0 +1,6 @@
+fn main(): Void {
+    while true {
+        stdout.println("x");
+    }
+    continue;
+}
