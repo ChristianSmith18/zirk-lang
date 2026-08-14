@@ -3,18 +3,20 @@
 //! `ZIRK_SPEC_FINAL.md` section 8 requires one valid and one invalid case per
 //! rule. Tests are grouped by rule so that correspondence stays verifiable.
 
-use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
 use zirk_sema::{check, codes};
 
 /// Checks a full program expecting no errors.
 fn accepted(source_text: &str) {
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    check(&sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),
@@ -25,11 +27,13 @@ fn accepted(source_text: &str) {
 
 /// Checks a full program expecting errors, returning them rendered.
 fn rejected(source_text: &str) -> String {
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    check(&sources, &program, &mut sink);
 
     assert!(sink.has_errors(), "an error was expected and none occurred");
     sink.render(RenderStyle::Human)
@@ -352,11 +356,16 @@ fn valid_the_reference_program_of_the_roadmap() {
 fn invalid_one_error_does_not_cascade() {
     // `x` is undeclared: that is one error. Everything downstream involves an
     // unknown type and must stay silent instead of piling on derived errors.
-    let source = SourceFile::new("test.zrk", in_main("mut y: Int32 = x + 1 + 2 + 3;"));
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        in_main("mut y: Int32 = x + 1 + 2 + 3;"),
+    ));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    check(&sources, &program, &mut sink);
 
     assert_eq!(
         sink.len(),
@@ -368,14 +377,16 @@ fn invalid_one_error_does_not_cascade() {
 
 #[test]
 fn invalid_several_independent_errors_are_all_reported() {
-    let source = SourceFile::new(
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
         "test.zrk",
         in_main("mut a: Int32 = \"x\";\nmut b: Boolean = 1;"),
-    );
+    ));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    check(&sources, &program, &mut sink);
 
     assert_eq!(
         sink.len(),

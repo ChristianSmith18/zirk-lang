@@ -1,0 +1,5 @@
+use whatever;
+
+fn main(): Void {
+    stdout.println("x");
+}

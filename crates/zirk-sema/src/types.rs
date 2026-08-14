@@ -212,6 +212,10 @@ pub struct FnType {
 pub struct EnumType {
     pub name: String,
     pub variants: Vec<String>,
+    /// Marked `share`, so files that import it may name it.
+    pub shared: bool,
+    /// Where it was declared, which is also which file owns it.
+    pub span: zirk_diagnostics::Span,
 }
 
 impl EnumType {
@@ -374,6 +378,8 @@ mod tests {
         let e = EnumType {
             name: "Direction".into(),
             variants: vec!["North".into(), "South".into()],
+            shared: false,
+            span: zirk_diagnostics::Span::new(0, 0),
         };
         assert_eq!(e.discriminant("North"), Some(0));
         assert_eq!(e.discriminant("South"), Some(1));

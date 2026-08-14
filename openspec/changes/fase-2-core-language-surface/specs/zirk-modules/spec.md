@@ -25,6 +25,7 @@ Esta fase no implementa los tres niveles de `public`/`private`/`protected` de `Z
 #### Scenario: Archivo inexistente
 - **WHEN** la ruta de un `import` no corresponde a ningún archivo del crate
 - **THEN** se emite un diagnóstico que nombra la ruta no encontrada
+- **AND** señala el `import` que la pidió, no el inicio del archivo
 
 #### Scenario: Nombre no compartido en el archivo de destino
 - **WHEN** se importa un nombre que existe en el archivo de destino pero no está marcado `share`
@@ -39,17 +40,20 @@ Esta fase no implementa los tres niveles de `public`/`private`/`protected` de `Z
 - **THEN** dentro del archivo, `RolDeDominio` resuelve a la declaración `Rol` del archivo importado
 - **AND** el nombre `Rol` sin alias no queda disponible en el archivo que importa
 
-### Requirement: Detección de ciclos de importación
+### Requirement: Importaciones mutuas
 
-La resolución de módulos SHALL detectar ciclos de `import` entre archivos del crate antes de iniciar el chequeo de tipos, y SHALL rechazarlos con un diagnóstico que muestre la cadena de archivos involucrados.
+La resolución de módulos SHALL admitir que dos archivos se importen entre sí, y SHALL leer cada archivo del crate una sola vez.
+
+Una versión anterior de este requisito exigía rechazar los ciclos. Se corrigió al implementarlo: `import` trae nombres al scope y nada en esta fase depende del orden en que se leen los archivos —las firmas se recogen antes de chequear cualquier cuerpo—, así que dos archivos que se referencian mutuamente son un programa normal. El peligro real es recorrer el ciclo indefinidamente, y eso lo resuelve leer cada archivo una vez, no rechazar el programa.
 
 #### Scenario: Ciclo directo
 - **WHEN** el archivo A importa del archivo B y el archivo B importa del archivo A
-- **THEN** se emite un diagnóstico que nombra ambos archivos y el orden del ciclo
+- **THEN** el crate compila
+- **AND** cada archivo se lee una sola vez
 
-#### Scenario: Ciclo indirecto
-- **WHEN** A importa de B, B importa de C y C importa de A
-- **THEN** se emite un diagnóstico que muestra la cadena completa A → B → C → A
+#### Scenario: Rombo de importaciones
+- **WHEN** A importa de B y de C, y ambos importan de D
+- **THEN** `D` se lee una sola vez
 
 ### Requirement: Colisión de nombres compartidos
 

@@ -298,6 +298,11 @@ impl SourceMap {
         id
     }
 
+    /// The file compilation started from.
+    pub fn entry(&self) -> &SourceFile {
+        self.file(FileId::ENTRY)
+    }
+
     pub fn file(&self, id: FileId) -> &SourceFile {
         &self.files[id.0 as usize]
     }
