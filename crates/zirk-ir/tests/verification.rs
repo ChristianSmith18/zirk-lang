@@ -336,6 +336,54 @@ fn returning_the_wrong_type_is_rejected() {
     );
 }
 
+#[test]
+fn println_over_a_non_string_is_rejected() {
+    // This is the defect that reached runtime: the value was read as a pointer
+    // to an arbitrary address.
+    let module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                value(0, InstKind::ConstInt(3), IrType::Int32),
+                Instruction {
+                    result: None,
+                    kind: InstKind::Println(Operand(ValueId(0))),
+                    ty: IrType::Void,
+                    span: S,
+                },
+            ],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![],
+    );
+
+    let errors = errors_of(&module);
+    assert!(
+        errors.iter().any(|e| e.contains("expected String")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_conversion_that_does_not_produce_a_string_is_rejected() {
+    let module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                value(0, InstKind::ConstInt(3), IrType::Int32),
+                value(1, InstKind::ToString(Operand(ValueId(0))), IrType::Int32),
+            ],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![],
+    );
+
+    let errors = errors_of(&module);
+    assert!(errors.iter().any(|e| e.contains("ToString")), "{errors:?}");
+}
+
 // --- Slots ------------------------------------------------------------------
 
 #[test]
