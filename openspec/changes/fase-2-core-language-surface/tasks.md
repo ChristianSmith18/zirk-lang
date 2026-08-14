@@ -63,11 +63,11 @@
 - [x] 7.1 Exigir `Boolean` sin truthiness en la condición de `for` y `while`
 - [x] 7.2 Rechazar `break`/`continue` fuera de un bucle
 - [x] 7.3 Resolver a qué bucle apunta `break`/`continue` en bucles anidados
-- [ ] 7.4 Implementar el protocolo mínimo de `for ... in`: rangos y `String` (D3)
-- [ ] 7.5 Rechazar `for ... in` sobre tipos no soportados, con diagnóstico de fase
+- [x] 7.4 Implementar el protocolo mínimo de `for ... in`: rangos y `String` (D3)
+- [x] 7.5 Rechazar `for ... in` sobre tipos no soportados, con diagnóstico de fase
 - [x] 7.6 Tipar `if` como expresión: exigir ambas ramas y tipos compatibles (D7)
 - [x] 7.7 Extender el análisis de retorno-en-toda-ruta para considerar `if` exhaustivo y bucles infinitos sin `break` que salga
-- [ ] 7.8 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 7.8 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 8. Tipos y flujo — funciones completas y closures
 
@@ -75,10 +75,10 @@
 - [ ] 8.2 Sustituir parámetros ausentes por su valor por defecto, evaluado en el sitio de llamada
 - [ ] 8.3 Empaquetar argumentos sobrantes en el parámetro variadic
 - [ ] 8.4 Tipar valores nulos para parámetros opcionales sin argumento
-- [ ] 8.5 Inferir el tipo función de una lambda a partir de parámetros y cuerpo
-- [ ] 8.6 Registrar qué variables externas captura una closure
-- [ ] 8.7 Rechazar la mutación de una variable capturada (D2)
-- [ ] 8.8 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 8.5 Inferir el tipo función de una lambda a partir de parámetros y cuerpo
+- [x] 8.6 Registrar qué variables externas captura una closure
+- [x] 8.7 Rechazar la mutación de una variable capturada (D2)
+- [x] 8.8 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 9. Tipos y flujo — `match`
 
@@ -103,28 +103,28 @@
 - [x] 11.2 Bajar `while`, `loop`, `for` y `for ... in` a bloques de condición/cuerpo/continuación
 - [x] 11.3 Bajar `break`/`continue` a saltos directos al bloque correspondiente del bucle que los contiene
 - [x] 11.4 Bajar `if`-expresión produciendo el valor de la rama tomada en el bloque de continuación
-- [ ] 11.5 Verificador de IR: aceptar ciclos bien formados, seguir rechazando terminadores fuera de lugar
-- [ ] 11.6 Tests: IR esperada para cada construcción nueva
+- [x] 11.5 Verificador de IR: aceptar ciclos bien formados, seguir rechazando terminadores fuera de lugar
+- [x] 11.6 Tests: IR esperada para cada construcción nueva
 
 ## 12. IR — closures, `match`, nulabilidad
 
-- [ ] 12.1 Definir la operación de alocación de entorno de closure, reutilizando la alocación abstracta existente (D2)
-- [ ] 12.2 Bajar la creación de una closure a función independiente más entorno con capturas copiadas
-- [ ] 12.3 Bajar la llamada a un valor de closure como llamada indirecta con entorno implícito
+- [x] 12.1 Definir la operación de alocación de entorno de closure, reutilizando la alocación abstracta existente (D2)
+- [x] 12.2 Bajar la creación de una closure a función independiente más entorno con capturas copiadas
+- [x] 12.3 Bajar la llamada a un valor de closure como llamada indirecta con entorno implícito
 - [x] 12.4 Bajar `match` a comparaciones sobre el discriminante con salto a cada bloque de brazo
 - [x] 12.5 Bajar `match`-expresión con bloque de continuación común que recibe el valor del brazo
 - [x] 12.6 Bajar `??` a comprobación explícita de nulidad con evaluación perezosa del fallback (D5)
-- [ ] 12.7 Tests: IR esperada para cada construcción nueva
+- [x] 12.7 Tests: IR esperada para cada construcción nueva
 
 ## 13. Backend LLVM
 
 - [x] 13.1 Traducir bloques con ciclos, verificando el módulo LLVM resultante
-- [ ] 13.2 Traducir closures: función LLVM con entorno como primer argumento, valor agregado (función, entorno)
-- [ ] 13.3 Traducir llamadas indirectas a closures
+- [x] 13.2 Traducir closures: función LLVM con entorno como primer argumento, valor agregado (función, entorno)
+- [x] 13.3 Traducir llamadas indirectas a closures
 - [x] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
 - [x] 13.5 Traducir `match` no exhaustivo o sobre otros tipos a comparaciones encadenadas
 - [x] 13.6 Traducir la comprobación de nulidad de `??`, sin costo para tipos no nulables
-- [ ] 13.7 Tests: el módulo LLVM generado verifica para cada construcción nueva
+- [x] 13.7 Tests: el módulo LLVM generado verifica para cada construcción nueva
 
 ## 14. Verificación de punta a punta
 

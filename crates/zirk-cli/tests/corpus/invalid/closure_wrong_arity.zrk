@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
+    stdout.println(ADD(1));
+}

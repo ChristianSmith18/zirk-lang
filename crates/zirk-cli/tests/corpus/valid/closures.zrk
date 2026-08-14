@@ -1,0 +1,20 @@
+fn main(): Void {
+    inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
+    stdout.println(ADD(2, 3));
+
+    inmut BASE = 100;
+    inmut OFFSET = (n: Int32): Int32 => n + BASE;
+    stdout.println(OFFSET(5));
+
+    inmut GREETING = "hola";
+    inmut SHOUT = (): Void => {
+        stdout.println(GREETING);
+    };
+    SHOUT();
+
+    mut total = 0;
+    for i in 1..=4 {
+        total += ADD(i, i);
+    }
+    stdout.println(total);
+}

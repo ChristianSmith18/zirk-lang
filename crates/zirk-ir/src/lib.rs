@@ -29,8 +29,8 @@ mod lower;
 mod verify;
 
 pub use ir::{
-    BinaryOp, Block, BlockId, Function, InstKind, Instruction, IrType, Module, Operand, Slot,
-    SlotId, StringId, Terminator, UnaryOp, ValueId,
+    BinaryOp, Block, BlockId, ClosureLayout, Function, InstKind, Instruction, IrType, Module,
+    Nullable, Operand, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId,
 };
 pub use lower::lower;
 pub use verify::{IrError, verify};

@@ -1278,11 +1278,6 @@ impl<'a> Checker<'a> {
     }
 
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {
-        self.not_lowered(
-            expr.span,
-            "a lambda",
-            "declare a `fn` at the top level and call it by name",
-        );
         let params: Vec<ParamInfo> = expr.params.iter().map(|p| self.resolve_param(p)).collect();
         let returns = self.resolve_type(&expr.return_type);
 
