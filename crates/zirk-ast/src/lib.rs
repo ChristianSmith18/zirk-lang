@@ -29,11 +29,85 @@ use zirk_diagnostics::Span;
 
 /// A parsed source file.
 ///
-/// In this phase a program is a single file of function declarations:
-/// multi-file modules arrive in Phase 2.
+/// A program is one file of a crate. Which files make up the crate, and how
+/// their names resolve to each other, is decided by module resolution, not
+/// here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    pub imports: Vec<ImportDecl>,
+    pub uses: Vec<UseDecl>,
+    pub enums: Vec<EnumDecl>,
     pub functions: Vec<FnDecl>,
+    pub span: Span,
+}
+
+/// `import { A, B -> C } from "./path";`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    pub names: Vec<ImportName>,
+    pub source: ImportSource,
+    pub span: Span,
+}
+
+/// One name inside an `import` list, with its optional alias.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportName {
+    pub name: Ident,
+    /// Present for `name -> alias`.
+    pub alias: Option<Ident>,
+    pub span: Span,
+}
+
+impl ImportName {
+    /// The name this import binds in the importing file.
+    pub fn bound_name(&self) -> &Ident {
+        self.alias.as_ref().unwrap_or(&self.name)
+    }
+}
+
+/// Where an `import` reads from.
+///
+/// The quotes are what distinguishes them, per `ZIRK_LANGUAGE_SPEC.md`
+/// section 10: local paths are quoted, standard modules are not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportSource {
+    /// `"./domain/user"`, without the `.zrk` extension.
+    Local { path: String, span: Span },
+    /// `std.io`
+    Std { path: String, span: Span },
+}
+
+impl ImportSource {
+    pub fn span(&self) -> Span {
+        match self {
+            ImportSource::Local { span, .. } | ImportSource::Std { span, .. } => *span,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        match self {
+            ImportSource::Local { path, .. } | ImportSource::Std { path, .. } => path,
+        }
+    }
+}
+
+/// `use stdout;`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    pub name: Ident,
+    pub span: Span,
+}
+
+/// `enum Direction { North, South }`
+///
+/// Without associated data: that is the extension Phase 3 adds, per decision
+/// D1 of the design.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: Ident,
+    pub variants: Vec<Ident>,
+    /// Marked `share`, so other files of the crate may import it.
+    pub shared: bool,
     pub span: Span,
 }
 
@@ -45,6 +119,8 @@ pub struct FnDecl {
     /// Return type. Mandatory in this phase.
     pub return_type: TypeRef,
     pub body: Block,
+    /// Marked `share`, so other files of the crate may import it.
+    pub shared: bool,
     pub span: Span,
 }
 
@@ -53,6 +129,12 @@ pub struct FnDecl {
 pub struct Param {
     pub name: Ident,
     pub ty: TypeRef,
+    /// `name?: T`, which makes the parameter nullable and defaultable to null.
+    pub optional: bool,
+    /// `name: T = expr`.
+    pub default: Option<Expr>,
+    /// `...name: T`, which collects the remaining arguments.
+    pub variadic: bool,
     pub span: Span,
 }
 
@@ -79,6 +161,8 @@ impl Ident {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRef {
     pub name: String,
+    /// Written `T?`, which per `ZIRK_LANGUAGE_SPEC.md` section 4 is `T | Null`.
+    pub nullable: bool,
     pub span: Span,
 }
 
@@ -86,6 +170,15 @@ impl TypeRef {
     pub fn new(name: impl Into<String>, span: Span) -> Self {
         Self {
             name: name.into(),
+            nullable: false,
+            span,
+        }
+    }
+
+    pub fn nullable(name: impl Into<String>, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            nullable: true,
             span,
         }
     }
@@ -119,6 +212,15 @@ pub enum Stmt {
     Assign(AssignStmt),
     /// `if cond { } else { }`
     If(IfStmt),
+    /// `while cond { }`, `loop { }` and `for (init; cond; step) { }`, which
+    /// share a shape once parsed.
+    Loop(LoopStmt),
+    /// `for x in iterable { }`
+    ForIn(ForInStmt),
+    /// `break;`
+    Break(JumpStmt),
+    /// `continue;`
+    Continue(JumpStmt),
     /// `return expr;`
     Return(ReturnStmt),
     /// An expression evaluated for its effect, such as a call.
@@ -133,11 +235,66 @@ impl Stmt {
             Stmt::Let(s) => s.span,
             Stmt::Assign(s) => s.span,
             Stmt::If(s) => s.span,
+            Stmt::Loop(s) => s.span,
+            Stmt::ForIn(s) => s.span,
+            Stmt::Break(s) | Stmt::Continue(s) => s.span,
             Stmt::Return(s) => s.span,
             Stmt::Expr(s) => s.span,
             Stmt::Block(b) => b.span,
         }
     }
+}
+
+/// The three loop forms that are not `for ... in`.
+///
+/// `while c { b }` is `LoopStmt { condition: Some(c), .. }`, `loop { b }` is
+/// the same with no condition, and `for (i; c; s) { b }` adds the
+/// initialization and the step. Keeping one node instead of three avoids
+/// repeating the same lowering three times for what LLVM sees as one shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopStmt {
+    /// The syntactic form written, kept for diagnostics.
+    pub kind: LoopKind,
+    /// Runs once before the loop, in a scope enclosing it. Only `for`.
+    pub init: Option<Box<Stmt>>,
+    /// Checked before each iteration. Absent in `loop`.
+    pub condition: Option<Expr>,
+    /// Runs after each iteration, and is where `continue` jumps to. Only `for`.
+    pub step: Option<Box<Stmt>>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopKind {
+    For,
+    While,
+    Loop,
+}
+
+impl LoopKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LoopKind::For => "for",
+            LoopKind::While => "while",
+            LoopKind::Loop => "loop",
+        }
+    }
+}
+
+/// `for binding in iterable { }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForInStmt {
+    pub binding: Ident,
+    pub iterable: Expr,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// `break;` or `continue;`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JumpStmt {
+    pub span: Span,
 }
 
 /// A variable declaration.
@@ -198,10 +355,28 @@ pub enum Expr {
     Int(IntLit),
     Str(StrLit),
     Bool(BoolLit),
+    /// `null`, the sole value of the `Null` half of `T?`.
+    Null(NullLit),
     Path(Ident),
     Unary(UnaryExpr),
     Binary(BinaryExpr),
     Call(CallExpr),
+    /// `0..10` and `0..=10`.
+    Range(RangeExpr),
+    /// `if c { a } else { b }` used where a value is expected.
+    ///
+    /// The node is the same one the statement form uses: what changes is the
+    /// position, and with it whether the branches must produce a value.
+    /// Decision D7 of the design.
+    If(Box<IfStmt>),
+    /// `match x { p => v, ... }`, in either position.
+    ///
+    /// There is no separate statement node: in statement position the parser
+    /// wraps this in `Stmt::Expr`, and the checker is what decides whether the
+    /// arms must produce a value.
+    Match(MatchExpr),
+    /// `(a: Int32): Int32 => a + 1`
+    Lambda(LambdaExpr),
     /// `stdout.println(expr)`.
     ///
     /// A special syntactic form recognized by the compiler while neither
@@ -216,13 +391,125 @@ impl Expr {
             Expr::Int(e) => e.span,
             Expr::Str(e) => e.span,
             Expr::Bool(e) => e.span,
+            Expr::Null(e) => e.span,
             Expr::Path(i) => i.span,
             Expr::Unary(e) => e.span,
             Expr::Binary(e) => e.span,
             Expr::Call(e) => e.span,
+            Expr::Range(e) => e.span,
+            Expr::If(e) => e.span,
+            Expr::Match(e) => e.span,
+            Expr::Lambda(e) => e.span,
             Expr::Println(e) => e.span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NullLit {
+    pub span: Span,
+}
+
+/// `start..end` or `start..=end`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeExpr {
+    pub start: Box<Expr>,
+    pub end: Box<Expr>,
+    /// `..=` includes the endpoint; `..` does not.
+    pub inclusive: bool,
+    pub span: Span,
+}
+
+/// `match scrutinee { arms }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchExpr {
+    pub scrutinee: Box<Expr>,
+    pub arms: Vec<MatchArm>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: ArmBody,
+    pub span: Span,
+}
+
+/// The body of a `match` arm.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArmBody {
+    Expr(Expr),
+    Block(Block),
+}
+
+impl ArmBody {
+    pub fn span(&self) -> Span {
+        match self {
+            ArmBody::Expr(e) => e.span(),
+            ArmBody::Block(b) => b.span,
+        }
+    }
+}
+
+/// A pattern of a `match` arm.
+///
+/// Destructuring and patterns over unions need records and unions, which are
+/// Phase 3. This phase covers what a closed set of constructors needs in order
+/// for exhaustiveness to mean something.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    /// `_`
+    Wildcard(Span),
+    /// A name, which binds the scrutinee.
+    Binding(Ident),
+    /// `Direction.North`
+    Variant(VariantPattern),
+    Int(IntLit),
+    Str(StrLit),
+    Bool(BoolLit),
+    Null(NullLit),
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Wildcard(s) => *s,
+            Pattern::Binding(i) => i.span,
+            Pattern::Variant(v) => v.span,
+            Pattern::Int(l) => l.span,
+            Pattern::Str(l) => l.span,
+            Pattern::Bool(l) => l.span,
+            Pattern::Null(l) => l.span,
+        }
+    }
+
+    /// Whether the pattern matches every possible value.
+    pub fn is_irrefutable(&self) -> bool {
+        matches!(self, Pattern::Wildcard(_) | Pattern::Binding(_))
+    }
+}
+
+/// `Direction.North` in pattern position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantPattern {
+    pub enum_name: Ident,
+    pub variant: Ident,
+    pub span: Span,
+}
+
+/// A lambda, which is a function value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaExpr {
+    pub params: Vec<Param>,
+    pub return_type: TypeRef,
+    pub body: Box<LambdaBody>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LambdaBody {
+    Expr(Expr),
+    Block(Block),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +583,8 @@ pub enum BinaryOp {
     GtEq,
     And,
     Or,
+    /// `??`, which yields the left operand unless it is null.
+    Coalesce,
 }
 
 impl BinaryOp {
@@ -315,6 +604,7 @@ impl BinaryOp {
             GtEq => ">=",
             And => "&&",
             Or => "||",
+            Coalesce => "??",
         }
     }
 
@@ -328,9 +618,33 @@ impl BinaryOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallExpr {
-    pub callee: Ident,
-    pub args: Vec<Expr>,
+    /// What is being called.
+    ///
+    /// An expression rather than a name, because a closure held in a variable
+    /// is called the same way a function is.
+    pub callee: Box<Expr>,
+    pub args: Vec<Arg>,
     pub span: Span,
+}
+
+/// One argument of a call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arg {
+    /// Present for `name: value`, which matches by name instead of position.
+    pub name: Option<Ident>,
+    pub value: Expr,
+    pub span: Span,
+}
+
+impl Arg {
+    /// A plain positional argument.
+    pub fn positional(value: Expr) -> Self {
+        Self {
+            name: None,
+            span: value.span(),
+            value,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
