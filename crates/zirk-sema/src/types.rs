@@ -1,17 +1,42 @@
-//! The types of the Phase 1 subset.
+//! The types of the Phase 2 subset.
 //!
-//! Only what `ZIRK_ROADMAP.md` Phase 1 fixes is modelled: `Void`, `Int32`,
-//! `Boolean` and `String`. The remaining families of `ZIRK_LANGUAGE_SPEC.md`
-//! section 3 are recognized by name so the diagnostic can say they exist but are
-//! not implemented, rather than "unknown type".
+//! Phase 1 modelled four scalars. This phase adds what its constructs need: a
+//! nullable form for `T?`, enums as closed sets of names, function types for
+//! closures, and ranges for `for ... in`.
+//!
+//! # Why a struct instead of one more variant
+//!
+//! `T?` is `T | Null` for every `T`, so a `Nullable` variant would have to hold
+//! another type, and that makes the type non-`Copy` — which ripples through
+//! every layer that passes types around by value. Since `T??` is not a thing,
+//! nullability is exactly one bit, and a bit next to the base costs nothing.
+//!
+//! Enums and function types carry an index into a table owned by the checker
+//! rather than their contents, for the same reason.
 
 /// A type of the subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Type {
+pub struct Type {
+    pub base: Base,
+    /// Written `T?`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
+    pub nullable: bool,
+}
+
+/// The part of a type that is not its nullability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Base {
     Void,
     Int32,
     Boolean,
     String,
+    /// The type of the `null` literal, assignable to any nullable type.
+    Null,
+    /// A declared enum, identified by its index in the checker's table.
+    Enum(u32),
+    /// A function value, identified by its index in the checker's table.
+    Function(u32),
+    /// The result of `a..b`, iterable by `for ... in`.
+    Range,
     /// Assigned to expressions whose type could not be determined.
     ///
     /// It exists so one type error does not cascade into a dozen derived ones:
@@ -21,42 +46,177 @@ pub enum Type {
 }
 
 impl Type {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Type::Void => "Void",
-            Type::Int32 => "Int32",
-            Type::Boolean => "Boolean",
-            Type::String => "String",
-            Type::Unknown => "<unknown>",
+    pub const VOID: Type = Type::of(Base::Void);
+    pub const INT32: Type = Type::of(Base::Int32);
+    pub const BOOLEAN: Type = Type::of(Base::Boolean);
+    pub const STRING: Type = Type::of(Base::String);
+    pub const NULL: Type = Type::of(Base::Null);
+    pub const RANGE: Type = Type::of(Base::Range);
+    pub const UNKNOWN: Type = Type::of(Base::Unknown);
+
+    pub const fn of(base: Base) -> Self {
+        Self {
+            base,
+            nullable: false,
         }
     }
 
-    /// Resolves a type from the name written in the source.
-    pub fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "Void" => Type::Void,
-            "Int32" => Type::Int32,
-            "Boolean" => Type::Boolean,
-            "String" => Type::String,
-            _ => return None,
-        })
+    /// The nullable form of this type.
+    pub const fn as_nullable(self) -> Self {
+        Self {
+            base: self.base,
+            nullable: true,
+        }
+    }
+
+    /// The type with its nullability removed, which is what `??` produces.
+    pub const fn without_null(self) -> Self {
+        Self {
+            base: self.base,
+            nullable: false,
+        }
+    }
+
+    pub const fn is_unknown(self) -> bool {
+        matches!(self.base, Base::Unknown)
+    }
+
+    /// Whether a value of this type may be absent.
+    pub const fn admits_null(self) -> bool {
+        self.nullable || matches!(self.base, Base::Null | Base::Unknown)
     }
 
     /// Whether two types are compatible for assignment.
     ///
     /// There are no implicit conversions (`LANGUAGE_SPEC` section 3), so
-    /// compatibility is equality. `Unknown` is compatible with everything to
-    /// avoid cascading errors.
+    /// compatibility is equality, with two exceptions that are not conversions:
+    ///
+    /// - `T` is accepted where `T?` is expected. Widening loses nothing, and
+    ///   the reverse is what `??` exists to make explicit.
+    /// - `null` is accepted by any nullable type.
+    ///
+    /// `Unknown` is compatible with everything, to avoid cascading errors.
     pub fn accepts(self, other: Type) -> bool {
-        self == other || self == Type::Unknown || other == Type::Unknown
+        if self.is_unknown() || other.is_unknown() {
+            return true;
+        }
+
+        // `null` fits anything that admits absence, and nothing else.
+        if matches!(other.base, Base::Null) {
+            return self.admits_null();
+        }
+
+        if self.base != other.base {
+            return false;
+        }
+
+        // `T` fits `T?`; `T?` does not fit `T`.
+        self.nullable || !other.nullable
+    }
+
+    /// The type both operands of `??` or of a `match` share, if any.
+    ///
+    /// Not general unification: with no subtyping until Phase 3, two types are
+    /// either the same base or incompatible. The only real work is deciding
+    /// the nullability of the result.
+    pub fn unify(self, other: Type) -> Option<Type> {
+        if self.is_unknown() {
+            return Some(other);
+        }
+        if other.is_unknown() {
+            return Some(self);
+        }
+
+        if matches!(self.base, Base::Null) {
+            return Some(other.as_nullable());
+        }
+        if matches!(other.base, Base::Null) {
+            return Some(self.as_nullable());
+        }
+
+        if self.base != other.base {
+            return None;
+        }
+
+        Some(Type {
+            base: self.base,
+            nullable: self.nullable || other.nullable,
+        })
     }
 
     /// Range of values representable by the type, for integer literals.
     pub const fn integer_range(self) -> Option<(i128, i128)> {
-        match self {
-            Type::Int32 => Some((i32::MIN as i128, i32::MAX as i128)),
+        match self.base {
+            Base::Int32 => Some((i32::MIN as i128, i32::MAX as i128)),
             _ => None,
         }
+    }
+
+    /// Resolves a non-nullable type from the name written in the source.
+    ///
+    /// Enums are not here: they are declared by the program, so the checker
+    /// resolves them against its own table.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Void" => Type::VOID,
+            "Int32" => Type::INT32,
+            "Boolean" => Type::BOOLEAN,
+            "String" => Type::STRING,
+            _ => return None,
+        })
+    }
+}
+
+/// Names a type for diagnostics.
+///
+/// Enums and functions need the checker's tables to be named, so this is a
+/// free function taking a resolver rather than a method: a type alone does not
+/// know what `Enum(3)` is called.
+pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
+    let base = match ty.base {
+        Base::Void => "Void".to_string(),
+        Base::Int32 => "Int32".to_string(),
+        Base::Boolean => "Boolean".to_string(),
+        Base::String => "String".to_string(),
+        Base::Null => "Null".to_string(),
+        Base::Range => "Range".to_string(),
+        Base::Unknown => "<unknown>".to_string(),
+        Base::Enum(id) => names.enum_name(id),
+        Base::Function(id) => names.function_type(id),
+    };
+
+    if ty.nullable {
+        format!("{base}?")
+    } else {
+        base
+    }
+}
+
+/// What [`describe`] needs in order to name the types it cannot name alone.
+pub trait TypeNames {
+    fn enum_name(&self, id: u32) -> String;
+    fn function_type(&self, id: u32) -> String;
+}
+
+/// The signature of a function type, for closures and declared functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnType {
+    pub params: Vec<Type>,
+    pub returns: Type,
+}
+
+/// A declared enum: a closed set of names, without associated data.
+///
+/// Associated data is the extension Phase 3 adds, per decision D1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumType {
+    pub name: String,
+    pub variants: Vec<String>,
+}
+
+impl EnumType {
+    pub fn discriminant(&self, variant: &str) -> Option<u32> {
+        self.variants.iter().position(|v| v == variant).map(|i| i as u32)
     }
 }
 
@@ -94,12 +254,10 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
         "Char",
         "Object",
         "Never",
-        "Null",
         "List",
         "Map",
         "Set",
         "Array",
-        "Range",
     ];
     // Phase 4 brings errors and resources.
     const PHASE_4: &[&str] = &["Result", "Pointer", "Resource"];
@@ -120,10 +278,10 @@ mod tests {
 
     #[test]
     fn the_subset_types_resolve_by_name() {
-        assert_eq!(Type::from_name("Int32"), Some(Type::Int32));
-        assert_eq!(Type::from_name("Void"), Some(Type::Void));
-        assert_eq!(Type::from_name("Boolean"), Some(Type::Boolean));
-        assert_eq!(Type::from_name("String"), Some(Type::String));
+        assert_eq!(Type::from_name("Int32"), Some(Type::INT32));
+        assert_eq!(Type::from_name("Void"), Some(Type::VOID));
+        assert_eq!(Type::from_name("Boolean"), Some(Type::BOOLEAN));
+        assert_eq!(Type::from_name("String"), Some(Type::STRING));
     }
 
     #[test]
@@ -146,23 +304,79 @@ mod tests {
 
     #[test]
     fn there_are_no_implicit_conversions() {
-        assert!(Type::Int32.accepts(Type::Int32));
-        assert!(!Type::Int32.accepts(Type::String));
-        assert!(!Type::Boolean.accepts(Type::Int32));
+        assert!(Type::INT32.accepts(Type::INT32));
+        assert!(!Type::INT32.accepts(Type::STRING));
+        assert!(!Type::BOOLEAN.accepts(Type::INT32));
     }
 
     #[test]
     fn unknown_is_compatible_with_everything() {
         // Prevents one error from cascading into a dozen derived ones.
-        assert!(Type::Int32.accepts(Type::Unknown));
-        assert!(Type::Unknown.accepts(Type::String));
+        assert!(Type::INT32.accepts(Type::UNKNOWN));
+        assert!(Type::UNKNOWN.accepts(Type::STRING));
     }
 
     #[test]
     fn int32_declares_its_range() {
         assert_eq!(
-            Type::Int32.integer_range(),
+            Type::INT32.integer_range(),
             Some((-2_147_483_648, 2_147_483_647))
         );
+    }
+
+    #[test]
+    fn a_value_widens_to_its_nullable_form() {
+        assert!(Type::STRING.as_nullable().accepts(Type::STRING));
+    }
+
+    #[test]
+    fn a_nullable_value_does_not_narrow_on_its_own() {
+        // This is what `??` exists to make explicit.
+        assert!(!Type::STRING.accepts(Type::STRING.as_nullable()));
+    }
+
+    #[test]
+    fn null_fits_only_what_admits_absence() {
+        assert!(Type::STRING.as_nullable().accepts(Type::NULL));
+        assert!(!Type::STRING.accepts(Type::NULL));
+        assert!(!Type::INT32.accepts(Type::NULL));
+    }
+
+    #[test]
+    fn nullability_of_different_bases_does_not_make_them_compatible() {
+        assert!(!Type::STRING.as_nullable().accepts(Type::INT32.as_nullable()));
+    }
+
+    #[test]
+    fn unifying_keeps_nullability_if_either_side_has_it() {
+        assert_eq!(
+            Type::STRING.unify(Type::STRING.as_nullable()),
+            Some(Type::STRING.as_nullable())
+        );
+        assert_eq!(Type::STRING.unify(Type::STRING), Some(Type::STRING));
+    }
+
+    #[test]
+    fn unifying_with_null_yields_the_nullable_form() {
+        assert_eq!(
+            Type::STRING.unify(Type::NULL),
+            Some(Type::STRING.as_nullable())
+        );
+    }
+
+    #[test]
+    fn unifying_different_bases_fails() {
+        assert_eq!(Type::STRING.unify(Type::INT32), None);
+    }
+
+    #[test]
+    fn an_enum_knows_the_discriminant_of_its_variants() {
+        let e = EnumType {
+            name: "Direction".into(),
+            variants: vec!["North".into(), "South".into()],
+        };
+        assert_eq!(e.discriminant("North"), Some(0));
+        assert_eq!(e.discriminant("South"), Some(1));
+        assert_eq!(e.discriminant("Up"), None);
     }
 }
