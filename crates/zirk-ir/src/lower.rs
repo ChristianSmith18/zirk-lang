@@ -19,8 +19,16 @@ use zirk_sema::{Base, CheckedProgram, Type};
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     let mut module = Module::default();
 
+    // Default values are written in the declaration but evaluated at the call
+    // site, so the lowering needs the declarations while lowering the calls.
+    let declarations: HashMap<&str, &ast::FnDecl> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.name.as_str(), f))
+        .collect();
+
     for function in &program.functions {
-        let lowering = FunctionLowering::new(&mut module, checked);
+        let lowering = FunctionLowering::new(&mut module, checked, &declarations);
         let (lowered, lifted) = lowering.run(function);
         module.functions.push(lowered);
         // Lambdas become module functions of their own: the closure value only
@@ -59,6 +67,7 @@ fn ir_type(ty: Type) -> IrType {
 struct FunctionLowering<'a> {
     module: &'a mut Module,
     checked: &'a CheckedProgram,
+    declarations: &'a HashMap<&'a str, &'a ast::FnDecl>,
 
     slots: Vec<Slot>,
     blocks: Vec<Block>,
@@ -86,10 +95,15 @@ struct LoopTargets {
 }
 
 impl<'a> FunctionLowering<'a> {
-    fn new(module: &'a mut Module, checked: &'a CheckedProgram) -> Self {
+    fn new(
+        module: &'a mut Module,
+        checked: &'a CheckedProgram,
+        declarations: &'a HashMap<&'a str, &'a ast::FnDecl>,
+    ) -> Self {
         Self {
             module,
             checked,
+            declarations,
             slots: Vec::new(),
             blocks: Vec::new(),
             current: BlockId(0),
@@ -244,13 +258,21 @@ impl<'a> FunctionLowering<'a> {
         self.current = entry;
         self.scopes.push(HashMap::new());
 
+        // The parameter types come from the checker, not from what was
+        // written: `name?: T` is declared as `T` and resolved as `T?`, and the
+        // slot has to hold the resolved one.
+        let resolved: Vec<IrType> = self
+            .checked
+            .functions
+            .get(&function.name.name)
+            .map(|s| s.params.iter().map(|p| ir_type(p.ty)).collect())
+            .expect("the checker records every declared function");
+
         let params: Vec<SlotId> = function
             .params
             .iter()
-            .map(|p| {
-                let ty = self.ir_type_from_ref(&p.ty);
-                self.declare_slot(&p.name.name, ty, p.name.span)
-            })
+            .zip(resolved)
+            .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span))
             .collect();
 
         self.lower_block(&function.body);
@@ -756,8 +778,9 @@ impl<'a> FunctionLowering<'a> {
             .expect("the checker records every lambda it accepted");
 
         let capture_types: Vec<IrType> = info.captures.iter().map(|c| ir_type(c.ty)).collect();
-        let param_types: Vec<IrType> = expr.params.iter().map(|p| self.ir_type_from_ref(&p.ty)).collect();
-        let returns = self.ir_type_from_ref(&expr.return_type);
+        let signature = &self.checked.fn_types[info.fn_type as usize];
+        let param_types: Vec<IrType> = signature.params.iter().map(|t| ir_type(*t)).collect();
+        let returns = ir_type(signature.returns);
 
         let name = format!("<lambda>#{}", self.module.closures.len());
         let id = self.module.closures.len() as u32;
@@ -807,7 +830,7 @@ impl<'a> FunctionLowering<'a> {
         types: &[IrType],
         returns: IrType,
     ) -> Function {
-        let mut inner = FunctionLowering::new(self.module, self.checked);
+        let mut inner = FunctionLowering::new(self.module, self.checked, self.declarations);
         inner.return_type = returns;
 
         let entry = inner.new_block();
@@ -1129,20 +1152,81 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
-    /// Lowers the arguments of a call into the parameter types.
+    /// Lowers the arguments of a call into the parameters they fill.
+    ///
+    /// Named arguments are placed by name and omitted ones take their default,
+    /// so the call reaching the IR always has the declared arity. That is
+    /// decision D4: neither the IR nor LLVM ever sees a named or missing
+    /// argument.
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
-        let expected: Vec<IrType> = self
+        let name = callee_name(call);
+        let signature = self
             .checked
             .functions
-            .get(callee_name(call))
-            .map(|s| s.params.iter().map(|p| ir_type(p.ty)).collect())
+            .get(name)
             .expect("a verified program only calls declared functions");
-
-        call.args
+        let params: Vec<(String, IrType)> = signature
+            .params
             .iter()
-            .zip(expected)
-            .map(|(a, ty)| self.lower_expr_as(&a.value, ty))
+            .map(|p| (p.name.clone(), ir_type(p.ty)))
+            .collect();
+
+        let mut slots: Vec<Option<Operand>> = vec![None; params.len()];
+        let mut next = 0usize;
+
+        for arg in &call.args {
+            let index = match &arg.name {
+                Some(named) => params
+                    .iter()
+                    .position(|(name, _)| *name == named.name)
+                    .expect("the checker resolved every named argument"),
+                None => {
+                    while next < slots.len() && slots[next].is_some() {
+                        next += 1;
+                    }
+                    let index = next;
+                    next += 1;
+                    index
+                }
+            };
+            slots[index] = Some(self.lower_expr_as(&arg.value, params[index].1));
+        }
+
+        let declaration = self.declarations.get(name).copied();
+
+        slots
+            .into_iter()
+            .enumerate()
+            .map(|(index, filled)| match filled {
+                Some(operand) => operand,
+                None => self.lower_default(declaration, index, params[index].1, call.span),
+            })
             .collect()
+    }
+
+    /// The value a parameter takes when the call omits it.
+    fn lower_default(
+        &mut self,
+        declaration: Option<&ast::FnDecl>,
+        index: usize,
+        ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let param = declaration
+            .and_then(|d| d.params.get(index))
+            .expect("the checker rejects a call missing a parameter with no default");
+
+        match &param.default {
+            Some(expr) => self.lower_expr_as(expr, ty),
+            // An optional parameter with no default is absent, and absence is
+            // `null`: the checker made its type nullable for exactly this.
+            None => {
+                let IrType::Nullable(base) = ty else {
+                    unreachable!("an omitted parameter without a default is nullable")
+                };
+                self.emit(InstKind::NullValue(base), ty, span)
+            }
+        }
     }
 
     /// Whether a call goes through a closure value rather than a name.

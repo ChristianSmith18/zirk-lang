@@ -261,6 +261,16 @@ impl<'a> Checker<'a> {
             ty = ty.as_nullable();
         }
 
+        // A variadic collects its values into a sequence, and no collection
+        // type exists until Phase 3 brings `List`.
+        if p.variadic {
+            self.not_lowered(
+                p.span,
+                "a variadic parameter",
+                "declare the parameters explicitly until collections arrive",
+            );
+        }
+
         ParamInfo {
             name: p.name.name.clone(),
             ty,

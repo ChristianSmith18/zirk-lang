@@ -1,0 +1,16 @@
+fn label(name: String, suffix?: String): String {
+    return suffix ?? name;
+}
+
+fn describe(n: Int32, unit: String = "veces"): String {
+    return unit;
+}
+
+fn main(): Void {
+    stdout.println(label("uno"));
+    stdout.println(label("dos", "DOS"));
+    stdout.println(label(name: "tres"));
+    stdout.println(describe(1));
+    stdout.println(describe(2, unit: "metros"));
+    stdout.println(describe(unit: "kilos", n: 3));
+}

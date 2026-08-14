@@ -1,0 +1,7 @@
+fn greet(name: String): String {
+    return name;
+}
+
+fn main(): Void {
+    stdout.println(greet(nombre: "Ana"));
+}
