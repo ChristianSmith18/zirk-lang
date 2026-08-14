@@ -48,7 +48,10 @@ impl<'a> Parser<'a> {
         self.tokens
             .get(self.pos)
             .map(|t| t.span)
-            .unwrap_or_else(|| Span::empty(self.source.text().len() as u32))
+            .unwrap_or_else(|| {
+                let end = self.source.text().len() as u32;
+                self.source.span(end, end)
+            })
     }
 
     fn at_eof(&self) -> bool {

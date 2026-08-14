@@ -21,7 +21,7 @@ mod source;
 
 pub use color::Color;
 pub use render::RenderStyle;
-pub use source::{SourceFile, Span};
+pub use source::{FileId, SourceFile, SourceMap, Span};
 
 /// Severity of a diagnostic.
 ///
