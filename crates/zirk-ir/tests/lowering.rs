@@ -4,7 +4,7 @@
 //! expected shape, and that it passes the verifier. The second check is what
 //! catches structural bugs the first one would let through.
 
-use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::*;
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
@@ -12,11 +12,13 @@ use zirk_sema::check;
 
 /// Runs the full frontend and lowers, asserting the IR is well formed.
 fn compile(source_text: &str) -> Module {
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    let checked = check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),
@@ -418,11 +420,13 @@ fn a_conversion_requires_allocation() {
 #[test]
 fn every_instruction_keeps_its_source_location() {
     let source_text = "fn main(): Void {\n    mut x: Int32 = 42;\n}";
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    let checked = check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
     let module = lower(&program, &checked);
 
     let main = module.function("main").expect("main exists");

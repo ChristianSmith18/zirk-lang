@@ -11,7 +11,7 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{Base, EnumType, FnType, Type, TypeNames, describe, pending_type};
 use std::collections::HashMap;
 use zirk_ast::*;
-use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
 /// The result of checking, for later stages.
 #[derive(Debug, Default)]
@@ -49,8 +49,8 @@ pub struct Capture {
 }
 
 /// Checks a program, accumulating diagnostics in the sink.
-pub fn check(source: &SourceFile, program: &Program, sink: &mut DiagnosticSink) -> CheckedProgram {
-    Checker::new(source, sink).run(program)
+pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) -> CheckedProgram {
+    Checker::new(sources, sink).run(program)
 }
 
 /// Names types for diagnostics, given the checker's tables.
@@ -77,7 +77,7 @@ impl TypeNames for Names<'_> {
 }
 
 struct Checker<'a> {
-    source: &'a SourceFile,
+    sources: &'a SourceMap,
     sink: &'a mut DiagnosticSink,
     scopes: Scopes,
     functions: HashMap<String, Signature>,
@@ -85,6 +85,8 @@ struct Checker<'a> {
     fn_types: Vec<FnType>,
     lambdas: HashMap<Span, LambdaInfo>,
     matches: HashMap<Span, Type>,
+    /// Per file, the names it imported: bound name to original name.
+    imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Return type of the function or lambda being checked.
     current_return: Type,
     /// How many loops enclose the statement being checked.
@@ -96,9 +98,9 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(source: &'a SourceFile, sink: &'a mut DiagnosticSink) -> Self {
+    fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
         Self {
-            source,
+            sources,
             sink,
             scopes: Scopes::new(),
             functions: HashMap::new(),
@@ -106,6 +108,7 @@ impl<'a> Checker<'a> {
             fn_types: Vec::new(),
             lambdas: HashMap::new(),
             matches: HashMap::new(),
+            imported: HashMap::new(),
             current_return: Type::VOID,
             loop_depth: 0,
             capture_stack: Vec::new(),
@@ -123,8 +126,8 @@ impl<'a> Checker<'a> {
         help: Option<String>,
     ) {
         let mut d = Diagnostic::error(code, message)
-            .at(self.source.location(span))
-            .with_snippet(self.source.snippet(span))
+            .at(self.sources.location(span))
+            .with_snippet(self.sources.snippet(span))
             .with_cause(cause);
         if let Some(help) = help {
             d = d.with_help(help);
@@ -146,23 +149,7 @@ impl<'a> Checker<'a> {
     // --- Program ----------------------------------------------------------
 
     fn run(mut self, program: &Program) -> CheckedProgram {
-        // Module resolution is its own pass and does not exist yet, so an
-        // `import` would bind no name and every use of it would be reported as
-        // undeclared — an error that points at the wrong place.
-        for import in &program.imports {
-            self.not_lowered(
-                import.span,
-                "`import`",
-                "put everything in one file until module resolution lands",
-            );
-        }
-        for use_decl in &program.uses {
-            self.not_lowered(
-                use_decl.span,
-                "`use`",
-                "name what you need explicitly until module resolution lands",
-            );
-        }
+        self.record_imports(program);
 
         // Enums come first: a signature may name one.
         for e in &program.enums {
@@ -189,6 +176,71 @@ impl<'a> Checker<'a> {
             lambdas: self.lambdas,
             matches: self.matches,
         }
+    }
+
+    /// Notes which names each file brought in with `import`.
+    ///
+    /// A name is visible in a file when it was declared there, or when it is
+    /// `share`d and that file imported it. Both halves are needed: importing
+    /// something private must fail, and so must naming something shared that
+    /// was never imported.
+    fn record_imports(&mut self, program: &Program) {
+        for import in &program.imports {
+            for name in &import.names {
+                // A standard module is not a file of the crate: `std.io` is
+                // still the intrinsic of Phase 1 (design D4).
+                if matches!(import.source, ImportSource::Std { .. }) {
+                    continue;
+                }
+
+                self.imported
+                    .entry(import.span.file)
+                    .or_default()
+                    .insert(name.bound_name().name.clone(), name.name.name.clone());
+            }
+        }
+
+        // `use` only enables globals already brought in; naming something it
+        // never imported is what the requirement rejects.
+        for use_decl in &program.uses {
+            let known = self
+                .imported
+                .get(&use_decl.span.file)
+                .is_some_and(|names| names.contains_key(&use_decl.name.name));
+
+            if !known && Type::from_name(&use_decl.name.name).is_none() {
+                self.error(
+                    codes::UNDECLARED_NAME,
+                    use_decl.name.span,
+                    format!("`{}` is not available in this file", use_decl.name.name),
+                    "`use` enables a name the file already imported",
+                    Some(format!("add `import {{ {} }} from ...` first", use_decl.name.name)),
+                );
+            }
+        }
+    }
+
+    /// Reports naming a declaration that another file keeps to itself.
+    ///
+    /// Visibility is binary in this phase: a declaration is private to its file
+    /// unless marked `share`. The three levels of
+    /// `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and are Phase 3.
+    fn require_visible(&mut self, owner: Span, shared: bool, used: &Ident, what: &str) {
+        if owner.file == used.span.file || shared {
+            return;
+        }
+
+        let keyword = if what == "enum" { "enum" } else { "fn" };
+
+        let file = self.sources.file(owner.file).name().to_string();
+        let line = self.sources.location(owner).line;
+        self.error(
+            codes::UNDECLARED_NAME,
+            used.span,
+            format!("{what} `{}` is not accessible from this file", used.name),
+            format!("it is declared on line {line} of `{file}` without `share`"),
+            Some(format!("mark it `share {keyword} {}` to publish it", used.name)),
+        );
     }
 
     fn declare_enum(&mut self, decl: &EnumDecl) {
@@ -221,6 +273,8 @@ impl<'a> Checker<'a> {
         self.enums.push(EnumType {
             name: decl.name.name.clone(),
             variants,
+            shared: decl.shared,
+            span: decl.name.span,
         });
     }
 
@@ -235,11 +289,12 @@ impl<'a> Checker<'a> {
             name: f.name.name.clone(),
             params,
             returns: self.resolve_type(&f.return_type),
+            shared: f.shared,
             span: f.name.span,
         };
 
         if let Some(previous) = self.functions.get(&signature.name) {
-            let line = self.source.location(previous.span).line;
+            let line = self.sources.location(previous.span).line;
             self.error(
                 codes::DUPLICATE_FUNCTION,
                 f.name.span,
@@ -285,7 +340,7 @@ impl<'a> Checker<'a> {
         let Some(main) = self.functions.get("main").cloned() else {
             self.error(
                 codes::MISSING_ENTRYPOINT,
-                self.source.span(0, 0),
+                self.sources.entry().span(0, 0),
                 "the program has no entrypoint",
                 "no `main` function was found in the file",
                 Some("add `fn main(): Void { }`".into()),
@@ -315,10 +370,16 @@ impl<'a> Checker<'a> {
         let base = if let Some(ty) = Type::from_name(&reference.name) {
             Some(ty)
         } else {
-            self.enums
-                .iter()
-                .position(|e| e.name == reference.name)
-                .map(|i| Type::of(Base::Enum(i as u32)))
+            match self.enums.iter().position(|e| e.name == reference.name) {
+                Some(index) => {
+                    let declared = self.enums[index].span;
+                    let shared = self.enums[index].shared;
+                    let named = Ident::new(reference.name.clone(), reference.span);
+                    self.require_visible(declared, shared, &named, "enum");
+                    Some(Type::of(Base::Enum(index as u32)))
+                }
+                None => None,
+            }
         };
 
         if let Some(ty) = base {
@@ -545,7 +606,7 @@ impl<'a> Checker<'a> {
         // A closure captures by value, so writing to a captured name would
         // silently update a copy. Decision D2.
         if resolved.captured {
-            let line = self.source.location(resolved.binding.span).line;
+            let line = self.sources.location(resolved.binding.span).line;
             self.error(
                 codes::CAPTURED_MUTATION,
                 stmt.target.span,
@@ -560,7 +621,7 @@ impl<'a> Checker<'a> {
         }
 
         if resolved.binding.mutability == Mutability::Immutable {
-            let line = self.source.location(resolved.binding.span).line;
+            let line = self.sources.location(resolved.binding.span).line;
             self.error(
                 codes::ASSIGN_TO_IMMUTABLE,
                 stmt.target.span,
@@ -815,7 +876,7 @@ impl<'a> Checker<'a> {
         };
 
         if !resolved.binding.initialized {
-            let line = self.source.location(resolved.binding.span).line;
+            let line = self.sources.location(resolved.binding.span).line;
             self.error(
                 codes::USE_BEFORE_INITIALIZATION,
                 ident.span,
@@ -1373,6 +1434,7 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&callee.name).is_none()
             && let Some(signature) = self.functions.get(&callee.name).cloned()
         {
+            self.require_visible(signature.span, signature.shared, callee, "function");
             return self.check_direct_call(expr, &signature);
         }
 

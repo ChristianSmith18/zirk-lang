@@ -466,3 +466,126 @@ fn help_and_version_succeed() {
         assert!(!output.stdout.is_empty());
     }
 }
+
+// --- Crates of several files ------------------------------------------------
+
+/// Writes a crate of several files and compiles its entry point.
+fn crate_of(name: &str, files: &[(&str, &str)]) -> Output {
+    let dir = workspace(name);
+
+    for (path, contents) in files {
+        let target = dir.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).expect("create the directory");
+        }
+        std::fs::write(&target, contents).expect("write the source");
+    }
+
+    let output = Command::new(compiler())
+        .arg("run")
+        .arg(files[0].0)
+        .current_dir(&dir)
+        .output()
+        .expect("run the compiler");
+
+    Output {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[test]
+fn a_crate_of_several_files_compiles_and_runs() {
+    let output = crate_of(
+        "modules_shared",
+        &[
+            (
+                "main.zrk",
+                "import { Role, describe } from \"./domain/user\";\n\
+                 fn main(): Void {\n\
+                 stdout.println(describe(Role.Admin));\n\
+                 stdout.println(describe(Role.Guest));\n\
+                 }\n",
+            ),
+            (
+                "domain/user.zrk",
+                "share enum Role { Admin, Guest }\n\
+                 share fn describe(r: Role): String {\n\
+                 return match r {\n\
+                 Role.Admin => \"administrador\",\n\
+                 Role.Guest => \"invitado\"\n\
+                 };\n\
+                 }\n",
+            ),
+        ],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "administrador\ninvitado\n");
+}
+
+#[test]
+fn a_declaration_without_share_is_private_to_its_file() {
+    let output = crate_of(
+        "modules_private",
+        &[
+            (
+                "main.zrk",
+                "import { helper } from \"./other\";\n\
+                 fn main(): Void { stdout.println(helper()); }\n",
+            ),
+            ("other.zrk", "fn helper(): String { return \"x\"; }\n"),
+        ],
+    );
+
+    assert_ne!(output.status, 0, "the private name should not resolve");
+    assert!(
+        output.stderr.contains("not accessible from this file"),
+        "stderr:\n{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn two_files_may_import_from_each_other() {
+    // Mutual imports are a normal program: nothing in this phase depends on the
+    // order files are read. What matters is that each is read once.
+    let output = crate_of(
+        "modules_mutual",
+        &[
+            (
+                "a.zrk",
+                "import { b } from \"./b\";\n\
+                 share fn a(): String { return b(); }\n\
+                 fn main(): Void { stdout.println(a()); }\n",
+            ),
+            (
+                "b.zrk",
+                "import { a } from \"./a\";\n\
+                 share fn b(): String { return \"desde b\"; }\n",
+            ),
+        ],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "desde b\n");
+}
+
+#[test]
+fn a_missing_imported_file_is_reported_at_the_import() {
+    let output = crate_of(
+        "modules_missing",
+        &[(
+            "main.zrk",
+            "import { thing } from \"./nowhere\";\nfn main(): Void { }\n",
+        )],
+    );
+
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.contains("nowhere.zrk"),
+        "the diagnostic must name the file it could not read:\n{}",
+        output.stderr
+    );
+}

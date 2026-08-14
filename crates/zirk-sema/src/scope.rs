@@ -131,6 +131,8 @@ pub struct Signature {
     pub name: String,
     pub params: Vec<ParamInfo>,
     pub returns: Type,
+    /// Marked `share`, so files that import it may name it.
+    pub shared: bool,
     pub span: Span,
 }
 

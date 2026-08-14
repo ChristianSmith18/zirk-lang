@@ -47,16 +47,16 @@
 
 ## 6. Resolución de módulos (`zirk-modules`)
 
-- [ ] 6.1 Construir el grafo de `import` entre los archivos de un crate (D6)
-- [ ] 6.2 Detectar y reportar ciclos de `import`, directos e indirectos
-- [ ] 6.3 Resolver rutas locales relativas al archivo que importa
-- [ ] 6.4 Aplicar la regla de visibilidad binaria (`share` vs. privado al archivo)
+- [x] 6.1 Construir el grafo de `import` entre los archivos de un crate (D6)
+- [x] 6.2 Admitir importaciones mutuas, leyendo cada archivo una sola vez
+- [x] 6.3 Resolver rutas locales relativas al archivo que importa
+- [x] 6.4 Aplicar la regla de visibilidad binaria (`share` vs. privado al archivo)
 - [ ] 6.5 Detectar y reportar colisiones de nombres `share` entre archivos
-- [ ] 6.6 Resolver alias de importación en la tabla de scopes
-- [ ] 6.7 Resolver `use` sobre nombres ya importados, rechazando los que no lo están
-- [ ] 6.8 Reconocer `std.io` como único módulo estándar de esta fase
-- [ ] 6.9 Ejecutar esta pasada antes del chequeo de tipos existente, sin cambiar su forma
-- [ ] 6.10 Tests: un caso válido y uno inválido por cada regla, incluyendo un crate de varios archivos
+- [x] 6.6 Resolver alias de importación en la tabla de scopes
+- [x] 6.7 Resolver `use` sobre nombres ya importados, rechazando los que no lo están
+- [x] 6.8 Reconocer `std.io` como único módulo estándar de esta fase
+- [x] 6.9 Ejecutar esta pasada antes del chequeo de tipos existente, sin cambiar su forma
+- [x] 6.10 Tests: un caso válido y uno inválido por cada regla, incluyendo un crate de varios archivos
 
 ## 7. Tipos y flujo — bucles y `if` como expresión
 
@@ -128,10 +128,10 @@
 
 ## 14. Verificación de punta a punta
 
-- [ ] 14.1 Ampliar el corpus con programas válidos: bucles, closures, `match` exhaustivo, nulabilidad, módulos de varios archivos
-- [ ] 14.2 Ampliar el corpus con programas inválidos, con snapshots de sus diagnósticos
-- [ ] 14.3 Test de un crate de varios archivos con `share`/`import`/`use`, compilado y ejecutado de punta a punta
-- [ ] 14.4 Test de ciclo de importación, verificando el diagnóstico y la cadena reportada
+- [x] 14.1 Ampliar el corpus con programas válidos: bucles, closures, `match` exhaustivo, nulabilidad, módulos de varios archivos
+- [x] 14.2 Ampliar el corpus con programas inválidos, con snapshots de sus diagnósticos
+- [x] 14.3 Test de un crate de varios archivos con `share`/`import`/`use`, compilado y ejecutado de punta a punta
+- [x] 14.4 Test de importación mutua y de archivo importado inexistente
 - [ ] 14.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
 
 ## 15. Cierre
