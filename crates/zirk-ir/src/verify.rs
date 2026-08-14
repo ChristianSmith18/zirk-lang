@@ -225,7 +225,28 @@ fn verify_instruction(
             }
         },
 
-        InstKind::Println(_) => expect(inst.ty, IrType::Void, position, "Println", report),
+        InstKind::ToString(operand) => {
+            expect(inst.ty, IrType::String, position, "ToString", report);
+            if let Some(value) = type_of(operand)
+                && value == IrType::Void
+            {
+                report(format!("{position}: ToString applied to Void"));
+            }
+        }
+
+        InstKind::Println(operand) => {
+            expect(inst.ty, IrType::Void, position, "Println", report);
+            // The runtime reads the operand as a string handle: any other type
+            // would be interpreted as a pointer to an arbitrary address.
+            if let Some(value) = type_of(operand)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: Println receives {}, expected String",
+                    value.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -312,6 +333,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Unary { operand, .. } => vec![*operand],
         InstKind::Binary { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
+        InstKind::ToString(operand) => vec![*operand],
         InstKind::Println(operand) => vec![*operand],
     }
 }

@@ -1,0 +1,25 @@
+// Los cinco aritméticos, los seis comparadores y los tres lógicos.
+fn main(): Void {
+    inmut A: Int32 = 17;
+    inmut B: Int32 = 5;
+
+    stdout.println(A + B);
+    stdout.println(A - B);
+    stdout.println(A * B);
+    stdout.println(A / B);
+    stdout.println(A % B);
+    stdout.println(-A);
+
+    stdout.println(A < B);
+    stdout.println(A <= B);
+    stdout.println(A > B);
+    stdout.println(A >= B);
+    stdout.println(A == B);
+    stdout.println(A != B);
+
+    mut t: Boolean = true;
+    mut f: Boolean = false;
+    stdout.println(t && f);
+    stdout.println(t || f);
+    stdout.println(!t);
+}

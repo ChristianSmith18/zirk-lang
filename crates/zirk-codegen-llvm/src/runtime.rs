@@ -20,6 +20,12 @@ pub mod symbols {
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";
     /// Builds a `String` from UTF-8 bytes and a length.
     pub const STR_FROM_UTF8: &str = "zirk_str_from_utf8";
+    /// Converts an `Int32` into a `String`.
+    pub const STR_FROM_I32: &str = "zirk_str_from_i32";
+    /// Converts a `Boolean` into a `String`.
+    pub const STR_FROM_BOOL: &str = "zirk_str_from_bool";
+    /// Structural equality of two strings.
+    pub const STR_EQ: &str = "zirk_str_eq";
     /// Writes a `String` to standard output with a line break.
     pub const IO_PRINTLN: &str = "zirk_io_println";
     /// Reports an arithmetic overflow and terminates.
@@ -33,6 +39,9 @@ pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
+    pub str_from_i32: FunctionValue<'ctx>,
+    pub str_from_bool: FunctionValue<'ctx>,
+    pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
     pub overflow: FunctionValue<'ctx>,
     pub division_by_zero: FunctionValue<'ctx>,
@@ -52,6 +61,26 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let str_from_utf8 = module.add_function(
         symbols::STR_FROM_UTF8,
         ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+
+    let str_from_i32 = module.add_function(
+        symbols::STR_FROM_I32,
+        ptr.fn_type(&[context.i32_type().into()], false),
+        external,
+    );
+
+    let str_from_bool = module.add_function(
+        symbols::STR_FROM_BOOL,
+        ptr.fn_type(&[context.bool_type().into()], false),
+        external,
+    );
+
+    let str_eq = module.add_function(
+        symbols::STR_EQ,
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), ptr.into()], false),
         external,
     );
 
@@ -82,6 +111,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         init,
         shutdown,
         str_from_utf8,
+        str_from_i32,
+        str_from_bool,
+        str_eq,
         io_println,
         overflow,
         division_by_zero,

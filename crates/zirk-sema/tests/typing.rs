@@ -334,6 +334,10 @@ fn invalid_literal_out_of_range() {
 
 #[test]
 fn valid_println_accepts_any_type() {
+    // The checker admits any type. Turning the value into a `String` is the
+    // lowering's job, and the IR verifier enforces that `Println` only ever
+    // receives one — this test used to be read as if it covered that too, and
+    // it never did: a value reaching the runtime raw crashed the program.
     accepted_body("stdout.println(\"a\");\nstdout.println(1);\nstdout.println(true);");
 }
 
