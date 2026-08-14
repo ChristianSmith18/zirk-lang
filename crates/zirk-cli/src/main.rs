@@ -104,6 +104,7 @@ fn dispatch(args: &[String]) -> i32 {
 
 fn compile(args: &[String], action: Action) -> i32 {
     let json = args.iter().any(|a| a == "--json");
+    let color = driver::resolve_color(color_choice(args).as_deref());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     if files.is_empty() {
@@ -131,7 +132,7 @@ fn compile(args: &[String], action: Action) -> i32 {
     // Diagnostics go to standard error so they never mix with the output of the
     // compiled program.
     if !compilation.sink.is_empty() {
-        eprint!("{}", driver::render(&compilation.sink, json));
+        eprint!("{}", driver::render(&compilation.sink, json, color));
     }
 
     let Some(executable) = compilation.executable else {
@@ -146,11 +147,17 @@ fn compile(args: &[String], action: Action) -> i32 {
         Action::Run => match driver::run(&executable) {
             Ok(code) => code,
             Err(diagnostic) => {
-                eprint!("{}", diagnostic.render());
+                eprint!("{}", diagnostic.render_colored(color));
                 1
             }
         },
     }
+}
+
+/// Reads `--color=<choice>` from the arguments.
+fn color_choice(args: &[String]) -> Option<String> {
+    args.iter()
+        .find_map(|a| a.strip_prefix("--color=").map(|c| c.to_string()))
 }
 
 /// Emits a diagnostic of the CLI itself and returns the exit code.
@@ -159,7 +166,9 @@ fn fail(code: zirk_diagnostics::Code, message: &str, cause: &str, help: Option<&
     if let Some(help) = help {
         diagnostic = diagnostic.with_help(help);
     }
-    eprint!("{}", diagnostic.render());
+    // The CLI's own diagnostics get the same treatment as the compiler's: the
+    // reader cannot tell which layer produced them, and should not have to.
+    eprint!("{}", diagnostic.render_colored(driver::resolve_color(None)));
     1
 }
 
@@ -174,6 +183,7 @@ fn help() {
     println!();
     println!("Options:");
     println!("      --json         emit diagnostics in structured form");
+    println!("      --color=<when> always, never or auto (default: auto)");
     println!("  -V, --version      show the version");
     println!("      --list-targets list the supported targets");
     println!("  -h, --help         show this help");
