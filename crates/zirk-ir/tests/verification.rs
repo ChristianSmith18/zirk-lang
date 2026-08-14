@@ -25,6 +25,7 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
             span: S,
         }],
         strings: Vec::new(),
+        closures: Vec::new(),
     }
 }
 
@@ -276,6 +277,7 @@ fn a_binary_operation_between_different_types_is_rejected() {
             span: S,
         }],
         strings: vec!["x".into()],
+        closures: Vec::new(),
     };
 
     let errors = errors_of(&module);

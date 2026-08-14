@@ -20,8 +20,12 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     let mut module = Module::default();
 
     for function in &program.functions {
-        let lowered = FunctionLowering::new(&mut module, checked).run(function);
+        let lowering = FunctionLowering::new(&mut module, checked);
+        let (lowered, lifted) = lowering.run(function);
         module.functions.push(lowered);
+        // Lambdas become module functions of their own: the closure value only
+        // carries a pointer to one plus the captures. Decision D10.
+        module.functions.extend(lifted);
     }
 
     module
@@ -68,6 +72,11 @@ struct FunctionLowering<'a> {
     return_type: IrType,
     /// Where `break` and `continue` jump, innermost loop last.
     loops: Vec<LoopTargets>,
+    /// Lambda bodies lifted out of the function being lowered.
+    lifted: Vec<Function>,
+    /// The type of each value emitted, so a destination can ask for it instead
+    /// of deriving it from the tree a second time.
+    value_types: HashMap<ValueId, IrType>,
 }
 
 /// The two blocks a loop exposes to the jumps inside it.
@@ -88,6 +97,8 @@ impl<'a> FunctionLowering<'a> {
             scopes: Vec::new(),
             return_type: IrType::Void,
             loops: Vec::new(),
+            lifted: Vec::new(),
+            value_types: HashMap::new(),
         }
     }
 
@@ -115,6 +126,7 @@ impl<'a> FunctionLowering<'a> {
     /// Appends an instruction that produces a value.
     fn emit(&mut self, kind: InstKind, ty: IrType, span: Span) -> Operand {
         let result = self.new_value();
+        self.value_types.insert(result, ty);
         let current = self.current;
         self.block_mut(current).instructions.push(Instruction {
             result: Some(result),
@@ -225,7 +237,7 @@ impl<'a> FunctionLowering<'a> {
 
     // --- Function ---------------------------------------------------------
 
-    fn run(mut self, function: &ast::FnDecl) -> Function {
+    fn run(mut self, function: &ast::FnDecl) -> (Function, Vec<Function>) {
         self.return_type = self.ir_type_from_ref(&function.return_type);
 
         let entry = self.new_block();
@@ -250,7 +262,8 @@ impl<'a> FunctionLowering<'a> {
 
         self.scopes.pop();
 
-        Function {
+        let lifted = std::mem::take(&mut self.lifted);
+        let lowered = Function {
             name: function.name.name.clone(),
             params,
             return_type: self.return_type,
@@ -258,7 +271,9 @@ impl<'a> FunctionLowering<'a> {
             blocks: self.blocks,
             entry,
             span: function.span,
-        }
+        };
+
+        (lowered, lifted)
     }
 
     fn lower_block(&mut self, block: &ast::Block) {
@@ -302,12 +317,13 @@ impl<'a> FunctionLowering<'a> {
             (operand, e.span())
         });
 
-        let ty = match annotated {
-            Some(ty) => ty,
-            None => {
-                let (_, span) = value.expect("without a type there is always an initializer");
-                self.type_of(stmt.init.as_ref().expect("initializer"), span)
-            }
+        let ty = match (annotated, value) {
+            (Some(ty), _) => ty,
+            // Without an annotation the type is the one the initializer
+            // produced. Asking the value rather than the tree is what lets a
+            // lambda be inferred: its closure type only exists once lowered.
+            (None, Some((operand, _))) => self.type_of_operand(operand),
+            (None, None) => unreachable!("without a type there is always an initializer"),
         };
 
         let slot = self.declare_slot(&stmt.name.name, ty, stmt.name.span);
@@ -608,6 +624,23 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
+            // Calling a closure value goes through the value, not a name.
+            ast::Expr::Call(e) if self.is_closure_call(e) => {
+                let callee = self.lower_expr(&e.callee);
+                let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
+                    unreachable!("checked by `is_closure_call`")
+                };
+                let expected = self.module.closures[id as usize].params.clone();
+                let returns = self.module.closures[id as usize].returns;
+                let args = e
+                    .args
+                    .iter()
+                    .zip(expected)
+                    .map(|(a, ty)| self.lower_expr_as(&a.value, ty))
+                    .collect();
+                self.emit(InstKind::CallClosure { id, callee, args }, returns, span)
+            }
+
             ast::Expr::Call(e) => {
                 let name = callee_name(e);
                 let args = self.lower_args(e);
@@ -636,9 +669,11 @@ impl<'a> FunctionLowering<'a> {
 
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
+            ast::Expr::Lambda(e) => self.lower_lambda(e, span),
+
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
-            ast::Expr::Null(_) | ast::Expr::Range(_) | ast::Expr::Lambda(_) => {
+            ast::Expr::Null(_) | ast::Expr::Range(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
@@ -705,6 +740,112 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), result_type, span)
+    }
+
+    /// Lowers a lambda into a module function plus a closure value.
+    ///
+    /// The body becomes a function whose leading parameters are the captures,
+    /// and the value pairs a pointer to it with the captured values themselves.
+    /// Nothing is allocated: a closure cannot escape in this phase, so the
+    /// value lives wherever its slot does. Decision D10.
+    fn lower_lambda(&mut self, expr: &ast::LambdaExpr, span: Span) -> Operand {
+        let info = self
+            .checked
+            .lambdas
+            .get(&expr.span)
+            .expect("the checker records every lambda it accepted");
+
+        let capture_types: Vec<IrType> = info.captures.iter().map(|c| ir_type(c.ty)).collect();
+        let param_types: Vec<IrType> = expr.params.iter().map(|p| self.ir_type_from_ref(&p.ty)).collect();
+        let returns = self.ir_type_from_ref(&expr.return_type);
+
+        let name = format!("<lambda>#{}", self.module.closures.len());
+        let id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            function: name.clone(),
+            captures: capture_types.clone(),
+            params: param_types.clone(),
+            returns,
+        });
+
+        // The captures are read in the enclosing function, where their slots
+        // live, before the body is lifted out.
+        let captures: Vec<Operand> = info
+            .captures
+            .iter()
+            .map(|c| {
+                let slot = self.lookup_slot(&c.name);
+                self.emit(InstKind::Load(slot), self.slot_type(slot), span)
+            })
+            .collect();
+
+        let names: Vec<String> = info
+            .captures
+            .iter()
+            .map(|c| c.name.clone())
+            .chain(expr.params.iter().map(|p| p.name.name.clone()))
+            .collect();
+        let types: Vec<IrType> = capture_types.into_iter().chain(param_types).collect();
+
+        let body = self.lift_lambda_body(expr, &name, &names, &types, returns);
+        self.lifted.push(body);
+
+        self.emit(InstKind::MakeClosure { id, captures }, IrType::Closure(id), span)
+    }
+
+    /// Lowers a lambda body as a function of its own.
+    ///
+    /// A fresh lowering is used rather than reusing this one: the body has its
+    /// own slots and blocks, and sharing them would let a capture resolve to
+    /// the enclosing function's slot instead of to the parameter that carries
+    /// its copy.
+    fn lift_lambda_body(
+        &mut self,
+        expr: &ast::LambdaExpr,
+        name: &str,
+        params: &[String],
+        types: &[IrType],
+        returns: IrType,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(self.module, self.checked);
+        inner.return_type = returns;
+
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+
+        let slots: Vec<SlotId> = params
+            .iter()
+            .zip(types)
+            .map(|(name, ty)| inner.declare_slot(name, *ty, expr.span))
+            .collect();
+
+        match &*expr.body {
+            ast::LambdaBody::Expr(e) => {
+                let value = inner.lower_expr_as(e, returns);
+                inner.terminate(Terminator::Return(Some(value)));
+            }
+            ast::LambdaBody::Block(b) => {
+                inner.lower_block(b);
+                inner.terminate(Terminator::Return(None));
+            }
+        }
+
+        inner.scopes.pop();
+
+        // A lambda may itself contain lambdas.
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+
+        Function {
+            name: name.to_string(),
+            params: slots,
+            return_type: returns,
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span: expr.span,
+        }
     }
 
     /// The discriminant a variant lowers to.
@@ -955,7 +1096,12 @@ impl<'a> FunctionLowering<'a> {
                 let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
             }
-            ast::Expr::Call(e) if self.signature_return(callee_name(e)) == IrType::Void => {
+            // A closure call goes through the value and has its own arm in
+            // `lower_expr`; only a direct call is special-cased here.
+            ast::Expr::Call(e)
+                if !self.is_closure_call(e)
+                    && self.signature_return(callee_name(e)) == IrType::Void =>
+            {
                 let name = callee_name(e).to_string();
                 let args = self.lower_args(e);
                 self.emit_effect(InstKind::Call { callee: name, args }, expr.span());
@@ -999,6 +1145,19 @@ impl<'a> FunctionLowering<'a> {
             .collect()
     }
 
+    /// Whether a call goes through a closure value rather than a name.
+    fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
+        match &*call.callee {
+            ast::Expr::Path(ident) => self
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&ident.name))
+                .is_some_and(|slot| matches!(self.slot_type(*slot), IrType::Closure(_))),
+            other => matches!(self.type_of(other, other.span()), IrType::Closure(_)),
+        }
+    }
+
     fn signature_return(&self, name: &str) -> IrType {
         self.checked
             .functions
@@ -1036,15 +1195,31 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Binary(e) => {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
+            ast::Expr::Call(e) if self.is_closure_call(e) => {
+                let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
+                    unreachable!("checked by `is_closure_call`")
+                };
+                self.module.closures[id as usize].returns
+            }
             ast::Expr::Call(e) => self.signature_return(callee_name(e)),
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int32,
             ast::Expr::Println(_) => IrType::Void,
-            ast::Expr::Null(_) | ast::Expr::Range(_) | ast::Expr::Lambda(_) => {
-                unreachable!("lowering received a construct the checker should have rejected")
+            // A lambda's type is the closure layout it produced, which only
+            // exists once it has been lowered: the caller asks the value.
+            ast::Expr::Lambda(_) | ast::Expr::Null(_) | ast::Expr::Range(_) => {
+                unreachable!("the type of this expression comes from the value it produced")
             }
         }
+    }
+
+    /// The type of an already emitted value.
+    fn type_of_operand(&self, operand: Operand) -> IrType {
+        self.value_types
+            .get(&operand.0)
+            .copied()
+            .expect("every emitted value records its type")
     }
 }
 
