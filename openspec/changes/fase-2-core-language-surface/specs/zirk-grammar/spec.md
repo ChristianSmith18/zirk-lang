@@ -123,19 +123,41 @@ Los patrones admitidos esta fase son: literales, constructores de un `enum` sin 
 
 ### Requirement: Nulabilidad
 
-El parser SHALL reconocer `T?` como anotación de tipo, `?.` como acceso seguro y `??` como operador de coalescencia nula, según `ZIRK_LANGUAGE_SPEC.md` sección 4.
+El parser SHALL reconocer `T?` como anotación de tipo, `null` como literal y `??` como operador de coalescencia nula, según `ZIRK_LANGUAGE_SPEC.md` sección 4.
+
+`?.` se reconoce pero se rechaza con el diagnóstico de fase (decisión D8): requiere miembros que acceder, y ningún tipo de esta fase los tiene.
 
 #### Scenario: Tipo nulable
 - **WHEN** se parsea `mut nombre: String? = null;`
-- **THEN** se produce una declaración con tipo `String?`
-
-#### Scenario: Acceso seguro
-- **WHEN** se parsea `usuario?.nombre`
-- **THEN** se produce una expresión de acceso seguro
+- **THEN** se produce una declaración con tipo `String?` e inicializador nulo
 
 #### Scenario: Coalescencia nula
 - **WHEN** se parsea `nombre ?? "anónimo"`
 - **THEN** se produce una expresión con fallback
+
+#### Scenario: Precedencia de `??`
+- **WHEN** se parsea `a ?? b || c`
+- **THEN** el árbol representa `(a ?? b) || c`, porque `??` liga más fuerte que los operadores lógicos
+
+#### Scenario: `?.` difiere a Fase 3
+- **WHEN** se parsea `usuario?.nombre`
+- **THEN** se emite el diagnóstico de construcción no implementada indicando Fase 3
+
+### Requirement: Asignación compuesta e incremento
+
+El parser SHALL reconocer `+=`, `-=`, `*=`, `/=`, `%=`, `++` y `--` en posición de **sentencia**, expandiéndolos al árbol de la asignación equivalente, según la decisión D9 del design.
+
+#### Scenario: Asignación compuesta
+- **WHEN** se parsea `total += 5;`
+- **THEN** el árbol producido es equivalente al de `total = total + 5;`
+
+#### Scenario: Incremento
+- **WHEN** se parsea `i++;` o `++i;`
+- **THEN** el árbol producido es equivalente al de `i = i + 1;`
+
+#### Scenario: Incremento en posición de expresión
+- **WHEN** se parsea `mut x = i++;`
+- **THEN** se emite un diagnóstico indicando que el incremento solo se admite como sentencia en esta fase
 
 ### Requirement: Módulos dentro de un crate
 
