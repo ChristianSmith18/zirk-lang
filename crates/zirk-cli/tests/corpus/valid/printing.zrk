@@ -1,0 +1,21 @@
+// Cubre println sobre cada tipo del subset. `STDLIB_SPEC` sección 3 dice que
+// todo valor imprimible pasa por to_string(), así que ninguno de estos puede
+// llegar al runtime como un valor crudo.
+fn doble(n: Int32): Int32 {
+    return n * 2;
+}
+
+fn main(): Void {
+    stdout.println("cadena");
+    stdout.println(42);
+    stdout.println(-7);
+    stdout.println(0);
+    stdout.println(true);
+    stdout.println(false);
+
+    inmut A: Int32 = 10;
+    inmut B: Int32 = 3;
+    stdout.println(A / B);
+    stdout.println(doble(21));
+    stdout.println(A > B);
+}

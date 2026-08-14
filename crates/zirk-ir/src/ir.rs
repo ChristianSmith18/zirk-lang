@@ -162,7 +162,8 @@ impl Instruction {
     ///
     /// See [`IrType::needs_allocation`] for why this is expressed abstractly.
     pub fn allocates(&self) -> bool {
-        matches!(self.kind, InstKind::ConstString(_)) && self.ty.needs_allocation()
+        matches!(self.kind, InstKind::ConstString(_) | InstKind::ToString(_))
+            && self.ty.needs_allocation()
     }
 }
 
@@ -194,7 +195,17 @@ pub enum InstKind {
         callee: String,
         args: Vec<Operand>,
     },
+    /// Converts a value into a `String`.
+    ///
+    /// `ZIRK_STDLIB_SPEC.md` section 3 states that every printable value goes
+    /// through `to_string(): String`. Making the conversion explicit in the IR
+    /// is what keeps `Println` receiving a `String` always, and it is the shape
+    /// that becomes a real trait call once traits exist in Phase 3.
+    ToString(Operand),
     /// `stdout.println`, an intrinsic while there is no stdlib (design D4).
+    ///
+    /// Its operand is **always** a `String`: the lowering inserts a `ToString`
+    /// when it is not, and the verifier enforces it.
     Println(Operand),
 }
 

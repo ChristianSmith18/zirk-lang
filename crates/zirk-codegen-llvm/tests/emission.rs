@@ -272,6 +272,64 @@ fn println_calls_the_runtime() {
     assert!(ir.contains(&format!("@{}", symbols::IO_PRINTLN)));
 }
 
+#[test]
+fn printing_an_integer_converts_through_the_runtime() {
+    // Without the conversion the value would reach the runtime as a pointer.
+    let ir = llvm_ir(&in_main("mut n: Int32 = 42;\nstdout.println(n);"));
+    assert!(
+        ir.contains(&format!("@{}", symbols::STR_FROM_I32)),
+        "the conversion must go through the runtime:\n{ir}"
+    );
+}
+
+#[test]
+fn printing_a_boolean_converts_through_the_runtime() {
+    let ir = llvm_ir(&in_main("mut b: Boolean = true;\nstdout.println(b);"));
+    assert!(ir.contains(&format!("@{}", symbols::STR_FROM_BOOL)), "{ir}");
+}
+
+#[test]
+fn println_always_receives_a_pointer() {
+    // The invariant the crash violated: whatever gets printed arrives as a
+    // string handle, never as a raw value.
+    for body in [
+        "mut s: String = \"a\";\nstdout.println(s);",
+        "mut n: Int32 = 1;\nstdout.println(n);",
+        "mut b: Boolean = true;\nstdout.println(b);",
+    ] {
+        let ir = llvm_ir(&in_main(body));
+        let call = format!("call void @{}(ptr", symbols::IO_PRINTLN);
+        assert!(ir.contains(&call), "for `{body}`:\n{ir}");
+    }
+}
+
+// --- String equality --------------------------------------------------------
+
+#[test]
+fn string_equality_is_structural() {
+    // `LANGUAGE_SPEC` section 4: `==` compares structurally. Comparing handles
+    // would compare identity, which is what `is` means.
+    let ir = llvm_ir(&in_main(
+        "mut a: String = \"x\";\nmut b: String = \"y\";\nmut eq: Boolean = a == b;",
+    ));
+    assert!(
+        ir.contains(&format!("@{}", symbols::STR_EQ)),
+        "equality must go through the runtime:\n{ir}"
+    );
+}
+
+#[test]
+fn string_inequality_negates_the_comparison() {
+    let ir = llvm_ir(&in_main(
+        "mut a: String = \"x\";\nmut b: String = \"y\";\nmut ne: Boolean = a != b;",
+    ));
+    assert!(ir.contains(&format!("@{}", symbols::STR_EQ)));
+    assert!(
+        ir.contains(" xor "),
+        "the negation of an i1 is a xor:\n{ir}"
+    );
+}
+
 // --- Reference program ------------------------------------------------------
 
 #[test]
