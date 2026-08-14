@@ -4,10 +4,11 @@
 //! crate; here they are coordinated, the linker is invoked and the result is
 //! turned into terminal output and exit codes.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use zirk_codegen_llvm::compile_to_object;
-use zirk_diagnostics::{Diagnostic, DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{Color, Diagnostic, DiagnosticSink, RenderStyle, SourceFile};
 
 use crate::codes;
 
@@ -271,10 +272,42 @@ pub fn run(executable: &Path) -> Result<i32, Box<Diagnostic>> {
 }
 
 /// Renders the accumulated diagnostics.
-pub fn render(sink: &DiagnosticSink, json: bool) -> String {
-    sink.render(if json {
+pub fn render(sink: &DiagnosticSink, json: bool, color: Color) -> String {
+    let style = if json {
         RenderStyle::Json
     } else {
         RenderStyle::Human
-    })
+    };
+    sink.render_colored(style, color)
+}
+
+/// Decides whether the diagnostics carry colour.
+///
+/// `ZIRK_COMPILER_SPEC.md` section 9 requires deterministic output, so colour
+/// only appears when the destination is a terminal a person is reading. Piping
+/// the output must yield exactly the same bytes as an uncoloured run.
+///
+/// The precedence is the usual one in the ecosystem, from strongest to weakest:
+///
+/// 1. an explicit `--color` on the command line;
+/// 2. `NO_COLOR`, which by convention disables colour whatever its value
+///    (<https://no-color.org>);
+/// 3. whether standard error is a terminal.
+pub fn resolve_color(requested: Option<&str>) -> Color {
+    match requested {
+        Some("always") => return Color::Ansi,
+        Some("never") => return Color::Never,
+        _ => {}
+    }
+
+    if std::env::var_os("NO_COLOR").is_some() {
+        return Color::Never;
+    }
+
+    // Standard error and not output: that is where diagnostics go.
+    if std::io::stderr().is_terminal() {
+        Color::Ansi
+    } else {
+        Color::Never
+    }
 }
