@@ -23,3 +23,6 @@
 # Archivos de prueba sueltos en la raíz. El corpus versionado vive en
 # crates/zirk-cli/tests/corpus/.
 /*.zrk
+
+# VS Code packaging
+*.vsix
