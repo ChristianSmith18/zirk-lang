@@ -1,0 +1,39 @@
+{
+  "name": "zirk-lang",
+  "displayName": "Zirk Language Support",
+  "description": "Syntax highlighting and language support for the Zirk programming language",
+  "version": "0.1.0",
+  "publisher": "cristian",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:zirk"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "zirk",
+        "aliases": [
+          "Zirk",
+          "zirk"
+        ],
+        "extensions": [
+          ".zrk"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zirk",
+        "scopeName": "source.zirk",
+        "path": "./syntaxes/zirk.tmLanguage.json"
+      }
+    ]
+  }
+}
