@@ -1,0 +1,7 @@
+fn main(): Void {
+    mut x = match 1 {
+        1 => "uno",
+        _ => 0
+    };
+    stdout.println(x);
+}

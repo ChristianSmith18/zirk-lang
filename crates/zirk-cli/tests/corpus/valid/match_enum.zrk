@@ -1,0 +1,20 @@
+enum Direction { North, South, East, West }
+
+fn name(d: Direction): String {
+    return match d {
+        Direction.North => "norte",
+        Direction.South => "sur",
+        Direction.East => "este",
+        Direction.West => "oeste"
+    };
+}
+
+fn main(): Void {
+    stdout.println(name(Direction.North));
+    stdout.println(name(Direction.West));
+
+    match Direction.South {
+        Direction.South => { stdout.println("es sur"); }
+        _ => { stdout.println("no lo es"); }
+    }
+}
