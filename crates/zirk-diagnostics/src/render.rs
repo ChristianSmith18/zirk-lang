@@ -17,7 +17,8 @@
 //! document is written in Spanish, but compiler output is addressed to whoever
 //! uses Zirk. See `docs/decisions/ADR-006-language-of-the-codebase.md`.
 
-use crate::Diagnostic;
+use crate::color::Style;
+use crate::{Color, Diagnostic, Severity};
 use std::fmt::Write as _;
 
 /// Requested output form.
@@ -29,17 +30,22 @@ pub enum RenderStyle {
     Json,
 }
 
-pub(crate) fn human(diagnostic: &Diagnostic) -> String {
+pub(crate) fn human(diagnostic: &Diagnostic, color: Color) -> String {
     let mut out = String::new();
 
-    // error[E1234]: precise description
-    let _ = writeln!(
-        out,
+    let severity_style = match diagnostic.severity {
+        Severity::Error => Style::Error,
+        Severity::Warning => Style::Warning,
+    };
+
+    // error[E0403]: incompatible types
+    let header = format!(
         "{}[{}]: {}",
         diagnostic.severity.as_str(),
         diagnostic.code,
         diagnostic.message
     );
+    let _ = writeln!(out, "{}", color.paint(severity_style, &header));
 
     // The width of the left gutter depends on how many digits the line has.
     let gutter = diagnostic
@@ -48,42 +54,78 @@ pub(crate) fn human(diagnostic: &Diagnostic) -> String {
         .map(|l| l.line.to_string().len())
         .unwrap_or(0);
     let pad = " ".repeat(gutter);
+    let bar = color.paint(Style::Gutter, "|");
 
     if let Some(location) = &diagnostic.location {
-        let _ = writeln!(
-            out,
-            "{pad} {}:{}:{}",
-            location.file, location.line, location.column
-        );
+        let where_ = format!("{}:{}:{}", location.file, location.line, location.column);
+        let _ = writeln!(out, "{pad} {}", color.paint(Style::Location, &where_));
 
         // The snippet is optional: without source, the diagnostic keeps its
         // header, location, cause and help.
         if let Some(snippet) = &diagnostic.snippet {
-            let _ = writeln!(out, "{pad} |");
-            let _ = writeln!(out, "{} | {}", location.line, snippet.line_text);
+            let _ = writeln!(out, "{pad} {bar}");
+
+            let number = color.paint(Style::Gutter, &location.line.to_string());
+            let line = highlight(&snippet.line_text, location.column, snippet.width, color);
+            let _ = writeln!(out, "{number} {bar} {line}");
 
             let offset = " ".repeat(location.column.saturating_sub(1) as usize);
-            let marker = "^".repeat(snippet.width as usize);
+            let marker = color.paint(Style::Marker, &"^".repeat(snippet.width as usize));
             match &snippet.label {
                 Some(label) => {
-                    let _ = writeln!(out, "{pad} | {offset}{marker} {label}");
+                    let label = color.paint(Style::Marker, label);
+                    let _ = writeln!(out, "{pad} {bar} {offset}{marker} {label}");
                 }
                 None => {
-                    let _ = writeln!(out, "{pad} | {offset}{marker}");
+                    let _ = writeln!(out, "{pad} {bar} {offset}{marker}");
                 }
             }
-            let _ = writeln!(out, "{pad} |");
+            let _ = writeln!(out, "{pad} {bar}");
         }
     }
 
     if let Some(cause) = &diagnostic.cause {
-        let _ = writeln!(out, "{pad} = cause: {cause}");
+        let _ = writeln!(
+            out,
+            "{pad} {} {cause}",
+            color.paint(Style::Cause, "= cause:")
+        );
     }
     if let Some(help) = &diagnostic.help {
-        let _ = writeln!(out, "{pad} = help: {help}");
+        let _ = writeln!(out, "{pad} {} {help}", color.paint(Style::Help, "= help:"));
     }
 
     out
+}
+
+/// Emphasizes the fragment of the source line the diagnostic points at.
+///
+/// The line keeps its own reading and only the marked span is bold, so the eye
+/// lands on the exact spot without the surrounding code losing legibility.
+///
+/// Columns and widths count Unicode characters, so the split is done over
+/// characters and not bytes: cutting `ñ` in half would corrupt the output.
+fn highlight(line: &str, column: u32, width: u32, color: Color) -> String {
+    if !color.enabled() {
+        return line.to_string();
+    }
+
+    let start = column.saturating_sub(1) as usize;
+    let chars: Vec<char> = line.chars().collect();
+
+    // A location past the end of the line is not an error worth aborting on:
+    // the line is emitted as it is.
+    if start >= chars.len() {
+        return line.to_string();
+    }
+
+    let end = (start + width as usize).min(chars.len());
+
+    let before: String = chars[..start].iter().collect();
+    let marked: String = chars[start..end].iter().collect();
+    let after: String = chars[end..].iter().collect();
+
+    format!("{before}{}{after}", color.paint(Style::Marked, &marked))
 }
 
 pub(crate) fn json(diagnostic: &Diagnostic) -> String {
@@ -124,7 +166,7 @@ pub(crate) fn json(diagnostic: &Diagnostic) -> String {
     out
 }
 
-pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle) -> String {
+pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle, color: Color) -> String {
     // Diagnostics are sorted by location before rendering. Pipeline stages emit
     // in the order they work — all of the lexing first, then all of the
     // parsing — so without this an error on line 3 can appear before one on
@@ -133,7 +175,11 @@ pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle) -> String {
     sorted.sort_by_key(|d| sort_key(d));
 
     match style {
-        RenderStyle::Human => sorted.into_iter().map(human).collect::<Vec<_>>().join("\n"),
+        RenderStyle::Human => sorted
+            .into_iter()
+            .map(|d| human(d, color))
+            .collect::<Vec<_>>()
+            .join("\n"),
         RenderStyle::Json => {
             let items = sorted.into_iter().map(json).collect::<Vec<_>>().join(",");
             format!("[{items}]")
@@ -175,7 +221,7 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Code, Diagnostic, DiagnosticSink, Location, RenderStyle, Snippet};
+    use crate::{Code, Color, Diagnostic, DiagnosticSink, Location, RenderStyle, Snippet};
 
     fn complete_diagnostic() -> Diagnostic {
         Diagnostic::error(Code::new("E1234"), "precise description")
@@ -282,6 +328,137 @@ error[E1234]: precise description
         assert!(rendered.starts_with('['));
         assert!(rendered.ends_with(']'));
         assert_eq!(rendered.matches(r#""severity""#).count(), 2);
+    }
+
+    // --- Colour -------------------------------------------------------------
+
+    #[test]
+    fn without_colour_the_output_carries_no_escape_sequences() {
+        // This is the property that keeps the output deterministic when piped,
+        // as `COMPILER_SPEC` section 9 requires.
+        let plain = complete_diagnostic().render();
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+    }
+
+    #[test]
+    fn colour_does_not_alter_the_text() {
+        // Stripping the escape sequences must give exactly the plain rendering:
+        // colour adds emphasis, it does not change what is said.
+        let plain = complete_diagnostic().render();
+        let colored = complete_diagnostic().render_colored(Color::Ansi);
+        assert_eq!(strip(&colored), plain);
+    }
+
+    #[test]
+    fn the_error_the_cause_and_the_help_are_distinguishable() {
+        let colored = complete_diagnostic().render_colored(Color::Ansi);
+
+        let line_of = |needle: &str| {
+            colored
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no line with `{needle}`"))
+                .to_string()
+        };
+
+        let error = line_of("E1234");
+        let cause = line_of("cause:");
+        let help = line_of("help:");
+
+        for line in [&error, &cause, &help] {
+            assert!(line.contains('\x1b'), "uncoloured: {line:?}");
+        }
+        assert_ne!(prefix_of(&error), prefix_of(&cause));
+        assert_ne!(prefix_of(&cause), prefix_of(&help));
+    }
+
+    #[test]
+    fn the_marked_fragment_is_emphasized() {
+        let colored = complete_diagnostic().render_colored(Color::Ansi);
+
+        // The marker is one character wide at column 12, which lands inside
+        // `problematic`. The word is therefore split by the emphasis, and
+        // looking for it whole would not find it — which is exactly the point:
+        // the bold covers the marked span and nothing more.
+        let source_line = colored
+            .lines()
+            .find(|l| l.contains("expression"))
+            .expect("the source line");
+
+        assert!(
+            source_line.contains("\x1b[1m"),
+            "the marked fragment must be bold: {source_line:?}"
+        );
+        assert_eq!(
+            strip(source_line)
+                .trim_start_matches(['1', '8', ' ', '|'])
+                .trim(),
+            "problematic expression",
+            "stripping the emphasis must give the original line back"
+        );
+    }
+
+    #[test]
+    fn a_marker_past_the_end_of_the_line_does_not_abort() {
+        // A malformed location must not take the compiler down while it is
+        // already reporting an error.
+        let rendered = Diagnostic::error(Code::new("E0001"), "beyond")
+            .at(Location::new("a.zrk", 1, 99))
+            .with_snippet(Snippet::new("short", 3))
+            .render_colored(Color::Ansi);
+
+        assert!(rendered.contains("short"));
+    }
+
+    #[test]
+    fn the_emphasis_respects_unicode() {
+        // Splitting by bytes would cut `ñ` in half and corrupt the output.
+        let rendered = Diagnostic::error(Code::new("E0001"), "unicode")
+            .at(Location::new("a.zrk", 1, 5))
+            .with_snippet(Snippet::new("mut ñandú = 1;", 5))
+            .render_colored(Color::Ansi);
+
+        assert!(rendered.contains("ñandú"), "{rendered:?}");
+        assert!(strip(&rendered).contains("ñandú"));
+    }
+
+    #[test]
+    fn the_structured_form_never_carries_colour() {
+        // What tooling consumes must be parseable, and an escape sequence
+        // inside a JSON string is not.
+        let mut sink = DiagnosticSink::new();
+        sink.emit(complete_diagnostic());
+
+        let json = sink.render_colored(RenderStyle::Json, Color::Ansi);
+        assert!(!json.contains('\x1b'), "{json:?}");
+    }
+
+    /// Removes the ANSI escape sequences from a text.
+    fn strip(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            // A sequence runs until its final letter, `m` for the ones used here.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The escape sequence that opens a line, to compare roles.
+    fn prefix_of(line: &str) -> String {
+        line.chars()
+            .skip_while(|c| *c != '\x1b')
+            .take_while(|c| *c != 'm')
+            .collect()
     }
 
     #[test]
