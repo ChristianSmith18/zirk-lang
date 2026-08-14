@@ -175,6 +175,46 @@ fn build_produces_an_executable_that_runs_on_its_own() {
 }
 
 #[test]
+fn the_executable_stays_small() {
+    // Without dead-code elimination at link time, this same program links to
+    // roughly 1.4 MB: zirk-runtime exposes several separate `extern "C"`
+    // entry points, and a static archive is linked at whole-object-file
+    // granularity, so the linker keeps far more of Rust's `std` than this
+    // program actually calls. The threshold is generous — the point is
+    // catching a regression back to unlinked dead code, not pinning an exact
+    // byte count that would vary by platform and toolchain version.
+    let source = corpus("valid").join("hello.zrk");
+    let dir = workspace("binary_size");
+    let copied = dir.join("hello.zrk");
+    std::fs::copy(&source, &copied).expect("copy the source");
+
+    let build = Command::new(compiler())
+        .arg("build")
+        .arg("hello.zrk")
+        .current_dir(&dir)
+        .output()
+        .expect("run the compiler");
+    assert!(
+        build.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let executable = String::from_utf8_lossy(&build.stdout).trim().to_string();
+    let executable = dir.join(&executable);
+    let size = std::fs::metadata(&executable)
+        .expect("the executable exists")
+        .len();
+
+    const ONE_MEGABYTE: u64 = 1024 * 1024;
+    assert!(
+        size < ONE_MEGABYTE,
+        "the executable grew to {} KB; dead-code elimination at link time may be missing",
+        size / 1024
+    );
+}
+
+#[test]
 fn the_executable_stays_on_disk_after_run() {
     // Resolves an open question of the design: someone who ran their program
     // will most likely want to distribute it.
