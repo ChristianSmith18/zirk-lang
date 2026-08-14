@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use zirk_codegen_llvm::compile_to_object;
-use zirk_diagnostics::{Color, Diagnostic, DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{Color, Diagnostic, DiagnosticSink, RenderStyle};
 
 use crate::codes;
 
@@ -40,29 +40,18 @@ impl Compilation {
 pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
     let mut sink = DiagnosticSink::new();
 
-    let Ok(text) = std::fs::read_to_string(path) else {
-        sink.emit(
-            Diagnostic::error(
-                codes::UNREADABLE_FILE,
-                format!("could not read `{}`", path.display()),
-            )
-            .with_cause("the file does not exist or is not readable")
-            .with_help("check the path and its permissions"),
-        );
+    // The crate is the entry file plus everything it imports, walked from the
+    // entry rather than from a directory listing: a `.zrk` nobody imports is
+    // not part of the program.
+    let Some(loaded) = crate::modules::load(path, &mut sink) else {
         return Compilation::failed(sink);
     };
-
-    let source = SourceFile::new(path.display().to_string(), text);
-
-    // The frontend accumulates every diagnostic it finds; the pipeline only
-    // stops between stages, so one run reports as much as it can.
-    let tokens = zirk_lexer::tokenize(&source, &mut sink);
-    let program = zirk_parser::parse(&source, &tokens, &mut sink);
     if sink.has_errors() {
         return Compilation::failed(sink);
     }
 
-    let checked = zirk_sema::check(&source, &program, &mut sink);
+    let program = merge(&loaded);
+    let checked = zirk_sema::check(&loaded.sources, &program, &mut sink);
     if sink.has_errors() {
         return Compilation::failed(sink);
     }
@@ -120,6 +109,33 @@ pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
         executable: Some(executable),
         sink,
     }
+}
+
+/// Merges the files of a crate into the program the checker sees.
+///
+/// There is one namespace per crate in this phase: which file a declaration
+/// came from still matters for visibility, and that travels in its spans, but
+/// two declarations cannot share a name even in different files. Proper
+/// per-module namespacing belongs with the project system of Phase 6.
+fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
+    let mut program = zirk_ast::Program {
+        imports: Vec::new(),
+        uses: Vec::new(),
+        enums: Vec::new(),
+        functions: Vec::new(),
+        span: loaded.sources.entry().span(0, 0),
+    };
+
+    for unit in &loaded.units {
+        program.imports.extend(unit.program.imports.iter().cloned());
+        program.uses.extend(unit.program.uses.iter().cloned());
+        program.enums.extend(unit.program.enums.iter().cloned());
+        program
+            .functions
+            .extend(unit.program.functions.iter().cloned());
+    }
+
+    program
 }
 
 /// Links the object with the Zirk runtime.

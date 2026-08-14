@@ -11,7 +11,7 @@ mod common;
 
 use inkwell::context::Context;
 use zirk_codegen_llvm::{emit, symbols};
-use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::lower;
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
@@ -21,11 +21,13 @@ use zirk_sema::check;
 fn llvm_ir(source_text: &str) -> String {
     let _llvm = common::llvm_lock();
 
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    let checked = check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),

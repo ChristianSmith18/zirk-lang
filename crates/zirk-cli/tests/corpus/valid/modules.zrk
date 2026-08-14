@@ -1,0 +1,5 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    stdout.println("desde std.io");
+}

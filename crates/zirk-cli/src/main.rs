@@ -14,6 +14,7 @@
 //! `format`, `lint` — arrive in later phases, and each says so when invoked.
 
 mod driver;
+mod modules;
 
 use driver::Action;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,8 @@ pub mod codes {
     pub const INVALID_USAGE: Code = Code::new("E0507");
     /// The compiler produced invalid IR: a compiler bug.
     pub const INTERNAL_ERROR: Code = Code::new("E0508");
+    /// The imports of a crate form a cycle.
+    pub const IMPORT_CYCLE: Code = Code::new("E0509");
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
