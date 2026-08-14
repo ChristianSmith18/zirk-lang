@@ -1,0 +1,13 @@
+// `LANGUAGE_SPEC` sección 4: `==` compara estructuralmente. Dos cadenas con el
+// mismo contenido son iguales aunque sean valores distintos.
+fn main(): Void {
+    mut a: String = "igual";
+    mut b: String = "igual";
+    mut c: String = "distinta";
+
+    stdout.println(a == b);
+    stdout.println(a == c);
+    stdout.println(a != c);
+    stdout.println("ñandú" == "ñandú");
+    stdout.println("hola" == "holaa");
+}

@@ -321,6 +321,98 @@ fn a_discarded_println_produces_no_value() {
     );
 }
 
+// --- Conversion to String ---------------------------------------------------
+
+#[test]
+fn println_over_a_string_needs_no_conversion() {
+    let f = main_body("stdout.println(\"hola\");");
+    let has_conversion = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::ToString(_)));
+    assert!(!has_conversion, "a String is already printable");
+}
+
+#[test]
+fn println_over_an_integer_converts_first() {
+    // Without the conversion the runtime would read the value as a pointer.
+    let f = main_body("stdout.println(42);");
+
+    let conversion = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .find(|i| matches!(i.kind, InstKind::ToString(_)))
+        .expect("there must be a conversion");
+
+    assert_eq!(conversion.ty, IrType::String);
+}
+
+#[test]
+fn println_over_a_boolean_converts_first() {
+    let f = main_body("stdout.println(true);");
+    let has_conversion = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::ToString(_)));
+    assert!(has_conversion);
+}
+
+#[test]
+fn println_always_receives_a_string() {
+    // The invariant that keeps the runtime from reading a value as a pointer.
+    for body in [
+        "stdout.println(\"a\");",
+        "stdout.println(1);",
+        "stdout.println(true);",
+        "stdout.println(1 + 2);",
+        "stdout.println(1 < 2);",
+    ] {
+        let f = main_body(body);
+
+        let types: Vec<_> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .map(|i| (i.result, i.kind.clone(), i.ty))
+            .collect();
+
+        let printed = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find_map(|i| match &i.kind {
+                InstKind::Println(operand) => Some(*operand),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("there must be a println in `{body}`"));
+
+        let operand_type = types
+            .iter()
+            .find(|(result, _, _)| *result == Some(printed.0))
+            .map(|(_, _, ty)| *ty)
+            .unwrap_or_else(|| panic!("the operand of println is undefined in `{body}`"));
+
+        assert_eq!(
+            operand_type,
+            IrType::String,
+            "println must receive a String in `{body}`"
+        );
+    }
+}
+
+#[test]
+fn a_conversion_requires_allocation() {
+    let f = main_body("stdout.println(42);");
+
+    let allocating: Vec<_> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| i.allocates())
+        .collect();
+
+    assert_eq!(allocating.len(), 1, "the conversion produces a new String");
+}
+
 // --- Traceability -----------------------------------------------------------
 
 #[test]

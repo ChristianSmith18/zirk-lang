@@ -374,7 +374,7 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Println(e) => {
-                let operand = self.lower_expr(&e.arg);
+                let operand = self.lower_println_argument(e, span);
                 self.emit(InstKind::Println(operand), IrType::Void, span)
             }
         }
@@ -387,7 +387,7 @@ impl<'a> FunctionLowering<'a> {
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
             ast::Expr::Println(e) => {
-                let operand = self.lower_expr(&e.arg);
+                let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
             }
             ast::Expr::Call(e) if self.signature_return(&e.callee.name) == IrType::Void => {
@@ -404,6 +404,23 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_expr(other);
             }
         }
+    }
+
+    /// Lowers the argument of a `println`, converting it when it is not a
+    /// `String`.
+    ///
+    /// `ZIRK_STDLIB_SPEC.md` section 3: every printable value goes through
+    /// `to_string()`. Without this the runtime would read an `Int32` as if it
+    /// were a pointer.
+    fn lower_println_argument(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
+        let operand = self.lower_expr(&expr.arg);
+        let ty = self.type_of(&expr.arg, expr.arg.span());
+
+        if ty == IrType::String {
+            return operand;
+        }
+
+        self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
     fn signature_return(&self, name: &str) -> IrType {
