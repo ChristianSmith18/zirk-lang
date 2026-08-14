@@ -439,6 +439,16 @@ impl<'a> Lexer<'a> {
             ';' => Semicolon,
             ':' if self.eat(':') => ColonColon,
             ':' => Colon,
+            // Longest match first: `...` before `..=` before `..` before `.`.
+            '.' if self.eat('.') => {
+                if self.eat('.') {
+                    DotDotDot
+                } else if self.eat('=') {
+                    DotDotEq
+                } else {
+                    DotDot
+                }
+            }
             '.' => Dot,
             other => {
                 let span = Span::new(start, self.offset());

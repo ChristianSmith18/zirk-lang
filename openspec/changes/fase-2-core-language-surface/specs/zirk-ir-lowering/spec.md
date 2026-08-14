@@ -93,13 +93,13 @@ El lowering SHALL traducir un `match` a una secuencia de comparaciones sobre el 
 - **WHEN** se baja un `match` usado como expresión
 - **THEN** cada bloque de brazo termina saltando a un bloque de continuación común que recibe el valor de ese brazo
 
-### Requirement: Lowering de acceso seguro y coalescencia nula
+### Requirement: Lowering de coalescencia nula
 
-El lowering SHALL traducir `expr?.miembro` a una comprobación explícita de nulidad con dos bloques — uno que produce `null` y otro que produce el acceso al miembro — y SHALL traducir `a ?? b` a una comprobación equivalente que produce `a` cuando no es nulo y evalúa `b` en el otro bloque.
+El lowering SHALL traducir `a ?? b` a una comprobación explícita de nulidad con dos bloques, que produce `a` cuando no es nulo y evalúa `b` en el otro bloque.
 
-#### Scenario: Acceso seguro
-- **WHEN** se baja `usuario?.nombre`
-- **THEN** se produce una comprobación de nulidad sobre `usuario` con dos bloques de resultado
+#### Scenario: Comprobación con dos bloques
+- **WHEN** se baja `a ?? b`
+- **THEN** se produce una comprobación de nulidad sobre `a` con un bloque por cada resultado
 
 #### Scenario: Coalescencia nula evalúa el fallback perezosamente
 - **WHEN** se baja `a ?? costoso()`

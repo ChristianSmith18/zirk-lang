@@ -127,18 +127,51 @@ El chequeador SHALL exigir que todo `match` sobre un `enum` cubra todos sus cons
 - **WHEN** todos los brazos de un `match` usado como expresión producen el mismo tipo
 - **THEN** ese es el tipo del `match`
 
-### Requirement: Acceso seguro y coalescencia nula
+### Requirement: Coalescencia nula
 
-El chequeador SHALL tipar `expr?.miembro` como el tipo nulable del miembro cuando `expr` es nulable, y SHALL exigir que ambos operandos de `??` compartan un tipo común, produciendo el tipo no nulable cuando el operando derecho no es nulable.
-
-#### Scenario: Acceso seguro sobre valor nulable
-- **WHEN** `usuario` tiene tipo `Usuario?` y se evalúa `usuario?.nombre`
-- **THEN** el resultado tiene tipo `String?`, asumiendo que `nombre` es `String`
+El chequeador SHALL exigir que ambos operandos de `??` compartan un tipo común, produciendo el tipo no nulable cuando el operando derecho no es nulable.
 
 #### Scenario: Coalescencia con fallback no nulable
 - **WHEN** se evalúa `nombre ?? "anónimo"` con `nombre: String?`
 - **THEN** el resultado tiene tipo `String`
 
-#### Scenario: `?.` sobre valor no nulable
-- **WHEN** `?.` se usa sobre una expresión de tipo no nulable
-- **THEN** se emite un diagnóstico indicando que el operador es innecesario, con `.` como sugerencia
+#### Scenario: Coalescencia con fallback nulable
+- **WHEN** ambos operandos de `??` son nulables
+- **THEN** el resultado sigue siendo nulable
+
+#### Scenario: `??` sobre operando izquierdo no nulable
+- **WHEN** `??` se usa sobre una expresión de tipo no nulable
+- **THEN** se emite un diagnóstico indicando que el operador es innecesario
+
+#### Scenario: Operandos sin tipo común
+- **WHEN** los operandos de `??` no comparten un tipo común
+- **THEN** se emite un diagnóstico que señala ambos tipos
+
+### Requirement: Asignación entre tipos nulables y no nulables
+
+El chequeador SHALL admitir asignar un valor de tipo `T` donde se espera `T?`, y SHALL rechazar la dirección contraria sin coalescencia explícita.
+
+#### Scenario: Ensanchar a nulable
+- **WHEN** se asigna un `String` a una variable declarada `String?`
+- **THEN** el chequeo tiene éxito
+
+#### Scenario: Estrechar sin coalescencia
+- **WHEN** se asigna un `String?` a una variable declarada `String`
+- **THEN** se emite un diagnóstico
+- **AND** la ayuda sugiere `??` para proveer un valor por defecto
+
+#### Scenario: `null` como valor
+- **WHEN** se asigna `null` a una variable de tipo no nulable
+- **THEN** se emite un diagnóstico que indica que el tipo no admite ausencia de valor
+
+### Requirement: `?.` difiere a la fase de objetos
+
+El chequeador SHALL rechazar `?.` con el diagnóstico de construcción no implementada, indicando Fase 3.
+
+El operador de acceso seguro requiere que exista un miembro que acceder, y ningún tipo de esta fase tiene miembros: clases, records y traits son Fase 3. Ver decisión D8 del design.
+
+#### Scenario: Uso de `?.`
+- **WHEN** se escribe `usuario?.nombre`
+- **THEN** se emite un diagnóstico que nombra el operador
+- **AND** indica que llega en Fase 3, junto con los tipos que tienen miembros
+- **AND** NO se reporta como token inesperado
