@@ -305,6 +305,31 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 call.try_as_basic_value().basic()
             }
 
+            ir::InstKind::ToString(operand) => {
+                // The conversion goes through the runtime: the compiler does
+                // not know how a `String` is built (ADR-005).
+                let value = self.operand(*operand);
+                let converter = match value {
+                    BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => {
+                        self.runtime.str_from_bool
+                    }
+                    BasicValueEnum::IntValue(_) => self.runtime.str_from_i32,
+                    // A `String` needs no conversion; the lowering does not emit
+                    // `ToString` over one, so reaching here means malformed IR.
+                    other => unreachable!("ToString over {other:?}"),
+                };
+
+                let call = self
+                    .builder
+                    .build_call(converter, &[value.into()], "str")
+                    .expect("call to the converter");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the converter returns a value"),
+                )
+            }
+
             ir::InstKind::Println(operand) => {
                 self.builder
                     .build_call(
@@ -352,6 +377,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
 
+        // `ZIRK_LANGUAGE_SPEC.md` section 4: `==` compares structurally. Over a
+        // `String` the operands are opaque handles, so comparing them as
+        // integers would compare identity — which is what `is` means, not `==`.
+        if left.is_pointer_value() {
+            return self.compare_strings(op, left, right);
+        }
+
         let l = left.into_int_value();
         let r = right.into_int_value();
 
@@ -387,6 +419,35 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .build_or(l, r, "or")
                 .expect("disjunction")
                 .into(),
+        }
+    }
+
+    /// Structural equality between strings, through the runtime.
+    fn compare_strings(
+        &self,
+        op: ir::BinaryOp,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let equal = self
+            .builder
+            .build_call(self.runtime.str_eq, &[left.into(), right.into()], "streq")
+            .expect("call to string equality")
+            .try_as_basic_value()
+            .basic()
+            .expect("equality returns a value")
+            .into_int_value();
+
+        match op {
+            ir::BinaryOp::Eq => equal.into(),
+            ir::BinaryOp::NotEq => self
+                .builder
+                .build_not(equal, "strneq")
+                .expect("negation")
+                .into(),
+            // The checker only admits `==` and `!=` between strings: ordering
+            // needs a comparison contract of the type, which is Phase 3.
+            other => unreachable!("operator {other:?} over String"),
         }
     }
 

@@ -124,7 +124,7 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     }
 
     assert!(
-        checked >= 6,
+        checked >= 10,
         "the corpus shrank unexpectedly: {checked} programs"
     );
 }
