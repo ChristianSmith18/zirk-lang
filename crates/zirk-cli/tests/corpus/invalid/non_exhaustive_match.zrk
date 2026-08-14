@@ -1,0 +1,12 @@
+enum Direction { North, South, East, West }
+
+fn name(d: Direction): String {
+    return match d {
+        Direction.North => "norte",
+        Direction.South => "sur"
+    };
+}
+
+fn main(): Void {
+    stdout.println(name(Direction.North));
+}

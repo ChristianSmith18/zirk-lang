@@ -1489,6 +1489,18 @@ impl<'a> Parser<'a> {
             return None;
         }
 
+        // `Direction.North` names a variant. Only an enum is reachable this
+        // way in this phase: no other type has anything after a `.`.
+        if matches!(self.peek(), TokenKind::Dot) {
+            self.pos += 1;
+            let variant = self.expect_identifier("after the enum name")?;
+            return Some(Expr::Variant(VariantExpr {
+                span: ident.span.to(variant.span),
+                enum_name: ident,
+                variant,
+            }));
+        }
+
         if matches!(self.peek(), TokenKind::LParen) {
             let args = self.parse_args()?;
             let end = self.peek_span();

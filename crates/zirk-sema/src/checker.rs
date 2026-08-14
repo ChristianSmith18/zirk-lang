@@ -765,6 +765,7 @@ impl<'a> Checker<'a> {
             Expr::If(e) => self.check_if_expr(e),
             Expr::Match(e) => self.check_match(e, true),
             Expr::Lambda(e) => self.check_lambda(e),
+            Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
                 self.check_expr(&e.arg);
                 Type::VOID
@@ -1034,12 +1035,6 @@ impl<'a> Checker<'a> {
     }
 
     fn check_match(&mut self, expr: &MatchExpr, as_value: bool) -> Type {
-        self.not_lowered(
-            expr.span,
-            "a `match`",
-            "use `if` / `else if` chains until the lowering lands",
-        );
-
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
 
@@ -1258,6 +1253,36 @@ impl<'a> Checker<'a> {
             "the grammar and the type rules for it exist, but its code generation does not",
             Some(instead.to_string()),
         );
+    }
+
+    /// `Direction.North` in expression position.
+    fn check_variant(&mut self, expr: &VariantExpr) -> Type {
+        let Some(index) = self.enums.iter().position(|e| e.name == expr.enum_name.name) else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.enum_name.span,
+                format!("`{}` is not a declared enum", expr.enum_name.name),
+                "only an enum has variants to name in this phase",
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+
+        let enum_type = &self.enums[index];
+        if !enum_type.variants.contains(&expr.variant.name) {
+            let enum_name = enum_type.name.clone();
+            let known = enum_type.variants.join(", ");
+            self.error(
+                codes::UNKNOWN_VARIANT,
+                expr.variant.span,
+                format!("`{enum_name}` has no variant `{}`", expr.variant.name),
+                format!("its variants are: {known}"),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        Type::of(Base::Enum(index as u32))
     }
 
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {

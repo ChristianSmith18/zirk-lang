@@ -36,15 +36,15 @@ fn ir_type(ty: Type) -> IrType {
         Base::String => IrType::String,
         // A verified program contains none of these: the checker reports and
         // the pipeline stops before reaching lowering.
-        Base::Unknown | Base::Null | Base::Enum(_) | Base::Function(_) | Base::Range => {
+        // An enum without associated data is exactly its discriminant. Phase 3
+        // gives it a payload and with it a representation of its own.
+        Base::Enum(_) => IrType::Int32,
+        Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     }
 }
 
-fn ir_type_from_name(name: &str) -> IrType {
-    ir_type(Type::from_name(name).expect("a verified program only names known types"))
-}
 
 struct FunctionLowering<'a> {
     module: &'a mut Module,
@@ -175,10 +175,24 @@ impl<'a> FunctionLowering<'a> {
         self.slots[id.0 as usize].ty
     }
 
+    /// The IR type a written annotation names.
+    ///
+    /// Enums are not built in, so the name is resolved against the table the
+    /// checker produced rather than against a fixed list.
+    fn ir_type_from_name(&self, name: &str) -> IrType {
+        if let Some(ty) = Type::from_name(name) {
+            return ir_type(ty);
+        }
+        if self.checked.enums.iter().any(|e| e.name == name) {
+            return IrType::Int32;
+        }
+        unreachable!("a verified program only names known types")
+    }
+
     // --- Function ---------------------------------------------------------
 
     fn run(mut self, function: &ast::FnDecl) -> Function {
-        self.return_type = ir_type_from_name(&function.return_type.name);
+        self.return_type = self.ir_type_from_name(&function.return_type.name);
 
         let entry = self.new_block();
         self.current = entry;
@@ -188,7 +202,7 @@ impl<'a> FunctionLowering<'a> {
             .params
             .iter()
             .map(|p| {
-                let ty = ir_type_from_name(&p.ty.name);
+                let ty = self.ir_type_from_name(&p.ty.name);
                 self.declare_slot(&p.name.name, ty, p.name.span)
             })
             .collect();
@@ -247,7 +261,7 @@ impl<'a> FunctionLowering<'a> {
         let value = stmt.init.as_ref().map(|e| (self.lower_expr(e), e.span()));
 
         let ty = match &stmt.ty {
-            Some(annotation) => ir_type_from_name(&annotation.name),
+            Some(annotation) => self.ir_type_from_name(&annotation.name),
             None => {
                 let (_, span) = value.expect("without a type there is always an initializer");
                 self.type_of(stmt.init.as_ref().expect("initializer"), span)
@@ -564,6 +578,11 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
+            ast::Expr::Match(e) => self.lower_match(e, span),
+            ast::Expr::Variant(e) => {
+                let value = self.discriminant(&e.enum_name.name, &e.variant.name);
+                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
+            }
 
             ast::Expr::Println(e) => {
                 let operand = self.lower_println_argument(e, span);
@@ -572,13 +591,179 @@ impl<'a> FunctionLowering<'a> {
 
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
-            ast::Expr::Null(_)
-            | ast::Expr::Range(_)
-            | ast::Expr::Match(_)
-            | ast::Expr::Lambda(_) => {
+            ast::Expr::Null(_) | ast::Expr::Range(_) | ast::Expr::Lambda(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
+    }
+
+    /// The discriminant a variant lowers to.
+    fn discriminant(&self, enum_name: &str, variant: &str) -> i32 {
+        self.checked
+            .enums
+            .iter()
+            .find(|e| e.name == enum_name)
+            .and_then(|e| e.discriminant(variant))
+            .expect("a verified program only names declared variants") as i32
+    }
+
+    /// Lowers a `match` into a chain of comparisons.
+    ///
+    /// ```text
+    ///   test₁ ──(no)──▶ test₂ ──(no)──▶ … ──▶ default
+    ///     │(yes)          │(yes)
+    ///     ▼               ▼
+    ///   arm₁            arm₂ ──▶ continue ◀── …
+    /// ```
+    ///
+    /// A chain rather than a jump table: the backend recognizes the shape and
+    /// emits a `switch` when the arms are dense, and building the table here
+    /// would duplicate an optimization LLVM already does.
+    fn lower_match(&mut self, expr: &ast::MatchExpr, span: Span) -> Operand {
+        let scrutinee_type = self.type_of(&expr.scrutinee, expr.scrutinee.span());
+        let value = self.lower_expr(&expr.scrutinee);
+
+        // Values do not cross blocks in this IR (ADR-007), and the chain tests
+        // the same value in each of them: it goes through a slot, and each
+        // block reloads it.
+        let scrutinee = self.declare_slot("<scrutinee>", scrutinee_type, span);
+        self.emit_effect(InstKind::Store(scrutinee, value), span);
+
+        // A `match` used as a statement produces nothing, and a slot has no
+        // `Void` form to hold it.
+        let result_type = self.arm_value_type(expr);
+        let result = (result_type != IrType::Void)
+            .then(|| self.declare_slot("<match>", result_type, span));
+
+        let continue_block = self.new_block();
+        let mut reachable = false;
+
+        for arm in &expr.arms {
+            // An irrefutable pattern takes the value unconditionally, and
+            // anything after it is unreachable.
+            let body_block = if arm.pattern.is_irrefutable() {
+                let block = self.new_block();
+                self.terminate(Terminator::Jump(block));
+                block
+            } else {
+                let test = self.lower_pattern_test(&arm.pattern, scrutinee, scrutinee_type, span);
+
+                let body_block = self.new_block();
+                let next_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: test,
+                    then_block: body_block,
+                    else_block: next_block,
+                });
+                self.current = next_block;
+                body_block
+            };
+
+            let resume = self.current;
+            self.current = body_block;
+
+            self.scopes.push(HashMap::new());
+            // A binding pattern names the scrutinee inside its arm.
+            if let ast::Pattern::Binding(ident) = &arm.pattern {
+                let current = self.emit(InstKind::Load(scrutinee), scrutinee_type, ident.span);
+                let slot = self.declare_slot(&ident.name, scrutinee_type, ident.span);
+                self.emit_effect(InstKind::Store(slot, current), ident.span);
+            }
+
+            let value = match &arm.body {
+                ast::ArmBody::Expr(e) => self.lower_expr(e),
+                ast::ArmBody::Block(b) if result_type == IrType::Void => {
+                    self.lower_block(b);
+                    self.emit(InstKind::ConstInt(0), IrType::Int32, span)
+                }
+                ast::ArmBody::Block(b) => self.lower_block_value(b),
+            };
+            self.scopes.pop();
+
+            if let Some(slot) = result {
+                self.emit_effect(InstKind::Store(slot, value), span);
+            }
+            self.terminate(Terminator::Jump(continue_block));
+            reachable = true;
+
+            self.current = resume;
+            if arm.pattern.is_irrefutable() {
+                break;
+            }
+        }
+
+        // The checker proved the arms exhaustive, so falling off the chain
+        // cannot happen at run time — but the block still needs a terminator
+        // for the IR to be well formed.
+        if !reachable || !self.is_terminated(self.current) {
+            self.terminate(Terminator::Jump(continue_block));
+        }
+
+        self.current = continue_block;
+
+        match result {
+            Some(slot) => self.emit(InstKind::Load(slot), result_type, span),
+            // Nothing reads the result of a statement `match`; a placeholder
+            // keeps the signature of `lower_expr` total.
+            None => self.emit(InstKind::ConstInt(0), IrType::Int32, span),
+        }
+    }
+
+    /// The comparison one pattern stands for.
+    fn lower_pattern_test(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: SlotId,
+        scrutinee_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let left = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+
+        let expected = match pattern {
+            ast::Pattern::Int(lit) => {
+                self.emit(InstKind::ConstInt(lit.value as i32), IrType::Int32, span)
+            }
+            ast::Pattern::Bool(lit) => {
+                self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
+            }
+            ast::Pattern::Str(lit) => {
+                let id = self.module.intern_string(&lit.value);
+                self.emit(InstKind::ConstString(id), IrType::String, span)
+            }
+            ast::Pattern::Variant(v) => {
+                let value = self.discriminant(&v.enum_name.name, &v.variant.name);
+                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
+            }
+            ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) | ast::Pattern::Null(_) => {
+                unreachable!("an irrefutable or null pattern is not tested this way")
+            }
+        };
+
+        self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right: expected,
+            },
+            IrType::Boolean,
+            span,
+        )
+    }
+
+    /// The type the arms of a `match` produce.
+    fn arm_value_type(&self, expr: &ast::MatchExpr) -> IrType {
+        for arm in &expr.arms {
+            match &arm.body {
+                ast::ArmBody::Expr(e) => return self.type_of(e, e.span()),
+                ast::ArmBody::Block(b) => {
+                    if matches!(b.statements.last(), Some(ast::Stmt::Expr(_))) {
+                        return self.block_value_type(b);
+                    }
+                    return IrType::Void;
+                }
+            }
+        }
+        IrType::Void
     }
 
     /// Lowers an `if` used as a value.
@@ -715,11 +900,10 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Call(e) => self.signature_return(callee_name(e)),
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
+            ast::Expr::Match(e) => self.arm_value_type(e),
+            ast::Expr::Variant(_) => IrType::Int32,
             ast::Expr::Println(_) => IrType::Void,
-            ast::Expr::Null(_)
-            | ast::Expr::Range(_)
-            | ast::Expr::Match(_)
-            | ast::Expr::Lambda(_) => {
+            ast::Expr::Null(_) | ast::Expr::Range(_) | ast::Expr::Lambda(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
