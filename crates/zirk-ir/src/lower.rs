@@ -13,7 +13,7 @@ use crate::ir::*;
 use std::collections::HashMap;
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
-use zirk_sema::{CheckedProgram, Type};
+use zirk_sema::{Base, CheckedProgram, Type};
 
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
@@ -29,14 +29,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
 /// Converts a frontend type into an IR type.
 fn ir_type(ty: Type) -> IrType {
-    match ty {
-        Type::Void => IrType::Void,
-        Type::Int32 => IrType::Int32,
-        Type::Boolean => IrType::Boolean,
-        Type::String => IrType::String,
-        // A verified program contains no `Unknown`: the checker reports and the
-        // pipeline stops before reaching lowering.
-        Type::Unknown => unreachable!("lowering received an unchecked program"),
+    match ty.base {
+        Base::Void => IrType::Void,
+        Base::Int32 => IrType::Int32,
+        Base::Boolean => IrType::Boolean,
+        Base::String => IrType::String,
+        // A verified program contains none of these: the checker reports and
+        // the pipeline stops before reaching lowering.
+        Base::Unknown | Base::Null | Base::Enum(_) | Base::Function(_) | Base::Range => {
+            unreachable!("lowering received a construct the checker should have rejected")
+        }
     }
 }
 
@@ -58,6 +60,14 @@ struct FunctionLowering<'a> {
     /// checker did.
     scopes: Vec<HashMap<String, SlotId>>,
     return_type: IrType,
+    /// Where `break` and `continue` jump, innermost loop last.
+    loops: Vec<LoopTargets>,
+}
+
+/// The two blocks a loop exposes to the jumps inside it.
+struct LoopTargets {
+    break_to: BlockId,
+    continue_to: BlockId,
 }
 
 impl<'a> FunctionLowering<'a> {
@@ -71,6 +81,7 @@ impl<'a> FunctionLowering<'a> {
             next_value: 0,
             scopes: Vec::new(),
             return_type: IrType::Void,
+            loops: Vec::new(),
         }
     }
 
@@ -217,6 +228,10 @@ impl<'a> FunctionLowering<'a> {
             ast::Stmt::Let(s) => self.lower_let(s),
             ast::Stmt::Assign(s) => self.lower_assign(s),
             ast::Stmt::If(s) => self.lower_if(s),
+            ast::Stmt::Loop(s) => self.lower_loop(s),
+            ast::Stmt::ForIn(s) => self.lower_for_in(s),
+            ast::Stmt::Break(s) => self.lower_break(s),
+            ast::Stmt::Continue(s) => self.lower_continue(s),
             ast::Stmt::Return(s) => self.lower_return(s),
             ast::Stmt::Expr(s) => {
                 self.lower_expr_for_effect(&s.expr);
@@ -311,6 +326,180 @@ impl<'a> FunctionLowering<'a> {
         self.current = continue_block;
     }
 
+    /// Lowers `while`, `loop` and the three-clause `for` into a cycle.
+    ///
+    /// ```text
+    ///     init
+    ///      │
+    ///      ▼
+    ///   ┌ header ──(false)──▶ continue
+    ///   │  │(true)
+    ///   │  ▼
+    ///   │ body ──▶ step ──┐
+    ///   └─────────────────┘
+    /// ```
+    ///
+    /// The step is its own block rather than the tail of the body because that
+    /// is where `continue` has to jump: skipping it would turn `for` into an
+    /// infinite loop the first time someone wrote `continue`.
+    fn lower_loop(&mut self, stmt: &ast::LoopStmt) {
+        self.scopes.push(HashMap::new());
+
+        if let Some(init) = &stmt.init {
+            self.lower_stmt(init);
+        }
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        match &stmt.condition {
+            Some(condition) => {
+                let value = self.lower_expr(condition);
+                self.terminate(Terminator::Branch {
+                    condition: value,
+                    then_block: body_block,
+                    else_block: continue_block,
+                });
+            }
+            // `loop` has no exit other than `break`.
+            None => self.terminate(Terminator::Jump(body_block)),
+        }
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: step_block,
+        });
+
+        self.current = body_block;
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(step_block));
+
+        self.loops.pop();
+
+        self.current = step_block;
+        if let Some(step) = &stmt.step {
+            self.lower_stmt(step);
+        }
+        self.terminate(Terminator::Jump(header));
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    /// Lowers `for x in a..b` into the counter loop it stands for.
+    ///
+    /// There is no iterator protocol to call into: `ZIRK_LANGUAGE_SPEC.md`
+    /// leaves iteration to traits, which are Phase 3. Over a range the loop is
+    /// exactly a counter, so it is built directly instead of inventing a
+    /// protocol the language does not define yet. Decision D3.
+    fn lower_for_in(&mut self, stmt: &ast::ForInStmt) {
+        let ast::Expr::Range(range) = &stmt.iterable else {
+            unreachable!("a verified program only iterates ranges in this phase")
+        };
+
+        self.scopes.push(HashMap::new());
+
+        let start = self.lower_expr(&range.start);
+        let binding = self.declare_slot(&stmt.binding.name, IrType::Int32, stmt.binding.span);
+        self.emit_effect(InstKind::Store(binding, start), stmt.span);
+
+        // The end is evaluated once, before the loop: re-evaluating it each
+        // iteration would call any function in it repeatedly.
+        let end = self.lower_expr(&range.end);
+        let limit = self.declare_slot("<range end>", IrType::Int32, range.end.span());
+        self.emit_effect(InstKind::Store(limit, end), stmt.span);
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let current = self.emit(InstKind::Load(binding), IrType::Int32, stmt.span);
+        let bound = self.emit(InstKind::Load(limit), IrType::Int32, stmt.span);
+        let op = if range.inclusive {
+            BinaryOp::LtEq
+        } else {
+            BinaryOp::Lt
+        };
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op,
+                left: current,
+                right: bound,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep_going,
+            then_block: body_block,
+            else_block: continue_block,
+        });
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: step_block,
+        });
+
+        self.current = body_block;
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(step_block));
+
+        self.loops.pop();
+
+        self.current = step_block;
+        let value = self.emit(InstKind::Load(binding), IrType::Int32, stmt.span);
+        let one = self.emit(InstKind::ConstInt(1), IrType::Int32, stmt.span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: value,
+                right: one,
+            },
+            IrType::Int32,
+            stmt.span,
+        );
+        self.emit_effect(InstKind::Store(binding, next), stmt.span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    fn lower_break(&mut self, _stmt: &ast::JumpStmt) {
+        let target = self
+            .loops
+            .last()
+            .expect("a verified program only breaks inside a loop")
+            .break_to;
+        self.terminate(Terminator::Jump(target));
+
+        // Statements after a `break` are unreachable, but the block they would
+        // land in still needs to exist and be terminated.
+        let unreachable = self.new_block();
+        self.current = unreachable;
+    }
+
+    fn lower_continue(&mut self, _stmt: &ast::JumpStmt) {
+        let target = self
+            .loops
+            .last()
+            .expect("a verified program only continues inside a loop")
+            .continue_to;
+        self.terminate(Terminator::Jump(target));
+
+        let unreachable = self.new_block();
+        self.current = unreachable;
+    }
+
     fn lower_return(&mut self, stmt: &ast::ReturnStmt) {
         let value = stmt.value.as_ref().map(|e| self.lower_expr(e));
         self.terminate(Terminator::Return(value));
@@ -361,11 +550,12 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
-                let args = e.args.iter().map(|a| self.lower_expr(a)).collect();
-                let returns = self.signature_return(&e.callee.name);
+                let name = callee_name(e);
+                let args = e.args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                let returns = self.signature_return(name);
                 self.emit(
                     InstKind::Call {
-                        callee: e.callee.name.clone(),
+                        callee: name.to_string(),
                         args,
                     },
                     returns,
@@ -373,11 +563,91 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
+            ast::Expr::If(e) => self.lower_if_expr(e, span),
+
             ast::Expr::Println(e) => {
                 let operand = self.lower_println_argument(e, span);
                 self.emit(InstKind::Println(operand), IrType::Void, span)
             }
+
+            // The checker rejects these before lowering runs; see
+            // `zirk_sema` and the tasks still open for this phase.
+            ast::Expr::Null(_)
+            | ast::Expr::Range(_)
+            | ast::Expr::Match(_)
+            | ast::Expr::Lambda(_) => {
+                unreachable!("lowering received a construct the checker should have rejected")
+            }
         }
+    }
+
+    /// Lowers an `if` used as a value.
+    ///
+    /// The branches write into one slot and the continuation reads it. With
+    /// locals as slots and no SSA of our own (ADR-007), that is the whole of
+    /// it: LLVM promotes the slot to a register and inserts the phi node.
+    fn lower_if_expr(&mut self, stmt: &ast::IfStmt, span: Span) -> Operand {
+        let ty = self.block_value_type(&stmt.then_branch);
+        let result = self.declare_slot("<if>", ty, span);
+
+        let condition = self.lower_expr(&stmt.condition);
+        let then_block = self.new_block();
+        let else_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Branch {
+            condition,
+            then_block,
+            else_block,
+        });
+
+        self.current = then_block;
+        let value = self.lower_block_value(&stmt.then_branch);
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = else_block;
+        let value = match &stmt.else_branch {
+            Some(ast::ElseBranch::Block(b)) => self.lower_block_value(b),
+            Some(ast::ElseBranch::If(nested)) => self.lower_if_expr(nested, span),
+            None => unreachable!("a verified `if` expression always has an `else`"),
+        };
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), ty, span)
+    }
+
+    /// Lowers a block used as a value: its statements, then its last
+    /// expression.
+    fn lower_block_value(&mut self, block: &ast::Block) -> Operand {
+        self.scopes.push(HashMap::new());
+
+        let (last, rest) = block
+            .statements
+            .split_last()
+            .expect("a verified block used as a value is not empty");
+
+        for stmt in rest {
+            self.lower_stmt(stmt);
+        }
+
+        let ast::Stmt::Expr(e) = last else {
+            unreachable!("a verified block used as a value ends in an expression")
+        };
+        let value = self.lower_expr(&e.expr);
+
+        self.scopes.pop();
+        value
+    }
+
+    /// The type a block used as a value produces.
+    fn block_value_type(&self, block: &ast::Block) -> IrType {
+        let Some(ast::Stmt::Expr(e)) = block.statements.last() else {
+            unreachable!("a verified block used as a value ends in an expression")
+        };
+        self.type_of(&e.expr, e.expr.span())
     }
 
     /// Lowers an expression whose value is discarded.
@@ -390,15 +660,10 @@ impl<'a> FunctionLowering<'a> {
                 let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
             }
-            ast::Expr::Call(e) if self.signature_return(&e.callee.name) == IrType::Void => {
-                let args = e.args.iter().map(|a| self.lower_expr(a)).collect();
-                self.emit_effect(
-                    InstKind::Call {
-                        callee: e.callee.name.clone(),
-                        args,
-                    },
-                    expr.span(),
-                );
+            ast::Expr::Call(e) if self.signature_return(callee_name(e)) == IrType::Void => {
+                let name = callee_name(e).to_string();
+                let args = e.args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                self.emit_effect(InstKind::Call { callee: name, args }, expr.span());
             }
             other => {
                 self.lower_expr(other);
@@ -448,8 +713,15 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Binary(e) => {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
-            ast::Expr::Call(e) => self.signature_return(&e.callee.name),
+            ast::Expr::Call(e) => self.signature_return(callee_name(e)),
+            ast::Expr::If(e) => self.block_value_type(&e.then_branch),
             ast::Expr::Println(_) => IrType::Void,
+            ast::Expr::Null(_)
+            | ast::Expr::Range(_)
+            | ast::Expr::Match(_)
+            | ast::Expr::Lambda(_) => {
+                unreachable!("lowering received a construct the checker should have rejected")
+            }
         }
     }
 }
@@ -470,5 +742,20 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         A::GtEq => BinaryOp::GtEq,
         A::And => BinaryOp::And,
         A::Or => BinaryOp::Or,
+        // `??` is expanded by the lowering into a null check with two blocks,
+        // so it never reaches the IR as an operator.
+        A::Coalesce => unreachable!("`??` is lowered into branches, not an operator"),
+    }
+}
+
+/// The name of a directly called function.
+///
+/// Calling a closure value goes through a different instruction, and the
+/// checker rejects anything else, so a verified program only reaches here with
+/// a plain name.
+fn callee_name(call: &ast::CallExpr) -> &str {
+    match &*call.callee {
+        ast::Expr::Path(ident) => &ident.name,
+        _ => unreachable!("a verified program calls a name or a closure value"),
     }
 }

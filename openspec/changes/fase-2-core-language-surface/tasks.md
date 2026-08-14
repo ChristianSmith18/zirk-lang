@@ -60,13 +60,13 @@
 
 ## 7. Tipos y flujo — bucles y `if` como expresión
 
-- [ ] 7.1 Exigir `Boolean` sin truthiness en la condición de `for` y `while`
-- [ ] 7.2 Rechazar `break`/`continue` fuera de un bucle
-- [ ] 7.3 Resolver a qué bucle apunta `break`/`continue` en bucles anidados
+- [x] 7.1 Exigir `Boolean` sin truthiness en la condición de `for` y `while`
+- [x] 7.2 Rechazar `break`/`continue` fuera de un bucle
+- [x] 7.3 Resolver a qué bucle apunta `break`/`continue` en bucles anidados
 - [ ] 7.4 Implementar el protocolo mínimo de `for ... in`: rangos y `String` (D3)
 - [ ] 7.5 Rechazar `for ... in` sobre tipos no soportados, con diagnóstico de fase
-- [ ] 7.6 Tipar `if` como expresión: exigir ambas ramas y tipos compatibles (D7)
-- [ ] 7.7 Extender el análisis de retorno-en-toda-ruta para considerar `if` exhaustivo y bucles infinitos sin `break` que salga
+- [x] 7.6 Tipar `if` como expresión: exigir ambas ramas y tipos compatibles (D7)
+- [x] 7.7 Extender el análisis de retorno-en-toda-ruta para considerar `if` exhaustivo y bucles infinitos sin `break` que salga
 - [ ] 7.8 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 8. Tipos y flujo — funciones completas y closures
@@ -99,10 +99,10 @@
 
 ## 11. IR — bucles, `if`-expresión y `break`/`continue`
 
-- [ ] 11.1 Extender el lowering para producir grafos de bloques con ciclos
-- [ ] 11.2 Bajar `while`, `loop`, `for` y `for ... in` a bloques de condición/cuerpo/continuación
-- [ ] 11.3 Bajar `break`/`continue` a saltos directos al bloque correspondiente del bucle que los contiene
-- [ ] 11.4 Bajar `if`-expresión produciendo el valor de la rama tomada en el bloque de continuación
+- [x] 11.1 Extender el lowering para producir grafos de bloques con ciclos
+- [x] 11.2 Bajar `while`, `loop`, `for` y `for ... in` a bloques de condición/cuerpo/continuación
+- [x] 11.3 Bajar `break`/`continue` a saltos directos al bloque correspondiente del bucle que los contiene
+- [x] 11.4 Bajar `if`-expresión produciendo el valor de la rama tomada en el bloque de continuación
 - [ ] 11.5 Verificador de IR: aceptar ciclos bien formados, seguir rechazando terminadores fuera de lugar
 - [ ] 11.6 Tests: IR esperada para cada construcción nueva
 
@@ -118,7 +118,7 @@
 
 ## 13. Backend LLVM
 
-- [ ] 13.1 Traducir bloques con ciclos, verificando el módulo LLVM resultante
+- [x] 13.1 Traducir bloques con ciclos, verificando el módulo LLVM resultante
 - [ ] 13.2 Traducir closures: función LLVM con entorno como primer argumento, valor agregado (función, entorno)
 - [ ] 13.3 Traducir llamadas indirectas a closures
 - [ ] 13.4 Traducir `match` exhaustivo sobre `enum` a `switch` de LLVM
