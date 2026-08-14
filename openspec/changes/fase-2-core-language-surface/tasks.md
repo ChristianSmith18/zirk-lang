@@ -71,10 +71,10 @@
 
 ## 8. Tipos y flujo — funciones completas y closures
 
-- [ ] 8.1 Resolver argumentos nombrados a posición contra la firma (D4)
-- [ ] 8.2 Sustituir parámetros ausentes por su valor por defecto, evaluado en el sitio de llamada
-- [ ] 8.3 Empaquetar argumentos sobrantes en el parámetro variadic
-- [ ] 8.4 Tipar valores nulos para parámetros opcionales sin argumento
+- [x] 8.1 Resolver argumentos nombrados a posición contra la firma (D4)
+- [x] 8.2 Sustituir parámetros ausentes por su valor por defecto, evaluado en el sitio de llamada
+- [x] 8.3 Empaquetar argumentos sobrantes en el parámetro variadic
+- [x] 8.4 Tipar valores nulos para parámetros opcionales sin argumento
 - [x] 8.5 Inferir el tipo función de una lambda a partir de parámetros y cuerpo
 - [x] 8.6 Registrar qué variables externas captura una closure
 - [x] 8.7 Rechazar la mutación de una variable capturada (D2)
