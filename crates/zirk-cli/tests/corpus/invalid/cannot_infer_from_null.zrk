@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut x = null;
+    stdout.println("x");
+}
