@@ -230,7 +230,20 @@ impl DiagnosticSink {
         if self.warnings_as_errors && diagnostic.severity == Severity::Warning {
             diagnostic.severity = Severity::Error;
         }
-        self.diagnostics.push(diagnostic);
+
+        // Two diagnostics with the same code, place and message are the same
+        // report as far as anyone reading them is concerned. A block left open
+        // at end of file produces one per enclosing block, and printing the
+        // identical text twice says nothing the first one did not.
+        let duplicate = self.diagnostics.iter().any(|previous| {
+            previous.code == diagnostic.code
+                && previous.message == diagnostic.message
+                && previous.location == diagnostic.location
+        });
+
+        if !duplicate {
+            self.diagnostics.push(diagnostic);
+        }
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {

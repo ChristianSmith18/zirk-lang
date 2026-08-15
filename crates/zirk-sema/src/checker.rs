@@ -372,6 +372,19 @@ impl<'a> Checker<'a> {
             variants.push(variant.name.clone());
         }
 
+        // An enum with no variants names a type nothing can ever be. The
+        // language spells that `Never`, which arrives in Phase 3; here it is a
+        // typo, and accepting it would give the concept a second spelling.
+        if variants.is_empty() {
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("enum `{}` has no variants", decl.name.name),
+                "a type with no values can never be constructed",
+                Some("add at least one variant".into()),
+            );
+        }
+
         self.enums.push(EnumType {
             name: decl.name.name.clone(),
             variants,
@@ -1042,7 +1055,7 @@ impl<'a> Checker<'a> {
 
         match expr.op {
             UnaryOp::Neg => {
-                if !operand.accepts(Type::INT32) {
+                if !Type::INT32.accepts(operand) {
                     let found = self.name(operand);
                     self.error(
                         codes::TYPE_MISMATCH,
@@ -1084,6 +1097,7 @@ impl<'a> Checker<'a> {
             Eq | NotEq => {
                 self.expect_same(left, right, expr);
                 self.reject_nullable_comparison(left, right, expr);
+                self.reject_closure_comparison(left, right, expr);
                 Type::BOOLEAN
             }
 
@@ -1622,10 +1636,16 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let fn_type = self.intern_fn_type(FnType {
+        // Each lambda gets a type of its own rather than sharing one per
+        // signature: its captures are part of its representation (D10), so two
+        // lambdas of the same shape are not interchangeable. Interning them
+        // together would let one be assigned over the other and leave the IR
+        // holding a value whose layout no longer matches its slot.
+        self.fn_types.push(FnType {
             params: params.iter().map(|p| p.ty).collect(),
             returns,
         });
+        let fn_type = (self.fn_types.len() - 1) as u32;
 
         self.lambdas.insert(
             expr.span,
@@ -1860,6 +1880,19 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        // Two closures of the same shape still have different types, and
+        // saying `(Int32) => Int32` is not `(Int32) => Int32` would be useless.
+        if matches!(expected.base, Base::Function(_)) && matches!(actual.base, Base::Function(_)) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                span,
+                "a closure cannot be replaced by another one",
+                "each closure carries its own captures, so each has its own type",
+                Some("declare a separate variable, or call a named `fn` instead".into()),
+            );
+            return;
+        }
+
         let e = self.name(expected);
         let a = self.name(actual);
 
@@ -1882,7 +1915,10 @@ impl<'a> Checker<'a> {
     }
 
     fn expect_boolean(&mut self, actual: Type, span: Span, context: &str) {
-        if actual.accepts(Type::BOOLEAN) {
+        // The question is whether a `Boolean` slot could hold this value, not
+        // whether this value's type could hold a `Boolean`: the second is the
+        // widening direction, and it answers yes for `Boolean?`.
+        if Type::BOOLEAN.accepts(actual) {
             return;
         }
 
@@ -1899,7 +1935,7 @@ impl<'a> Checker<'a> {
     }
 
     fn expect_numeric(&mut self, actual: Type, span: Span, op: BinaryOp) {
-        if actual.accepts(Type::INT32) {
+        if Type::INT32.accepts(actual) {
             return;
         }
 
@@ -1914,7 +1950,7 @@ impl<'a> Checker<'a> {
     }
 
     fn expect_numeric_value(&mut self, actual: Type, span: Span, context: &str) {
-        if actual.accepts(Type::INT32) {
+        if Type::INT32.accepts(actual) {
             return;
         }
 
@@ -1948,6 +1984,25 @@ impl<'a> Checker<'a> {
             "values that may be absent cannot be compared",
             "the language does not define yet how absence compares",
             Some("resolve it first with `?? <fallback>`, or match on `null`".into()),
+        );
+    }
+
+    /// Rejects comparing closures.
+    ///
+    /// `ZIRK_LANGUAGE_SPEC.md` section 4 defines `==` as structural equality,
+    /// and a closure has no structure to compare: it is a function pointer plus
+    /// whatever it captured.
+    fn reject_closure_comparison(&mut self, left: Type, right: Type, expr: &BinaryExpr) {
+        if !matches!(left.base, Base::Function(_)) && !matches!(right.base, Base::Function(_)) {
+            return;
+        }
+
+        self.error(
+            codes::TYPE_MISMATCH,
+            expr.op_span,
+            "closures cannot be compared",
+            "there is no structural equality for code",
+            Some("compare the values they produce instead".into()),
         );
     }
 
