@@ -47,4 +47,6 @@ pub mod codes {
     pub const EMPTY_MATCH: Code = Code::new("E0309");
     /// An `import` whose source is neither a quoted path nor a standard module.
     pub const INVALID_IMPORT_SOURCE: Code = Code::new("E0310");
+    /// Nesting deep enough to threaten the parser's own stack.
+    pub const NESTING_TOO_DEEP: Code = Code::new("E0311");
 }

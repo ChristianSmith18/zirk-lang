@@ -18,11 +18,30 @@ pub fn parse(source: &SourceFile, tokens: &[Token], sink: &mut DiagnosticSink) -
     Parser::new(source, tokens, sink).parse_program()
 }
 
+/// How deeply expressions and blocks may nest.
+///
+/// The parser is recursive descent, so nesting costs stack, and running out of
+/// it aborts the process with no diagnostic at all — the worst possible way to
+/// fail. The limit turns that into an error that says what happened.
+///
+/// The number is set by the smallest stack the parser can be called on, not by
+/// the language: measured on a 2 MB thread — what a test thread gets, and less
+/// than the main thread's 8 MB — a debug build runs out somewhere between 260
+/// and 280 levels. 128 keeps a factor of two on the worst case while sitting
+/// far above anything written by hand.
+///
+/// Raising it means giving the compiler a stack of its own to run on, the way
+/// `rustc` spawns a thread for the job. That belongs with the compilation
+/// driver, not here.
+const MAX_NESTING: u32 = 128;
+
 struct Parser<'a> {
     source: &'a SourceFile,
     tokens: &'a [Token],
     sink: &'a mut DiagnosticSink,
     pos: usize,
+    /// How many expressions and blocks enclose the one being parsed.
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -32,7 +51,36 @@ impl<'a> Parser<'a> {
             tokens,
             sink,
             pos: 0,
+            depth: 0,
         }
+    }
+
+    /// Enters one nesting level, reporting when the limit is reached.
+    ///
+    /// Returns `false` when the caller must give up rather than recurse.
+    fn enter(&mut self) -> bool {
+        self.depth += 1;
+        if self.depth <= MAX_NESTING {
+            return true;
+        }
+
+        // Only the first one is worth reporting: every enclosing level would
+        // otherwise repeat it on the way out.
+        if self.depth == MAX_NESTING + 1 {
+            let span = self.peek_span();
+            self.error(
+                codes::NESTING_TOO_DEEP,
+                span,
+                "the code nests too deeply",
+                format!("the parser stops at {MAX_NESTING} levels of nesting"),
+                Some("split the expression into named parts".into()),
+            );
+        }
+        false
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     // --- Navigation -------------------------------------------------------
@@ -597,6 +645,16 @@ impl<'a> Parser<'a> {
     // --- Statements -------------------------------------------------------
 
     fn parse_block(&mut self) -> Option<Block> {
+        if !self.enter() {
+            self.leave();
+            return None;
+        }
+        let parsed = self.parse_block_nested();
+        self.leave();
+        parsed
+    }
+
+    fn parse_block_nested(&mut self) -> Option<Block> {
         let start = self.peek_span();
 
         if !self.eat(&TokenKind::LBrace) {
@@ -1053,6 +1111,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr_inner(&mut self) -> Option<Expr> {
+        if !self.enter() {
+            self.leave();
+            return None;
+        }
+        let parsed = self.parse_expr_nested();
+        self.leave();
+        parsed
+    }
+
+    fn parse_expr_nested(&mut self) -> Option<Expr> {
         // A lambda is recognized before anything else: `(` would otherwise be
         // read as a parenthesized expression.
         if self.at_lambda() {
