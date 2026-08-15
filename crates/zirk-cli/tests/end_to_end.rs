@@ -618,3 +618,101 @@ fn two_shared_declarations_cannot_share_a_name() {
         output.stderr
     );
 }
+
+#[test]
+fn an_import_alias_binds_only_the_alias() {
+    // The declaration keeps its own name; the importing file only gets the one
+    // it asked for. Otherwise the alias would add a name instead of renaming.
+    let output = crate_of(
+        "modules_alias",
+        &[
+            (
+                "main.zrk",
+                "import { Role -> R, describe -> name } from \"./lib\";\n\
+                 fn main(): Void { stdout.println(name(R.Guest)); }\n",
+            ),
+            (
+                "lib.zrk",
+                "share enum Role { Admin, Guest }\n\
+                 share fn describe(r: Role): String {\n\
+                 return match r { Role.Admin => \"admin\", Role.Guest => \"guest\" };\n\
+                 }\n",
+            ),
+        ],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "guest\n");
+}
+
+#[test]
+fn the_original_name_is_not_available_under_an_alias() {
+    let output = crate_of(
+        "modules_alias_hides",
+        &[
+            (
+                "main.zrk",
+                "import { valor -> v } from \"./lib\";\n\
+                 fn main(): Void { stdout.println(valor()); }\n",
+            ),
+            ("lib.zrk", "share fn valor(): Int32 { return 8; }\n"),
+        ],
+    );
+
+    assert_ne!(output.status, 0, "the original name must not resolve");
+    assert!(
+        output.stderr.contains("not imported"),
+        "stderr:\n{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn a_shared_declaration_still_has_to_be_imported() {
+    // Being `share` publishes a declaration; it does not put it in scope
+    // everywhere. Otherwise `import` would be decoration.
+    let output = crate_of(
+        "modules_needs_import",
+        &[
+            (
+                "main.zrk",
+                "import { one } from \"./lib\";\n\
+                 fn main(): Void { stdout.println(one() + two()); }\n",
+            ),
+            (
+                "lib.zrk",
+                "share fn one(): Int32 { return 1; }\n\
+                 share fn two(): Int32 { return 2; }\n",
+            ),
+        ],
+    );
+
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.contains("not imported"),
+        "stderr:\n{}",
+        output.stderr
+    );
+}
+
+#[test]
+fn a_private_enum_is_not_reachable_from_another_file() {
+    let output = crate_of(
+        "modules_private_enum",
+        &[
+            (
+                "main.zrk",
+                "import { E } from \"./lib\";\n\
+                 fn main(): Void { stdout.println(match E.A { _ => \"x\" }); }\n",
+            ),
+            ("lib.zrk", "enum E { A }\n"),
+        ],
+    );
+
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.contains("not accessible from this file"),
+        "stderr:\n{}",
+        output.stderr
+    );
+}
