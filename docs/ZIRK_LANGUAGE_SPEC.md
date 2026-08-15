@@ -9,6 +9,10 @@ parser where there is no ambiguity, but the official formatter adds it. Both
 `//` and `/* ... */` are supported; documentation uses multi-line documentation
 comments.
 
+Regex literals use `re'pattern'`. The lexer recognizes `**`, `**=`, `..=`,
+`do`, `gen`, and `yield`. An unterminated regex is diagnosed at its opening
+delimiter.
+
 Conventions:
 
 - variables, functions, methods, parameters and files: `snake_case`;
@@ -34,6 +38,10 @@ flow analysis prevents reading a variable that is not yet available.
 
 There are block, function, file and module scopes. A file symbol does not leave
 it unless published with `share`.
+
+An ordinary local cannot hide another still-visible local or parameter. Lambda
+parameters are the deliberate capture exception: the plain name selects the
+lambda-local binding and `this.name` selects the captured outer value.
 
 Only an `application` may declare globals, and exclusively in the `globals`
 block of `init.zrk`:
@@ -87,7 +95,7 @@ uses `??`.
 - `is`: same instance, only for types with observable identity.
 - Comparators: `<`, `<=`, `>`, `>=`, per the contracts of the type.
 - Logical: `&&`, `||`, `!`, booleans only.
-- Arithmetic and compound: `+`, `-`, `*`, `/`, `%`, `+=`, `-=`, `*=`, `/=`, `%=`.
+- Arithmetic and compound: `+`, `-`, `*`, `/`, `%`, `**`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`.
 - Increment: `count++`, `count--`, `++count`, `--count`, preserving conventional
   postfix/prefix semantics.
 - Ternary: `condition ? when_true : when_false`.
@@ -95,17 +103,31 @@ uses `??`.
 Operators may only be overloaded through contracts defined by the language; an
 overload cannot alter precedence or arity.
 
+User-defined types implement those contracts with reserved methods such as
+`_add` and `_subtract` in safe code. Application code cannot reopen native
+types or replace their fundamental behavior; `unsafe` remains for memory and
+ABI operations, not ordinary operator implementation.
+
 ## 5. Control flow and pattern matching
 
-`if`/`else`, `for`, `for ... in`, `while`, `loop`, `break` and `continue` are
-included. `if` may be an expression when every branch produces compatible types.
+`if`/`else`, traditional `for`, `for ... in`, `while`, `do ... while`, `loop`,
+`break` and `continue` are included. `if` may be an expression when every branch
+produces compatible types. The ternary is preferred for a short value choice.
+An effect-only `if` may govern one immediate statement without braces:
+
+```text
+if closed return;
+```
+
+The traditional loop is `for mut i = 0; i < 10; i++ { ... }`. A post-condition
+loop is `do { ... } while condition;` and always executes its body once.
 
 `match` is exhaustive when used as an expression:
 
 ```text
 mut message: String = match result {
-    Ok(value) { "Value: {value}" }
-    Error(error) { "Error: {error}" }
+    Ok(value) => "Value: {value}";
+    Error(error) => "Error: {error}";
 };
 ```
 
@@ -113,13 +135,28 @@ As a statement it controls flow and produces no value. It admits values, types,
 associated enums, unions and destructuring. There are no special `capture` or
 `yield` forms for recovering its result.
 
+Commas group alternative patterns before one `=>` body. A regex literal is a
+string pattern, and nested patterns compose:
+
+```text
+match input {
+    re'^[0-9]+$' => parse_number(input);
+    _ => reject(input);
+}
+
+match event {
+    UserCreated({ id, name }) => audit(id, name);
+    _ => ignore(event);
+}
+```
+
 `match with` acquires a `Resource<E>` and guarantees it is closed when any
 branch ends, including error, exception, `return` or cancellation:
 
 ```text
 mut first_line: String = match with File.open("data.txt") {
-    Ok(file) { file.read_line() }
-    Error(error) { "" }
+    Ok(file) => file.read_line();
+    Error(error) => "";
 };
 ```
 
@@ -134,8 +171,10 @@ fn add(a: Int32, b: Int32): Int32 {
 }
 ```
 
-Local inference, optional parameters (`name?`), nullable types (`String?`),
-default values, named parameters and variadics (`...values`) are supported.
+Local inference, typed optional parameters (`name?: String`), nullable types
+(`String?`), default values, named parameters and variadics (`...values`) are
+supported. Optional positional parameters follow required ones. Inside a
+function, a variadic is an ordered read-only `Iterable<T>` valid for the call.
 There is no traditional overloading; unions, generics or different names are
 used instead.
 
@@ -143,6 +182,7 @@ Lambdas are equivalent to function values:
 
 ```text
 inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
+inmut SUBTRACT = fn(a: Int32, b: Int32): Int32 => a - b;
 inmut ACTION = (): Void => {
     stdout.println("ok");
 };
@@ -150,13 +190,17 @@ inmut ACTION = (): Void => {
 
 A closure captures immutable values safely. Shared mutable capture requires that
 concurrency analysis prove it safe, or that explicit synchronization be used.
+The leading `fn` is optional on a lambda. When a lambda-local name collides with
+a capture, `this.name` selects the capture. `clone(receiver.method)` creates a
+local callable bound to the same receiver and preserves its complete callable
+contract without cloning that receiver or an external handle.
 
 ## 7. Objects and data types
 
 ```text
 class User implements Serializable {
-    public inmut id: UInt64;
-    public mut name: String;
+    inmut id: UInt64;
+    name: String;
 
     construct(id: UInt64, name: String) {
         this.id = id;
@@ -165,11 +209,18 @@ class User implements Serializable {
 }
 
 mut user = User(1, "Cristian");
+mut named_user = User(name: "Cristian", id: 1);
 ```
 
 The constructor is called `construct`; there is no `new`; the current instance
-is `this`. Visibility is `public`, `private` or `protected`, with `public` as
-the default.
+is `this`. Visibility is `public`, `private` or `protected`. An unmodified class
+field is `public mut`; either modifier may be written to state a non-default
+contract explicitly.
+
+A class may declare multiple `construct` members when their effective
+parameter signatures differ. Resolution uses arity, type and argument labels,
+including reordered named arguments, and rejects duplicate or ambiguous sets.
+This exception does not enable ordinary function or method overloading.
 
 A class may extend one class and combine multiple interfaces and traits. Classes
 are inheritable by default; `abstract` classes and methods exist, but `final`
@@ -185,12 +236,15 @@ They are specialized for concrete types where appropriate.
 
 Additional data types:
 
-- traditional enums and algebraic enums with associated values;
+- traditional enums, whose unmapped cases expose their exact names as default
+  string values and may map with `->` to compatible string or numeric values;
+- algebraic enums with zero or more associated typed values;
 - aliases via `type`;
 - unions `A | B`;
 - immutable records with structural semantics;
 - value classes without observable identity, storable inline;
-- dynamic arrays, fixed arrays, `List<T>`, `Map<K,V>` and `Set<T>`.
+- fixed-length arrays written as `T[]`, canonically sized as `T[n]`, or
+  constructed as `Array<T>(n)`; resizable `List<T>`; `Map<K,V>` and `Set<T>`.
 
 A normal class has identity and state; a record represents data; a value class
 represents a compact value. `clone()` exists only through an explicit trait and
@@ -198,14 +252,19 @@ may be derived when every field is cloneable.
 
 ## 8. Iteration and functional style
 
-`Iterable<T>` and `Iterator<T>` define iteration. Generators use `fn gen` and
-produce values in a suspendable way. Collections offer `map`, `filter` and
-`reduce` without mutating the source. The pipe `|>` passes the left-hand result
-into the next operation.
+`Iterable<T>` and `Iterator<T>` define iteration. Generators use `fn gen`,
+produce values in a suspendable way, preserve locals between `yield` points,
+and implement both iteration contracts. `String` is iterable over its public
+character units. Collections offer `map`, `filter` and `reduce` without
+mutating the source. The pipe `|>` passes the left-hand result into the next
+ordinary function, so pure functions need not be methods on the value's class.
 
-`Range<T>` is iterable and independent of slicing. Inclusive and exclusive
-ranges defined by their constructor are supported, as is `[start:end:step]`
-slicing.
+`Range<T>` is lazy, iterable and independent of slicing. `start..end` excludes
+the end; `start..=end` includes it. Direction follows the relative bounds,
+`.step(distance)` uses a positive non-zero distance, `.reverse()` inverts a
+range, and an inline computed bound may be `0..{number}`. Slicing uses
+`[start:end:step]`, permits omitted or negative components, applies to ordered
+collections and `String`, and excludes its end.
 
 ## 9. Errors
 
@@ -240,6 +299,12 @@ import { stdin, stdout, stderr } from std.io;
 
 Local paths use quotes and omit `.zrk`. Standard modules use unquoted names.
 `share` publishes code; `import` brings code in; `use` only enables globals.
+
+Importing a compiler-known standard-library object also exposes its declared
+convenience members directly when unambiguous. After
+`import { stdout } from std.io`, `println("hello")` resolves to
+`stdout.println("hello")`. A collision requires qualification. Local and
+package objects do not inject methods into file scope.
 
 `init.zrk` is a declarative DSL, not executable code. It contains `project`,
 `build_targets`, `globals`, `permissions`, `compile_permissions`, `requires` and

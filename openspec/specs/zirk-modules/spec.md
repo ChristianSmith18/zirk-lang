@@ -5,9 +5,7 @@
 Defines how the files of one crate see each other: `share`, `import` and `use`.
 
 Which files make up a crate is decided by walking `import` from the entry file, so a `.zrk` nobody imports is not part of the program. Visibility is binary here — shared or private to its file. The three levels of `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and arrive with them, and per-module namespacing belongs with the project system.
-
 ## Requirements
-
 ### Requirement: Visibilidad binaria entre archivos de un crate
 
 Una declaración de nivel superior SHALL ser visible únicamente dentro del archivo que la define, salvo que esté marcada `share`, en cuyo caso SHALL ser visible desde cualquier otro archivo del mismo crate que la importe.
@@ -96,3 +94,18 @@ Esta fase solo reconoce `std.io` con `stdout`, `stdin` y `stderr`, ya existentes
 #### Scenario: Módulo estándar no reconocido
 - **WHEN** se importa desde un módulo estándar distinto de `std.io`
 - **THEN** se emite un diagnóstico indicando que ese módulo llega en una fase posterior
+
+### Requirement: Standard-library convenience member resolution
+Importing a compiler-known standard-library object SHALL make its declared convenience members callable without qualification when the name is otherwise unambiguous. A local or imported collision SHALL require qualification through the imported object. Objects from local files or packages SHALL NOT inject their methods into file scope.
+
+#### Scenario: Direct standard output call
+- **WHEN** a file imports `{ stdout } from std.io` and has no competing `println`
+- **THEN** `println("hello")` resolves to `stdout.println("hello")`
+
+#### Scenario: Ambiguous convenience name
+- **WHEN** the file also declares or imports another `println`
+- **THEN** an unqualified call is diagnosed and `stdout.println(...)` selects the standard operation
+
+#### Scenario: Package object import
+- **WHEN** an object is imported from a package rather than a standard module
+- **THEN** its methods remain accessible only through the object unless explicitly exported as declarations

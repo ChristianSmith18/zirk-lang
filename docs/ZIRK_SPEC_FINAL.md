@@ -8,6 +8,18 @@ Manifest: `init.zrk`
 Lockfile: `zirk.lock`
 Distributable package: `.zpkg`
 
+> **Authorial language checkpoint — 15 August 2026.** The language author's
+> numbered handbook annotations supersede older omissions and contradictory
+> examples in the 12 August snapshot. The specialized language and standard
+> library specifications now define exponentiation; complete range and slicing
+> forms; classic `for`, single-statement `if`, and `do ... while`; regex
+> literals and patterns; comma-grouped `match`; typed optional and iterable
+> variadic parameters; optional `fn` lambdas; qualified closure captures; class
+> field defaults; constructor signatures; operator methods; enum mappings;
+> fixed arrays; generators; pure-function pipelines; standard-library
+> convenience imports; and bound callable cloning. This checkpoint is
+> normative even where the current compiler has not implemented the surface.
+
 > **Language of this document.** Every normative specification, and the codebase
 > itself, is written in English. See
 > [decisions/ADR-006-language-of-the-codebase.md](./decisions/ADR-006-language-of-the-codebase.md).
@@ -133,6 +145,11 @@ fn main(): Void {
   event loop.
 - `share` publishes declarations, `import` brings them in, and `use` enables
   globals from `init.zrk`.
+- Ordinary local shadowing is rejected; an explicit lambda capture collision
+  uses `this.name`.
+- All arrays have fixed length; `List<T>` is the resizable sequence.
+- A class field without modifiers is `public mut`; constructors may have
+  distinct signatures although ordinary functions remain non-overloaded.
 
 ## 7. Distribution and security
 

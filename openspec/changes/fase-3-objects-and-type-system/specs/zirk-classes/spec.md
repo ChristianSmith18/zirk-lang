@@ -8,6 +8,14 @@ El compilador SHALL admitir `class` con campos y métodos, según `ZIRK_LANGUAGE
 - **WHEN** se declara `class User { public inmut id: Int32; construct(id: Int32) { this.id = id; } }`
 - **THEN** se produce un tipo `User` con un campo y un constructor
 
+#### Scenario: Campo sin modificadores
+- **WHEN** una clase declara `name: String;`
+- **THEN** el campo equivale a `public mut name: String;`
+
+#### Scenario: Múltiples constructores
+- **WHEN** una clase declara dos `construct` con firmas efectivas distintas
+- **THEN** ambos son constructores válidos y quedan disponibles para resolución
+
 #### Scenario: Instanciación sin `new`
 - **WHEN** se escribe `mut u = User(1);`
 - **THEN** se construye una instancia

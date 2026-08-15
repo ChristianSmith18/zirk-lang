@@ -3,12 +3,15 @@
 ## 1. Principles
 
 The stdlib must be small, coherent, typed, cross-platform and explicit about
-I/O, permissions and errors. There are no global print or read functions.
+I/O, permissions and errors. Print and read operations belong to imported
+standard objects; compiler-known convenience members may be called directly
+after that object is imported when the name is unambiguous.
 Standard modules are imported without quotes:
 
 ```text
 import { stdout } from std.io;
 import { File } from std.fs;
+println("ready"); // Resolves to `stdout.println`.
 ```
 
 The first version includes the core needed for native applications. Specialized
@@ -47,6 +50,7 @@ import { stdin, stdout, stderr } from std.io;
 stdout.print("Hola");
 stdout.println("Mundo");
 stdout.println();
+println("Direct convenience call");
 stderr.println("Diagnóstico");
 mut line = stdin.read_line();
 ```
@@ -59,6 +63,10 @@ mut line = stdin.read_line();
 - every printable value uses `to_string(): String` or the corresponding
   formatting trait.
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
+- an unqualified convenience call resolves through the imported standard object
+  when unique; a collision requires `stdout.println(...)`.
+- `clone(stdout.println)` produces a callable bound to `stdout` without cloning
+  the stream or its native handle.
 
 `stdin` offers line, char and byte reads. EOF is not an exception: it is
 represented through `ReadResult<T>` or an equivalent algebraic result that
@@ -73,8 +81,8 @@ The async variants suspend a task without blocking a thread.
 import { File } from std.fs;
 
 mut content: String = match with File.open("data.txt") {
-    Ok(file) { file.read_text() }
-    Error(error) { return Error(error); }
+    Ok(file) => file.read_text();
+    Error(error) => return Error(error);
 };
 ```
 
@@ -139,9 +147,9 @@ process permission; extra environment requires its corresponding capability.
 
 Minimum types:
 
-- `Array<T>`, dynamic and general purpose;
-- fixed arrays where the size is part of the type;
-- `List<T>` where an explicit list contract is needed;
+- `Array<T>`, always fixed-length, with size inferred from an initializer or
+  supplied as `T[n]`/`Array<T>(n)`;
+- `List<T>` for a resizable ordered sequence;
 - `Map<K,V>` with hashable/equatable keys;
 - `Set<T>`;
 - `Range<T>`;
