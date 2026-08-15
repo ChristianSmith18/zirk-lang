@@ -129,7 +129,9 @@ y el cuerpo del lambda se eleva a una función de módulo cuyos primeros paráme
 Consecuencias:
 
 - **Cero alocación.** El valor vive donde viva su slot, en el marco de pila, y no se toca ADR-003.
-- **Cada lambda tiene su propio tipo de IR**, identificado por el lambda y no por su firma. Es correcto justamente porque no hay forma de escribir un tipo función: en cada sitio de uso el tipo es estáticamente conocido. Dos lambdas de la misma firma no son intercambiables, y como no hay dónde declararlas intercambiables, no se nota.
+- **Cada lambda tiene su propio tipo**, identificado por el lambda y no por su firma. Es correcto porque no hay forma de escribir un tipo función: en cada sitio de uso el tipo es estáticamente conocido.
+
+  La primera versión de esta decisión añadía que "no se nota", y eso resultó falso al probarlo: **la reasignación sí lo nota**. `mut F = (): Int32 => 1; F = (): Int32 => 2;` dejaba el slot con un valor cuyo layout ya no correspondía. Se rechaza con un diagnóstico propio, porque decir que `(Int32) => Int32` no es `(Int32) => Int32` no le sirve a nadie.
 - **La captura sigue siendo por valor e inmutable**, tal como D2 lo fijó. Nada de D2 se deshace: cambia solo dónde vive el entorno.
 
 Cuando Fase 3 le dé sintaxis a los tipos función, una closure podrá escapar y ahí sí hará falta decidir dónde vive su entorno. Esa decisión llega junto con la de memoria, que es donde corresponde, y no antes de tiempo.
