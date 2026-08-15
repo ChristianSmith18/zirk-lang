@@ -220,7 +220,10 @@ pub struct EnumType {
 
 impl EnumType {
     pub fn discriminant(&self, variant: &str) -> Option<u32> {
-        self.variants.iter().position(|v| v == variant).map(|i| i as u32)
+        self.variants
+            .iter()
+            .position(|v| v == variant)
+            .map(|i| i as u32)
     }
 }
 
@@ -348,7 +351,11 @@ mod tests {
 
     #[test]
     fn nullability_of_different_bases_does_not_make_them_compatible() {
-        assert!(!Type::STRING.as_nullable().accepts(Type::INT32.as_nullable()));
+        assert!(
+            !Type::STRING
+                .as_nullable()
+                .accepts(Type::INT32.as_nullable())
+        );
     }
 
     #[test]

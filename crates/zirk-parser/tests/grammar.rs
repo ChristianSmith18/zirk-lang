@@ -392,7 +392,10 @@ fn invalid_declaration_inside_a_function_says_where_it_belongs() {
             output.contains(codes::MODULES_UNAVAILABLE.as_str()),
             "for `{source_text}`:\n{output}"
         );
-        assert!(output.contains("top level"), "for `{source_text}`:\n{output}");
+        assert!(
+            output.contains("top level"),
+            "for `{source_text}`:\n{output}"
+        );
     }
 }
 
@@ -416,7 +419,10 @@ fn invalid_increment_as_expression_is_rejected() {
 #[test]
 fn invalid_variadic_must_be_last() {
     let output = errors("fn f(...xs: Int32, y: Int32): Void { }");
-    assert!(output.contains(codes::VARIADIC_NOT_LAST.as_str()), "{output}");
+    assert!(
+        output.contains(codes::VARIADIC_NOT_LAST.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -822,5 +828,9 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
     );
     let output = errors(&source);
 
-    assert!(output.contains(codes::NESTING_TOO_DEEP.as_str()), "{}", &output[..200.min(output.len())]);
+    assert!(
+        output.contains(codes::NESTING_TOO_DEEP.as_str()),
+        "{}",
+        &output[..200.min(output.len())]
+    );
 }

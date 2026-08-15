@@ -258,7 +258,8 @@ impl<'a> Lexer<'a> {
             } else if c == '_' {
                 // Two separators in a row, or a leading one, are invalid.
                 if last_was_separator || digits.is_empty() {
-                    invalid_separator.get_or_insert(self.source.span(self.offset(), self.offset() + 1));
+                    invalid_separator
+                        .get_or_insert(self.source.span(self.offset(), self.offset() + 1));
                 }
                 last_was_separator = true;
                 self.pos += 1;
