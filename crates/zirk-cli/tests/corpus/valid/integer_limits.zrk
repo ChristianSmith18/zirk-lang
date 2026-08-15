@@ -1,0 +1,15 @@
+fn main(): Void {
+    // `-2147483648` is one literal: folding the sign into it is what makes the
+    // minimum writable at all, since its magnitude alone does not fit.
+    stdout.println(-2147483648);
+    stdout.println(2147483647);
+
+    mut low = -2147483648;
+    stdout.println(low);
+
+    mut a = -10;
+    mut b = 3;
+    stdout.println(a / b);
+    stdout.println(a % b);
+    stdout.println(1_000_000);
+}

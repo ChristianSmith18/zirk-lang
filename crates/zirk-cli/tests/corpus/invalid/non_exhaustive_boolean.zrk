@@ -1,0 +1,2 @@
+fn f(b: Boolean): Int32 { return match b { true => 1 }; }
+fn main(): Void { stdout.println(f(true)); }

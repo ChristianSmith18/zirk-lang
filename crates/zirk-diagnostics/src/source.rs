@@ -14,24 +14,59 @@ use crate::{Location, Snippet};
 /// when a diagnostic has to be emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
+    /// The file the offsets belong to.
+    ///
+    /// Offsets stay local to their file rather than living in one global
+    /// address space: editing a file must not shift the spans of every file
+    /// after it. See `docs/decisions/ADR-010-ubicaciones-multiarchivo.md`.
+    pub file: FileId,
     pub start: u32,
     pub end: u32,
 }
 
+/// Identifies a file within a [`SourceMap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileId(pub u32);
+
+impl FileId {
+    /// The first file, which is the entry point of a compilation.
+    pub const ENTRY: FileId = FileId(0);
+}
+
 impl Span {
     pub const fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
+        Self::in_file(FileId::ENTRY, start, end)
+    }
+
+    pub const fn in_file(file: FileId, start: u32, end: u32) -> Self {
+        Self { file, start, end }
     }
 
     /// An empty span at a position, useful to point at "something is missing
     /// here".
     pub const fn empty(at: u32) -> Self {
-        Self { start: at, end: at }
+        Self::in_file(FileId::ENTRY, at, at)
+    }
+
+    pub const fn empty_in(file: FileId, at: u32) -> Self {
+        Self::in_file(file, at, at)
     }
 
     /// A span covering from the start of this one to the end of the other.
+    ///
+    /// Both must belong to the same file: a range spanning two files names no
+    /// text, and making that impossible to write is half the point of carrying
+    /// the file at all (ADR-010).
     pub fn to(self, other: Span) -> Span {
-        Span::new(self.start.min(other.start), self.end.max(other.end))
+        debug_assert_eq!(
+            self.file, other.file,
+            "spans from different files cannot be combined"
+        );
+        Span::in_file(
+            self.file,
+            self.start.min(other.start),
+            self.end.max(other.end),
+        )
     }
 
     pub const fn len(self) -> u32 {
@@ -50,6 +85,11 @@ impl Span {
 /// for every diagnostic does not scale.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
+    /// Which file this is within its [`SourceMap`].
+    ///
+    /// The file carries its own id so every stage that already holds the file
+    /// can build spans for it without threading a second parameter alongside.
+    id: FileId,
     name: String,
     text: String,
     /// Byte offset where each line starts. Always begins with 0.
@@ -66,14 +106,26 @@ impl SourceFile {
             }
         }
         Self {
+            // A file built on its own is the entry point until a `SourceMap`
+            // says otherwise, which keeps single-file use unchanged.
+            id: FileId::ENTRY,
             name: name.into(),
             text,
             line_starts,
         }
     }
 
+    pub fn id(&self) -> FileId {
+        self.id
+    }
+
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// A span within this file.
+    pub fn span(&self, start: u32, end: u32) -> Span {
+        Span::in_file(self.id, start, end)
     }
 
     pub fn text(&self) -> &str {
@@ -218,5 +270,116 @@ mod tests {
     #[test]
     fn two_spans_combine_covering_both() {
         assert_eq!(Span::new(2, 5).to(Span::new(8, 10)), Span::new(2, 10));
+    }
+}
+
+/// The files of one compilation.
+///
+/// It owns every [`SourceFile`] and resolves a [`Span`] against the one its
+/// [`FileId`] names, so no stage has to carry the right file alongside the
+/// span. See `docs/decisions/ADR-010-ubicaciones-multiarchivo.md`.
+#[derive(Debug, Default)]
+pub struct SourceMap {
+    files: Vec<SourceFile>,
+}
+
+impl SourceMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a file and returns the id that names it.
+    ///
+    /// The first file added is the entry point, and gets [`FileId::ENTRY`].
+    pub fn add(&mut self, mut file: SourceFile) -> FileId {
+        let id = FileId(self.files.len() as u32);
+        file.id = id;
+        self.files.push(file);
+        id
+    }
+
+    /// The file compilation started from.
+    pub fn entry(&self) -> &SourceFile {
+        self.file(FileId::ENTRY)
+    }
+
+    pub fn file(&self, id: FileId) -> &SourceFile {
+        &self.files[id.0 as usize]
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = (FileId, &SourceFile)> {
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (FileId(index as u32), file))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Looks a file up by the name it was added with.
+    pub fn find(&self, name: &str) -> Option<FileId> {
+        self.files
+            .iter()
+            .position(|f| f.name() == name)
+            .map(|index| FileId(index as u32))
+    }
+
+    pub fn location(&self, span: Span) -> Location {
+        self.file(span.file).location(span)
+    }
+
+    pub fn snippet(&self, span: Span) -> Snippet {
+        self.file(span.file).snippet(span)
+    }
+
+    pub fn slice(&self, span: Span) -> &str {
+        self.file(span.file).slice(span)
+    }
+}
+
+#[cfg(test)]
+mod source_map_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_file_added_is_the_entry_point() {
+        let mut map = SourceMap::new();
+        let id = map.add(SourceFile::new("main.zrk", "fn main(): Void { }"));
+        assert_eq!(id, FileId::ENTRY);
+    }
+
+    #[test]
+    fn a_span_resolves_against_its_own_file() {
+        let mut map = SourceMap::new();
+        let first = map.add(SourceFile::new("a.zrk", "alpha"));
+        let second = map.add(SourceFile::new("b.zrk", "beta"));
+
+        // The same offsets in different files name different text: that is
+        // exactly what the file id is for.
+        assert_eq!(map.slice(Span::in_file(first, 0, 5)), "alpha");
+        assert_eq!(map.slice(Span::in_file(second, 0, 4)), "beta");
+    }
+
+    #[test]
+    fn a_location_names_the_file_it_belongs_to() {
+        let mut map = SourceMap::new();
+        map.add(SourceFile::new("a.zrk", "one\ntwo"));
+        let second = map.add(SourceFile::new("b.zrk", "uno\ndos"));
+
+        let location = map.location(Span::in_file(second, 4, 7));
+        assert_eq!(location.file, "b.zrk");
+        assert_eq!(location.line, 2);
+    }
+
+    #[test]
+    fn a_file_can_be_found_by_name() {
+        let mut map = SourceMap::new();
+        map.add(SourceFile::new("a.zrk", ""));
+        let second = map.add(SourceFile::new("b.zrk", ""));
+
+        assert_eq!(map.find("b.zrk"), Some(second));
+        assert_eq!(map.find("c.zrk"), None);
     }
 }

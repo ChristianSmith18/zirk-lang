@@ -11,7 +11,7 @@ mod common;
 
 use inkwell::context::Context;
 use zirk_codegen_llvm::{emit, symbols};
-use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile};
+use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::lower;
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
@@ -21,11 +21,13 @@ use zirk_sema::check;
 fn llvm_ir(source_text: &str) -> String {
     let _llvm = common::llvm_lock();
 
-    let source = SourceFile::new("test.zrk", source_text);
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
     let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(&source, &mut sink);
-    let program = parse(&source, &tokens, &mut sink);
-    let checked = check(&source, &program, &mut sink);
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),
@@ -230,8 +232,17 @@ fn logical_operators_do_not_check_overflow() {
     let ir = llvm_ir(&in_main(
         "mut p: Boolean = true;\nmut q: Boolean = false;\nmut x: Boolean = p && q;",
     ));
-    assert!(ir.contains(" and "), "{ir}");
-    assert!(!ir.contains("llvm.sadd"));
+    assert!(!ir.contains("llvm.sadd"), "{ir}");
+}
+
+#[test]
+fn logical_operators_short_circuit() {
+    // `&&` becomes a branch rather than an `and`: the right operand must not
+    // run when the left already decided the answer.
+    let ir = llvm_ir(&in_main(
+        "mut p: Boolean = true;\nmut q: Boolean = false;\nmut x: Boolean = p && q;",
+    ));
+    assert!(ir.contains("br i1"), "{ir}");
 }
 
 // --- Control flow -----------------------------------------------------------
@@ -340,4 +351,34 @@ fn the_reference_program_of_the_roadmap_emits() {
     assert!(ir.contains(&format!("@{}", symbols::STR_FROM_UTF8)));
     assert!(ir.contains(&format!("@{}", symbols::IO_PRINTLN)));
     assert!(ir.contains("define i32 @main()"));
+}
+
+#[test]
+fn generated_symbols_only_use_characters_every_assembler_accepts() {
+    // A symbol reaches the object file through the target's assembler, and the
+    // safe set is not the same everywhere: `#` starts a comment in x86_64's
+    // AT&T syntax, so a lifted lambda named `<lambda>#0` broke there and
+    // nowhere else — aarch64 comments with `//`.
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+         inmut A = 1;\n\
+         inmut F = (x: Int32): Int32 => x + A;\n\
+         stdout.println(F(1));\n\
+         }",
+    );
+
+    for line in ir.lines().filter(|l| l.starts_with("define")) {
+        let name: String = line
+            .chars()
+            .skip_while(|c| *c != '@')
+            .skip(1)
+            .take_while(|c| *c != '(')
+            .collect();
+
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+            "`{name}` uses a character an assembler may not accept"
+        );
+    }
 }

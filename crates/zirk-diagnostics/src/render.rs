@@ -166,13 +166,36 @@ pub(crate) fn json(diagnostic: &Diagnostic) -> String {
     out
 }
 
-pub(crate) fn sink(diagnostics: &[Diagnostic], style: RenderStyle, color: Color) -> String {
+pub(crate) fn sink(
+    diagnostics: &[Diagnostic],
+    suppressed: usize,
+    style: RenderStyle,
+    color: Color,
+) -> String {
     // Diagnostics are sorted by location before rendering. Pipeline stages emit
     // in the order they work — all of the lexing first, then all of the
     // parsing — so without this an error on line 3 can appear before one on
     // line 2. Readers expect to walk their file from top to bottom.
     let mut sorted: Vec<&Diagnostic> = diagnostics.iter().collect();
     sorted.sort_by_key(|d| sort_key(d));
+
+    // The count of what was dropped travels as a diagnostic of its own, so it
+    // reaches the structured form too: a tool that reads only the array would
+    // otherwise have no way to tell a full report from a truncated one.
+    let truncated = (suppressed > 0).then(|| {
+        Diagnostic::error(
+            crate::codes::TOO_MANY_DIAGNOSTICS,
+            format!("{suppressed} more problem(s) were not shown"),
+        )
+        .with_cause(format!(
+            "one compilation reports at most {} diagnostics",
+            crate::MAX_DIAGNOSTICS
+        ))
+        .with_help("fix the ones above first: most of the rest are usually derived from them")
+    });
+    if let Some(note) = &truncated {
+        sorted.push(note);
+    }
 
     match style {
         RenderStyle::Human => sorted

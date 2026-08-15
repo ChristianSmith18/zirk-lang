@@ -1,0 +1,21 @@
+fn add(a: Int32, b: Int32): Int32 { return a + b; }
+
+fn main(): Void {
+    mut y: Int32? = null;
+    inmut F = (a: Int32, b: Int32): Int32 => a - b;
+
+    // Each of these evaluates one operand before another opens blocks of its
+    // own, which is what strands values when they are not held in a slot.
+    stdout.println(1 + (if true { 10 } else { 20 }));
+    stdout.println(add(1, y ?? 9));
+    stdout.println(add(y ?? 4, y ?? 2));
+    stdout.println(F(10, y ?? 3));
+    stdout.println(add(if true { 1 } else { 2 }, y ?? 5));
+
+    mut acc = 0;
+    for i in 0..3 {
+        mut x: Int32? = i;
+        acc += x ?? 0;
+    }
+    stdout.println(acc);
+}

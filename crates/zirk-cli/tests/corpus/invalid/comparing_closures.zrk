@@ -1,0 +1,1 @@
+fn main(): Void { inmut F = (): Int32 => 1; inmut G = (): Int32 => 2; stdout.println(F == G); }

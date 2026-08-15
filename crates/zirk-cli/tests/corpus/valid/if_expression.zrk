@@ -1,0 +1,12 @@
+fn classify(n: Int32): String {
+    return if n % 2 == 0 { "par" } else { "impar" };
+}
+
+fn main(): Void {
+    for i in 1..=4 {
+        stdout.println(classify(i));
+    }
+
+    inmut LABEL = if true { "si" } else { "no" };
+    stdout.println(LABEL);
+}

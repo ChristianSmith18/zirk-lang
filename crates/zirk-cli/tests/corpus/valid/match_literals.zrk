@@ -1,0 +1,13 @@
+fn size(n: Int32): String {
+    return match n {
+        0 => "cero",
+        1 => "uno",
+        other => "muchos"
+    };
+}
+
+fn main(): Void {
+    for i in 0..4 {
+        stdout.println(size(i));
+    }
+}

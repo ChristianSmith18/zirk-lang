@@ -1,0 +1,23 @@
+fn main(): Void {
+    mut total = 0;
+
+    for (mut i = 0; i < 10; i++) {
+        if i == 3 { continue; }
+        if i == 7 { break; }
+        total += i;
+    }
+    stdout.println(total);
+
+    mut countdown = 3;
+    while countdown > 0 {
+        stdout.println(countdown);
+        countdown -= 1;
+    }
+
+    mut guard = 0;
+    loop {
+        guard++;
+        if guard == 2 { break; }
+    }
+    stdout.println(guard);
+}

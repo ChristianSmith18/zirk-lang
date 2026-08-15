@@ -27,6 +27,51 @@ pub enum IrType {
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
     String,
+    /// A closure, identified by its layout in the module.
+    ///
+    /// Each lambda has its own type rather than sharing one per signature: a
+    /// closure cannot escape in this phase, so at every use site the type is
+    /// statically known. Decision D10.
+    Closure(u32),
+    /// `T?`: a value that may be absent.
+    ///
+    /// Represented uniformly as a present flag next to the value, rather than
+    /// as a null pointer for `String` and something else for the scalars. A
+    /// per-type trick would be smaller for `String` and would need a separate
+    /// rule for every type added later; one shape needs none.
+    Nullable(Nullable),
+}
+
+/// The types that have a nullable form.
+///
+/// Kept apart from [`IrType`] so a nullable type stays `Copy`: wrapping an
+/// `IrType` would need a box, and `T??` does not exist, so one level is all
+/// there is to express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Nullable {
+    Int32,
+    Boolean,
+    String,
+}
+
+impl Nullable {
+    pub const fn inner(self) -> IrType {
+        match self {
+            Nullable::Int32 => IrType::Int32,
+            Nullable::Boolean => IrType::Boolean,
+            Nullable::String => IrType::String,
+        }
+    }
+
+    /// The nullable form of a type, if it has one.
+    pub const fn of(ty: IrType) -> Option<Self> {
+        Some(match ty {
+            IrType::Int32 => Nullable::Int32,
+            IrType::Boolean => Nullable::Boolean,
+            IrType::String => Nullable::String,
+            _ => return None,
+        })
+    }
 }
 
 impl IrType {
@@ -36,6 +81,20 @@ impl IrType {
             IrType::Int32 => "Int32",
             IrType::Boolean => "Boolean",
             IrType::String => "String",
+            IrType::Closure(_) => "closure",
+            IrType::Nullable(n) => match n {
+                Nullable::Int32 => "Int32?",
+                Nullable::Boolean => "Boolean?",
+                Nullable::String => "String?",
+            },
+        }
+    }
+
+    /// The type inside a nullable one, or the type itself.
+    pub const fn unwrapped(self) -> Self {
+        match self {
+            IrType::Nullable(base) => base.inner(),
+            other => other,
         }
     }
 
@@ -73,6 +132,22 @@ pub struct Module {
     /// String literals, deduplicated. The backend materializes them as
     /// constants and the runtime turns them into `String` values.
     pub strings: Vec<String>,
+    /// Closure layouts, indexed by the id [`IrType::Closure`] carries.
+    pub closures: Vec<ClosureLayout>,
+}
+
+/// What one closure value holds and what its lifted function expects.
+///
+/// The captures live inside the value, so the lifted function takes them as
+/// its leading parameters: nothing is allocated and nothing is dereferenced.
+/// Decision D10.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosureLayout {
+    /// The module function the lambda body was lifted into.
+    pub function: String,
+    pub captures: Vec<IrType>,
+    pub params: Vec<IrType>,
+    pub returns: IrType,
 }
 
 impl Module {
@@ -207,6 +282,39 @@ pub enum InstKind {
     /// Its operand is **always** a `String`: the lowering inserts a `ToString`
     /// when it is not, and the verifier enforces it.
     Println(Operand),
+
+    /// The absent value of a nullable type.
+    NullValue(Nullable),
+    /// Widens a value into its nullable form.
+    ///
+    /// `T` is accepted where `T?` is expected, and this is that widening made
+    /// explicit: the IR never has an implicit representation change.
+    Wrap {
+        base: Nullable,
+        value: Operand,
+    },
+    /// Whether a nullable value is absent.
+    IsNull(Operand),
+    /// The value inside a nullable one.
+    ///
+    /// Only emitted on a path where an [`InstKind::IsNull`] already proved it
+    /// present, which is what `??` establishes before using it.
+    Unwrap(Operand),
+
+    /// Builds a closure value from its captures.
+    MakeClosure {
+        id: u32,
+        captures: Vec<Operand>,
+    },
+    /// Calls a closure value.
+    ///
+    /// The captures travel inside the operand, so the call passes them ahead of
+    /// the arguments the caller wrote.
+    CallClosure {
+        id: u32,
+        callee: Operand,
+        args: Vec<Operand>,
+    },
 }
 
 /// An input to an instruction.
@@ -254,6 +362,13 @@ impl BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
     Return(Option<Operand>),
+    /// Control never arrives here.
+    ///
+    /// A block still needs a terminator even when nothing can reach it — the
+    /// block after `loop { return x; }` is the ordinary case. Inventing a
+    /// return value for it would have to invent one of the function's type,
+    /// and that value would be a lie about code that never runs.
+    Unreachable,
     Jump(BlockId),
     Branch {
         condition: Operand,
@@ -266,7 +381,7 @@ impl Terminator {
     /// Blocks this terminator can transfer control to.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
-            Terminator::Return(_) => Vec::new(),
+            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
             Terminator::Jump(target) => vec![*target],
             Terminator::Branch {
                 then_block,

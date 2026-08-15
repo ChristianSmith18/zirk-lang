@@ -349,11 +349,29 @@ fn valid_nullability_and_pipe_operators() {
 
 #[test]
 fn valid_pending_operators_declare_their_phase() {
-    assert_eq!(TokenKind::PlusEq.phase(), Some(2));
     assert_eq!(TokenKind::PipeGt.phase(), Some(3));
     // Subset operators declare no pending phase.
     assert_eq!(TokenKind::Plus.phase(), None);
     assert_eq!(TokenKind::Eq.phase(), None);
+    // Phase 2 retires these from the pending list.
+    assert_eq!(TokenKind::PlusEq.phase(), None);
+    assert_eq!(TokenKind::PlusPlus.phase(), None);
+    assert_eq!(TokenKind::QuestionDot.phase(), None);
+}
+
+#[test]
+fn valid_range_and_variadic_operators() {
+    use TokenKind::*;
+    assert_eq!(
+        tokens(".. ..= ... ."),
+        vec![DotDot, DotDotEq, DotDotDot, Dot, Eof]
+    );
+}
+
+#[test]
+fn valid_range_is_not_confused_with_member_access() {
+    use TokenKind::*;
+    assert_eq!(tokens("0..10"), vec![Integer(0), DotDot, Integer(10), Eof]);
 }
 
 #[test]

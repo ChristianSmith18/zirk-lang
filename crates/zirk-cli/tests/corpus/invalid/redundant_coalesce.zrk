@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut X = 1 ?? 2;
+    stdout.println(X);
+}

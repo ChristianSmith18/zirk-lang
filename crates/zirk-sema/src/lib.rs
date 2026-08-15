@@ -21,9 +21,9 @@ mod checker;
 mod scope;
 mod types;
 
-pub use checker::{CheckedProgram, check};
-pub use scope::{Binding, Scopes, Signature};
-pub use types::{PendingType, Type, pending_type};
+pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
+pub use scope::{Binding, ParamInfo, Scopes, Signature};
+pub use types::{Base, EnumType, FnType, PendingType, Type, pending_type};
 
 /// Diagnostic codes of the checker.
 pub mod codes {
@@ -53,4 +53,26 @@ pub mod codes {
     pub const DUPLICATE_FUNCTION: Code = Code::new("E0411");
     /// A variable declared with type `Void`.
     pub const VOID_VARIABLE: Code = Code::new("E0412");
+    /// `break` or `continue` outside any loop.
+    pub const JUMP_OUTSIDE_LOOP: Code = Code::new("E0413");
+    /// `for ... in` over a type this phase cannot iterate.
+    pub const NOT_ITERABLE: Code = Code::new("E0414");
+    /// A `match` that does not cover every case.
+    pub const NON_EXHAUSTIVE_MATCH: Code = Code::new("E0415");
+    /// A named argument that no parameter answers to.
+    pub const UNKNOWN_ARGUMENT_NAME: Code = Code::new("E0416");
+    /// Reassigning a variable captured by a closure.
+    pub const CAPTURED_MUTATION: Code = Code::new("E0417");
+    /// An operator applied where it has no effect.
+    pub const REDUNDANT_OPERATOR: Code = Code::new("E0418");
+    /// Calling something that is not a function.
+    pub const NOT_CALLABLE: Code = Code::new("E0419");
+    /// A name used as an enum variant that is not one.
+    pub const UNKNOWN_VARIANT: Code = Code::new("E0420");
+    /// A declaration whose name collides with another.
+    pub const DUPLICATE_DECLARATION: Code = Code::new("E0421");
+    /// An `if` used as a value without an `else`.
+    pub const IF_WITHOUT_ELSE: Code = Code::new("E0422");
+    /// A construct this phase checks but does not compile yet.
+    pub const NOT_LOWERED: Code = Code::new("E0423");
 }

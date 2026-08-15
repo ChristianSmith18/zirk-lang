@@ -1,0 +1,12 @@
+fn loud(): Boolean {
+    stdout.println("evaluado");
+    return true;
+}
+
+fn main(): Void {
+    if false && loud() { stdout.println("no llega"); }
+    if true || loud() { stdout.println("si"); }
+
+    if true && loud() { stdout.println("ambos"); }
+    if false || loud() { stdout.println("alternativa"); }
+}

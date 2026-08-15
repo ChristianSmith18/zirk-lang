@@ -136,7 +136,7 @@ impl<'a> Lexer<'a> {
             let start = self.offset();
 
             let Some(c) = self.peek() else {
-                tokens.push(Token::new(TokenKind::Eof, Span::empty(start)));
+                tokens.push(Token::new(TokenKind::Eof, self.source.span(start, start)));
                 break;
             };
 
@@ -151,7 +151,7 @@ impl<'a> Lexer<'a> {
             };
 
             if let Some(kind) = kind {
-                tokens.push(Token::new(kind, Span::new(start, self.offset())));
+                tokens.push(Token::new(kind, self.source.span(start, self.offset())));
             }
         }
 
@@ -193,7 +193,7 @@ impl<'a> Lexer<'a> {
         loop {
             match self.peek() {
                 None => {
-                    let span = Span::new(start, start + 2);
+                    let span = self.source.span(start, start + 2);
                     let d = self.error(
                         codes::UNTERMINATED_COMMENT,
                         span,
@@ -258,7 +258,8 @@ impl<'a> Lexer<'a> {
             } else if c == '_' {
                 // Two separators in a row, or a leading one, are invalid.
                 if last_was_separator || digits.is_empty() {
-                    invalid_separator.get_or_insert(Span::new(self.offset(), self.offset() + 1));
+                    invalid_separator
+                        .get_or_insert(self.source.span(self.offset(), self.offset() + 1));
                 }
                 last_was_separator = true;
                 self.pos += 1;
@@ -270,7 +271,7 @@ impl<'a> Lexer<'a> {
                 while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     self.pos += 1;
                 }
-                invalid_suffix.get_or_insert(Span::new(suffix_start, self.offset()));
+                invalid_suffix.get_or_insert(self.source.span(suffix_start, self.offset()));
             } else {
                 break;
             }
@@ -278,10 +279,10 @@ impl<'a> Lexer<'a> {
 
         // A trailing separator is not valid either.
         if last_was_separator {
-            invalid_separator.get_or_insert(Span::new(self.offset() - 1, self.offset()));
+            invalid_separator.get_or_insert(self.source.span(self.offset() - 1, self.offset()));
         }
 
-        let span = Span::new(start_offset, self.offset());
+        let span = self.source.span(start_offset, self.offset());
 
         if let Some(suffix_span) = invalid_suffix {
             let text: String = self.source.slice(suffix_span).to_string();
@@ -338,7 +339,7 @@ impl<'a> Lexer<'a> {
         loop {
             match self.peek() {
                 None | Some('\n') => {
-                    let span = Span::new(start_offset, start_offset + 1);
+                    let span = self.source.span(start_offset, start_offset + 1);
                     let d = self.error(
                         codes::UNTERMINATED_STRING,
                         span,
@@ -367,7 +368,7 @@ impl<'a> Lexer<'a> {
                         Some('"') => value.push('"'),
                         Some('\\') => value.push('\\'),
                         Some(other) => {
-                            let span = Span::new(escape_start, self.offset());
+                            let span = self.source.span(escape_start, self.offset());
                             let d = self.error(
                                 codes::UNKNOWN_ESCAPE,
                                 span,
@@ -439,9 +440,19 @@ impl<'a> Lexer<'a> {
             ';' => Semicolon,
             ':' if self.eat(':') => ColonColon,
             ':' => Colon,
+            // Longest match first: `...` before `..=` before `..` before `.`.
+            '.' if self.eat('.') => {
+                if self.eat('.') {
+                    DotDotDot
+                } else if self.eat('=') {
+                    DotDotEq
+                } else {
+                    DotDot
+                }
+            }
             '.' => Dot,
             other => {
-                let span = Span::new(start, self.offset());
+                let span = self.source.span(start, self.offset());
                 let d = self.error(
                     codes::UNRECOGNIZED_CHARACTER,
                     span,
