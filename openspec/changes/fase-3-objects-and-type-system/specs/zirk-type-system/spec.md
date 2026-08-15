@@ -1,0 +1,86 @@
+## MODIFIED Requirements
+
+### Requirement: `?.` difiere a la fase de objetos
+
+El chequeador SHALL tipar `expr?.miembro` como el tipo del miembro en su forma nulable cuando el receptor es nulable.
+
+El diferimiento de la fase anterior termina aquí: su razón era que ningún tipo tenía miembros.
+
+#### Scenario: Acceso seguro sobre valor nulable
+- **WHEN** `usuario` tiene tipo `User?` y `nombre` es `String`
+- **THEN** `usuario?.nombre` tiene tipo `String?`
+
+#### Scenario: `?.` sobre valor no nulable
+- **WHEN** `?.` se usa sobre una expresión que nunca es nula
+- **THEN** se emite un diagnóstico indicando que el operador es innecesario, con `.` como sugerencia
+
+#### Scenario: Miembro inexistente
+- **WHEN** `?.` nombra un miembro que el tipo no tiene
+- **THEN** se emite un diagnóstico que nombra el miembro y el tipo
+
+## ADDED Requirements
+
+### Requirement: Tipos nominales y subtipado
+
+El chequeador SHALL tratar cada clase, record, value class y enum como un tipo nominal distinto, y SHALL admitir un valor donde se espera una superclase suya o un contrato que implementa.
+
+#### Scenario: Subclase donde se espera la base
+- **WHEN** se pasa una instancia de `Admin` a un parámetro de tipo `User`
+- **THEN** el chequeo tiene éxito
+
+#### Scenario: Implementación donde se espera el contrato
+- **WHEN** se pasa una instancia a un parámetro cuyo tipo es un contrato que implementa
+- **THEN** el chequeo tiene éxito
+
+#### Scenario: Dos tipos con la misma forma no son el mismo
+- **WHEN** dos clases declaran los mismos campos y se asigna una donde se espera la otra
+- **THEN** se emite un diagnóstico: la equivalencia es por nombre, no por forma
+
+#### Scenario: Base donde se espera la subclase
+- **WHEN** se pasa una instancia de `User` a un parámetro de tipo `Admin`
+- **THEN** se emite un diagnóstico
+
+### Requirement: Resolución de miembros
+
+El chequeador SHALL resolver un acceso `expr.miembro` contra el tipo de `expr` y su cadena de herencia, respetando la visibilidad.
+
+#### Scenario: Miembro heredado
+- **WHEN** se accede a un campo declarado en la superclase
+- **THEN** resuelve a esa declaración
+
+#### Scenario: Miembro inexistente
+- **WHEN** se accede a un miembro que ningún ancestro declara
+- **THEN** se emite un diagnóstico que nombra el miembro y el tipo
+
+#### Scenario: Miembro oculto por visibilidad
+- **WHEN** se accede desde fuera a un miembro `private`
+- **THEN** se emite un diagnóstico de visibilidad, distinto del de miembro inexistente
+
+### Requirement: Casts comprobables
+
+Un cast a un tipo relacionado SHALL comprobarse en tiempo de ejecución y fallar de forma controlada; un cast entre tipos no relacionados SHALL rechazarse al compilar.
+
+#### Scenario: Descenso válido
+- **WHEN** se convierte un `User` que en realidad es un `Admin` a `Admin`
+- **THEN** el resultado es la instancia
+
+#### Scenario: Descenso inválido
+- **WHEN** el valor no es del tipo pedido
+- **THEN** el programa termina con un error de runtime diagnosticado
+- **AND** NO incurre en comportamiento indefinido
+
+#### Scenario: Tipos sin relación
+- **WHEN** se convierte entre dos tipos que no comparten jerarquía ni contrato
+- **THEN** se emite un diagnóstico al compilar
+
+### Requirement: Los operadores resuelven por contrato
+
+El chequeador SHALL resolver un operador buscando el contrato que su tipo implementa, en vez de comparar contra una lista fija de tipos.
+
+#### Scenario: Concatenación
+- **WHEN** se evalúa `"a" + "b"`
+- **THEN** el tipo resultante es `String`
+
+#### Scenario: Operando sin el contrato
+- **WHEN** un operando no implementa el contrato del operador
+- **THEN** el diagnóstico nombra el contrato que falta, no una lista de tipos admitidos
