@@ -93,6 +93,24 @@ fn trace(step: &str) {
     }
 }
 
+/// The relocation model to emit with, which is not the same on every target.
+///
+/// Linux distributions link executables as PIE, and a PIE cannot hold the
+/// absolute relocations `RelocMode::Default` produces on x86_64: taking the
+/// address of a function — which is what building a closure does — fails at
+/// link time with `R_X86_64_32 against .rodata`. It surfaced only there:
+/// aarch64 has no absolute relocation of that shape to pick in the first place.
+///
+/// Windows keeps `Default`. PIC is a Unix concept that does not apply to COFF,
+/// and forcing it caused an access violation while emitting.
+fn relocation_model(triple: &str) -> RelocMode {
+    if triple.contains("windows") {
+        RelocMode::Default
+    } else {
+        RelocMode::PIC
+    }
+}
+
 /// Looks up a target by its canonical Zirk name.
 pub fn target_by_name(name: &str) -> Option<&'static ZirkTarget> {
     TARGETS.iter().find(|t| t.name == name)
@@ -142,9 +160,6 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
         .boxed()
     })?;
 
-    // RelocMode::Default lets LLVM pick the right model for each target.
-    // Forcing PIC is a Unix concept that does not apply to COFF and caused an
-    // access violation when emitting for Windows.
     trace("creating target machine");
     target
         .create_target_machine(
@@ -152,7 +167,7 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
             "generic",
             "",
             OptimizationLevel::None,
-            RelocMode::Default,
+            relocation_model(triple),
             CodeModel::Default,
         )
         .ok_or_else(|| {
