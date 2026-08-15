@@ -164,6 +164,16 @@ Cuatro que no estaban previstas, cada una descubierta al escribir el código y n
 
 - **Un `Span` nombra su archivo**, en [ADR-010](../../../docs/decisions/ADR-010-ubicaciones-multiarchivo.md). Los módulos rompen la suposición de un solo archivo, y la alternativa barata —offsets globales al estilo de rustc— estorba al LSP de la Fase 9. Fue a un ADR y no aquí porque es un contrato con el debugger de la Fase 11 y con el `.zpkg` de la Fase 8: un change se archiva, un ADR no.
 
+## Hallazgos que solo aparecieron en CI
+
+Dos bugs que las cuatro plataformas no compartían, y que ninguna cantidad de pruebas en una sola máquina habría encontrado:
+
+- **El nombre de una lambda tiene que ser un símbolo válido.** Las funciones elevadas se llamaban `<lambda>#0`, y `#` es el carácter de comentario del ensamblador en sintaxis AT&T. Rompía solo en x86_64; aarch64 comenta con `//`. Pasan a llamarse `lambda.N`, y un test fija el conjunto de caracteres admitido.
+
+- **Hay que emitir PIC fuera de Windows.** Las distribuciones de Linux enlazan como PIE, y un PIE no admite las relocalizaciones absolutas que `RelocMode::Default` produce en x86_64. Lo dispara tomar la dirección de una función — exactamente lo que hace construir una closure—, así que ningún programa de la Fase 1 lo notaba.
+
+Los dos son consecuencia de la misma característica, y los dos aparecieron en una sola de las cuatro plataformas de la matriz. Es la justificación concreta de por qué ADR-004 exige verificar en todas.
+
 ## Correcciones a este mismo documento
 
 - **El requisito de rechazar ciclos de `import` no tenía razón detrás.** `import` trae nombres al scope y nada en esta fase depende del orden en que se leen los archivos. Dos archivos que se referencian mutuamente son un programa normal; lo que hay que evitar es recorrer el ciclo indefinidamente, y eso se resuelve leyendo cada archivo una vez. El requisito quedó reescrito.
