@@ -1,0 +1,17 @@
+enum E { A, B }
+
+fn from_bool(b: Boolean): Int32 { return match b { true => 1, false => 0 }; }
+
+fn from_enum(e: E): String { match e { E.A => { return "a"; } E.B => { return "b"; } } }
+
+fn forever(): Int32 { loop { return 7; } }
+
+fn main(): Void {
+    stdout.println(from_bool(true));
+    stdout.println(from_bool(false));
+    stdout.println(from_enum(E.B));
+    stdout.println(forever());
+
+    inmut NESTED = if true { if false { 1 } else { 2 } } else { 3 };
+    stdout.println(NESTED);
+}
