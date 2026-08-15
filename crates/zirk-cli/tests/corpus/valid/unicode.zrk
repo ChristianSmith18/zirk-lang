@@ -1,5 +1,10 @@
 fn main(): Void {
-    stdout.println("café ñandú 日本");
-    stdout.println("");
-    stdout.println("tab\there");
+    stdout.println("áéíóú ñ");
+    stdout.println("🚀 zirk");
+    stdout.println("日本語");
+    stdout.println("a\tb\"c\\d");
+    stdout.println("ñ" == "ñ");
+
+    mut año = 2026;
+    stdout.println(año);
 }
