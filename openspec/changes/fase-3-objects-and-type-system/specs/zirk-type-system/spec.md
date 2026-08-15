@@ -56,6 +56,26 @@ El chequeador SHALL resolver un acceso `expr.miembro` contra el tipo de `expr` y
 - **WHEN** se accede desde fuera a un miembro `private`
 - **THEN** se emite un diagnóstico de visibilidad, distinto del de miembro inexistente
 
+### Requirement: Shadowing y captura calificada
+
+El chequeador SHALL rechazar una declaración local que oculte otro local o parámetro todavía visible. Un parámetro de lambda MAY compartir el nombre de una captura únicamente cuando la captura se referencia como `this.nombre`; el nombre simple designa el parámetro.
+
+#### Scenario: Local duplicado en scope anidado
+- **WHEN** un bloque interno declara un nombre local todavía visible
+- **THEN** se emite un diagnóstico que señala ambas declaraciones
+
+#### Scenario: Colisión de parámetro y captura
+- **WHEN** una lambda declara el parámetro `prefix` y lee `this.prefix`
+- **THEN** `prefix` resuelve al parámetro y `this.prefix` a la captura exterior
+
+### Requirement: Resolución de constructores
+
+El chequeador SHALL seleccionar entre múltiples `construct` por aridad, tipos, opcionales y nombres, SHALL permitir reordenar argumentos nombrados y SHALL rechazar firmas efectivas duplicadas o llamadas ambiguas.
+
+#### Scenario: Construcción nombrada reordenada
+- **WHEN** `User(name: "Cristian", id: 1)` coincide con `construct(id: UInt64, name: String)`
+- **THEN** se selecciona esa firma y cada valor se liga por nombre
+
 ### Requirement: Casts comprobables
 
 Un cast a un tipo relacionado SHALL comprobarse en tiempo de ejecución y fallar de forma controlada; un cast entre tipos no relacionados SHALL rechazarse al compilar.

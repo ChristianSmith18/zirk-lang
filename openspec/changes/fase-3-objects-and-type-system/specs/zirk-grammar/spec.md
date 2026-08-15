@@ -56,6 +56,10 @@ El parser SHALL reconocer `class`, sus campos y métodos, `construct`, `this`, l
 - **WHEN** `construct` aparece en el nivel superior del archivo
 - **THEN** se emite un diagnóstico indicando que un constructor pertenece a una clase
 
+#### Scenario: Varios constructores y argumentos nombrados
+- **WHEN** una clase declara varios `construct` y se construye con argumentos nombrados reordenados
+- **THEN** el árbol conserva todas las firmas y las etiquetas de cada argumento para la resolución semántica
+
 ### Requirement: Sintaxis de contratos
 
 El parser SHALL reconocer `interface` y `trait` con sus métodos, y admitir cuerpo únicamente en los de un `trait`.
@@ -95,6 +99,10 @@ El parser SHALL reconocer `record`, value classes, variantes de enum con datos a
 #### Scenario: Enum con datos asociados
 - **WHEN** se parsea `enum Shape { Circle(Int32), Rect(Int32, Int32) }`
 - **THEN** se producen dos variantes con uno y dos tipos asociados
+
+#### Scenario: Mapping de enum tradicional
+- **WHEN** se parsea `enum Direction { North -> "N", South }`
+- **THEN** `North` conserva su mapping explícito y `South` queda sin mapping explícito
 
 #### Scenario: Patrón con destructuring
 - **WHEN** se parsea `match s { Shape.Circle(r) => r, _ => 0 }`

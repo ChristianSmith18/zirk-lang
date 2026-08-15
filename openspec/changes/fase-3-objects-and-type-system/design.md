@@ -20,7 +20,7 @@ ADRs vigentes que restringen esta fase:
 
 **Goals:**
 
-- `class` con campos, métodos, `construct`, `this`, visibilidad y herencia simple.
+- `class` con campos `public mut` por defecto, métodos, múltiples `construct`, `this`, visibilidad y herencia simple.
 - Interfaces y traits, con los traits aportando implementación.
 - Genéricos `<T>` con restricciones `from`.
 - Records, value classes, enums algebraicos y uniones.
@@ -94,9 +94,9 @@ La IR **sí** recibe una copia por combinación de tipos usada. Es lo que `ZIRK_
 
 Se dejan fuera, porque el spec no los pide: varianza, tipos asociados, genéricos de orden superior y especialización explícita por el usuario.
 
-### D6 — Los operadores se sobrecargan por contratos, y es lo que vuelve `+` sobre `String` concatenación
+### D6 — Los operadores se sobrecargan por contratos reservados, y es lo que vuelve `+` sobre `String` concatenación
 
-`ZIRK_LANGUAGE_SPEC.md` sección 4 dice que un operador solo se sobrecarga a través de contratos del lenguaje y que la sobrecarga no altera precedencia ni aridad. Esta fase define esos contratos y los aplica al primer caso que la Fase 2 dejó pendiente: `String` implementa el contrato de concatenación y `"a" + "b"` empieza a funcionar.
+`ZIRK_LANGUAGE_SPEC.md` sección 4 dice que un operador solo se sobrecarga a través de contratos del lenguaje y que la sobrecarga no altera precedencia ni aridad. Esta fase fija los nombres reservados (`_add`, `_subtract`, etc.), permite implementarlos en tipos del usuario y prohíbe reabrir tipos nativos. `String` implementa internamente el contrato de concatenación y `"a" + "b"` empieza a funcionar.
 
 La consecuencia que importa es de dirección: el chequeador deja de tener una lista fija de tipos por operador y pasa a buscar el contrato. Los enteros y los booleanos siguen resolviéndose de forma directa —son del lenguaje, no de una biblioteca— pero lo hacen por el mismo camino.
 
@@ -131,6 +131,10 @@ En consecuencia, durante toda la Fase 3 una closure:
 **Qué NO queda decidido por esto.** La representación actual —capturas inline, un tipo por lambda— es una consecuencia de que no puedan escapar, **no un argumento sobre cómo deberían escribirse o compararse los tipos función cuando existan**. La sintaxis futura y la compatibilidad entre closures quedan abiertas; que hoy dos lambdas de la misma firma no sean intercambiables no prejuzga que no debieran serlo cuando haya con qué expresarlo.
 
 Usar un lambda donde se exige una anotación de tipo produce un diagnóstico que dice que los tipos función pertenecen a una fase posterior, y no "tipo desconocido".
+
+### D10 — Las decisiones autorales posteriores prevalecen sobre los borradores heredados
+
+Las acotaciones autorales de agosto de 2026 fijan la superficie que esta fase comparte con el handbook: no hay shadowing ordinario; `this.nombre` desambigua una captura que colisiona con un parámetro de lambda; los campos son `public mut` por defecto; puede haber varios `construct`; los argumentos nombrados seleccionan y reordenan parámetros; y los enums tradicionales exponen el nombre del caso salvo mapping `->` explícito. Estas reglas se verifican en parser y checker antes de fijar lowering o layout.
 
 ## Risks / Trade-offs
 

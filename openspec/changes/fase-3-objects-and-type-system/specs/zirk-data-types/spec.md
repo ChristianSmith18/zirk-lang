@@ -4,6 +4,8 @@
 
 Un `enum` SHALL admitir variantes con valores asociados, extendiendo el enum sin datos de la fase anterior.
 
+Un caso tradicional sin mapping SHALL exponer como valor observable su nombre exacto y NO SHALL recibir un índice numérico implícito. Un caso MAY declarar un mapping de cadena o numérico compatible mediante `->`.
+
 #### Scenario: Variante con datos
 - **WHEN** se declara `enum Shape { Circle(Int32), Rect(Int32, Int32) }`
 - **THEN** `Shape.Circle(3)` construye un valor

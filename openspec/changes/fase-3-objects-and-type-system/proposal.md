@@ -21,19 +21,20 @@ Tres de los pendientes de la Fase 2 se difirieron **nombrando esta fase como su 
 ### Clases
 
 - `class` con campos y métodos, `construct` como constructor, `this` como instancia actual.
-- Visibilidad `public` / `private` / `protected`, con `public` por defecto.
+- Visibilidad `public` / `private` / `protected`; un campo sin modificadores equivale a `public mut`.
+- Múltiples declaraciones `construct`, resueltas por tipos, aridad y argumentos nombrados, incluso reordenados.
 - Herencia simple: una clase extiende a lo sumo una clase. Las clases son heredables por defecto; hay `abstract` para clases y métodos, y no hay `final`.
 
 ### Contratos
 
 - **Interfaces**: firmas sin implementación, combinables sin límite.
 - **Traits**: pueden incluir implementación reutilizable.
-- **Contratos de operador**: la única forma de sobrecargar `+`, `==` y compañía, sin alterar precedencia ni aridad (`ZIRK_LANGUAGE_SPEC.md` sección 4). Es lo que convierte `"a" + "b"` en concatenación.
+- **Contratos de operador**: la única forma de sobrecargar `+`, `==` y compañía, mediante métodos reservados como `_add` y `_subtract`, sin alterar precedencia ni aridad (`ZIRK_LANGUAGE_SPEC.md` sección 4). Los tipos nativos no se pueden reabrir.
 - **`Iterable<T>` / `Iterator<T>`**: lo que hace que `for ... in` funcione sobre tipos propios y retira el protocolo cerrado de la Fase 2.
 
 ### Tipos de datos
 
-- **Enums algebraicos**: extienden el `enum` sin datos de la Fase 2 con valores asociados, y con ellos el `match` gana destructuring.
+- **Enums algebraicos**: extienden el `enum` tradicional —cuyo valor observable por defecto es el nombre exacto del caso y que admite mappings `->`— con valores asociados; `match` gana destructuring anidado.
 - **Records**: inmutables, con semántica estructural.
 - **Value classes**: sin identidad observable, almacenables inline.
 - **Uniones** `A | B`, y alias con `type`.

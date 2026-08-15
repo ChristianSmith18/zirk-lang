@@ -17,6 +17,8 @@
 > **Checkpoint de decoradores, paquetes, targets y permisos — 12 de agosto de 2026.** Se incorporaron `fn dec`, paquetes con API pública e implementación intermedia portable, `build_targets`, proyectos `application`/`library` y la separación entre `permissions`, `compile_permissions` y `requires`. Los globals quedan reservados a las aplicaciones.
 
 > **Semántica contextual de `match` — 12 de agosto de 2026.** Como sentencia, `match` solo controla el flujo; en cualquier contexto que espere una expresión, todas sus ramas deben producir un valor compatible. No existen `capture` ni `yield`.
+
+> **Checkpoint de revisión autoral del handbook — 15 de agosto de 2026.** Las 37 acotaciones del autor corrigen respuestas anteriores de esta plantilla. Quedan confirmados `**`/`**=`, ranges descendentes y con `step`, bounds interpolados, `if` de una sola sentencia, `do ... while`, regex `re'...'`, alternativas de `match` separadas por coma, parámetros opcionales siempre tipados, variadics iterables, `fn` opcional en lambdas, capturas desambiguadas con `this`, campos `public mut` por defecto, múltiples `construct` por firma, enums tradicionales con valor string nominal o mapping explícito, arrays siempre fijos, slicing `[inicio:fin:salto]`, strings iterables, generators, pipelines de funciones puras, miembros convenientes de la stdlib y cloning de callables ligados. Este checkpoint prevalece sobre respuestas incompatibles más abajo.
 >
 
 > **Checkpoint de recursos — 12 de agosto de 2026.** Se formalizó `match with` para la adquisición y cierre automático de `Resource<E>`, manteniendo `match` sin `with` para la transferencia manual.
@@ -1048,7 +1050,7 @@ class Vector {
 
 **Respuesta:**
 
-Sí. La sobrecarga se declarará con la palabra reservada `operator`, y los métodos correspondientes usarán nombres reservados como `__add` y `__substract`.
+Sí. Los tipos propios implementarán los contratos de operador mediante métodos reservados como `_add` y `_subtract`. Esto será código seguro. Los tipos nativos no podrán reabrirse ni reemplazar su comportamiento desde una aplicación; `unsafe` seguirá reservado para memoria y ABI.
 
 ---
 
@@ -1259,7 +1261,7 @@ inmut status = if age >= 18 {
 
 **Respuesta:**
 
-`if` no será una expresión. Para producir un valor condicional se utilizará el operador ternario: `condition ? yes : no`.
+`if` podrá ser una expresión cuando todas sus ramas produzcan tipos compatibles. Para una elección breve se preferirá el operador ternario `condition ? yes : no`; para ramas con varias operaciones se utilizará `if` como expresión.
 
 ---
 
@@ -1308,6 +1310,17 @@ match status {
 
 - Como sentencia independiente, ejecutará una rama y no producirá un valor.
 - En un contexto que requiera una expresión, producirá un valor obligatoriamente.
+
+Las alternativas de una misma rama se separarán con comas y compartirán un solo
+`=>`. Los regex serán literales tipados `re'patrón'` y podrán utilizarse como
+patrones de strings:
+
+```text
+match input {
+    re'^[0-9]+$' => parse_number(input);
+    _ => reject(input);
+}
+```
 
 Ejemplo como expresión:
 
@@ -1378,6 +1391,16 @@ while (running) {
 **Respuesta:**
 
 Se usará la sintaxis propuesta y los paréntesis serán opcionales.
+
+También existirá la variante con comprobación posterior:
+
+```text
+do {
+    tick();
+} while running;
+```
+
+El cuerpo de `do ... while` se ejecutará al menos una vez.
 
 ---
 
@@ -1611,6 +1634,11 @@ Opciones:
 
 El constructor se llamará `construct`.
 
+Una clase podrá declarar múltiples `construct` siempre que sus firmas efectivas
+no sean idénticas ni ambiguas. La resolución considerará cantidad, tipos,
+parámetros opcionales y argumentos nombrados. Esta excepción no habilitará
+sobrecarga general de funciones o métodos.
+
 ---
 
 ## 10.3 Instanciación
@@ -1709,6 +1737,10 @@ Opciones:
 **Respuesta:**
 
 La visibilidad predeterminada será `public`.
+
+Los campos de clase también serán `mut` por defecto. Por tanto, `name: String;`
+equivaldrá a `public mut name: String;`; `private` e `inmut` deberán escribirse
+cuando se quiera apartar de esos defaults.
 
 ---
 
@@ -3071,6 +3103,17 @@ Las rutas no incluirán la extensión `.zrk`. Solo podrán importarse declaracio
 
 `import` no se utilizará para variables globales; estas se habilitarán mediante `use`.
 
+Al importar un objeto conocido de la biblioteca estándar se podrán invocar sus
+miembros de conveniencia directamente cuando no exista ambigüedad:
+
+```text
+import { stdout } from std.io;
+println("Hola"); // stdout.println("Hola")
+```
+
+Si existe otro `println`, deberá escribirse `stdout.println(...)`. Los objetos
+de archivos locales o paquetes no inyectarán automáticamente sus métodos.
+
 ---
 
 ## 19.2 Export
@@ -4379,6 +4422,11 @@ match status {
 
 No existirán valores numéricos implícitos. Cuando se necesite asociar un código o valor, deberá declararse explícitamente.
 
+Sin mapping explícito, el valor string observable de una variante será
+exactamente su nombre (`Status.Active` → `"Active"`). Un mapping se declarará
+con `->`, por ejemplo `North -> "N"` o `Success -> 0`; la variante conservará
+su tipo enum y todos los mappings del enum tendrán tipos compatibles.
+
 ---
 
 ## 26.2 Enum con valores asociados
@@ -4882,9 +4930,17 @@ users
 
 **Respuesta:**
 
-No existirá inicialmente un pipe operator.
+Existirá el pipe operator para ordenar llamadas a funciones puras sin anidarlas:
 
-El encadenamiento de métodos ya permitirá expresar estas operaciones claramente:
+```text
+users
+    |> filter(is_active)
+    |> map(to_name)
+    |> reduce(join_names);
+```
+
+El encadenamiento de métodos seguirá disponible cuando la operación pertenezca
+al contrato de la colección:
 
 ```text
 users
@@ -4893,7 +4949,8 @@ users
     .to_list();
 ```
 
-Esto evita introducir placeholders, reglas especiales para la posición de argumentos y un operador adicional. El pipe operator podrá reevaluarse si aparecen casos que el encadenamiento de métodos no pueda expresar de manera clara.
+El pipe permite reutilizar funciones independientes; el chaining llama métodos
+del valor receptor. Ambos conservan los mismos tipos, errores y efectos.
 
 ---
 
@@ -6205,6 +6262,10 @@ Los ranges implementarán `Iterable<T>` y podrán utilizar `map`, `filter` y `re
 (0..10).reverse();
 ```
 
+La dirección se inferirá por los bounds: `10..0` descenderá hasta excluir `0` y
+`10..=0` lo incluirá. `step(n)` recibirá una distancia positiva distinta de
+cero. Un bound calculado podrá escribirse como `0..{number}.step(1)`.
+
 `Range<T>` será independiente del slicing. El slicing conservará su sintaxis `[inicio:fin:paso]`, mientras que un range será un objeto iterable.
 
 ---
@@ -6604,6 +6665,16 @@ mut copy: User = user.clone();
 ```
 
 `clone()` producirá una copia lógica independiente. El compilador podrá derivar su implementación cuando todos los campos sean clonables; en los demás casos deberá implementarse manualmente.
+
+Un método también podrá clonarse como callable ligado a su receptor:
+
+```text
+inmut print = clone(stdout.println);
+print("Hola");
+```
+
+Esto copiará el valor callable y conservará su firma, efectos y permisos; no
+clonará `stdout` ni su handle nativo.
 
 Recursos, archivos abiertos, sockets, threads, tasks activas, channels y handles nativos no serán clonables por defecto.
 

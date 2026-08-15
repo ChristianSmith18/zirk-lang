@@ -31,7 +31,7 @@
 
 ## 2. Gramática — clases y contratos
 
-- [ ] 2.1 Parsear `class` con campos, métodos y `construct`
+- [ ] 2.1 Parsear `class` con campos, métodos, campos `public mut` por defecto y múltiples `construct`
 - [ ] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
 - [ ] 2.3 Parsear `extends` con una sola clase y `implements` con varios contratos
 - [ ] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
@@ -66,7 +66,7 @@
 - [ ] 5.3 Resolver miembros contra el tipo y su cadena de herencia
 - [ ] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
 - [ ] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
-- [ ] 5.6 Verificar `construct`: que exista, que inicialice todo campo sin valor por defecto
+- [ ] 5.6 Verificar `construct`: que exista, resolver múltiples firmas por aridad/tipo/nombre, admitir argumentos nombrados reordenados e inicializar todo campo sin valor por defecto
 - [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere
 - [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
@@ -74,6 +74,7 @@
 - [ ] 5.11 Rechazar que una closure escape de la función que la crea (D9)
 - [ ] 5.12 Tests: una closure sigue funcionando en variable local e invocación (D9)
 - [ ] 5.13 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 5.14 Rechazar shadowing ordinario y resolver una captura homónima únicamente mediante `this.nombre`
 
 ## 6. Tipos — contratos
 
@@ -82,7 +83,7 @@
 - [ ] 6.3 Copiar en la clase los métodos de trait con cuerpo que no redefine (D4)
 - [ ] 6.4 Rechazar el conflicto entre dos traits que aportan el mismo método (D4)
 - [ ] 6.5 Admitir una implementación donde se espera su contrato
-- [ ] 6.6 Definir los contratos de operador del lenguaje (D6)
+- [ ] 6.6 Definir los contratos de operador y sus métodos reservados (`_add`, `_subtract`, etc.), impidiendo reabrir tipos nativos (D6)
 - [ ] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
 - [ ] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`
 - [ ] 6.9 Definir `Iterable<T>` e `Iterator<T>` como contratos del lenguaje
@@ -101,7 +102,7 @@
 
 ## 8. Tipos — tipos de datos y casts
 
-- [ ] 8.1 Extender los enums con datos asociados, conservando los sin datos
+- [ ] 8.1 Extender los enums con datos asociados, conservando los tradicionales, su nombre como valor por defecto y mappings explícitos con `->`
 - [ ] 8.2 Verificar aridad y tipos de un constructor de variante
 - [ ] 8.3 Tipar los patrones con destructuring, ligando los nombres a su tipo
 - [ ] 8.4 Extender la exhaustividad a enums con datos asociados

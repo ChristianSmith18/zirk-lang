@@ -38,6 +38,8 @@ Un `trait` SHALL poder incluir métodos con cuerpo, que la clase que lo adopta r
 
 La sobrecarga de un operador SHALL ocurrir únicamente implementando el contrato que el lenguaje define para él, y NO SHALL alterar su precedencia ni su aridad, según `ZIRK_LANGUAGE_SPEC.md` sección 4.
 
+Los contratos usan métodos reservados como `_add` y `_subtract`. Los tipos definidos por el usuario MAY implementarlos en código seguro; los tipos nativos NO SHALL poder reabrirse desde código de aplicación.
+
 #### Scenario: Concatenación de cadenas
 - **WHEN** se evalúa `"a" + "b"`
 - **THEN** el resultado es `"ab"`
