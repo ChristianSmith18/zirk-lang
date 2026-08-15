@@ -915,7 +915,19 @@ impl<'a> FunctionLowering<'a> {
             .get(&expr.span)
             .expect("the checker records every lambda it accepted");
 
-        let capture_types: Vec<IrType> = info.captures.iter().map(|c| ir_type(c.ty)).collect();
+        // The types come from the slots the captures live in, not from the
+        // checker's types. A captured closure is the reason: the checker
+        // identifies a closure type by its own numbering and the IR by the
+        // layout it built, and only the slot knows which layout this one is.
+        let capture_slots: Vec<SlotId> = info
+            .captures
+            .iter()
+            .map(|c| self.lookup_slot(&c.name))
+            .collect();
+        let capture_types: Vec<IrType> = capture_slots
+            .iter()
+            .map(|slot| self.slot_type(*slot))
+            .collect();
         let signature = &self.checked.fn_types[info.fn_type as usize];
         let param_types: Vec<IrType> = signature.params.iter().map(|t| ir_type(*t)).collect();
         let returns = ir_type(signature.returns);
@@ -938,13 +950,9 @@ impl<'a> FunctionLowering<'a> {
 
         // The captures are read in the enclosing function, where their slots
         // live, before the body is lifted out.
-        let captures: Vec<Operand> = info
-            .captures
+        let captures: Vec<Operand> = capture_slots
             .iter()
-            .map(|c| {
-                let slot = self.lookup_slot(&c.name);
-                self.emit(InstKind::Load(slot), self.slot_type(slot), span)
-            })
+            .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
             .collect();
 
         let names: Vec<String> = info
