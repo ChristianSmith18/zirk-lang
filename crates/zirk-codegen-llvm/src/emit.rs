@@ -153,7 +153,8 @@ fn llvm_type_in<'ctx>(
             let layout = closures
                 .get(id as usize)
                 .expect("a verified module declares every closure layout");
-            let mut fields: Vec<BasicTypeEnum> = vec![context.ptr_type(AddressSpace::default()).into()];
+            let mut fields: Vec<BasicTypeEnum> =
+                vec![context.ptr_type(AddressSpace::default()).into()];
             for capture in &layout.captures {
                 fields.push(
                     llvm_type_in(context, *capture, closures).expect("a capture is not Void"),
@@ -729,10 +730,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
         self.trap_if(is_zero, self.runtime.division_by_zero, function);
 
-        let min = self
-            .context
-            .i32_type()
-            .const_int(i32::MIN as u64, true);
+        let min = self.context.i32_type().const_int(i32::MIN as u64, true);
         let minus_one = self.context.i32_type().const_all_ones();
 
         let left_is_min = self

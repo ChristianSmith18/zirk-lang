@@ -63,7 +63,6 @@ fn ir_type(ty: Type) -> IrType {
     IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
 }
 
-
 struct FunctionLowering<'a> {
     module: &'a mut Module,
     checked: &'a CheckedProgram,
@@ -757,14 +756,7 @@ impl<'a> FunctionLowering<'a> {
                 let name = self.callee_name(e);
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
-                self.emit(
-                    InstKind::Call {
-                        callee: name,
-                        args,
-                    },
-                    returns,
-                    span,
-                )
+                self.emit(InstKind::Call { callee: name, args }, returns, span)
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
@@ -890,11 +882,17 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = present_block;
         let held = self.emit(InstKind::Load(holder), self.slot_type(holder), span);
-        let inner = self.emit(InstKind::Unwrap(held), self.slot_type(holder).unwrapped(), span);
+        let inner = self.emit(
+            InstKind::Unwrap(held),
+            self.slot_type(holder).unwrapped(),
+            span,
+        );
         // The result may still be nullable when the fallback is: widening the
         // unwrapped value back keeps both branches storing the same type.
         let inner = match result_type {
-            IrType::Nullable(base) => self.emit(InstKind::Wrap { base, value: inner }, result_type, span),
+            IrType::Nullable(base) => {
+                self.emit(InstKind::Wrap { base, value: inner }, result_type, span)
+            }
             _ => inner,
         };
         self.emit_effect(InstKind::Store(result, inner), span);
@@ -953,7 +951,11 @@ impl<'a> FunctionLowering<'a> {
         let body = self.lift_lambda_body(expr, &name, &names, &types, returns);
         self.lifted.push(body);
 
-        self.emit(InstKind::MakeClosure { id, captures }, IrType::Closure(id), span)
+        self.emit(
+            InstKind::MakeClosure { id, captures },
+            IrType::Closure(id),
+            span,
+        )
     }
 
     /// Lowers a lambda body as a function of its own.
@@ -1047,8 +1049,8 @@ impl<'a> FunctionLowering<'a> {
         // A `match` used as a statement produces nothing, and a slot has no
         // `Void` form to hold it.
         let result_type = self.arm_value_type(expr);
-        let result = (result_type != IrType::Void)
-            .then(|| self.declare_slot("<match>", result_type, span));
+        let result =
+            (result_type != IrType::Void).then(|| self.declare_slot("<match>", result_type, span));
 
         let continue_block = self.new_block();
         let mut reachable = false;
@@ -1172,18 +1174,21 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type the arms of a `match` produce.
     fn arm_value_type(&self, expr: &ast::MatchExpr) -> IrType {
-        for arm in &expr.arms {
-            match &arm.body {
-                ast::ArmBody::Expr(e) => return self.type_of(e, e.span()),
-                ast::ArmBody::Block(b) => {
-                    if matches!(b.statements.last(), Some(ast::Stmt::Expr(_))) {
-                        return self.block_value_type(b);
-                    }
-                    return IrType::Void;
-                }
+        // The first arm decides: the checker already proved every arm agrees,
+        // so looking further would only confirm what it verified.
+        let Some(first) = expr.arms.first() else {
+            return IrType::Void;
+        };
+
+        match &first.body {
+            ast::ArmBody::Expr(e) => self.type_of(e, e.span()),
+            ast::ArmBody::Block(b) if matches!(b.statements.last(), Some(ast::Stmt::Expr(_))) => {
+                self.block_value_type(b)
             }
+            // A block that does not end in an expression produces nothing, and
+            // that makes the whole `match` a statement.
+            ast::ArmBody::Block(_) => IrType::Void,
         }
-        IrType::Void
     }
 
     /// Lowers an `if` used as a value.
@@ -1272,11 +1277,10 @@ impl<'a> FunctionLowering<'a> {
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
-                if !self.is_closure_call(e)
-                    && {
-                let name = self.callee_name(e);
-                self.signature_return(&name)
-            } == IrType::Void =>
+                if !self.is_closure_call(e) && {
+                    let name = self.callee_name(e);
+                    self.signature_return(&name)
+                } == IrType::Void =>
             {
                 let name = self.callee_name(e).to_string();
                 let args = self.lower_args(e);
@@ -1347,11 +1351,8 @@ impl<'a> FunctionLowering<'a> {
             let branches_later = call.args[position + 1..]
                 .iter()
                 .any(|a| opens_blocks(&a.value));
-            slots[index] = Some(self.lower_and_hold_as(
-                &arg.value,
-                params[index].1,
-                branches_later,
-            ));
+            slots[index] =
+                Some(self.lower_and_hold_as(&arg.value, params[index].1, branches_later));
         }
 
         let declaration = self.declarations.get(name.as_str()).copied();
@@ -1450,7 +1451,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) => {
                 let name = self.callee_name(e);
                 self.signature_return(&name)
-            },
+            }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int32,

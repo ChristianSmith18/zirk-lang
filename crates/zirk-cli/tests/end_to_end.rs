@@ -604,10 +604,7 @@ fn two_shared_declarations_cannot_share_a_name() {
                  share fn helper(): String { return \"a\"; }\n\
                  fn main(): Void { stdout.println(helper()); }\n",
             ),
-            (
-                "other.zrk",
-                "share fn helper(): String { return \"b\"; }\n",
-            ),
+            ("other.zrk", "share fn helper(): String { return \"b\"; }\n"),
         ],
     );
 

@@ -289,7 +289,10 @@ pub enum InstKind {
     ///
     /// `T` is accepted where `T?` is expected, and this is that widening made
     /// explicit: the IR never has an implicit representation change.
-    Wrap { base: Nullable, value: Operand },
+    Wrap {
+        base: Nullable,
+        value: Operand,
+    },
     /// Whether a nullable value is absent.
     IsNull(Operand),
     /// The value inside a nullable one.
@@ -299,7 +302,10 @@ pub enum InstKind {
     Unwrap(Operand),
 
     /// Builds a closure value from its captures.
-    MakeClosure { id: u32, captures: Vec<Operand> },
+    MakeClosure {
+        id: u32,
+        captures: Vec<Operand>,
+    },
     /// Calls a closure value.
     ///
     /// The captures travel inside the operand, so the call passes them ahead of

@@ -221,7 +221,10 @@ impl<'a> Checker<'a> {
                     use_decl.name.span,
                     format!("`{}` is not available in this file", use_decl.name.name),
                     "`use` enables a name the file already imported",
-                    Some(format!("add `import {{ {} }} from ...` first", use_decl.name.name)),
+                    Some(format!(
+                        "add `import {{ {} }} from ...` first",
+                        use_decl.name.name
+                    )),
                 );
             }
         }
@@ -317,7 +320,10 @@ impl<'a> Checker<'a> {
                 used.span,
                 format!("{what} `{}` is not accessible from this file", used.name),
                 format!("it is declared on line {line} of `{file}` without `share`"),
-                Some(format!("mark it `share {keyword} {}` to publish it", used.name)),
+                Some(format!(
+                    "mark it `share {keyword} {}` to publish it",
+                    used.name
+                )),
             );
             return;
         }
@@ -527,14 +533,20 @@ impl<'a> Checker<'a> {
                     "the type exists in the language but arrives in Phase {}",
                     pending.phase
                 ),
-                Some("the available types are Void, Int32, Boolean, String and declared enums".into()),
+                Some(
+                    "the available types are Void, Int32, Boolean, String and declared enums"
+                        .into(),
+                ),
             ),
             None => self.error(
                 codes::UNKNOWN_TYPE,
                 reference.span,
                 format!("unknown type: `{}`", reference.name),
                 "no type with that name exists in the language",
-                Some("the available types are Void, Int32, Boolean, String and declared enums".into()),
+                Some(
+                    "the available types are Void, Int32, Boolean, String and declared enums"
+                        .into(),
+                ),
             ),
         }
 
@@ -889,9 +901,7 @@ impl<'a> Checker<'a> {
                     span,
                     format!("`{name}` cannot be iterated"),
                     "this phase iterates ranges and strings only",
-                    Some(
-                        "iteration over your own types arrives with the traits of Phase 3".into(),
-                    ),
+                    Some("iteration over your own types arrives with the traits of Phase 3".into()),
                 );
                 Type::UNKNOWN
             }
@@ -1277,7 +1287,11 @@ impl<'a> Checker<'a> {
             Stmt::Return(_) => true,
             Stmt::Block(b) => b.statements.iter().any(|s| self.returns_always(s)),
             Stmt::If(i) => {
-                let then_returns = i.then_branch.statements.iter().any(|s| self.returns_always(s));
+                let then_returns = i
+                    .then_branch
+                    .statements
+                    .iter()
+                    .any(|s| self.returns_always(s));
                 then_returns
                     && match &i.else_branch {
                         Some(ElseBranch::Block(b)) => {
@@ -1647,13 +1661,8 @@ impl<'a> Checker<'a> {
         });
         let fn_type = (self.fn_types.len() - 1) as u32;
 
-        self.lambdas.insert(
-            expr.span,
-            LambdaInfo {
-                captures,
-                fn_type,
-            },
-        );
+        self.lambdas
+            .insert(expr.span, LambdaInfo { captures, fn_type });
 
         Type::of(Base::Function(fn_type))
     }
@@ -1691,7 +1700,11 @@ impl<'a> Checker<'a> {
         };
 
         let fn_type = self.fn_types[id as usize].clone();
-        let arguments: Vec<Type> = expr.args.iter().map(|a| self.check_expr(&a.value)).collect();
+        let arguments: Vec<Type> = expr
+            .args
+            .iter()
+            .map(|a| self.check_expr(&a.value))
+            .collect();
 
         // A closure value has no parameter names to match against.
         for arg in &expr.args {
@@ -1745,9 +1758,8 @@ impl<'a> Checker<'a> {
 
             match slot {
                 ArgSlot::Given { ty, span } => {
-                    let expected = if param.variadic { param.ty } else { param.ty };
                     self.expect_assignable(
-                        expected,
+                        param.ty,
                         *ty,
                         *span,
                         &format!("argument `{}`", param.name),
@@ -1815,7 +1827,10 @@ impl<'a> Checker<'a> {
                     self.error(
                         codes::UNKNOWN_ARGUMENT_NAME,
                         name.span,
-                        format!("`{}` has no parameter named `{}`", signature.name, name.name),
+                        format!(
+                            "`{}` has no parameter named `{}`",
+                            signature.name, name.name
+                        ),
                         format!("its parameters are: {}", known.join(", ")),
                         None,
                     );
@@ -1833,10 +1848,7 @@ impl<'a> Checker<'a> {
                     continue;
                 }
 
-                slots[index] = ArgSlot::Given {
-                    ty,
-                    span: arg.span,
-                };
+                slots[index] = ArgSlot::Given { ty, span: arg.span };
                 continue;
             }
 
@@ -1851,10 +1863,7 @@ impl<'a> Checker<'a> {
             match slots.get_mut(next_position) {
                 Some(ArgSlot::Variadic(items)) => items.push((ty, arg.span)),
                 Some(slot) => {
-                    *slot = ArgSlot::Given {
-                        ty,
-                        span: arg.span,
-                    };
+                    *slot = ArgSlot::Given { ty, span: arg.span };
                     next_position += 1;
                 }
                 None => {

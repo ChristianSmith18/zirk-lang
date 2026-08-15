@@ -249,7 +249,13 @@ fn verify_instruction(
         }
 
         InstKind::NullValue(base) => {
-            expect(inst.ty, IrType::Nullable(*base), position, "NullValue", report);
+            expect(
+                inst.ty,
+                IrType::Nullable(*base),
+                position,
+                "NullValue",
+                report,
+            );
         }
 
         InstKind::Wrap { base, value } => {
@@ -278,10 +284,18 @@ fn verify_instruction(
         }
 
         InstKind::MakeClosure { id, captures } => {
-            expect(inst.ty, IrType::Closure(*id), position, "MakeClosure", report);
+            expect(
+                inst.ty,
+                IrType::Closure(*id),
+                position,
+                "MakeClosure",
+                report,
+            );
 
             let Some(layout) = module.closures.get(*id as usize) else {
-                report(format!("{position}: MakeClosure names layout {id}, which does not exist"));
+                report(format!(
+                    "{position}: MakeClosure names layout {id}, which does not exist"
+                ));
                 return;
             };
 
@@ -323,7 +337,9 @@ fn verify_instruction(
             }
 
             let Some(layout) = module.closures.get(id as usize) else {
-                report(format!("{position}: CallClosure names layout {id}, which does not exist"));
+                report(format!(
+                    "{position}: CallClosure names layout {id}, which does not exist"
+                ));
                 return;
             };
 
