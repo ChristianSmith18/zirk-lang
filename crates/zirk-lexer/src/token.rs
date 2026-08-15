@@ -36,13 +36,21 @@ pub enum Keyword {
     True,
     False,
 
-    // --- Whole language, later phases ---
+    // --- Phase 2: control flow, functions, match, nullability, modules ---
     For,
+    In,
     While,
     Loop,
     Break,
     Continue,
     Match,
+    Enum,
+    Null,
+    Share,
+    Import,
+    Use,
+
+    // --- Whole language, later phases ---
     With,
     Try,
     Catch,
@@ -50,12 +58,8 @@ pub enum Keyword {
     Class,
     Construct,
     This,
-    Enum,
     Record,
     Type,
-    Share,
-    Import,
-    Use,
     Public,
     Private,
     Protected,
@@ -73,7 +77,6 @@ pub enum Keyword {
     Sync,
     Dec,
     Gen,
-    Null,
     Default,
 }
 
@@ -94,6 +97,7 @@ impl Keyword {
             "true" => True,
             "false" => False,
             "for" => For,
+            "in" => In,
             "while" => While,
             "loop" => Loop,
             "break" => Break,
@@ -148,6 +152,7 @@ impl Keyword {
             True => "true",
             False => "false",
             For => "for",
+            In => "in",
             While => "while",
             Loop => "loop",
             Break => "break",
@@ -190,8 +195,7 @@ impl Keyword {
 
     /// Whether the keyword belongs to the subset this phase implements.
     pub const fn in_subset(self) -> bool {
-        use Keyword::*;
-        matches!(self, Fn | Mut | Inmut | If | Else | Return | True | False)
+        self.phase().is_none()
     }
 
     /// Roadmap phase in which the construct arrives, used by the diagnostic.
@@ -200,10 +204,9 @@ impl Keyword {
     pub const fn phase(self) -> Option<u8> {
         use Keyword::*;
         Some(match self {
-            For | While | Loop | Break | Continue | Match | Share | Import | Use => 2,
-            Class | Construct | This | Enum | Record | Type | Public | Private | Protected
-            | Abstract | Implements | Extends | From | As | Is => 3,
-            Try | Catch | Finally | With | Unsafe | Null => 4,
+            Class | Construct | This | Record | Type | Public | Private | Protected | Abstract
+            | Implements | Extends | From | As | Is => 3,
+            Try | Catch | Finally | With | Unsafe => 4,
             Task | Await | Parallel | Thread | Sync => 5,
             Dec | Gen | Default => 10,
             _ => return None,
@@ -267,6 +270,12 @@ pub enum TokenKind {
     Colon,
     ColonColon,
     Dot,
+    /// `..`, exclusive range.
+    DotDot,
+    /// `..=`, inclusive range.
+    DotDotEq,
+    /// `...`, variadic parameter marker.
+    DotDotDot,
     Arrow,
     FatArrow,
 
@@ -281,8 +290,6 @@ impl TokenKind {
     pub const fn phase(&self) -> Option<u8> {
         use TokenKind::*;
         Some(match self {
-            PlusEq | MinusEq | StarEq | SlashEq | PercentEq | PlusPlus | MinusMinus => 2,
-            Question | QuestionQuestion | QuestionDot => 2,
             PipeGt => 3,
             _ => return None,
         })
@@ -342,6 +349,9 @@ impl TokenKind {
             Colon => ":",
             ColonColon => "::",
             Dot => ".",
+            DotDot => "..",
+            DotDotEq => "..=",
+            DotDotDot => "...",
             Arrow => "->",
             FatArrow => "=>",
             _ => "",
@@ -363,8 +373,35 @@ mod tests {
     fn later_phase_keywords_declare_their_phase() {
         assert!(!Keyword::Class.in_subset());
         assert_eq!(Keyword::Class.phase(), Some(3));
-        assert_eq!(Keyword::For.phase(), Some(2));
         assert_eq!(Keyword::Task.phase(), Some(5));
+    }
+
+    #[test]
+    fn phase_two_keywords_are_in_the_subset() {
+        for k in [
+            Keyword::For,
+            Keyword::In,
+            Keyword::While,
+            Keyword::Loop,
+            Keyword::Break,
+            Keyword::Continue,
+            Keyword::Match,
+            Keyword::Enum,
+            Keyword::Null,
+            Keyword::Share,
+            Keyword::Import,
+            Keyword::Use,
+        ] {
+            assert!(k.in_subset(), "`{}` should be implemented", k.as_str());
+            assert_eq!(k.phase(), None, "`{}`", k.as_str());
+        }
+    }
+
+    #[test]
+    fn range_and_variadic_tokens_carry_their_symbol() {
+        assert_eq!(TokenKind::DotDot.symbol(), "..");
+        assert_eq!(TokenKind::DotDotEq.symbol(), "..=");
+        assert_eq!(TokenKind::DotDotDot.symbol(), "...");
     }
 
     #[test]

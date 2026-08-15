@@ -15,7 +15,9 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module as LlvmModule};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+};
 use inkwell::{AddressSpace, IntPredicate};
 use std::collections::HashMap;
 use zirk_ir as ir;
@@ -31,6 +33,33 @@ const FUNCTION_PREFIX: &str = "zk_";
 /// Name of the Zirk entrypoint, per `ZIRK_RUNTIME_SPEC.md` section 2.
 const ENTRYPOINT: &str = "main";
 
+/// The LLVM signature of a closure's lifted body.
+///
+/// The captures come first, then the parameters: that is the order
+/// [`ir::InstKind::CallClosure`] passes them in and the order the lifted
+/// function declares them.
+fn closure_signature<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::ClosureLayout,
+    closures: &[ir::ClosureLayout],
+) -> inkwell::types::FunctionType<'ctx> {
+    let params: Vec<BasicMetadataTypeEnum> = layout
+        .captures
+        .iter()
+        .chain(&layout.params)
+        .map(|ty| {
+            llvm_type_in(context, *ty, closures)
+                .expect("a capture or parameter cannot be Void")
+                .into()
+        })
+        .collect();
+
+    match llvm_type_in(context, layout.returns, closures) {
+        Some(ty) => ty.fn_type(&params, false),
+        None => context.void_type().fn_type(&params, false),
+    }
+}
+
 /// Translates an IR module into an LLVM module.
 pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> LlvmModule<'ctx> {
     let llvm = context.create_module(name);
@@ -42,7 +71,7 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
     // reference a function defined further down the file.
     let mut functions = HashMap::new();
     for function in &module.functions {
-        let declared = declare_function(context, &llvm, function);
+        let declared = declare_function(context, &llvm, function, &module.closures);
         functions.insert(function.name.clone(), declared);
     }
 
@@ -93,6 +122,15 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
 }
 
 fn llvm_type<'ctx>(context: &'ctx Context, ty: ir::IrType) -> Option<BasicTypeEnum<'ctx>> {
+    llvm_type_in(context, ty, &[])
+}
+
+/// The LLVM type of an IR type, resolving closure layouts against the module.
+fn llvm_type_in<'ctx>(
+    context: &'ctx Context,
+    ty: ir::IrType,
+    closures: &[ir::ClosureLayout],
+) -> Option<BasicTypeEnum<'ctx>> {
     Some(match ty {
         ir::IrType::Void => return None,
         ir::IrType::Int32 => context.i32_type().into(),
@@ -101,6 +139,29 @@ fn llvm_type<'ctx>(context: &'ctx Context, ty: ir::IrType) -> Option<BasicTypeEn
         ir::IrType::Boolean => context.bool_type().into(),
         // `String` is an opaque pointer. Its layout belongs to the runtime.
         ir::IrType::String => context.ptr_type(AddressSpace::default()).into(),
+        // A present flag next to the value. The flag comes first so the struct
+        // has the same shape whatever the payload is.
+        ir::IrType::Nullable(base) => {
+            let inner = llvm_type(context, base.inner()).expect("a nullable payload is not Void");
+            context
+                .struct_type(&[context.bool_type().into(), inner], false)
+                .into()
+        }
+        // A closure is its function pointer followed by its captures, inline.
+        // Nothing is allocated: it cannot escape in this phase (D10).
+        ir::IrType::Closure(id) => {
+            let layout = closures
+                .get(id as usize)
+                .expect("a verified module declares every closure layout");
+            let mut fields: Vec<BasicTypeEnum> =
+                vec![context.ptr_type(AddressSpace::default()).into()];
+            for capture in &layout.captures {
+                fields.push(
+                    llvm_type_in(context, *capture, closures).expect("a capture is not Void"),
+                );
+            }
+            context.struct_type(&fields, false).into()
+        }
     })
 }
 
@@ -108,18 +169,19 @@ fn declare_function<'ctx>(
     context: &'ctx Context,
     llvm: &LlvmModule<'ctx>,
     function: &ir::Function,
+    closures: &[ir::ClosureLayout],
 ) -> FunctionValue<'ctx> {
     let params: Vec<BasicMetadataTypeEnum> = function
         .params
         .iter()
         .map(|slot| {
-            llvm_type(context, function.slots[slot.0 as usize].ty)
+            llvm_type_in(context, function.slots[slot.0 as usize].ty, closures)
                 .expect("a parameter cannot be Void")
                 .into()
         })
         .collect();
 
-    let signature = match llvm_type(context, function.return_type) {
+    let signature = match llvm_type_in(context, function.return_type, closures) {
         Some(ty) => ty.fn_type(&params, false),
         None => context.void_type().fn_type(&params, false),
     };
@@ -198,7 +260,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // unnecessary (design D2).
         self.builder.position_at_end(self.blocks[&function.entry]);
         for (index, slot) in function.slots.iter().enumerate() {
-            let ty = llvm_type(self.context, slot.ty).expect("a slot cannot be Void");
+            let ty = llvm_type_in(self.context, slot.ty, &self.module.closures)
+                .expect("a slot cannot be Void");
             let pointer = self
                 .builder
                 .build_alloca(ty, &slot.name)
@@ -273,7 +336,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Load(slot) => {
-                let ty = llvm_type(self.context, instruction.ty).expect("a load cannot be Void");
+                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures)
+                    .expect("a load cannot be Void");
                 Some(
                     self.builder
                         .build_load(ty, self.slots[slot], "load")
@@ -339,6 +403,144 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     )
                     .expect("call to println");
                 None
+            }
+
+            // A nullable value is `{ i1 present, T value }`. The absent form
+            // still carries a payload slot, left undefined: nothing reads it
+            // without checking the flag first, and the verifier enforces that.
+            ir::InstKind::NullValue(base) => {
+                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                    .expect("a nullable type has a representation")
+                    .into_struct_type();
+                Some(ty.get_undef().into()).map(|value: BasicValueEnum| {
+                    self.builder
+                        .build_insert_value(
+                            value.into_struct_value(),
+                            self.context.bool_type().const_zero(),
+                            0,
+                            "absent",
+                        )
+                        .expect("present flag")
+                        .as_basic_value_enum()
+                })
+            }
+
+            ir::InstKind::Wrap { base, value } => {
+                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                    .expect("a nullable type has a representation")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(
+                        ty.get_undef(),
+                        self.context.bool_type().const_int(1, false),
+                        0,
+                        "present",
+                    )
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_insert_value(
+                            with_flag.into_struct_value(),
+                            self.operand(*value),
+                            1,
+                            "wrapped",
+                        )
+                        .expect("payload")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::IsNull(operand) => {
+                let present = self
+                    .builder
+                    .build_extract_value(self.operand(*operand).into_struct_value(), 0, "present")
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_not(present.into_int_value(), "absent")
+                        .expect("negation")
+                        .into(),
+                )
+            }
+
+            ir::InstKind::Unwrap(operand) => Some(
+                self.builder
+                    .build_extract_value(self.operand(*operand).into_struct_value(), 1, "unwrapped")
+                    .expect("payload"),
+            ),
+
+            ir::InstKind::MakeClosure { id, captures } => {
+                let layout = &self.module.closures[*id as usize];
+                let ty = llvm_type_in(
+                    self.context,
+                    ir::IrType::Closure(*id),
+                    &self.module.closures,
+                )
+                .expect("a closure has a representation")
+                .into_struct_type();
+
+                let target = self.functions[layout.function.as_str()];
+
+                let mut value = self
+                    .builder
+                    .build_insert_value(
+                        ty.get_undef(),
+                        target.as_global_value().as_pointer_value(),
+                        0,
+                        "fn",
+                    )
+                    .expect("function pointer")
+                    .into_struct_value();
+
+                for (index, capture) in captures.iter().enumerate() {
+                    value = self
+                        .builder
+                        .build_insert_value(
+                            value,
+                            self.operand(*capture),
+                            index as u32 + 1,
+                            "capture",
+                        )
+                        .expect("capture")
+                        .into_struct_value();
+                }
+
+                Some(value.into())
+            }
+
+            ir::InstKind::CallClosure { id, callee, args } => {
+                let layout = self.module.closures[*id as usize].clone();
+                let value = self.operand(*callee).into_struct_value();
+
+                let pointer = self
+                    .builder
+                    .build_extract_value(value, 0, "fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+
+                // The captures travel inside the value and go ahead of the
+                // arguments, which is the order the lifted body declares.
+                let mut arguments: Vec<BasicMetadataValueEnum> = Vec::new();
+                for index in 0..layout.captures.len() {
+                    arguments.push(
+                        self.builder
+                            .build_extract_value(value, index as u32 + 1, "capture")
+                            .expect("capture")
+                            .into(),
+                    );
+                }
+                for arg in args {
+                    arguments.push(self.operand(*arg).into());
+                }
+
+                let signature = closure_signature(self.context, &layout, &self.module.closures);
+                let call = self
+                    .builder
+                    .build_indirect_call(signature, pointer, &arguments, "closure")
+                    .expect("indirect call");
+
+                call.try_as_basic_value().basic()
             }
         };
 
@@ -504,10 +706,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         result
     }
 
-    /// Division and remainder, checking the divisor.
+    /// Division and remainder, checking the divisor and the one overflow case.
     ///
     /// `ZIRK_LANGUAGE_SPEC.md` section 9 requires that a division by zero never
     /// become undefined behaviour, and in LLVM `sdiv` by zero is exactly that.
+    ///
+    /// `Int32::MIN / -1` is the other one: its result is one past the maximum,
+    /// so it overflows, and in LLVM it is undefined rather than wrapping. It is
+    /// the only pair of operands that overflows a division, which is why it is
+    /// checked here instead of through the overflow intrinsics.
     fn checked_division(
         &mut self,
         op: ir::BinaryOp,
@@ -522,6 +729,24 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("divisor comparison");
 
         self.trap_if(is_zero, self.runtime.division_by_zero, function);
+
+        let min = self.context.i32_type().const_int(i32::MIN as u64, true);
+        let minus_one = self.context.i32_type().const_all_ones();
+
+        let left_is_min = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, left, min, "is_min")
+            .expect("dividend comparison");
+        let right_is_minus_one = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, right, minus_one, "is_minus_one")
+            .expect("divisor comparison");
+        let overflows = self
+            .builder
+            .build_and(left_is_min, right_is_minus_one, "div_overflows")
+            .expect("conjunction");
+
+        self.trap_if(overflows, self.runtime.overflow, function);
 
         match op {
             ir::BinaryOp::Div => self
@@ -568,6 +793,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     fn emit_terminator(&mut self, terminator: &ir::Terminator) {
         match terminator {
+            // LLVM has this exact concept, so nothing is invented here.
+            ir::Terminator::Unreachable => {
+                self.builder
+                    .build_unreachable()
+                    .expect("unreachable terminator");
+            }
             ir::Terminator::Return(None) => {
                 self.builder.build_return(None).expect("empty return");
             }

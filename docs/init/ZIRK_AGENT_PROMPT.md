@@ -121,21 +121,54 @@ calls, `return` and `stdout.println` as an intrinsic.
 Available commands: `zirk build <file.zrk>` and `zirk run <file.zrk>`, over a
 single file, with artifacts written to `build/`.
 
-## Next phase: Zirk 0.2 — core language surface
+## Phase 2 — complete
 
-Phase 2 of `docs/init/ZIRK_ROADMAP.md`: complete control flow (`for`, `while`,
-`loop`, `break`, `continue`, `if` as an expression), complete functions
-(optional, named and variadic parameters, closures), `match` with basic
-exhaustiveness, nullability (`T?`, `?.`, `??`) and modules within a single
-crate.
+**Zirk has a language surface.** Programs with several functions, real control
+flow, closures and more than one file compile to a native binary and run.
 
-Two things this phase deliberately left pending, and Phase 2 should pick up:
+Added on top of Phase 1: `for`, `for ... in` over ranges, `while`, `loop`,
+`break`, `continue`, `if` as an expression, `match` with enforced exhaustiveness
+over enums without associated data, `T?` with `null` and `??`, closures with
+capture, optional/default/named parameters, compound assignment and increment,
+and `share`/`import`/`use` across the files of a crate.
 
-- **`&&` and `||` do not short-circuit.** Both operands are already evaluated
-  when the IR is lowered. Short-circuiting needs its own blocks and goes
-  together with `if` as an expression.
+Decisions taken during the phase live in `docs/decisions/` as ADR-010, and in
+the `design.md` of `fase-2-core-language-surface` as D1 to D10.
+
+Short-circuiting, left pending by Phase 1, is done: `&&` and `||` lower to
+blocks and do not evaluate their right operand when the left already decides.
+
+### What this phase deliberately left pending
+
+Each of these is reported today with **E0423**, so nothing reaches a backend
+that cannot compile it. That diagnostic list is the pending work, made
+executable: if it compiles, it works.
+
+- **`?.`** needs a type with members, and classes are Phase 3 (design D8).
+- **Variadic parameters** collect into a sequence, and there is no collection
+  type until Phase 3 brings `List`.
+- **Iterating a `String`** needs the runtime to expose access by character.
+- **`+` on `String`** is not concatenation: it arrives with the operator
+  contracts of Phase 3.
+
+Two more, which produce no diagnostic because they are not user-visible:
+
+- **A crate has one namespace.** Two declarations cannot share a name even in
+  different files. Per-module namespacing belongs with the project system of
+  Phase 6.
 - **The IR is not versioned.** `ZIRK_COMPILER_SPEC.md` section 4 requires it for
   `.zpkg`; it is Phase 8 work, noted here so it is not discovered late.
+
+## Next phase: Zirk 0.3 — objects and the type system
+
+Phase 3 of `docs/init/ZIRK_ROADMAP.md`: `class`, `construct`, visibility,
+single inheritance, interfaces, traits, generics with `from`, records, value
+classes, algebraic enums, unions and casts.
+
+The enum of this phase is meant to be **extended** by Phase 3 with associated
+data, not replaced (design D1). The same goes for `for ... in`, which becomes a
+real trait once traits exist (design D3), and for closures, which will be able
+to escape once function types have syntax (design D10).
 
 ## Expected working style
 

@@ -247,6 +247,142 @@ fn verify_instruction(
                 ));
             }
         }
+
+        InstKind::NullValue(base) => {
+            expect(
+                inst.ty,
+                IrType::Nullable(*base),
+                position,
+                "NullValue",
+                report,
+            );
+        }
+
+        InstKind::Wrap { base, value } => {
+            expect(inst.ty, IrType::Nullable(*base), position, "Wrap", report);
+            if let Some(inner) = type_of(value)
+                && inner != base.inner()
+            {
+                report(format!(
+                    "{position}: Wrap receives {}, expected {}",
+                    inner.as_str(),
+                    base.inner().as_str()
+                ));
+            }
+        }
+
+        InstKind::IsNull(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "IsNull", report);
+            if let Some(value) = type_of(operand)
+                && !matches!(value, IrType::Nullable(_))
+            {
+                report(format!(
+                    "{position}: IsNull receives {}, which is never absent",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::MakeClosure { id, captures } => {
+            expect(
+                inst.ty,
+                IrType::Closure(*id),
+                position,
+                "MakeClosure",
+                report,
+            );
+
+            let Some(layout) = module.closures.get(*id as usize) else {
+                report(format!(
+                    "{position}: MakeClosure names layout {id}, which does not exist"
+                ));
+                return;
+            };
+
+            if captures.len() != layout.captures.len() {
+                report(format!(
+                    "{position}: MakeClosure passes {} capture(s), the layout declares {}",
+                    captures.len(),
+                    layout.captures.len()
+                ));
+                return;
+            }
+
+            for (index, (operand, expected)) in captures.iter().zip(&layout.captures).enumerate() {
+                if let Some(actual) = type_of(operand)
+                    && actual != *expected
+                {
+                    report(format!(
+                        "{position}: capture {index} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::CallClosure { id, callee, args } => {
+            let id = *id;
+            // The operand must be the very closure the id names: otherwise the
+            // captures extracted from it would not match what the body expects.
+            if let Some(actual) = type_of(callee)
+                && actual != IrType::Closure(id)
+            {
+                report(format!(
+                    "{position}: CallClosure receives {}, expected {}",
+                    actual.as_str(),
+                    IrType::Closure(id).as_str()
+                ));
+                return;
+            }
+
+            let Some(layout) = module.closures.get(id as usize) else {
+                report(format!(
+                    "{position}: CallClosure names layout {id}, which does not exist"
+                ));
+                return;
+            };
+
+            expect(inst.ty, layout.returns, position, "CallClosure", report);
+
+            if args.len() != layout.params.len() {
+                report(format!(
+                    "{position}: CallClosure passes {} argument(s), the closure takes {}",
+                    args.len(),
+                    layout.params.len()
+                ));
+                return;
+            }
+
+            for (index, (operand, expected)) in args.iter().zip(&layout.params).enumerate() {
+                if let Some(actual) = type_of(operand)
+                    && actual != *expected
+                {
+                    report(format!(
+                        "{position}: argument {index} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::Unwrap(operand) => {
+            // Unwrapping must produce exactly the type inside the operand:
+            // that is what makes the representation change checkable rather
+            // than implicit.
+            if let Some(value) = type_of(operand) {
+                match value {
+                    IrType::Nullable(base) => {
+                        expect(inst.ty, base.inner(), position, "Unwrap", report)
+                    }
+                    other => report(format!(
+                        "{position}: Unwrap receives {}, which is not nullable",
+                        other.as_str()
+                    )),
+                }
+            }
+        }
     }
 }
 
@@ -260,6 +396,9 @@ fn verify_terminator(
     let position = format!("block {:?}, terminator", block.id);
 
     match terminator {
+        // Nothing to check: a block nothing reaches transfers control nowhere.
+        Terminator::Unreachable => {}
+
         Terminator::Return(value) => {
             let returned = match value {
                 None => IrType::Void,
@@ -335,5 +474,14 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
         InstKind::Println(operand) => vec![*operand],
+        InstKind::NullValue(_) => Vec::new(),
+        InstKind::Wrap { value, .. } => vec![*value],
+        InstKind::IsNull(operand) | InstKind::Unwrap(operand) => vec![*operand],
+        InstKind::MakeClosure { captures, .. } => captures.clone(),
+        InstKind::CallClosure { callee, args, .. } => {
+            let mut operands = vec![*callee];
+            operands.extend(args.iter().copied());
+            operands
+        }
     }
 }

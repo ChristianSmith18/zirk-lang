@@ -60,10 +60,28 @@ fn shape(e: &Expr) -> String {
         Expr::Path(i) => i.name.clone(),
         Expr::Unary(u) => format!("({}{})", u.op.as_str(), shape(&u.operand)),
         Expr::Binary(b) => format!("({} {} {})", shape(&b.left), b.op.as_str(), shape(&b.right)),
+        Expr::Null(_) => "null".to_string(),
         Expr::Call(c) => {
-            let args: Vec<_> = c.args.iter().map(shape).collect();
-            format!("{}({})", c.callee.name, args.join(", "))
+            let args: Vec<_> = c
+                .args
+                .iter()
+                .map(|a| match &a.name {
+                    Some(name) => format!("{}: {}", name.name, shape(&a.value)),
+                    None => shape(&a.value),
+                })
+                .collect();
+            format!("{}({})", shape(&c.callee), args.join(", "))
         }
+        Expr::Range(r) => format!(
+            "({}{}{})",
+            shape(&r.start),
+            if r.inclusive { "..=" } else { ".." },
+            shape(&r.end)
+        ),
+        Expr::If(i) => format!("if({})", shape(&i.condition)),
+        Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
+        Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
+        Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
         Expr::Println(p) => format!("println({})", shape(&p.arg)),
     }
 }
@@ -332,9 +350,6 @@ fn invalid_other_stdout_method() {
 #[test]
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
-        ("fn main(): Void { for x in y { } }", "for", "Phase 2"),
-        ("fn main(): Void { while a { } }", "while", "Phase 2"),
-        ("fn main(): Void { match x { } }", "match", "Phase 2"),
         ("class User { }", "class", "Phase 3"),
         ("fn main(): Void { try { } }", "try", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
@@ -366,17 +381,328 @@ fn invalid_constructs_from_other_phases_are_not_unexpected_tokens() {
 }
 
 #[test]
-fn invalid_import_has_its_own_diagnostic() {
-    let output = errors("import { stdout } from std.io;\nfn main(): Void { }");
-    assert!(output.contains(codes::MODULES_UNAVAILABLE.as_str()));
-    assert!(output.contains("Phase 2"));
+fn invalid_declaration_inside_a_function_says_where_it_belongs() {
+    for source_text in [
+        "fn main(): Void { import { a } from \"./b\"; }",
+        "fn main(): Void { use stdout; }",
+        "fn main(): Void { enum E { A } }",
+    ] {
+        let output = errors(source_text);
+        assert!(
+            output.contains(codes::MODULES_UNAVAILABLE.as_str()),
+            "for `{source_text}`:\n{output}"
+        );
+        assert!(
+            output.contains("top level"),
+            "for `{source_text}`:\n{output}"
+        );
+    }
 }
 
 #[test]
-fn invalid_compound_assignment_states_its_phase() {
-    let output = errors("fn main(): Void { mut x = 1; x += 1; }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()));
-    assert!(output.contains("+="));
+fn invalid_safe_access_states_its_phase() {
+    let output = errors("fn main(): Void { mut u = 1; mut n = u?.name; }");
+    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+    assert!(output.contains("?."), "{output}");
+    assert!(output.contains("Phase 3"), "{output}");
+}
+
+#[test]
+fn invalid_increment_as_expression_is_rejected() {
+    let output = errors("fn main(): Void { mut i = 0; mut x = i++; }");
+    assert!(
+        output.contains(codes::INCREMENT_AS_EXPRESSION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_variadic_must_be_last() {
+    let output = errors("fn f(...xs: Int32, y: Int32): Void { }");
+    assert!(
+        output.contains(codes::VARIADIC_NOT_LAST.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_needs_at_least_one_arm() {
+    let output = errors("fn main(): Void { match 1 { } }");
+    assert!(output.contains(codes::EMPTY_MATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_enum_with_associated_data_states_its_phase() {
+    let output = errors("enum Shape { Circle(Int32) }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+    assert!(output.contains("Phase 3"), "{output}");
+}
+
+#[test]
+fn invalid_import_source_must_be_a_path_or_a_module() {
+    let output = errors("import { a } from 42;\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::INVALID_IMPORT_SOURCE.as_str()),
+        "{output}"
+    );
+}
+
+// --- Loops -----------------------------------------------------------------
+
+#[test]
+fn valid_while_loop() {
+    let stmts = statements("while x > 0 { }");
+    let Stmt::Loop(l) = &stmts[0] else {
+        panic!("expected a loop, got {:?}", stmts[0]);
+    };
+    assert_eq!(l.kind, LoopKind::While);
+    assert!(l.condition.is_some());
+    assert!(l.init.is_none() && l.step.is_none());
+}
+
+#[test]
+fn valid_loop_is_unconditional() {
+    let stmts = statements("loop { break; }");
+    let Stmt::Loop(l) = &stmts[0] else {
+        panic!("expected a loop");
+    };
+    assert_eq!(l.kind, LoopKind::Loop);
+    assert!(l.condition.is_none());
+    assert!(matches!(l.body.statements[0], Stmt::Break(_)));
+}
+
+#[test]
+fn valid_for_with_three_clauses() {
+    let stmts = statements("for (mut i = 0; i < 10; i++) { }");
+    let Stmt::Loop(l) = &stmts[0] else {
+        panic!("expected a loop");
+    };
+    assert_eq!(l.kind, LoopKind::For);
+    assert!(l.init.is_some());
+    assert!(l.condition.is_some());
+    assert!(l.step.is_some());
+}
+
+#[test]
+fn valid_for_in_over_a_range() {
+    let stmts = statements("for i in 0..10 { }");
+    let Stmt::ForIn(f) = &stmts[0] else {
+        panic!("expected a for-in, got {:?}", stmts[0]);
+    };
+    assert_eq!(f.binding.name, "i");
+    assert_eq!(shape(&f.iterable), "(0..10)");
+}
+
+#[test]
+fn valid_inclusive_range() {
+    assert_eq!(shape(&expression("0..=10")), "(0..=10)");
+}
+
+#[test]
+fn valid_break_and_continue() {
+    let stmts = statements("loop { break; continue; }");
+    let Stmt::Loop(l) = &stmts[0] else {
+        panic!("expected a loop");
+    };
+    assert!(matches!(l.body.statements[0], Stmt::Break(_)));
+    assert!(matches!(l.body.statements[1], Stmt::Continue(_)));
+}
+
+// --- Compound assignment and increment -------------------------------------
+
+#[test]
+fn valid_compound_assignment_desugars() {
+    // The whole point of the desugaring is that nothing downstream can tell
+    // the two forms apart.
+    let compound = statements("total += 5;");
+    let explicit = statements("total = total + 5;");
+
+    let (Stmt::Assign(a), Stmt::Assign(b)) = (&compound[0], &explicit[0]) else {
+        panic!("expected two assignments");
+    };
+    assert_eq!(shape(&a.value), shape(&b.value));
+    assert_eq!(a.target.name, b.target.name);
+}
+
+#[test]
+fn valid_increment_desugars_in_both_positions() {
+    for source_text in ["i++;", "++i;"] {
+        let stmts = statements(source_text);
+        let Stmt::Assign(a) = &stmts[0] else {
+            panic!("expected an assignment for `{source_text}`");
+        };
+        assert_eq!(shape(&a.value), "(i + 1)", "for `{source_text}`");
+    }
+}
+
+// --- Functions, lambdas and calls ------------------------------------------
+
+#[test]
+fn valid_optional_default_and_variadic_parameters() {
+    let p = program("fn f(a?: Int32, b: Int32 = 2, ...rest: Int32): Void { }");
+    let params = &p.functions[0].params;
+
+    assert!(params[0].optional);
+    assert!(params[1].default.is_some());
+    assert!(params[2].variadic);
+}
+
+#[test]
+fn valid_named_arguments() {
+    assert_eq!(shape(&expression("f(name: 1, 2)")), "f(name: 1, 2)");
+}
+
+#[test]
+fn valid_lambda_with_expression_body() {
+    let e = expression("(a: Int32, b: Int32): Int32 => a + b");
+    let Expr::Lambda(l) = &e else {
+        panic!("expected a lambda, got {e:?}");
+    };
+    assert_eq!(l.params.len(), 2);
+    assert_eq!(l.return_type.name, "Int32");
+    assert!(matches!(*l.body, LambdaBody::Expr(_)));
+}
+
+#[test]
+fn valid_lambda_with_block_body() {
+    let e = expression("(): Void => { stdout.println(\"ok\"); }");
+    let Expr::Lambda(l) = &e else {
+        panic!("expected a lambda");
+    };
+    assert!(matches!(*l.body, LambdaBody::Block(_)));
+}
+
+#[test]
+fn valid_parenthesized_expression_is_not_a_lambda() {
+    // Both start with `(`; only the `:` after the closing paren tells them
+    // apart.
+    assert_eq!(shape(&expression("(1 + 2) * 3")), "((1 + 2) * 3)");
+}
+
+// --- Enums and match -------------------------------------------------------
+
+#[test]
+fn valid_enum_declaration() {
+    let p = program("enum Direction { North, South, East, West }\nfn main(): Void { }");
+    let e = &p.enums[0];
+
+    assert_eq!(e.name.name, "Direction");
+    assert_eq!(e.variants.len(), 4);
+    assert_eq!(e.variants[0].name, "North");
+    assert!(!e.shared);
+}
+
+#[test]
+fn valid_enum_variant_as_a_value() {
+    assert_eq!(shape(&expression("Direction.North")), "Direction.North");
+}
+
+#[test]
+fn valid_match_as_an_expression() {
+    let e = expression("match d { Direction.North => 1, _ => 0 }");
+    let Expr::Match(m) = &e else {
+        panic!("expected a match, got {e:?}");
+    };
+    assert_eq!(m.arms.len(), 2);
+    assert!(matches!(m.arms[0].pattern, Pattern::Variant(_)));
+    assert!(matches!(m.arms[1].pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn valid_match_as_a_statement() {
+    let stmts = statements("match d { _ => { } }");
+    let Stmt::Expr(e) = &stmts[0] else {
+        panic!("expected an expression statement, got {:?}", stmts[0]);
+    };
+    assert!(matches!(e.expr, Expr::Match(_)));
+}
+
+#[test]
+fn valid_patterns_cover_the_forms_of_this_phase() {
+    let e = expression("match x { 1 => a, \"s\" => b, true => c, null => d, other => e, _ => f }");
+    let Expr::Match(m) = &e else {
+        panic!("expected a match");
+    };
+    assert!(matches!(m.arms[0].pattern, Pattern::Int(_)));
+    assert!(matches!(m.arms[1].pattern, Pattern::Str(_)));
+    assert!(matches!(m.arms[2].pattern, Pattern::Bool(_)));
+    assert!(matches!(m.arms[3].pattern, Pattern::Null(_)));
+    assert!(matches!(m.arms[4].pattern, Pattern::Binding(_)));
+    assert!(matches!(m.arms[5].pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn valid_match_with_states_its_phase() {
+    let output = errors("fn main(): Void { match with r { } }");
+    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+    assert!(output.contains("Phase 4"), "{output}");
+}
+
+// --- Nullability -----------------------------------------------------------
+
+#[test]
+fn valid_nullable_type_annotation() {
+    let stmts = statements("mut name: String? = null;");
+    let Stmt::Let(l) = &stmts[0] else {
+        panic!("expected a declaration");
+    };
+    let ty = l.ty.as_ref().expect("annotated");
+    assert_eq!(ty.name, "String");
+    assert!(ty.nullable);
+    assert!(matches!(l.init, Some(Expr::Null(_))));
+}
+
+#[test]
+fn valid_coalescing_binds_tighter_than_logical_operators() {
+    assert_eq!(shape(&expression("a ?? b || c")), "((a ?? b) || c)");
+}
+
+#[test]
+fn valid_coalescing_binds_tighter_than_comparison() {
+    // Otherwise `name ?? "x" == "x"` would coalesce against a boolean, which
+    // is the C# gotcha this precedence avoids.
+    assert_eq!(shape(&expression("a ?? b == c")), "((a ?? b) == c)");
+}
+
+// --- Modules ---------------------------------------------------------------
+
+#[test]
+fn valid_import_from_a_local_path() {
+    let p = program("import { User, Role } from \"./domain/user\";\nfn main(): Void { }");
+    let i = &p.imports[0];
+
+    assert_eq!(i.names.len(), 2);
+    assert_eq!(i.names[0].name.name, "User");
+    assert!(matches!(&i.source, ImportSource::Local { path, .. } if path == "./domain/user"));
+}
+
+#[test]
+fn valid_import_with_alias() {
+    let p = program("import { Role -> DomainRole } from \"./user\";\nfn main(): Void { }");
+    let name = &p.imports[0].names[0];
+
+    assert_eq!(name.name.name, "Role");
+    assert_eq!(name.bound_name().name, "DomainRole");
+}
+
+#[test]
+fn valid_import_from_a_standard_module() {
+    let p = program("import { stdout } from std.io;\nfn main(): Void { }");
+    assert!(matches!(&p.imports[0].source, ImportSource::Std { path, .. } if path == "std.io"));
+}
+
+#[test]
+fn valid_use_declaration() {
+    let p = program("use stdout;\nfn main(): Void { }");
+    assert_eq!(p.uses[0].name.name, "stdout");
+}
+
+#[test]
+fn valid_share_marks_the_declaration() {
+    let p = program("share fn helper(): Void { }\nshare enum E { A }\nfn main(): Void { }");
+    assert!(p.functions[0].shared);
+    assert!(p.enums[0].shared);
+    assert!(!p.functions[1].shared);
 }
 
 // --- Location --------------------------------------------------------------
@@ -472,5 +798,39 @@ fn invalid_diagnostics_come_out_in_source_order() {
     assert!(
         line_2 < line_3,
         "diagnostics must come out top to bottom:\n{output}"
+    );
+}
+
+#[test]
+fn valid_a_negative_literal_is_one_literal() {
+    // Otherwise `-2147483648` would be rejected: its magnitude does not fit in
+    // `Int32` even though the value does.
+    let e = expression("-2147483648");
+    let Expr::Int(lit) = &e else {
+        panic!("expected an integer literal, got {e:?}");
+    };
+    assert_eq!(lit.value, -2_147_483_648);
+}
+
+#[test]
+fn valid_negation_of_a_name_is_still_unary() {
+    assert_eq!(shape(&expression("-x")), "(-x)");
+}
+
+#[test]
+fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
+    // Recursive descent costs stack: without a limit this aborts the process
+    // with no diagnostic at all.
+    let source = format!(
+        "fn main(): Void {{ mut x = {}1{}; }}",
+        "(".repeat(500),
+        ")".repeat(500)
+    );
+    let output = errors(&source);
+
+    assert!(
+        output.contains(codes::NESTING_TOO_DEEP.as_str()),
+        "{}",
+        &output[..200.min(output.len())]
     );
 }

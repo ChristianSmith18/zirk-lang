@@ -39,4 +39,14 @@ pub mod codes {
     pub const MISSING_BRACES: Code = Code::new("E0305");
     /// Multi-file modules, which arrive in a later phase.
     pub const MODULES_UNAVAILABLE: Code = Code::new("E0306");
+    /// A variadic parameter is not the last one in the list.
+    pub const VARIADIC_NOT_LAST: Code = Code::new("E0307");
+    /// Increment or decrement used where a value is expected.
+    pub const INCREMENT_AS_EXPRESSION: Code = Code::new("E0308");
+    /// A `match` arm list that is empty.
+    pub const EMPTY_MATCH: Code = Code::new("E0309");
+    /// An `import` whose source is neither a quoted path nor a standard module.
+    pub const INVALID_IMPORT_SOURCE: Code = Code::new("E0310");
+    /// Nesting deep enough to threaten the parser's own stack.
+    pub const NESTING_TOO_DEEP: Code = Code::new("E0311");
 }

@@ -1,0 +1,8 @@
+fn main(): Void {
+    for i in 0..3 {
+        stdout.println(i);
+    }
+    for i in 1..=3 {
+        stdout.println(i);
+    }
+}

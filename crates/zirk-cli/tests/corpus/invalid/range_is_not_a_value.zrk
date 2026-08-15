@@ -1,0 +1,1 @@
+fn main(): Void { mut r = 0..10; }

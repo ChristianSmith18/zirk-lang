@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut x: Int32 = null;
+    stdout.println(x);
+}

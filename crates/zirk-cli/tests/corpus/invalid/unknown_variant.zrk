@@ -1,0 +1,8 @@
+enum Direction { North, South }
+
+fn main(): Void {
+    stdout.println(match Direction.North {
+        Direction.Up => "arriba",
+        _ => "otra"
+    });
+}
