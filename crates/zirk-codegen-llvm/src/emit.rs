@@ -705,10 +705,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         result
     }
 
-    /// Division and remainder, checking the divisor.
+    /// Division and remainder, checking the divisor and the one overflow case.
     ///
     /// `ZIRK_LANGUAGE_SPEC.md` section 9 requires that a division by zero never
     /// become undefined behaviour, and in LLVM `sdiv` by zero is exactly that.
+    ///
+    /// `Int32::MIN / -1` is the other one: its result is one past the maximum,
+    /// so it overflows, and in LLVM it is undefined rather than wrapping. It is
+    /// the only pair of operands that overflows a division, which is why it is
+    /// checked here instead of through the overflow intrinsics.
     fn checked_division(
         &mut self,
         op: ir::BinaryOp,
@@ -723,6 +728,27 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("divisor comparison");
 
         self.trap_if(is_zero, self.runtime.division_by_zero, function);
+
+        let min = self
+            .context
+            .i32_type()
+            .const_int(i32::MIN as u64, true);
+        let minus_one = self.context.i32_type().const_all_ones();
+
+        let left_is_min = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, left, min, "is_min")
+            .expect("dividend comparison");
+        let right_is_minus_one = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, right, minus_one, "is_minus_one")
+            .expect("divisor comparison");
+        let overflows = self
+            .builder
+            .build_and(left_is_min, right_is_minus_one, "div_overflows")
+            .expect("conjunction");
+
+        self.trap_if(overflows, self.runtime.overflow, function);
 
         match op {
             ir::BinaryOp::Div => self

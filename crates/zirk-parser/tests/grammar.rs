@@ -794,3 +794,19 @@ fn invalid_diagnostics_come_out_in_source_order() {
         "diagnostics must come out top to bottom:\n{output}"
     );
 }
+
+#[test]
+fn valid_a_negative_literal_is_one_literal() {
+    // Otherwise `-2147483648` would be rejected: its magnitude does not fit in
+    // `Int32` even though the value does.
+    let e = expression("-2147483648");
+    let Expr::Int(lit) = &e else {
+        panic!("expected an integer literal, got {e:?}");
+    };
+    assert_eq!(lit.value, -2_147_483_648);
+}
+
+#[test]
+fn valid_negation_of_a_name_is_still_unary() {
+    assert_eq!(shape(&expression("-x")), "(-x)");
+}
