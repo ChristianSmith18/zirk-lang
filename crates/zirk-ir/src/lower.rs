@@ -226,6 +226,67 @@ impl<'a> FunctionLowering<'a> {
         IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
     }
 
+    /// Lowers an expression whose value must survive lowering a later one.
+    ///
+    /// Values do not cross blocks in this IR (ADR-007), and `??`, `if`, `match`
+    /// and the logical operators all open blocks of their own. When the later
+    /// expression is one of those, the earlier value goes through a slot and is
+    /// reloaded where it is used; when it is not, nothing is spilled and the
+    /// IR stays as it was.
+    fn lower_and_hold(&mut self, expr: &ast::Expr, will_branch: bool) -> Held {
+        let value = self.lower_expr(expr);
+        if !will_branch {
+            return Held::Value(value);
+        }
+
+        let ty = self.type_of_operand(value);
+        let slot = self.declare_slot("<held>", ty, expr.span());
+        self.emit_effect(InstKind::Store(slot, value), expr.span());
+        Held::Spilled(slot, ty)
+    }
+
+    /// Lowers a list of arguments, holding each across the ones that follow.
+    ///
+    /// An argument that opens blocks would strand every value already computed,
+    /// so the earlier ones go through slots and are reloaded once the last has
+    /// been lowered.
+    fn lower_held_args(&mut self, args: &[ast::Arg], expected: &[IrType]) -> Vec<Operand> {
+        let mut held = Vec::with_capacity(args.len());
+
+        for (position, arg) in args.iter().enumerate() {
+            let ty = expected.get(position).copied().unwrap_or(IrType::Int32);
+            let branches_later = args[position + 1..]
+                .iter()
+                .any(|later| opens_blocks(&later.value));
+            held.push(self.lower_and_hold_as(&arg.value, ty, branches_later));
+        }
+
+        held.into_iter()
+            .zip(args)
+            .map(|(value, arg)| self.reload(value, arg.span))
+            .collect()
+    }
+
+    /// [`Self::lower_and_hold`], lowering into an expected type.
+    fn lower_and_hold_as(&mut self, expr: &ast::Expr, ty: IrType, will_branch: bool) -> Held {
+        let value = self.lower_expr_as(expr, ty);
+        if !will_branch {
+            return Held::Value(value);
+        }
+
+        let slot = self.declare_slot("<arg>", ty, expr.span());
+        self.emit_effect(InstKind::Store(slot, value), expr.span());
+        Held::Spilled(slot, ty)
+    }
+
+    /// Recovers a held value in whatever block is current now.
+    fn reload(&mut self, held: Held, span: Span) -> Operand {
+        match held {
+            Held::Value(operand) => operand,
+            Held::Spilled(slot, ty) => self.emit(InstKind::Load(slot), ty, span),
+        }
+    }
+
     /// Lowers an expression into the type its destination expects.
     ///
     /// `T` is accepted where `T?` is expected, and `null` fits any nullable
@@ -277,10 +338,15 @@ impl<'a> FunctionLowering<'a> {
 
         self.lower_block(&function.body);
 
-        // A `Void` function may end without an explicit return; the terminator
-        // is added so the IR is well formed. In a non-`Void` function the
-        // checker already guaranteed every path returns.
-        self.terminate(Terminator::Return(None));
+        // A `Void` function may end without an explicit return. In a non-`Void`
+        // one the checker already proved every path returns, so an open block
+        // here is one nothing reaches — the block after `loop { return x; }`
+        // being the ordinary case.
+        if self.return_type == IrType::Void {
+            self.terminate(Terminator::Return(None));
+        } else {
+            self.terminate(Terminator::Unreachable);
+        }
 
         self.scopes.pop();
 
@@ -641,8 +707,9 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Binary(e) => {
-                let left = self.lower_expr(&e.left);
+                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
                 let right = self.lower_expr(&e.right);
+                let left = self.reload(held, e.left.span());
                 let op = binary_op(e.op);
                 let operand_type = self.type_of(&e.left, e.left.span());
                 self.emit(
@@ -654,18 +721,16 @@ impl<'a> FunctionLowering<'a> {
 
             // Calling a closure value goes through the value, not a name.
             ast::Expr::Call(e) if self.is_closure_call(e) => {
-                let callee = self.lower_expr(&e.callee);
                 let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_closure_call`")
                 };
+                let branching = e.args.iter().any(|a| opens_blocks(&a.value));
+                let held = self.lower_and_hold(&e.callee, branching);
+
                 let expected = self.module.closures[id as usize].params.clone();
                 let returns = self.module.closures[id as usize].returns;
-                let args = e
-                    .args
-                    .iter()
-                    .zip(expected)
-                    .map(|(a, ty)| self.lower_expr_as(&a.value, ty))
-                    .collect();
+                let args = self.lower_held_args(&e.args, &expected);
+                let callee = self.reload(held, e.callee.span());
                 self.emit(InstKind::CallClosure { id, callee, args }, returns, span)
             }
 
@@ -1047,8 +1112,6 @@ impl<'a> FunctionLowering<'a> {
         scrutinee_type: IrType,
         span: Span,
     ) -> Operand {
-        let left = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
-
         let expected = match pattern {
             ast::Pattern::Int(lit) => {
                 self.emit(InstKind::ConstInt(lit.value as i32), IrType::Int32, span)
@@ -1064,11 +1127,18 @@ impl<'a> FunctionLowering<'a> {
                 let value = self.discriminant(&v.enum_name.name, &v.variant.name);
                 self.emit(InstKind::ConstInt(value), IrType::Int32, span)
             }
-            ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) | ast::Pattern::Null(_) => {
-                unreachable!("an irrefutable or null pattern is not tested this way")
+            // `null` tests absence rather than a value, so it is the one
+            // pattern that does not compare against anything.
+            ast::Pattern::Null(_) => {
+                let value = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                return self.emit(InstKind::IsNull(value), IrType::Boolean, span);
+            }
+            ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) => {
+                unreachable!("an irrefutable pattern is not tested this way")
             }
         };
 
+        let left = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
         self.emit(
             InstKind::Binary {
                 op: BinaryOp::Eq,
@@ -1148,10 +1218,13 @@ impl<'a> FunctionLowering<'a> {
             self.lower_stmt(stmt);
         }
 
-        let ast::Stmt::Expr(e) = last else {
-            unreachable!("a verified block used as a value ends in an expression")
+        let value = match last {
+            ast::Stmt::Expr(e) => self.lower_expr(&e.expr),
+            // Same reason as in the checker: an `if` is parsed as a statement
+            // wherever it appears, and the position decides what it is.
+            ast::Stmt::If(nested) => self.lower_if_expr(nested, nested.span),
+            _ => unreachable!("a verified block used as a value ends in an expression"),
         };
-        let value = self.lower_expr(&e.expr);
 
         self.scopes.pop();
         value
@@ -1159,10 +1232,11 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a block used as a value produces.
     fn block_value_type(&self, block: &ast::Block) -> IrType {
-        let Some(ast::Stmt::Expr(e)) = block.statements.last() else {
-            unreachable!("a verified block used as a value ends in an expression")
-        };
-        self.type_of(&e.expr, e.expr.span())
+        match block.statements.last() {
+            Some(ast::Stmt::Expr(e)) => self.type_of(&e.expr, e.expr.span()),
+            Some(ast::Stmt::If(nested)) => self.block_value_type(&nested.then_branch),
+            _ => unreachable!("a verified block used as a value ends in an expression"),
+        }
     }
 
     /// Lowers an expression whose value is discarded.
@@ -1227,10 +1301,10 @@ impl<'a> FunctionLowering<'a> {
             .map(|p| (p.name.clone(), ir_type(p.ty)))
             .collect();
 
-        let mut slots: Vec<Option<Operand>> = vec![None; params.len()];
+        let mut slots: Vec<Option<Held>> = (0..params.len()).map(|_| None).collect();
         let mut next = 0usize;
 
-        for arg in &call.args {
+        for (position, arg) in call.args.iter().enumerate() {
             let index = match &arg.name {
                 Some(named) => params
                     .iter()
@@ -1245,7 +1319,16 @@ impl<'a> FunctionLowering<'a> {
                     index
                 }
             };
-            slots[index] = Some(self.lower_expr_as(&arg.value, params[index].1));
+            // A later argument that opens blocks would strand the ones already
+            // computed, so each is held until every argument is lowered.
+            let branches_later = call.args[position + 1..]
+                .iter()
+                .any(|a| opens_blocks(&a.value));
+            slots[index] = Some(self.lower_and_hold_as(
+                &arg.value,
+                params[index].1,
+                branches_later,
+            ));
         }
 
         let declaration = self.declarations.get(name).copied();
@@ -1254,7 +1337,7 @@ impl<'a> FunctionLowering<'a> {
             .into_iter()
             .enumerate()
             .map(|(index, filled)| match filled {
-                Some(operand) => operand,
+                Some(held) => self.reload(held, call.span),
                 None => self.lower_default(declaration, index, params[index].1, call.span),
             })
             .collect()
@@ -1382,6 +1465,35 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         // `??` is expanded by the lowering into a null check with two blocks,
         // so it never reaches the IR as an operator.
         A::Coalesce => unreachable!("`??` is lowered into branches, not an operator"),
+    }
+}
+
+/// Where a value waits while a later expression is lowered.
+enum Held {
+    /// Still in its block, because nothing moved the insertion point.
+    Value(Operand),
+    /// Parked in a slot, because the later expression opened blocks.
+    Spilled(SlotId, IrType),
+}
+
+/// Whether lowering this expression opens blocks of its own.
+///
+/// Only these constructs move the insertion point, and that is what forces an
+/// earlier value to travel through a slot.
+fn opens_blocks(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::If(_) | ast::Expr::Match(_) => true,
+        ast::Expr::Binary(e) => {
+            matches!(
+                e.op,
+                ast::BinaryOp::Coalesce | ast::BinaryOp::And | ast::BinaryOp::Or
+            ) || opens_blocks(&e.left)
+                || opens_blocks(&e.right)
+        }
+        ast::Expr::Unary(e) => opens_blocks(&e.operand),
+        ast::Expr::Call(e) => e.args.iter().any(|a| opens_blocks(&a.value)),
+        ast::Expr::Println(e) => opens_blocks(&e.arg),
+        _ => false,
     }
 }
 

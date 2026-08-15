@@ -1,0 +1,11 @@
+fn describe(x: Int32?): String {
+    return match x {
+        null => "vacío",
+        _ => "tiene valor"
+    };
+}
+
+fn main(): Void {
+    stdout.println(describe(null));
+    stdout.println(describe(7));
+}
