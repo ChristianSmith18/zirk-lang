@@ -352,3 +352,33 @@ fn the_reference_program_of_the_roadmap_emits() {
     assert!(ir.contains(&format!("@{}", symbols::IO_PRINTLN)));
     assert!(ir.contains("define i32 @main()"));
 }
+
+#[test]
+fn generated_symbols_only_use_characters_every_assembler_accepts() {
+    // A symbol reaches the object file through the target's assembler, and the
+    // safe set is not the same everywhere: `#` starts a comment in x86_64's
+    // AT&T syntax, so a lifted lambda named `<lambda>#0` broke there and
+    // nowhere else — aarch64 comments with `//`.
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+         inmut A = 1;\n\
+         inmut F = (x: Int32): Int32 => x + A;\n\
+         stdout.println(F(1));\n\
+         }",
+    );
+
+    for line in ir.lines().filter(|l| l.starts_with("define")) {
+        let name: String = line
+            .chars()
+            .skip_while(|c| *c != '@')
+            .skip(1)
+            .take_while(|c| *c != '(')
+            .collect();
+
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+            "`{name}` uses a character an assembler may not accept"
+        );
+    }
+}

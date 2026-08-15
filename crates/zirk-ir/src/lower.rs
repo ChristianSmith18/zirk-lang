@@ -920,7 +920,14 @@ impl<'a> FunctionLowering<'a> {
         let param_types: Vec<IrType> = signature.params.iter().map(|t| ir_type(*t)).collect();
         let returns = ir_type(signature.returns);
 
-        let name = format!("<lambda>#{}", self.module.closures.len());
+        // The name reaches the object file as a symbol, so it may only use
+        // characters every target's assembler accepts. `#` starts a comment in
+        // x86_64's AT&T syntax — with `<lambda>#0` the symbol broke there and
+        // nowhere else, since aarch64 comments with `//`.
+        //
+        // A dot is valid in ELF, Mach-O and COFF symbols, and impossible in a
+        // Zirk identifier, so it cannot collide with a user's function.
+        let name = format!("lambda.{}", self.module.closures.len());
         let id = self.module.closures.len() as u32;
         self.module.closures.push(ClosureLayout {
             function: name.clone(),
