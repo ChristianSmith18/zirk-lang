@@ -1,3 +1,28 @@
+> **Las secciones son una lista de cobertura, no un orden de ejecución.**
+>
+> Clases, contratos y genéricos son un núcleo mutuamente dependiente: las clases
+> necesitan genéricos para ser útiles, los genéricos necesitan contratos para
+> restringir, y los contratos necesitan clases para implementarse. No existe un
+> orden en que una parte se termine antes que las otras, así que leer esto como
+> "terminar todas las clases antes de empezar contratos" llevaría a un callejón.
+>
+> La implementación avanza por **cortes verticales**:
+>
+> 1. Crear las representaciones mínimas compartidas: símbolos nominales,
+>    parámetros de tipo, contratos, miembros y relaciones entre tipos.
+> 2. Parsear el subconjunto mínimo de clases, interfaces y genéricos.
+> 3. Registrar las declaraciones y resolver las referencias entre ellas, aunque
+>    sus cuerpos todavía no estén verificados por completo.
+> 4. Completar en conjunto la implementación de contratos, las restricciones
+>    `from` y los miembros genéricos.
+> 5. Añadir lowering y codegen **solo** después de cerrar cada construcción en
+>    parser, resolución y chequeo.
+> 6. Expandir después hacia traits, herencia, tipos algebraicos, casts y
+>    optimizaciones.
+>
+> Cada caja marcada significa que su regla está cubierta de punta a punta, no
+> que su capa esté terminada.
+
 ## 1. Léxico
 
 - [ ] 1.1 Añadir las palabras clave que faltan: `interface`, `trait`, `value`
@@ -31,7 +56,8 @@
 - [ ] 4.5 Parsear casts postfijos (`as`) y prefijos (`<T>`)
 - [ ] 4.6 Rechazar los casts que exigen `unsafe`, indicando la fase que los trae
 - [ ] 4.7 Parsear `?.`, retirando el diagnóstico de fase de la fase anterior
-- [ ] 4.8 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 4.8 Rechazar la sintaxis de tipo función en posición de tipo, indicando la fase que la trae (D9)
+- [ ] 4.9 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 5. Tipos — nominalidad y miembros
 
@@ -44,7 +70,10 @@
 - [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere
 - [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
-- [ ] 5.10 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 5.10 Rechazar anotar una closure como parámetro, retorno o campo (D9)
+- [ ] 5.11 Rechazar que una closure escape de la función que la crea (D9)
+- [ ] 5.12 Tests: una closure sigue funcionando en variable local e invocación (D9)
+- [ ] 5.13 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 6. Tipos — contratos
 
@@ -140,3 +169,4 @@
 - [ ] 14.2 Registrar en ADRs las decisiones durables: layout de objetos y forma del despacho
 - [ ] 14.3 Resolver o registrar como pendientes las preguntas abiertas del design
 - [ ] 14.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha
+- [ ] 14.5 Confirmar que D9 sigue en pie al cerrar: ninguna closure escapa ni se anota
