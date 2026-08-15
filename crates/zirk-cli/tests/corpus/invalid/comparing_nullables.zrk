@@ -1,0 +1,1 @@
+fn main(): Void { mut a: Int32? = 1; stdout.println(a == 1); }

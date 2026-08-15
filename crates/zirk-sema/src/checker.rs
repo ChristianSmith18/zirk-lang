@@ -234,6 +234,41 @@ impl<'a> Checker<'a> {
         format!("on line {line} of `{file}`")
     }
 
+    /// Reports printing a value the runtime cannot turn into text.
+    ///
+    /// `ZIRK_STDLIB_SPEC.md` section 3 routes every printable value through
+    /// `to_string()`, and until traits exist that is not something a type can
+    /// provide: the runtime knows exactly `Int32`, `Boolean` and `String`.
+    fn require_printable(&mut self, ty: Type, span: Span) {
+        if ty.is_unknown() {
+            return;
+        }
+
+        let reason = match ty.base {
+            Base::Int32 | Base::Boolean | Base::String if !ty.nullable => return,
+            _ if ty.nullable => "a value that may be absent has no text form",
+            Base::Enum(_) => "an enum has no text for its variants yet",
+            Base::Function(_) => "a closure is code, not data",
+            Base::Void => "`Void` is the absence of a value",
+            _ => "the runtime has no text form for it",
+        };
+
+        let name = self.name(ty);
+        let help = if ty.nullable {
+            "use `?? <fallback>` to provide a value to print"
+        } else {
+            "`to_string()` becomes a trait in Phase 3; print an `Int32`, `Boolean` or `String` for now"
+        };
+
+        self.error(
+            codes::TYPE_MISMATCH,
+            span,
+            format!("`{name}` cannot be printed"),
+            reason,
+            Some(help.to_string()),
+        );
+    }
+
     /// Reports naming a declaration that another file keeps to itself.
     ///
     /// Visibility is binary in this phase: a declaration is private to its file
@@ -549,6 +584,13 @@ impl<'a> Checker<'a> {
                 self.check_return(s);
                 true
             }
+            // A `match` whose arms all return, and which covers every case,
+            // guarantees the function returned — the same way an `if` with
+            // both branches does.
+            Stmt::Expr(ExprStmt {
+                expr: Expr::Match(m),
+                ..
+            }) => self.check_match_statement(m),
             Stmt::Expr(s) => {
                 self.check_expr(&s.expr);
                 false
@@ -730,7 +772,12 @@ impl<'a> Checker<'a> {
     }
 
     fn check_for_in(&mut self, stmt: &ForInStmt) {
-        let iterable = self.check_expr(&stmt.iterable);
+        // The range is checked directly here rather than through `check_expr`,
+        // which rejects it: this is the one position where it is meaningful.
+        let iterable = match &stmt.iterable {
+            Expr::Range(range) => self.check_range(range),
+            other => self.check_expr(other),
+        };
         let element = self.element_type(iterable, stmt.iterable.span());
 
         self.scopes.push();
@@ -839,13 +886,27 @@ impl<'a> Checker<'a> {
             Expr::Unary(e) => self.check_unary(e),
             Expr::Binary(e) => self.check_binary(e),
             Expr::Call(e) => self.check_call(e),
-            Expr::Range(e) => self.check_range(e),
+            // A range is not a value: there is no `Range` type to hold one
+            // until Phase 3 brings collections. It only means something as the
+            // iterable of a `for ... in`, which checks it directly.
+            Expr::Range(e) => {
+                self.check_range(e);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    e.span,
+                    "a range is not a value",
+                    "it can only be iterated, not stored or passed around",
+                    Some("write it directly in a `for ... in`".into()),
+                );
+                Type::UNKNOWN
+            }
             Expr::If(e) => self.check_if_expr(e),
             Expr::Match(e) => self.check_match(e, true),
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
-                self.check_expr(&e.arg);
+                let ty = self.check_expr(&e.arg);
+                self.require_printable(ty, e.arg.span());
                 Type::VOID
             }
         }
@@ -968,6 +1029,7 @@ impl<'a> Checker<'a> {
             // Equality is structural and requires both sides to share a type.
             Eq | NotEq => {
                 self.expect_same(left, right, expr);
+                self.reject_nullable_comparison(left, right, expr);
                 Type::BOOLEAN
             }
 
@@ -1095,6 +1157,10 @@ impl<'a> Checker<'a> {
 
         let ty = match last {
             Stmt::Expr(e) => self.check_expr(&e.expr),
+            // The parser builds `if` as a statement wherever it appears, so a
+            // block ending in one is a block ending in an expression: which it
+            // is depends on the position, not on the shape.
+            Stmt::If(nested) => self.check_if_expr(nested),
             other => {
                 self.check_stmt(other);
                 self.error(
@@ -1110,6 +1176,53 @@ impl<'a> Checker<'a> {
 
         self.scopes.pop();
         ty
+    }
+
+    /// Checks a `match` used as a statement, reporting whether it returns.
+    fn check_match_statement(&mut self, expr: &MatchExpr) -> bool {
+        self.check_match(expr, false);
+
+        // Only an exhaustive match can guarantee anything: with a case left
+        // uncovered, execution can fall past it.
+        let covers_everything = expr.arms.iter().any(|a| a.pattern.is_irrefutable())
+            || self.matches.get(&expr.span).is_some_and(|scrutinee| {
+                matches!(scrutinee.base, Base::Enum(_)) && !scrutinee.nullable
+            });
+
+        covers_everything && self.arms_all_return(expr)
+    }
+
+    /// Whether every arm of a `match` ends in a return.
+    ///
+    /// The arms were already checked; this walks them again only to ask about
+    /// control flow, which is cheap and keeps `check_match` about types.
+    fn arms_all_return(&mut self, expr: &MatchExpr) -> bool {
+        expr.arms.iter().all(|arm| match &arm.body {
+            ArmBody::Block(b) => b.statements.iter().any(|s| self.returns_always(s)),
+            ArmBody::Expr(_) => false,
+        })
+    }
+
+    /// Whether a statement guarantees a return, without re-reporting errors.
+    fn returns_always(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return(_) => true,
+            Stmt::Block(b) => b.statements.iter().any(|s| self.returns_always(s)),
+            Stmt::If(i) => {
+                let then_returns = i.then_branch.statements.iter().any(|s| self.returns_always(s));
+                then_returns
+                    && match &i.else_branch {
+                        Some(ElseBranch::Block(b)) => {
+                            b.statements.iter().any(|s| self.returns_always(s))
+                        }
+                        Some(ElseBranch::If(nested)) => {
+                            self.returns_always(&Stmt::If((**nested).clone()))
+                        }
+                        None => false,
+                    }
+            }
+            _ => false,
+        }
     }
 
     fn check_match(&mut self, expr: &MatchExpr, as_value: bool) -> Type {
@@ -1191,7 +1304,15 @@ impl<'a> Checker<'a> {
                 self.expect_pattern_type(scrutinee, ty, lit.span);
             }
             Pattern::Str(lit) => self.expect_pattern_type(scrutinee, Type::STRING, lit.span),
-            Pattern::Bool(lit) => self.expect_pattern_type(scrutinee, Type::BOOLEAN, lit.span),
+            Pattern::Bool(lit) => {
+                self.expect_pattern_type(scrutinee, Type::BOOLEAN, lit.span);
+                // `Boolean` is a closed set of two values, so covering both is
+                // as exhaustive as covering every variant of an enum.
+                let name = lit.value.to_string();
+                if !covered.contains(&name) {
+                    covered.push(name);
+                }
+            }
             Pattern::Null(lit) => {
                 if !scrutinee.admits_null() && !scrutinee.is_unknown() {
                     let name = self.name(scrutinee);
@@ -1279,8 +1400,28 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        // An enum is the only closed set of values this phase has, so it is the
-        // only case where exhaustiveness can be met without `_`.
+        // `Boolean` and enums are the closed sets this phase has: for anything
+        // else, no finite list of arms can cover every value.
+        if scrutinee.base == Base::Boolean && !scrutinee.nullable {
+            let missing: Vec<&str> = ["true", "false"]
+                .into_iter()
+                .filter(|v| !covered.iter().any(|c| c == v))
+                .collect();
+
+            if missing.is_empty() {
+                return;
+            }
+
+            self.error(
+                codes::NON_EXHAUSTIVE_MATCH,
+                expr.span,
+                "the `match` does not cover every case of `Boolean`",
+                format!("these values have no arm: {}", missing.join(", ")),
+                Some("add the missing arm, or `_` for the rest".into()),
+            );
+            return;
+        }
+
         if let Base::Enum(id) = scrutinee.base
             && !scrutinee.nullable
             && let Some(enum_type) = self.enums.get(id as usize)
@@ -1726,6 +1867,29 @@ impl<'a> Checker<'a> {
             format!("{context} must be Int32"),
             format!("a value of type {found} was found"),
             None,
+        );
+    }
+
+    /// Rejects comparing values that may be absent.
+    ///
+    /// `ZIRK_LANGUAGE_SPEC.md` section 4 calls `==` structural equality but
+    /// says nothing about how absence compares — whether two absent values are
+    /// equal, and whether an absent one equals a present one. Guessing would
+    /// fix a semantics the spec has not fixed.
+    fn reject_nullable_comparison(&mut self, left: Type, right: Type, expr: &BinaryExpr) {
+        if !left.admits_null() && !right.admits_null() {
+            return;
+        }
+        if left.is_unknown() || right.is_unknown() {
+            return;
+        }
+
+        self.error(
+            codes::TYPE_MISMATCH,
+            expr.op_span,
+            "values that may be absent cannot be compared",
+            "the language does not define yet how absence compares",
+            Some("resolve it first with `?? <fallback>`, or match on `null`".into()),
         );
     }
 

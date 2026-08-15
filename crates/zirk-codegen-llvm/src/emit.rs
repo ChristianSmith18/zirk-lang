@@ -769,6 +769,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     fn emit_terminator(&mut self, terminator: &ir::Terminator) {
         match terminator {
+            // LLVM has this exact concept, so nothing is invented here.
+            ir::Terminator::Unreachable => {
+                self.builder
+                    .build_unreachable()
+                    .expect("unreachable terminator");
+            }
             ir::Terminator::Return(None) => {
                 self.builder.build_return(None).expect("empty return");
             }

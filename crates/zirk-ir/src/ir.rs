@@ -356,6 +356,13 @@ impl BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
     Return(Option<Operand>),
+    /// Control never arrives here.
+    ///
+    /// A block still needs a terminator even when nothing can reach it — the
+    /// block after `loop { return x; }` is the ordinary case. Inventing a
+    /// return value for it would have to invent one of the function's type,
+    /// and that value would be a lie about code that never runs.
+    Unreachable,
     Jump(BlockId),
     Branch {
         condition: Operand,
@@ -368,7 +375,7 @@ impl Terminator {
     /// Blocks this terminator can transfer control to.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
-            Terminator::Return(_) => Vec::new(),
+            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
             Terminator::Jump(target) => vec![*target],
             Terminator::Branch {
                 then_block,

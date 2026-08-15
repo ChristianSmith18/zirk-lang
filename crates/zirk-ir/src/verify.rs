@@ -380,6 +380,9 @@ fn verify_terminator(
     let position = format!("block {:?}, terminator", block.id);
 
     match terminator {
+        // Nothing to check: a block nothing reaches transfers control nowhere.
+        Terminator::Unreachable => {}
+
         Terminator::Return(value) => {
             let returned = match value {
                 None => IrType::Void,
