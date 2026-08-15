@@ -27,6 +27,12 @@ pub struct CheckedProgram {
     /// lambda uniquely without inventing a numbering the parser would have to
     /// maintain.
     pub lambdas: HashMap<Span, LambdaInfo>,
+    /// Names written under an import alias, keyed by the use site.
+    ///
+    /// `import { Role -> DomainRole }` lets a file write `DomainRole` for a
+    /// declaration called `Role`. Recording the resolution here means lowering
+    /// does not have to repeat it — or know that aliases exist at all.
+    pub aliases: HashMap<Span, String>,
     /// The resolved type of each `match` scrutinee, keyed by the match's span.
     ///
     /// Lowering compares against a discriminant for enums and against the value
@@ -87,6 +93,8 @@ struct Checker<'a> {
     matches: HashMap<Span, Type>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    /// Use sites whose written name differs from the declaration's.
+    aliases: HashMap<Span, String>,
     /// Return type of the function or lambda being checked.
     current_return: Type,
     /// How many loops enclose the statement being checked.
@@ -109,6 +117,7 @@ impl<'a> Checker<'a> {
             lambdas: HashMap::new(),
             matches: HashMap::new(),
             imported: HashMap::new(),
+            aliases: HashMap::new(),
             current_return: Type::VOID,
             loop_depth: 0,
             capture_stack: Vec::new(),
@@ -175,6 +184,7 @@ impl<'a> Checker<'a> {
             fn_types: self.fn_types,
             lambdas: self.lambdas,
             matches: self.matches,
+            aliases: self.aliases,
         }
     }
 
@@ -187,12 +197,9 @@ impl<'a> Checker<'a> {
     fn record_imports(&mut self, program: &Program) {
         for import in &program.imports {
             for name in &import.names {
-                // A standard module is not a file of the crate: `std.io` is
-                // still the intrinsic of Phase 1 (design D4).
-                if matches!(import.source, ImportSource::Std { .. }) {
-                    continue;
-                }
-
+                // Standard modules are recorded too. They name no declaration
+                // of the crate, so they never reach the visibility check, but
+                // `use` does ask whether the file imported the name.
                 self.imported
                     .entry(import.span.file)
                     .or_default()
@@ -232,6 +239,27 @@ impl<'a> Checker<'a> {
 
         let file = self.sources.file(previous.file).name().to_string();
         format!("on line {line} of `{file}`")
+    }
+
+    /// The declaration a name refers to, following the file's import aliases.
+    ///
+    /// `import { Role -> DomainRole }` binds `DomainRole` in the importing
+    /// file, but the declaration is still called `Role`: every lookup goes
+    /// through here so the alias is applied in exactly one place.
+    fn resolved_name(&mut self, name: &str, at: Span) -> String {
+        let Some(original) = self
+            .imported
+            .get(&at.file)
+            .and_then(|names| names.get(name))
+            .cloned()
+        else {
+            return name.to_string();
+        };
+
+        if original != name {
+            self.aliases.insert(at, original.clone());
+        }
+        original
     }
 
     /// Reports printing a value the runtime cannot turn into text.
@@ -275,21 +303,45 @@ impl<'a> Checker<'a> {
     /// unless marked `share`. The three levels of
     /// `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and are Phase 3.
     fn require_visible(&mut self, owner: Span, shared: bool, used: &Ident, what: &str) {
-        if owner.file == used.span.file || shared {
+        if owner.file == used.span.file {
             return;
         }
 
         let keyword = if what == "enum" { "enum" } else { "fn" };
-
         let file = self.sources.file(owner.file).name().to_string();
         let line = self.sources.location(owner).line;
-        self.error(
-            codes::UNDECLARED_NAME,
-            used.span,
-            format!("{what} `{}` is not accessible from this file", used.name),
-            format!("it is declared on line {line} of `{file}` without `share`"),
-            Some(format!("mark it `share {keyword} {}` to publish it", used.name)),
-        );
+
+        if !shared {
+            self.error(
+                codes::UNDECLARED_NAME,
+                used.span,
+                format!("{what} `{}` is not accessible from this file", used.name),
+                format!("it is declared on line {line} of `{file}` without `share`"),
+                Some(format!("mark it `share {keyword} {}` to publish it", used.name)),
+            );
+            return;
+        }
+
+        // Being shared is not enough: the file has to have asked for it.
+        // Otherwise every `share` in the crate would be in scope everywhere,
+        // and `import` would be decoration.
+        let imported = self
+            .imported
+            .get(&used.span.file)
+            .is_some_and(|names| names.contains_key(&used.name));
+
+        if !imported {
+            self.error(
+                codes::UNDECLARED_NAME,
+                used.span,
+                format!("`{}` is not imported in this file", used.name),
+                format!("it is declared on line {line} of `{file}`, but nothing brings it here"),
+                Some(format!(
+                    "add `import {{ {} }} from \"...\";` naming that file",
+                    used.name
+                )),
+            );
+        }
     }
 
     fn declare_enum(&mut self, decl: &EnumDecl) {
@@ -420,7 +472,8 @@ impl<'a> Checker<'a> {
         let base = if let Some(ty) = Type::from_name(&reference.name) {
             Some(ty)
         } else {
-            match self.enums.iter().position(|e| e.name == reference.name) {
+            let resolved = self.resolved_name(&reference.name, reference.span);
+            match self.enums.iter().position(|e| e.name == resolved) {
                 Some(index) => {
                     let declared = self.enums[index].span;
                     let shared = self.enums[index].shared;
@@ -936,7 +989,8 @@ impl<'a> Checker<'a> {
     fn check_path(&mut self, ident: &Ident) -> Type {
         // A bare function name is a value: that is what lets a function be
         // passed where a closure is expected.
-        if let Some(signature) = self.functions.get(&ident.name).cloned()
+        let declared = self.resolved_name(&ident.name, ident.span);
+        if let Some(signature) = self.functions.get(&declared).cloned()
             && self.scopes.lookup(&ident.name).is_none()
         {
             let id = self.intern_fn_type(FnType {
@@ -1335,11 +1389,8 @@ impl<'a> Checker<'a> {
         scrutinee: Type,
         covered: &mut Vec<String>,
     ) {
-        let Some(index) = self
-            .enums
-            .iter()
-            .position(|e| e.name == pattern.enum_name.name)
-        else {
+        let resolved = self.resolved_name(&pattern.enum_name.name, pattern.enum_name.span);
+        let Some(index) = self.enums.iter().position(|e| e.name == resolved) else {
             self.error(
                 codes::UNKNOWN_TYPE,
                 pattern.enum_name.span,
@@ -1476,7 +1527,8 @@ impl<'a> Checker<'a> {
 
     /// `Direction.North` in expression position.
     fn check_variant(&mut self, expr: &VariantExpr) -> Type {
-        let Some(index) = self.enums.iter().position(|e| e.name == expr.enum_name.name) else {
+        let resolved = self.resolved_name(&expr.enum_name.name, expr.enum_name.span);
+        let Some(index) = self.enums.iter().position(|e| e.name == resolved) else {
             self.error(
                 codes::UNKNOWN_TYPE,
                 expr.enum_name.span,
@@ -1486,6 +1538,10 @@ impl<'a> Checker<'a> {
             );
             return Type::UNKNOWN;
         };
+
+        let declared = self.enums[index].span;
+        let shared = self.enums[index].shared;
+        self.require_visible(declared, shared, &expr.enum_name, "enum");
 
         let enum_type = &self.enums[index];
         if !enum_type.variants.contains(&expr.variant.name) {
@@ -1588,10 +1644,12 @@ impl<'a> Checker<'a> {
         // value goes through its function type, which has none of that.
         if let Expr::Path(callee) = &*expr.callee
             && self.scopes.lookup(&callee.name).is_none()
-            && let Some(signature) = self.functions.get(&callee.name).cloned()
         {
-            self.require_visible(signature.span, signature.shared, callee, "function");
-            return self.check_direct_call(expr, &signature);
+            let declared = self.resolved_name(&callee.name, callee.span);
+            if let Some(signature) = self.functions.get(&declared).cloned() {
+                self.require_visible(signature.span, signature.shared, callee, "function");
+                return self.check_direct_call(expr, &signature);
+            }
         }
 
         let callee = self.check_expr(&expr.callee);
