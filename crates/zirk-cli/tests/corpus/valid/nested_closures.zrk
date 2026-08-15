@@ -1,0 +1,23 @@
+fn main(): Void {
+    // A closure capturing another one: the checker identifies a closure type
+    // by its own numbering and the IR by the layout it built, so the capture's
+    // type has to come from the slot that holds it.
+    inmut A = (): Int32 => 1;
+    inmut B = (): Int32 => A() + 1;
+    inmut C = (): Int32 => B() + 1;
+    stdout.println(C());
+
+    inmut N = 10;
+    inmut D = (): Int32 => N;
+    inmut E = (): Int32 => D() * 2;
+    stdout.println(E());
+
+    inmut S = "hola";
+    inmut F = (): String => S;
+    inmut G = (): Void => { stdout.println(F()); };
+    G();
+
+    inmut H = (x: Int32): Int32 => x + 1;
+    inmut I = (y: Int32): Int32 => H(y) * 2;
+    stdout.println(I(4));
+}
