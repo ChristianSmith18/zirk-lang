@@ -589,3 +589,32 @@ fn a_missing_imported_file_is_reported_at_the_import() {
         output.stderr
     );
 }
+
+#[test]
+fn two_shared_declarations_cannot_share_a_name() {
+    // A crate has one namespace in this phase, so the collision is an error
+    // and the diagnostic has to name the other file: a bare line number says
+    // nothing when the two declarations live in different ones.
+    let output = crate_of(
+        "modules_collision",
+        &[
+            (
+                "main.zrk",
+                "import { helper } from \"./other\";\n\
+                 share fn helper(): String { return \"a\"; }\n\
+                 fn main(): Void { stdout.println(helper()); }\n",
+            ),
+            (
+                "other.zrk",
+                "share fn helper(): String { return \"b\"; }\n",
+            ),
+        ],
+    );
+
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.contains("already defined") && output.stderr.contains("other.zrk"),
+        "the diagnostic must name the other file:\n{}",
+        output.stderr
+    );
+}

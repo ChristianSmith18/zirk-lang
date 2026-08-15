@@ -232,8 +232,17 @@ fn logical_operators_do_not_check_overflow() {
     let ir = llvm_ir(&in_main(
         "mut p: Boolean = true;\nmut q: Boolean = false;\nmut x: Boolean = p && q;",
     ));
-    assert!(ir.contains(" and "), "{ir}");
-    assert!(!ir.contains("llvm.sadd"));
+    assert!(!ir.contains("llvm.sadd"), "{ir}");
+}
+
+#[test]
+fn logical_operators_short_circuit() {
+    // `&&` becomes a branch rather than an `and`: the right operand must not
+    // run when the left already decided the answer.
+    let ir = llvm_ir(&in_main(
+        "mut p: Boolean = true;\nmut q: Boolean = false;\nmut x: Boolean = p && q;",
+    ));
+    assert!(ir.contains("br i1"), "{ir}");
 }
 
 // --- Control flow -----------------------------------------------------------

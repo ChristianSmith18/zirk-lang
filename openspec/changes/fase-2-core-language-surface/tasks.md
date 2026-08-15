@@ -51,7 +51,7 @@
 - [x] 6.2 Admitir importaciones mutuas, leyendo cada archivo una sola vez
 - [x] 6.3 Resolver rutas locales relativas al archivo que importa
 - [x] 6.4 Aplicar la regla de visibilidad binaria (`share` vs. privado al archivo)
-- [ ] 6.5 Detectar y reportar colisiones de nombres `share` entre archivos
+- [x] 6.5 Detectar y reportar colisiones de nombres `share` entre archivos
 - [x] 6.6 Resolver alias de importación en la tabla de scopes
 - [x] 6.7 Resolver `use` sobre nombres ya importados, rechazando los que no lo están
 - [x] 6.8 Reconocer `std.io` como único módulo estándar de esta fase
@@ -136,6 +136,6 @@
 
 ## 15. Cierre
 
-- [ ] 15.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
-- [ ] 15.2 Registrar en ADRs cualquier decisión de arquitectura tomada durante la implementación
-- [ ] 15.3 Resolver o registrar como pendientes las preguntas abiertas del design
+- [x] 15.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
+- [x] 15.2 Registrar en ADRs cualquier decisión de arquitectura tomada durante la implementación
+- [x] 15.3 Resolver o registrar como pendientes las preguntas abiertas del design
