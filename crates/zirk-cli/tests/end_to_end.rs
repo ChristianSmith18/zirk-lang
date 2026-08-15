@@ -111,8 +111,8 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
 
         assert_eq!(
             output.status, 0,
-            "`{name}` did not run successfully.\nstderr:\n{}",
-            output.stderr
+            "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
         );
         assert_eq!(
             normalize(&output.stdout),
