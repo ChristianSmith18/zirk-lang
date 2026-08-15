@@ -1357,6 +1357,21 @@ impl<'a> Parser<'a> {
 
         if let Some(op) = op {
             self.pos += 1;
+
+            // `-<integer>` is one literal, not a negation applied to one.
+            // Without folding it here, `-2147483648` would be rejected: its
+            // magnitude does not fit in `Int32` even though the value does.
+            if op == UnaryOp::Neg
+                && let TokenKind::Integer(value) = self.peek().clone()
+            {
+                let end = self.peek_span();
+                self.pos += 1;
+                return Some(Expr::Int(IntLit {
+                    value: -value,
+                    span: start.to(end),
+                }));
+            }
+
             let operand = self.parse_unary()?;
             let span = start.to(operand.span());
             return Some(Expr::Unary(UnaryExpr {

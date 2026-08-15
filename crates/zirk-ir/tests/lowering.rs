@@ -204,7 +204,9 @@ fn comparison_produces_a_boolean() {
 
 #[test]
 fn unary_operators_lower_with_their_type() {
-    let f = main_body("mut a: Int32 = -1;\nmut b: Boolean = !true;");
+    // Negation goes through a variable: `-1` is one literal, not a negation
+    // applied to one, which is what lets `-2147483648` be written at all.
+    let f = main_body("mut n: Int32 = 1;\nmut a: Int32 = -n;\nmut b: Boolean = !true;");
 
     let unaries: Vec<_> = f
         .blocks
