@@ -1,0 +1,1 @@
+fn main(): Void { mut b: Boolean? = null; if b { } }
