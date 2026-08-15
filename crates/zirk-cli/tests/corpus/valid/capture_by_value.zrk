@@ -1,0 +1,16 @@
+fn main(): Void {
+    // Capture is by value (design D2): the closure copies what it captured
+    // when it was created, so changing the original afterwards does not reach
+    // it. This is the property the whole decision rests on.
+    mut n = 1;
+    inmut F = (): Int32 => n;
+    n = 99;
+    stdout.println(F());
+    stdout.println(n);
+
+    // Shadowing resolves the same way it does outside a closure.
+    inmut OUTER = 5;
+    inmut G = (OUTER: Int32): Int32 => OUTER * 2;
+    stdout.println(G(3));
+    stdout.println(OUTER);
+}
