@@ -414,9 +414,7 @@ impl<'a> Parser<'a> {
             let mut end;
 
             loop {
-                let Some(segment) = self.expect_identifier("in the module name") else {
-                    return None;
-                };
+                let segment = self.expect_identifier("in the module name")?;
                 if !path.is_empty() {
                     path.push('.');
                 }
@@ -440,7 +438,10 @@ impl<'a> Parser<'a> {
             span,
             "expected the source of the import",
             format!("found {found}"),
-            Some("a local path goes in quotes (`\"./user\"`); a standard module does not (`std.io`)".into()),
+            Some(
+                "a local path goes in quotes (`\"./user\"`); a standard module does not (`std.io`)"
+                    .into(),
+            ),
         );
         self.synchronize();
         None
