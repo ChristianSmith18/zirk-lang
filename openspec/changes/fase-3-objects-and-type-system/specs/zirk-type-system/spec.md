@@ -84,3 +84,31 @@ El chequeador SHALL resolver un operador buscando el contrato que su tipo implem
 #### Scenario: Operando sin el contrato
 - **WHEN** un operando no implementa el contrato del operador
 - **THEN** el diagnóstico nombra el contrato que falta, no una lista de tipos admitidos
+
+### Requirement: Los tipos función no se escriben todavía
+
+El chequeador SHALL rechazar cualquier posición que exija anotar el tipo de una closure —parámetro, retorno o campo— con un diagnóstico que indique que los tipos función llegan en una fase posterior.
+
+Un lambda sigue siendo un valor cuyo tipo se infiere y es nominal por expresión, tal como fijó D10 de la fase anterior y confirma D9 de esta. Que no se puedan escribir es lo que mantiene a una closure sin escapar de la función que la crea, y con ello evita decidir dónde vive y cuánto dura su entorno — una decisión de memoria, que corresponde a la Fase 4.
+
+#### Scenario: Closure en una variable local
+- **WHEN** se declara `inmut F = (a: Int32): Int32 => a + 1;` y se llama `F(1)`
+- **THEN** el chequeo tiene éxito
+- **AND** el tipo de `F` se infiere sin escribirse
+
+#### Scenario: Closure como tipo de parámetro
+- **WHEN** una función declara un parámetro cuyo tipo pretende ser una función
+- **THEN** se emite un diagnóstico indicando que los tipos función llegan en una fase posterior
+- **AND** NO se reporta como tipo desconocido
+
+#### Scenario: Closure como tipo de retorno
+- **WHEN** una función declara devolver una closure
+- **THEN** se emite el mismo diagnóstico
+
+#### Scenario: Closure como tipo de campo
+- **WHEN** una clase declara un campo cuyo tipo pretende ser una función
+- **THEN** se emite el mismo diagnóstico
+
+#### Scenario: Retornar una closure creada localmente
+- **WHEN** una función construye una closure y la retorna
+- **THEN** se emite un diagnóstico indicando que una closure no puede escapar de la función que la crea

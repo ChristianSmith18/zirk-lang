@@ -108,6 +108,20 @@ El parser SHALL reconocer `record`, value classes, variantes de enum con datos a
 - **WHEN** se parsea `type Id = Int32;`
 - **THEN** se produce una declaración de alias
 
+### Requirement: No hay sintaxis de tipo función
+
+El parser NO SHALL reconocer una sintaxis de tipo función como `(Int32, Int32) => Int32` en posición de tipo.
+
+Es la contraparte sintáctica de D9: mientras un tipo función no se pueda escribir, una closure no puede anotarse y por tanto no puede escapar. La representación actual —capturas inline, un tipo por lambda— es consecuencia de eso y **no prejuzga** cómo se escribirán ni cómo se compararán los tipos función cuando existan.
+
+#### Scenario: Tipo función en una anotación
+- **WHEN** se parsea una anotación de tipo con la forma de una firma de función
+- **THEN** se emite un diagnóstico indicando que los tipos función llegan en una fase posterior
+
+#### Scenario: El lambda como expresión no cambia
+- **WHEN** se parsea `(a: Int32): Int32 => a + 1` en posición de valor
+- **THEN** se produce un lambda, igual que en la fase anterior
+
 ### Requirement: Sintaxis de casts
 
 El parser SHALL reconocer la forma postfija `expr as T` y la prefija `<T>expr`, según `ZIRK_LANGUAGE_SPEC.md` sección 11.

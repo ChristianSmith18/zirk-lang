@@ -35,6 +35,7 @@ ADRs vigentes que restringen esta fase:
 - La biblioteca de colecciones, y con ella el parámetro variadic que la espera.
 - Generadores, `|>` y el resto del estilo funcional de la sección 8.
 - Varianza, tipos asociados, genéricos de orden superior: el spec no los pide.
+- Sintaxis de tipo función, y con ella closures que escapan (D9).
 - Decoradores, reflexión, errores, concurrencia.
 
 ## Decisions
@@ -111,6 +112,26 @@ D3 de la Fase 2 acotó `for ... in` a rangos y `String` porque no había traits,
 
 `Iterable<T>` e `Iterator<T>` se definen como contratos del lenguaje, y `for x in e` pasa a exigir que el tipo de `e` implemente `Iterable<T>`. Los rangos y `String` dejan de ser casos especiales del compilador y pasan a implementarlo, que es lo que hace que un tipo del usuario sea indistinguible de uno del lenguaje en un `for`.
 
+### D9 — Los tipos función siguen sin sintaxis, así que D10 de la Fase 2 sigue vigente toda esta fase
+
+Era la pregunta abierta con la que arrancó el design, y se resuelve antes de escribir código porque condiciona qué se puede hacer con una closure.
+
+**No se introduce sintaxis de tipo función.** Nada como `(Int32, Int32) => Int32` aparece en esta fase. Un lambda sigue siendo un valor cuyo tipo se infiere y es **nominal por expresión**: cada lambda tiene el suyo, tal como D10 de la Fase 2 lo estableció.
+
+En consecuencia, durante toda la Fase 3 una closure:
+
+- **puede** guardarse en una variable local cuyo tipo se infiere;
+- **puede** invocarse dentro del alcance donde su tipo concreto se conoce;
+- **no puede** anotarse como tipo de parámetro, de retorno ni de campo;
+- **no puede** escapar de la función que la crea;
+- conserva sus capturas inline, sin entorno con vida propia.
+
+**Por qué no ahora.** Introducir la sintaxis convertiría las closures en valores intercambiables por firma: se podrían guardar en objetos, retornar y recibir como argumento. Eso obliga a decidir **dónde vive el entorno y cuánto dura**, que es una decisión de memoria, y las decisiones de memoria son de la Fase 4 (ADR-003). Sería adelantar exactamente lo que D1 de esta fase se cuida de no adelantar.
+
+**Qué NO queda decidido por esto.** La representación actual —capturas inline, un tipo por lambda— es una consecuencia de que no puedan escapar, **no un argumento sobre cómo deberían escribirse o compararse los tipos función cuando existan**. La sintaxis futura y la compatibilidad entre closures quedan abiertas; que hoy dos lambdas de la misma firma no sean intercambiables no prejuzga que no debieran serlo cuando haya con qué expresarlo.
+
+Usar un lambda donde se exige una anotación de tipo produce un diagnóstico que dice que los tipos función pertenecen a una fase posterior, y no "tipo desconocido".
+
 ## Risks / Trade-offs
 
 - **Alocar sin liberar es correcto para esta fase y una fuga en cuanto un programa sea largo** → Mitigación: el requisito lo declara como deuda con fecha en Fase 4, y no se construye ninguna liberación parcial que después haya que deshacer (D1).
@@ -133,9 +154,8 @@ Rollback: revertir el merge. Ninguna fase anterior depende de esta.
 
 ## Open Questions
 
-- **¿Los tipos función tienen sintaxis en esta fase?** De ello depende si una closure puede escapar, y con eso si su entorno puede seguir viviendo en la pila (D10 de la Fase 2). `ZIRK_LANGUAGE_SPEC.md` sección 6 dice que un lambda es un valor de función pero no muestra cómo se escribe ese tipo en una anotación.
+La pregunta sobre los tipos función se resolvió antes de empezar y pasó a ser D9.
 
-  Si la respuesta es que sí, esta fase tiene que decidir dónde vive el entorno de una closure que escapa, y esa decisión pertenece a la misma familia que D1. Si es que no, D10 sigue en pie sin cambios. Se resuelve antes de tocar closures.
 
 - **¿Una value class puede tener métodos virtuales?** Sección 7 dice que no tienen identidad observable y que se almacenan inline. Un método virtual necesita un descriptor de tipo en tiempo de ejecución, y guardarlo en algo que se almacena inline contradice "compacto".
 
