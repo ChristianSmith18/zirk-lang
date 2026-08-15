@@ -211,10 +211,29 @@ impl<'a> FunctionLowering<'a> {
     ///
     /// Enums are not built in, so the name is resolved against the table the
     /// checker produced rather than against a fixed list.
+    /// The declaration a call names, with any import alias already applied.
+    ///
+    /// The checker recorded the resolution, so lowering does not need to know
+    /// that aliases exist.
+    fn callee_name(&self, call: &ast::CallExpr) -> String {
+        let ident = callee_ident(call);
+        self.declaration_of(&ident.name, ident.span)
+    }
+
+    /// The declaration a written name refers to, following import aliases.
+    fn declaration_of(&self, written: &str, at: Span) -> String {
+        self.checked
+            .aliases
+            .get(&at)
+            .cloned()
+            .unwrap_or_else(|| written.to_string())
+    }
+
     fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
+        let declared = self.declaration_of(&reference.name, reference.span);
         let base = if let Some(ty) = Type::from_name(&reference.name) {
             ir_type(ty)
-        } else if self.checked.enums.iter().any(|e| e.name == reference.name) {
+        } else if self.checked.enums.iter().any(|e| e.name == declared) {
             IrType::Int32
         } else {
             unreachable!("a verified program only names known types")
@@ -735,12 +754,12 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
-                let name = callee_name(e);
+                let name = self.callee_name(e);
                 let args = self.lower_args(e);
-                let returns = self.signature_return(name);
+                let returns = self.signature_return(&name);
                 self.emit(
                     InstKind::Call {
-                        callee: name.to_string(),
+                        callee: name,
                         args,
                     },
                     returns,
@@ -751,7 +770,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::If(e) => self.lower_if_expr(e, span),
             ast::Expr::Match(e) => self.lower_match(e, span),
             ast::Expr::Variant(e) => {
-                let value = self.discriminant(&e.enum_name.name, &e.variant.name);
+                let value = self.discriminant(&e.enum_name, &e.variant.name);
                 self.emit(InstKind::ConstInt(value), IrType::Int32, span)
             }
 
@@ -993,11 +1012,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// The discriminant a variant lowers to.
-    fn discriminant(&self, enum_name: &str, variant: &str) -> i32 {
+    fn discriminant(&self, enum_name: &ast::Ident, variant: &str) -> i32 {
+        let declared = self.declaration_of(&enum_name.name, enum_name.span);
         self.checked
             .enums
             .iter()
-            .find(|e| e.name == enum_name)
+            .find(|e| e.name == declared)
             .and_then(|e| e.discriminant(variant))
             .expect("a verified program only names declared variants") as i32
     }
@@ -1124,7 +1144,7 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::ConstString(id), IrType::String, span)
             }
             ast::Pattern::Variant(v) => {
-                let value = self.discriminant(&v.enum_name.name, &v.variant.name);
+                let value = self.discriminant(&v.enum_name, &v.variant.name);
                 self.emit(InstKind::ConstInt(value), IrType::Int32, span)
             }
             // `null` tests absence rather than a value, so it is the one
@@ -1253,9 +1273,12 @@ impl<'a> FunctionLowering<'a> {
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
                 if !self.is_closure_call(e)
-                    && self.signature_return(callee_name(e)) == IrType::Void =>
+                    && {
+                let name = self.callee_name(e);
+                self.signature_return(&name)
+            } == IrType::Void =>
             {
-                let name = callee_name(e).to_string();
+                let name = self.callee_name(e).to_string();
                 let args = self.lower_args(e);
                 self.emit_effect(InstKind::Call { callee: name, args }, expr.span());
             }
@@ -1289,11 +1312,11 @@ impl<'a> FunctionLowering<'a> {
     /// decision D4: neither the IR nor LLVM ever sees a named or missing
     /// argument.
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
-        let name = callee_name(call);
+        let name = self.callee_name(call);
         let signature = self
             .checked
             .functions
-            .get(name)
+            .get(&name)
             .expect("a verified program only calls declared functions");
         let params: Vec<(String, IrType)> = signature
             .params
@@ -1331,7 +1354,7 @@ impl<'a> FunctionLowering<'a> {
             ));
         }
 
-        let declaration = self.declarations.get(name).copied();
+        let declaration = self.declarations.get(name.as_str()).copied();
 
         slots
             .into_iter()
@@ -1424,7 +1447,10 @@ impl<'a> FunctionLowering<'a> {
                 };
                 self.module.closures[id as usize].returns
             }
-            ast::Expr::Call(e) => self.signature_return(callee_name(e)),
+            ast::Expr::Call(e) => {
+                let name = self.callee_name(e);
+                self.signature_return(&name)
+            },
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int32,
@@ -1502,9 +1528,9 @@ fn opens_blocks(expr: &ast::Expr) -> bool {
 /// Calling a closure value goes through a different instruction, and the
 /// checker rejects anything else, so a verified program only reaches here with
 /// a plain name.
-fn callee_name(call: &ast::CallExpr) -> &str {
+fn callee_ident(call: &ast::CallExpr) -> &ast::Ident {
     match &*call.callee {
-        ast::Expr::Path(ident) => &ident.name,
+        ast::Expr::Path(ident) => ident,
         _ => unreachable!("a verified program calls a name or a closure value"),
     }
 }
