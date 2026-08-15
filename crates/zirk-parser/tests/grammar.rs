@@ -810,3 +810,17 @@ fn valid_a_negative_literal_is_one_literal() {
 fn valid_negation_of_a_name_is_still_unary() {
     assert_eq!(shape(&expression("-x")), "(-x)");
 }
+
+#[test]
+fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
+    // Recursive descent costs stack: without a limit this aborts the process
+    // with no diagnostic at all.
+    let source = format!(
+        "fn main(): Void {{ mut x = {}1{}; }}",
+        "(".repeat(500),
+        ")".repeat(500)
+    );
+    let output = errors(&source);
+
+    assert!(output.contains(codes::NESTING_TOO_DEEP.as_str()), "{}", &output[..200.min(output.len())]);
+}

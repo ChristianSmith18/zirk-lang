@@ -213,7 +213,25 @@ pub type DiagnosticResult<T> = Result<T, Box<Diagnostic>>;
 pub struct DiagnosticSink {
     diagnostics: Vec<Diagnostic>,
     warnings_as_errors: bool,
+    /// How many were dropped once the limit was reached.
+    suppressed: usize,
 }
+
+/// Diagnostic codes owned by this crate.
+pub mod codes {
+    use crate::Code;
+
+    /// The report was truncated for exceeding the limit.
+    pub const TOO_MANY_DIAGNOSTICS: Code = Code::new("E0101");
+}
+
+/// How many diagnostics one compilation reports.
+///
+/// A single mistake can cascade: deeply nested code that hits the parser's
+/// limit produces one real error and tens of thousands of derived ones on the
+/// way out. Nobody reads past the first screen, and the ones that matter are at
+/// the top — so the rest are counted instead of printed.
+pub const MAX_DIAGNOSTICS: usize = 100;
 
 impl DiagnosticSink {
     pub fn new() -> Self {
@@ -231,6 +249,11 @@ impl DiagnosticSink {
             diagnostic.severity = Severity::Error;
         }
 
+        if self.diagnostics.len() >= MAX_DIAGNOSTICS {
+            self.suppressed += 1;
+            return;
+        }
+
         // Two diagnostics with the same code, place and message are the same
         // report as far as anyone reading them is concerned. A block left open
         // at end of file produces one per enclosing block, and printing the
@@ -244,6 +267,11 @@ impl DiagnosticSink {
         if !duplicate {
             self.diagnostics.push(diagnostic);
         }
+    }
+
+    /// How many diagnostics were dropped for exceeding the limit.
+    pub fn suppressed(&self) -> usize {
+        self.suppressed
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
@@ -267,7 +295,7 @@ impl DiagnosticSink {
 
     /// Renders every accumulated diagnostic, without colour.
     pub fn render(&self, style: RenderStyle) -> String {
-        render::sink(&self.diagnostics, style, Color::Never)
+        render::sink(&self.diagnostics, self.suppressed, style, Color::Never)
     }
 
     /// Renders every accumulated diagnostic, with colour.
@@ -279,7 +307,7 @@ impl DiagnosticSink {
             RenderStyle::Human => color,
             RenderStyle::Json => Color::Never,
         };
-        render::sink(&self.diagnostics, style, color)
+        render::sink(&self.diagnostics, self.suppressed, style, color)
     }
 }
 
@@ -316,5 +344,66 @@ mod tests {
     #[test]
     fn a_snippet_has_a_marker_of_at_least_one_character() {
         assert_eq!(Snippet::new("texto", 0).width, 1);
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn error(n: usize) -> Diagnostic {
+        Diagnostic::error(Code::new("E9999"), format!("problem {n}"))
+    }
+
+    #[test]
+    fn every_diagnostic_is_kept_below_the_limit() {
+        let mut sink = DiagnosticSink::new();
+        for n in 0..10 {
+            sink.emit(error(n));
+        }
+
+        assert_eq!(sink.len(), 10);
+        assert_eq!(sink.suppressed(), 0);
+    }
+
+    #[test]
+    fn diagnostics_past_the_limit_are_counted_not_kept() {
+        let mut sink = DiagnosticSink::new();
+        for n in 0..MAX_DIAGNOSTICS + 25 {
+            sink.emit(error(n));
+        }
+
+        assert_eq!(sink.len(), MAX_DIAGNOSTICS);
+        assert_eq!(sink.suppressed(), 25);
+    }
+
+    #[test]
+    fn the_truncation_is_reported_where_a_tool_can_see_it() {
+        let mut sink = DiagnosticSink::new();
+        for n in 0..MAX_DIAGNOSTICS + 1 {
+            sink.emit(error(n));
+        }
+
+        let json = sink.render(RenderStyle::Json);
+        assert!(json.contains("E0101"), "{json}");
+        assert!(json.contains("1 more problem"), "{json}");
+    }
+
+    #[test]
+    fn an_identical_diagnostic_is_reported_once() {
+        let mut sink = DiagnosticSink::new();
+        sink.emit(error(1));
+        sink.emit(error(1));
+
+        assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn diagnostics_differing_in_message_are_both_kept() {
+        let mut sink = DiagnosticSink::new();
+        sink.emit(error(1));
+        sink.emit(error(2));
+
+        assert_eq!(sink.len(), 2);
     }
 }
