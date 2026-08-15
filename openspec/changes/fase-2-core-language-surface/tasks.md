@@ -132,7 +132,7 @@
 - [x] 14.2 Ampliar el corpus con programas inválidos, con snapshots de sus diagnósticos
 - [x] 14.3 Test de un crate de varios archivos con `share`/`import`/`use`, compilado y ejecutado de punta a punta
 - [x] 14.4 Test de importación mutua y de archivo importado inexistente
-- [ ] 14.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
+- [x] 14.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
 
 ## 15. Cierre
 
