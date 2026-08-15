@@ -634,6 +634,12 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => self.lower_coalesce(e, span),
 
+            // `&&` and `||` must not evaluate their right operand when the
+            // left already decides the answer.
+            ast::Expr::Binary(e) if matches!(e.op, ast::BinaryOp::And | ast::BinaryOp::Or) => {
+                self.lower_short_circuit(e, span)
+            }
+
             ast::Expr::Binary(e) => {
                 let left = self.lower_expr(&e.left);
                 let right = self.lower_expr(&e.right);
@@ -699,6 +705,56 @@ impl<'a> FunctionLowering<'a> {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
+    }
+
+    /// Lowers `&&` and `||` so the right operand only runs when it matters.
+    ///
+    /// ```text
+    ///   a ──(decides)──▶ result = <that answer>  ──┐
+    ///   │(undecided)                               │
+    ///   ▼                                          ▼
+    ///   result = b ──────────────────────────▶ continue
+    /// ```
+    ///
+    /// `false && f()` and `true || f()` must not call `f`. Evaluating both
+    /// operands was the Phase 1 behaviour, noted there as pending precisely
+    /// because short-circuiting needs blocks of its own.
+    fn lower_short_circuit(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+        let is_and = expr.op == ast::BinaryOp::And;
+        let result = self.declare_slot("<logic>", IrType::Boolean, span);
+
+        let left = self.lower_expr(&expr.left);
+
+        let rest_block = self.new_block();
+        let decided_block = self.new_block();
+        let continue_block = self.new_block();
+
+        // `&&` continues when the left is true; `||` when it is false.
+        let (then_block, else_block) = if is_and {
+            (rest_block, decided_block)
+        } else {
+            (decided_block, rest_block)
+        };
+
+        self.terminate(Terminator::Branch {
+            condition: left,
+            then_block,
+            else_block,
+        });
+
+        // The left operand already decided: `false` for `&&`, `true` for `||`.
+        self.current = decided_block;
+        let decided = self.emit(InstKind::ConstBool(!is_and), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(result, decided), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = rest_block;
+        let right = self.lower_expr(&expr.right);
+        self.emit_effect(InstKind::Store(result, right), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), IrType::Boolean, span)
     }
 
     /// Lowers `a ?? b` into an explicit null check with two blocks.
