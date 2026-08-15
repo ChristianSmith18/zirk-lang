@@ -150,12 +150,30 @@ Aditivo sobre un pipeline que ya funciona. Cada construcción nueva que hoy fall
 
 Rollback: revertir el merge. Fase 1 no depende de nada de esta fase.
 
+## Decisiones tomadas durante la implementación
+
+Cuatro que no estaban previstas, cada una descubierta al escribir el código y no al planificar:
+
+- **`?.` se difiere a Fase 3** (D8). El roadmap lo agrupa con `T?` y `??` como si fueran una característica, y no lo son: `?.` accede a un miembro, y ningún tipo de esta fase tiene miembros.
+
+- **Los operadores compuestos e incremento entran acá** (D9). La Fase 1 ya los marcaba como pendientes de Fase 2, y el `for` de tres cláusulas del spec del lenguaje se escribe con `i++`.
+
+- **Las capturas de una closure viajan dentro del valor** (D10). Una closure no puede escapar en esta fase, así que no hace falta alocar un entorno — y no alocar es lo que evita adelantar la decisión de memoria de ADR-003.
+
+- **Un `Span` nombra su archivo**, en [ADR-010](../../../docs/decisions/ADR-010-ubicaciones-multiarchivo.md). Los módulos rompen la suposición de un solo archivo, y la alternativa barata —offsets globales al estilo de rustc— estorba al LSP de la Fase 9. Fue a un ADR y no aquí porque es un contrato con el debugger de la Fase 11 y con el `.zpkg` de la Fase 8: un change se archiva, un ADR no.
+
+## Correcciones a este mismo documento
+
+- **El requisito de rechazar ciclos de `import` no tenía razón detrás.** `import` trae nombres al scope y nada en esta fase depende del orden en que se leen los archivos. Dos archivos que se referencian mutuamente son un programa normal; lo que hay que evitar es recorrer el ciclo indefinidamente, y eso se resuelve leyendo cada archivo una vez. El requisito quedó reescrito.
+
+- **Un variadic recoge sus valores en una secuencia, y no hay tipo colección hasta Fase 3.** Se acepta gramaticalmente y se reporta con E0423 en vez de compilarse mal.
+
 ## Open Questions
 
 - **¿Qué pasa si dos archivos del mismo crate declaran el mismo nombre compartido?** `ZIRK_LANGUAGE_SPEC.md` sección 10 no lo dice.
 
-  Propuesta: error de colisión en la pasada de resolución de D6, sin resolución implícita por orden de archivo — mismo espíritu que Fase 1 tuvo con la ausencia de conversiones implícitas: preferir un error claro a una regla de desempate sorprendente. Se confirma durante la implementación.
+  **Resuelto: es un error de colisión, sin desempate por orden de archivo.** Un crate tiene un solo espacio de nombres en esta fase, así que la colisión se detecta aunque las declaraciones sean privadas. El diagnóstico nombra el archivo de la otra, porque un número de línea suelto no dice nada cuando están en archivos distintos. El namespacing por módulo pertenece al sistema de proyecto de la Fase 6.
 
 - **¿`for x in 0..N` incluye `N`?** El azúcar de rangos no está definido en los documentos normativos leídos para esta fase.
 
-  Propuesta: `0..N` exclusivo, `0..=N` inclusivo, siguiendo la convención más común y evitando que el caso exclusivo (el que se usa para "N veces") necesite escribir `N - 1`. Se confirma durante la implementación y se documenta donde corresponda si difiere de esta propuesta.
+  **Resuelto: `0..N` exclusivo, `0..=N` inclusivo.** Es la convención más extendida y evita que el caso de uso más común —"N veces"— tenga que escribir `N - 1`. Ambas formas tienen test de punta a punta que fija el comportamiento.

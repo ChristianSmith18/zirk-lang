@@ -220,6 +220,20 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where a previous declaration lives, naming its file when it is another.
+    ///
+    /// A line number alone is confusing across files: "line 1" says nothing
+    /// when the two declarations are in different ones.
+    fn declared_at(&self, previous: Span, current: Span) -> String {
+        let line = self.sources.location(previous).line;
+        if previous.file == current.file {
+            return format!("on line {line}");
+        }
+
+        let file = self.sources.file(previous.file).name().to_string();
+        format!("on line {line} of `{file}`")
+    }
+
     /// Reports naming a declaration that another file keeps to itself.
     ///
     /// Visibility is binary in this phase: a declaration is private to its file
@@ -244,13 +258,14 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_enum(&mut self, decl: &EnumDecl) {
-        if self.enums.iter().any(|e| e.name == decl.name.name) {
+        if let Some(previous) = self.enums.iter().find(|e| e.name == decl.name.name) {
+            let where_ = self.declared_at(previous.span, decl.name.span);
             self.error(
                 codes::DUPLICATE_DECLARATION,
                 decl.name.span,
                 format!("enum `{}` is already defined", decl.name.name),
-                "a previous definition exists in this file",
-                Some("rename one of the two".into()),
+                format!("a previous definition exists {where_}"),
+                Some("rename one of the two: a crate has one namespace in this phase".into()),
             );
             return;
         }
@@ -293,13 +308,13 @@ impl<'a> Checker<'a> {
             span: f.name.span,
         };
 
-        if let Some(previous) = self.functions.get(&signature.name) {
-            let line = self.sources.location(previous.span).line;
+        if let Some(previous) = self.functions.get(&signature.name).cloned() {
+            let where_ = self.declared_at(previous.span, f.name.span);
             self.error(
                 codes::DUPLICATE_FUNCTION,
                 f.name.span,
                 format!("function `{}` is already defined", f.name.name),
-                format!("a previous definition exists on line {line}"),
+                format!("a previous definition exists {where_}"),
                 Some("rename one of the two: there is no overloading".into()),
             );
         } else {
