@@ -1,0 +1,142 @@
+## 1. Léxico
+
+- [ ] 1.1 Añadir las palabras clave que faltan: `interface`, `trait`, `value`
+- [ ] 1.2 Retirar de `phase()` lo que esta fase implementa: `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as`, `is`
+- [ ] 1.3 Tests: las palabras clave nuevas se reconocen y las retiradas dejan de declarar fase
+
+## 2. Gramática — clases y contratos
+
+- [ ] 2.1 Parsear `class` con campos, métodos y `construct`
+- [ ] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
+- [ ] 2.3 Parsear `extends` con una sola clase y `implements` con varios contratos
+- [ ] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
+- [ ] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
+- [ ] 2.6 Parsear `trait`, admitiendo cuerpos
+- [ ] 2.7 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 3. Gramática — genéricos
+
+- [ ] 3.1 Parsear parámetros de tipo `<T>` en funciones, clases y tipos de datos
+- [ ] 3.2 Parsear restricciones con `from`
+- [ ] 3.3 Parsear argumentos de tipo en los usos (`Box<Int32>`)
+- [ ] 3.4 Distinguir `<` de apertura de genéricos y de comparación
+- [ ] 3.5 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 4. Gramática — tipos de datos y casts
+
+- [ ] 4.1 Parsear variantes de enum con datos asociados
+- [ ] 4.2 Parsear patrones con destructuring de variantes
+- [ ] 4.3 Parsear `record` y value classes
+- [ ] 4.4 Parsear uniones `A | B` y alias con `type`
+- [ ] 4.5 Parsear casts postfijos (`as`) y prefijos (`<T>`)
+- [ ] 4.6 Rechazar los casts que exigen `unsafe`, indicando la fase que los trae
+- [ ] 4.7 Parsear `?.`, retirando el diagnóstico de fase de la fase anterior
+- [ ] 4.8 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 5. Tipos — nominalidad y miembros
+
+- [ ] 5.1 Representar clases, records, value classes y enums como tipos nominales
+- [ ] 5.2 Construir la jerarquía de herencia y detectar ciclos
+- [ ] 5.3 Resolver miembros contra el tipo y su cadena de herencia
+- [ ] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
+- [ ] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
+- [ ] 5.6 Verificar `construct`: que exista, que inicialice todo campo sin valor por defecto
+- [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere
+- [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
+- [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
+- [ ] 5.10 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 6. Tipos — contratos
+
+- [ ] 6.1 Registrar interfaces y traits como contratos, con sus métodos
+- [ ] 6.2 Verificar que una declaración implemente por completo lo que dice implementar
+- [ ] 6.3 Copiar en la clase los métodos de trait con cuerpo que no redefine (D4)
+- [ ] 6.4 Rechazar el conflicto entre dos traits que aportan el mismo método (D4)
+- [ ] 6.5 Admitir una implementación donde se espera su contrato
+- [ ] 6.6 Definir los contratos de operador del lenguaje (D6)
+- [ ] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
+- [ ] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`
+- [ ] 6.9 Definir `Iterable<T>` e `Iterator<T>` como contratos del lenguaje
+- [ ] 6.10 Hacer que `for ... in` exija `Iterable<T>`, y que rangos y `String` lo implementen (D8)
+- [ ] 6.11 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 7. Tipos — genéricos
+
+- [ ] 7.1 Representar parámetros de tipo y su alcance en la declaración
+- [ ] 7.2 Verificar el cuerpo genérico una sola vez contra sus restricciones (D5)
+- [ ] 7.3 Verificar en el sitio de uso que el argumento cumple la restricción `from`
+- [ ] 7.4 Rechazar en el cuerpo lo que la restricción no garantiza
+- [ ] 7.5 Rechazar varianza, tipos asociados y orden superior con diagnóstico propio
+- [ ] 7.6 Unificar tipos genéricos en llamadas, inferiendo el argumento cuando es inequívoco
+- [ ] 7.7 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 8. Tipos — tipos de datos y casts
+
+- [ ] 8.1 Extender los enums con datos asociados, conservando los sin datos
+- [ ] 8.2 Verificar aridad y tipos de un constructor de variante
+- [ ] 8.3 Tipar los patrones con destructuring, ligando los nombres a su tipo
+- [ ] 8.4 Extender la exhaustividad a enums con datos asociados
+- [ ] 8.5 Implementar records: inmutables, con igualdad estructural derivada
+- [ ] 8.6 Implementar value classes: sin identidad observable
+- [ ] 8.7 Implementar uniones y exigir discriminarlas antes de usarlas
+- [ ] 8.8 Implementar alias con `type`
+- [ ] 8.9 Verificar casts: admitir los relacionados, rechazar los que no lo están
+- [ ] 8.10 Tests: un caso válido y uno inválido por cada regla nueva
+
+## 9. Runtime — alocación de objetos
+
+- [ ] 9.1 Añadir la función de alocación como `extern "C"` tras la frontera ABI (D1, ADR-002)
+- [ ] 9.2 Documentar en el runtime que no libera y que la estrategia llega en Fase 4
+- [ ] 9.3 Tests: el símbolo aparece sin mangling en la biblioteca estática
+- [ ] 9.4 Tests: un programa que construye objetos termina con código de salida cero
+
+## 10. IR — objetos y despacho
+
+- [ ] 10.1 Representar el layout de un objeto: cabecera y campos (D2)
+- [ ] 10.2 Colocar los campos heredados antes que los propios (D2)
+- [ ] 10.3 Bajar la construcción a alocación abstracta más inicialización
+- [ ] 10.4 Bajar el acceso a campo a lectura por desplazamiento
+- [ ] 10.5 Bajar la llamada directa cuando el método no es redefinible (D3)
+- [ ] 10.6 Bajar la llamada indirecta por tabla cuando lo es (D3)
+- [ ] 10.7 Bajar el despacho a través de un contrato por la tabla de la interfaz (D3)
+- [ ] 10.8 Bajar `?.` a comprobación de nulidad con dos bloques (D7)
+- [ ] 10.9 Extender el verificador a las instrucciones nuevas
+- [ ] 10.10 Tests: IR esperada para cada construcción nueva
+
+## 11. IR — genéricos y tipos de datos
+
+- [ ] 11.1 Especializar cada combinación de argumentos de tipo usada (D5)
+- [ ] 11.2 Reutilizar la especialización cuando la combinación se repite
+- [ ] 11.3 Bajar los enums con datos asociados: discriminante más carga útil
+- [ ] 11.4 Bajar el destructuring de patrones a lecturas de la carga útil
+- [ ] 11.5 Bajar records y value classes sin indirección
+- [ ] 11.6 Bajar el cast comprobado a comparación de descriptor
+- [ ] 11.7 Tests: IR esperada para cada construcción nueva
+
+## 12. Backend LLVM
+
+- [ ] 12.1 Traducir el layout de objetos, con el prefijo compartido entre base y subclase
+- [ ] 12.2 Emitir el descriptor de tipo de cada tipo con identidad
+- [ ] 12.3 Emitir la tabla de métodos por tipo, con índices estables al heredar
+- [ ] 12.4 Emitir una tabla por interfaz implementada y su búsqueda en el descriptor
+- [ ] 12.5 Traducir la llamada indirecta del despacho dinámico
+- [ ] 12.6 Traducir el cast comprobado, transfiriendo al runtime cuando falla
+- [ ] 12.7 Traducir value classes inline, sin puntero intermedio
+- [ ] 12.8 Tests: el módulo LLVM generado verifica para cada construcción nueva
+
+## 13. Verificación de punta a punta
+
+- [ ] 13.1 Ampliar el corpus con programas válidos: clases, herencia, contratos, genéricos, tipos de datos, casts
+- [ ] 13.2 Ampliar el corpus con programas inválidos, con snapshots de sus diagnósticos
+- [ ] 13.3 Verificar que el corpus de las fases 1 y 2 sigue verde sin modificarlo
+- [ ] 13.4 Test de que `"a" + "b"` concatena, cerrando la deuda de la fase anterior
+- [ ] 13.5 Test de `for ... in` sobre un tipo propio que implementa `Iterable<T>`
+- [ ] 13.6 Sondear los cruces entre construcciones, no solo cada una por separado
+- [ ] 13.7 Confirmar que CI pasa en las cuatro plataformas de la matriz
+
+## 14. Cierre
+
+- [ ] 14.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
+- [ ] 14.2 Registrar en ADRs las decisiones durables: layout de objetos y forma del despacho
+- [ ] 14.3 Resolver o registrar como pendientes las preguntas abiertas del design
+- [ ] 14.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha
