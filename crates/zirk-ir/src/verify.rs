@@ -158,6 +158,21 @@ fn verify_instruction(
             Some(_) => expect(inst.ty, IrType::Object(*id), position, "Alloc", report),
         },
 
+        InstKind::CallVirtual { object, index, .. } => {
+            let known = match type_of(object) {
+                Some(IrType::Object(id)) => module
+                    .objects
+                    .get(id as usize)
+                    .is_some_and(|o| (*index as usize) < o.methods.len()),
+                _ => false,
+            };
+            if !known {
+                report(format!(
+                    "{position}: calls method {index} through something that is not an object with it"
+                ));
+            }
+        }
+
         InstKind::LoadField { object, index } => {
             match field_type(module, type_of(object), *index) {
                 Some(ty) => expect(inst.ty, ty, position, "LoadField", report),
@@ -523,6 +538,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
+        InstKind::CallVirtual { object, args, .. } => {
+            let mut operands = vec![*object];
+            operands.extend(args.iter().copied());
+            operands
+        }
         InstKind::LoadField { object, .. } => vec![*object],
         InstKind::StoreField { object, value, .. } => vec![*object, *value],
         InstKind::Unary { operand, .. } => vec![*operand],

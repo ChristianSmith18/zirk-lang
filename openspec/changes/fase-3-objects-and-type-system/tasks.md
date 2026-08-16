@@ -41,7 +41,7 @@
 
 - [x] 2.1 Parsear `class` con campos, métodos, campos `public mut` por defecto y múltiples `construct`
 - [x] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
-- [ ] 2.3 Parsear `extends` con una sola clase y `implements` con varios contratos
+- [x] 2.3 Parsear `extends` con una sola clase. `implements` llega con los contratos
 - [x] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
 - [ ] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
 - [ ] 2.6 Parsear `trait`, admitiendo cuerpos
@@ -70,12 +70,12 @@
 ## 5. Tipos — nominalidad y miembros
 
 - [x] 5.1 Representar clases, records, value classes y enums como tipos nominales
-- [ ] 5.2 Construir la jerarquía de herencia y detectar ciclos
+- [x] 5.2 Construir la jerarquía de herencia y detectar ciclos
 - [x] 5.3 Resolver miembros contra el tipo y su cadena de herencia
 - [x] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
-- [ ] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
+- [x] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
 - [x] 5.6 Verificar `construct`: que exista, resolver por aridad e inicializar todo campo. Falta desempatar firmas de igual aridad por tipo y por etiqueta, que llega con los argumentos nombrados reordenados
-- [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere — llega con `extends`, que es lo que hace posible redefinir
+- [x] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere — llega con `extends`, que es lo que hace posible redefinir
 - [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
 - [ ] 5.10 Rechazar anotar una closure como parámetro, retorno o campo (D9)
@@ -133,11 +133,11 @@
 ## 10. IR — objetos y despacho
 
 - [x] 10.1 Representar el layout de un objeto: cabecera y campos (D2)
-- [ ] 10.2 Colocar los campos heredados antes que los propios (D2)
+- [x] 10.2 Colocar los campos heredados antes que los propios (D2)
 - [x] 10.3 Bajar la construcción a alocación abstracta más inicialización
 - [x] 10.4 Bajar el acceso a campo a lectura por desplazamiento
 - [x] 10.5 Bajar la llamada directa cuando el método no es redefinible (D3). Sin herencia ninguno lo es, así que hoy toda llamada es directa
-- [ ] 10.6 Bajar la llamada indirecta por tabla cuando lo es (D3)
+- [x] 10.6 Bajar la llamada indirecta por tabla cuando lo es (D3)
 - [ ] 10.7 Bajar el despacho a través de un contrato por la tabla de la interfaz (D3)
 - [ ] 10.8 Bajar `?.` a comprobación de nulidad con dos bloques (D7)
 - [x] 10.9 Extender el verificador a las instrucciones nuevas
@@ -156,10 +156,10 @@
 ## 12. Backend LLVM
 
 - [x] 12.1 Traducir el layout de objetos, con el prefijo compartido entre base y subclase
-- [ ] 12.2 Emitir el descriptor de tipo de cada tipo con identidad
-- [ ] 12.3 Emitir la tabla de métodos por tipo, con índices estables al heredar
+- [x] 12.2 Emitir el descriptor de tipo de cada tipo con identidad
+- [x] 12.3 Emitir la tabla de métodos por tipo, con índices estables al heredar
 - [ ] 12.4 Emitir una tabla por interfaz implementada y su búsqueda en el descriptor
-- [ ] 12.5 Traducir la llamada indirecta del despacho dinámico
+- [x] 12.5 Traducir la llamada indirecta del despacho dinámico
 - [ ] 12.6 Traducir el cast comprobado, transfiriendo al runtime cuando falla
 - [ ] 12.7 Traducir value classes inline, sin puntero intermedio
 - [ ] 12.8 Tests: el módulo LLVM generado verifica para cada construcción nueva

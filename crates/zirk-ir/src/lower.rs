@@ -32,6 +32,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                     ty: ir_type(field.ty),
                 })
                 .collect(),
+            // Ordered by index, which is what makes the table of a subclass
+            // start with its base's.
+            methods: {
+                let mut table = vec![String::new(); class.methods.len()];
+                for method in &class.methods {
+                    let owner = &checked.classes[method.owner as usize].name;
+                    table[method.index] = method_symbol(owner, &method.name);
+                }
+                table
+            },
         })
         .collect();
 
@@ -1501,17 +1511,46 @@ impl<'a> FunctionLowering<'a> {
 
         let class = &self.checked.classes[id as usize];
         let method = class.method(&field.name.name)?;
-        let name = method_symbol(&class.name, &method.name);
+        // The body lives in the class that declares it, which is not always
+        // the one being called through: an inherited method keeps its owner.
+        let owner = &self.checked.classes[method.owner as usize].name;
+        let name = method_symbol(owner, &method.name);
         let returns = ir_type(method.returns);
         let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
 
+        let virtual_index = method.overridden.then_some(method.index as u32);
+
         let receiver = self.lower_expr(&field.object);
-        let mut args = vec![receiver];
+        let mut args = Vec::new();
         for (arg, ty) in call.args.iter().zip(params) {
             args.push(self.lower_expr_as(&arg.value, ty));
         }
 
-        Some(self.emit(InstKind::Call { callee: name, args }, returns, span))
+        // A method some subclass redefines has no statically known target, so
+        // it goes through the object's own table. Every other call is direct.
+        Some(match virtual_index {
+            Some(index) => self.emit(
+                InstKind::CallVirtual {
+                    object: receiver,
+                    index,
+                    args,
+                },
+                returns,
+                span,
+            ),
+            None => {
+                let mut all = vec![receiver];
+                all.extend(args);
+                self.emit(
+                    InstKind::Call {
+                        callee: name,
+                        args: all,
+                    },
+                    returns,
+                    span,
+                )
+            }
+        })
     }
 
     /// The layout id of a class, if the name is one.

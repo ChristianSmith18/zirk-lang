@@ -247,10 +247,21 @@ impl EnumType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassType {
     pub name: String,
+    /// The class this one extends, by its id.
+    pub base: Option<u32>,
+    /// Every field, inherited ones first, in the order the hierarchy declares
+    /// them.
+    ///
+    /// Flattening the chain here means a member lookup is one search rather
+    /// than a walk, and — more importantly — it is what makes a subclass's
+    /// layout start with its base's: reaching an inherited field is the same
+    /// offset whoever is looking. Decision D2.
     pub fields: Vec<FieldInfo>,
     /// One entry per `construct`. More than one is admissible when their
     /// effective signatures differ.
     pub constructors: Vec<Vec<crate::scope::ParamInfo>>,
+    /// Every method, inherited ones first, with an override replacing the
+    /// entry it overrides so its index does not move.
     pub methods: Vec<MethodInfo>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
@@ -279,6 +290,14 @@ pub struct MethodInfo {
     /// Its position among the class's methods, which is the name it is
     /// emitted under.
     pub index: usize,
+    /// The class that declares the body this call reaches.
+    pub owner: u32,
+    /// Whether some subclass redefines it.
+    ///
+    /// A method nobody overrides is called directly: that is most calls, and
+    /// paying an indirection for all of them would be paying for a generality
+    /// the program does not use. Decision D3.
+    pub overridden: bool,
 }
 
 /// One field of a class, as the checker sees it.
@@ -289,6 +308,8 @@ pub struct FieldInfo {
     pub visibility: zirk_ast::Visibility,
     pub mutability: zirk_ast::Mutability,
     pub span: zirk_diagnostics::Span,
+    /// The class that declares it, which is not always the one that has it.
+    pub owner: u32,
 }
 
 /// A type of the language that exists in the spec but not in this subset.

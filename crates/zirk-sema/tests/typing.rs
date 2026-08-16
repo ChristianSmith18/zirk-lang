@@ -843,3 +843,165 @@ fn invalid_method_without_a_return_on_every_path() {
     ));
     assert!(output.contains(codes::MISSING_RETURN.as_str()), "{output}");
 }
+
+// --- Herencia ----------------------------------------------------------------
+
+const HIERARCHY: &str = "class User {
+    name: String;
+    protected role: String;
+
+    construct(name: String) { this.name = name; this.role = \"user\"; }
+
+    fn describe(): String { return this.name; }
+}
+
+class Manager extends User {
+    team: Int32;
+
+    construct(name: String, team: Int32) {
+        this.name = name;
+        this.role = \"manager\";
+        this.team = team;
+    }
+
+    fn describe(): String { return this.role; }
+}";
+
+#[test]
+fn valid_subclass_inherits_fields_and_methods() {
+    accepted(&with_class(
+        HIERARCHY,
+        "mut m = Manager(\"x\", 1);\nstdout.println(m.name);\nstdout.println(m.describe());",
+    ));
+}
+
+#[test]
+fn valid_subclass_stands_where_its_base_is_expected() {
+    accepted(&format!(
+        "{HIERARCHY}\nfn greet(u: User): String {{ return u.describe(); }}\n\
+         fn main(): Void {{ mut m = Manager(\"x\", 1); stdout.println(greet(m)); }}"
+    ));
+}
+
+#[test]
+fn invalid_base_where_a_subclass_is_expected() {
+    // One direction only: accepting the reverse would promise members the
+    // value may not have.
+    let output = rejected(&format!(
+        "{HIERARCHY}\nfn lead(m: Manager): String {{ return m.describe(); }}\n\
+         fn main(): Void {{ mut u = User(\"x\"); stdout.println(lead(u)); }}"
+    ));
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_protected_reaches_the_subclass() {
+    accepted(&with_class(HIERARCHY, ""));
+}
+
+#[test]
+fn invalid_private_does_not_reach_the_subclass() {
+    let output = rejected(
+        "class Base {
+             private hidden: Int32;
+             construct() { this.hidden = 0; }
+         }
+         class Derived extends Base {
+             construct() { this.hidden = 1; }
+             fn peek(): Int32 { return this.hidden; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("only inside its own class"), "{output}");
+}
+
+#[test]
+fn invalid_protected_from_outside_the_hierarchy() {
+    let output = rejected(&with_class(
+        HIERARCHY,
+        "mut u = User(\"x\");\nstdout.println(u.role);",
+    ));
+    assert!(
+        output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_override_with_a_different_signature() {
+    // A call through the base would reach a body expecting something else,
+    // which is the one thing the base's type promises it will not.
+    let output = rejected(
+        "class Base {
+             x: Int32;
+             construct() { this.x = 0; }
+             fn value(): Int32 { return this.x; }
+         }
+         class Derived extends Base {
+             construct() { this.x = 0; }
+             fn value(): String { return \"x\"; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("overrides"), "{output}");
+}
+
+#[test]
+fn invalid_inheritance_cycle() {
+    let output = rejected(
+        "class A extends B { construct() { } }
+         class B extends A { construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(output.contains("inherits from itself"), "{output}");
+}
+
+#[test]
+fn invalid_extending_something_that_is_not_a_class() {
+    let output = rejected("class A extends Int32 { construct() { } }\nfn main(): Void { }");
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_redeclaring_an_inherited_field() {
+    let output = rejected(
+        "class Base { x: Int32; construct() { this.x = 0; } }
+         class Derived extends Base { x: Int32; construct() { this.x = 0; } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("inherited field"), "{output}");
+}
+
+#[test]
+fn invalid_subclass_constructor_leaving_an_inherited_field_unset() {
+    // The language has no way to run a base's constructor from a subclass, so
+    // every field this one leaves unset would stay unset.
+    let output = rejected(
+        "class Base { x: Int32; construct() { this.x = 0; } }
+         class Derived extends Base { y: Int32; construct() { this.y = 1; } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::UNINITIALIZED_FIELD.as_str()),
+        "{output}"
+    );
+    assert!(output.contains('x'), "{output}");
+}
+
+#[test]
+fn valid_a_class_may_extend_one_declared_later() {
+    accepted(
+        "class Derived extends Base { construct() { this.x = 1; } }
+         class Base { x: Int32; construct() { this.x = 0; } }
+         fn main(): Void { }",
+    );
+}

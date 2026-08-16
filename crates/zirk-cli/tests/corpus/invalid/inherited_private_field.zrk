@@ -1,0 +1,11 @@
+class Base {
+    private hidden: Int32;
+
+    construct() { this.hidden = 0; }
+}
+
+class Derived extends Base {
+    construct() { }
+}
+
+fn main(): Void { }

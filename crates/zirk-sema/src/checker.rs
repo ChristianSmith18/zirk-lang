@@ -197,14 +197,18 @@ impl<'a> Checker<'a> {
             self.declare_enum(e);
         }
 
+        // Classes before signatures: a parameter may name one. In three
+        // passes, because a class may extend one declared later in the file
+        // and its members depend on its base's.
+        for c in &program.classes {
+            self.register_class(c);
+        }
+        self.resolve_bases(program);
+        self.declare_members(program);
+
         // Signatures next, so a function can call another declared later.
         for f in &program.functions {
             self.declare_function(f);
-        }
-
-        // Classes before signatures: a parameter may name one.
-        for c in &program.classes {
-            self.declare_class(c);
         }
 
         self.check_entrypoint(program);
@@ -396,7 +400,8 @@ impl<'a> Checker<'a> {
     ///
     /// Declaration comes before checking so a field, a parameter or another
     /// class may name it regardless of the order the file declares them in.
-    fn declare_class(&mut self, decl: &ClassDecl) {
+    /// Registers a class by name, before anything about it is resolved.
+    fn register_class(&mut self, decl: &ClassDecl) {
         if let Some(previous) = self.classes.iter().find(|c| c.name == decl.name.name) {
             let where_ = self.declared_at(previous.span, decl.name.span);
             self.error(
@@ -409,28 +414,168 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        // The class is registered before its fields are resolved, so a field
-        // may name the class it belongs to.
-        let id = self.classes.len() as u32;
         self.classes.push(ClassType {
             name: decl.name.name.clone(),
+            base: None,
             fields: Vec::new(),
             constructors: Vec::new(),
             methods: Vec::new(),
             shared: decl.shared,
             span: decl.name.span,
         });
+    }
 
-        let mut fields: Vec<FieldInfo> = Vec::new();
+    /// Resolves every `extends`, rejecting a base that is not a class and any
+    /// cycle in the result.
+    fn resolve_bases(&mut self, program: &Program) {
+        for decl in &program.classes {
+            let Some(base) = &decl.extends else { continue };
+            let Some(id) = self.class_id(&decl.name.name) else {
+                continue;
+            };
+
+            let resolved = self.resolved_name(&base.name, base.span);
+            let Some(base_id) = self.class_id(&resolved) else {
+                self.error(
+                    codes::UNKNOWN_TYPE,
+                    base.span,
+                    format!("`{}` is not a declared class", base.name),
+                    "a class extends a class",
+                    None,
+                );
+                continue;
+            };
+
+            let declared = self.classes[base_id as usize].span;
+            let shared = self.classes[base_id as usize].shared;
+            self.require_visible(declared, shared, base, "class");
+            self.classes[id as usize].base = Some(base_id);
+        }
+
+        // A cycle would make the flattening below run forever, so it is cut
+        // before anything walks the chain.
+        for id in 0..self.classes.len() as u32 {
+            if let Some(cycle) = self.inheritance_cycle(id) {
+                let span = self.classes[id as usize].span;
+                let name = self.classes[id as usize].name.clone();
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    span,
+                    format!("`{name}` inherits from itself"),
+                    format!("the chain closes on itself: {cycle}"),
+                    Some("a class cannot be, directly or indirectly, its own base".into()),
+                );
+                self.classes[id as usize].base = None;
+            }
+        }
+    }
+
+    /// The chain from a class back to itself, if it has one.
+    fn inheritance_cycle(&self, id: u32) -> Option<String> {
+        let mut seen = vec![id];
+        let mut current = self.classes[id as usize].base;
+
+        while let Some(next) = current {
+            if seen.contains(&next) {
+                let names: Vec<&str> = seen
+                    .iter()
+                    .map(|i| self.classes[*i as usize].name.as_str())
+                    .collect();
+                return Some(format!(
+                    "{} -> {}",
+                    names.join(" -> "),
+                    self.classes[next as usize].name
+                ));
+            }
+            seen.push(next);
+            current = self.classes[next as usize].base;
+        }
+
+        None
+    }
+
+    fn class_id(&self, name: &str) -> Option<u32> {
+        self.classes
+            .iter()
+            .position(|c| c.name == name)
+            .map(|i| i as u32)
+    }
+
+    /// Fills in fields, constructors and methods, bases before subclasses.
+    fn declare_members(&mut self, program: &Program) {
+        for decl in self.in_hierarchy_order(program) {
+            self.declare_class_members(decl);
+        }
+    }
+
+    /// The declarations ordered so a class always follows its base.
+    fn in_hierarchy_order<'p>(&self, program: &'p Program) -> Vec<&'p ClassDecl> {
+        let mut ordered: Vec<&ClassDecl> = Vec::new();
+        let mut pending: Vec<&ClassDecl> = program.classes.iter().collect();
+
+        // The chain is acyclic by now, so every round places at least one
+        // class and the loop terminates.
+        while !pending.is_empty() {
+            let mut placed = Vec::new();
+            pending.retain(|decl| {
+                let ready = match self
+                    .class_id(&decl.name.name)
+                    .map(|id| self.classes[id as usize].base)
+                {
+                    Some(Some(base)) => ordered
+                        .iter()
+                        .any(|d| self.class_id(&d.name.name) == Some(base)),
+                    _ => true,
+                };
+                if ready {
+                    placed.push(*decl);
+                }
+                !ready
+            });
+
+            if placed.is_empty() {
+                // Only reachable if a base was rejected: the rest are placed
+                // as they are so their own members still get checked.
+                ordered.append(&mut pending);
+                break;
+            }
+            ordered.extend(placed);
+        }
+
+        ordered
+    }
+
+    fn declare_class_members(&mut self, decl: &ClassDecl) {
+        let Some(id) = self.class_id(&decl.name.name) else {
+            return;
+        };
+
+        // Inherited members come first, which is what makes a subclass's
+        // layout start with its base's (D2).
+        let base = self.classes[id as usize].base;
+        let mut fields: Vec<FieldInfo> = base
+            .map(|b| self.classes[b as usize].fields.clone())
+            .unwrap_or_default();
+
         for field in &decl.fields {
             if let Some(previous) = fields.iter().find(|f| f.name == field.name.name) {
+                let owner = self.classes[previous.owner as usize].name.clone();
+                let inherited = previous.owner != id;
                 let where_ = self.declared_at(previous.span, field.name.span);
                 self.error(
                     codes::DUPLICATE_DECLARATION,
                     field.name.span,
                     format!("field `{}` is already defined", field.name.name),
-                    format!("a previous definition exists {where_}"),
-                    Some("rename one of the two".into()),
+                    if inherited {
+                        format!("`{owner}` already declares it, {where_}")
+                    } else {
+                        format!("a previous definition exists {where_}")
+                    },
+                    Some(if inherited {
+                        "a subclass cannot redeclare an inherited field".into()
+                    } else {
+                        "rename one of the two".to_string()
+                    }),
                 );
                 continue;
             }
@@ -452,6 +597,7 @@ impl<'a> Checker<'a> {
                 visibility: field.visibility,
                 mutability: field.mutability,
                 span: field.name.span,
+                owner: id,
             });
         }
 
@@ -461,22 +607,11 @@ impl<'a> Checker<'a> {
             .map(|c| c.params.iter().map(|p| self.resolve_param(p)).collect())
             .collect();
 
-        let mut methods: Vec<MethodInfo> = Vec::new();
-        for (index, method) in decl.methods.iter().enumerate() {
-            if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
-                let where_ = self.declared_at(previous.span, method.name.span);
-                self.error(
-                    codes::DUPLICATE_DECLARATION,
-                    method.name.span,
-                    format!("method `{}` is already defined", method.name.name),
-                    format!("a previous definition exists {where_}"),
-                    Some("rename one of the two: there is no overloading".into()),
-                );
-                continue;
-            }
+        let mut methods: Vec<MethodInfo> = base
+            .map(|b| self.classes[b as usize].methods.clone())
+            .unwrap_or_default();
 
-            // A method and a field cannot share a name: `u.name` would have to
-            // mean both.
+        for method in &decl.methods {
             if let Some(field) = fields.iter().find(|f| f.name == method.name.name) {
                 let where_ = self.declared_at(field.span, method.name.span);
                 self.error(
@@ -489,7 +624,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            methods.push(MethodInfo {
+            let resolved = MethodInfo {
                 name: method.name.name.clone(),
                 params: method
                     .params
@@ -499,13 +634,122 @@ impl<'a> Checker<'a> {
                 returns: self.resolve_type(&method.return_type),
                 visibility: method.visibility,
                 span: method.name.span,
-                index,
-            });
+                index: 0,
+                owner: id,
+                overridden: false,
+            };
+
+            match methods.iter().position(|m| m.name == method.name.name) {
+                Some(position) if methods[position].owner != id => {
+                    // An override replaces the entry it overrides, keeping its
+                    // index: that is what lets a subclass's table start with
+                    // its base's, so a method's slot does not move.
+                    self.require_same_signature(&methods[position], &resolved, method.name.span);
+                    let index = methods[position].index;
+                    methods[position] = MethodInfo { index, ..resolved };
+                }
+                Some(position) => {
+                    let previous = methods[position].span;
+                    let where_ = self.declared_at(previous, method.name.span);
+                    self.error(
+                        codes::DUPLICATE_DECLARATION,
+                        method.name.span,
+                        format!("method `{}` is already defined", method.name.name),
+                        format!("a previous definition exists {where_}"),
+                        Some("rename one of the two: there is no overloading".into()),
+                    );
+                }
+                None => {
+                    let index = methods.len();
+                    methods.push(MethodInfo { index, ..resolved });
+                }
+            }
         }
 
         self.classes[id as usize].fields = fields;
         self.classes[id as usize].constructors = constructors;
         self.classes[id as usize].methods = methods;
+
+        // The base now knows one of its methods is redefined, which is what
+        // decides whether a call to it can be direct.
+        if let Some(base_id) = base {
+            for method in &decl.methods {
+                self.mark_overridden(base_id, &method.name.name);
+            }
+        }
+    }
+
+    /// Whether a value of one type may stand where another is expected
+    /// because it is a subclass of it.
+    ///
+    /// One direction only: a `Manager` is a `User`, and a `User` is not a
+    /// `Manager`. Accepting the reverse would mean promising members the value
+    /// may not have.
+    ///
+    /// Nullability follows the same rule as everywhere: `T` fits `T?`, and the
+    /// other way needs `??`.
+    fn is_subclass_of(&self, actual: Type, expected: Type) -> bool {
+        let (Base::Class(mut current), Base::Class(target)) = (actual.base, expected.base) else {
+            return false;
+        };
+        if actual.nullable && !expected.nullable {
+            return false;
+        }
+
+        while let Some(base) = self.classes[current as usize].base {
+            if base == target {
+                return true;
+            }
+            current = base;
+        }
+
+        false
+    }
+
+    /// Marks a method as redefined, all the way up the chain.
+    fn mark_overridden(&mut self, id: u32, name: &str) {
+        let mut current = Some(id);
+        while let Some(class) = current {
+            if let Some(method) = self.classes[class as usize]
+                .methods
+                .iter_mut()
+                .find(|m| m.name == name)
+            {
+                method.overridden = true;
+            }
+            current = self.classes[class as usize].base;
+        }
+    }
+
+    /// An override keeps the signature it overrides.
+    ///
+    /// Anything else would let a call through the base reach a body that
+    /// expects something different, which is the one thing the base's type is
+    /// supposed to promise.
+    fn require_same_signature(&mut self, base: &MethodInfo, override_: &MethodInfo, at: Span) {
+        let same_params = base.params.len() == override_.params.len()
+            && base
+                .params
+                .iter()
+                .zip(&override_.params)
+                .all(|(a, b)| a.ty == b.ty);
+
+        if same_params && base.returns == override_.returns {
+            return;
+        }
+
+        let name = base.name.clone();
+        let line = self.sources.location(base.span).line;
+        self.error(
+            codes::TYPE_MISMATCH,
+            at,
+            format!("`{name}` does not match the method it overrides"),
+            format!("the one declared on line {line} has a different signature"),
+            Some(
+                "an override keeps the parameters and the return type of the method it replaces"
+                    .into(),
+            ),
+        );
     }
 
     /// Checks the bodies of a class: its constructors and its methods.
@@ -598,26 +842,66 @@ impl<'a> Checker<'a> {
     /// reading a variable before it holds a value. A field is no different.
     fn require_fields_initialized(&mut self, decl: &ClassDecl, constructor: &ConstructDecl) {
         let assigned = assigned_fields(&constructor.body);
+        let Some(id) = self.class_id(&decl.name.name) else {
+            return;
+        };
 
-        let missing: Vec<String> = decl
+        // Inherited fields count too. The language has no way to run a base's
+        // constructor from a subclass — `ZIRK_LANGUAGE_SPEC.md` section 7
+        // describes neither `super` nor constructor chaining — so the only
+        // constructor that runs is this one, and every field it leaves unset
+        // would stay unset. Requiring all of them is the rule that cannot be
+        // wrong: if chaining is added later it relaxes this, it does not
+        // change what any existing program means.
+        let unset: Vec<FieldInfo> = self.classes[id as usize]
             .fields
             .iter()
-            .filter(|f| !assigned.contains(&f.name.name))
-            .map(|f| f.name.name.clone())
+            .filter(|f| !assigned.contains(&f.name))
+            .cloned()
             .collect();
 
-        if missing.is_empty() {
+        if unset.is_empty() {
             return;
         }
 
-        let names = missing.join("`, `");
-        self.error(
-            codes::UNINITIALIZED_FIELD,
-            constructor.span,
-            format!("`{names}` is not initialized by this constructor"),
-            "every field must hold a value once the constructor returns",
-            Some(format!("assign it with `this.{} = ...`", missing[0])),
-        );
+        // A field the subclass cannot even name is a different problem: it is
+        // not that the author forgot, it is that the language gives them no
+        // way to do it. Saying "assign it" would be advice they cannot follow.
+        let (reachable, hidden): (Vec<_>, Vec<_>) = unset
+            .into_iter()
+            .partition(|f| self.can_access(f.visibility, f.owner));
+
+        if let Some(field) = hidden.first() {
+            let owner = self.classes[field.owner as usize].name.clone();
+            self.error(
+                codes::UNINITIALIZED_FIELD,
+                constructor.span,
+                format!("`{}` cannot be initialized from here", field.name),
+                format!(
+                    "it is `{}` in `{owner}`, and this class has no way to run that constructor",
+                    field.visibility.as_str()
+                ),
+                Some(
+                    "the language has no base-constructor call yet; make the field `protected`, or do not extend this class"
+                        .into(),
+                ),
+            );
+        }
+
+        if let Some(first) = reachable.first() {
+            let names = reachable
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join("`, `");
+            self.error(
+                codes::UNINITIALIZED_FIELD,
+                constructor.span,
+                format!("`{names}` is not initialized by this constructor"),
+                "every field must hold a value once the constructor returns",
+                Some(format!("assign it with `this.{} = ...`", first.name)),
+            );
+        }
     }
 
     fn declare_enum(&mut self, decl: &EnumDecl) {
@@ -819,7 +1103,7 @@ impl<'a> Checker<'a> {
                 format!("unknown type: `{}`", reference.name),
                 "no type with that name exists in the language",
                 Some(
-                    "the available types are Void, Int32, Boolean, String and declared enums"
+                    "the available types are Void, Int32, Boolean, String, and declared enums and classes"
                         .into(),
                 ),
             ),
@@ -2054,30 +2338,82 @@ impl<'a> Checker<'a> {
         let ty = field.ty;
         let visibility = field.visibility;
         let declared = field.span;
-
-        // Inside its own class every member is reachable: visibility limits
-        // who may look in from outside, not what the class may do with itself.
-        let from_inside = self.this_type == Some(Type::of(Base::Class(id)));
+        let owner = field.owner;
 
         // A hidden member is a different mistake from one that does not
         // exist, and saying so is the difference between "you cannot reach
         // this" and "you misspelled it".
-        if visibility != Visibility::Public && !from_inside {
-            let class_name = self.classes[id as usize].name.clone();
-            let line = self.sources.location(declared).line;
-            self.error(
-                codes::INACCESSIBLE_MEMBER,
-                member.span,
-                format!("`{}` is not accessible here", member.name),
-                format!(
-                    "it is declared `{}` in `{class_name}`, on line {line}",
-                    visibility.as_str()
-                ),
-                Some("only `public` members are reachable from outside the class".into()),
-            );
+        if !self.can_access(visibility, owner) {
+            self.report_inaccessible(&member.name, member.span, visibility, owner, declared);
         }
 
         ty
+    }
+
+    /// Whether the code being checked may see a member with this visibility.
+    ///
+    /// Inside its own class every member is reachable: visibility limits who
+    /// looks in from outside, not what the class does with itself. `protected`
+    /// extends that reach to the subclasses, which is the whole of what it
+    /// adds over `private`.
+    fn can_access(&self, visibility: Visibility, owner: u32) -> bool {
+        if visibility == Visibility::Public {
+            return true;
+        }
+
+        let Some(Type {
+            base: Base::Class(current),
+            ..
+        }) = self.this_type
+        else {
+            return false;
+        };
+
+        if current == owner {
+            return true;
+        }
+
+        visibility == Visibility::Protected && self.inherits_from(current, owner)
+    }
+
+    /// Whether a class has another somewhere up its chain.
+    fn inherits_from(&self, mut current: u32, ancestor: u32) -> bool {
+        while let Some(base) = self.classes[current as usize].base {
+            if base == ancestor {
+                return true;
+            }
+            current = base;
+        }
+        false
+    }
+
+    fn report_inaccessible(
+        &mut self,
+        member: &str,
+        at: Span,
+        visibility: Visibility,
+        owner: u32,
+        declared: Span,
+    ) {
+        let owner_name = self.classes[owner as usize].name.clone();
+        let line = self.sources.location(declared).line;
+        let help = match visibility {
+            Visibility::Private => "a `private` member is reachable only inside its own class",
+            Visibility::Protected => {
+                "a `protected` member is reachable inside its class and its subclasses"
+            }
+            Visibility::Public => unreachable!("a public member is always reachable"),
+        };
+        self.error(
+            codes::INACCESSIBLE_MEMBER,
+            at,
+            format!("`{member}` is not accessible here"),
+            format!(
+                "it is declared `{}` in `{owner_name}`, on line {line}",
+                visibility.as_str()
+            ),
+            Some(help.into()),
+        );
     }
 
     /// Reports a construct that parses but whose checking has not landed yet.
@@ -2585,7 +2921,7 @@ impl<'a> Checker<'a> {
 
     /// Checks that a value may be stored where a type is expected.
     fn expect_assignable(&mut self, expected: Type, actual: Type, span: Span, context: &str) {
-        if expected.accepts(actual) {
+        if expected.accepts(actual) || self.is_subclass_of(actual, expected) {
             return;
         }
 

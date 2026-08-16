@@ -220,8 +220,9 @@ impl Keyword {
         Some(match self {
             // `class`, `construct`, `this` and the visibility modifiers are
             // implemented; the rest of the phase's vocabulary is not yet.
-            Record | Type | Extends | Implements | Abstract | From | As | Is | Interface
-            | Trait => Phase::THREE,
+            Record | Type | Implements | Abstract | From | As | Is | Interface | Trait => {
+                Phase::THREE
+            }
             // `default` labels the catch-all arm of a `try`, so it arrives with
             // error handling and not with the decorators it used to be filed
             // under.
