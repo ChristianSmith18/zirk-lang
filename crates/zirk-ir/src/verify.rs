@@ -151,6 +151,46 @@ fn verify_instruction(
             }
         }
 
+        InstKind::Alloc(id) => match module.objects.get(*id as usize) {
+            None => report(format!(
+                "{position}: allocates object layout {id}, which is not in the module table"
+            )),
+            Some(_) => expect(inst.ty, IrType::Object(*id), position, "Alloc", report),
+        },
+
+        InstKind::LoadField { object, index } => {
+            match field_type(module, type_of(object), *index) {
+                Some(ty) => expect(inst.ty, ty, position, "LoadField", report),
+                None => report(format!(
+                    "{position}: reads field {index} of something that is not an object with it"
+                )),
+            }
+        }
+
+        InstKind::StoreField {
+            object,
+            index,
+            value,
+        } => {
+            expect(inst.ty, IrType::Void, position, "StoreField", report);
+            match field_type(module, type_of(object), *index) {
+                Some(ty) => {
+                    if let Some(actual) = type_of(value)
+                        && actual != ty
+                    {
+                        report(format!(
+                            "{position}: stores {} into a field of type {}",
+                            actual.as_str(),
+                            ty.as_str()
+                        ));
+                    }
+                }
+                None => report(format!(
+                    "{position}: writes field {index} of something that is not an object with it"
+                )),
+            }
+        }
+
         InstKind::Load(slot) => match function.slot(*slot) {
             None => report(format!(
                 "{position}: reads slot {slot:?}, which does not exist"
@@ -463,12 +503,28 @@ fn expect(
     }
 }
 
+/// The type of field `index` of an object, if the operand is one and has it.
+fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrType> {
+    let IrType::Object(id) = object? else {
+        return None;
+    };
+    module
+        .objects
+        .get(id as usize)?
+        .fields
+        .get(index as usize)
+        .map(|f| f.ty)
+}
+
 /// Operands an instruction reads.
 fn operands_of(kind: &InstKind) -> Vec<Operand> {
     match kind {
         InstKind::ConstInt(_) | InstKind::ConstBool(_) | InstKind::ConstString(_) => Vec::new(),
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
+        InstKind::Alloc(_) => Vec::new(),
+        InstKind::LoadField { object, .. } => vec![*object],
+        InstKind::StoreField { object, value, .. } => vec![*object, *value],
         InstKind::Unary { operand, .. } => vec![*operand],
         InstKind::Binary { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),

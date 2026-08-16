@@ -125,23 +125,23 @@
 
 ## 9. Runtime — alocación de objetos
 
-- [ ] 9.1 Añadir la función de alocación como `extern "C"` tras la frontera ABI (D1, ADR-002)
-- [ ] 9.2 Documentar en el runtime que no libera y que la estrategia llega en Fase 4
-- [ ] 9.3 Tests: el símbolo aparece sin mangling en la biblioteca estática
-- [ ] 9.4 Tests: un programa que construye objetos termina con código de salida cero
+- [x] 9.1 Añadir la función de alocación como `extern "C"` tras la frontera ABI (D1, ADR-002)
+- [x] 9.2 Documentar en el runtime que no libera y que la estrategia llega en Fase 4
+- [x] 9.3 Tests: el símbolo aparece sin mangling en la biblioteca estática
+- [x] 9.4 Tests: un programa que construye objetos termina con código de salida cero
 
 ## 10. IR — objetos y despacho
 
-- [ ] 10.1 Representar el layout de un objeto: cabecera y campos (D2)
+- [x] 10.1 Representar el layout de un objeto: cabecera y campos (D2)
 - [ ] 10.2 Colocar los campos heredados antes que los propios (D2)
-- [ ] 10.3 Bajar la construcción a alocación abstracta más inicialización
-- [ ] 10.4 Bajar el acceso a campo a lectura por desplazamiento
+- [x] 10.3 Bajar la construcción a alocación abstracta más inicialización
+- [x] 10.4 Bajar el acceso a campo a lectura por desplazamiento
 - [ ] 10.5 Bajar la llamada directa cuando el método no es redefinible (D3)
 - [ ] 10.6 Bajar la llamada indirecta por tabla cuando lo es (D3)
 - [ ] 10.7 Bajar el despacho a través de un contrato por la tabla de la interfaz (D3)
 - [ ] 10.8 Bajar `?.` a comprobación de nulidad con dos bloques (D7)
-- [ ] 10.9 Extender el verificador a las instrucciones nuevas
-- [ ] 10.10 Tests: IR esperada para cada construcción nueva
+- [x] 10.9 Extender el verificador a las instrucciones nuevas
+- [x] 10.10 Tests: IR esperada para cada construcción nueva
 
 ## 11. IR — genéricos y tipos de datos
 
@@ -155,7 +155,7 @@
 
 ## 12. Backend LLVM
 
-- [ ] 12.1 Traducir el layout de objetos, con el prefijo compartido entre base y subclase
+- [x] 12.1 Traducir el layout de objetos, con el prefijo compartido entre base y subclase
 - [ ] 12.2 Emitir el descriptor de tipo de cada tipo con identidad
 - [ ] 12.3 Emitir la tabla de métodos por tipo, con índices estables al heredar
 - [ ] 12.4 Emitir una tabla por interfaz implementada y su búsqueda en el descriptor

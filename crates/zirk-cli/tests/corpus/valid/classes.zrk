@@ -1,0 +1,40 @@
+// Una clase que se construye, lee sus campos y escribe los mutables.
+
+class User {
+    inmut id: Int32;
+    name: String;
+
+    construct(id: Int32, name: String) {
+        this.id = id;
+        this.name = name;
+    }
+}
+
+class Counter {
+    count: Int32;
+
+    // Varios `construct`: se resuelven por aridad.
+    construct(start: Int32) { this.count = start; }
+    construct() { this.count = 0; }
+}
+
+fn main(): Void {
+    mut user = User(1, "Cristian");
+    stdout.println(user.id);
+    stdout.println(user.name);
+
+    // El campo `mut` se puede reescribir; el `inmut` no.
+    user.name = "otro";
+    stdout.println(user.name);
+
+    mut from_zero = Counter();
+    mut from_ten = Counter(10);
+    stdout.println(from_zero.count);
+    stdout.println(from_ten.count);
+
+    // Dos objetos distintos no comparten estado.
+    mut a = User(1, "a");
+    mut b = User(2, "b");
+    a.name = "cambiado";
+    stdout.println(b.name);
+}

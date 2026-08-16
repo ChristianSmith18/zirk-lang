@@ -33,6 +33,12 @@ pub enum IrType {
     /// closure cannot escape in this phase, so at every use site the type is
     /// statically known. Decision D10.
     Closure(u32),
+    /// A reference to an object, identified by its layout in the module.
+    ///
+    /// It is a reference and not a value: an object has identity, and identity
+    /// is the address. Two bindings holding the same object hold the same
+    /// address, which is what `is` compares.
+    Object(u32),
     /// `T?`: a value that may be absent.
     ///
     /// Represented uniformly as a present flag next to the value, rather than
@@ -82,6 +88,7 @@ impl IrType {
             IrType::Boolean => "Boolean",
             IrType::String => "String",
             IrType::Closure(_) => "closure",
+            IrType::Object(_) => "object",
             IrType::Nullable(n) => match n {
                 Nullable::Int32 => "Int32?",
                 Nullable::Boolean => "Boolean?",
@@ -134,6 +141,47 @@ pub struct Module {
     pub strings: Vec<String>,
     /// Closure layouts, indexed by the id [`IrType::Closure`] carries.
     pub closures: Vec<ClosureLayout>,
+    /// Object layouts, indexed by the id [`IrType::Object`] carries.
+    pub objects: Vec<ObjectLayout>,
+}
+
+/// What one object holds in memory.
+///
+/// ```text
+///    object  =  [ type descriptor | field₁ | field₂ | … ]
+/// ```
+///
+/// The header carries **only** the descriptor for now. What the memory phase
+/// needs — marks, counts, whatever the strategy asks for — is added there, and
+/// that is why the header exists as a separate concept from the start instead
+/// of appearing when it is needed. Decision D2.
+///
+/// Inherited fields come before a class's own, in the order the hierarchy
+/// declares them, so a subclass's prefix matches its superclass's and reaching
+/// an inherited field is the same offset whoever is looking.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectLayout {
+    /// The name of the class, which the descriptor is emitted under.
+    pub name: String,
+    pub fields: Vec<ObjectField>,
+}
+
+impl ObjectLayout {
+    /// The position of a field in the object, header excluded.
+    pub fn field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f.name == name)
+    }
+
+    pub fn field(&self, name: &str) -> Option<&ObjectField> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+}
+
+/// One field inside an object layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectField {
+    pub name: String,
+    pub ty: IrType,
 }
 
 /// What one closure value holds and what its lifted function expects.
@@ -237,8 +285,9 @@ impl Instruction {
     ///
     /// See [`IrType::needs_allocation`] for why this is expressed abstractly.
     pub fn allocates(&self) -> bool {
-        matches!(self.kind, InstKind::ConstString(_) | InstKind::ToString(_))
-            && self.ty.needs_allocation()
+        matches!(self.kind, InstKind::Alloc(_))
+            || (matches!(self.kind, InstKind::ConstString(_) | InstKind::ToString(_))
+                && self.ty.needs_allocation())
     }
 }
 
@@ -255,6 +304,24 @@ pub enum InstKind {
     Load(SlotId),
     /// Writes a slot.
     Store(SlotId, Operand),
+
+    /// Obtains storage for an object of the given layout.
+    ///
+    /// Expressed as "give me an object of this type", not as "reserve these
+    /// bytes here": the strategy behind it belongs to the runtime, and naming
+    /// one here is exactly what ADR-003 forbids the IR to do.
+    Alloc(u32),
+    /// Reads field `index` of an object, header excluded.
+    LoadField {
+        object: Operand,
+        index: u32,
+    },
+    /// Writes field `index` of an object.
+    StoreField {
+        object: Operand,
+        index: u32,
+        value: Operand,
+    },
 
     Unary {
         op: UnaryOp,

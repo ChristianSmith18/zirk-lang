@@ -584,3 +584,126 @@ fn both_increment_forms_store_the_updated_value() {
         );
     }
 }
+
+// --- Objetos -----------------------------------------------------------------
+
+/// A program with a class, plus the `main` every program needs.
+fn with_class(class: &str, body: &str) -> Module {
+    compile(&format!("{class}\nfn main(): Void {{\n{body}\n}}"))
+}
+
+const USER: &str = "class User {
+    id: Int32;
+    name: String;
+    construct(id: Int32, name: String) { this.id = id; this.name = name; }
+}";
+
+#[test]
+fn a_class_becomes_an_object_layout() {
+    let module = with_class(USER, "");
+    let layout = &module.objects[0];
+
+    assert_eq!(layout.name, "User");
+    assert_eq!(layout.fields.len(), 2);
+    assert_eq!(layout.fields[0].name, "id");
+    assert_eq!(layout.fields[0].ty, IrType::Int32);
+    assert_eq!(layout.fields[1].ty, IrType::String);
+}
+
+#[test]
+fn a_constructor_becomes_a_function_over_the_object() {
+    let module = with_class(USER, "");
+    let constructor = module
+        .function(&zirk_ir::constructor_symbol("User", 0))
+        .expect("the constructor is emitted");
+
+    // `this` first, then the declared parameters.
+    assert_eq!(constructor.params.len(), 3);
+    assert_eq!(
+        constructor
+            .slot(constructor.params[0])
+            .map(|s| s.name.as_str()),
+        Some("this")
+    );
+    assert_eq!(
+        constructor.slot(constructor.params[0]).map(|s| s.ty),
+        Some(IrType::Object(0))
+    );
+    assert_eq!(constructor.return_type, IrType::Void);
+}
+
+#[test]
+fn building_an_object_allocates_and_then_calls_its_constructor() {
+    let module = with_class(USER, "mut u = User(1, \"x\");");
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    let alloc = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::Alloc(0)))
+        .expect("the object is allocated");
+    let call = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::Call { callee, .. } if callee.contains("construct")))
+        .expect("its constructor is called");
+
+    // The object exists — and has its address, which is its identity — before
+    // its constructor runs on it.
+    assert!(alloc < call);
+}
+
+#[test]
+fn a_field_is_read_by_its_position() {
+    let module = with_class(USER, "mut u = User(1, \"x\");\nstdout.println(u.name);");
+    let main = module.function("main").expect("main exists");
+
+    // `name` is the second field, so index 1. The header is not counted here:
+    // it is added when the address is computed.
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::LoadField { index: 1, .. })),
+        "the second field is read by its index"
+    );
+}
+
+#[test]
+fn a_constructor_writes_its_fields_by_position() {
+    let module = with_class(USER, "");
+    let constructor = module
+        .function(&zirk_ir::constructor_symbol("User", 0))
+        .expect("the constructor is emitted");
+    let kinds = instructions(constructor);
+
+    for index in [0, 1] {
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, InstKind::StoreField { index: i, .. } if *i == index)),
+            "field {index} must be written"
+        );
+    }
+}
+
+#[test]
+fn several_constructors_are_emitted_under_distinct_names() {
+    let module = with_class(
+        "class Point {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
+             construct() { this.x = 0; }
+         }",
+        "",
+    );
+
+    assert!(
+        module
+            .function(&zirk_ir::constructor_symbol("Point", 0))
+            .is_some()
+    );
+    assert!(
+        module
+            .function(&zirk_ir::constructor_symbol("Point", 1))
+            .is_some()
+    );
+}

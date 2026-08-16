@@ -17,7 +17,28 @@ use zirk_sema::{Base, CheckedProgram, Type};
 
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
-    let mut module = Module::default();
+    // The layouts come first: a function that builds an object needs the
+    // layout it allocates, and a field access needs its offsets.
+    let objects = checked
+        .classes
+        .iter()
+        .map(|class| ObjectLayout {
+            name: class.name.clone(),
+            fields: class
+                .fields
+                .iter()
+                .map(|field| ObjectField {
+                    name: field.name.clone(),
+                    ty: ir_type(field.ty),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut module = Module {
+        objects,
+        ..Module::default()
+    };
 
     // Default values are written in the declaration but evaluated at the call
     // site, so the lowering needs the declarations while lowering the calls.
@@ -26,6 +47,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .iter()
         .map(|f| (f.name.name.as_str(), f))
         .collect();
+
+    // A constructor becomes an ordinary function whose first parameter is the
+    // object being built. Emitting it once and calling it beats inlining the
+    // body at every construction site, and it is the same shape a method call
+    // will need.
+    for class in &program.classes {
+        let Some(id) = checked
+            .classes
+            .iter()
+            .position(|c| c.name == class.name.name)
+        else {
+            continue;
+        };
+        for (index, constructor) in class.constructors.iter().enumerate() {
+            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
+            let (lowered, lifted) = lowering.run_constructor(class, constructor, id as u32, index);
+            module.functions.push(lowered);
+            module.functions.extend(lifted);
+        }
+    }
 
     for function in &program.functions {
         let lowering = FunctionLowering::new(&mut module, checked, &declarations);
@@ -39,6 +80,15 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     module
 }
 
+/// The name a constructor is emitted under.
+///
+/// The class name plus the index of the `construct` in its declaration order,
+/// because a class may have several and they must not collide. The `$` cannot
+/// appear in a Zirk identifier, so a user function can never take the name.
+pub fn constructor_symbol(class: &str, index: usize) -> String {
+    format!("{class}$construct${index}")
+}
+
 /// Converts a frontend type into an IR type.
 fn ir_type(ty: Type) -> IrType {
     let base = match ty.base {
@@ -49,9 +99,11 @@ fn ir_type(ty: Type) -> IrType {
         // An enum without associated data is exactly its discriminant. Phase 3
         // gives it a payload and with it a representation of its own.
         Base::Enum(_) => IrType::Int32,
+        // An object is reached through its address: that is its identity.
+        Base::Class(id) => IrType::Object(id),
         // A verified program contains none of these: the checker reports and
         // the pipeline stops before reaching lowering.
-        Base::Unknown | Base::Null | Base::Function(_) | Base::Range | Base::Class(_) => {
+        Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -382,6 +434,61 @@ impl<'a> FunctionLowering<'a> {
         (lowered, lifted)
     }
 
+    /// Lowers one `construct` into a function over the object being built.
+    ///
+    /// `this` is an ordinary slot holding the object's address, which is what
+    /// makes `this.name = value` a field write like any other rather than a
+    /// form of its own.
+    fn run_constructor(
+        mut self,
+        class: &ast::ClassDecl,
+        constructor: &ast::ConstructDecl,
+        id: u32,
+        index: usize,
+    ) -> (Function, Vec<Function>) {
+        self.return_type = IrType::Void;
+
+        let entry = self.new_block();
+        self.current = entry;
+        self.scopes.push(HashMap::new());
+
+        let this = self.declare_slot("this", IrType::Object(id), class.name.span);
+
+        let resolved: Vec<IrType> = self
+            .checked
+            .classes
+            .get(id as usize)
+            .and_then(|c| c.constructors.get(index))
+            .map(|params| params.iter().map(|p| ir_type(p.ty)).collect())
+            .expect("the checker records every constructor");
+
+        let mut params = vec![this];
+        params.extend(
+            constructor
+                .params
+                .iter()
+                .zip(resolved)
+                .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span)),
+        );
+
+        self.lower_block(&constructor.body);
+        self.terminate(Terminator::Return(None));
+        self.scopes.pop();
+
+        let lifted = std::mem::take(&mut self.lifted);
+        let lowered = Function {
+            name: constructor_symbol(&class.name.name, index),
+            params,
+            return_type: IrType::Void,
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span: constructor.span,
+        };
+
+        (lowered, lifted)
+    }
+
     fn lower_block(&mut self, block: &ast::Block) {
         self.scopes.push(HashMap::new());
         for stmt in &block.statements {
@@ -440,9 +547,28 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
-        let slot = self.lookup_slot(stmt.target.name());
-        let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
-        self.emit_effect(InstKind::Store(slot, value), stmt.span);
+        match &stmt.target {
+            ast::AssignTarget::Name(name) => {
+                let slot = self.lookup_slot(&name.name);
+                let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
+                self.emit_effect(InstKind::Store(slot, value), stmt.span);
+            }
+            ast::AssignTarget::Field(field) => {
+                // The object is evaluated before the value, which is the order
+                // it is written in.
+                let object = self.lower_expr(&field.object);
+                let (index, ty) = self.field_position(&field.object, &field.name.name);
+                let value = self.lower_expr_as(&stmt.value, ty);
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object,
+                        index,
+                        value,
+                    },
+                    stmt.span,
+                );
+            }
+        }
     }
 
     /// Lowers `if`/`else` into blocks with a conditional branch.
@@ -761,23 +887,19 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Call(e) => {
                 let name = self.callee_name(e);
+                if let Some(id) = self.class_id(&name) {
+                    return self.lower_construction(e, id, span);
+                }
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
                 self.emit(InstKind::Call { callee: name, args }, returns, span)
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
-            // A member access that the checker resolved to an enum variant.
-            // Anything else never reaches lowering: the checker rejects it.
-            ast::Expr::Field(e) => {
-                let ast::Expr::Path(enum_name) = &*e.object else {
-                    unreachable!("only a variant access reaches lowering in this phase")
-                };
-                let value = self.discriminant(enum_name, &e.name.name);
-                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
-            }
+            ast::Expr::Field(e) => self.lower_field(e, span),
             ast::Expr::This(_) => {
-                unreachable!("a verified program of this phase has no `this`")
+                let slot = self.lookup_slot("this");
+                self.emit(InstKind::Load(slot), self.slot_type(slot), span)
             }
             ast::Expr::Ternary(e) => self.lower_ternary(e, span),
             ast::Expr::Increment(e) => self.lower_increment(e, span),
@@ -1265,6 +1387,104 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), ty, span)
     }
 
+    /// The layout id of a class, if the name is one.
+    fn class_id(&self, name: &str) -> Option<u32> {
+        self.module
+            .objects
+            .iter()
+            .position(|o| o.name == name)
+            .map(|i| i as u32)
+    }
+
+    /// Lowers `User(...)` into an allocation plus a call to its constructor.
+    ///
+    /// The two steps are what separates identity from initialization: the
+    /// object exists — and has its address, which is its identity — before its
+    /// constructor runs on it.
+    fn lower_construction(&mut self, call: &ast::CallExpr, id: u32, span: Span) -> Operand {
+        let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+
+        let index = self.constructor_index(id, call.args.len());
+        let params: Vec<IrType> = self
+            .checked
+            .classes
+            .get(id as usize)
+            .and_then(|c| c.constructors.get(index))
+            .map(|p| p.iter().map(|param| ir_type(param.ty)).collect())
+            .expect("the checker resolved the constructor");
+
+        let mut args = vec![object];
+        for (arg, ty) in call.args.iter().zip(params) {
+            args.push(self.lower_expr_as(&arg.value, ty));
+        }
+
+        let name = self.module.objects[id as usize].name.clone();
+        self.emit_effect(
+            InstKind::Call {
+                callee: constructor_symbol(&name, index),
+                args,
+            },
+            span,
+        );
+
+        object
+    }
+
+    /// Which `construct` a call of this arity resolves to.
+    fn constructor_index(&self, id: u32, arity: usize) -> usize {
+        self.checked.classes[id as usize]
+            .constructors
+            .iter()
+            .position(|params| {
+                let required = params
+                    .iter()
+                    .filter(|p| !p.optional && !p.variadic && !p.has_default)
+                    .count();
+                let variadic = params.iter().any(|p| p.variadic);
+                arity >= required && (variadic || arity <= params.len())
+            })
+            .expect("the checker resolved the constructor")
+    }
+
+    /// Lowers `a.b`, which is a variant access or a field read.
+    ///
+    /// The checker already decided which one it is and recorded the answer, so
+    /// this reads the decision rather than repeating it with the same tables.
+    fn lower_field(&mut self, expr: &ast::FieldExpr, span: Span) -> Operand {
+        if self.checked.variant_accesses.contains(&expr.span) {
+            let ast::Expr::Path(enum_name) = &*expr.object else {
+                unreachable!("a variant access names its enum")
+            };
+            let value = self.discriminant(enum_name, &expr.name.name);
+            return self.emit(InstKind::ConstInt(value), IrType::Int32, span);
+        }
+
+        let object = self.lower_expr(&expr.object);
+        let (index, ty) = self.field_position(&expr.object, &expr.name.name);
+        self.emit(InstKind::LoadField { object, index }, ty, span)
+    }
+
+    /// The type a member access produces.
+    fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        if self.checked.variant_accesses.contains(&expr.span) {
+            // A variant without associated data is exactly its discriminant.
+            return IrType::Int32;
+        }
+        self.field_position(&expr.object, &expr.name.name).1
+    }
+
+    /// Where a field sits in its object, and what type it holds.
+    fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
+        let IrType::Object(id) = self.type_of(object, object.span()) else {
+            unreachable!("a verified field access reads an object")
+        };
+        let layout = &self.module.objects[id as usize];
+        let index = layout
+            .field_index(name)
+            .expect("the checker resolved the field against this layout");
+        (index as u32, layout.fields[index].ty)
+    }
+
     /// Lowers `cond ? a : b`.
     ///
     /// The same shape as the `if` expression — two blocks writing one slot —
@@ -1550,15 +1770,14 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Call(e) => {
                 let name = self.callee_name(e);
-                self.signature_return(&name)
+                match self.class_id(&name) {
+                    Some(id) => IrType::Object(id),
+                    None => self.signature_return(&name),
+                }
             }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
-            // Only variant accesses reach lowering, and a variant without
-            // associated data is exactly its discriminant.
-            ast::Expr::Field(_) => IrType::Int32,
-            ast::Expr::This(_) => {
-                unreachable!("a verified program of this phase has no `this`")
-            }
+            ast::Expr::Field(e) => self.field_type_of(e),
+            ast::Expr::This(_) => self.slot_type(self.lookup_slot("this")),
             ast::Expr::Ternary(e) => self.type_of(&e.when_true, e.when_true.span()),
             // Both forms yield the type of the operand they update.
             ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(e.target.name())),

@@ -21,6 +21,8 @@ pub struct CheckedProgram {
     pub functions: HashMap<String, Signature>,
     /// Declared enums, indexed by the id their [`Base::Enum`] carries.
     pub enums: Vec<EnumType>,
+    /// Declared classes, indexed by the id their [`Base::Class`] carries.
+    pub classes: Vec<ClassType>,
     /// Function types, indexed by the id their [`Base::Function`] carries.
     pub fn_types: Vec<FnType>,
     /// What each lambda captures, keyed by the lambda's span.
@@ -218,6 +220,7 @@ impl<'a> Checker<'a> {
         CheckedProgram {
             functions: self.functions,
             enums: self.enums,
+            classes: self.classes,
             fn_types: self.fn_types,
             lambdas: self.lambdas,
             matches: self.matches,
@@ -2223,17 +2226,7 @@ impl<'a> Checker<'a> {
             shared,
             span,
         };
-        let ty = self.check_direct_call(expr, &signature);
-
-        // Building an instance is the one point where an object comes into
-        // existence, so reporting here covers every use of one.
-        self.not_lowered(
-            expr.span,
-            "building an object",
-            "the object layout and its allocation land in the next slice of this phase",
-        );
-
-        ty
+        self.check_direct_call(expr, &signature)
     }
 
     fn check_call(&mut self, expr: &CallExpr) -> Type {

@@ -32,6 +32,11 @@ pub mod symbols {
     pub const OVERFLOW: &str = "zirk_rt_overflow";
     /// Reports a division by zero and terminates.
     pub const DIVISION_BY_ZERO: &str = "zirk_rt_division_by_zero";
+    /// Obtains storage for an object. The strategy behind it is the runtime's
+    /// (ADR-003), which is why the IR only ever says `alloc <type>`.
+    pub const ALLOC: &str = "zirk_rt_alloc";
+    /// Reports that an object could not be allocated and terminates.
+    pub const ALLOCATION_FAILED: &str = "zirk_rt_allocation_failed";
 }
 
 /// The runtime functions available to generated code.
@@ -45,6 +50,7 @@ pub struct Runtime<'ctx> {
     pub io_println: FunctionValue<'ctx>,
     pub overflow: FunctionValue<'ctx>,
     pub division_by_zero: FunctionValue<'ctx>,
+    pub alloc: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -99,7 +105,20 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
-    for handler in [overflow, division_by_zero] {
+    let alloc = module.add_function(
+        symbols::ALLOC,
+        ptr.fn_type(&[i64.into(), i64.into()], false),
+        external,
+    );
+    // Declared so the allocator can reach it, and marked `noreturn` with the
+    // rest: generated code never calls it directly, the runtime does.
+    let allocation_failed = module.add_function(
+        symbols::ALLOCATION_FAILED,
+        void.fn_type(&[], false),
+        external,
+    );
+
+    for handler in [overflow, division_by_zero, allocation_failed] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
             0,
@@ -117,5 +136,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         io_println,
         overflow,
         division_by_zero,
+        alloc,
     }
 }
