@@ -1,0 +1,10 @@
+class User {
+    id: Int32;
+    name: String;
+
+    construct(id: Int32) {
+        this.id = id;
+    }
+}
+
+fn main(): Void { }

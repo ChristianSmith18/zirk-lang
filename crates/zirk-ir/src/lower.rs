@@ -51,7 +51,7 @@ fn ir_type(ty: Type) -> IrType {
         Base::Enum(_) => IrType::Int32,
         // A verified program contains none of these: the checker reports and
         // the pipeline stops before reaching lowering.
-        Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
+        Base::Unknown | Base::Null | Base::Function(_) | Base::Range | Base::Class(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };

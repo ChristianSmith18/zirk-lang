@@ -495,3 +495,236 @@ fn invalid_string_iteration_defers_to_the_phase_of_char() {
     assert!(output.contains("Char"), "{output}");
     assert!(output.contains("Phase 3b"), "{output}");
 }
+
+// --- Clases ------------------------------------------------------------------
+
+/// A class plus a `main`, which every program needs.
+fn with_class(class: &str, body: &str) -> String {
+    format!("{class}\nfn main(): Void {{\n{body}\n}}")
+}
+
+const USER: &str = "class User {
+    inmut id: Int32;
+    name: String;
+
+    construct(id: Int32, name: String) {
+        this.id = id;
+        this.name = name;
+    }
+
+    fn greeting(): String { return this.name; }
+}";
+
+#[test]
+fn valid_class_with_fields_constructor_and_method() {
+    accepted(&with_class(USER, ""));
+}
+
+#[test]
+fn valid_this_reads_and_writes_its_own_fields() {
+    accepted(&with_class(
+        "class Counter {
+             count: Int32;
+             construct() { this.count = 0; }
+             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn invalid_this_outside_a_class() {
+    let output = rejected_body("stdout.println(this.name);");
+    assert!(output.contains(codes::UNDECLARED_NAME.as_str()), "{output}");
+    assert!(output.contains("inside a class"), "{output}");
+}
+
+#[test]
+fn invalid_member_that_does_not_exist() {
+    let output = rejected(&with_class(
+        "class User {
+             name: String;
+             construct(name: String) { this.name = name; }
+             fn broken(): String { return this.nombre; }
+         }",
+        "",
+    ));
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    // The diagnostic lists what does exist, which is what turns a typo into a
+    // fix rather than a search.
+    assert!(output.contains("its fields are: name"), "{output}");
+}
+
+#[test]
+fn invalid_private_member_from_outside() {
+    let output = rejected(&with_class(
+        "class User {
+             private name: String;
+             construct(name: String) { this.name = name; }
+         }",
+        "mut u = User(\"x\");\nstdout.println(u.name);",
+    ));
+    // A hidden member is a different mistake from one that does not exist.
+    assert!(
+        output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("private"), "{output}");
+}
+
+#[test]
+fn valid_private_member_from_inside_its_class() {
+    accepted(&with_class(
+        "class User {
+             private name: String;
+             construct(name: String) { this.name = name; }
+             fn greeting(): String { return this.name; }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn invalid_constructor_leaves_a_field_without_a_value() {
+    let output = rejected(&with_class(
+        "class User {
+             id: Int32;
+             name: String;
+             construct(id: Int32) { this.id = id; }
+         }",
+        "",
+    ));
+    assert!(
+        output.contains(codes::UNINITIALIZED_FIELD.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("name"), "{output}");
+}
+
+#[test]
+fn valid_field_assigned_in_both_branches_counts_as_initialized() {
+    // A syntactic walk, not flow analysis: setting a field in both arms of an
+    // `if` is ordinary code, not a mistake.
+    accepted(&with_class(
+        "class User {
+             name: String;
+             construct(anonymous: Boolean) {
+                 if anonymous { this.name = \"?\"; } else { this.name = \"x\"; }
+             }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn valid_inmut_field_is_set_by_the_constructor() {
+    accepted(&with_class(
+        "class User {
+             inmut id: Int32;
+             construct(id: Int32) { this.id = id; }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn invalid_writing_an_inmut_field_from_outside_the_constructor() {
+    let output = rejected(&with_class(
+        "class User {
+             inmut id: Int32;
+             construct(id: Int32) { this.id = id; }
+             fn reset(): Void { this.id = 0; }
+         }",
+        "",
+    ));
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_construction_with_the_wrong_number_of_arguments() {
+    let output = rejected(&with_class(USER, "mut u = User(1);"));
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_construction_with_the_wrong_argument_type() {
+    let output = rejected(&with_class(USER, "mut u = User(\"uno\", \"x\");"));
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_several_constructors_resolve_by_arity() {
+    // Both calls resolve. What they still report is that building an object
+    // does not reach code generation yet, which is a different thing from the
+    // call not matching a constructor.
+    let output = rejected(&with_class(
+        "class Point {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
+             construct() { this.x = 0; }
+         }",
+        "mut a = Point(1);\nmut b = Point();",
+    ));
+    assert!(
+        !output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "both arities must resolve:\n{output}"
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_duplicate_class() {
+    let output = rejected(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_duplicate_field() {
+    let output = rejected(&with_class(
+        "class User { name: String; name: Int32; construct() { this.name = \"x\"; } }",
+        "",
+    ));
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_member_of_a_type_without_members() {
+    let output = rejected_body("mut n = 1;\nstdout.println(n.field);");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_class_type_is_not_interchangeable_with_another() {
+    // Nominal: two classes with the same members are still different types.
+    let output = rejected(
+        "class A { x: Int32; construct() { this.x = 0; } }
+         class B { x: Int32; construct() { this.x = 0; } }
+         fn main(): Void { mut a: A = B(); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_a_class_names_its_own_type_in_a_field() {
+    // The class is registered before its fields resolve, so it can name itself.
+    accepted(&with_class(
+        "class Node { next: Node?; construct() { this.next = null; } }",
+        "",
+    ));
+}

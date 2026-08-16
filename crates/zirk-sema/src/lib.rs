@@ -75,6 +75,12 @@ pub mod codes {
     pub const IF_WITHOUT_ELSE: Code = Code::new("E0422");
     /// A construct this phase checks but does not compile yet.
     pub const NOT_LOWERED: Code = Code::new("E0423");
+    /// A field left without a value by a constructor.
+    pub const UNINITIALIZED_FIELD: Code = Code::new("E0425");
+    /// A member that the type does not have.
+    pub const UNKNOWN_MEMBER: Code = Code::new("E0426");
+    /// A member the type has but that this code may not see.
+    pub const INACCESSIBLE_MEMBER: Code = Code::new("E0427");
     /// A construct of the language that this phase does not implement.
     ///
     /// Distinct from [`NOT_LOWERED`]: that one is checked and merely not

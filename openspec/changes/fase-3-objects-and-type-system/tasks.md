@@ -69,12 +69,12 @@
 
 ## 5. Tipos — nominalidad y miembros
 
-- [ ] 5.1 Representar clases, records, value classes y enums como tipos nominales
+- [x] 5.1 Representar clases, records, value classes y enums como tipos nominales
 - [ ] 5.2 Construir la jerarquía de herencia y detectar ciclos
-- [ ] 5.3 Resolver miembros contra el tipo y su cadena de herencia
-- [ ] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
+- [x] 5.3 Resolver miembros contra el tipo y su cadena de herencia
+- [x] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
 - [ ] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
-- [ ] 5.6 Verificar `construct`: que exista, resolver múltiples firmas por aridad/tipo/nombre, admitir argumentos nombrados reordenados e inicializar todo campo sin valor por defecto
+- [x] 5.6 Verificar `construct`: que exista, resolver por aridad e inicializar todo campo. Falta desempatar firmas de igual aridad por tipo y por etiqueta, que llega con los argumentos nombrados reordenados
 - [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere
 - [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)

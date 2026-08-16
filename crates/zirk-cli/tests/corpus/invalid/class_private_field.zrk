@@ -1,0 +1,12 @@
+class User {
+    private name: String;
+
+    construct(name: String) {
+        this.name = name;
+    }
+}
+
+fn main(): Void {
+    mut u = User("Cristian");
+    stdout.println(u.name);
+}

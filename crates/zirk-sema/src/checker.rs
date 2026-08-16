@@ -8,7 +8,9 @@
 
 use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
-use crate::types::{Base, EnumType, FnType, Type, TypeNames, describe, pending_type};
+use crate::types::{
+    Base, ClassType, EnumType, FieldInfo, FnType, Type, TypeNames, describe, pending_type,
+};
 use std::collections::HashMap;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceMap, Span};
@@ -70,6 +72,7 @@ pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) 
 struct Names<'t> {
     enums: &'t [EnumType],
     fn_types: &'t [FnType],
+    classes: &'t [ClassType],
 }
 
 impl TypeNames for Names<'_> {
@@ -78,6 +81,13 @@ impl TypeNames for Names<'_> {
             .get(id as usize)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| "<enum>".into())
+    }
+
+    fn class_name(&self, id: u32) -> String {
+        self.classes
+            .get(id as usize)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "<class>".into())
     }
 
     fn function_type(&self, id: u32) -> String {
@@ -95,6 +105,7 @@ struct Checker<'a> {
     scopes: Scopes,
     functions: HashMap<String, Signature>,
     enums: Vec<EnumType>,
+    classes: Vec<ClassType>,
     fn_types: Vec<FnType>,
     lambdas: HashMap<Span, LambdaInfo>,
     matches: HashMap<Span, Type>,
@@ -105,6 +116,11 @@ struct Checker<'a> {
     aliases: HashMap<Span, String>,
     /// Return type of the function or lambda being checked.
     current_return: Type,
+    /// The class whose body is being checked, if any. It is what `this` names.
+    this_type: Option<Type>,
+    /// Whether the body being checked is a constructor, which is the one place
+    /// an `inmut` field may be written.
+    in_constructor: bool,
     /// How many loops enclose the statement being checked.
     ///
     /// Zero means `break` and `continue` have nothing to jump out of.
@@ -121,6 +137,7 @@ impl<'a> Checker<'a> {
             scopes: Scopes::new(),
             functions: HashMap::new(),
             enums: Vec::new(),
+            classes: Vec::new(),
             fn_types: Vec::new(),
             lambdas: HashMap::new(),
             matches: HashMap::new(),
@@ -128,6 +145,8 @@ impl<'a> Checker<'a> {
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
+            this_type: None,
+            in_constructor: false,
             loop_depth: 0,
             capture_stack: Vec::new(),
         }
@@ -160,6 +179,7 @@ impl<'a> Checker<'a> {
             &Names {
                 enums: &self.enums,
                 fn_types: &self.fn_types,
+                classes: &self.classes,
             },
         )
     }
@@ -179,20 +199,17 @@ impl<'a> Checker<'a> {
             self.declare_function(f);
         }
 
-        // Classes parse but are not checked yet. Reporting them is what keeps
-        // an unverified class body from reaching lowering, which would then
-        // meet constructs no rule ever looked at.
+        // Classes before signatures: a parameter may name one.
         for c in &program.classes {
-            self.not_checked(
-                c.name.span,
-                &format!("`class {}`", c.name.name),
-                "its members, constructors and instances are checked in the next slice of this phase",
-            );
+            self.declare_class(c);
         }
 
         self.check_entrypoint(program);
 
         self.scopes.push();
+        for c in &program.classes {
+            self.check_class(c);
+        }
         for f in &program.functions {
             self.check_function(f);
         }
@@ -371,6 +388,190 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Registers a class as a nominal type, with its fields and constructors.
+    ///
+    /// Declaration comes before checking so a field, a parameter or another
+    /// class may name it regardless of the order the file declares them in.
+    fn declare_class(&mut self, decl: &ClassDecl) {
+        if let Some(previous) = self.classes.iter().find(|c| c.name == decl.name.name) {
+            let where_ = self.declared_at(previous.span, decl.name.span);
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("class `{}` is already defined", decl.name.name),
+                format!("a previous definition exists {where_}"),
+                Some("rename one of the two".into()),
+            );
+            return;
+        }
+
+        // The class is registered before its fields are resolved, so a field
+        // may name the class it belongs to.
+        let id = self.classes.len() as u32;
+        self.classes.push(ClassType {
+            name: decl.name.name.clone(),
+            fields: Vec::new(),
+            constructors: Vec::new(),
+            shared: decl.shared,
+            span: decl.name.span,
+        });
+
+        let mut fields: Vec<FieldInfo> = Vec::new();
+        for field in &decl.fields {
+            if let Some(previous) = fields.iter().find(|f| f.name == field.name.name) {
+                let where_ = self.declared_at(previous.span, field.name.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    field.name.span,
+                    format!("field `{}` is already defined", field.name.name),
+                    format!("a previous definition exists {where_}"),
+                    Some("rename one of the two".into()),
+                );
+                continue;
+            }
+
+            let ty = self.resolve_type(&field.ty);
+            if matches!(ty.base, Base::Void) {
+                self.error(
+                    codes::VOID_VARIABLE,
+                    field.ty.span,
+                    "a field cannot have type `Void`",
+                    "`Void` is the absence of a value, so there is nothing to store",
+                    None,
+                );
+            }
+
+            fields.push(FieldInfo {
+                name: field.name.name.clone(),
+                ty,
+                visibility: field.visibility,
+                mutability: field.mutability,
+                span: field.name.span,
+            });
+        }
+
+        let constructors = decl
+            .constructors
+            .iter()
+            .map(|c| c.params.iter().map(|p| self.resolve_param(p)).collect())
+            .collect();
+
+        self.classes[id as usize].fields = fields;
+        self.classes[id as usize].constructors = constructors;
+    }
+
+    /// Checks the bodies of a class: its constructors and its methods.
+    ///
+    /// `this` is bound as an ordinary immutable binding of the class type. It
+    /// cannot be reassigned — there is no instance to swap for another — but
+    /// what it points at is mutable, which is what makes `this.name = value`
+    /// work.
+    fn check_class(&mut self, decl: &ClassDecl) {
+        let Some(id) = self.classes.iter().position(|c| c.name == decl.name.name) else {
+            // Its declaration was rejected; its bodies would report the same
+            // problem again from every member.
+            return;
+        };
+        let class_type = Type::of(Base::Class(id as u32));
+
+        for constructor in &decl.constructors {
+            self.in_constructor = true;
+            self.check_member_body(class_type, &constructor.params, Type::VOID, |checker| {
+                checker.check_block(&constructor.body);
+            });
+            self.in_constructor = false;
+            self.require_fields_initialized(decl, constructor);
+        }
+
+        for method in &decl.methods {
+            let Some(body) = &method.body else { continue };
+            let returns = self.resolve_type(&method.return_type);
+            let name = method.name.name.clone();
+            let span = body.span;
+            self.check_member_body(class_type, &method.params, returns, |checker| {
+                let always_returns = checker.check_block(body);
+                if returns != Type::VOID && !returns.is_unknown() && !always_returns {
+                    let declared = checker.name(returns);
+                    checker.error(
+                        codes::MISSING_RETURN,
+                        span,
+                        format!("not every path of `{name}` returns a value"),
+                        format!("the method declares `{declared}` as its return type"),
+                        Some("add a `return` at the end of the method".into()),
+                    );
+                }
+            });
+        }
+    }
+
+    /// Runs a member body with `this` and the parameters in scope.
+    fn check_member_body(
+        &mut self,
+        class_type: Type,
+        params: &[Param],
+        returns: Type,
+        check: impl FnOnce(&mut Self),
+    ) {
+        let previous_return = self.current_return;
+        let previous_this = self.this_type;
+        self.current_return = returns;
+        self.this_type = Some(class_type);
+
+        self.scopes.push_function();
+        self.scopes.declare(Binding {
+            name: "this".to_string(),
+            ty: class_type,
+            mutability: Mutability::Immutable,
+            span: Span::new(0, 0),
+            initialized: true,
+        });
+        for param in params {
+            let info = self.resolve_param(param);
+            self.scopes.declare(Binding {
+                name: info.name,
+                ty: info.ty,
+                mutability: Mutability::Immutable,
+                span: param.name.span,
+                initialized: true,
+            });
+        }
+
+        check(self);
+
+        self.scopes.pop();
+        self.current_return = previous_return;
+        self.this_type = previous_this;
+    }
+
+    /// Every field without a default must be written by the constructor.
+    ///
+    /// An object whose fields were never set would hand out whatever the
+    /// allocation happened to contain, and `LANGUAGE_SPEC` section 2 forbids
+    /// reading a variable before it holds a value. A field is no different.
+    fn require_fields_initialized(&mut self, decl: &ClassDecl, constructor: &ConstructDecl) {
+        let assigned = assigned_fields(&constructor.body);
+
+        let missing: Vec<String> = decl
+            .fields
+            .iter()
+            .filter(|f| !assigned.contains(&f.name.name))
+            .map(|f| f.name.name.clone())
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        let names = missing.join("`, `");
+        self.error(
+            codes::UNINITIALIZED_FIELD,
+            constructor.span,
+            format!("`{names}` is not initialized by this constructor"),
+            "every field must hold a value once the constructor returns",
+            Some(format!("assign it with `this.{} = ...`", missing[0])),
+        );
+    }
+
     fn declare_enum(&mut self, decl: &EnumDecl) {
         if let Some(previous) = self.enums.iter().find(|e| e.name == decl.name.name) {
             let where_ = self.declared_at(previous.span, decl.name.span);
@@ -513,15 +714,20 @@ impl<'a> Checker<'a> {
             Some(ty)
         } else {
             let resolved = self.resolved_name(&reference.name, reference.span);
-            match self.enums.iter().position(|e| e.name == resolved) {
-                Some(index) => {
-                    let declared = self.enums[index].span;
-                    let shared = self.enums[index].shared;
-                    let named = Ident::new(reference.name.clone(), reference.span);
-                    self.require_visible(declared, shared, &named, "enum");
-                    Some(Type::of(Base::Enum(index as u32)))
-                }
-                None => None,
+            let named = Ident::new(reference.name.clone(), reference.span);
+
+            if let Some(index) = self.enums.iter().position(|e| e.name == resolved) {
+                let declared = self.enums[index].span;
+                let shared = self.enums[index].shared;
+                self.require_visible(declared, shared, &named, "enum");
+                Some(Type::of(Base::Enum(index as u32)))
+            } else if let Some(index) = self.classes.iter().position(|c| c.name == resolved) {
+                let declared = self.classes[index].span;
+                let shared = self.classes[index].shared;
+                self.require_visible(declared, shared, &named, "class");
+                Some(Type::of(Base::Class(index as u32)))
+            } else {
+                None
             }
         };
 
@@ -555,7 +761,7 @@ impl<'a> Checker<'a> {
                     pending.phase
                 ),
                 Some(
-                    "the available types are Void, Int32, Boolean, String and declared enums"
+                    "the available types are Void, Int32, Boolean, String, and declared enums and classes"
                         .into(),
                 ),
             ),
@@ -755,13 +961,11 @@ impl<'a> Checker<'a> {
         let value = self.check_expr(&stmt.value);
 
         let AssignTarget::Name(name) = &stmt.target else {
-            // Writing a field needs the member rules, which land with the
-            // class checking of the next slice.
-            self.not_checked(
-                stmt.target.span(),
-                "assigning to a field",
-                "writing a member needs a type with members",
-            );
+            let AssignTarget::Field(field) = &stmt.target else {
+                unreachable!("an assignment target is a name or a field")
+            };
+            let target = self.check_writable_field(field);
+            self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
             return;
         };
 
@@ -771,6 +975,39 @@ impl<'a> Checker<'a> {
 
         self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
         self.scopes.mark_initialized(&name.name);
+    }
+
+    /// The type of a field being written to, reporting why it cannot be.
+    ///
+    /// A field is writable when its own `inmut` allows it. Where the object
+    /// came from does not enter into it here: whether the *reference* permits
+    /// mutation is the `mut`/`inmut`/`inmut::strict` matrix, which lands with
+    /// the rest of reference mutability.
+    fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
+        let object = self.check_expr(&field.object);
+        let ty = self.member_type(object, &field.name, field.object.span());
+
+        // An `inmut` field is set exactly once, by the constructor: that is
+        // where its value comes from. Rejecting it there would leave no way to
+        // give it one.
+        let in_own_constructor = self.in_constructor && matches!(&*field.object, Expr::This(_));
+
+        if !in_own_constructor
+            && let Base::Class(id) = object.base
+            && let Some(info) = self.classes[id as usize].field(&field.name.name)
+            && info.mutability == Mutability::Immutable
+        {
+            let line = self.sources.location(info.span).line;
+            self.error(
+                codes::ASSIGN_TO_IMMUTABLE,
+                field.name.span,
+                format!("cannot assign to `{}`", field.name.name),
+                format!("the field is declared `inmut` on line {line}"),
+                Some("an `inmut` field is set by the constructor and not again".into()),
+            );
+        }
+
+        ty
     }
 
     /// Resolves a name that is about to be written to, reporting why it cannot
@@ -1028,12 +1265,19 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
             Expr::If(e) => self.check_if_expr(e),
-            Expr::This(e) => {
-                // `this` only means something inside a class body, and class
-                // bodies are not checked yet.
-                self.not_checked(e.span, "`this`", "it names the instance a method runs on");
-                Type::UNKNOWN
-            }
+            Expr::This(e) => match self.this_type {
+                Some(ty) => ty,
+                None => {
+                    self.error(
+                        codes::UNDECLARED_NAME,
+                        e.span,
+                        "`this` is only available inside a class",
+                        "it names the instance a constructor or method runs on",
+                        None,
+                    );
+                    Type::UNKNOWN
+                }
+            },
             Expr::Field(e) => self.check_field(e),
             Expr::Ternary(e) => self.check_ternary(e),
             Expr::Increment(e) => self.check_increment(e),
@@ -1706,12 +1950,86 @@ impl<'a> Checker<'a> {
             }
         }
 
-        self.not_checked(
-            expr.span,
-            "member access",
-            "reading a field needs a type with members",
-        );
-        Type::UNKNOWN
+        let object = self.check_expr(&expr.object);
+        self.member_type(object, &expr.name, expr.object.span())
+    }
+
+    /// The type of a member read from a value, reporting why it cannot be.
+    fn member_type(&mut self, object: Type, member: &Ident, object_span: Span) -> Type {
+        if object.is_unknown() {
+            return Type::UNKNOWN;
+        }
+
+        if object.nullable {
+            let name = self.name(object);
+            self.error(
+                codes::TYPE_MISMATCH,
+                object_span,
+                format!("`{name}` may be absent"),
+                "reading a member of a value that may be null is not allowed",
+                Some("use `?.`, or provide a value with `??` first".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let Base::Class(id) = object.base else {
+            let name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{name}` has no member `{}`", member.name),
+                "only a class has members in this phase",
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+
+        let class = &self.classes[id as usize];
+        let Some(field) = class.field(&member.name) else {
+            let class_name = class.name.clone();
+            let known: Vec<&str> = class.fields.iter().map(|f| f.name.as_str()).collect();
+            let help = if known.is_empty() {
+                format!("`{class_name}` declares no fields")
+            } else {
+                format!("its fields are: {}", known.join(", "))
+            };
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{class_name}` has no member `{}`", member.name),
+                help,
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+
+        let ty = field.ty;
+        let visibility = field.visibility;
+        let declared = field.span;
+
+        // Inside its own class every member is reachable: visibility limits
+        // who may look in from outside, not what the class may do with itself.
+        let from_inside = self.this_type == Some(Type::of(Base::Class(id)));
+
+        // A hidden member is a different mistake from one that does not
+        // exist, and saying so is the difference between "you cannot reach
+        // this" and "you misspelled it".
+        if visibility != Visibility::Public && !from_inside {
+            let class_name = self.classes[id as usize].name.clone();
+            let line = self.sources.location(declared).line;
+            self.error(
+                codes::INACCESSIBLE_MEMBER,
+                member.span,
+                format!("`{}` is not accessible here", member.name),
+                format!(
+                    "it is declared `{}` in `{class_name}`, on line {line}",
+                    visibility.as_str()
+                ),
+                Some("only `public` members are reachable from outside the class".into()),
+            );
+        }
+
+        ty
     }
 
     /// Reports a construct that parses but whose checking has not landed yet.
@@ -1843,6 +2161,81 @@ impl<'a> Checker<'a> {
         Type::of(Base::Function(fn_type))
     }
 
+    /// `User(...)`, which builds an instance.
+    ///
+    /// A class may declare several constructors, so this picks the one whose
+    /// arity admits the call and checks against it. Resolving overlapping
+    /// signatures by type and by argument label is the rest of the rule, and
+    /// it needs the whole matching machinery that named arguments already use.
+    fn check_construction(&mut self, expr: &CallExpr, id: u32, callee: &Ident) -> Type {
+        let class = &self.classes[id as usize];
+        let class_name = class.name.clone();
+        let shared = class.shared;
+        let span = class.span;
+        let constructors = class.constructors.clone();
+
+        self.require_visible(span, shared, callee, "class");
+
+        if constructors.is_empty() {
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                expr.span,
+                format!("`{class_name}` has no constructor"),
+                "a class is built through a `construct` declaration",
+                Some(format!("add `construct(...) {{ ... }}` to `{class_name}`")),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::of(Base::Class(id));
+        }
+
+        let arity = expr.args.len();
+        let chosen = constructors
+            .iter()
+            .find(|params| admits_arity(params, arity))
+            .cloned();
+
+        let Some(params) = chosen else {
+            let arities: Vec<String> = constructors
+                .iter()
+                .map(|p| p.len().to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("no constructor of `{class_name}` takes {arity} arguments"),
+                format!("its constructors take: {}", arities.join(", ")),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::of(Base::Class(id));
+        };
+
+        let signature = Signature {
+            name: class_name,
+            params,
+            returns: Type::of(Base::Class(id)),
+            shared,
+            span,
+        };
+        let ty = self.check_direct_call(expr, &signature);
+
+        // Building an instance is the one point where an object comes into
+        // existence, so reporting here covers every use of one.
+        self.not_lowered(
+            expr.span,
+            "building an object",
+            "the object layout and its allocation land in the next slice of this phase",
+        );
+
+        ty
+    }
+
     fn check_call(&mut self, expr: &CallExpr) -> Type {
         // A call to a name resolves against the declared functions first, so a
         // named function keeps its optional and variadic parameters. Calling a
@@ -1854,6 +2247,12 @@ impl<'a> Checker<'a> {
             if let Some(signature) = self.functions.get(&declared).cloned() {
                 self.require_visible(signature.span, signature.shared, callee, "function");
                 return self.check_direct_call(expr, &signature);
+            }
+
+            // `User(1, "x")` builds an instance. There is no `new`: the type
+            // name is the constructor (`LANGUAGE_SPEC` section 7).
+            if let Some(id) = self.classes.iter().position(|c| c.name == declared) {
+                return self.check_construction(expr, id as u32, callee);
             }
         }
 
@@ -2230,4 +2629,61 @@ enum ArgSlot {
     Missing,
     /// The values collected by a `...` parameter.
     Variadic(Vec<(Type, Span)>),
+}
+
+/// The fields a constructor body assigns through `this`.
+///
+/// A syntactic walk, not flow analysis: a field assigned inside a branch counts
+/// as assigned. Being stricter would mean deciding which paths run, and a
+/// constructor that sets a field in both arms of an `if` is ordinary code, not
+/// a mistake.
+fn assigned_fields(body: &Block) -> std::collections::HashSet<String> {
+    let mut found = std::collections::HashSet::new();
+    collect_assigned_fields(&body.statements, &mut found);
+    found
+}
+
+fn collect_assigned_fields(statements: &[Stmt], found: &mut std::collections::HashSet<String>) {
+    for statement in statements {
+        match statement {
+            Stmt::Assign(assign) => {
+                if let AssignTarget::Field(field) = &assign.target
+                    && matches!(&*field.object, Expr::This(_))
+                {
+                    found.insert(field.name.name.clone());
+                }
+            }
+            Stmt::If(conditional) => {
+                collect_assigned_fields(&conditional.then_branch.statements, found);
+                match &conditional.else_branch {
+                    Some(ElseBranch::Block(b)) => collect_assigned_fields(&b.statements, found),
+                    Some(ElseBranch::If(nested)) => {
+                        collect_assigned_fields(&nested.then_branch.statements, found);
+                    }
+                    None => {}
+                }
+            }
+            Stmt::Loop(loop_stmt) => {
+                collect_assigned_fields(&loop_stmt.body.statements, found);
+            }
+            Stmt::ForIn(for_in) => collect_assigned_fields(&for_in.body.statements, found),
+            Stmt::Block(block) => collect_assigned_fields(&block.statements, found),
+            _ => {}
+        }
+    }
+}
+
+/// Whether a constructor's parameters admit a call with this many arguments.
+///
+/// Only arity is consulted here: it is what tells the candidates apart without
+/// checking the arguments, and checking them against the wrong constructor
+/// would report errors about a signature the author never meant.
+fn admits_arity(params: &[ParamInfo], arity: usize) -> bool {
+    let required = params
+        .iter()
+        .filter(|p| !p.optional && !p.variadic && !p.has_default)
+        .count();
+    let variadic = params.iter().any(|p| p.variadic);
+
+    arity >= required && (variadic || arity <= params.len())
 }

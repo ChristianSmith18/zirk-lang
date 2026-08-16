@@ -156,7 +156,7 @@ impl Signature {
 }
 
 /// One parameter of a signature.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParamInfo {
     pub name: String,
     pub ty: Type,
