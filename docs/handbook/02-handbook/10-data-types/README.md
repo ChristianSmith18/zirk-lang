@@ -6,4 +6,4 @@ Choosing among them determines construction, equality, identity, exhaustiveness,
 
 ---
 
-**Previous:** [← Monomorphization](../11-generics/07-monomorphization.md) · **Next:** [ Records](01-records.md)
+**Previous:** [← Variance, Recursion, and Runtime Identity](../11-generics/08-variance-recursion-and-runtime.md) · **Next:** [Tuples →](00-tuples.md)

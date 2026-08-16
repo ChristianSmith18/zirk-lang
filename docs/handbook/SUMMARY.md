@@ -110,16 +110,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Mutability in Parameters](./02-handbook/07-functions/09-mutability-in-parameters.md)
     - [No Traditional Overloading](./02-handbook/07-functions/10-no-traditional-overloading.md)
     - [Never-Returning Functions](./02-handbook/07-functions/11-never-returning-functions.md)
-  - Types
-    - `The Zirk Type Model`
-    - `Integers and Floats`
-    - `Boolean, Char, and String`
-    - `Nullability and Optional Values`
-    - `Result and Expected Failure`
-    - `Arrays, Lists, Maps, and Sets`
-    - `Tuples, Records, Enums, and Associated Values`
-    - `Aliases, Unions, and Narrowing`
-    - `Conversions and Casts`
+    - [Function Types and Callable Values](./02-handbook/07-functions/12-function-types-and-callable-values.md)
   - [Generics](./02-handbook/11-generics/README.md)
     - [Generic Functions](./02-handbook/11-generics/01-generic-functions.md)
     - [Generic Types](./02-handbook/11-generics/02-generic-types.md)
@@ -128,7 +119,9 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Generic Inference](./02-handbook/11-generics/05-inference.md)
     - [Specialization](./02-handbook/11-generics/06-specialization.md)
     - [Monomorphization](./02-handbook/11-generics/07-monomorphization.md)
+    - [Variance, Recursion, and Runtime Identity](./02-handbook/11-generics/08-variance-recursion-and-runtime.md)
   - [Data Types](./02-handbook/10-data-types/README.md)
+    - [Tuples](./02-handbook/10-data-types/00-tuples.md)
     - [Records](./02-handbook/10-data-types/01-records.md)
     - [Value Classes](./02-handbook/10-data-types/02-value-classes.md)
     - [Traditional Enums](./02-handbook/10-data-types/03-traditional-enums.md)
@@ -147,6 +140,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Indexing](./02-handbook/12-collections/07-indexing.md)
     - [Slicing](./02-handbook/12-collections/08-slicing.md)
     - [Safe Collection Access](./02-handbook/12-collections/09-safe-access.md)
+    - [Collection Contracts and Complexity](./02-handbook/12-collections/10-collection-contracts-and-complexity.md)
   - [Iteration and Functional Style](./02-handbook/13-iteration-and-functional-style/README.md)
     - [`Iterable`](./02-handbook/13-iteration-and-functional-style/01-iterable.md)
     - [`Iterator`](./02-handbook/13-iteration-and-functional-style/02-iterator.md)
@@ -167,7 +161,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [`match` as an Expression](./02-handbook/14-pattern-matching/08-match-as-expression.md)
   - [Classes and Objects](./02-handbook/08-classes-and-objects/README.md)
     - [Declaring Classes](./02-handbook/08-classes-and-objects/01-declaring-classes.md)
-    - [Fields and Properties](./02-handbook/08-classes-and-objects/02-fields-and-properties.md)
+    - [Attributes and Accessor Methods](./02-handbook/08-classes-and-objects/02-fields-and-properties.md)
     - [Constructors](./02-handbook/08-classes-and-objects/03-constructors.md)
     - [Instantiation](./02-handbook/08-classes-and-objects/04-instantiation.md)
     - [`this`](./02-handbook/08-classes-and-objects/05-this.md)
@@ -246,13 +240,14 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
   - [Libraries](./03-projects/04-libraries.md)
   - [Entry Point](./03-projects/05-entry-point.md)
   - [Globals](./03-projects/06-globals.md)
-  - [Runtime Permissions](./03-projects/07-runtime-permissions.md)
-  - [Compile Permissions](./03-projects/08-compile-permissions.md)
+  - [Application Permissions](./03-projects/07-runtime-permissions.md)
+  - [Build and Runtime Permission Phases](./03-projects/08-compile-permissions.md)
   - [Library Requirements](./03-projects/09-library-requirements.md)
   - [Build Targets](./03-projects/10-build-targets.md)
   - [Dependencies](./03-projects/11-dependencies.md)
   - [Lockfile](./03-projects/12-lockfile.md)
   - [Reproducible Builds](./03-projects/13-reproducible-builds.md)
+  - [Permission Approval and Audit](./03-projects/14-permission-approval-and-audit.md)
 - [Standard Library](./04-standard-library/README.md)
   - [Common API Contracts](./04-standard-library/01-common-api-contracts.md)
   - [`std.io`](./04-standard-library/02-std-io.md)
@@ -271,6 +266,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
   - [`std.testing`](./04-standard-library/15-std-testing.md)
   - [`std.reflect`](./04-standard-library/16-std-reflect.md)
   - [`std.system`](./04-standard-library/17-std-system.md)
+  - [`std.environment`](./04-standard-library/18-std-environment.md)
 - [Native and Low-Level Programming](./05-native-and-low-level/README.md)
   - [C ABI](./05-native-and-low-level/01-c-abi.md)
   - [Importing C](./05-native-and-low-level/02-importing-c.md)

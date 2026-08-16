@@ -116,11 +116,13 @@ El parser SHALL reconocer `record`, value classes, variantes de enum con datos a
 - **WHEN** se parsea `type Id = Int32;`
 - **THEN** se produce una declaración de alias
 
-### Requirement: No hay sintaxis de tipo función
+### Requirement: Fase 3 todavía no parsea el tipo función final
 
-El parser NO SHALL reconocer una sintaxis de tipo función como `(Int32, Int32) => Int32` en posición de tipo.
+El parser de Fase 3 NO SHALL aceptar todavía la sintaxis final
+`Function(Int32, Int32) => Int32` ni su alias `Fn(Int32, Int32) => Int32`.
 
-Es la contraparte sintáctica de D9: mientras un tipo función no se pueda escribir, una closure no puede anotarse y por tanto no puede escapar. La representación actual —capturas inline, un tipo por lambda— es consecuencia de eso y **no prejuzga** cómo se escribirán ni cómo se compararán los tipos función cuando existan.
+Es una restricción temporal del compilador de Fase 3. La sintaxis, compatibilidad
+por firma y escape final ya están decididos en el checkpoint canónico.
 
 #### Scenario: Tipo función en una anotación
 - **WHEN** se parsea una anotación de tipo con la forma de una firma de función

@@ -3,14 +3,22 @@
 Exceptions represent unusual but recoverable control transfer. They are not the default mechanism for ordinary absence or validation failure.
 
 ```zirk
+fn synchronize(): Void throws NetworkError | StorageError { ... }
+
 try {
-    execute();
-} catch<HttpError> error {
-    stderr.println(error);
+    synchronize();
+} catch NetworkError(error) {
+    retry(error);
+} catch StorageError(error) {
+    report(error);
 }
 ```
 
-An exception crosses frames until a compatible handler is found, while resource and `finally` cleanup still runs. Public APIs must document exceptions callers are expected to recover from.
+An explicit `throw` must be caught or declared; public APIs write the complete
+explicit set. Built-in safety failures belong to typed `RuntimeError`
+subclasses and remain catchable without appearing in every signature. Declared
+exception sets participate in `Fn` compatibility. An exception crosses frames
+while resource and `finally` cleanup still runs.
 
 ---
 

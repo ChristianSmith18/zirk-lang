@@ -44,6 +44,12 @@ or several typed values.
 
 Two enum values are equal when they have the same variant and equal associated values. Equality can be derived only when every payload supports it. Ordering is never inferred from declaration order. Each `match` arm narrows its payload types.
 
+Algebraic enums may be generic. Their variants are ordinary typed constructors.
+The enum remains data-only: it declares no user methods. Clone and equality are
+available only when every reachable payload satisfies the corresponding
+contract. Payload extraction is legal only inside `match`; direct enum
+destructuring is deliberately rejected.
+
 ---
 
 **Previous:** [← Traditional Enums](03-traditional-enums.md) · **Next:** [ Associated Values](05-associated-values.md)

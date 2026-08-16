@@ -2,7 +2,8 @@
 
 Decorators can inspect explicitly authorized declarations and metadata through the Syntax API. Compile-time reflection is scoped to this model; general `comptime {}` is excluded from Zirk 1.x.
 
-Reflection must preserve visibility and cannot read arbitrary project files without `compile_permissions`.
+Reflection must preserve visibility and cannot read arbitrary project files
+without an application `permissions` grant marked `during: build`.
 
 ---
 

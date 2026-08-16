@@ -2,6 +2,8 @@
 
 - Use an **interface** for a behavior contract with no required reusable implementation.
 - Use a **trait** for a contract plus composable behavior.
+- Use an **abstract class** for a nominal set of required attributes and
+  abstract functions, adopted through `implements` without state or bodies.
 - Use a **class** for identity, state, construction, lifecycle, or one inheritance lineage.
 
 An interface answers “what can this value do?” A trait may also answer “what common implementation follows?” A class answers “what kind of identity-bearing object is this?”

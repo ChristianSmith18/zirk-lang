@@ -9,7 +9,9 @@ record Point {
 }
 ```
 
-Records suit messages, configuration, coordinates, and other data whose fields are the primary contract. Their construction must provide required fields with compatible types. Structural equality compares the fields defined by the record contract.
+Records suit messages, configuration, coordinates, and other data whose
+attributes are the primary contract. Construction is named-only; an omitted
+attribute receives its declared type's default.
 
 ```zirk
 inmut first = Point(x: 10.0, y: 20.0);
@@ -30,10 +32,15 @@ Records have a nominal declared type but value-oriented, structural semantics:
 two records of different declared types are not interchangeable merely because
 their fields happen to look alike.
 
+Records may define non-mutating methods that compute from their contents. They
+cannot declare a custom `construct`, mutate an attribute, inherit from a class,
+or acquire reference identity. Use an external factory returning `Result` when
+creation requires validation beyond the built-in type checks.
+
 Derived equality compares every field. Derived hashing is available only when every field is hashable and must agree with equality: equal records always hash equally. A record containing an unhashable field can still exist, but cannot derive hashing or serve as a hashed collection key.
 
 Prefer a class when observable identity, lifecycle, inheritance, or substantial encapsulated behavior is central. Prefer an algebraic enum when a value is one of several variants rather than one fixed product of fields.
 
 ---
 
-**Previous:** [← Data Types](README.md) · **Next:** [ Value Classes](02-value-classes.md)
+**Previous:** [← Tuples](00-tuples.md) · **Next:** [Value Classes →](02-value-classes.md)

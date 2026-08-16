@@ -35,6 +35,43 @@ Distributable package: `.zpkg`
 > earlier Decimal, immutable-String, code-point Char and undifferentiated Date
 > descriptions.
 
+> **Authorial core-language checkpoint — 16 August 2026.** The writable
+> callable type is `Function(P...) => R`, conventionally `Fn(P...) => R`;
+> compatible functions, lambdas and methods adapt to it and closures may escape
+> under compiler-managed storage. Assigning, passing, returning or capturing a
+> whole reference shares it, while reading an attribute, index, slice,
+> destructured component or pattern binding produces an independent deep clone;
+> the same projection used as a place mutates original storage. Zirk has
+> attributes and ordinary `get_`/`set_` methods, not properties. Abstract
+> classes are nominal requirement sets adopted through `implements`; only
+> concrete classes use `extends`. Generics support combined `from A & B`
+> constraints, defaults, declared `in`/`out` variance, recursion and managed
+> `Box<T>`. Tuples, records, data-only enums, normalized unions, exhaustive
+> guard-free matching, collection copying, `Iteration<T>` and Python-shaped
+> omitted slice components follow the detailed language specification. These
+> are final language semantics even when delivery belongs to a later phase.
+
+> **Authorial failure, resource, and permission checkpoint — 16 August 2026.**
+> `Result<T,E>` is mandatory for expected failure; explicit exceptions are
+> checked through `throws`, while typed implicit `RuntimeError` safety failures
+> remain catchable without signature noise. Pattern-shaped `catch`, exact
+> rethrow, immutable throwable identity, causes, suppressed failures, and lazy
+> traces are final. `match with` closes `Resource<E>` exactly once, composes
+> body/close failures, and permits only explicit safe transfer. Libraries use
+> `requires`, applications use `permissions`, and `during` separates build from
+> runtime authority. Consent is a signed external record bound to project name
+> and canonical location plus exact requester fingerprints; manifest edits do
+> not grant authority. Validation is incremental and reapproval follows any
+> permission widening, requester update, project rename, or project move.
+
+Contributors implementing these decisions must next read the consolidated
+[`CORE_LANGUAGE_SEMANTICS.md`](CORE_LANGUAGE_SEMANTICS.md) checkpoint before
+consulting phase plans or historical inventories.
+
+Then read [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md)
+before implementing failures, cleanup, external effects, manifests, packages,
+or permission tooling.
+
 > **Language of this document.** Every normative specification, and the codebase
 > itself, is written in English. See
 > [decisions/ADR-006-language-of-the-codebase.md](./decisions/ADR-006-language-of-the-codebase.md).
@@ -141,8 +178,8 @@ fn main(): Void {
 
 ## 6. Foundational contracts
 
-- Every value semantically belongs to a class; simple values may be represented
-  inline.
+- Every value belongs under the conceptual `Object` root; simple values may be
+  represented inline without becoming heap objects.
 - On references, `mut` permits reassignment and referent mutation, `inmut`
   prevents reassignment but permits referent mutation, and `inmut::strict`
   requires deep immutability and forbids mutable aliases to the same referent.
@@ -166,19 +203,24 @@ fn main(): Void {
 - All arrays have fixed length; `List<T>` is the resizable sequence.
 - A class field without modifiers is `public mut`; constructors may have
   distinct signatures although ordinary functions remain non-overloaded.
+- Whole references alias; projections read as values deep-clone, while
+  projections used as assignment places retain direct access to storage.
 
 ## 7. Distribution and security
 
 An `application` may declare globals and grants the final permissions. A
-`library` cannot declare globals; it declares `requires` and
-`compile_permissions`. Packages include a typed public API, a portable
+`library` cannot declare globals; it declares `requires`. The application uses
+`permissions` with per-operation `during: build | runtime | both`. Packages include a typed public API, a portable
 intermediate representation, a manifest, documentation and a license. In the
 final build, every piece is compiled for the same target.
 
-Permissions are finite capabilities declared in `init.zrk`. `zirk prepare`
-audits and may propose changes; `zirk build` is strict and grants no permissions
-interactively. Tokens and secrets are never stored in `init.zrk` or in
-`zirk.lock`.
+Permissions are finite capabilities declared in `init.zrk`, but declaration is
+not consent. A signed external approval binds exact authority/requesters to the
+project name and canonical location. Trusted interactive commands may show and
+apply a narrow manifest diff only after explicit consent; unchanged signed
+fingerprints take an incremental fast path. CI is noninteractive and deployed
+programs never prompt. Tokens and secret values are never stored in `init.zrk`,
+`zirk.lock`, diagnostics, or approval history.
 
 ## 8. Completeness criterion
 

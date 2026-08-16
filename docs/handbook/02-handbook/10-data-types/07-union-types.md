@@ -17,6 +17,11 @@ Before narrowing, only members and operators valid for every alternative with a 
 
 Prefer an enum when alternatives form one owned closed domain with meaningful case names or payloads. Use a union when existing types themselves are the alternatives.
 
+The compiler normalizes unions: member order is irrelevant, duplicates are
+removed, subsumed alternatives collapse, and `Never` disappears when another
+member exists. Diagnostics print the canonical form so equivalent unions do
+not look different because they were written in another order.
+
 ---
 
 **Previous:** [← Type Aliases](06-type-aliases.md) · **Next:** [ Class, Record, or Value Class?](08-class-record-value-class.md)

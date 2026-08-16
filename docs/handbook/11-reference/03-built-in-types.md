@@ -14,6 +14,8 @@ This catalog is the quick lookup for Zirk's compiler-known types. For semantics 
 | Text | `String` | mutable, shared reference; grapheme-indexed | `""` |
 | Temporal values | `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`, `Period` | immutable value types; nanosecond precision where applicable | type-specific or explicit |
 | Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Range<T>` | native reference containers except value-like `Range` | empty where meaningful |
+| Callable | `Function(P...) => R`; `Fn(P...) => R` | signature-compatible callable identity with compiler-managed environment | no implicit default |
+| Product | `Tuple(T...)` | immutable heterogeneous value with constant `[]` access | component defaults where explicitly constructed |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
 `Decimal*` is not a Zirk type family. Exact base-ten arithmetic may later be supplied as a distinct standard-library type; it must not be confused with `Float`.
@@ -21,6 +23,10 @@ This catalog is the quick lookup for Zirk's compiler-known types. For semantics 
 ## Domain types
 
 User programs add nominal reference `class` types, immutable structural `record` values, nominal inline `value class` values, traditional and algebraic `enum` values, aliases, and unions. These are not compiler primitives, but all belong under the conceptual `Object` root.
+
+Complete reference variables alias when moved. Reads through an attribute,
+index, slice, destructuring, pattern, iterator, argument, return, or closure
+capture are independent projections and require `Clone` when reference-backed.
 
 ## Universal and conditional members
 

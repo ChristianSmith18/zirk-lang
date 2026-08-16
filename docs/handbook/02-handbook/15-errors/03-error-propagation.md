@@ -11,6 +11,11 @@ return match load(path) {
 
 Translate errors at abstraction boundaries when callers need domain meaning; preserve the original cause for diagnostics where safe.
 
+There is no automatic conversion between `Result.Error` and a thrown
+exception. Use `or_throw` with an explicit mapper when a boundary needs that
+change. A callback passed to `map`, `and_then`, or another combinator preserves
+its declared `throws`; the combinator does not absorb the exception into `E`.
+
 ---
 
 **Previous:** [← Handling Result](02-handling-result.md) · **Next:** [ Exceptions](04-exceptions.md)

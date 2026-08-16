@@ -6,4 +6,4 @@ Reproducibility does not mean one binary works on every platform; each target re
 
 ---
 
-**Previous:** [← Lockfile](12-lockfile.md) · **Next:** [ Standard Library](../04-standard-library/README.md)
+**Previous:** [← Lockfile](12-lockfile.md) · **Next:** [Permission Approval and Audit →](14-permission-approval-and-audit.md)

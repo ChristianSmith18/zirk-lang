@@ -116,11 +116,15 @@ El chequeador SHALL resolver un operador buscando el contrato que su tipo implem
 - **WHEN** un operando no implementa el contrato del operador
 - **THEN** el diagnóstico nombra el contrato que falta, no una lista de tipos admitidos
 
-### Requirement: Los tipos función no se escriben todavía
+### Requirement: La sintaxis final de tipos función no se entrega en Fase 3
 
-El chequeador SHALL rechazar cualquier posición que exija anotar el tipo de una closure —parámetro, retorno o campo— con un diagnóstico que indique que los tipos función llegan en una fase posterior.
+El chequeador de Fase 3 SHALL rechazar cualquier posición que exija anotar el
+tipo de una closure —parámetro, retorno o atributo— con un diagnóstico que
+indique que `Function(P...) => R` / `Fn(P...) => R` llega en una fase posterior.
 
-Un lambda sigue siendo un valor cuyo tipo se infiere y es nominal por expresión, tal como fijó D10 de la fase anterior y confirma D9 de esta. Que no se puedan escribir es lo que mantiene a una closure sin escapar de la función que la crea, y con ello evita decidir dónde vive y cuánto dura su entorno — una decisión de memoria, que corresponde a la Fase 4.
+Este es un límite de implementación, no la semántica final. El lenguaje ya
+define compatibilidad por firma, closures escapables y almacenamiento
+automático conforme a `docs/CORE_LANGUAGE_SEMANTICS.md`.
 
 #### Scenario: Closure en una variable local
 - **WHEN** se declara `inmut F = (a: Int32): Int32 => a + 1;` y se llama `F(1)`
@@ -136,8 +140,8 @@ Un lambda sigue siendo un valor cuyo tipo se infiere y es nominal por expresión
 - **WHEN** una función declara devolver una closure
 - **THEN** se emite el mismo diagnóstico
 
-#### Scenario: Closure como tipo de campo
-- **WHEN** una clase declara un campo cuyo tipo pretende ser una función
+#### Scenario: Closure como tipo de atributo
+- **WHEN** una clase declara un atributo cuyo tipo pretende ser una función
 - **THEN** se emite el mismo diagnóstico
 
 #### Scenario: Retornar una closure creada localmente

@@ -9,7 +9,14 @@ match load(path) {
 }
 ```
 
-Expression form can convert both outcomes into one value. Exhaustiveness prevents errors from being silently ignored. If an API intentionally discards a result, the linter may warn because ignored failure is usually a defect.
+Expression form can convert both outcomes into one value. Exhaustiveness
+prevents errors from being silently ignored. A `Result` expression used as an
+ordinary discarded statement is a compile-time error:
+
+```zirk
+load(path);     // error: Result not handled
+_ = load(path); // explicit discard; linter may request justification
+```
 
 ---
 

@@ -20,23 +20,28 @@ parameter. `this.` is needed only for this collision; an unambiguous capture is
 read directly by name. Within a class lambda, member resolution remains tied to
 the surrounding instance and the compiler diagnoses any ambiguous use.
 
-Capturing stable immutable data is straightforward. Capturing mutable state into concurrent work can require synchronization or be rejected when safety cannot be proven. A resource cannot escape its `match with` lifetime indirectly through a closure.
+Immutable captured values are snapshots. Capturing a complete reference shares
+its referent, while capturing an attribute, index, slice, or other projection
+makes an independent deep snapshot. If a closure writes a captured binding, the
+compiler lifts that binding into one shared cell observed by all closures that
+capture it. Closures may escape; the compiler chooses stack, inline, or managed
+storage without changing these rules. Concurrent mutable capture can require
+synchronization or be rejected. A resource cannot escape its `match with`
+lifetime indirectly through a closure.
 
 The compiler chooses closure representation; capture behavior is observable semantics and cannot change because of optimization.
 
-Methods can be cloned into a local callable value together with their bound
-receiver:
+Methods can be stored as callable values together with their bound receiver:
 
 ```zirk
-inmut print = clone(stdout.println);
+mut print: Fn(String) => Void = stdout.println;
 print("Hello");
 ```
 
-`print` retains the same parameter, return, error, effect, and permission
-contract as `stdout.println`, and it remains bound to `stdout`. `clone` here
-copies the callable value; it does not clone the stream object or its external
-handle. A method that cannot form a safe callable value is diagnosed rather
-than partially copied.
+`print` remains bound to `stdout`; `mut` permits rebinding the variable.
+Assigning it shares callable identity and environment. Calling `clone()` on a
+callable instead deep-clones its captured environment when all parts are
+cloneable. Callables compare identity with `is` and do not support `==`.
 
 ---
 

@@ -8,9 +8,19 @@ fn render<T from Display>(value: T): String {
 }
 ```
 
+Join multiple constraints with `&`:
+
+```zirk
+fn stable_key<T from Hashable & Equatable & Clone>(value: T): T {
+    return value;
+}
+```
+
 A call with a type that does not satisfy `Display` fails at the call site with the missing contract. The implementation cannot call operations outside the declared constraint merely because current callers happen to provide them.
 
-> **Specification status:** The historical inventory names `from` constraints. Exact complete grammar must remain aligned with the final generic grammar as it is formalized.
+A constraint may be an interface, trait, abstract requirement class, concrete
+base, or native contract. Failure diagnostics identify the chosen argument and
+every missing requirement at the call site.
 
 ---
 

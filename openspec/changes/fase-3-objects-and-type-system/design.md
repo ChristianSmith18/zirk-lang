@@ -112,23 +112,36 @@ D3 de la Fase 2 acotó `for ... in` a rangos y `String` porque no había traits,
 
 `Iterable<T>` e `Iterator<T>` se definen como contratos del lenguaje, y `for x in e` pasa a exigir que el tipo de `e` implemente `Iterable<T>`. Los rangos y `String` dejan de ser casos especiales del compilador y pasan a implementarlo, que es lo que hace que un tipo del usuario sea indistinguible de uno del lenguaje en un `for`.
 
-### D9 — Los tipos función siguen sin sintaxis, así que D10 de la Fase 2 sigue vigente toda esta fase
+### D9 — La Fase 3 no entrega todavía la sintaxis final de tipos función
 
 Era la pregunta abierta con la que arrancó el design, y se resuelve antes de escribir código porque condiciona qué se puede hacer con una closure.
 
-**No se introduce sintaxis de tipo función.** Nada como `(Int32, Int32) => Int32` aparece en esta fase. Un lambda sigue siendo un valor cuyo tipo se infiere y es **nominal por expresión**: cada lambda tiene el suyo, tal como D10 de la Fase 2 lo estableció.
+**Límite de implementación de esta fase.** La sintaxis final aceptada es
+`Function(P...) => R`, con alias preferido `Fn(P...) => R`, compatibilidad por
+firma y closures escapables con almacenamiento automático. Fase 3 todavía no
+la implementa: su parser y checker rechazan la anotación con un diagnóstico de
+disponibilidad de fase. El rechazo no constituye semántica final ni hace
+nominal por expresión al tipo futuro.
 
 En consecuencia, durante toda la Fase 3 una closure:
 
 - **puede** guardarse en una variable local cuyo tipo se infiere;
 - **puede** invocarse dentro del alcance donde su tipo concreto se conoce;
 - **no puede** anotarse como tipo de parámetro, de retorno ni de campo;
-- **no puede** escapar de la función que la crea;
-- conserva sus capturas inline, sin entorno con vida propia.
+- **no puede todavía** escapar de la función que la crea en el compilador de
+  Fase 3;
+- conserva temporalmente sus capturas inline, sin prejuzgar la representación
+  automática final.
 
 **Por qué no ahora.** Introducir la sintaxis convertiría las closures en valores intercambiables por firma: se podrían guardar en objetos, retornar y recibir como argumento. Eso obliga a decidir **dónde vive el entorno y cuánto dura**, que es una decisión de memoria, y las decisiones de memoria son de la Fase 4 (ADR-003). Sería adelantar exactamente lo que D1 de esta fase se cuida de no adelantar.
 
-**Qué NO queda decidido por esto.** La representación actual —capturas inline, un tipo por lambda— es una consecuencia de que no puedan escapar, **no un argumento sobre cómo deberían escribirse o compararse los tipos función cuando existan**. La sintaxis futura y la compatibilidad entre closures quedan abiertas; que hoy dos lambdas de la misma firma no sean intercambiables no prejuzga que no debieran serlo cuando haya con qué expresarlo.
+**Semántica ya decidida fuera del alcance de entrega.** Las funciones, lambdas,
+métodos compatibles y objetos invocables se adaptan al tipo `Fn`; las closures
+pueden escapar; los parámetros son contravariantes y los retornos covariantes;
+la identidad usa `is`; y la asignación comparte el entorno mientras `clone()`
+lo copia profundamente. La fase posterior que implemente esta superficie debe
+seguir el checkpoint canónico, no inferir reglas desde la limitación temporal
+de Fase 3.
 
 Usar un lambda donde se exige una anotación de tipo produce un diagnóstico que dice que los tipos función pertenecen a una fase posterior, y no "tipo desconocido".
 
@@ -144,7 +157,11 @@ grafo alcanzable. Una referencia strict no produce aliases mutables ni puede
 adquirirse desde un alias mutable todavía accesible; `clone()` crea una copia
 lógica independiente cuando el contrato existe. Fase 3 aplica esta regla a los
 objetos y contratos que introduce; la estrategia concreta de análisis y memoria
-sigue perteneciendo a las fases correspondientes.
+sigue perteneciendo a las fases correspondientes. Solo mover la variable
+completa comparte referencia. Leer un atributo, índice, slice, componente
+desestructurado o binding de patrón produce una copia lógica profunda e
+independiente; la misma ruta usada como place sí muta el almacenamiento
+original. Una proyección de referencia exige `Clone`.
 
 ## Risks / Trade-offs
 

@@ -1,16 +1,21 @@
 # Typed `catch`
 
-`catch<Type> name` handles a compatible exception and narrows the binding to that type.
+`catch Type(binding)` uses the same guard-free pattern model as `match` and
+narrows the binding to the selected throwable type or variant.
 
 ```zirk
-catch<HttpError> error {
-    retry(error.retry_after);
-} default error {
+catch HttpError.Timeout(duration) {
+    retry_after(duration);
+} catch Throwable(error) {
     report(error);
 }
 ```
 
-Place specific recovery before a default handler. A handler should recover, translate, or rethrow deliberately; swallowing an exception without restoring invariants is unsafe.
+Explicit declared exceptions must be caught exhaustively or propagated. Place
+specific recovery before a general handler; an unreachable catch is a compile
+error. `catch Throwable(error)` catches all recoverable throwables and `catch
+RuntimeError(error)` only implicit safety failures. A handler recovers,
+translates, or uses exact `throw;` deliberately.
 
 ---
 

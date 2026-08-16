@@ -17,6 +17,28 @@ String is the simplest visible reference example: assigning it shares one
 mutable instance, while `clone()` creates independent content. Temporal values,
 records and value classes are value-semantic and expose no `is` identity.
 
+## Whole references, projections, and places
+
+Whole-reference assignment, argument passing, returning, and closure capture
+share the referent. Reading inside a reference—an attribute, index, slice,
+destructured component, pattern binding, projected argument, projected return,
+or projected capture—creates an independent logical value. A reference-backed
+projection is deeply cloned and must satisfy `Clone`.
+
+```zirk
+mut users = [User(name: "Ada")]
+mut alias = users              // shares the whole list
+mut first = users[0]           // independent projected User
+users[0].name = "Grace"        // place write changes users and alias
+stdout.println(first.name)     // Ada
+```
+
+The same expression can be a read or a place. On the left of assignment,
+`users[0].name` retains its path and mutates original storage. When read, it is
+a projection. The rule is transitive and generic extraction APIs must declare
+`Clone` whenever they return an independent reference-backed result. An
+explicit documented view is the only way to share a subregion.
+
 ---
 
 **Previous:** [← Shadowing](08-shadowing.md) · **Next:** [ Everyday Types](../03-everyday-types/README.md)
