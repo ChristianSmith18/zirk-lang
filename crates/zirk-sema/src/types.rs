@@ -160,10 +160,10 @@ impl Type {
     /// resolves them against its own table.
     ///
     /// `Int` and `Integer` resolve here rather than being deferred, because an
-    /// alias *is* its target: both name `Int32`, which has existed since Phase
-    /// 1. Deferring them deferred a spelling, not a capability. After
-    /// resolution nothing distinguishes them, which is what being an alias
-    /// means. `UInt` is not here because `UInt32` is not implemented.
+    /// alias *is* its target: both name `Int32`, which has existed since the
+    /// first phase. Deferring them deferred a spelling, not a capability, and
+    /// after resolution nothing distinguishes them — which is what being an
+    /// alias means. `UInt` is not here because `UInt32` is not implemented.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "Void" => Type::VOID,

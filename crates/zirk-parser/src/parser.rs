@@ -320,6 +320,7 @@ impl<'a> Parser<'a> {
         let mut imports = Vec::new();
         let mut uses = Vec::new();
         let mut enums = Vec::new();
+        let mut classes = Vec::new();
         let mut functions = Vec::new();
 
         while !self.at_eof() {
@@ -358,6 +359,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if self.check_keyword(Keyword::Class) {
+                if let Some(c) = self.parse_class(shared_at.is_some()) {
+                    classes.push(c);
+                }
+                continue;
+            }
+
             if self.report_if_from_another_phase() {
                 continue;
             }
@@ -367,12 +375,12 @@ impl<'a> Parser<'a> {
             let (cause, help) = if shared_at.is_some() {
                 (
                     format!("found {found} after `share`"),
-                    "`share` applies to a `fn` or an `enum`",
+                    "`share` applies to a `fn`, an `enum` or a `class`",
                 )
             } else {
                 (
                     format!("found {found} at the top level of the file"),
-                    "a file contains `import`, `use`, `enum` and `fn` declarations",
+                    "a file contains `import`, `use`, `enum`, `class` and `fn` declarations",
                 )
             };
             self.error(
@@ -393,6 +401,7 @@ impl<'a> Parser<'a> {
             imports,
             uses,
             enums,
+            classes,
             functions,
             span: start.to(end),
         }
@@ -508,6 +517,213 @@ impl<'a> Parser<'a> {
     /// `enum Direction { North, South }`
     ///
     /// Without associated data: that is Phase 3, per decision D1.
+    /// `class User { fields, constructs and methods }`
+    ///
+    /// The three kinds of member are told apart by what starts them: the
+    /// `construct` keyword, a `fn`, or anything else — which is a field.
+    fn parse_class(&mut self, shared: bool) -> Option<ClassDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Class);
+
+        let name = self.expect_identifier("after `class`")?;
+        self.expect(&TokenKind::LBrace, "after the class name");
+
+        let mut fields = Vec::new();
+        let mut constructors = Vec::new();
+        let mut methods = Vec::new();
+
+        while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
+            let Some(member) = self.parse_class_member() else {
+                self.synchronize_member();
+                continue;
+            };
+            match member {
+                ClassMember::Field(f) => fields.push(f),
+                ClassMember::Construct(c) => constructors.push(c),
+                ClassMember::Method(m) => methods.push(m),
+            }
+        }
+
+        let end = self.peek_span();
+        self.expect(&TokenKind::RBrace, "to close the class body");
+
+        Some(ClassDecl {
+            name,
+            fields,
+            constructors,
+            methods,
+            shared,
+            span: start.to(end),
+        })
+    }
+
+    /// One member of a class body.
+    fn parse_class_member(&mut self) -> Option<ClassMember> {
+        let start = self.peek_span();
+
+        // The modifiers come first and apply to whatever follows.
+        let visibility = self.parse_visibility();
+
+        // `abstract` needs the inheritance it constrains, which this slice of
+        // the phase does not have yet.
+        if self.check_keyword(Keyword::Abstract) && self.report_if_from_another_phase() {
+            return None;
+        }
+        let is_abstract = false;
+
+        if self.check_keyword(Keyword::Construct) {
+            return self
+                .parse_construct(visibility.unwrap_or(Visibility::Public), start)
+                .map(ClassMember::Construct);
+        }
+
+        if self.check_keyword(Keyword::Fn) {
+            return self
+                .parse_method(visibility.unwrap_or(Visibility::Public), is_abstract, start)
+                .map(ClassMember::Method);
+        }
+
+        self.parse_field(visibility, start).map(ClassMember::Field)
+    }
+
+    /// `public`, `private` or `protected`, if one is written.
+    fn parse_visibility(&mut self) -> Option<Visibility> {
+        let visibility = match self.peek() {
+            TokenKind::Keyword(Keyword::Public) => Visibility::Public,
+            TokenKind::Keyword(Keyword::Private) => Visibility::Private,
+            TokenKind::Keyword(Keyword::Protected) => Visibility::Protected,
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(visibility)
+    }
+
+    /// A field: `[visibility] [mut|inmut] name: Type;`
+    ///
+    /// Writing neither modifier means `public mut`
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 7). Both spellings produce the same
+    /// member; only the flag remembers which was written.
+    fn parse_field(&mut self, visibility: Option<Visibility>, start: Span) -> Option<FieldDecl> {
+        let mutability = match self.peek() {
+            TokenKind::Keyword(Keyword::Mut) => {
+                self.pos += 1;
+                Some(Mutability::Mutable)
+            }
+            TokenKind::Keyword(Keyword::Inmut) => {
+                self.pos += 1;
+                Some(Mutability::Immutable)
+            }
+            _ => None,
+        };
+
+        let name = self.expect_identifier("as the name of a field")?;
+        self.expect(&TokenKind::Colon, "after the field name");
+        let ty = self.parse_type()?;
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(FieldDecl {
+            name,
+            ty,
+            visibility: visibility.unwrap_or(Visibility::Public),
+            mutability: mutability.unwrap_or(Mutability::Mutable),
+            explicit_modifiers: visibility.is_some() || mutability.is_some(),
+            span: start.to(end),
+        })
+    }
+
+    fn parse_construct(&mut self, visibility: Visibility, start: Span) -> Option<ConstructDecl> {
+        self.eat_keyword(Keyword::Construct);
+
+        self.expect(&TokenKind::LParen, "after `construct`");
+        let params = self.parse_params();
+        self.expect(&TokenKind::RParen, "to close the parameter list");
+        let body = self.parse_block()?;
+        let span = start.to(body.span);
+
+        Some(ConstructDecl {
+            params,
+            body,
+            visibility,
+            span,
+        })
+    }
+
+    fn parse_method(
+        &mut self,
+        visibility: Visibility,
+        is_abstract: bool,
+        start: Span,
+    ) -> Option<MethodDecl> {
+        self.eat_keyword(Keyword::Fn);
+
+        let name = self.expect_identifier("after `fn`")?;
+        self.expect(&TokenKind::LParen, "after the method name");
+        let params = self.parse_params();
+        self.expect(&TokenKind::RParen, "to close the parameter list");
+        let return_type = self.parse_return_type(&name)?;
+
+        // An `abstract` method declares a signature and stops there.
+        let body = if is_abstract {
+            let end = self.peek_span();
+            if matches!(self.peek(), TokenKind::LBrace) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    end,
+                    "an `abstract` method has no body",
+                    "it declares the signature its subclasses must implement",
+                    Some("remove the body, or remove `abstract`".into()),
+                );
+                return None;
+            }
+            self.eat(&TokenKind::Semicolon);
+            None
+        } else {
+            Some(self.parse_block()?)
+        };
+
+        let end = body.as_ref().map(|b| b.span).unwrap_or(name.span);
+
+        Some(MethodDecl {
+            name,
+            params,
+            return_type,
+            body,
+            visibility,
+            is_abstract,
+            span: start.to(end),
+        })
+    }
+
+    /// Skips to the end of a class member after an error inside one.
+    fn synchronize_member(&mut self) {
+        let mut depth = 0usize;
+        while !self.at_eof() {
+            match self.peek() {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                TokenKind::RBrace => {
+                    if depth == 0 {
+                        // It closes the class body, which the caller consumes.
+                        return;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                TokenKind::Semicolon if depth == 0 => {
+                    self.pos += 1;
+                    return;
+                }
+                _ => self.pos += 1,
+            }
+        }
+    }
+
     fn parse_enum(&mut self, shared: bool) -> Option<EnumDecl> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Enum);
@@ -563,24 +779,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
-        // The return type is mandatory in this phase.
-        let return_type = if self.eat(&TokenKind::Colon) {
-            self.parse_type()?
-        } else {
-            let span = self.peek_span();
-            self.error(
-                codes::MISSING_RETURN_TYPE,
-                span,
-                "missing return type on function",
-                "every function declares its return type",
-                Some(format!(
-                    "write `fn {}(...): Void` if the function returns nothing",
-                    name.name
-                )),
-            );
-            self.synchronize();
-            return None;
-        };
+        let return_type = self.parse_return_type(&name)?;
 
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -593,6 +792,27 @@ impl<'a> Parser<'a> {
             shared,
             span,
         })
+    }
+
+    /// The mandatory return type of a function or method.
+    fn parse_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
+        if self.eat(&TokenKind::Colon) {
+            return self.parse_type();
+        }
+
+        let span = self.peek_span();
+        self.error(
+            codes::MISSING_RETURN_TYPE,
+            span,
+            "missing return type on function",
+            "every function declares its return type",
+            Some(format!(
+                "write `fn {}(...): Void` if the function returns nothing",
+                name.name
+            )),
+        );
+        self.synchronize();
+        None
     }
 
     /// Parameters, with the optional, default and variadic forms of
@@ -1150,12 +1370,12 @@ impl<'a> Parser<'a> {
             let end = self.peek_span();
             self.eat(&TokenKind::Semicolon);
 
-            let Expr::Path(target) = expr else {
+            let Some(target) = as_assignable(&expr) else {
                 self.error(
                     codes::UNEXPECTED_TOKEN,
                     start,
-                    "the left-hand side of an assignment must be a variable",
-                    "only a name can be assigned to",
+                    "the left-hand side of an assignment must be a place",
+                    "only a name or a field names storage that can be written",
                     None,
                 );
                 return None;
@@ -1180,13 +1400,18 @@ impl<'a> Parser<'a> {
     /// Builds the `target = target <op> value` that a compound form stands for.
     fn desugar_compound(
         &mut self,
-        target: Ident,
+        target: AssignTarget,
         op: BinaryOp,
         value: Expr,
         op_span: Span,
         span: Span,
     ) -> Stmt {
-        let read = Expr::Path(target.clone());
+        // The place is read and written once each, in that order, which is
+        // what the compound form means.
+        let read = match &target {
+            AssignTarget::Name(ident) => Expr::Path(ident.clone()),
+            AssignTarget::Field(field) => Expr::Field(field.clone()),
+        };
         let combined = Expr::Binary(BinaryExpr {
             op,
             span: read.span().to(value.span()),
@@ -1551,8 +1776,9 @@ impl<'a> Parser<'a> {
         if let Some(op) = increment_op(self.peek()) {
             let op_span = self.peek_span();
             self.pos += 1;
-            let target = self.expect_identifier("after the increment operator")?;
-            let span = start.to(target.span);
+            let name = self.expect_identifier("after the increment operator")?;
+            let span = start.to(name.span);
+            let target = AssignTarget::Name(name);
             return Some(Expr::Increment(IncrementExpr {
                 target,
                 op,
@@ -1594,7 +1820,10 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        let expr = self.parse_primary()?;
+        // Member access binds tighter than everything else (level 1 of the
+        // operator table), so it is applied to the primary before anything.
+        let primary = self.parse_primary()?;
+        let expr = self.parse_member_chain(primary)?;
 
         // `i++` and `i--` in value position: the expression is the previous
         // value and the operand is updated afterwards.
@@ -1660,6 +1889,10 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Null) => {
                 self.pos += 1;
                 Some(Expr::Null(NullLit { span }))
+            }
+            TokenKind::Keyword(Keyword::This) => {
+                self.pos += 1;
+                Some(Expr::This(ThisExpr { span }))
             }
             TokenKind::LParen => {
                 self.pos += 1;
@@ -1730,33 +1963,6 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // `?.` needs a member to access, and no type of this phase has
-        // members. Decision D8.
-        if matches!(self.peek(), TokenKind::QuestionDot) {
-            let span = self.peek_span();
-            self.error(
-                codes::NOT_IMPLEMENTED,
-                span,
-                "`?.` is not implemented yet",
-                "safe access needs a type with members, and classes arrive in Phase 3",
-                Some("`T?` and `??` do work in this phase".into()),
-            );
-            self.synchronize();
-            return None;
-        }
-
-        // `Direction.North` names a variant. Only an enum is reachable this
-        // way in this phase: no other type has anything after a `.`.
-        if matches!(self.peek(), TokenKind::Dot) {
-            self.pos += 1;
-            let variant = self.expect_identifier("after the enum name")?;
-            return Some(Expr::Variant(VariantExpr {
-                span: ident.span.to(variant.span),
-                enum_name: ident,
-                variant,
-            }));
-        }
-
         if matches!(self.peek(), TokenKind::LParen) {
             let args = self.parse_args()?;
             let end = self.peek_span();
@@ -1770,6 +1976,31 @@ impl<'a> Parser<'a> {
         }
 
         Some(Expr::Path(ident))
+    }
+
+    /// `.name` and `?.name` chains hanging off an already-parsed expression.
+    ///
+    /// `Direction.North` and `user.name` are the same shape, and telling them
+    /// apart means knowing whether `Direction` is a type or a value — which is
+    /// resolution, not parsing. Both produce a field access and the checker
+    /// decides which one it is.
+    fn parse_member_chain(&mut self, mut object: Expr) -> Option<Expr> {
+        loop {
+            let safe = match self.peek() {
+                TokenKind::Dot => false,
+                TokenKind::QuestionDot => true,
+                _ => return Some(object),
+            };
+            self.pos += 1;
+
+            let name = self.expect_identifier("after the access operator")?;
+            object = Expr::Field(FieldExpr {
+                span: object.span().to(name.span),
+                object: Box::new(object),
+                name,
+                safe,
+            });
+        }
     }
 
     /// The argument list of a call, positional or named.
@@ -1813,10 +2044,14 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The assignment target an expression stands for, if it is a plain name.
-fn as_assignable(expr: &Expr) -> Option<Ident> {
+/// The place an expression names, if it names one.
+///
+/// A safe access is not a place: `a?.b = 1` would have to mean something when
+/// `a` is absent, and there is no answer that is not a silent no-op.
+fn as_assignable(expr: &Expr) -> Option<AssignTarget> {
     match expr {
-        Expr::Path(ident) => Some(ident.clone()),
+        Expr::Path(ident) => Some(AssignTarget::Name(ident.clone())),
+        Expr::Field(field) if !field.safe => Some(AssignTarget::Field(field.clone())),
         _ => None,
     }
 }
@@ -1845,6 +2080,17 @@ fn increment_op(kind: &TokenKind) -> Option<IncrementOp> {
 /// The literal `1` that `++` and `--` add or subtract.
 fn one(span: Span) -> Expr {
     Expr::Int(IntLit { value: 1, span })
+}
+
+/// One parsed member of a class body, before it is filed by kind.
+///
+/// It exists only inside the parser: the tree keeps the three kinds in
+/// separate lists, because everything downstream looks up fields,
+/// constructors and methods separately and never in declaration order.
+enum ClassMember {
+    Field(FieldDecl),
+    Construct(ConstructDecl),
+    Method(MethodDecl),
 }
 
 /// Binary operator and its precedence level.

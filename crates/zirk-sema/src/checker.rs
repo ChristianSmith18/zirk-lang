@@ -38,6 +38,13 @@ pub struct CheckedProgram {
     /// Lowering compares against a discriminant for enums and against the value
     /// itself otherwise, and that choice is made here.
     pub matches: HashMap<Span, Type>,
+    /// Member accesses that turned out to be enum variants, by their span.
+    ///
+    /// `Direction.North` and `user.name` are the same shape to the parser, and
+    /// which one it is depends on whether the base names a type or a value.
+    /// Recording the answer here means lowering resolves it once, here, rather
+    /// than repeating the decision with the same tables.
+    pub variant_accesses: std::collections::HashSet<Span>,
 }
 
 /// What the checker learned about one lambda.
@@ -91,6 +98,7 @@ struct Checker<'a> {
     fn_types: Vec<FnType>,
     lambdas: HashMap<Span, LambdaInfo>,
     matches: HashMap<Span, Type>,
+    variant_accesses: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Use sites whose written name differs from the declaration's.
@@ -116,6 +124,7 @@ impl<'a> Checker<'a> {
             fn_types: Vec::new(),
             lambdas: HashMap::new(),
             matches: HashMap::new(),
+            variant_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
@@ -170,6 +179,17 @@ impl<'a> Checker<'a> {
             self.declare_function(f);
         }
 
+        // Classes parse but are not checked yet. Reporting them is what keeps
+        // an unverified class body from reaching lowering, which would then
+        // meet constructs no rule ever looked at.
+        for c in &program.classes {
+            self.not_checked(
+                c.name.span,
+                &format!("`class {}`", c.name.name),
+                "its members, constructors and instances are checked in the next slice of this phase",
+            );
+        }
+
         self.check_entrypoint(program);
 
         self.scopes.push();
@@ -184,6 +204,7 @@ impl<'a> Checker<'a> {
             fn_types: self.fn_types,
             lambdas: self.lambdas,
             matches: self.matches,
+            variant_accesses: self.variant_accesses,
             aliases: self.aliases,
         }
     }
@@ -733,12 +754,23 @@ impl<'a> Checker<'a> {
     fn check_assign(&mut self, stmt: &AssignStmt) {
         let value = self.check_expr(&stmt.value);
 
-        let Some(target) = self.require_writable(&stmt.target) else {
+        let AssignTarget::Name(name) = &stmt.target else {
+            // Writing a field needs the member rules, which land with the
+            // class checking of the next slice.
+            self.not_checked(
+                stmt.target.span(),
+                "assigning to a field",
+                "writing a member needs a type with members",
+            );
+            return;
+        };
+
+        let Some(target) = self.require_writable(name) else {
             return;
         };
 
         self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
-        self.scopes.mark_initialized(&stmt.target.name);
+        self.scopes.mark_initialized(&name.name);
     }
 
     /// Resolves a name that is about to be written to, reporting why it cannot
@@ -996,6 +1028,13 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
             Expr::If(e) => self.check_if_expr(e),
+            Expr::This(e) => {
+                // `this` only means something inside a class body, and class
+                // bodies are not checked yet.
+                self.not_checked(e.span, "`this`", "it names the instance a method runs on");
+                Type::UNKNOWN
+            }
+            Expr::Field(e) => self.check_field(e),
             Expr::Ternary(e) => self.check_ternary(e),
             Expr::Increment(e) => self.check_increment(e),
             Expr::Match(e) => self.check_match(e, true),
@@ -1268,7 +1307,16 @@ impl<'a> Checker<'a> {
     /// assignment does. Which value they produce is a lowering concern
     /// (`LANGUAGE_SPEC` section 4); the type is the same either way.
     fn check_increment(&mut self, expr: &IncrementExpr) -> Type {
-        let Some(ty) = self.require_writable(&expr.target) else {
+        let AssignTarget::Name(name) = &expr.target else {
+            self.not_checked(
+                expr.target.span(),
+                "incrementing a field",
+                "writing a member needs a type with members",
+            );
+            return Type::UNKNOWN;
+        };
+
+        let Some(ty) = self.require_writable(name) else {
             return Type::UNKNOWN;
         };
 
@@ -1278,7 +1326,7 @@ impl<'a> Checker<'a> {
                 codes::TYPE_MISMATCH,
                 expr.op_span,
                 format!("`{}` requires a number", expr.op.as_str()),
-                format!("`{}` has type {found}", expr.target.name),
+                format!("`{}` has type {found}", expr.target.name()),
                 None,
             );
             return Type::UNKNOWN;
@@ -1629,6 +1677,55 @@ impl<'a> Checker<'a> {
             format!("{what} is not compilable yet"),
             "the grammar and the type rules for it exist, but its code generation does not",
             Some(instead.to_string()),
+        );
+    }
+
+    /// `a.b`, which is an enum variant or a field of an object.
+    ///
+    /// The parser cannot tell them apart — `Direction.North` and `user.name`
+    /// have the same shape — so the decision lands here, where it is known
+    /// whether the base names a type or a value.
+    fn check_field(&mut self, expr: &FieldExpr) -> Type {
+        if expr.safe {
+            self.not_checked(expr.span, "`?.`", "safe access needs a type with members");
+            return Type::UNKNOWN;
+        }
+
+        // A base that names a declared enum is a variant access.
+        if let Expr::Path(base) = &*expr.object {
+            let resolved = self.resolved_name(&base.name, base.span);
+            if self.enums.iter().any(|e| e.name == resolved) {
+                let variant = VariantExpr {
+                    enum_name: base.clone(),
+                    variant: expr.name.clone(),
+                    span: expr.span,
+                };
+                let ty = self.check_variant(&variant);
+                self.variant_accesses.insert(expr.span);
+                return ty;
+            }
+        }
+
+        self.not_checked(
+            expr.span,
+            "member access",
+            "reading a field needs a type with members",
+        );
+        Type::UNKNOWN
+    }
+
+    /// Reports a construct that parses but whose checking has not landed yet.
+    ///
+    /// Distinct from [`Self::not_lowered`]: there the rules exist and only the
+    /// code generation is missing, while here the rules themselves are not
+    /// written, so accepting it silently would let unverified code through.
+    fn not_checked(&mut self, span: Span, what: &str, why: &str) {
+        self.error(
+            codes::PENDING_FEATURE,
+            span,
+            format!("{what} is not checked yet"),
+            why,
+            Some("classes parse in this phase; their checking lands next".into()),
         );
     }
 

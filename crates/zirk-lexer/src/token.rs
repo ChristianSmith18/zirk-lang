@@ -218,8 +218,10 @@ impl Keyword {
     pub const fn phase(self) -> Option<Phase> {
         use Keyword::*;
         Some(match self {
-            Class | Construct | This | Record | Type | Public | Private | Protected | Abstract
-            | Implements | Extends | From | As | Is | Interface | Trait => Phase::THREE,
+            // `class`, `construct`, `this` and the visibility modifiers are
+            // implemented; the rest of the phase's vocabulary is not yet.
+            Record | Type | Extends | Implements | Abstract | From | As | Is | Interface
+            | Trait => Phase::THREE,
             // `default` labels the catch-all arm of a `try`, so it arrives with
             // error handling and not with the decorators it used to be filed
             // under.
@@ -556,9 +558,17 @@ mod tests {
     }
 
     #[test]
+    fn implemented_keywords_declare_no_phase() {
+        // `class`, `construct` and `this` landed with the objects of Phase 3.
+        for k in [Keyword::Class, Keyword::Construct, Keyword::This] {
+            assert!(k.in_subset(), "`{}` is implemented", k.as_str());
+        }
+    }
+
+    #[test]
     fn later_phase_keywords_declare_their_phase() {
-        assert!(!Keyword::Class.in_subset());
-        assert_eq!(Keyword::Class.phase(), Some(Phase::THREE));
+        assert!(!Keyword::Record.in_subset());
+        assert_eq!(Keyword::Record.phase(), Some(Phase::THREE));
         assert_eq!(Keyword::Task.phase(), Some(Phase::FIVE));
     }
 
