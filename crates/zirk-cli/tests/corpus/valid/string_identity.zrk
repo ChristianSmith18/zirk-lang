@@ -1,0 +1,10 @@
+// La misma palabra escrita compuesta y descompuesta: bytes distintos en el
+// archivo, mismo texto para quien lo lee. ADR-011 las hace iguales.
+
+fn main(): Void {
+    inmut COMPOSED: String = "hó";
+    inmut DECOMPOSED: String = "hó";
+
+    stdout.println(COMPOSED == DECOMPOSED);
+    stdout.println(COMPOSED == "otra");
+}

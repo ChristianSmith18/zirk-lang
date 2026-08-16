@@ -14,6 +14,8 @@
 //! Enums and function types carry an index into a table owned by the checker
 //! rather than their contents, for the same reason.
 
+use zirk_diagnostics::Phase;
+
 /// A type of the subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Type {
@@ -156,10 +158,16 @@ impl Type {
     ///
     /// Enums are not here: they are declared by the program, so the checker
     /// resolves them against its own table.
+    ///
+    /// `Int` and `Integer` resolve here rather than being deferred, because an
+    /// alias *is* its target: both name `Int32`, which has existed since Phase
+    /// 1. Deferring them deferred a spelling, not a capability. After
+    /// resolution nothing distinguishes them, which is what being an alias
+    /// means. `UInt` is not here because `UInt32` is not implemented.
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "Void" => Type::VOID,
-            "Int32" => Type::INT32,
+            "Int32" | "Int" | "Integer" => Type::INT32,
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
             _ => return None,
@@ -233,45 +241,57 @@ impl EnumType {
 /// way the parser does for constructs.
 pub struct PendingType {
     pub name: &'static str,
-    pub phase: u8,
+    pub phase: Phase,
 }
 
 /// Looks up a type from a later phase by name.
+///
+/// The `Decimal*` family is deliberately absent: it is not a type family of
+/// Zirk. An exact base-ten type may arrive one day as a standard-library type,
+/// and it would be a different thing from `Float`. Announcing a phase for a
+/// name the language does not have would teach a language that does not exist.
 pub fn pending_type(name: &str) -> Option<PendingType> {
-    // Phase 3 brings the rest of the type system: the remaining numeric
-    // families, `Char`, collections and user-defined types.
-    const PHASE_3: &[&str] = &[
-        "Int8",
-        "Int16",
-        "Int64",
-        "Int128",
-        "Int",
-        "Integer",
-        "UInt8",
-        "UInt16",
-        "UInt32",
-        "UInt64",
-        "UInt128",
-        "Decimal16",
-        "Decimal32",
-        "Decimal64",
-        "Decimal128",
-        "Dec",
-        "Decimal",
-        "Char",
-        "Object",
-        "Never",
-        "List",
-        "Map",
-        "Set",
-        "Array",
+    // Phase 3 brings user-defined types and the roots they hang from.
+    const PHASE_3: &[&str] = &["Object", "Never"];
+    // Phase 3b brings the rest of the scalars: the remaining integer widths,
+    // the binary floating family and `Char`.
+    const PHASE_3B: &[&str] = &[
+        "Int8", "Int16", "Int64", "Int128", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+        "UInt", "Float16", "Float32", "Float64", "Float128", "Float", "Char",
     ];
     // Phase 4 brings errors and resources.
     const PHASE_4: &[&str] = &["Result", "Pointer", "Resource"];
     // Phase 5 brings concurrency.
     const PHASE_5: &[&str] = &["Task", "Channel", "Thread", "Atomic"];
+    // Phase 7 brings the stdlib, and with it the collection and temporal
+    // families. They are compiler-known native types, not library objects:
+    // what that phase adds is their implementation, not their existence.
+    const PHASE_7: &[&str] = &[
+        "List",
+        "Map",
+        "Set",
+        "Array",
+        "Date",
+        "Time",
+        "DateTime",
+        "Instant",
+        "ZonedDateTime",
+        "TimeZone",
+        "Duration",
+        "Period",
+        "Regex",
+    ];
+    // Phase 7b brings the functional style.
+    const PHASE_7B: &[&str] = &["Iterable", "Iterator"];
 
-    for (names, phase) in [(PHASE_3, 3u8), (PHASE_4, 4), (PHASE_5, 5)] {
+    for (names, phase) in [
+        (PHASE_3, Phase::THREE),
+        (PHASE_3B, Phase::THREE_B),
+        (PHASE_4, Phase::FOUR),
+        (PHASE_5, Phase::FIVE),
+        (PHASE_7, Phase::SEVEN),
+        (PHASE_7B, Phase::SEVEN_B),
+    ] {
         if let Some(found) = names.iter().find(|n| **n == name) {
             return Some(PendingType { name: found, phase });
         }
@@ -298,10 +318,66 @@ mod tests {
     }
 
     #[test]
+    fn the_short_aliases_of_the_default_integer_resolve() {
+        // An alias *is* its target: after resolution nothing distinguishes it.
+        assert_eq!(Type::from_name("Int"), Some(Type::INT32));
+        assert_eq!(Type::from_name("Integer"), Some(Type::INT32));
+    }
+
+    #[test]
+    fn the_alias_of_an_unimplemented_type_stays_pending() {
+        // `UInt` is `UInt32`, which does not exist yet.
+        assert_eq!(Type::from_name("UInt"), None);
+        assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
+    }
+
+    #[test]
     fn types_from_later_phases_declare_their_phase() {
-        assert_eq!(pending_type("Int64").map(|t| t.phase), Some(3));
-        assert_eq!(pending_type("Result").map(|t| t.phase), Some(4));
-        assert_eq!(pending_type("Channel").map(|t| t.phase), Some(5));
+        assert_eq!(pending_type("Int64").map(|t| t.phase), Some(Phase::THREE_B));
+        assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
+        assert_eq!(pending_type("Result").map(|t| t.phase), Some(Phase::FOUR));
+        assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
+    }
+
+    #[test]
+    fn the_float_family_is_pending_not_unknown() {
+        for name in ["Float", "Float16", "Float32", "Float64", "Float128"] {
+            assert_eq!(
+                pending_type(name).map(|t| t.phase),
+                Some(Phase::THREE_B),
+                "`{name}` should announce its phase"
+            );
+        }
+    }
+
+    #[test]
+    fn the_temporal_family_is_pending_not_unknown() {
+        for name in [
+            "Date",
+            "Time",
+            "DateTime",
+            "Instant",
+            "ZonedDateTime",
+            "TimeZone",
+            "Duration",
+            "Period",
+        ] {
+            assert_eq!(
+                pending_type(name).map(|t| t.phase),
+                Some(Phase::SEVEN),
+                "`{name}` should announce its phase"
+            );
+        }
+    }
+
+    #[test]
+    fn the_decimal_family_is_not_a_type_of_the_language() {
+        // It was removed from Zirk. Announcing a phase for it would teach a
+        // language that does not exist.
+        for name in ["Decimal", "Decimal16", "Decimal32", "Decimal64", "Dec"] {
+            assert!(pending_type(name).is_none(), "`{name}` is not a Zirk type");
+            assert_eq!(Type::from_name(name), None);
+        }
     }
 
     #[test]

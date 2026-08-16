@@ -1,0 +1,38 @@
+// Las formas de sentencia que la norma define y el parser incorporó al
+// alinearse con ella: paréntesis opcionales, `do ... while`, el `if` sin
+// llaves, el ternario y el incremento como expresión.
+
+fn main(): Void {
+    // La forma canónica del `for` tradicional no lleva paréntesis.
+    for mut i = 0; i < 3; i++ {
+        stdout.println(i);
+    }
+
+    // Escribirlos sigue siendo válido.
+    for (mut j = 0; j < 2; j++) {
+        stdout.println(j);
+    }
+
+    // El cuerpo de un `do ... while` corre aunque la condición sea falsa.
+    mut n = 10;
+    do {
+        stdout.println(n);
+        n = n + 1;
+    } while n < 5;
+
+    mut label: String = n > 5 ? "alto" : "bajo";
+    stdout.println(label);
+
+    // Postfijo devuelve el valor previo; prefijo, el ya incrementado.
+    mut i = 0;
+    stdout.println(i++);
+    stdout.println(++i);
+
+    mut closed = true;
+    if closed stdout.println("cerrado");
+
+    // `Int` e `Integer` nombran `Int32`.
+    mut a: Int = 1;
+    mut b: Integer = 2;
+    stdout.println(a + b);
+}

@@ -20,7 +20,7 @@
 
 mod token;
 
-pub use token::{Keyword, Token, TokenKind};
+pub use token::{DurationUnit, FLOAT_WIDTHS, Keyword, NumberLit, StrPart, Token, TokenKind};
 
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
 
@@ -42,6 +42,12 @@ pub mod codes {
     pub const INVALID_NUMERIC_SUFFIX: Code = Code::new("E0207");
     /// Integer literal exceeding the internal representation.
     pub const INTEGER_TOO_LARGE: Code = Code::new("E0206");
+    /// Character literal without a closing quote.
+    pub const UNTERMINATED_CHARACTER: Code = Code::new("E0208");
+    /// Regex literal without a closing delimiter.
+    pub const UNTERMINATED_REGEX: Code = Code::new("E0209");
+    /// Interpolation inside a string that is never closed.
+    pub const UNTERMINATED_INTERPOLATION: Code = Code::new("E0210");
 }
 
 /// Turns a source file into tokens, accumulating any errors found.
@@ -140,12 +146,19 @@ impl<'a> Lexer<'a> {
                 break;
             };
 
-            let kind = if c.is_alphabetic() || c == '_' {
+            // `re'...'` before the word recognizer, or `re` would be an
+            // identifier and the pattern a broken character literal.
+            let kind = if c == 'r' && self.peek_at(1) == Some('e') && self.peek_at(2) == Some('\'')
+            {
+                self.regex()
+            } else if c.is_alphabetic() || c == '_' {
                 Some(self.word())
             } else if c.is_ascii_digit() {
                 self.number()
             } else if c == '"' {
                 self.string()
+            } else if c == '\'' {
+                self.character()
             } else {
                 self.punctuation()
             };
@@ -242,80 +255,214 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Decimal integer literal, allowing `_` as a separator.
+    /// A numeric literal: integer, float or duration.
+    ///
+    /// The forms of `docs/handbook/11-reference/04-literals.md`: decimal,
+    /// hexadecimal and binary integers, fractional and scientific floats with
+    /// an optional width suffix, and durations with a unit suffix. `_` is a
+    /// separator in all of them.
     fn number(&mut self) -> Option<TokenKind> {
         let start_offset = self.offset();
+
+        // A base prefix decides everything that follows, so it is checked first.
+        if self.peek() == Some('0')
+            && let Some(radix) = self.peek_at(1).and_then(Radix::from_prefix)
+        {
+            self.pos += 2;
+            return self.radix_integer(radix, start_offset);
+        }
+
+        let Some(integer_part) = self.digits(10, start_offset) else {
+            return None;
+        };
+        let mut text = integer_part;
+
+        // A fraction needs a digit after the point. Without that check `0..10`
+        // would read as `0.` followed by `.10`, and `1.abs()` as a malformed
+        // literal instead of a method call.
+        let fractional =
+            self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit());
+        if fractional {
+            self.pos += 1;
+            text.push('.');
+            let Some(fraction) = self.digits(10, start_offset) else {
+                return None;
+            };
+            text.push_str(&fraction);
+        }
+
+        let exponent = self.exponent(start_offset)?;
+        if let Some(exponent) = &exponent {
+            text.push_str(exponent);
+        }
+
+        let is_float = fractional || exponent.is_some();
+        self.finish_number(text, is_float, start_offset)
+    }
+
+    /// Digits of the given base, with `_` allowed between them.
+    ///
+    /// Returns `None` after reporting a malformed literal, so the caller stops
+    /// rather than building a token from digits it already knows are wrong.
+    fn digits(&mut self, radix: u32, start_offset: u32) -> Option<String> {
         let mut digits = String::new();
         let mut last_was_separator = false;
-        let mut invalid_separator: Option<Span> = None;
-        let mut invalid_suffix: Option<Span> = None;
 
         while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
+            if c.is_digit(radix) {
                 digits.push(c);
                 last_was_separator = false;
                 self.pos += 1;
             } else if c == '_' {
-                // Two separators in a row, or a leading one, are invalid.
+                // Two in a row, or a leading one, are invalid.
                 if last_was_separator || digits.is_empty() {
-                    invalid_separator
-                        .get_or_insert(self.source.span(self.offset(), self.offset() + 1));
+                    let at = self.source.span(self.offset(), self.offset() + 1);
+                    self.malformed_separator(at);
+                    return None;
                 }
                 last_was_separator = true;
                 self.pos += 1;
-            } else if c.is_alphanumeric() {
-                // `123abc`: the whole suffix is consumed so we do not fail
-                // again on every character, and it is reported as its own
-                // problem — the separator cause does not apply here.
-                let suffix_start = self.offset();
-                while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                    self.pos += 1;
-                }
-                invalid_suffix.get_or_insert(self.source.span(suffix_start, self.offset()));
             } else {
                 break;
             }
         }
 
-        // A trailing separator is not valid either.
         if last_was_separator {
-            invalid_separator.get_or_insert(self.source.span(self.offset() - 1, self.offset()));
+            let at = self.source.span(self.offset() - 1, self.offset());
+            self.malformed_separator(at);
+            return None;
         }
 
-        let span = self.source.span(start_offset, self.offset());
+        if digits.is_empty() {
+            let span = self
+                .source
+                .span(start_offset, self.offset().max(start_offset + 1));
+            let d = self.error(codes::INVALID_SEPARATOR, span, "malformed numeric literal");
+            self.emit(
+                d.with_cause("the literal has no digits")
+                    .with_help("write at least one digit"),
+            );
+            return None;
+        }
 
-        if let Some(suffix_span) = invalid_suffix {
-            let text: String = self.source.slice(suffix_span).to_string();
+        Some(digits)
+    }
+
+    fn malformed_separator(&mut self, at: Span) {
+        let d = self.error(codes::INVALID_SEPARATOR, at, "malformed numeric literal");
+        self.emit(
+            d.with_cause("`_` may only appear between digits")
+                .with_help("write the number as `1_000_000`"),
+        );
+    }
+
+    /// The `e`/`E` exponent of a scientific literal, if one follows.
+    ///
+    /// Returns `Some(None)` when there is no exponent, and `None` when there
+    /// was one but it was malformed.
+    fn exponent(&mut self, start_offset: u32) -> Option<Option<String>> {
+        if !matches!(self.peek(), Some('e' | 'E')) {
+            return Some(None);
+        }
+
+        // `1e2` is scientific; `1em` is a number with a bad suffix. The sign
+        // and at least one digit are what tell them apart.
+        let sign = matches!(self.peek_at(1), Some('+' | '-'));
+        let digit_at = if sign { 2 } else { 1 };
+        if !self.peek_at(digit_at).is_some_and(|c| c.is_ascii_digit()) {
+            return Some(None);
+        }
+
+        let mut text = String::from("e");
+        self.pos += 1;
+        if sign {
+            text.push(self.advance().expect("the sign was peeked"));
+        }
+        let digits = self.digits(10, start_offset)?;
+        text.push_str(&digits);
+
+        Some(Some(text))
+    }
+
+    /// Reads the suffix, if any, and builds the token it implies.
+    fn finish_number(
+        &mut self,
+        text: String,
+        is_float: bool,
+        start_offset: u32,
+    ) -> Option<TokenKind> {
+        let suffix_start = self.offset();
+        while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            self.pos += 1;
+        }
+        let suffix: String = self
+            .source
+            .slice(self.source.span(suffix_start, self.offset()))
+            .to_string();
+
+        if suffix.is_empty() {
+            return if is_float {
+                Some(TokenKind::Float(NumberLit::new(text)))
+            } else {
+                self.integer_token(&text, 10, start_offset)
+            };
+        }
+
+        if FLOAT_WIDTHS.contains(&suffix.as_str()) {
+            return Some(TokenKind::Float(NumberLit::new(text).with_width(suffix)));
+        }
+
+        if let Some(unit) = DurationUnit::from_text(&suffix) {
+            return Some(TokenKind::Duration(NumberLit::new(text), unit));
+        }
+
+        let span = self.source.span(suffix_start, self.offset());
+        let d = self.error(
+            codes::INVALID_NUMERIC_SUFFIX,
+            span,
+            format!("invalid suffix on numeric literal: `{suffix}`"),
+        );
+        self.emit(
+            d.with_cause("it is neither a width (`f32`) nor a duration unit (`ms`)")
+                .with_help("separate the number from the identifier with a space or an operator"),
+        );
+        None
+    }
+
+    /// A literal written in a base other than ten.
+    fn radix_integer(&mut self, radix: Radix, start_offset: u32) -> Option<TokenKind> {
+        let digits = self.digits(radix.value(), start_offset)?;
+
+        // A suffix on a based literal is always a mistake: widths belong to
+        // floats and duration units to durations.
+        if self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            let suffix_start = self.offset();
+            while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                self.pos += 1;
+            }
+            let span = self.source.span(suffix_start, self.offset());
+            let text = self.source.slice(span).to_string();
             let d = self.error(
                 codes::INVALID_NUMERIC_SUFFIX,
-                suffix_span,
+                span,
                 format!("invalid suffix on numeric literal: `{text}`"),
             );
-            self.emit(
-                d.with_cause("an integer literal only accepts digits and the `_` separator")
-                    .with_help(
-                        "separate the number from the identifier with a space or an operator",
-                    ),
-            );
+            self.emit(d.with_cause(format!(
+                "a {} literal only accepts its digits and the `_` separator",
+                radix.name()
+            )));
             return None;
         }
 
-        if let Some(invalid_span) = invalid_separator {
-            let d = self.error(
-                codes::INVALID_SEPARATOR,
-                invalid_span,
-                "malformed numeric literal",
-            );
-            self.emit(
-                d.with_cause("`_` may only appear between digits")
-                    .with_help("write the number as `1_000_000`"),
-            );
-            return None;
-        }
+        self.integer_token(&digits, radix.value(), start_offset)
+    }
 
-        match digits.parse::<i128>() {
+    /// Builds the integer token, reporting a value the compiler cannot hold.
+    fn integer_token(&mut self, digits: &str, radix: u32, start_offset: u32) -> Option<TokenKind> {
+        match i128::from_str_radix(digits, radix) {
             Ok(value) => Some(TokenKind::Integer(value)),
             Err(_) => {
+                let span = self.source.span(start_offset, self.offset());
                 let d = self.error(
                     codes::INTEGER_TOO_LARGE,
                     span,
@@ -335,6 +482,7 @@ impl<'a> Lexer<'a> {
         self.pos += 1; // opening quote
 
         let mut value = String::new();
+        let mut parts: Vec<StrPart> = Vec::new();
 
         loop {
             match self.peek() {
@@ -355,39 +503,213 @@ impl<'a> Lexer<'a> {
                 }
                 Some('"') => {
                     self.pos += 1;
-                    return Some(TokenKind::Str(value));
+                    if parts.is_empty() {
+                        return Some(TokenKind::Str(canonical(value)));
+                    }
+                    if !value.is_empty() {
+                        parts.push(StrPart::Literal(canonical(value)));
+                    }
+                    return Some(TokenKind::InterpolatedStr(parts));
+                }
+                Some('{') => {
+                    let part = self.interpolation()?;
+                    if !value.is_empty() {
+                        parts.push(StrPart::Literal(canonical(std::mem::take(&mut value))));
+                    }
+                    parts.push(part);
                 }
                 Some('\\') => {
-                    let escape_start = self.offset();
                     self.pos += 1;
-                    match self.advance() {
-                        Some('n') => value.push('\n'),
-                        Some('t') => value.push('\t'),
-                        Some('r') => value.push('\r'),
-                        Some('0') => value.push('\0'),
-                        Some('"') => value.push('"'),
-                        Some('\\') => value.push('\\'),
-                        Some(other) => {
-                            let span = self.source.span(escape_start, self.offset());
-                            let d = self.error(
-                                codes::UNKNOWN_ESCAPE,
-                                span,
-                                format!("unknown escape sequence: `\\{other}`"),
-                            );
-                            self.emit(
-                                d.with_cause("this is not an escape sequence of the language")
-                                    .with_help(
-                                        "the valid sequences are \\n, \\t, \\r, \\0, \\\" and \\\\",
-                                    ),
-                            );
-                            // The character is kept so tokenizing can continue.
-                            value.push(other);
-                        }
+                    match self.escape('"') {
+                        Some(c) => value.push(c),
                         None => continue,
                     }
                 }
                 Some(c) => {
                     value.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// One `{ expression }` inside a string literal.
+    ///
+    /// Braces are counted so an expression may contain its own — a lambda body
+    /// or a nested literal — and the interpolation still closes where it
+    /// should rather than at the first `}`.
+    fn interpolation(&mut self) -> Option<StrPart> {
+        let open_offset = self.offset();
+        self.pos += 1; // `{`
+
+        let text_start = self.offset();
+        let mut depth = 1usize;
+
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    let span = self.source.span(open_offset, open_offset + 1);
+                    let d = self.error(
+                        codes::UNTERMINATED_INTERPOLATION,
+                        span,
+                        "unterminated interpolation",
+                    );
+                    self.emit(
+                        d.with_cause("the interpolation opens here and is never closed")
+                            .with_help("add the closing `}`, or write `\\{` for a literal brace"),
+                    );
+                    return None;
+                }
+                Some('{') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let span = self.source.span(text_start, self.offset());
+                        let text = self.source.slice(span).to_string();
+                        self.pos += 1; // `}`
+                        return Some(StrPart::Expr { text, span });
+                    }
+                    self.pos += 1;
+                }
+                Some(_) => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Resolves one escape sequence, having already consumed the backslash.
+    ///
+    /// `quote` is the delimiter of the literal being read, so `\"` works
+    /// inside a string and `\'` inside a character literal.
+    fn escape(&mut self, quote: char) -> Option<char> {
+        let escape_start = self.offset() - 1;
+
+        match self.advance() {
+            Some('n') => Some('\n'),
+            Some('t') => Some('\t'),
+            Some('r') => Some('\r'),
+            Some('0') => Some('\0'),
+            Some('\\') => Some('\\'),
+            // A literal brace, which is otherwise the opening of an
+            // interpolation.
+            Some('{') => Some('{'),
+            Some('}') => Some('}'),
+            Some(c) if c == quote => Some(c),
+            Some(other) => {
+                let span = self.source.span(escape_start, self.offset());
+                let d = self.error(
+                    codes::UNKNOWN_ESCAPE,
+                    span,
+                    format!("unknown escape sequence: `\\{other}`"),
+                );
+                self.emit(
+                    d.with_cause("this is not an escape sequence of the language")
+                        .with_help(format!(
+                            "the valid sequences are \\n, \\t, \\r, \\0, \\{{, \\}}, \\{quote} and \\\\"
+                        )),
+                );
+                // The character is kept so tokenizing can continue.
+                Some(other)
+            }
+            None => None,
+        }
+    }
+
+    /// Character literal.
+    ///
+    /// The full content between the quotes is kept, however many code points
+    /// it holds: a `Char` is one Unicode **grapheme**, and a family emoji is
+    /// one grapheme made of several code points. Deciding whether the content
+    /// is exactly one grapheme needs Unicode segmentation, which is semantics
+    /// and not lexing.
+    fn character(&mut self) -> Option<TokenKind> {
+        let start_offset = self.offset();
+        self.pos += 1; // opening quote
+
+        let mut value = String::new();
+
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    let span = self.source.span(start_offset, start_offset + 1);
+                    let d = self.error(
+                        codes::UNTERMINATED_CHARACTER,
+                        span,
+                        "unterminated character literal",
+                    );
+                    self.emit(
+                        d.with_cause(
+                            "the literal opens here and is not closed before the end of the line",
+                        )
+                        .with_help("add the closing `'` quote"),
+                    );
+                    return None;
+                }
+                Some('\'') => {
+                    self.pos += 1;
+                    return Some(TokenKind::Char(canonical(value)));
+                }
+                Some('\\') => {
+                    self.pos += 1;
+                    match self.escape('\'') {
+                        Some(c) => value.push(c),
+                        None => continue,
+                    }
+                }
+                Some(c) => {
+                    value.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Regex literal `re'pattern'`.
+    ///
+    /// Escapes are **preserved**, not resolved: `\d` means something to the
+    /// regex engine and nothing to the string escapes. Resolving them here
+    /// would destroy the pattern before its own parser ever saw it.
+    fn regex(&mut self) -> Option<TokenKind> {
+        let start_offset = self.offset();
+        self.pos += 3; // `re'`
+
+        let mut pattern = String::new();
+
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    let span = self.source.span(start_offset, start_offset + 3);
+                    let d = self.error(
+                        codes::UNTERMINATED_REGEX,
+                        span,
+                        "unterminated regex literal",
+                    );
+                    self.emit(
+                        d.with_cause(
+                            "the literal opens here and is not closed before the end of the line",
+                        )
+                        .with_help("add the closing `'` quote"),
+                    );
+                    return None;
+                }
+                // An escaped quote belongs to the pattern, backslash included.
+                Some('\\') => {
+                    pattern.push('\\');
+                    self.pos += 1;
+                    if let Some(c) = self.advance() {
+                        pattern.push(c);
+                    }
+                }
+                Some('\'') => {
+                    self.pos += 1;
+                    return Some(TokenKind::Regex(pattern));
+                }
+                Some(c) => {
+                    pattern.push(c);
                     self.pos += 1;
                 }
             }
@@ -409,6 +731,14 @@ impl<'a> Lexer<'a> {
             '-' if self.eat('=') => MinusEq,
             '-' if self.eat('-') => MinusMinus,
             '-' => Minus,
+            // `**=` before `**` before `*=` before `*`.
+            '*' if self.eat('*') => {
+                if self.eat('=') {
+                    StarStarEq
+                } else {
+                    StarStar
+                }
+            }
             '*' if self.eat('=') => StarEq,
             '*' => Star,
             '/' if self.eat('=') => SlashEq,
@@ -423,13 +753,37 @@ impl<'a> Lexer<'a> {
             '?' if self.eat('?') => QuestionQuestion,
             '?' if self.eat('.') => QuestionDot,
             '?' => Question,
+            // `<<=` before `<<` before `<=` before `<`.
+            '<' if self.eat('<') => {
+                if self.eat('=') {
+                    ShlEq
+                } else {
+                    Shl
+                }
+            }
             '<' if self.eat('=') => LtEq,
             '<' => Lt,
+            '>' if self.eat('>') => {
+                if self.eat('=') {
+                    ShrEq
+                } else {
+                    Shr
+                }
+            }
             '>' if self.eat('=') => GtEq,
             '>' => Gt,
+            // The doubled forms are the short-circuit logical operators; the
+            // single ones are bitwise. Longest match keeps them apart.
             '&' if self.eat('&') => AndAnd,
+            '&' if self.eat('=') => AmpEq,
+            '&' => Amp,
             '|' if self.eat('|') => OrOr,
             '|' if self.eat('>') => PipeGt,
+            '|' if self.eat('=') => PipeEq,
+            '|' => Pipe,
+            '^' if self.eat('=') => CaretEq,
+            '^' => Caret,
+            '~' => Tilde,
             '(' => LParen,
             ')' => RParen,
             '{' => LBrace,
@@ -464,6 +818,57 @@ impl<'a> Lexer<'a> {
         };
 
         Some(kind)
+    }
+}
+
+/// Puts literal text into Unicode canonical form (NFC).
+///
+/// `"hó"` can be written with one code point or with two, depending on the
+/// editor, the keyboard and everything the text passed through on its way into
+/// the file. They look identical on screen, and
+/// `docs/decisions/ADR-011-identidad-e-igualdad-de-string.md` makes them equal.
+///
+/// Normalizing here — once, at compile time, on a machine in no hurry — is what
+/// keeps that promise cheap: comparing two literals stays a byte comparison,
+/// and the runtime never pays for normalization it can avoid.
+fn canonical(text: String) -> String {
+    // The overwhelmingly common case, and the one where allocating again would
+    // be pure waste: ASCII has no equivalent forms to collapse.
+    if text.is_ascii() {
+        return text;
+    }
+    unicode_normalization::UnicodeNormalization::nfc(text.as_str()).collect()
+}
+
+/// A base an integer literal may be written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Radix {
+    Hexadecimal,
+    Binary,
+}
+
+impl Radix {
+    /// The base the character after a leading `0` selects.
+    fn from_prefix(c: char) -> Option<Self> {
+        match c {
+            'x' | 'X' => Some(Radix::Hexadecimal),
+            'b' | 'B' => Some(Radix::Binary),
+            _ => None,
+        }
+    }
+
+    const fn value(self) -> u32 {
+        match self {
+            Radix::Hexadecimal => 16,
+            Radix::Binary => 2,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Radix::Hexadecimal => "hexadecimal",
+            Radix::Binary => "binary",
+        }
     }
 }
 

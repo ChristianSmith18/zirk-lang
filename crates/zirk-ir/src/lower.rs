@@ -532,7 +532,14 @@ impl<'a> FunctionLowering<'a> {
         let step_block = self.new_block();
         let continue_block = self.new_block();
 
-        self.terminate(Terminator::Jump(header));
+        // `do ... while` differs from `while` in exactly this edge: execution
+        // enters the body instead of the header, so the condition is first
+        // checked after one run. Everything below is shared.
+        if stmt.kind.body_runs_first() {
+            self.terminate(Terminator::Jump(body_block));
+        } else {
+            self.terminate(Terminator::Jump(header));
+        }
 
         self.current = header;
         match &stmt.condition {
@@ -760,6 +767,8 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
+            ast::Expr::Ternary(e) => self.lower_ternary(e, span),
+            ast::Expr::Increment(e) => self.lower_increment(e, span),
             ast::Expr::Match(e) => self.lower_match(e, span),
             ast::Expr::Variant(e) => {
                 let value = self.discriminant(&e.enum_name, &e.variant.name);
@@ -1244,6 +1253,70 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), ty, span)
     }
 
+    /// Lowers `cond ? a : b`.
+    ///
+    /// The same shape as the `if` expression — two blocks writing one slot —
+    /// because it means the same thing. What it does not share is the branches
+    /// being blocks: here they are expressions, so there is nothing to scope.
+    fn lower_ternary(&mut self, expr: &ast::TernaryExpr, span: Span) -> Operand {
+        let ty = self.type_of(&expr.when_true, expr.when_true.span());
+        let result = self.declare_slot("<ternary>", ty, span);
+
+        let condition = self.lower_expr(&expr.condition);
+        let then_block = self.new_block();
+        let else_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Branch {
+            condition,
+            then_block,
+            else_block,
+        });
+
+        // Only the selected branch runs: the operand of the other one is never
+        // evaluated, which is what makes a ternary usable as a guard.
+        self.current = then_block;
+        let value = self.lower_expr(&expr.when_true);
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = else_block;
+        let value = self.lower_expr(&expr.when_false);
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), ty, span)
+    }
+
+    /// Lowers `i++`, `++i`, `i--` and `--i` used as a value.
+    ///
+    /// Both forms perform the same update; they differ only in which value the
+    /// expression yields, and that is decided by whether the previous value is
+    /// read before or after the store.
+    fn lower_increment(&mut self, expr: &ast::IncrementExpr, span: Span) -> Operand {
+        let slot = self.lookup_slot(&expr.target.name);
+        let ty = self.slot_type(slot);
+
+        let previous = self.emit(InstKind::Load(slot), ty, span);
+        let one = self.emit(InstKind::ConstInt(1), IrType::Int32, span);
+        let updated = self.emit(
+            InstKind::Binary {
+                op: binary_op(expr.op.as_binary()),
+                left: previous,
+                right: one,
+            },
+            ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(slot, updated), span);
+
+        match expr.fix {
+            ast::IncrementFix::Prefix => updated,
+            ast::IncrementFix::Postfix => previous,
+        }
+    }
+
     /// Lowers a block used as a value: its statements, then its last
     /// expression.
     fn lower_block_value(&mut self, block: &ast::Block) -> Operand {
@@ -1468,6 +1541,9 @@ impl<'a> FunctionLowering<'a> {
                 self.signature_return(&name)
             }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
+            ast::Expr::Ternary(e) => self.type_of(&e.when_true, e.when_true.span()),
+            // Both forms yield the type of the operand they update.
+            ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(&e.target.name)),
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int32,
             ast::Expr::Println(_) => IrType::Void,
@@ -1524,7 +1600,9 @@ enum Held {
 /// earlier value to travel through a slot.
 fn opens_blocks(expr: &ast::Expr) -> bool {
     match expr {
-        ast::Expr::If(_) | ast::Expr::Match(_) => true,
+        // A ternary opens blocks for the same reason an `if` does: only one of
+        // its branches runs.
+        ast::Expr::If(_) | ast::Expr::Match(_) | ast::Expr::Ternary(_) => true,
         ast::Expr::Binary(e) => {
             matches!(
                 e.op,

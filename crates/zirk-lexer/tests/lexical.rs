@@ -4,8 +4,8 @@
 //! least one valid and one invalid case. Tests are grouped by rule so that
 //! correspondence is verifiable at a glance.
 
-use zirk_diagnostics::{DiagnosticSink, SourceFile};
-use zirk_lexer::{Keyword, TokenKind, codes, tokenize};
+use zirk_diagnostics::{DiagnosticSink, Phase, SourceFile};
+use zirk_lexer::{DurationUnit, Keyword, NumberLit, StrPart, TokenKind, codes, tokenize};
 
 /// Tokenizes expecting no errors.
 fn tokens(source_text: &str) -> Vec<TokenKind> {
@@ -20,6 +20,11 @@ fn tokens(source_text: &str) -> Vec<TokenKind> {
     );
 
     tokens.into_iter().map(|t| t.kind).collect()
+}
+
+/// An identifier token, which the operator tests need on both sides.
+fn id(name: &str) -> TokenKind {
+    TokenKind::Identifier(name.to_string())
 }
 
 /// Tokenizes expecting an error, returning the rendered diagnostics.
@@ -349,7 +354,8 @@ fn valid_nullability_and_pipe_operators() {
 
 #[test]
 fn valid_pending_operators_declare_their_phase() {
-    assert_eq!(TokenKind::PipeGt.phase(), Some(3));
+    // The pipe belongs to the functional style, not to the objects of Phase 3.
+    assert_eq!(TokenKind::PipeGt.phase(), Some(Phase::SEVEN_B));
     // Subset operators declare no pending phase.
     assert_eq!(TokenKind::Plus.phase(), None);
     assert_eq!(TokenKind::Eq.phase(), None);
@@ -419,5 +425,349 @@ fn valid_block_comments_do_not_nest() {
     assert_eq!(
         tokens("/* a /* b */ fn"),
         vec![Keyword(zirk_lexer::Keyword::Fn), Eof]
+    );
+}
+
+// --- Exponentiation, bitwise and shifts -------------------------------------
+
+#[test]
+fn valid_exponentiation_is_one_token_not_two_multiplications() {
+    use TokenKind::*;
+    assert_eq!(tokens("a ** b"), vec![id("a"), StarStar, id("b"), Eof]);
+    assert_eq!(tokens("a **= b"), vec![id("a"), StarStarEq, id("b"), Eof]);
+    // The single form is unaffected.
+    assert_eq!(tokens("a * b"), vec![id("a"), Star, id("b"), Eof]);
+    assert_eq!(tokens("a *= b"), vec![id("a"), StarEq, id("b"), Eof]);
+}
+
+#[test]
+fn valid_bitwise_operators_are_distinct_from_the_logical_ones() {
+    use TokenKind::*;
+    // Longest match keeps `&&` and `&` apart, and `||`, `|>` and `|`.
+    assert_eq!(tokens("a && b"), vec![id("a"), AndAnd, id("b"), Eof]);
+    assert_eq!(tokens("a & b"), vec![id("a"), Amp, id("b"), Eof]);
+    assert_eq!(tokens("a || b"), vec![id("a"), OrOr, id("b"), Eof]);
+    assert_eq!(tokens("a |> b"), vec![id("a"), PipeGt, id("b"), Eof]);
+    assert_eq!(tokens("a | b"), vec![id("a"), Pipe, id("b"), Eof]);
+    assert_eq!(tokens("a ^ b"), vec![id("a"), Caret, id("b"), Eof]);
+    assert_eq!(tokens("~a"), vec![Tilde, id("a"), Eof]);
+}
+
+#[test]
+fn valid_shifts_and_their_compound_forms() {
+    use TokenKind::*;
+    assert_eq!(tokens("a << b"), vec![id("a"), Shl, id("b"), Eof]);
+    assert_eq!(tokens("a >> b"), vec![id("a"), Shr, id("b"), Eof]);
+    assert_eq!(tokens("a <<= b"), vec![id("a"), ShlEq, id("b"), Eof]);
+    assert_eq!(tokens("a >>= b"), vec![id("a"), ShrEq, id("b"), Eof]);
+    assert_eq!(tokens("a &= b"), vec![id("a"), AmpEq, id("b"), Eof]);
+    assert_eq!(tokens("a |= b"), vec![id("a"), PipeEq, id("b"), Eof]);
+    assert_eq!(tokens("a ^= b"), vec![id("a"), CaretEq, id("b"), Eof]);
+    // Comparison is unaffected.
+    assert_eq!(tokens("a < b"), vec![id("a"), Lt, id("b"), Eof]);
+    assert_eq!(tokens("a >= b"), vec![id("a"), GtEq, id("b"), Eof]);
+}
+
+#[test]
+fn valid_bitwise_and_power_operators_declare_their_phase() {
+    use TokenKind::*;
+    for kind in [StarStar, StarStarEq, Amp, Pipe, Caret, Tilde, Shl, Shr] {
+        assert_eq!(
+            kind.phase(),
+            Some(Phase::THREE_B),
+            "`{}` should announce its phase",
+            kind.symbol()
+        );
+    }
+}
+
+#[test]
+fn valid_words_of_the_whole_language_are_keywords_not_identifiers() {
+    use Keyword::*;
+    for (text, keyword) in [
+        ("do", Do),
+        ("yield", Yield),
+        ("interface", Interface),
+        ("trait", Trait),
+    ] {
+        assert_eq!(
+            tokens(text),
+            vec![TokenKind::Keyword(keyword), TokenKind::Eof],
+            "`{text}` must not lex as an identifier"
+        );
+    }
+}
+
+#[test]
+fn valid_contextual_words_stay_identifiers() {
+    // Reserving these would break `mut value = 1;` and `match r { Ok(value) =>
+    // ... }`, which are ordinary Zirk. They are recognized by position.
+    for text in ["value", "strict"] {
+        assert_eq!(
+            tokens(text),
+            vec![id(text), TokenKind::Eof],
+            "`{text}` must stay an identifier"
+        );
+    }
+}
+
+// --- Numeric literals -------------------------------------------------------
+
+#[test]
+fn valid_fractional_literal_is_one_token_not_three() {
+    use TokenKind::*;
+    // The worst failure this change fixes: `1.5` used to lex as `1`, `.`, `5`
+    // in silence, so the language could not even say "not yet".
+    assert_eq!(tokens("1.5"), vec![Float(NumberLit::new("1.5")), Eof]);
+    assert_eq!(tokens("0.125"), vec![Float(NumberLit::new("0.125")), Eof]);
+}
+
+#[test]
+fn valid_scientific_notation() {
+    use TokenKind::*;
+    assert_eq!(tokens("1e2"), vec![Float(NumberLit::new("1e2")), Eof]);
+    assert_eq!(
+        tokens("6.02e23"),
+        vec![Float(NumberLit::new("6.02e23")), Eof]
+    );
+    assert_eq!(tokens("1e-9"), vec![Float(NumberLit::new("1e-9")), Eof]);
+    assert_eq!(tokens("1E+3"), vec![Float(NumberLit::new("1e+3")), Eof]);
+}
+
+#[test]
+fn valid_float_width_suffix() {
+    use TokenKind::*;
+    assert_eq!(
+        tokens("1.5f32"),
+        vec![Float(NumberLit::new("1.5").with_width("f32")), Eof]
+    );
+}
+
+#[test]
+fn valid_range_is_not_read_as_a_fraction() {
+    use TokenKind::*;
+    // `0..10` must stay a range: a fraction needs a digit right after the dot.
+    assert_eq!(tokens("0..10"), vec![Integer(0), DotDot, Integer(10), Eof]);
+    assert_eq!(
+        tokens("0..=10"),
+        vec![Integer(0), DotDotEq, Integer(10), Eof]
+    );
+}
+
+#[test]
+fn valid_member_access_on_an_integer_is_not_a_fraction() {
+    use TokenKind::*;
+    assert_eq!(
+        tokens("1.abs()"),
+        vec![Integer(1), Dot, id("abs"), LParen, RParen, Eof]
+    );
+}
+
+#[test]
+fn valid_hexadecimal_and_binary_literals() {
+    use TokenKind::*;
+    assert_eq!(tokens("0xff"), vec![Integer(255), Eof]);
+    assert_eq!(tokens("0XFF"), vec![Integer(255), Eof]);
+    assert_eq!(tokens("0b1010"), vec![Integer(10), Eof]);
+    assert_eq!(tokens("0xff_ff"), vec![Integer(65535), Eof]);
+}
+
+#[test]
+fn valid_duration_literals_carry_their_unit() {
+    use DurationUnit::*;
+    use TokenKind::*;
+    for (source_text, unit) in [
+        ("10ns", Nanoseconds),
+        ("5us", Microseconds),
+        ("250ms", Milliseconds),
+        ("30s", Seconds),
+        ("15m", Minutes),
+        ("2h", Hours),
+        ("3d", Days),
+        ("1w", Weeks),
+    ] {
+        let digits: String = source_text
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        assert_eq!(
+            tokens(source_text),
+            vec![Duration(NumberLit::new(digits), unit), Eof],
+            "`{source_text}` must carry its unit"
+        );
+    }
+}
+
+#[test]
+fn valid_minutes_are_not_months() {
+    use DurationUnit::*;
+    use TokenKind::*;
+    // A calendar month is a `Period`, whose length depends on where it lands.
+    assert_eq!(
+        tokens("1m"),
+        vec![Duration(NumberLit::new("1"), Minutes), Eof]
+    );
+}
+
+#[test]
+fn invalid_numeric_suffix_is_still_diagnosed() {
+    let output = errors("123abc");
+    assert!(
+        output.contains(codes::INVALID_NUMERIC_SUFFIX.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_digit_for_the_base() {
+    // `2` is not a binary digit, so it is read as a suffix.
+    let output = errors("0b12");
+    assert!(
+        output.contains(codes::INVALID_NUMERIC_SUFFIX.as_str()),
+        "{output}"
+    );
+}
+
+// --- Character, regex and interpolation -------------------------------------
+
+#[test]
+fn valid_character_literal() {
+    use TokenKind::*;
+    assert_eq!(tokens("'a'"), vec![Char("a".into()), Eof]);
+    assert_eq!(tokens("'é'"), vec![Char("é".into()), Eof]);
+}
+
+#[test]
+fn valid_character_literal_keeps_every_code_point_of_a_grapheme() {
+    use TokenKind::*;
+    // One family emoji is one grapheme built from several code points. The
+    // lexer keeps all of them; whether it is exactly one grapheme is decided
+    // by the semantics of `Char`.
+    let family = "👨‍👩‍👧‍👦";
+    assert!(family.chars().count() > 1);
+    assert_eq!(
+        tokens(&format!("'{family}'")),
+        vec![Char(family.into()), Eof]
+    );
+}
+
+#[test]
+fn valid_escaped_quote_in_a_character_literal() {
+    use TokenKind::*;
+    assert_eq!(tokens(r"'\''"), vec![Char("'".into()), Eof]);
+    assert_eq!(tokens(r"'\n'"), vec![Char("\n".into()), Eof]);
+}
+
+#[test]
+fn invalid_unterminated_character_points_at_its_opening() {
+    let output = errors("'a");
+    assert!(
+        output.contains(codes::UNTERMINATED_CHARACTER.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("= help:"));
+}
+
+#[test]
+fn valid_regex_literal_keeps_its_escapes() {
+    use TokenKind::*;
+    // `\d` means something to the regex engine and nothing to string escapes:
+    // resolving it here would destroy the pattern.
+    assert_eq!(tokens(r"re'^[0-9]+$'"), vec![Regex("^[0-9]+$".into()), Eof]);
+    assert_eq!(tokens(r"re'\d+'"), vec![Regex(r"\d+".into()), Eof]);
+}
+
+#[test]
+fn invalid_unterminated_regex_points_at_its_opening() {
+    let output = errors("re'^[0-9]");
+    assert!(
+        output.contains(codes::UNTERMINATED_REGEX.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_interpolated_string_separates_its_parts() {
+    use TokenKind::*;
+    let TokenKind::InterpolatedStr(parts) = &tokens("\"value={value}\"")[0] else {
+        panic!("expected an interpolated string");
+    };
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], StrPart::Literal("value=".into()));
+    let StrPart::Expr { text, .. } = &parts[1] else {
+        panic!("the second part is the embedded expression");
+    };
+    assert_eq!(text, "value");
+    // The braces are not part of the text.
+    assert!(!text.contains('{'));
+}
+
+#[test]
+fn valid_interpolation_closes_on_its_matching_brace() {
+    use TokenKind::*;
+    let TokenKind::InterpolatedStr(parts) = &tokens("\"{ f({ x }) }\"")[0] else {
+        panic!("expected an interpolated string");
+    };
+
+    let StrPart::Expr { text, .. } = &parts[0] else {
+        panic!("the whole literal is one interpolation");
+    };
+    assert_eq!(text.trim(), "f({ x })");
+}
+
+#[test]
+fn valid_string_without_braces_is_not_interpolated() {
+    use TokenKind::*;
+    assert_eq!(tokens("\"hola\""), vec![Str("hola".into()), Eof]);
+}
+
+#[test]
+fn valid_escaped_brace_is_literal_text() {
+    use TokenKind::*;
+    assert_eq!(tokens(r#""a \{ b""#), vec![Str("a { b".into()), Eof]);
+}
+
+#[test]
+fn invalid_unterminated_interpolation_points_at_its_opening() {
+    let output = errors("\"value={value\"");
+    assert!(
+        output.contains(codes::UNTERMINATED_INTERPOLATION.as_str()),
+        "{output}"
+    );
+}
+
+// --- Canonical literals -----------------------------------------------------
+
+#[test]
+fn valid_string_literals_reach_the_runtime_in_canonical_form() {
+    // The same text written composed and decomposed. Which one an editor
+    // produces depends on the operating system and the keyboard, and they are
+    // indistinguishable on screen — so `ADR-011` makes them equal, and
+    // normalizing here is what keeps that promise cheap.
+    let composed = "\"h\u{f3}\"";
+    let decomposed = "\"ho\u{301}\"";
+
+    assert_ne!(
+        composed, decomposed,
+        "the two sources must really differ in bytes"
+    );
+    assert_eq!(
+        tokens(composed),
+        tokens(decomposed),
+        "both spellings must produce the same literal"
+    );
+}
+
+#[test]
+fn valid_character_literals_are_canonical_too() {
+    assert_eq!(tokens("'\u{f3}'"), tokens("'o\u{301}'"));
+}
+
+#[test]
+fn valid_ascii_literals_are_untouched() {
+    assert_eq!(
+        tokens("\"plain ascii\"")[0],
+        TokenKind::Str("plain ascii".into())
     );
 }

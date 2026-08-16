@@ -1,25 +1,4 @@
-# zirk-lexical-syntax
-
-## Purpose
-
-Defines the lexicon of Zirk: tokens, literals, comments, locations and lexical errors.
-
-The keywords of the whole language are recognized, not only those of the implemented subset, so a construct from a later phase can be told apart from a syntax error.
-## Requirements
-### Requirement: Tokenización del subset
-
-El lexer SHALL convertir texto fuente `.zrk` en una secuencia de tokens, cada uno con su ubicación en el source.
-
-Los tokens del subset son: identificadores, palabras clave, literales enteros, literales de cadena, literales booleanos, operadores, delimitadores y fin de archivo.
-
-#### Scenario: Programa mínimo
-- **WHEN** se tokeniza `fn main(): Void { }`
-- **THEN** se produce la secuencia: palabra clave `fn`, identificador `main`, `(`, `)`, `:`, identificador de tipo `Void`, `{`, `}`, fin de archivo
-
-#### Scenario: Ubicación de cada token
-- **WHEN** se tokeniza cualquier entrada
-- **THEN** cada token expone archivo, línea y columna de inicio, 1-based
-- **AND** la columna cuenta caracteres Unicode, no bytes
+## MODIFIED Requirements
 
 ### Requirement: Literales enteros
 
@@ -44,77 +23,7 @@ binaria (`0b`), admitiendo `_` como separador entre dígitos, según
 - **THEN** se produce un literal entero de valor 255 y 10 respectivamente
 - **AND** NO se emite un diagnóstico de sufijo inválido
 
-### Requirement: Literales de cadena
-
-El lexer SHALL reconocer literales de cadena delimitados por comillas dobles, con secuencias de escape.
-
-#### Scenario: Cadena simple
-- **WHEN** se tokeniza `"Hola"`
-- **THEN** se produce un literal de cadena con contenido `Hola`
-
-#### Scenario: Secuencias de escape
-- **WHEN** una cadena contiene `\n`, `\t`, `\"` o `\\`
-- **THEN** el literal las representa como salto de línea, tabulación, comilla y barra invertida
-
-#### Scenario: Cadena sin cerrar
-- **WHEN** una cadena no se cierra antes del fin de línea o de archivo
-- **THEN** se emite un diagnóstico que señala la apertura de la cadena
-- **AND** la ayuda indica que falta la comilla de cierre
-
-#### Scenario: Escape desconocido
-- **WHEN** una cadena contiene una secuencia de escape no reconocida
-- **THEN** se emite un diagnóstico que señala la secuencia
-
-### Requirement: Literales booleanos
-
-El lexer SHALL reconocer `true` y `false` como literales booleanos, no como identificadores.
-
-#### Scenario: Valores booleanos
-- **WHEN** se tokeniza `true` o `false`
-- **THEN** se produce un literal booleano
-
-### Requirement: Comentarios
-
-El lexer SHALL reconocer comentarios de línea `//` y de bloque `/* ... */`, descartándolos de la secuencia de tokens.
-
-#### Scenario: Comentario de línea
-- **WHEN** una línea contiene `// texto`
-- **THEN** el contenido desde `//` hasta el fin de línea no produce tokens
-
-#### Scenario: Comentario de bloque
-- **WHEN** el source contiene `/* texto */`
-- **THEN** el contenido delimitado no produce tokens
-
-#### Scenario: Comentario de bloque sin cerrar
-- **WHEN** un comentario de bloque no se cierra antes del fin de archivo
-- **THEN** se emite un diagnóstico que señala la apertura
-
-### Requirement: Palabras reservadas del lenguaje completo
-
-El lexer SHALL reconocer como palabras clave las del lenguaje completo, no solo las del subset implementado.
-
-Reconocerlas permite que el parser distinga una construcción no implementada de un error de sintaxis, y que el diagnóstico sea comprensible.
-
-#### Scenario: Palabra clave fuera del subset
-- **WHEN** se tokeniza `class`, `for`, `match`, `task` u otra palabra clave del lenguaje completo
-- **THEN** se produce el token de palabra clave correspondiente
-- **AND** NO se produce un identificador
-
-### Requirement: Sensibilidad a mayúsculas
-
-El lexer SHALL distinguir mayúsculas de minúsculas, según `ZIRK_LANGUAGE_SPEC.md` sección 1.
-
-#### Scenario: Identificador que difiere solo en capitalización
-- **WHEN** se tokenizan `total` y `Total`
-- **THEN** se producen dos identificadores distintos
-
-### Requirement: Carácter no reconocido
-
-El lexer SHALL emitir un diagnóstico ante cualquier carácter que no pertenezca al léxico, en vez de descartarlo silenciosamente.
-
-#### Scenario: Carácter inválido
-- **WHEN** el source contiene un carácter que no inicia ningún token válido
-- **THEN** se emite un diagnóstico con la ubicación exacta del carácter
+## ADDED Requirements
 
 ### Requirement: Literales fraccionarios y notación científica
 
@@ -140,14 +49,6 @@ fallar: el lenguaje no puede decir "todavía no" sobre algo que ni siquiera ve.
 #### Scenario: Float diferido a su fase
 - **WHEN** un literal Float aparece en un programa de una fase que no implementa la familia `Float`
 - **THEN** el diagnóstico nombra el literal e indica la fase en que llega
-
-### Requirement: Token de rango inclusivo
-
-El lexer SHALL reconocer `..=` como token propio, distinto de `..` y de `.`, aplicando coincidencia más larga.
-
-#### Scenario: Rango inclusivo
-- **WHEN** se tokeniza `0..=10`
-- **THEN** se producen los tokens de rango inclusivo, no `..` seguido de `=`
 
 ### Requirement: Tokens de potencia
 
@@ -287,3 +188,37 @@ la fase que el roadmap le asigna.
 #### Scenario: Operador de tubería
 - **WHEN** se consulta la fase de `|>`
 - **THEN** declara la fase del estilo funcional, no la de objetos
+
+### Requirement: Token de rango inclusivo
+
+El lexer SHALL reconocer `..=` como token propio, distinto de `..` y de `.`, aplicando coincidencia más larga.
+
+#### Scenario: Rango inclusivo
+- **WHEN** se tokeniza `0..=10`
+- **THEN** se producen los tokens de rango inclusivo, no `..` seguido de `=`
+
+## REMOVED Requirements
+
+### Requirement: Confirmed authorial tokens and literals
+
+**Reason**: Declaraba la intención —`**`, `**=`, `do`/`gen`/`yield`, `..=` y literales regex— sin los escenarios que la vuelven verificable. Los requisitos detallados de este cambio la cubren entera y con casos comprobables, y mantener la regla en dos sitios garantiza que se separen.
+
+**Migration**: `**` y `**=` pasan a *Tokens de potencia*; los literales regex y su diagnóstico de literal sin cerrar, a *Literales regex*; `do`, `gen` y `yield`, a *Palabras clave restantes del lenguaje completo*; `..=`, a *Token de rango inclusivo*.
+
+### Requirement: Range interpolation tokens
+
+**Reason**: El balanceo de llaves de un límite de rango interpolado es el mismo mecanismo que el de una cadena interpolada, y describirlo aparte invitaba a que divergieran.
+
+**Migration**: Cubierto por el escenario *Límite de rango interpolado* de *Interpolación en literales de cadena*.
+
+### Requirement: Float and temporal literal vocabulary
+
+**Reason**: Mezclaba dos reglas de capas distintas: los sufijos de duración, que son léxicos, y el reconocimiento de los nombres de tipo `Float*`, que es del sistema de tipos.
+
+**Migration**: Los sufijos de duración pasan a *Literales de duración*, incluido que `m` son minutos y nunca meses. El reconocimiento de los nombres `Float*` vive en *Familia `Float` y tipos temporales reconocidos como pendientes*, de `zirk-type-system`.
+
+### Requirement: Grapheme character literal
+
+**Reason**: Duplicaba, del lado léxico, la regla de grafema que `zirk-type-system` ya define para `Char`.
+
+**Migration**: La preservación íntegra del contenido Unicode pasa a *Literales de carácter*, con el emoji de familia como escenario. Qué cuenta como un grafema sigue en *Grapheme Char*, de `zirk-type-system`.

@@ -48,6 +48,28 @@ fn expression(expr: &str) -> Expr {
     }
 }
 
+/// Debug rendering of statements with every `Span { ... }` removed.
+///
+/// Lets two trees built from sources of different length be compared for
+/// shape, which is what "the same tree" means when the only difference in the
+/// source is punctuation that carries no meaning.
+fn without_spans(statements: &[Stmt]) -> String {
+    let rendered = format!("{statements:?}");
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered.as_str();
+
+    while let Some(at) = rest.find("Span {") {
+        out.push_str(&rest[..at]);
+        // Skip to the matching brace. Spans contain no nested braces of their
+        // own, so the first `}` closes it.
+        let after = &rest[at..];
+        let close = after.find('}').expect("a span is closed");
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Textual rendering of an expression with explicit parentheses.
 ///
 /// Makes the shape of the tree verifiable without depending on its internal
@@ -79,6 +101,16 @@ fn shape(e: &Expr) -> String {
             shape(&r.end)
         ),
         Expr::If(i) => format!("if({})", shape(&i.condition)),
+        Expr::Ternary(t) => format!(
+            "({} ? {} : {})",
+            shape(&t.condition),
+            shape(&t.when_true),
+            shape(&t.when_false)
+        ),
+        Expr::Increment(i) => match i.fix {
+            IncrementFix::Prefix => format!("({}{})", i.op.as_str(), i.target.name),
+            IncrementFix::Postfix => format!("({}{})", i.target.name, i.op.as_str()),
+        },
         Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
@@ -253,9 +285,27 @@ fn valid_chained_conditional() {
 }
 
 #[test]
-fn invalid_conditional_body_without_braces() {
-    let output = errors("fn main(): Void { if x return; }");
-    assert!(output.contains(codes::MISSING_BRACES.as_str()));
+fn valid_conditional_body_without_braces() {
+    // `LANGUAGE_SPEC` section 5: an effect-only `if` may govern one immediate
+    // statement. It is wrapped in a block, so it has the shape of the braced
+    // form it stands for.
+    let Stmt::If(conditional) = statements("if closed return;").remove(0) else {
+        panic!("expected a conditional");
+    };
+
+    assert_eq!(conditional.then_branch.statements.len(), 1);
+    assert!(matches!(
+        conditional.then_branch.statements[0],
+        Stmt::Return(_)
+    ));
+    assert!(conditional.else_branch.is_none());
+}
+
+#[test]
+fn invalid_else_over_a_conditional_without_braces() {
+    // Allowing it would bring back the dangling-else ambiguity.
+    let output = errors("fn main(): Void { if x return; else return; }");
+    assert!(output.contains("without braces"), "{output}");
     assert!(output.contains("= help:"));
 }
 
@@ -351,9 +401,43 @@ fn invalid_other_stdout_method() {
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
         ("class User { }", "class", "Phase 3"),
+        ("interface Serializable { }", "interface", "Phase 3"),
+        ("trait Printable { }", "trait", "Phase 3"),
         ("fn main(): Void { try { } }", "try", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
+        // The operators the norm defines and this phase does not implement.
+        ("fn main(): Void { mut x = 2 ** 3; }", "**", "Phase 3b"),
+        (
+            "fn main(): Void { mut a = 1; mut x = a & 2; }",
+            "&",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut a = 1; mut x = a << 2; }",
+            "<<",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut a = 1; mut x = a | 2; }",
+            "|",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut a = 1; mut x = a ^ 2; }",
+            "^",
+            "Phase 3b",
+        ),
+        // Generators belong to the functional style, not to the objects of
+        // Phase 3 they used to be filed under.
+        ("fn gen numbers(): Int32 { }", "gen", "Phase 7b"),
+        (
+            "fn main(): Void { mut a = 1; mut x = a |> f; }",
+            "|>",
+            "Phase 7b",
+        ),
+        // `default` labels the catch-all arm of a `try`.
+        ("fn main(): Void { default { } }", "default", "Phase 4"),
     ] {
         let output = errors(source_text);
         assert!(
@@ -408,10 +492,36 @@ fn invalid_safe_access_states_its_phase() {
 }
 
 #[test]
-fn invalid_increment_as_expression_is_rejected() {
-    let output = errors("fn main(): Void { mut i = 0; mut x = i++; }");
+fn valid_increment_as_expression_keeps_its_fix() {
+    // `LANGUAGE_SPEC` section 4 fixes the conventional postfix/prefix
+    // semantics, which is the order that used to be missing.
+    assert_eq!(shape(&expression("i++")), "(i++)");
+    assert_eq!(shape(&expression("++i")), "(++i)");
+    assert_eq!(shape(&expression("i--")), "(i--)");
+    assert_eq!(shape(&expression("--i")), "(--i)");
+}
+
+#[test]
+fn valid_increment_as_statement_is_still_an_assignment() {
+    // A statement discards the value, so both forms mean `i = i + 1` and
+    // nothing downstream needs to know the distinction exists.
+    let Stmt::Assign(assignment) = statements("i++;").remove(0) else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(assignment.target.name, "i");
+    assert_eq!(shape(&assignment.value), "(i + 1)");
+
+    let Stmt::Assign(assignment) = statements("++i;").remove(0) else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(shape(&assignment.value), "(i + 1)");
+}
+
+#[test]
+fn invalid_increment_of_something_that_is_not_a_name() {
+    let output = errors("fn main(): Void { mut x = 1++; }");
     assert!(
-        output.contains(codes::INCREMENT_AS_EXPRESSION.as_str()),
+        output.contains("only a variable can be incremented"),
         "{output}"
     );
 }
@@ -473,7 +583,8 @@ fn valid_loop_is_unconditional() {
 
 #[test]
 fn valid_for_with_three_clauses() {
-    let stmts = statements("for (mut i = 0; i < 10; i++) { }");
+    // The canonical form of `LANGUAGE_SPEC` section 5, without parentheses.
+    let stmts = statements("for mut i = 0; i < 10; i++ { }");
     let Stmt::Loop(l) = &stmts[0] else {
         panic!("expected a loop");
     };
@@ -481,6 +592,69 @@ fn valid_for_with_three_clauses() {
     assert!(l.init.is_some());
     assert!(l.condition.is_some());
     assert!(l.step.is_some());
+}
+
+#[test]
+fn valid_control_headers_accept_optional_parentheses() {
+    // The parentheses are optional in every control structure and produce the
+    // same tree. The canonical style omits them.
+    for (bare, parenthesized) in [
+        (
+            "for mut i = 0; i < 10; i++ { }",
+            "for (mut i = 0; i < 10; i++) { }",
+        ),
+        ("for x in 0..10 { }", "for (x in 0..10) { }"),
+        ("while ready { }", "while (ready) { }"),
+        ("if ready { }", "if (ready) { }"),
+        ("do { } while ready;", "do { } while (ready);"),
+    ] {
+        // Spans are compared away: the parenthesized source is two characters
+        // longer, so every offset in it differs. What must match is the shape.
+        assert_eq!(
+            without_spans(&statements(bare)),
+            without_spans(&statements(parenthesized)),
+            "`{bare}` and `{parenthesized}` must produce the same tree"
+        );
+    }
+}
+
+#[test]
+fn valid_do_while_runs_its_body_before_its_condition() {
+    let stmts = statements("do { poll(); } while pending;");
+    let Stmt::Loop(l) = &stmts[0] else {
+        panic!("expected a loop");
+    };
+    assert_eq!(l.kind, LoopKind::DoWhile);
+    assert!(l.kind.body_runs_first());
+    assert!(l.condition.is_some());
+    assert_eq!(l.body.statements.len(), 1);
+}
+
+#[test]
+fn invalid_do_without_its_while() {
+    let output = errors("fn main(): Void { do { } }");
+    assert!(output.contains("expected `while`"), "{output}");
+}
+
+#[test]
+fn valid_ternary_groups_to_the_right() {
+    assert_eq!(shape(&expression("a ? b : c")), "(a ? b : c)");
+    // Level 16 of the operator table is right-associative.
+    assert_eq!(
+        shape(&expression("a ? b : c ? d : e")),
+        "(a ? b : (c ? d : e))"
+    );
+    // It binds looser than every binary operator.
+    assert_eq!(
+        shape(&expression("x > 0 ? x + 1 : x - 1")),
+        "((x > 0) ? (x + 1) : (x - 1))"
+    );
+}
+
+#[test]
+fn invalid_ternary_without_its_alternative() {
+    let output = errors("fn main(): Void { mut x = a ? b; }");
+    assert!(output.contains("expected `:`"), "{output}");
 }
 
 #[test]
@@ -833,4 +1007,67 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
         "{}",
         &output[..200.min(output.len())]
     );
+}
+
+// --- Literals from later phases ---------------------------------------------
+
+#[test]
+fn invalid_literals_from_other_phases_name_themselves_and_their_phase() {
+    for (source_text, what, phase) in [
+        (
+            "fn main(): Void { mut x = 1.5; }",
+            "float literal",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut x = 'a'; }",
+            "character literal",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut x = \"a {b}\"; }",
+            "string interpolation",
+            "Phase 3b",
+        ),
+        (
+            "fn main(): Void { mut x = 250ms; }",
+            "duration literal",
+            "Phase 7",
+        ),
+        (
+            "fn main(): Void { mut x = re'^a$'; }",
+            "regex literal",
+            "Phase 7",
+        ),
+    ] {
+        let output = errors(source_text);
+        assert!(
+            output.contains(codes::NOT_IMPLEMENTED.as_str()),
+            "for {what}:\n{output}"
+        );
+        assert!(
+            output.contains(what),
+            "the diagnostic must name {what}:\n{output}"
+        );
+        assert!(
+            output.contains(phase),
+            "the diagnostic must say {phase} for {what}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn invalid_literal_from_another_phase_reports_once() {
+    // Abandoning the statement whole is what keeps a second "expected an
+    // expression" — matching no mistake the user made — from following it.
+    let output = errors("fn main(): Void { mut x = 1.5; }");
+    assert!(
+        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "a recognized literal must not also be an unexpected token:\n{output}"
+    );
+}
+
+#[test]
+fn valid_ordinary_string_is_unaffected_by_interpolation() {
+    assert_eq!(shape(&expression("\"hola\"")), "\"hola\"");
 }

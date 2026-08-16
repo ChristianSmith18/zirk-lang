@@ -25,9 +25,17 @@
 
 ## 1. Léxico
 
-- [ ] 1.1 Añadir las palabras clave que faltan: `interface`, `trait`, `value`
-- [ ] 1.2 Retirar de `phase()` lo que esta fase implementa: `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as`, `is`
-- [ ] 1.3 Tests: las palabras clave nuevas se reconocen y las retiradas dejan de declarar fase
+> El cambio `alinear-implementacion-con-norma-refinada` adelantó parte de este
+> grupo: `interface` y `trait` ya son palabras clave y ya declaran esta fase.
+> Y corrigió el supuesto de 1.1: **`value` no debe ser palabra reservada**.
+> Reservarla rompería `mut value = 1;` y `match r { Ok(value) => ... }`, que es
+> código Zirk corriente —el propio spec lo usa en sus ejemplos—. `value class`
+> se reconoce por posición, igual que `strict` en `inmut::strict`.
+
+- [x] 1.1 Añadir las palabras clave que faltan: `interface` y `trait`, ya hechas por el cambio de alineación. `value` queda contextual, no reservada
+- [ ] 1.2 Retirar de `phase()` lo que esta fase implementa: `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as`, `is`, `interface`, `trait`
+- [ ] 1.3 Tests: `value class` se parsea sin que `value` deje de ser un identificador válido, y las palabras retiradas dejan de declarar fase
+- [ ] 1.4 Al implementar genéricos, partir el token `>>` en dos `>` dentro del parser de tipos: `Box<Box<Int32>>` termina en el token de desplazamiento
 
 ## 2. Gramática — clases y contratos
 
