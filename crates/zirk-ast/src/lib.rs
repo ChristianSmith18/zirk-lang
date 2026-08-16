@@ -212,8 +212,8 @@ pub enum Stmt {
     Assign(AssignStmt),
     /// `if cond { } else { }`
     If(IfStmt),
-    /// `while cond { }`, `loop { }` and `for (init; cond; step) { }`, which
-    /// share a shape once parsed.
+    /// `while cond { }`, `loop { }`, `do { } while cond;` and
+    /// `for init; cond; step { }`, which share a shape once parsed.
     Loop(LoopStmt),
     /// `for x in iterable { }`
     ForIn(ForInStmt),
@@ -245,12 +245,16 @@ impl Stmt {
     }
 }
 
-/// The three loop forms that are not `for ... in`.
+/// The loop forms that are not `for ... in`.
 ///
 /// `while c { b }` is `LoopStmt { condition: Some(c), .. }`, `loop { b }` is
-/// the same with no condition, and `for (i; c; s) { b }` adds the
-/// initialization and the step. Keeping one node instead of three avoids
-/// repeating the same lowering three times for what LLVM sees as one shape.
+/// the same with no condition, and `for i; c; s { b }` adds the initialization
+/// and the step. Keeping one node instead of four avoids repeating the same
+/// lowering four times for what LLVM sees as one shape.
+///
+/// `do { b } while c;` shares that shape too: the only difference is which
+/// block execution enters first, which is one edge in the lowering rather than
+/// a node of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopStmt {
     /// The syntactic form written, kept for diagnostics.
@@ -270,6 +274,8 @@ pub enum LoopKind {
     For,
     While,
     Loop,
+    /// `do { } while cond;`, which checks its condition after the body.
+    DoWhile,
 }
 
 impl LoopKind {
@@ -278,7 +284,13 @@ impl LoopKind {
             LoopKind::For => "for",
             LoopKind::While => "while",
             LoopKind::Loop => "loop",
+            LoopKind::DoWhile => "do ... while",
         }
+    }
+
+    /// Whether the body runs before the condition is ever checked.
+    pub const fn body_runs_first(self) -> bool {
+        matches!(self, LoopKind::DoWhile)
     }
 }
 
@@ -369,6 +381,18 @@ pub enum Expr {
     /// position, and with it whether the branches must produce a value.
     /// Decision D7 of the design.
     If(Box<IfStmt>),
+    /// `cond ? a : b`.
+    ///
+    /// Kept apart from [`Expr::If`] even though both choose between two values:
+    /// its branches are expressions rather than blocks, and a diagnostic that
+    /// called it an `if` would name something the author did not write.
+    Ternary(TernaryExpr),
+    /// `i++`, `++i`, `i--` and `--i` where a value is expected.
+    ///
+    /// In statement position the parser still desugars these into the
+    /// equivalent assignment: there is no value to observe, so the prefix and
+    /// postfix forms are indistinguishable and the simpler tree wins.
+    Increment(IncrementExpr),
     /// `match x { p => v, ... }`, in either position.
     ///
     /// There is no separate statement node: in statement position the parser
@@ -400,6 +424,8 @@ impl Expr {
             Expr::Call(e) => e.span,
             Expr::Range(e) => e.span,
             Expr::If(e) => e.span,
+            Expr::Ternary(e) => e.span,
+            Expr::Increment(e) => e.span,
             Expr::Match(e) => e.span,
             Expr::Lambda(e) => e.span,
             Expr::Variant(e) => e.span,
@@ -421,6 +447,64 @@ pub struct RangeExpr {
     /// `..=` includes the endpoint; `..` does not.
     pub inclusive: bool,
     pub span: Span,
+}
+
+/// `condition ? when_true : when_false`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TernaryExpr {
+    pub condition: Box<Expr>,
+    pub when_true: Box<Expr>,
+    pub when_false: Box<Expr>,
+    /// The `?`, so a diagnostic can point at the operator and not the whole
+    /// expression.
+    pub op_span: Span,
+    pub span: Span,
+}
+
+/// `i++`, `++i`, `i--` or `--i` in expression position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncrementExpr {
+    /// The place being incremented. It must be assignable and mutable.
+    pub target: Ident,
+    pub op: IncrementOp,
+    pub fix: IncrementFix,
+    pub op_span: Span,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementOp {
+    /// `++`
+    Increment,
+    /// `--`
+    Decrement,
+}
+
+impl IncrementOp {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            IncrementOp::Increment => "++",
+            IncrementOp::Decrement => "--",
+        }
+    }
+
+    /// The binary operation the increment stands for.
+    pub const fn as_binary(self) -> BinaryOp {
+        match self {
+            IncrementOp::Increment => BinaryOp::Add,
+            IncrementOp::Decrement => BinaryOp::Sub,
+        }
+    }
+}
+
+/// Which value the expression produces, per `ZIRK_LANGUAGE_SPEC.md` section 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncrementFix {
+    /// `++i`: the operand is updated first and the expression is the new value.
+    Prefix,
+    /// `i++`: the expression is the previous value and the operand is updated
+    /// afterwards.
+    Postfix,
 }
 
 /// `match scrutinee { arms }`

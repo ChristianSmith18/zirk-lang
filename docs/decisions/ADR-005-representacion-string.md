@@ -36,3 +36,26 @@ El costo es una llamada indirecta donde podría haber acceso directo. Es aceptab
 - Los literales de string se materializan como constantes globales de LLVM más una llamada de construcción del runtime, no como punteros crudos entregados al usuario.
 - La misma disciplina aplica a las futuras colecciones (`List<T>`, `Map<K,V>`, `Set<T>`): layout privado del runtime.
 - Si en Fase 11 se mide que la indirección es un costo real en un caso concreto, se optimiza ahí con evidencia — no se rompe la frontera preventivamente.
+
+## Enmienda — el handle es la identidad observable
+
+- **Fecha:** 15 de agosto de 2026
+- **Motivo:** el refinamiento normativo definió `String` como referencia mutable compartida con identidad observable mediante `is`.
+
+La norma posterior no contradice esta decisión: la refuerza.
+
+El handle opaco **es** la identidad que `is` compara. Dos bindings que aliasan la misma `String` comparten handle y son idénticos; dos handles distintos no lo son aunque su contenido coincida. Esto no añade nada al compilador —comparar dos handles es comparar dos punteros— y no rompe la opacidad, porque comparar identidades no es inspeccionar contenido.
+
+De ahí se sigue el reparto de responsabilidades:
+
+| Operación | Quién la resuelve | Por qué |
+|---|---|---|
+| `is` | comparación de handles | la identidad **es** el handle |
+| `==` | runtime | depende del contenido y de la equivalencia canónica Unicode |
+| hash | runtime | debe derivarse de la misma forma canónica que `==` |
+| indexación por grafemas | runtime | exige el índice adaptativo que esta frontera protege |
+| normalización | runtime, con literales precanonizados por el compilador | ver [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) |
+
+El compilador conserva una sola responsabilidad nueva: emitir los literales ya en forma canónica. Es una transformación sobre el texto del literal, no sobre la representación del `String`, así que la frontera sigue intacta.
+
+**La opacidad, lejos de estorbar, es lo que hace barato todo esto:** el runtime puede guardar junto a los bytes las banderas y los campos cacheados que necesite —`is_ascii`, `normalization`, `grapheme_count`, `hash`— sin que ninguna otra capa se entere ni tenga que cambiar cuando aparezcan.

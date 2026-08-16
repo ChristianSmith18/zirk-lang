@@ -18,6 +18,7 @@ mod modules;
 
 use driver::Action;
 use std::path::{Path, PathBuf};
+use zirk_diagnostics::Phase;
 
 /// Diagnostic codes of the CLI.
 pub mod codes {
@@ -81,10 +82,13 @@ fn dispatch(args: &[String]) -> i32 {
         // does define.
         Some(later @ ("check" | "test" | "bench" | "format" | "lint" | "new" | "init" | "doc")) => {
             let phase = match later {
-                "check" => 2,
-                "format" | "lint" => 9,
-                "new" | "init" => 6,
-                _ => 7,
+                // The CLI surface belongs to Phase 6, with the project system.
+                // `check` used to claim Phase 2, which has since shipped
+                // without it: a promise that had already expired.
+                "check" | "test" | "new" | "init" => Phase::SIX,
+                "format" | "lint" => Phase::NINE,
+                // `bench` and `doc` need the standard library behind them.
+                _ => Phase::SEVEN,
             };
             fail(
                 codes::NOT_IMPLEMENTED,

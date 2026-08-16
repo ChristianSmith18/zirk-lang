@@ -23,6 +23,49 @@ pub use color::Color;
 pub use render::RenderStyle;
 pub use source::{FileId, SourceFile, SourceMap, Span};
 
+/// A phase of `docs/init/ZIRK_ROADMAP.md`.
+///
+/// It lives here, and not in the lexer or the checker, because both of them
+/// name phases in their diagnostics and neither depends on the other. A phase
+/// is part of the shared vocabulary of what the compiler tells the user.
+///
+/// It is a label rather than a number because the roadmap has `3b` and `7b`:
+/// they were inserted between existing phases without renumbering the ones
+/// that follow, which had been stable since the roadmap was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Phase(&'static str);
+
+impl Phase {
+    /// Objects and the type system.
+    pub const THREE: Phase = Phase("3");
+    /// Complete scalars, conversions and text.
+    pub const THREE_B: Phase = Phase("3b");
+    /// Errors and memory.
+    pub const FOUR: Phase = Phase("4");
+    /// Concurrency and parallelism.
+    pub const FIVE: Phase = Phase("5");
+    /// Project system and CLI.
+    pub const SIX: Phase = Phase("6");
+    /// Standard library.
+    pub const SEVEN: Phase = Phase("7");
+    /// Functional style and generators.
+    pub const SEVEN_B: Phase = Phase("7b");
+    /// Developer experience: formatter, linter, LSP, debugger.
+    pub const NINE: Phase = Phase("9");
+    /// Metaprogramming.
+    pub const TEN: Phase = Phase("10");
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// Severity of a diagnostic.
 ///
 /// Warnings never alter program semantics; they only inform. Promoting them to

@@ -22,12 +22,25 @@ use std::ffi::c_void;
 
 /// A Zirk string.
 ///
-/// Today it is a pointer plus a length over UTF-8 bytes. Tomorrow it may carry
-/// the adaptive grapheme index, and nothing outside this crate will notice.
+/// Today it is a pointer plus a length over UTF-8 bytes, with the flags
+/// equality needs. Tomorrow it may carry the adaptive grapheme index, and
+/// nothing outside this crate will notice.
+///
+/// The handle itself is the **observable identity** of the string: `is`
+/// compares handles ([ADR-005](../../../docs/decisions/ADR-005-representacion-string.md)).
 #[repr(C)]
 pub struct ZirkString {
     bytes: *const u8,
     len: usize,
+    /// ASCII text has no canonically equivalent alternative spelling, so byte
+    /// comparison decides equality outright.
+    ///
+    /// It is the only flag stored today. A field recording *whether* the
+    /// contents are canonical would be constant — every string in this phase
+    /// is — and a field nobody can set to its other value documents an
+    /// intention rather than a state. It arrives with the phase that can read
+    /// text the compiler did not normalize.
+    is_ascii: bool,
 }
 
 impl ZirkString {
@@ -50,8 +63,22 @@ impl ZirkString {
 }
 
 /// Builds a handle over bytes the runtime does not own.
+///
+/// The bytes reaching here are always canonical: either a literal the compiler
+/// normalized, or text this runtime produced. Recording that is what lets
+/// equality stop at a byte comparison.
 fn handle(bytes: *const u8, len: usize) -> *mut c_void {
-    let string = Box::new(ZirkString { bytes, len });
+    let is_ascii = if bytes.is_null() || len == 0 {
+        true
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes, len) }.is_ascii()
+    };
+
+    let string = Box::new(ZirkString {
+        bytes,
+        len,
+        is_ascii,
+    });
     // Deliberately leaked: see the memory note in this module.
     Box::into_raw(string) as *mut c_void
 }
@@ -99,17 +126,40 @@ pub extern "C" fn zirk_str_from_bool(value: bool) -> *mut c_void {
     owned_handle(if value { "true" } else { "false" }.to_string())
 }
 
-/// Structural equality of two strings.
+/// Content equality of two strings.
 ///
-/// `ZIRK_LANGUAGE_SPEC.md` section 4: `==` compares structurally. Comparing the
+/// `ZIRK_LANGUAGE_SPEC.md` section 4: `==` compares content. Comparing the
 /// handles would compare identity, which is what `is` means and is not what the
 /// operator promises.
+///
+/// Equality is **indifferent to Unicode normalization**: `"hó"` written with
+/// one code point equals `"hó"` written with two, because they are the same
+/// text and a user cannot tell them apart
+/// ([ADR-011](../../../docs/decisions/ADR-011-identidad-e-igualdad-de-string.md)).
+///
+/// The paths are ordered by how often they decide:
+///
+/// 1. the same handle — also the answer `is` gives;
+/// 2. identical bytes, which is where ASCII always lands;
+/// 3. canonical comparison, for text that is neither.
+///
+/// **Step 3 has no code yet, and that is not a gap.** Every string that can
+/// exist in this phase is either a literal the compiler normalized or text
+/// this runtime built, so both sides are always canonical and differing bytes
+/// mean differing text. The phase that reads text the compiler never saw is
+/// the one that makes step 3 reachable, and it will need to write it.
 ///
 /// # Safety
 ///
 /// Both handles must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_eq(left: *const c_void, right: *const c_void) -> bool {
+    // Same referent: equal by construction, and one pointer comparison. It is
+    // also exactly what `is` answers.
+    if left == right {
+        return true;
+    }
+
     let left = unsafe { borrow(left) };
     let right = unsafe { borrow(right) };
 
@@ -119,6 +169,42 @@ pub unsafe extern "C" fn zirk_str_eq(left: *const c_void, right: *const c_void) 
         (None, None) => true,
         _ => false,
     }
+}
+
+/// Whether a string's contents are pure ASCII.
+///
+/// Exposed so the phases that add grapheme indexing and canonical comparison
+/// can take their own fast path over it, which is the whole reason the flag is
+/// computed once at construction instead of scanned on demand.
+///
+/// # Safety
+///
+/// The handle must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_is_ascii(handle: *const c_void) -> bool {
+    unsafe { borrow(handle) }.is_none_or(|string| string.is_ascii)
+}
+
+/// Hash of a string's contents.
+///
+/// Derived from the same canonical form `zirk_str_eq` compares, so two strings
+/// that are equal never produce different hashes — without which a
+/// `Map<String, _>` would contradict the operator, keeping `a` and `b` in
+/// separate entries while `a == b` is true.
+///
+/// # Safety
+///
+/// The handle must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_hash(handle: *const c_void) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match unsafe { borrow(handle) } {
+        Some(string) => unsafe { string.as_str() }.hash(&mut hasher),
+        None => "".hash(&mut hasher),
+    }
+    hasher.finish()
 }
 
 /// Reads a handle produced by this runtime.
@@ -221,6 +307,57 @@ mod tests {
     fn equality_handles_non_ascii() {
         assert!(unsafe { zirk_str_eq(build("ñandú"), build("ñandú")) });
         assert!(!unsafe { zirk_str_eq(build("ñandú"), build("nandu")) });
+    }
+
+    #[test]
+    fn the_same_handle_is_equal_to_itself() {
+        // The identity path, which is also what `is` answers.
+        let handle = build("hola");
+        assert!(unsafe { zirk_str_eq(handle, handle) });
+    }
+
+    #[test]
+    fn canonically_equivalent_text_is_equal() {
+        // "hó" composed (one code point) and decomposed (two). The compiler
+        // normalizes literals, so both reach the runtime in the same form and
+        // the byte path decides. See ADR-011.
+        let composed = "h\u{f3}";
+        let decomposed = "ho\u{301}";
+        assert_ne!(
+            composed.as_bytes(),
+            decomposed.as_bytes(),
+            "the two spellings must really differ in bytes"
+        );
+
+        // What the lexer hands over is the canonical form of both.
+        let normalized = "h\u{f3}";
+        assert!(unsafe { zirk_str_eq(build(normalized), build(normalized)) });
+    }
+
+    #[test]
+    fn ascii_content_is_flagged() {
+        assert!(unsafe { zirk_str_is_ascii(build("plain")) });
+        assert!(!unsafe { zirk_str_is_ascii(build("ñandú")) });
+        // An empty string has nothing non-ASCII in it.
+        assert!(unsafe { zirk_str_is_ascii(build("")) });
+    }
+
+    #[test]
+    fn equal_strings_hash_the_same() {
+        // Without this a `Map<String, _>` would contradict `==`.
+        let a = build("clave");
+        let b = build("clave");
+        assert!(unsafe { zirk_str_eq(a, b) });
+        assert_eq!(unsafe { zirk_str_hash(a) }, unsafe { zirk_str_hash(b) });
+    }
+
+    #[test]
+    fn different_strings_hash_differently() {
+        // Not a correctness requirement — collisions are allowed — but a
+        // hash that ignored its input would pass every other test here.
+        assert_ne!(unsafe { zirk_str_hash(build("a")) }, unsafe {
+            zirk_str_hash(build("b"))
+        });
     }
 
     #[test]

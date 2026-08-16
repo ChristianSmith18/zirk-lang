@@ -11,7 +11,7 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{Base, EnumType, FnType, Type, TypeNames, describe, pending_type};
 use std::collections::HashMap;
 use zirk_ast::*;
-use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceMap, Span};
 
 /// The result of checking, for later stages.
 #[derive(Debug, Default)]
@@ -733,49 +733,62 @@ impl<'a> Checker<'a> {
     fn check_assign(&mut self, stmt: &AssignStmt) {
         let value = self.check_expr(&stmt.value);
 
-        let Some(resolved) = self.scopes.resolve(&stmt.target.name) else {
-            self.undeclared(&stmt.target);
+        let Some(target) = self.require_writable(&stmt.target) else {
             return;
         };
+
+        self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
+        self.scopes.mark_initialized(&stmt.target.name);
+    }
+
+    /// Resolves a name that is about to be written to, reporting why it cannot
+    /// be if that is the case.
+    ///
+    /// Shared by assignment and by the increment operators, which write to
+    /// their operand and therefore demand the same thing of it.
+    ///
+    /// Returns the declared type, or `None` when the name does not resolve at
+    /// all — an immutable binding still returns its type, so the rest of the
+    /// expression is checked and one error does not cascade.
+    fn require_writable(&mut self, target: &Ident) -> Option<Type> {
+        let Some(resolved) = self.scopes.resolve(&target.name) else {
+            self.undeclared(target);
+            return None;
+        };
+
+        let ty = resolved.binding.ty;
+        let declared_line = self.sources.location(resolved.binding.span).line;
 
         // A closure captures by value, so writing to a captured name would
         // silently update a copy. Decision D2.
         if resolved.captured {
-            let line = self.sources.location(resolved.binding.span).line;
             self.error(
                 codes::CAPTURED_MUTATION,
-                stmt.target.span,
-                format!("cannot reassign `{}` inside a closure", stmt.target.name),
-                format!("it is captured from line {line}, and capture is by value"),
+                target.span,
+                format!("cannot reassign `{}` inside a closure", target.name),
+                format!("it is captured from line {declared_line}, and capture is by value"),
                 Some(
                     "a closure captures immutable values; return the new value instead of writing to it"
                         .into(),
                 ),
             );
-            return;
+            return None;
         }
 
         if resolved.binding.mutability == Mutability::Immutable {
-            let line = self.sources.location(resolved.binding.span).line;
             self.error(
                 codes::ASSIGN_TO_IMMUTABLE,
-                stmt.target.span,
-                format!("cannot reassign `{}`", stmt.target.name),
-                format!("it was declared with `inmut` on line {line}"),
+                target.span,
+                format!("cannot reassign `{}`", target.name),
+                format!("it was declared with `inmut` on line {declared_line}"),
                 Some(format!(
                     "declare it with `mut {}` if it has to change",
-                    stmt.target.name
+                    target.name
                 )),
             );
         }
 
-        self.expect_assignable(
-            resolved.binding.ty,
-            value,
-            stmt.value.span(),
-            "the assigned value",
-        );
-        self.scopes.mark_initialized(&stmt.target.name);
+        Some(ty)
     }
 
     fn check_if(&mut self, stmt: &IfStmt) -> bool {
@@ -882,16 +895,22 @@ impl<'a> Checker<'a> {
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
         match iterable.base {
             Base::Range => Type::INT32,
-            // Iterating a `String` yields one-character strings: `Char` is a
-            // Phase 3 type, and inventing one here would be inventing a type
-            // the spec places elsewhere.
+            // A `String` iterates by grapheme and binds a `Char`, which does
+            // not exist yet. Binding a one-grapheme `String` instead would be
+            // inventing a rule the norm does not have, so the whole form is
+            // deferred to the phase that brings the type.
             Base::String => {
-                self.not_lowered(
+                self.error(
+                    codes::PENDING_FEATURE,
                     span,
-                    "iterating a `String`",
-                    "iterate a range, as in `for i in 0..n`",
+                    "iterating a `String` is not implemented yet",
+                    format!(
+                        "it binds a `Char`, one Unicode grapheme, which arrives in Phase {}",
+                        Phase::THREE_B
+                    ),
+                    Some("iterate a range, as in `for i in 0..n`".into()),
                 );
-                Type::STRING
+                Type::UNKNOWN
             }
             Base::Unknown => Type::UNKNOWN,
             _ => {
@@ -977,6 +996,8 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
             Expr::If(e) => self.check_if_expr(e),
+            Expr::Ternary(e) => self.check_ternary(e),
+            Expr::Increment(e) => self.check_increment(e),
             Expr::Match(e) => self.check_match(e, true),
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
@@ -1206,6 +1227,64 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
         }
+    }
+
+    /// `cond ? a : b`.
+    ///
+    /// The same rules as the `if` expression — Boolean condition, branches that
+    /// agree on a type — with wording that names the ternary, because that is
+    /// what the author wrote.
+    fn check_ternary(&mut self, expr: &TernaryExpr) -> Type {
+        let condition = self.check_expr(&expr.condition);
+        self.expect_boolean(
+            condition,
+            expr.condition.span(),
+            "the condition of a ternary",
+        );
+
+        let when_true = self.check_expr(&expr.when_true);
+        let when_false = self.check_expr(&expr.when_false);
+
+        match when_true.unify(when_false) {
+            Some(ty) => ty,
+            None => {
+                let t = self.name(when_true);
+                let f = self.name(when_false);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.op_span,
+                    "the branches of the ternary produce different types",
+                    format!("one branch produces {t} and the other {f}"),
+                    Some("both branches must agree, since either can be the result".into()),
+                );
+                Type::UNKNOWN
+            }
+        }
+    }
+
+    /// `i++`, `++i`, `i--` and `--i` where a value is expected.
+    ///
+    /// Both forms write to their operand, so they demand exactly what an
+    /// assignment does. Which value they produce is a lowering concern
+    /// (`LANGUAGE_SPEC` section 4); the type is the same either way.
+    fn check_increment(&mut self, expr: &IncrementExpr) -> Type {
+        let Some(ty) = self.require_writable(&expr.target) else {
+            return Type::UNKNOWN;
+        };
+
+        if !ty.is_unknown() && !Type::INT32.accepts(ty) {
+            let found = self.name(ty);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.op_span,
+                format!("`{}` requires a number", expr.op.as_str()),
+                format!("`{}` has type {found}", expr.target.name),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        ty
     }
 
     /// The value a block produces, which is that of its last statement.

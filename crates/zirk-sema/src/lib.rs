@@ -75,4 +75,10 @@ pub mod codes {
     pub const IF_WITHOUT_ELSE: Code = Code::new("E0422");
     /// A construct this phase checks but does not compile yet.
     pub const NOT_LOWERED: Code = Code::new("E0423");
+    /// A construct of the language that this phase does not implement.
+    ///
+    /// Distinct from [`NOT_LOWERED`]: that one is checked and merely not
+    /// compiled, while this one is not implemented at all and names the phase
+    /// that brings it.
+    pub const PENDING_FEATURE: Code = Code::new("E0424");
 }

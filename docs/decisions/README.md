@@ -16,6 +16,7 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-008](./ADR-008-color-en-diagnosticos.md) | Color en los diagnósticos | aceptada |
 | [ADR-009](./ADR-009-eliminacion-de-codigo-muerto-al-enlazar.md) | Eliminación de código muerto al enlazar | aceptada |
 | [ADR-010](./ADR-010-ubicaciones-multiarchivo.md) | Ubicaciones a través de varios archivos | aceptada |
+| [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) | Identidad, igualdad y normalización de `String` | aceptada |
 
 ## Estado de los pendientes de Fase 0
 

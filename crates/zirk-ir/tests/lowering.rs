@@ -492,3 +492,95 @@ fn the_reference_program_of_the_roadmap_lowers() {
             .any(|i| matches!(i, InstKind::Println(_)))
     );
 }
+
+// --- `do ... while`, ternary and increment ----------------------------------
+
+#[test]
+fn a_do_while_enters_its_body_before_its_condition() {
+    // The only difference from `while` is which block the entry jumps to.
+    let f = main_body("mut i = 0;\ndo { i += 1; } while i < 10;");
+
+    let entry = &f.blocks[0];
+    let Some(Terminator::Jump(target)) = entry.terminator else {
+        panic!("the entry block must jump into the loop");
+    };
+
+    // The header is the block that branches on the condition; the body is not
+    // it, which is exactly what makes the body run first.
+    let header = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
+        .expect("the loop has a header that branches");
+
+    assert_ne!(
+        target, header.id,
+        "a `do ... while` must not enter through its header"
+    );
+}
+
+#[test]
+fn a_while_enters_through_its_header() {
+    let f = main_body("mut i = 0;\nwhile i < 10 { i += 1; }");
+
+    let Some(Terminator::Jump(target)) = f.blocks[0].terminator else {
+        panic!("the entry block must jump into the loop");
+    };
+    let header = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
+        .expect("the loop has a header that branches");
+
+    assert_eq!(target, header.id);
+}
+
+#[test]
+fn a_ternary_evaluates_only_the_branch_it_selects() {
+    let f = main_body("mut x = 1;\nmut label: String = x > 0 ? \"yes\" : \"no\";");
+
+    // Two string literals, one per branch, in different blocks: neither is
+    // materialized before the branch is decided.
+    let branching = f
+        .blocks
+        .iter()
+        .filter(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i.kind, InstKind::ConstString(_)))
+        })
+        .count();
+
+    assert_eq!(branching, 2, "each branch owns its own block");
+}
+
+#[test]
+fn a_postfix_increment_yields_the_previous_value() {
+    let f = main_body("mut i = 0;\nmut previous = i++;");
+
+    // The slot holding the result of `i++` receives the loaded value, not the
+    // added one: the load precedes the addition.
+    let kinds = instructions(&f);
+    let load = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::Load(_)))
+        .expect("the previous value is loaded");
+    let add = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::Binary { .. }))
+        .expect("the increment adds");
+
+    assert!(load < add, "the previous value is read before updating");
+}
+
+#[test]
+fn both_increment_forms_store_the_updated_value() {
+    for body in ["mut i = 0;\nmut x = i++;", "mut i = 0;\nmut x = ++i;"] {
+        let f = main_body(body);
+        let kinds = instructions(&f);
+        assert!(
+            kinds.iter().any(|k| matches!(k, InstKind::Binary { .. })),
+            "`{body}` must update its operand"
+        );
+    }
+}

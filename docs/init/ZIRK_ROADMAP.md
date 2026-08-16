@@ -92,6 +92,33 @@ generics.
 
 ---
 
+## Phase 3b — Complete scalars, conversions and text
+
+Phase 1 implemented one integer width, one Boolean and an opaque `String`.
+Everything else the type system promises about scalars was never assigned a
+phase. This one owns it:
+
+- The remaining integer widths: `Int8`, `Int16`, `Int64`, `Int128` and the whole
+  `UInt*` family, with fixed width and checked arithmetic.
+- The binary floating family `Float16`, `Float32`, `Float64`, `Float128`, with
+  `Float` aliasing `Float64`, explicit infinities and no valid `NaN` — an
+  operation that would produce one is a controlled error.
+- `Char` as exactly one Unicode grapheme, which may span several code points.
+- Deep contextual conversion: `Float(3 / 4)` converts the operands before the
+  division rather than converting its integer result.
+- Bitwise and shift operators, levels 7 to 10 of the operator table.
+- String interpolation, which needs the `to_string()` contract Phase 3 defines.
+
+They arrive together because they depend on each other: contextual conversion
+means nothing without `Float`, `Float` literals mean nothing without the family,
+and interpolation needs Phase 3's contracts. Splitting them would mean
+implementing each one twice.
+
+**Output:** the complete scalar surface of the spec — every numeric width, real
+`Char`, and the conversion rules that connect them.
+
+---
+
 ## Phase 4 — Errors and memory
 
 - `Result<T, E>` with exhaustive `match`.
@@ -99,6 +126,10 @@ generics.
 - Full implementation of the memory strategy decided in Phase 0.
 - `unsafe {}`, `Pointer<T>`, memory-safety guarantees enforced by the compiler.
 - `Resource<E>` and `match with`.
+- `inmut::strict`: deep immutability with alias analysis. It lands here and not
+  with the other two mutability forms because it is not a local read-only flag —
+  it must prove that no accessible mutable alias of the reachable state exists,
+  which is the same analysis the memory strategy needs.
 
 **Output:** complete error handling and the central promise of the spec — safe
 code with no use-after-free, no uncontrolled null deref and no UB — verifiable
@@ -147,8 +178,46 @@ Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
 `std.system`.
 
+Two families in this phase are **not** ordinary library objects, and the
+distinction changes who implements them:
+
+- The **temporal family** — `Date`, `Time`, `DateTime`, `Instant`,
+  `ZonedDateTime`, `TimeZone`, `Duration` and `Period` — are compiler-known
+  native immutable values with their own literals, operators and type rules.
+  The lexer and the checker know them before `std.time` exists; what this phase
+  adds is their implementation, their IANA zone data and their API, not their
+  existence as types.
+- The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
+  native reference types under the same rule.
+
+`String` grapheme indexing also lands here, which is the moment ADR-005's
+boundary was designed to protect. With indexing come the forms that depend on
+it: slicing `[start:end:step]`, and `Range<T>`'s `.step(distance)` and
+`.reverse()`.
+
+Regex also lands here — the `re'pattern'` literal and regex patterns in `match`.
+The literal is core syntax and the lexer knows it earlier, but it means nothing
+without an engine to run it, and the engine is a library.
+
 **Output:** real non-trivial applications (a CLI, a simple backend) writable in
 Zirk using only the stdlib.
+
+---
+
+## Phase 7b — Functional style and generators
+
+- Generators: `fn gen` with `yield`, preserving locals between yield points and
+  implementing both `Iterator<T>` and `Iterable<T>`.
+- The pipe operator `|>`.
+- `map`, `filter` and `reduce` over collections, without mutating the source.
+
+It lands after the collections it operates on and after the iteration contracts
+Phase 3 defines. It is numbered `7b` rather than taking a number of its own so
+packaging, developer experience and metaprogramming keep the numbers they have
+had since the roadmap was written.
+
+**Output:** the functional style of `LANGUAGE_SPEC.md` section 8 working over
+the real collections.
 
 ---
 

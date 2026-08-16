@@ -136,9 +136,21 @@ ABI operations, not ordinary operator implementation.
 ## 5. Control flow and pattern matching
 
 `if`/`else`, traditional `for`, `for ... in`, `while`, `do ... while`, `loop`,
-`break` and `continue` are included. `if` may be an expression when every branch
-produces compatible types. The ternary is preferred for a short value choice.
-An effect-only `if` may govern one immediate statement without braces:
+`break` and `continue` are included.
+
+Parentheses around a control-structure header are **optional** in every one of
+these forms and in `match`. The canonical style, which the formatter produces
+and the documentation uses, omits them; writing them is valid and changes
+nothing:
+
+```text
+while pending { }        // canonical
+while (pending) { }      // equally valid
+```
+
+`if` may be an expression when every branch produces compatible types. The
+ternary is preferred for a short value choice. An effect-only `if` may govern
+one immediate statement without braces:
 
 ```text
 if closed return;

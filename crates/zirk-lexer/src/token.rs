@@ -5,7 +5,7 @@
 //! later phase apart from a syntax error, so the diagnostic can say "not
 //! implemented yet" instead of "unexpected token".
 
-use zirk_diagnostics::Span;
+use zirk_diagnostics::{Phase, Span};
 
 /// A token together with its location in the source.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +51,12 @@ pub enum Keyword {
     Use,
 
     // --- Whole language, later phases ---
+    /// `do { } while cond;`
+    Do,
+    /// `yield` inside a `fn gen`.
+    Yield,
+    Interface,
+    Trait,
     With,
     Try,
     Catch,
@@ -103,6 +109,10 @@ impl Keyword {
             "break" => Break,
             "continue" => Continue,
             "match" => Match,
+            "do" => Do,
+            "yield" => Yield,
+            "interface" => Interface,
+            "trait" => Trait,
             "with" => With,
             "try" => Try,
             "catch" => Catch,
@@ -158,6 +168,10 @@ impl Keyword {
             Break => "break",
             Continue => "continue",
             Match => "match",
+            Do => "do",
+            Yield => "yield",
+            Interface => "interface",
+            Trait => "trait",
             With => "with",
             Try => "try",
             Catch => "catch",
@@ -201,18 +215,116 @@ impl Keyword {
     /// Roadmap phase in which the construct arrives, used by the diagnostic.
     ///
     /// Returns `None` for keywords that are already implemented.
-    pub const fn phase(self) -> Option<u8> {
+    pub const fn phase(self) -> Option<Phase> {
         use Keyword::*;
         Some(match self {
             Class | Construct | This | Record | Type | Public | Private | Protected | Abstract
-            | Implements | Extends | From | As | Is => 3,
-            Try | Catch | Finally | With | Unsafe => 4,
-            Task | Await | Parallel | Thread | Sync => 5,
-            Dec | Gen | Default => 10,
+            | Implements | Extends | From | As | Is | Interface | Trait => Phase::THREE,
+            // `default` labels the catch-all arm of a `try`, so it arrives with
+            // error handling and not with the decorators it used to be filed
+            // under.
+            Try | Catch | Finally | With | Unsafe | Default => Phase::FOUR,
+            Task | Await | Parallel | Thread | Sync => Phase::FIVE,
+            // Generators are the functional style of `LANGUAGE_SPEC` section 8,
+            // which the roadmap places after the collections they iterate.
+            Gen | Yield => Phase::SEVEN_B,
+            Dec => Phase::TEN,
             _ => return None,
         })
     }
 }
+
+/// A piece of an interpolated string literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrPart {
+    /// Literal text, with its escapes already resolved.
+    Literal(String),
+    /// An embedded expression, kept as the source text between its braces.
+    ///
+    /// It is not tokenized here: doing so would make the lexer recursive for
+    /// no gain, since the parser has to run over these tokens anyway.
+    Expr { text: String, span: Span },
+}
+
+/// A numeric literal as written, minus its separators.
+///
+/// The text is kept instead of a computed value on purpose. The width is
+/// chosen by the checker, and `Float128` represents values a host `f64` would
+/// round on the way in: converting here would decide, in the wrong layer, a
+/// precision the target type may exceed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumberLit {
+    /// Digits, decimal point and exponent as written, without `_`.
+    pub text: String,
+    /// Explicit width suffix, such as the `f32` of `1.5f32`.
+    pub width: Option<String>,
+}
+
+impl NumberLit {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            width: None,
+        }
+    }
+
+    pub fn with_width(mut self, width: impl Into<String>) -> Self {
+        self.width = Some(width.into());
+        self
+    }
+}
+
+/// Unit of a duration literal.
+///
+/// Months and years are absent by design: they are calendar quantities whose
+/// length depends on where they are applied, so they belong to `Period` and not
+/// to an exact `Duration`. That is also why `m` is minutes here and never
+/// months.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DurationUnit {
+    Nanoseconds,
+    Microseconds,
+    Milliseconds,
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+    Weeks,
+}
+
+impl DurationUnit {
+    pub fn from_text(text: &str) -> Option<Self> {
+        use DurationUnit::*;
+        Some(match text {
+            "ns" => Nanoseconds,
+            "us" => Microseconds,
+            "ms" => Milliseconds,
+            "s" => Seconds,
+            "m" => Minutes,
+            "h" => Hours,
+            "d" => Days,
+            "w" => Weeks,
+            _ => return None,
+        })
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        use DurationUnit::*;
+        match self {
+            Nanoseconds => "ns",
+            Microseconds => "us",
+            Milliseconds => "ms",
+            Seconds => "s",
+            Minutes => "m",
+            Hours => "h",
+            Days => "d",
+            Weeks => "w",
+        }
+    }
+}
+
+/// Widths a float literal may name in a suffix.
+pub const FLOAT_WIDTHS: &[&str] = &["f16", "f32", "f64", "f128"];
 
 /// Class of token produced by the lexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -222,8 +334,26 @@ pub enum TokenKind {
 
     /// Integer literal, already normalized without separators.
     Integer(i128),
+    /// Fractional or scientific literal.
+    Float(NumberLit),
+    /// A number with a duration unit attached, such as `250ms`.
+    Duration(NumberLit, DurationUnit),
     /// String literal with escapes already resolved.
     Str(String),
+    /// String literal containing `{ expression }` interpolation.
+    ///
+    /// Kept as parts rather than as text so the embedded expressions retain
+    /// their own spans. Re-scanning the string later would work, but the
+    /// offsets into the file — and with them every diagnostic pointing inside
+    /// an interpolation — would already be lost.
+    InterpolatedStr(Vec<StrPart>),
+    /// Character literal, holding the full Unicode content between the quotes.
+    ///
+    /// Whether it is exactly one grapheme is not decided here: that is the
+    /// semantics of `Char`, and the lexer does not know Unicode segmentation.
+    Char(String),
+    /// Regex literal `re'pattern'`, holding the pattern with escapes intact.
+    Regex(String),
 
     // --- Operators ---
     Plus,
@@ -257,6 +387,32 @@ pub enum TokenKind {
     QuestionQuestion,
     QuestionDot,
     PipeGt,
+    /// `**`, exponentiation. Without it, `2 ** 3` would read as two
+    /// multiplications and fail with a message about the wrong thing.
+    StarStar,
+    StarStarEq,
+
+    // --- Bitwise and shift operators, levels 7 to 10 of the operator table --
+    /// `&`. Distinct from `&&`, which is the short-circuit conjunction.
+    Amp,
+    AmpEq,
+    /// `|`. Distinct from `||` and from the pipe `|>`.
+    Pipe,
+    PipeEq,
+    Caret,
+    CaretEq,
+    /// `~`, the integer complement. It has no compound form.
+    Tilde,
+    Shl,
+    ShlEq,
+    /// `>>`.
+    ///
+    /// Emitted as one token, which is what makes `a >> b` unambiguous. The
+    /// cost lands on generics: `Box<Box<Int32>>` ends in this token, so the
+    /// type parser of Phase 3 has to split it back into two `>`. That is the
+    /// same trade every language with both features makes.
+    Shr,
+    ShrEq,
 
     // --- Delimiters and punctuation ---
     LParen,
@@ -287,10 +443,21 @@ impl TokenKind {
     /// Roadmap phase in which the operator arrives, used by the diagnostic.
     ///
     /// Returns `None` for operators the subset already implements.
-    pub const fn phase(&self) -> Option<u8> {
+    pub const fn phase(&self) -> Option<Phase> {
         use TokenKind::*;
         Some(match self {
-            PipeGt => 3,
+            // The pipe belongs to the functional style, not to the objects of
+            // Phase 3 it used to be filed under.
+            PipeGt => Phase::SEVEN_B,
+            // Exponentiation needs `Float`: `2 ** -1` is defined as the
+            // mathematical result converted back, so it cannot be answered
+            // inside the integers alone.
+            StarStar | StarStarEq => Phase::THREE_B,
+            // The bitwise and shift family arrives with the integer widths it
+            // is defined over.
+            Amp | AmpEq | Pipe | PipeEq | Caret | CaretEq | Tilde | Shl | ShlEq | Shr | ShrEq => {
+                Phase::THREE_B
+            }
             _ => return None,
         })
     }
@@ -302,7 +469,13 @@ impl TokenKind {
             Identifier(name) => format!("identifier `{name}`"),
             Keyword(k) => format!("keyword `{}`", k.as_str()),
             Integer(v) => format!("integer literal `{v}`"),
+            Float(lit) => format!("float literal `{}`", lit.text),
+            Duration(lit, unit) => {
+                format!("duration literal `{}{}`", lit.text, unit.as_str())
+            }
             Str(_) => "a string literal".to_string(),
+            Char(c) => format!("character literal `'{c}'`"),
+            Regex(_) => "a regex literal".to_string(),
             Eof => "end of file".to_string(),
             other => format!("`{}`", other.symbol()),
         }
@@ -338,6 +511,19 @@ impl TokenKind {
             QuestionQuestion => "??",
             QuestionDot => "?.",
             PipeGt => "|>",
+            StarStar => "**",
+            StarStarEq => "**=",
+            Amp => "&",
+            AmpEq => "&=",
+            Pipe => "|",
+            PipeEq => "|=",
+            Caret => "^",
+            CaretEq => "^=",
+            Tilde => "~",
+            Shl => "<<",
+            ShlEq => "<<=",
+            Shr => ">>",
+            ShrEq => ">>=",
             LParen => "(",
             RParen => ")",
             LBrace => "{",
@@ -372,8 +558,8 @@ mod tests {
     #[test]
     fn later_phase_keywords_declare_their_phase() {
         assert!(!Keyword::Class.in_subset());
-        assert_eq!(Keyword::Class.phase(), Some(3));
-        assert_eq!(Keyword::Task.phase(), Some(5));
+        assert_eq!(Keyword::Class.phase(), Some(Phase::THREE));
+        assert_eq!(Keyword::Task.phase(), Some(Phase::FIVE));
     }
 
     #[test]

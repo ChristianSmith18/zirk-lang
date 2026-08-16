@@ -7,7 +7,7 @@
 
 use crate::codes;
 use zirk_ast::*;
-use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceFile, Span};
 use zirk_lexer::{Keyword, Token, TokenKind};
 
 /// Parses a sequence of tokens into a program.
@@ -196,6 +196,28 @@ impl<'a> Parser<'a> {
         true
     }
 
+    /// Reports a literal the language has and this phase does not implement.
+    ///
+    /// Literals cannot go through [`Self::report_if_from_another_phase`]: that
+    /// one names the token by its symbol, and a literal's symbol is its
+    /// content, which would put the user's own text where the construct's name
+    /// belongs.
+    fn pending_literal(&mut self, span: Span, what: &str, phase: Phase) -> Option<Expr> {
+        self.error(
+            codes::NOT_IMPLEMENTED,
+            span,
+            format!("{what} is not implemented yet"),
+            format!("it exists in the language but arrives in Phase {phase}"),
+            Some("see docs/init/ZIRK_ROADMAP.md for the scope of each phase".into()),
+        );
+        self.pos += 1;
+        // The statement is abandoned whole. Without this, the `;` left behind
+        // produces a second "expected an expression" that matches no mistake
+        // the user made.
+        self.synchronize();
+        None
+    }
+
     /// Advances to a point where resuming the parse makes sense.
     ///
     /// Without this, one error produces a cascade of derived errors that hides
@@ -246,6 +268,27 @@ impl<'a> Parser<'a> {
             codes::UNEXPECTED_TOKEN,
             span,
             format!("expected `{}` {context}", expected.symbol()),
+            format!("found {found}"),
+            None,
+        );
+        false
+    }
+
+    /// Like [`Self::expect`], but for keywords.
+    ///
+    /// It exists because `TokenKind::symbol` is empty for a keyword, so the
+    /// generic message would read "expected `` after ...".
+    fn expect_keyword(&mut self, expected: Keyword, context: &str) -> bool {
+        if self.eat_keyword(expected) {
+            return true;
+        }
+
+        let span = self.peek_span();
+        let found = self.peek().description();
+        self.error(
+            codes::UNEXPECTED_TOKEN,
+            span,
+            format!("expected `{}` {context}", expected.as_str()),
             format!("found {found}"),
             None,
         );
@@ -707,6 +750,9 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Loop) {
             return self.parse_loop();
         }
+        if self.check_keyword(Keyword::Do) {
+            return self.parse_do_while();
+        }
         if self.check_keyword(Keyword::For) {
             return self.parse_for();
         }
@@ -763,13 +809,23 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// `for (init; cond; step) { }` and `for x in iterable { }`.
+    /// `for init; cond; step { }` and `for x in iterable { }`, each with
+    /// optional parentheses around the header.
     ///
     /// Both start with `for`, and which one it is only becomes clear after the
-    /// binding: the `in` form has no parentheses.
+    /// binding.
+    ///
+    /// Without parentheses, what closes the header is the `{` of the body.
+    /// That works because Zirk has no brace-delimited literal in expression
+    /// position — records are built as `Type(...)` — so the ambiguity that
+    /// forces other languages to require the parentheses never arises.
     fn parse_for(&mut self) -> Option<Stmt> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::For);
+
+        // The parenthesis is optional, so it cannot be used to tell the two
+        // forms apart: both are probed after consuming it.
+        let parenthesized = self.eat(&TokenKind::LParen);
 
         // `for x in ...`: an identifier followed by `in`.
         if let TokenKind::Identifier(name) = self.peek().clone() {
@@ -780,6 +836,9 @@ impl<'a> Parser<'a> {
                 self.pos += 2;
                 let binding = Ident::new(name, binding_span);
                 let iterable = self.parse_expr()?;
+                if parenthesized {
+                    self.expect(&TokenKind::RParen, "to close the `for` header");
+                }
                 let body = self.parse_block()?;
                 let span = start.to(body.span);
 
@@ -791,8 +850,6 @@ impl<'a> Parser<'a> {
                 }));
             }
         }
-
-        self.expect(&TokenKind::LParen, "after `for`");
 
         let init = if matches!(self.peek(), TokenKind::Semicolon) {
             self.pos += 1;
@@ -809,13 +866,17 @@ impl<'a> Parser<'a> {
         };
         self.expect(&TokenKind::Semicolon, "after the loop condition");
 
-        let step = if matches!(self.peek(), TokenKind::RParen) {
+        // The step ends at the `{` of the body, or at the `)` when the header
+        // was written with parentheses.
+        let step = if self.header_ended(parenthesized) {
             None
         } else {
             let stmt = self.parse_simple_stmt()?;
             Some(Box::new(stmt))
         };
-        self.expect(&TokenKind::RParen, "to close the `for` header");
+        if parenthesized {
+            self.expect(&TokenKind::RParen, "to close the `for` header");
+        }
 
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -827,6 +888,39 @@ impl<'a> Parser<'a> {
             step,
             body,
             span,
+        }))
+    }
+
+    /// Whether the `for` header is over, which depends on how it was opened.
+    fn header_ended(&self, parenthesized: bool) -> bool {
+        if parenthesized {
+            matches!(self.peek(), TokenKind::RParen)
+        } else {
+            matches!(self.peek(), TokenKind::LBrace)
+        }
+    }
+
+    /// `do { } while cond;`
+    ///
+    /// The body always runs once: the condition is checked after it, which is
+    /// the only difference from `while` and is one edge in the lowering.
+    fn parse_do_while(&mut self) -> Option<Stmt> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Do);
+
+        let body = self.parse_block()?;
+        self.expect_keyword(Keyword::While, "after the body of a `do`");
+        let condition = self.parse_expr()?;
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(Stmt::Loop(LoopStmt {
+            kind: LoopKind::DoWhile,
+            init: None,
+            condition: Some(condition),
+            step: None,
+            body,
+            span: start.to(end),
         }))
     }
 
@@ -918,7 +1012,30 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::If);
 
         let condition = self.parse_expr()?;
-        let then_branch = self.parse_block()?;
+
+        // The effect-only form of `LANGUAGE_SPEC` section 5: `if closed
+        // return;` governs exactly one statement.
+        let braceless = !matches!(self.peek(), TokenKind::LBrace);
+        let then_branch = if braceless {
+            self.parse_governed_statement()?
+        } else {
+            self.parse_block()?
+        };
+
+        // `else` over the braceless form would bring back the dangling-else
+        // ambiguity, and the norm presents that form as an effect rather than
+        // as a complete conditional.
+        if braceless && self.check_keyword(Keyword::Else) {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "an `if` without braces cannot have an `else`",
+                "the form without braces governs one statement and nothing more",
+                Some("wrap both branches in `{ }`".into()),
+            );
+            return None;
+        }
 
         let else_branch = if self.eat_keyword(Keyword::Else) {
             if self.check_keyword(Keyword::If) {
@@ -944,6 +1061,21 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The single statement an `if` without braces governs.
+    ///
+    /// It is wrapped in a block so nothing downstream has to know the form
+    /// exists: scoping, flow analysis and lowering see the same shape they see
+    /// for `if closed { return; }`, which is what it means.
+    fn parse_governed_statement(&mut self) -> Option<Block> {
+        let stmt = self.parse_stmt()?;
+        let span = stmt.span();
+
+        Some(Block {
+            statements: vec![stmt],
+            span,
+        })
+    }
+
     fn parse_return(&mut self) -> Option<Stmt> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Return);
@@ -965,44 +1097,30 @@ impl<'a> Parser<'a> {
 
     /// A statement starting with an expression: an assignment or a call.
     ///
-    /// Compound assignment and increment are desugared here, per decision D9:
-    /// `i += 1` and `i++` both produce the tree of `i = i + 1`, so nothing
-    /// downstream needs to know they exist.
+    /// Compound assignment and increment are desugared here: `i += 1`, `i++`
+    /// and `++i` all produce the tree of `i = i + 1`, so nothing downstream
+    /// needs to know they exist.
+    ///
+    /// The two increment forms only differ in the value they produce, and a
+    /// statement discards it. Desugaring both to the same assignment is what
+    /// keeps that distinction out of every layer that does not need it.
     fn parse_expr_or_assign(&mut self) -> Option<Stmt> {
         let start = self.peek_span();
 
-        // Prefix increment: `++i`.
-        if let Some(op) = increment_op(self.peek()) {
-            let op_span = self.peek_span();
-            self.pos += 1;
-            let target = self.expect_identifier("after the increment operator")?;
-            let end = self.peek_span();
-            self.eat(&TokenKind::Semicolon);
-            return Some(self.desugar_compound(target, op, one(op_span), op_span, start.to(end)));
-        }
-
-        // The inner form, so a trailing `++` reaches the postfix branch below
-        // instead of being reported as a value-position increment.
         let expr = self.parse_expr_inner()?;
 
-        // Postfix increment: `i++`.
-        if let Some(op) = increment_op(self.peek()) {
-            let op_span = self.peek_span();
-            self.pos += 1;
+        // An increment that *is* the whole statement: its value goes nowhere.
+        if let Expr::Increment(inc) = &expr {
             let end = self.peek_span();
             self.eat(&TokenKind::Semicolon);
-
-            let Some(target) = as_assignable(&expr) else {
-                self.error(
-                    codes::UNEXPECTED_TOKEN,
-                    expr.span(),
-                    "only a variable can be incremented",
-                    "the operand of `++` or `--` must be a name",
-                    None,
-                );
-                return None;
-            };
-            return Some(self.desugar_compound(target, op, one(op_span), op_span, start.to(end)));
+            let one = one(inc.op_span);
+            return Some(self.desugar_compound(
+                inc.target.clone(),
+                inc.op.as_binary(),
+                one,
+                inc.op_span,
+                start.to(end),
+            ));
         }
 
         // Compound assignment: `i += 1`.
@@ -1087,28 +1205,8 @@ impl<'a> Parser<'a> {
     // --- Expressions ------------------------------------------------------
 
     /// An expression in value position.
-    ///
-    /// Differs from [`Self::parse_expr_inner`] only in rejecting a trailing
-    /// `++`/`--`: `i++` is a statement, and reaching here means it was written
-    /// where a value is expected. Decision D9.
     fn parse_expr(&mut self) -> Option<Expr> {
-        let expr = self.parse_expr_inner()?;
-
-        if increment_op(self.peek()).is_some() {
-            let symbol = self.peek().symbol();
-            let span = self.peek_span();
-            self.error(
-                codes::INCREMENT_AS_EXPRESSION,
-                span,
-                format!("`{symbol}` cannot be used where a value is expected"),
-                "in this phase increment and decrement are statements, not expressions",
-                Some("write it on its own line, then use the variable".into()),
-            );
-            self.pos += 1;
-            return None;
-        }
-
-        Some(expr)
+        self.parse_expr_inner()
     }
 
     fn parse_expr_inner(&mut self) -> Option<Expr> {
@@ -1134,7 +1232,7 @@ impl<'a> Parser<'a> {
             return self.parse_match();
         }
 
-        self.parse_range()
+        self.parse_ternary()
     }
 
     /// Whether the tokens ahead start a lambda rather than a parenthesized
@@ -1361,6 +1459,36 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `cond ? a : b`, which binds looser than everything else here.
+    ///
+    /// Right-associative, per level 16 of the operator table: `a ? b : c ? d :
+    /// e` groups as `a ? b : (c ? d : e)`, which is the only reading in which
+    /// the trailing branches mean anything.
+    ///
+    /// A `?` after an expression is unambiguously this operator: `??` and `?.`
+    /// are their own tokens, and the `?` of `T?` only appears in type position.
+    fn parse_ternary(&mut self) -> Option<Expr> {
+        let condition = self.parse_range()?;
+
+        if !matches!(self.peek(), TokenKind::Question) {
+            return Some(condition);
+        }
+        let op_span = self.peek_span();
+        self.pos += 1;
+
+        let when_true = self.parse_ternary()?;
+        self.expect(&TokenKind::Colon, "to separate the branches of the ternary");
+        let when_false = self.parse_ternary()?;
+
+        Some(Expr::Ternary(TernaryExpr {
+            span: condition.span().to(when_false.span()),
+            condition: Box::new(condition),
+            when_true: Box::new(when_true),
+            when_false: Box::new(when_false),
+            op_span,
+        }))
+    }
+
     /// `a..b` and `a..=b`, which bind looser than every binary operator.
     fn parse_range(&mut self) -> Option<Expr> {
         let start = self.parse_binary(0)?;
@@ -1418,6 +1546,22 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Option<Expr> {
         let start = self.peek_span();
 
+        // `++i` and `--i` in value position: the operand is updated first and
+        // the expression is the new value (`LANGUAGE_SPEC` section 4).
+        if let Some(op) = increment_op(self.peek()) {
+            let op_span = self.peek_span();
+            self.pos += 1;
+            let target = self.expect_identifier("after the increment operator")?;
+            let span = start.to(target.span);
+            return Some(Expr::Increment(IncrementExpr {
+                target,
+                op,
+                fix: IncrementFix::Prefix,
+                op_span,
+                span,
+            }));
+        }
+
         let op = match self.peek() {
             TokenKind::Minus => Some(UnaryOp::Neg),
             TokenKind::Not => Some(UnaryOp::Not),
@@ -1450,7 +1594,35 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        self.parse_primary()
+        let expr = self.parse_primary()?;
+
+        // `i++` and `i--` in value position: the expression is the previous
+        // value and the operand is updated afterwards.
+        if let Some(op) = increment_op(self.peek()) {
+            let op_span = self.peek_span();
+
+            let Some(target) = as_assignable(&expr) else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    expr.span(),
+                    "only a variable can be incremented",
+                    format!("the operand of `{}` must be a name", op.as_str()),
+                    None,
+                );
+                return None;
+            };
+            self.pos += 1;
+
+            return Some(Expr::Increment(IncrementExpr {
+                span: expr.span().to(op_span),
+                target,
+                op,
+                fix: IncrementFix::Postfix,
+                op_span,
+            }));
+        }
+
+        Some(expr)
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -1465,6 +1637,18 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Expr::Str(StrLit { value, span }))
             }
+            // Literals the norm defines and this phase does not implement.
+            // They are recognized so the diagnostic can name them and their
+            // phase; without the lexeme there would be nothing to name.
+            TokenKind::Float(_) => self.pending_literal(span, "a float literal", Phase::THREE_B),
+            TokenKind::Char(_) => self.pending_literal(span, "a character literal", Phase::THREE_B),
+            TokenKind::InterpolatedStr(_) => {
+                self.pending_literal(span, "string interpolation", Phase::THREE_B)
+            }
+            TokenKind::Duration(_, _) => {
+                self.pending_literal(span, "a duration literal", Phase::SEVEN)
+            }
+            TokenKind::Regex(_) => self.pending_literal(span, "a regex literal", Phase::SEVEN),
             TokenKind::Keyword(Keyword::True) => {
                 self.pos += 1;
                 Some(Expr::Bool(BoolLit { value: true, span }))
@@ -1476,21 +1660,6 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Null) => {
                 self.pos += 1;
                 Some(Expr::Null(NullLit { span }))
-            }
-            // Increment is a statement in this phase: as an expression its
-            // prefix/postfix distinction would need an evaluation order for
-            // side effects that no normative document defines. Decision D9.
-            TokenKind::PlusPlus | TokenKind::MinusMinus => {
-                let symbol = self.peek().symbol();
-                self.error(
-                    codes::INCREMENT_AS_EXPRESSION,
-                    span,
-                    format!("`{symbol}` cannot be used where a value is expected"),
-                    "in this phase increment and decrement are statements, not expressions",
-                    Some("write it on its own line, then use the variable".into()),
-                );
-                self.pos += 1;
-                None
             }
             TokenKind::LParen => {
                 self.pos += 1;
@@ -1665,10 +1834,10 @@ fn compound_op(kind: &TokenKind) -> Option<BinaryOp> {
 }
 
 /// The operator an increment or decrement stands for.
-fn increment_op(kind: &TokenKind) -> Option<BinaryOp> {
+fn increment_op(kind: &TokenKind) -> Option<IncrementOp> {
     Some(match kind {
-        TokenKind::PlusPlus => BinaryOp::Add,
-        TokenKind::MinusMinus => BinaryOp::Sub,
+        TokenKind::PlusPlus => IncrementOp::Increment,
+        TokenKind::MinusMinus => IncrementOp::Decrement,
         _ => return None,
     })
 }

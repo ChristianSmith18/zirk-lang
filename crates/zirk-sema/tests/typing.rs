@@ -91,7 +91,35 @@ fn valid_the_four_types_of_the_subset() {
 fn invalid_type_from_a_later_phase_states_its_phase() {
     let output = rejected_body("mut x: Int64 = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
-    assert!(output.contains("Phase 3"));
+    assert!(output.contains("Phase 3b"), "{output}");
+}
+
+#[test]
+fn valid_short_aliases_of_the_default_integer() {
+    // `Int` and `Integer` name `Int32`, which has existed since Phase 1.
+    accepted_body("mut a: Int = 1;\nmut b: Integer = 2;\nmut c: Int32 = a + b;");
+}
+
+#[test]
+fn invalid_float_type_states_its_phase_instead_of_being_unknown() {
+    let output = rejected_body("mut x: Float64 = 1;");
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
+    assert!(output.contains("Phase 3b"), "{output}");
+}
+
+#[test]
+fn invalid_temporal_type_states_its_phase() {
+    let output = rejected_body("mut x: Instant = 1;");
+    assert!(output.contains("Phase 7"), "{output}");
+}
+
+#[test]
+fn invalid_decimal_is_not_a_type_of_the_language() {
+    // The family was removed: announcing a phase would teach a language that
+    // does not exist.
+    let output = rejected_body("mut x: Decimal64 = 1;");
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
+    assert!(!output.contains("Phase"), "{output}");
 }
 
 #[test]
@@ -394,4 +422,76 @@ fn invalid_several_independent_errors_are_all_reported() {
         "both errors were expected:\n{}",
         sink.render(RenderStyle::Human)
     );
+}
+
+// --- Ternary, increment and `do ... while` ----------------------------------
+
+#[test]
+fn valid_ternary_with_branches_that_agree() {
+    accepted_body("mut x = 1;\nmut label: String = x > 0 ? \"yes\" : \"no\";");
+}
+
+#[test]
+fn invalid_ternary_with_branches_that_disagree() {
+    let output = rejected_body("mut x = 1;\nmut label = x > 0 ? \"yes\" : 0;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("ternary"), "{output}");
+}
+
+#[test]
+fn invalid_ternary_condition_is_not_boolean() {
+    // No truthiness, here as everywhere else.
+    let output = rejected_body("mut x = 1;\nmut label = x ? \"yes\" : \"no\";");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_increment_as_expression() {
+    accepted_body("mut i = 0;\nmut previous = i++;\nmut next = ++i;");
+}
+
+#[test]
+fn invalid_increment_of_an_immutable_binding() {
+    let output = rejected_body("inmut I = 0;\nmut x = I++;");
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_increment_of_a_non_numeric_value() {
+    let output = rejected_body("mut s = \"a\";\nmut x = s++;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_do_while_checks_a_boolean_condition() {
+    accepted_body("mut i = 0;\ndo { i += 1; } while i < 10;");
+}
+
+#[test]
+fn invalid_do_while_condition_is_not_boolean() {
+    let output = rejected_body("mut i = 0;\ndo { i += 1; } while i;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_break_inside_a_do_while() {
+    accepted_body("do { break; } while true;");
+}
+
+#[test]
+fn valid_conditional_without_braces() {
+    accepted_body("mut closed = true;\nif closed return;");
+}
+
+#[test]
+fn invalid_string_iteration_defers_to_the_phase_of_char() {
+    // It binds a `Char` — one grapheme — and binding a one-grapheme `String`
+    // instead would invent a rule the norm does not have.
+    let output = rejected_body("mut text = \"hola\";\nfor c in text { }");
+    assert!(output.contains(codes::PENDING_FEATURE.as_str()), "{output}");
+    assert!(output.contains("Char"), "{output}");
+    assert!(output.contains("Phase 3b"), "{output}");
 }
