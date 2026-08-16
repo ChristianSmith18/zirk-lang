@@ -108,9 +108,16 @@ fn shape(e: &Expr) -> String {
             shape(&t.when_false)
         ),
         Expr::Increment(i) => match i.fix {
-            IncrementFix::Prefix => format!("({}{})", i.op.as_str(), i.target.name),
-            IncrementFix::Postfix => format!("({}{})", i.target.name, i.op.as_str()),
+            IncrementFix::Prefix => format!("({}{})", i.op.as_str(), i.target.name()),
+            IncrementFix::Postfix => format!("({}{})", i.target.name(), i.op.as_str()),
         },
+        Expr::This(_) => "this".to_string(),
+        Expr::Field(f) => format!(
+            "{}{}{}",
+            shape(&f.object),
+            if f.safe { "?." } else { "." },
+            f.name.name
+        ),
         Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
@@ -350,7 +357,7 @@ fn valid_assignment_to_variable() {
     let Stmt::Assign(a) = statements("x = 5;").remove(0) else {
         panic!("expected an assignment");
     };
-    assert_eq!(a.target.name, "x");
+    assert_eq!(a.target.name(), "x");
 }
 
 #[test]
@@ -400,7 +407,7 @@ fn invalid_other_stdout_method() {
 #[test]
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
-        ("class User { }", "class", "Phase 3"),
+        ("record Point { }", "record", "Phase 3"),
         ("interface Serializable { }", "interface", "Phase 3"),
         ("trait Printable { }", "trait", "Phase 3"),
         ("fn main(): Void { try { } }", "try", "Phase 4"),
@@ -457,7 +464,7 @@ fn invalid_constructs_from_other_phases_say_which() {
 
 #[test]
 fn invalid_constructs_from_other_phases_are_not_unexpected_tokens() {
-    let output = errors("class User { }");
+    let output = errors("record Point { }");
     assert!(
         !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
         "a known construct must not be reported as an unexpected token:\n{output}"
@@ -484,11 +491,14 @@ fn invalid_declaration_inside_a_function_says_where_it_belongs() {
 }
 
 #[test]
-fn invalid_safe_access_states_its_phase() {
-    let output = errors("fn main(): Void { mut u = 1; mut n = u?.name; }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("?."), "{output}");
-    assert!(output.contains("Phase 3"), "{output}");
+fn valid_member_access_parses_uniformly() {
+    // `Direction.North` and `user.name` have the same shape. Telling them
+    // apart means knowing whether the base names a type or a value, which is
+    // resolution and not parsing, so both produce a field access.
+    assert_eq!(shape(&expression("user.name")), "user.name");
+    assert_eq!(shape(&expression("Direction.North")), "Direction.North");
+    assert_eq!(shape(&expression("a.b.c")), "a.b.c");
+    assert_eq!(shape(&expression("user?.name")), "user?.name");
 }
 
 #[test]
@@ -508,7 +518,7 @@ fn valid_increment_as_statement_is_still_an_assignment() {
     let Stmt::Assign(assignment) = statements("i++;").remove(0) else {
         panic!("expected an assignment");
     };
-    assert_eq!(assignment.target.name, "i");
+    assert_eq!(assignment.target.name(), "i");
     assert_eq!(shape(&assignment.value), "(i + 1)");
 
     let Stmt::Assign(assignment) = statements("++i;").remove(0) else {
@@ -695,7 +705,7 @@ fn valid_compound_assignment_desugars() {
         panic!("expected two assignments");
     };
     assert_eq!(shape(&a.value), shape(&b.value));
-    assert_eq!(a.target.name, b.target.name);
+    assert_eq!(a.target.name(), b.target.name());
 }
 
 #[test]
@@ -1070,4 +1080,115 @@ fn invalid_literal_from_another_phase_reports_once() {
 #[test]
 fn valid_ordinary_string_is_unaffected_by_interpolation() {
     assert_eq!(shape(&expression("\"hola\"")), "\"hola\"");
+}
+
+// --- Clases ------------------------------------------------------------------
+
+#[test]
+fn valid_class_with_fields_constructor_and_method() {
+    let p = program(
+        "class User {
+             inmut id: Int32;
+             name: String;
+
+             construct(id: Int32, name: String) {
+                 this.id = id;
+                 this.name = name;
+             }
+
+             fn greeting(): String { return this.name; }
+         }
+         fn main(): Void { }",
+    );
+
+    let class = &p.classes[0];
+    assert_eq!(class.name.name, "User");
+    assert_eq!(class.fields.len(), 2);
+    assert_eq!(class.constructors.len(), 1);
+    assert_eq!(class.constructors[0].params.len(), 2);
+    assert_eq!(class.methods.len(), 1);
+    assert_eq!(class.methods[0].name.name, "greeting");
+}
+
+#[test]
+fn valid_unmodified_field_is_public_mut() {
+    // `LANGUAGE_SPEC` section 7: a field with no modifiers is `public mut`.
+    let p = program("class User { name: String; }\nfn main(): Void { }");
+    let field = &p.classes[0].fields[0];
+
+    assert_eq!(field.visibility, Visibility::Public);
+    assert_eq!(field.mutability, Mutability::Mutable);
+    assert!(!field.explicit_modifiers);
+}
+
+#[test]
+fn valid_explicit_modifiers_mean_the_same_and_say_so() {
+    let p = program("class User { public mut name: String; }\nfn main(): Void { }");
+    let field = &p.classes[0].fields[0];
+
+    assert_eq!(field.visibility, Visibility::Public);
+    assert_eq!(field.mutability, Mutability::Mutable);
+    assert!(field.explicit_modifiers, "the source did write them");
+}
+
+#[test]
+fn valid_field_visibility_and_mutability() {
+    let p = program(
+        "class User { private inmut id: Int32; protected mut role: String; }
+         fn main(): Void { }",
+    );
+    let fields = &p.classes[0].fields;
+
+    assert_eq!(fields[0].visibility, Visibility::Private);
+    assert_eq!(fields[0].mutability, Mutability::Immutable);
+    assert_eq!(fields[1].visibility, Visibility::Protected);
+    assert_eq!(fields[1].mutability, Mutability::Mutable);
+}
+
+#[test]
+fn valid_several_constructors() {
+    // `LANGUAGE_SPEC` section 7 admits more than one when their effective
+    // signatures differ. Which ones are valid is a semantic question.
+    let p = program(
+        "class Point {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
+             construct() { this.x = 0; }
+         }
+         fn main(): Void { }",
+    );
+
+    assert_eq!(p.classes[0].constructors.len(), 2);
+}
+
+#[test]
+fn valid_shared_class() {
+    let p = program("share class User { name: String; }\nfn main(): Void { }");
+    assert!(p.classes[0].shared);
+}
+
+#[test]
+fn invalid_class_without_a_name() {
+    let output = errors("class { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_field_without_a_type() {
+    let output = errors("class User { name; }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_abstract_states_it_is_not_available_yet() {
+    // It constrains inheritance, which this slice of the phase does not have.
+    let output = errors("class Shape { abstract fn area(): Int32; }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+    assert!(output.contains("abstract"), "{output}");
 }

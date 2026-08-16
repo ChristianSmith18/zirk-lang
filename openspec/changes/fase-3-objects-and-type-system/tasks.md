@@ -39,10 +39,10 @@
 
 ## 2. Gramática — clases y contratos
 
-- [ ] 2.1 Parsear `class` con campos, métodos, campos `public mut` por defecto y múltiples `construct`
-- [ ] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
+- [x] 2.1 Parsear `class` con campos, métodos, campos `public mut` por defecto y múltiples `construct`
+- [x] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
 - [ ] 2.3 Parsear `extends` con una sola clase y `implements` con varios contratos
-- [ ] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
+- [x] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
 - [ ] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
 - [ ] 2.6 Parsear `trait`, admitiendo cuerpos
 - [ ] 2.7 Tests: un caso válido y uno inválido por cada regla nueva

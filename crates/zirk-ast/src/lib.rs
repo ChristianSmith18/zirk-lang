@@ -37,6 +37,7 @@ pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub uses: Vec<UseDecl>,
     pub enums: Vec<EnumDecl>,
+    pub classes: Vec<ClassDecl>,
     pub functions: Vec<FnDecl>,
     pub span: Span,
 }
@@ -109,6 +110,76 @@ pub struct EnumDecl {
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
     pub span: Span,
+}
+
+/// `class User { ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassDecl {
+    pub name: Ident,
+    pub fields: Vec<FieldDecl>,
+    /// Every `construct` the class declares. More than one is allowed when
+    /// their effective signatures differ (`ZIRK_LANGUAGE_SPEC.md` section 7).
+    pub constructors: Vec<ConstructDecl>,
+    pub methods: Vec<MethodDecl>,
+    /// Marked `share`, so other files of the crate may import it.
+    pub shared: bool,
+    pub span: Span,
+}
+
+/// A field of a class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDecl {
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub visibility: Visibility,
+    pub mutability: Mutability,
+    /// Whether the source wrote either modifier.
+    ///
+    /// An unmodified field is `public mut`, and both spellings mean the same
+    /// thing — but only one of them says it out loud, and a diagnostic about
+    /// a redundant modifier needs to tell them apart.
+    pub explicit_modifiers: bool,
+    pub span: Span,
+}
+
+/// `construct(...) { ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructDecl {
+    pub params: Vec<Param>,
+    pub body: Block,
+    pub visibility: Visibility,
+    pub span: Span,
+}
+
+/// A method of a class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodDecl {
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub return_type: TypeRef,
+    /// Absent on an `abstract` method, which declares a signature and no body.
+    pub body: Option<Block>,
+    pub visibility: Visibility,
+    pub is_abstract: bool,
+    pub span: Span,
+}
+
+/// Access level of a class member, per `ZIRK_LANGUAGE_SPEC.md` section 7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Private,
+    Protected,
+}
+
+impl Visibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+            Visibility::Protected => "protected",
+        }
+    }
 }
 
 /// Function declaration.
@@ -323,9 +394,39 @@ pub struct LetStmt {
 /// Reassignment of an existing variable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignStmt {
-    pub target: Ident,
+    pub target: AssignTarget,
     pub value: Expr,
     pub span: Span,
+}
+
+/// The place an assignment writes to.
+///
+/// Not every expression is one: `f() = 1` names no storage. Keeping the
+/// admissible forms in their own type is what lets the parser reject the rest
+/// where it reads them, instead of every later layer having to ask again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignTarget {
+    /// `count = 1`
+    Name(Ident),
+    /// `this.name = value` and `user.name = value`
+    Field(FieldExpr),
+}
+
+impl AssignTarget {
+    pub fn span(&self) -> Span {
+        match self {
+            AssignTarget::Name(i) => i.span,
+            AssignTarget::Field(f) => f.span,
+        }
+    }
+
+    /// The name being written, for a diagnostic that has to say one.
+    pub fn name(&self) -> &str {
+        match self {
+            AssignTarget::Name(i) => &i.name,
+            AssignTarget::Field(f) => &f.name.name,
+        }
+    }
 }
 
 /// Conditional as a statement.
@@ -393,6 +494,13 @@ pub enum Expr {
     /// equivalent assignment: there is no value to observe, so the prefix and
     /// postfix forms are indistinguishable and the simpler tree wins.
     Increment(IncrementExpr),
+    /// `this`, the instance a method or constructor runs on.
+    This(ThisExpr),
+    /// `object.field`, and `object?.field` for the safe form.
+    ///
+    /// Enum variants have their own node because `Direction.North` names a
+    /// type rather than a value: there is no object to read a member from.
+    Field(FieldExpr),
     /// `match x { p => v, ... }`, in either position.
     ///
     /// There is no separate statement node: in statement position the parser
@@ -424,6 +532,8 @@ impl Expr {
             Expr::Call(e) => e.span,
             Expr::Range(e) => e.span,
             Expr::If(e) => e.span,
+            Expr::This(e) => e.span,
+            Expr::Field(e) => e.span,
             Expr::Ternary(e) => e.span,
             Expr::Increment(e) => e.span,
             Expr::Match(e) => e.span,
@@ -449,6 +559,23 @@ pub struct RangeExpr {
     pub span: Span,
 }
 
+/// `this`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThisExpr {
+    pub span: Span,
+}
+
+/// `object.field` or `object?.field`
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldExpr {
+    pub object: Box<Expr>,
+    pub name: Ident,
+    /// Written `?.`: the whole access produces `null` when the object is
+    /// absent, instead of reading through it.
+    pub safe: bool,
+    pub span: Span,
+}
+
 /// `condition ? when_true : when_false`
 #[derive(Debug, Clone, PartialEq)]
 pub struct TernaryExpr {
@@ -465,7 +592,7 @@ pub struct TernaryExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncrementExpr {
     /// The place being incremented. It must be assignable and mutable.
-    pub target: Ident,
+    pub target: AssignTarget,
     pub op: IncrementOp,
     pub fix: IncrementFix,
     pub op_span: Span,

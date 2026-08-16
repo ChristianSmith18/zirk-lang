@@ -688,7 +688,6 @@ fn invalid_unterminated_regex_points_at_its_opening() {
 
 #[test]
 fn valid_interpolated_string_separates_its_parts() {
-    use TokenKind::*;
     let TokenKind::InterpolatedStr(parts) = &tokens("\"value={value}\"")[0] else {
         panic!("expected an interpolated string");
     };
@@ -705,7 +704,6 @@ fn valid_interpolated_string_separates_its_parts() {
 
 #[test]
 fn valid_interpolation_closes_on_its_matching_brace() {
-    use TokenKind::*;
     let TokenKind::InterpolatedStr(parts) = &tokens("\"{ f({ x }) }\"")[0] else {
         panic!("expected an interpolated string");
     };

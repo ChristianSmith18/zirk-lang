@@ -440,7 +440,7 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
-        let slot = self.lookup_slot(&stmt.target.name);
+        let slot = self.lookup_slot(stmt.target.name());
         let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
         self.emit_effect(InstKind::Store(slot, value), stmt.span);
     }
@@ -767,6 +767,18 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
+            // A member access that the checker resolved to an enum variant.
+            // Anything else never reaches lowering: the checker rejects it.
+            ast::Expr::Field(e) => {
+                let ast::Expr::Path(enum_name) = &*e.object else {
+                    unreachable!("only a variant access reaches lowering in this phase")
+                };
+                let value = self.discriminant(enum_name, &e.name.name);
+                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
+            }
+            ast::Expr::This(_) => {
+                unreachable!("a verified program of this phase has no `this`")
+            }
             ast::Expr::Ternary(e) => self.lower_ternary(e, span),
             ast::Expr::Increment(e) => self.lower_increment(e, span),
             ast::Expr::Match(e) => self.lower_match(e, span),
@@ -1295,7 +1307,7 @@ impl<'a> FunctionLowering<'a> {
     /// expression yields, and that is decided by whether the previous value is
     /// read before or after the store.
     fn lower_increment(&mut self, expr: &ast::IncrementExpr, span: Span) -> Operand {
-        let slot = self.lookup_slot(&expr.target.name);
+        let slot = self.lookup_slot(expr.target.name());
         let ty = self.slot_type(slot);
 
         let previous = self.emit(InstKind::Load(slot), ty, span);
@@ -1541,9 +1553,15 @@ impl<'a> FunctionLowering<'a> {
                 self.signature_return(&name)
             }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
+            // Only variant accesses reach lowering, and a variant without
+            // associated data is exactly its discriminant.
+            ast::Expr::Field(_) => IrType::Int32,
+            ast::Expr::This(_) => {
+                unreachable!("a verified program of this phase has no `this`")
+            }
             ast::Expr::Ternary(e) => self.type_of(&e.when_true, e.when_true.span()),
             // Both forms yield the type of the operand they update.
-            ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(&e.target.name)),
+            ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(e.target.name())),
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int32,
             ast::Expr::Println(_) => IrType::Void,

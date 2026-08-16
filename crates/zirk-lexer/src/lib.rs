@@ -272,10 +272,7 @@ impl<'a> Lexer<'a> {
             return self.radix_integer(radix, start_offset);
         }
 
-        let Some(integer_part) = self.digits(10, start_offset) else {
-            return None;
-        };
-        let mut text = integer_part;
+        let mut text = self.digits(10, start_offset)?;
 
         // A fraction needs a digit after the point. Without that check `0..10`
         // would read as `0.` followed by `.10`, and `1.abs()` as a malformed
@@ -285,10 +282,7 @@ impl<'a> Lexer<'a> {
         if fractional {
             self.pos += 1;
             text.push('.');
-            let Some(fraction) = self.digits(10, start_offset) else {
-                return None;
-            };
-            text.push_str(&fraction);
+            text.push_str(&self.digits(10, start_offset)?);
         }
 
         let exponent = self.exponent(start_offset)?;
