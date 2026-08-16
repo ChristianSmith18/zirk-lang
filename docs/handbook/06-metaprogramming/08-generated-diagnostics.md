@@ -6,4 +6,4 @@ Stable compiler diagnostic structure still requires severity, code, location, ca
 
 ---
 
-**Previous:** [← Reflection Retention](./07-reflection-retention.md) · **Next:** [Security and Permissions →](./09-security-and-permissions.md)
+**Previous:** [← Reflection Retention](07-reflection-retention.md) · **Next:** [ Security and Permissions](09-security-and-permissions.md)

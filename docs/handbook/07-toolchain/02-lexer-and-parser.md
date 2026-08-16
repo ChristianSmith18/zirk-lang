@@ -4,4 +4,4 @@ The lexer preserves tokens and spans; the parser builds syntax suitable for erro
 
 ---
 
-**Previous:** [← Compiler Pipeline](./01-compiler-pipeline.md) · **Next:** [Name Resolution →](./03-name-resolution.md)
+**Previous:** [← Compiler Pipeline](01-compiler-pipeline.md) · **Next:** [ Name Resolution](03-name-resolution.md)

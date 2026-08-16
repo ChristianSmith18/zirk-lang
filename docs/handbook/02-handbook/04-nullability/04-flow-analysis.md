@@ -23,4 +23,4 @@ Matching a union provides the same principle with explicit alternatives and exha
 
 ---
 
-**Previous:** [← Null Coalescing](./03-null-coalescing.md) · **Next:** [Common Nullability Errors →](./05-common-nullability-errors.md)
+**Previous:** [← Null Coalescing](03-null-coalescing.md) · **Next:** [ Common Nullability Errors](05-common-nullability-errors.md)

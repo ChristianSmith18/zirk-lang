@@ -6,4 +6,4 @@ Resolution selects one compatible graph from declared constraints, package metad
 
 ---
 
-**Previous:** [← Add, Remove, and Install](./04-add-remove-install.md) · **Next:** [Lockfile Verification →](./06-lockfile-verification.md)
+**Previous:** [← Add, Remove, and Install](04-add-remove-install.md) · **Next:** [ Lockfile Verification](06-lockfile-verification.md)

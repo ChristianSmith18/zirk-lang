@@ -18,6 +18,12 @@ The diagnostic should identify the immutable binding and suggest `mut` only if r
 
 Default to `inmut`. Stable names reduce the number of states a reader and compiler must track, while preserving mutation through APIs that explicitly permit it.
 
+```zirk
+inmut text = "hello";
+text[0] = 'H'; // valid: the String referent is mutable
+text = "bye";  // error: the binding is fixed
+```
+
 ---
 
-**Previous:** [← `mut`](./01-mut.md) · **Next:** [Strict Immutability →](./03-strict-immutability.md)
+**Previous:** [← mut](01-mut.md) · **Next:** [ Strict Immutability](03-strict-immutability.md)

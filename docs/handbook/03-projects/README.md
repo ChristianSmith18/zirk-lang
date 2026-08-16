@@ -4,4 +4,4 @@
 
 ---
 
-**Previous:** [← Circular Dependencies](../02-handbook/19-modules/07-circular-dependencies.md) · **Next:** [Project Layout →](./01-project-layout.md)
+**Previous:** [← Circular Dependencies](../02-handbook/19-modules/07-circular-dependencies.md) · **Next:** [ Project Layout](01-project-layout.md)

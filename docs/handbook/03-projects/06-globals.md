@@ -6,4 +6,4 @@ Consumers opt in with `use`. Shared mutable access requires synchronization; pre
 
 ---
 
-**Previous:** [← Entry Point](./05-entry-point.md) · **Next:** [Runtime Permissions →](./07-runtime-permissions.md)
+**Previous:** [← Entry Point](05-entry-point.md) · **Next:** [ Runtime Permissions](07-runtime-permissions.md)

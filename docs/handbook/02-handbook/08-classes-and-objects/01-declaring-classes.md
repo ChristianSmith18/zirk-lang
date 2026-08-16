@@ -13,4 +13,4 @@ Fields carry their own binding mutability. Classes are inheritable by default in
 
 ---
 
-**Previous:** [← Classes and Objects](./README.md) · **Next:** [Fields and Properties →](./02-fields-and-properties.md)
+**Previous:** [← Classes and Objects](README.md) · **Next:** [ Fields and Properties](02-fields-and-properties.md)

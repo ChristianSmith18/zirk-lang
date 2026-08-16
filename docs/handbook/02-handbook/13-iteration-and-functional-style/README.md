@@ -4,4 +4,4 @@ Iteration separates producing values from storing them. Zirk combines `Iterable`
 
 ---
 
-**Previous:** [← Safe Collection Access](../12-collections/09-safe-access.md) · **Next:** [`Iterable` →](./01-iterable.md)
+**Previous:** [← Safe Collection Access](../12-collections/09-safe-access.md) · **Next:** [ Iterable](01-iterable.md)

@@ -6,4 +6,4 @@ It does not contain arbitrary runtime/compiler configuration, imports, tokens, o
 
 ---
 
-**Previous:** [← Project Layout](./01-project-layout.md) · **Next:** [Applications →](./03-applications.md)
+**Previous:** [← Project Layout](01-project-layout.md) · **Next:** [ Applications](03-applications.md)

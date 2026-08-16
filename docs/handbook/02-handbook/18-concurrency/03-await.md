@@ -10,4 +10,4 @@ It is a cancellation-safe point and propagates the operation's typed outcome. Zi
 
 ---
 
-**Previous:** [← Tasks](./02-tasks.md) · **Next:** [Structured Concurrency →](./04-structured-concurrency.md)
+**Previous:** [← Tasks](02-tasks.md) · **Next:** [ Structured Concurrency](04-structured-concurrency.md)

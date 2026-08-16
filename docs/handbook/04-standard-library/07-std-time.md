@@ -6,4 +6,4 @@ Timer and sleep operations suspend tasks and observe cancellation. Wall-clock ch
 
 ---
 
-**Previous:** [← `std.collections`](./06-std-collections.md) · **Next:** [`std.task` →](./08-std-task.md)
+**Previous:** [← std.collections](06-std-collections.md) · **Next:** [ std.task](08-std-task.md)

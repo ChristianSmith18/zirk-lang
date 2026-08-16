@@ -6,4 +6,4 @@ Native libraries can perform effects invisible to ordinary type analysis. Manife
 
 ---
 
-**Previous:** [← Name Mangling](./05-name-mangling.md) · **Next:** [Intrinsics →](./07-intrinsics.md)
+**Previous:** [← Name Mangling](05-name-mangling.md) · **Next:** [ Intrinsics](07-intrinsics.md)

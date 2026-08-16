@@ -17,4 +17,4 @@ Zirk is case-sensitive, uses braces for blocks, and supports optional parser sem
 
 ---
 
-**Previous:** [← Language Handbook](../README.md) · **Next:** [Source Files →](./01-source-files.md)
+**Previous:** [← The Zirk Language Handbook](../README.md) · **Next:** [ Source Files](01-source-files.md)

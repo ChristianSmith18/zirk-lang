@@ -26,4 +26,4 @@ Filename conventions use `snake_case`. Case matters: `product.zrk` and `Product.
 
 ---
 
-**Previous:** [← Program Structure](./README.md) · **Next:** [Lexical Rules →](./02-lexical-rules.md)
+**Previous:** [← Program Structure](README.md) · **Next:** [ Lexical Rules](02-lexical-rules.md)

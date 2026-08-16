@@ -6,4 +6,4 @@ Bounds, alignment, overflow, and floating-point behavior remain part of the type
 
 ---
 
-**Previous:** [← Intrinsics](./07-intrinsics.md) · **Next:** [Automatic Vectorization →](./09-auto-vectorization.md)
+**Previous:** [← Intrinsics](07-intrinsics.md) · **Next:** [ Automatic Vectorization](09-auto-vectorization.md)

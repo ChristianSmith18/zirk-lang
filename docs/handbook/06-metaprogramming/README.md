@@ -4,4 +4,4 @@ Zirk metaprogramming uses declared decorators, a public immutable Syntax API, va
 
 ---
 
-**Previous:** [← Why No Inline Assembly?](../05-native-and-low-level/10-why-no-inline-assembly.md) · **Next:** [Decorators →](./01-decorators.md)
+**Previous:** [← Why No Inline Assembly?](../05-native-and-low-level/10-why-no-inline-assembly.md) · **Next:** [ Decorators](01-decorators.md)

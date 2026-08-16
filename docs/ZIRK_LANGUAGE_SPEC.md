@@ -29,9 +29,12 @@ inmut NAME: String = "Zirk";
 inmut::strict CONFIG: Config = Config();
 ```
 
-`mut` allows reassignment. `inmut` freezes the reference and respects the
-mutability of the referenced type. `inmut::strict` prevents transitive
-modification. Uppercase is a convention, not semantics encoded in the name.
+`mut` allows reassignment and, for a reference, mutation of its referent.
+`inmut` freezes the binding but still permits mutation through the reference.
+`inmut::strict` freezes both binding and reachable state. A strict reference
+cannot yield a mutable alias and cannot be acquired while an accessible mutable
+alias exists; `clone()` may create an independent mutable value when supported.
+Uppercase is a convention, not semantics encoded in the name.
 
 Inference is allowed where it is unambiguous. Every type has a default value;
 flow analysis prevents reading a variable that is not yet available.
@@ -59,32 +62,47 @@ error.
 
 ## 3. Type system
 
-Typing is static with inference. Every value belongs to a semantic class, even
-though the compiler may represent it without allocation.
+Typing is static with inference. `Object` is the conceptual semantic root; it
+does not require every value to be heap allocated or boxed. Types are grouped
+as compiler primitives, native values, native references, user-defined values
+or references, and special types. Capabilities such as equality, comparison,
+hashing, cloning, iteration and arithmetic come from contracts.
 
 Fundamental families:
 
-- `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, plus the aliases `Int`/`Integer`
-  for the default signed integer.
-- `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`.
-- `Decimal16`, `Decimal32`, `Decimal64`, `Decimal128`, plus the aliases
-  `Dec`/`Decimal` for the default decimal.
-- `Boolean`, exclusively `true` or `false`.
-- `Char`, a Unicode code point.
-- `String`, a Unicode sequence indexed semantically by graphemes and with an
-  adaptive internal index/cache.
-- `Void`, `Never`, `Null`, `Object` and the collection types.
+- signed `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, with `Int` and `Integer`
+  aliasing the default `Int32`;
+- unsigned `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`;
+- binary `Float16`, `Float32`, `Float64`, `Float128`, with `Float` aliasing
+  `Float64`; an exact base-ten `Decimal` may be a later stdlib type;
+- primitive `Boolean`, exactly `true` or `false`;
+- primitive `Char`, exactly one Unicode grapheme, even when composed of
+  multiple code points and bytes;
+- native reference `String`, a mutable Unicode grapheme sequence with shared
+  aliasing and an adaptive internal index/cache;
+- immutable native temporal values `Date`, `Time`, `DateTime`, `Instant`,
+  `ZonedDateTime`, `TimeZone`, `Duration` and `Period`;
+- special `Void`, `Never` and `Null`, plus `Object` and collection families.
 
 There is no numeric truthiness. `Boolean?` admits `null`; `Boolean` does not.
 There is no `undefined`.
 
 Literals admit scientific notation (`1e2`) and `_` as a separator
-(`1_000_000`). Durations are typed literals such as `5000ms`, `5s`, `5m` and
-`5h`; the runtime may normalize them internally.
+(`1_000_000`). A fractional literal defaults to `Float64`. `Float` has explicit
+positive and negative infinity but no valid `NaN`; division by zero, overflow
+and indeterminate results are controlled errors. Duration suffixes are `ns`,
+`us`, `ms`, `s`, `m`, `h`, `d` and `w`; calendar months and years use `Period`.
 
 Ordinary overflow produces a controlled error; wrapping, saturating and checked
-variants must be explicit operations. Conversions that may lose information are
-not implicit.
+variants must be explicit operations. Safe widening may be implicit where
+unambiguous; signed/unsigned and lossy conversions are explicit. Mixed integer
+and Float arithmetic produces Float.
+
+An explicit constructor may establish a deep contextual domain for the
+compatible operator tree directly inside it. `Float(3 / 4)` converts operands
+before division and yields `0.75`; `String("value=" + 42)` converts operands
+before concatenation. Context does not mutate operands or cross into a called
+function's body.
 
 ## 4. Nullability, equality and operators
 
@@ -99,6 +117,13 @@ uses `??`.
 - Increment: `count++`, `count--`, `++count`, `--count`, preserving conventional
   postfix/prefix semantics.
 - Ternary: `condition ? when_true : when_false`.
+
+Integer division truncates toward zero and remainder keeps the dividend sign,
+so `-10 / 3 == -3` and `-10 % 3 == -1`. `String + String` concatenates;
+`String * Integer` and `Integer * String` repeat with a checked non-negative
+count (`"ja" * 3 == "jajaja"`). A negative/non-integer count or impossible
+allocation is a controlled error. Boolean admits only equality and
+short-circuit logical operators. Native types expose no undocumented operator.
 
 Operators may only be overloaded through contracts defined by the language; an
 overload cannot alter precedence or arity.
@@ -265,6 +290,28 @@ the end; `start..=end` includes it. Direction follows the relative bounds,
 range, and an inline computed bound may be `0..{number}`. Slicing uses
 `[start:end:step]`, permits omitted or negative components, applies to ordered
 collections and `String`, and excludes its end.
+
+## 8.1 Temporal values
+
+`Date` is a calendar date; `Time` a clock time; `DateTime` combines them without
+a zone; `Instant` is an absolute timeline point; `ZonedDateTime` combines an
+instant with an IANA `TimeZone`. They are distinct immutable values in a sealed
+`Temporal` capability family. `Date + Time` produces `DateTime`, and assigning
+a zone produces `ZonedDateTime`; unrelated combinations are rejected.
+
+`Duration` is a signed exact timeline quantity with nanosecond precision and a
+conceptual `Int128` range. It contains fixed units through weeks and supports
+arithmetic, comparison, scalar multiplication/division, ratios and remainder.
+Wait/timeout APIs reject negative durations even though temporal differences
+may be negative. `Period` contains calendar years, months, weeks and days; it
+has no context-free total seconds or ordering. Adding one month to January 31
+clamps to the final valid February day; `add_strict` rejects the missing day.
+
+Time zones are canonical IANA zones, not fixed offsets. Ambiguous and
+nonexistent local times reject by default; explicit earlier/later and
+previous/next-valid policies resolve them. Temporal construction, parsing,
+formatting, overflow, invalid dates/times/zones and DST resolution use
+controlled typed errors.
 
 ## 9. Errors
 

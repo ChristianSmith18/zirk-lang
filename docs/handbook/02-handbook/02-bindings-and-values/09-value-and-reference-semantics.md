@@ -13,6 +13,10 @@ if first is second { /* same observable instance */ }
 
 `inmut` prevents rebinding but does not change the underlying type's value/reference behavior. `inmut::strict` adds a transitive mutation guarantee. Zirk 1.x does not expose ownership or reference counting as public syntax.
 
+String is the simplest visible reference example: assigning it shares one
+mutable instance, while `clone()` creates independent content. Temporal values,
+records and value classes are value-semantic and expose no `is` identity.
+
 ---
 
-**Previous:** [← Shadowing](./08-shadowing.md) · **Next:** [Everyday Types →](../03-everyday-types/README.md)
+**Previous:** [← Shadowing](08-shadowing.md) · **Next:** [ Everyday Types](../03-everyday-types/README.md)

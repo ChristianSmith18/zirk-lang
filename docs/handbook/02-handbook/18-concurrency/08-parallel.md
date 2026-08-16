@@ -10,4 +10,4 @@ The runtime chooses workers and scheduling. Unsafe mutable capture is rejected; 
 
 ---
 
-**Previous:** [← Channels](./07-channels.md) · **Next:** [`parallel for` →](./09-parallel-for.md)
+**Previous:** [← Channels](07-channels.md) · **Next:** [ parallel for](09-parallel-for.md)

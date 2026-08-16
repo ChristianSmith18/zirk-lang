@@ -6,4 +6,4 @@ Decorators operate through validated Syntax API builders, may request reflection
 
 ---
 
-**Previous:** [← Grammar Summary](./05-grammar-summary.md) · **Next:** [Diagnostic Codes →](./07-diagnostic-codes.md)
+**Previous:** [← Grammar Summary](05-grammar-summary.md) · **Next:** [ Diagnostic Codes](07-diagnostic-codes.md)

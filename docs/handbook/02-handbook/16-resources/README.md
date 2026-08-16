@@ -4,4 +4,4 @@ Memory lifetime and external-resource lifetime are different. Files, sockets, an
 
 ---
 
-**Previous:** [← Assertions](../15-errors/08-assertions.md) · **Next:** [The Resource Contract →](./01-resource-contract.md)
+**Previous:** [← Assertions](../15-errors/08-assertions.md) · **Next:** [ The Resource Contract](01-resource-contract.md)

@@ -6,4 +6,4 @@ Record target, toolchain, profile, hardware, variance, and input. A benchmark is
 
 ---
 
-**Previous:** [← Test Runner](./06-test-runner.md) · **Next:** Packages *(next section)*
+**Previous:** [← Test Runner](06-test-runner.md) · **Next:** [ Packages](../09-packages/README.md)

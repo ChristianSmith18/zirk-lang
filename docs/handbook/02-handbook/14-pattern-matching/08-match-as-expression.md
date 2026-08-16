@@ -15,4 +15,4 @@ When a branch cannot return normally, its `Never` type can coexist with the valu
 
 ---
 
-**Previous:** [← `match` as a Statement](./07-match-as-statement.md) · **Next:** Functions *(next handbook unit)*
+**Previous:** [← match as a Statement](07-match-as-statement.md) · **Next:** [ Classes and Objects](../08-classes-and-objects/README.md)

@@ -7,8 +7,8 @@ implements `+` and `_subtract` implements `-`:
 
 ```zirk
 class Vector2 {
-    x: Decimal64;
-    y: Decimal64;
+    x: Float64;
+    y: Float64;
 
     fn _add(other: Vector2): Vector2 {
         return Vector2(x + other.x, y + other.y);
@@ -32,4 +32,4 @@ When a named method communicates domain behavior better than a symbol, prefer th
 
 ---
 
-**Previous:** [← Ranges](./10-ranges.md) · **Next:** Control Flow *(next unit)*
+**Previous:** [← Ranges](10-ranges.md) · **Next:** [ Control Flow](../06-control-flow/README.md)

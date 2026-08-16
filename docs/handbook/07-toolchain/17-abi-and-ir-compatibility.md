@@ -4,4 +4,4 @@ IR version governs portable package consumption; target ABI governs final linkag
 
 ---
 
-**Previous:** [← Cross-Compilation](./16-cross-compilation.md) · **Next:** [Performance Goals →](./18-performance-goals.md)
+**Previous:** [← Cross-Compilation](16-cross-compilation.md) · **Next:** [ Performance Goals](18-performance-goals.md)

@@ -8,4 +8,4 @@ Use `Result` or a typed exception when callers can recover.
 
 ---
 
-**Previous:** [← `fatalError`](./07-fatal-error.md) · **Next:** [Resources →](../16-resources/README.md)
+**Previous:** [← fatalError](07-fatal-error.md) · **Next:** [ Resources](../16-resources/README.md)

@@ -5,7 +5,7 @@ Zirk favors readable code and strong tooling, but its program model differs fund
 ## Types exist before execution
 
 ```zirk
-fn total(prices: List<Decimal64>): Decimal64 {
+fn total(prices: List<Float64>): Float64 {
     return prices.reduce(0.0, (sum, price) => sum + price);
 }
 ```
@@ -30,4 +30,4 @@ Study bindings and inference first, then nullability, functions, declared data t
 
 ---
 
-**Previous:** [← Zirk for TypeScript Programmers](./02-zirk-for-typescript-programmers.md) · **Next:** [Zirk for Rust, C, and C++ Programmers →](./04-zirk-for-rust-c-cpp-programmers.md)
+**Previous:** [← Zirk for TypeScript Programmers](02-zirk-for-typescript-programmers.md) · **Next:** [ Zirk for Rust, C, and C++ Programmers](04-zirk-for-rust-c-cpp-programmers.md)

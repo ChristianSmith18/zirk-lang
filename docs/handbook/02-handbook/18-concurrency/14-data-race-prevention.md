@@ -6,4 +6,4 @@ Safe Zirk rejects unsynchronized concurrent access when at least one access muta
 
 ---
 
-**Previous:** [← Atomics](./13-atomics.md) · **Next:** Modules *(next unit)*
+**Previous:** [← Atomics](13-atomics.md) · **Next:** [ Modules](../19-modules/README.md)

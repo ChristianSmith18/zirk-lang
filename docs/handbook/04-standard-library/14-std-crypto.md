@@ -6,4 +6,4 @@ Obsolete algorithms are not enabled for convenience. Native-backed implementatio
 
 ---
 
-**Previous:** [← `std.json`](./13-std-json.md) · **Next:** [`std.testing` →](./15-std-testing.md)
+**Previous:** [← std.json](13-std-json.md) · **Next:** [ std.testing](15-std-testing.md)

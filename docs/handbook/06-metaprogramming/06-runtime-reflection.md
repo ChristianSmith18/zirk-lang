@@ -6,4 +6,4 @@ An operation requiring absent metadata returns an explicit result or diagnostic 
 
 ---
 
-**Previous:** [← Compile-Time Reflection](./05-compile-time-reflection.md) · **Next:** [Reflection Retention →](./07-reflection-retention.md)
+**Previous:** [← Compile-Time Reflection](05-compile-time-reflection.md) · **Next:** [ Reflection Retention](07-reflection-retention.md)

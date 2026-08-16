@@ -6,4 +6,4 @@ Filtering must not change test semantics, and machine-readable output remains de
 
 ---
 
-**Previous:** [← Concurrent Test Safety](./05-concurrent-test-safety.md) · **Next:** [Benchmarks →](./07-benchmarks.md)
+**Previous:** [← Concurrent Test Safety](05-concurrent-test-safety.md) · **Next:** [ Benchmarks](07-benchmarks.md)

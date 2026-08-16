@@ -6,4 +6,4 @@ Every transformation is reparsed, resolved, typed, and validated; decorators can
 
 ---
 
-**Previous:** [← Metaprogramming](./README.md) · **Next:** [`fn dec` →](./02-fn-dec.md)
+**Previous:** [← Metaprogramming](README.md) · **Next:** [ fn dec](02-fn-dec.md)

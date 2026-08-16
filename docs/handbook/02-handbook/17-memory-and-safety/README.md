@@ -4,4 +4,4 @@ Zirk manages memory automatically while safe code guarantees no use-after-free, 
 
 ---
 
-**Previous:** [← Why No General `defer` or Destructors?](../16-resources/06-why-no-defer-or-destructors.md) · **Next:** [Memory Model →](./01-memory-model.md)
+**Previous:** [← Why No General defer or Destructors?](../16-resources/06-why-no-defer-or-destructors.md) · **Next:** [ Memory Model](01-memory-model.md)

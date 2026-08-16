@@ -10,4 +10,4 @@ Callers can see and compose the failure without hidden control transfer. Choose 
 
 ---
 
-**Previous:** [← Errors](./README.md) · **Next:** [Handling `Result` →](./02-handling-result.md)
+**Previous:** [← Errors](README.md) · **Next:** [ Handling Result](02-handling-result.md)

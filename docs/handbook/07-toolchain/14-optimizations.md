@@ -4,4 +4,4 @@ Optimization may inline, specialize, devirtualize, remove checks proven redundan
 
 ---
 
-**Previous:** [← Debug and Release](./13-debug-and-release.md) · **Next:** [Incremental Compilation →](./15-incremental-compilation.md)
+**Previous:** [← Debug and Release](13-debug-and-release.md) · **Next:** [ Incremental Compilation](15-incremental-compilation.md)

@@ -18,4 +18,4 @@ Invalid characters or unterminated literals should fail lexically with a locatio
 
 ---
 
-**Previous:** [← Source Files](./01-source-files.md) · **Next:** [Comments and Documentation →](./03-comments-and-documentation.md)
+**Previous:** [← Source Files](01-source-files.md) · **Next:** [ Comments and Documentation](03-comments-and-documentation.md)

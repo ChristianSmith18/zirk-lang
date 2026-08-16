@@ -15,4 +15,4 @@ Do not assume that the default for every reference-like type is `null`; `null` i
 
 ---
 
-**Previous:** [← Type Inference](./04-type-inference.md) · **Next:** [Definite Initialization →](./06-definite-initialization.md)
+**Previous:** [← Type Inference](04-type-inference.md) · **Next:** [ Definite Initialization](06-definite-initialization.md)

@@ -36,4 +36,4 @@ the surrounding grammar makes the two uses unambiguous.
 
 ---
 
-**Previous:** [← Value Patterns](./01-value-patterns.md) · **Next:** [Type Patterns →](./03-type-patterns.md)
+**Previous:** [← Value Patterns](01-value-patterns.md) · **Next:** [ Type Patterns](03-type-patterns.md)

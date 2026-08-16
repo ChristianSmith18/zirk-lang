@@ -15,4 +15,4 @@ Keep a type parameter only when it represents a relationship consumers need. An 
 
 ---
 
-**Previous:** [← Generic Functions](./01-generic-functions.md) · **Next:** [Constraints with `from` →](./03-constraints-with-from.md)
+**Previous:** [← Generic Functions](01-generic-functions.md) · **Next:** [ Constraints with from](03-constraints-with-from.md)

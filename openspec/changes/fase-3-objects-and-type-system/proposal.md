@@ -16,6 +16,11 @@ Tres de los pendientes de la Fase 2 se difirieron **nombrando esta fase como su 
 - **`+` sobre `String`** esperaba a los contratos de operador, que `ZIRK_LANGUAGE_SPEC.md` sección 4 exige como única vía de sobrecarga.
 - **`for ... in` sobre tipos propios** (D3 de Fase 2) esperaba a los traits.
 
+La fuente normativa posterior también fija que `String` es una referencia
+mutable compartida y que sus operadores nativos incluyen concatenación y
+repetición. Esta fase implementa los contratos que los expresan, pero la familia
+temporal completa y sus APIs pertenecen a la fase de biblioteca estándar.
+
 ## What Changes
 
 ### Clases

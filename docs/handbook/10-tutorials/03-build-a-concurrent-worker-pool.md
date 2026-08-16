@@ -6,4 +6,4 @@ Return typed results through a second channel, preserve the chosen output order,
 
 ---
 
-**Previous:** [← Build a File Processor](./02-build-a-file-processor.md) · **Next:** [Build an HTTP Service →](./04-build-an-http-service.md)
+**Previous:** [← Build a File Processor](02-build-a-file-processor.md) · **Next:** [ Build an HTTP Service](04-build-an-http-service.md)

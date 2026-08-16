@@ -14,4 +14,4 @@ A call with a type that does not satisfy `Display` fails at the call site with t
 
 ---
 
-**Previous:** [← Generic Types](./02-generic-types.md) · **Next:** [Multiple Type Parameters →](./04-multiple-type-parameters.md)
+**Previous:** [← Generic Types](02-generic-types.md) · **Next:** [ Multiple Type Parameters](04-multiple-type-parameters.md)

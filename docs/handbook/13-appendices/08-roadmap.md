@@ -6,4 +6,4 @@ Future features require an explicit specification change, compatibility analysis
 
 ---
 
-**Previous:** [← Current Limitations](./07-current-limitations.md) · **Next:** [Normative Sources →](./09-normative-sources.md)
+**Previous:** [← Current Limitations](07-current-limitations.md) · **Next:** [ Normative Sources](09-normative-sources.md)

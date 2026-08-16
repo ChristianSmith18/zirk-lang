@@ -4,4 +4,4 @@ Files provide private declaration boundaries; `share` publishes names, `import` 
 
 ---
 
-**Previous:** [← Data-Race Prevention](../18-concurrency/14-data-race-prevention.md) · **Next:** [File Modules →](./01-file-modules.md)
+**Previous:** [← Data-Race Prevention](../18-concurrency/14-data-race-prevention.md) · **Next:** [ File Modules](01-file-modules.md)

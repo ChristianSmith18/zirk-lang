@@ -136,6 +136,16 @@ Usar un lambda donde se exige una anotación de tipo produce un diagnóstico que
 
 Las acotaciones autorales de agosto de 2026 fijan la superficie que esta fase comparte con el handbook: no hay shadowing ordinario; `this.nombre` desambigua una captura que colisiona con un parámetro de lambda; los campos son `public mut` por defecto; puede haber varios `construct`; los argumentos nombrados seleccionan y reordenan parámetros; y los enums tradicionales exponen el nombre del caso salvo mapping `->` explícito. Estas reglas se verifican en parser y checker antes de fijar lowering o layout.
 
+### D11 — Las referencias compartidas obedecen la misma matriz de mutabilidad
+
+`String`, arrays, colecciones y clases comparten la regla pública: `mut` permite
+reasignar y mutar, `inmut` solo impide reasignar, y `inmut::strict` congela el
+grafo alcanzable. Una referencia strict no produce aliases mutables ni puede
+adquirirse desde un alias mutable todavía accesible; `clone()` crea una copia
+lógica independiente cuando el contrato existe. Fase 3 aplica esta regla a los
+objetos y contratos que introduce; la estrategia concreta de análisis y memoria
+sigue perteneciendo a las fases correspondientes.
+
 ## Risks / Trade-offs
 
 - **Alocar sin liberar es correcto para esta fase y una fuga en cuanto un programa sea largo** → Mitigación: el requisito lo declara como deuda con fecha en Fase 4, y no se construye ninguna liberación parcial que después haya que deshacer (D1).

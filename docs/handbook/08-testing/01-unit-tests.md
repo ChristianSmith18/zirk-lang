@@ -11,4 +11,4 @@ Unit tests should isolate one contract, avoid uncontrolled I/O, and remain deter
 
 ---
 
-**Previous:** [← Testing](./README.md) · **Next:** [End-to-End Tests →](./02-e2e-tests.md)
+**Previous:** [← Testing](README.md) · **Next:** [ End-to-End Tests](02-e2e-tests.md)

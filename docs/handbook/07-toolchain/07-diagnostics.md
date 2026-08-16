@@ -4,4 +4,4 @@ Every diagnostic carries severity, stable code, location, cause, and actionable 
 
 ---
 
-**Previous:** [← LLVM Backend](./06-llvm-backend.md) · **Next:** [CLI →](./08-cli.md)
+**Previous:** [← LLVM Backend](06-llvm-backend.md) · **Next:** [ CLI](08-cli.md)

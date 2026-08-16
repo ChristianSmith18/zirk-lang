@@ -6,4 +6,4 @@ Catch exceptions before crossing into C, translate failure to the declared ABI, 
 
 ---
 
-**Previous:** [← Importing C](./02-importing-c.md) · **Next:** [Dynamic Libraries →](./04-dynamic-libraries.md)
+**Previous:** [← Importing C](02-importing-c.md) · **Next:** [ Dynamic Libraries](04-dynamic-libraries.md)

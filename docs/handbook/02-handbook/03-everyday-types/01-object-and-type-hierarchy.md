@@ -1,13 +1,58 @@
-# Object and Type Hierarchy
+# Object and the Type Tree
 
-Every value in Zirk belongs semantically to a class. This gives fundamental values a consistent place in generic constraints and method contracts without requiring every value to allocate an object on the heap.
+Every Zirk value has a static type and belongs conceptually beneath `Object`.
+That common root lets generic APIs ask for universal operations such as
+`type` and `to_string()` without claiming that every value is a heap object.
 
-`Object` is the broad root abstraction. More specific types preserve stronger operations: integers support arithmetic, `Boolean` supports logical operators, and `String` provides Unicode text behavior.
+```text
+Object
+├── Value
+│   ├── Numeric
+│   │   ├── Integer: Int8 … Int128, UInt8 … UInt128
+│   │   └── Float: Float16 … Float128
+│   ├── Boolean
+│   ├── Char
+│   ├── Temporal
+│   ├── Record
+│   ├── ValueClass
+│   └── Enum
+├── Reference
+│   ├── String
+│   ├── Array, List, Map, Set
+│   └── Class
+└── Special
+    ├── Null
+    ├── Void
+    └── Never
+```
 
-Static typing means the compiler uses the narrowest established type when validating an operation. Widening a value to `Object` loses specific operations until safe narrowing restores them.
+The tree is a learning model, not automatic subtype permission. `Int32` and
+`Float64` share numeric capabilities, but a function accepting `Int32` does not
+accept every numeric value. `Date` and `Duration` are both temporal, but only
+the combinations defined by their contracts compile.
 
-Do not confuse semantic hierarchy with representation. ABI layout, boxing, stack placement, and specialization remain compiler decisions unless a native boundary documents them.
+## Semantics are not layout
+
+An `Int32`, record, value class, or temporal value may be stored inline. A
+`String`, collection, or class instance has reference semantics. The compiler
+may still specialize, move, box, cache, or allocate values when observable
+behavior remains unchanged. Only an ABI document can make physical layout part
+of a public contract.
+
+## Static type controls available operations
+
+```zirk
+inmut count: Int32 = 3;
+inmut broad: Object = count;
+```
+
+`count` supports integer arithmetic. `broad` exposes only operations guaranteed
+by `Object` until a safe check narrows it. Zirk never searches for an operation
+dynamically merely because the runtime value happens to support it.
+
+Continue with [Type Categories](./01a-type-categories.md) before choosing an
+individual built-in type.
 
 ---
 
-**Previous:** [← Everyday Types](./README.md) · **Next:** [Signed Integers →](./02-signed-integers.md)
+**Previous:** [← Everyday Types](README.md) · **Next:** [ Type Categories](01a-type-categories.md)

@@ -13,4 +13,4 @@ Expression form can convert both outcomes into one value. Exhaustiveness prevent
 
 ---
 
-**Previous:** [← `Result`](./01-result.md) · **Next:** [Error Propagation →](./03-error-propagation.md)
+**Previous:** [← Result](01-result.md) · **Next:** [ Error Propagation](03-error-propagation.md)

@@ -12,4 +12,4 @@ Use a named predicate when the rule has domain meaning or deserves direct tests.
 
 ---
 
-**Previous:** [← `map`](./04-map.md) · **Next:** [`reduce` →](./06-reduce.md)
+**Previous:** [← map](04-map.md) · **Next:** [ reduce](06-reduce.md)

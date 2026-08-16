@@ -6,4 +6,4 @@ Construction and lexical operations do not access the filesystem. Absolute/canon
 
 ---
 
-**Previous:** [← `std.fs`](./03-std-fs.md) · **Next:** [`std.process` →](./05-std-process.md)
+**Previous:** [← std.fs](03-std-fs.md) · **Next:** [ std.process](05-std-process.md)

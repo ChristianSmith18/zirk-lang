@@ -6,4 +6,4 @@ Its simplicity shifts ownership, errors, layout, and safety into explicit bindin
 
 ---
 
-**Previous:** [← Why No Inline Assembly?](./08-why-no-inline-assembly.md) · **Next:** [Why Permissions? →](./10-why-permissions.md)
+**Previous:** [← Why No Inline Assembly?](08-why-no-inline-assembly.md) · **Next:** [ Why Permissions?](10-why-permissions.md)

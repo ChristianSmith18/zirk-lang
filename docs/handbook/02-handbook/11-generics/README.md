@@ -4,4 +4,4 @@ Generics express one statically checked algorithm or data structure across a fam
 
 ---
 
-**Previous:** [← Never-Returning Functions](../07-functions/11-never-returning-functions.md) · **Next:** [Generic Functions →](./01-generic-functions.md)
+**Previous:** [← Never-Returning Functions](../07-functions/11-never-returning-functions.md) · **Next:** [ Generic Functions](01-generic-functions.md)

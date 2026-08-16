@@ -13,4 +13,4 @@ Read/write permissions are scoped and real paths are checked against `..` and sy
 
 ---
 
-**Previous:** [← `std.io`](./02-std-io.md) · **Next:** [`std.path` →](./04-std-path.md)
+**Previous:** [← std.io](02-std-io.md) · **Next:** [ std.path](04-std-path.md)

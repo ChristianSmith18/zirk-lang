@@ -6,4 +6,4 @@ Return generated code through parse, resolution, type, and safety validation. Re
 
 ---
 
-**Previous:** [← Call a C Library](./06-call-a-c-library.md) · **Next:** Reference *(next section)*
+**Previous:** [← Call a C Library](06-call-a-c-library.md) · **Next:** [ Reference](../11-reference/README.md)

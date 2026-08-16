@@ -6,4 +6,4 @@ Keep the unsafe binding layer small and expose a safe wrapper returning Zirk val
 
 ---
 
-**Previous:** [← C ABI](./01-c-abi.md) · **Next:** [Exporting Zirk →](./03-exporting-zirk.md)
+**Previous:** [← C ABI](01-c-abi.md) · **Next:** [ Exporting Zirk](03-exporting-zirk.md)

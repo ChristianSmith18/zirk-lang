@@ -6,4 +6,4 @@ Classes still have identity; syntax simply avoids encoding a representation deci
 
 ---
 
-**Previous:** [← Why `match with`?](./04-why-match-with.md) · **Next:** [Why No Traditional Overloading? →](./06-why-no-traditional-overloading.md)
+**Previous:** [← Why match with?](04-why-match-with.md) · **Next:** [ Why No Traditional Overloading?](06-why-no-traditional-overloading.md)

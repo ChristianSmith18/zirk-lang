@@ -12,4 +12,4 @@ Errors, permissions, and cancellation inside the transform remain visible in its
 
 ---
 
-**Previous:** [← Generators](./03-generators.md) · **Next:** [`filter` →](./05-filter.md)
+**Previous:** [← Generators](03-generators.md) · **Next:** [ filter](05-filter.md)

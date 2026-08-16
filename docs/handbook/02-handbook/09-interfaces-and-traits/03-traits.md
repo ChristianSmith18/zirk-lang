@@ -29,4 +29,4 @@ that behavior needs.
 
 ---
 
-**Previous:** [← Implementing Contracts](./02-implementing-contracts.md) · **Next:** [Default Implementations →](./04-default-implementations.md)
+**Previous:** [← Implementing Contracts](02-implementing-contracts.md) · **Next:** [ Default Implementations](04-default-implementations.md)

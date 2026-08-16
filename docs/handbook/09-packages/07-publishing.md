@@ -6,4 +6,4 @@ Published versions are immutable. A release must not contain credentials, undecl
 
 ---
 
-**Previous:** [← Lockfile Verification](./06-lockfile-verification.md) · **Next:** [Native Dependencies →](./08-native-dependencies.md)
+**Previous:** [← Lockfile Verification](06-lockfile-verification.md) · **Next:** [ Native Dependencies](08-native-dependencies.md)

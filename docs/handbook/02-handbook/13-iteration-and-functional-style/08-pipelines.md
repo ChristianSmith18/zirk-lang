@@ -33,7 +33,6 @@ class to own every operation.
 
 Use pipelines when data movement is the story. Use explicit statements when branching, recovery, resource scopes, or intermediate diagnostics deserve names.
 
-
 ---
 
-**Previous:** [← Lazy Operations](./07-lazy-operations.md) · **Next:** Classes and Objects *(next handbook unit)*
+**Previous:** [← Lazy Operations](07-lazy-operations.md) · **Next:** [ Pattern Matching](../14-pattern-matching/README.md)

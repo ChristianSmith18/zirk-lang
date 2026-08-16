@@ -4,4 +4,4 @@ Zirk uses the C ABI as its stable native boundary. Raw pointers and ABI-sensitiv
 
 ---
 
-**Previous:** [← `std.system`](../04-standard-library/17-std-system.md) · **Next:** [C ABI →](./01-c-abi.md)
+**Previous:** [← std.system](../04-standard-library/17-std-system.md) · **Next:** [ C ABI](01-c-abi.md)

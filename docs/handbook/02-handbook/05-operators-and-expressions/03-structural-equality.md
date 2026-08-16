@@ -14,4 +14,4 @@ Use `is` when identity itself is the question. Choosing `==` for identity-sensit
 
 ---
 
-**Previous:** [← Comparison](./02-comparison.md) · **Next:** [Object Identity →](./04-object-identity.md)
+**Previous:** [← Comparison](02-comparison.md) · **Next:** [ Object Identity](04-object-identity.md)

@@ -6,4 +6,4 @@ Waiting is task-suspending; scope exit joins or cancels children. Channel operat
 
 ---
 
-**Previous:** [← `std.time`](./07-std-time.md) · **Next:** [`std.thread` →](./09-std-thread.md)
+**Previous:** [← std.time](07-std-time.md) · **Next:** [ std.thread](09-std-thread.md)

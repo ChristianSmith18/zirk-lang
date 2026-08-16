@@ -6,4 +6,4 @@ Prefer portable Zirk IR where possible; isolate native calls behind safe C ABI w
 
 ---
 
-**Previous:** [← Publishing](./07-publishing.md) · **Next:** [Package Security →](./09-package-security.md)
+**Previous:** [← Publishing](07-publishing.md) · **Next:** [ Package Security](09-package-security.md)

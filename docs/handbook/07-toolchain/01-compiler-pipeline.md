@@ -4,4 +4,4 @@ Source passes through incremental lexing, parsing, name resolution, type/flow an
 
 ---
 
-**Previous:** [← Toolchain](./README.md) · **Next:** [Lexer and Parser →](./02-lexer-and-parser.md)
+**Previous:** [← Toolchain](README.md) · **Next:** [ Lexer and Parser](02-lexer-and-parser.md)

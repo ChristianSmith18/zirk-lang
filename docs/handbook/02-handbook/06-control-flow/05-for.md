@@ -27,4 +27,4 @@ ranges, and user-defined iterable types.
 
 ---
 
-**Previous:** [← Exhaustiveness](./04-exhaustiveness.md) · **Next:** [`for ... in` →](./06-for-in.md)
+**Previous:** [← Exhaustiveness](04-exhaustiveness.md) · **Next:** [ for ... in](06-for-in.md)

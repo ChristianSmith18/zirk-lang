@@ -6,4 +6,4 @@ The module provides dynamic and fixed arrays, `List<T>`, `Map<K,V>`, `Set<T>`, `
 
 ---
 
-**Previous:** [← `std.process`](./05-std-process.md) · **Next:** [`std.time` →](./07-std-time.md)
+**Previous:** [← std.process](05-std-process.md) · **Next:** [ std.time](07-std-time.md)

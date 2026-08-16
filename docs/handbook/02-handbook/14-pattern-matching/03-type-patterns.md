@@ -16,4 +16,4 @@ Use algebraic enums instead when the set of alternatives is closed and owned by 
 
 ---
 
-**Previous:** [← Multiple Patterns](./02-multiple-patterns.md) · **Next:** [Enum Patterns →](./04-enum-patterns.md)
+**Previous:** [← Multiple Patterns](02-multiple-patterns.md) · **Next:** [ Enum Patterns](04-enum-patterns.md)

@@ -39,4 +39,4 @@ the conflict explicitly.
 
 ---
 
-**Previous:** [← Traits](./03-traits.md) · **Next:** [Interface, Trait, or Class? →](./05-interface-vs-trait-vs-class.md)
+**Previous:** [← Traits](03-traits.md) · **Next:** [ Interface, Trait, or Class?](05-interface-vs-trait-vs-class.md)

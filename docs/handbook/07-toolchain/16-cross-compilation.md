@@ -4,4 +4,4 @@ An explicit CLI target overrides manifest targets; otherwise the manifest or hos
 
 ---
 
-**Previous:** [← Incremental Compilation](./15-incremental-compilation.md) · **Next:** [ABI and IR Compatibility →](./17-abi-and-ir-compatibility.md)
+**Previous:** [← Incremental Compilation](15-incremental-compilation.md) · **Next:** [ ABI and IR Compatibility](17-abi-and-ir-compatibility.md)

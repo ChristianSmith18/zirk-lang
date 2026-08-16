@@ -20,4 +20,4 @@ Invalid code should be diagnosed at the point where inference lacks enough infor
 
 ---
 
-**Previous:** [← Strict Immutability](./03-strict-immutability.md) · **Next:** [Default Values →](./05-default-values.md)
+**Previous:** [← Strict Immutability](03-strict-immutability.md) · **Next:** [ Default Values](05-default-values.md)

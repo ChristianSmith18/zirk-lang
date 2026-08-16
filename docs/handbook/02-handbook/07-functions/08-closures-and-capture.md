@@ -40,4 +40,4 @@ than partially copied.
 
 ---
 
-**Previous:** [← Lambdas](./07-lambdas.md) · **Next:** [Mutability in Parameters →](./09-mutability-in-parameters.md)
+**Previous:** [← Lambdas](07-lambdas.md) · **Next:** [ Mutability in Parameters](09-mutability-in-parameters.md)

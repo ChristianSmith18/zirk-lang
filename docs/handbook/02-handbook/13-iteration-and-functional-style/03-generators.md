@@ -30,4 +30,4 @@ and resources remain governed by the same contracts as ordinary functions.
 
 ---
 
-**Previous:** [← `Iterator`](./02-iterator.md) · **Next:** [`map` →](./04-map.md)
+**Previous:** [← Iterator](02-iterator.md) · **Next:** [ map](04-map.md)

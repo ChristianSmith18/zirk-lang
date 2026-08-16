@@ -6,4 +6,4 @@ Generated source returns through normal validation. Secrets must not enter gener
 
 ---
 
-**Previous:** [← Generated Diagnostics](./08-generated-diagnostics.md) · **Next:** Toolchain *(next section)*
+**Previous:** [← Generated Diagnostics](08-generated-diagnostics.md) · **Next:** [ Toolchain](../07-toolchain/README.md)

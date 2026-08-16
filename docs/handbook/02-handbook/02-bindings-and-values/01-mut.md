@@ -1,6 +1,7 @@
 # `mut`
 
-Use `mut` when a binding must be assigned a new value after declaration.
+Use `mut` when a binding must be assigned a new value after declaration. For a
+reference, it also permits mutation through that reference.
 
 ```zirk
 mut attempts: Int32 = 0;
@@ -20,6 +21,12 @@ The compiler inferred an integer type from the initializer and should diagnose t
 
 Prefer a new `inmut` value when transformation can be expressed without changing identity. Use `mut` for counters, accumulators, state machines, and other genuinely evolving bindings.
 
+```zirk
+mut text = "hello";
+text[0] = 'H';   // referent mutation
+text = "bye";    // binding reassignment
+```
+
 ---
 
-**Previous:** [← Bindings and Values](./README.md) · **Next:** [`inmut` →](./02-inmut.md)
+**Previous:** [← Bindings and Values](README.md) · **Next:** [ inmut](02-inmut.md)

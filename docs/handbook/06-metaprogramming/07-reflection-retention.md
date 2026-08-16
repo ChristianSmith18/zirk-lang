@@ -6,4 +6,4 @@ Retention affects binary size and compatibility but does not publish private mem
 
 ---
 
-**Previous:** [← Runtime Reflection](./06-runtime-reflection.md) · **Next:** [Generated Diagnostics →](./08-generated-diagnostics.md)
+**Previous:** [← Runtime Reflection](06-runtime-reflection.md) · **Next:** [ Generated Diagnostics](08-generated-diagnostics.md)

@@ -41,4 +41,4 @@ general function overloading.
 
 ---
 
-**Previous:** [← Fields and Properties](./02-fields-and-properties.md) · **Next:** [Instantiation →](./04-instantiation.md)
+**Previous:** [← Fields and Properties](02-fields-and-properties.md) · **Next:** [ Instantiation](04-instantiation.md)

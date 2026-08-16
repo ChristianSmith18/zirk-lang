@@ -6,4 +6,4 @@ Requirements should be narrow and explain which API needs them. Optional functio
 
 ---
 
-**Previous:** [← Compile Permissions](./08-compile-permissions.md) · **Next:** [Build Targets →](./10-build-targets.md)
+**Previous:** [← Compile Permissions](08-compile-permissions.md) · **Next:** [ Build Targets](10-build-targets.md)

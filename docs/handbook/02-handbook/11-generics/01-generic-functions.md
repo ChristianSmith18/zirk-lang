@@ -14,4 +14,4 @@ Generics replace duplicated algorithms without erasing type information. They ar
 
 ---
 
-**Previous:** [← Generics](./README.md) · **Next:** [Generic Types →](./02-generic-types.md)
+**Previous:** [← Generics](README.md) · **Next:** [ Generic Types](02-generic-types.md)

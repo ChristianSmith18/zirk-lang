@@ -6,4 +6,4 @@ Reproducible builds, immutable releases, minimal capabilities, audit output, and
 
 ---
 
-**Previous:** [← Native Dependencies](./08-native-dependencies.md) · **Next:** Toolchain *(next section)*
+**Previous:** [← Native Dependencies](08-native-dependencies.md) · **Next:** [ Tutorials](../10-tutorials/README.md)

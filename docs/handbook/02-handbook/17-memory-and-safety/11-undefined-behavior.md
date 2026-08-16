@@ -8,4 +8,4 @@ Zirk 1.x exposes neither ownership nor reference counting as source semantics; i
 
 ---
 
-**Previous:** [← Use-After-Free Prevention](./10-use-after-free.md) · **Next:** Concurrency *(next unit)*
+**Previous:** [← Use-After-Free Prevention](10-use-after-free.md) · **Next:** [ Concurrency](../18-concurrency/README.md)

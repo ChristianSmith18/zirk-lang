@@ -8,4 +8,4 @@ Iterations must be safely independent or use explicit reduction primitives. Resu
 
 ---
 
-**Previous:** [← `parallel`](./08-parallel.md) · **Next:** [Threads →](./10-threads.md)
+**Previous:** [← parallel](08-parallel.md) · **Next:** [ Threads](10-threads.md)

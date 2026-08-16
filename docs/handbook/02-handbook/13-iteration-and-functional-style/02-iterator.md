@@ -8,4 +8,4 @@ Prefer an iterator-returning API when callers need streaming consumption or comp
 
 ---
 
-**Previous:** [← `Iterable`](./01-iterable.md) · **Next:** [Generators →](./03-generators.md)
+**Previous:** [← Iterable](01-iterable.md) · **Next:** [ Generators](03-generators.md)

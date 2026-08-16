@@ -18,4 +18,4 @@ Input supports lines, characters, and bytes. EOF is data—not an exception—an
 
 ---
 
-**Previous:** [← Common API Contracts](./01-common-api-contracts.md) · **Next:** [`std.fs` →](./03-std-fs.md)
+**Previous:** [← Common API Contracts](01-common-api-contracts.md) · **Next:** [ std.fs](03-std-fs.md)

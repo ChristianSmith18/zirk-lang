@@ -4,4 +4,4 @@ The checker validates inference, calls, generics, nullability, exhaustiveness, d
 
 ---
 
-**Previous:** [← Name Resolution](./03-name-resolution.md) · **Next:** [Portable IR →](./05-portable-ir.md)
+**Previous:** [← Name Resolution](03-name-resolution.md) · **Next:** [ Portable IR](05-portable-ir.md)

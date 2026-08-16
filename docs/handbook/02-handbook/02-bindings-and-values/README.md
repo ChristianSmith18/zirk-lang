@@ -18,4 +18,4 @@ This unit also covers inference, defaults, initialization, destructuring, shadow
 
 ---
 
-**Previous:** [← Naming Conventions](../01-program-structure/06-naming-conventions.md) · **Next:** [`mut` →](./01-mut.md)
+**Previous:** [← Naming Conventions](../01-program-structure/06-naming-conventions.md) · **Next:** [ mut](01-mut.md)

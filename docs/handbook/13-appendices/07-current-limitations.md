@@ -6,4 +6,4 @@ Zirk 1.x explicitly excludes browser/WebAssembly, public runtime directives/even
 
 ---
 
-**Previous:** [← Differences from Rust](./06-differences-from-rust.md) · **Next:** [Roadmap →](./08-roadmap.md)
+**Previous:** [← Differences from Rust](06-differences-from-rust.md) · **Next:** [ Roadmap](08-roadmap.md)

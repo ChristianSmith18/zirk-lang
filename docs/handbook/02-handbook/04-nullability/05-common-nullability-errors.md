@@ -32,4 +32,4 @@ Use `T?` when “not present” is an ordinary value. Use `Result<T, E>` when th
 
 ---
 
-**Previous:** [← Flow Analysis](./04-flow-analysis.md) · **Next:** [Operators and Expressions →](../05-operators-and-expressions/README.md)
+**Previous:** [← Flow Analysis](04-flow-analysis.md) · **Next:** [ Operators and Expressions](../05-operators-and-expressions/README.md)

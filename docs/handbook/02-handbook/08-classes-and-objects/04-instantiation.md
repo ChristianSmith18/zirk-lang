@@ -21,4 +21,4 @@ The compiler should explain that Zirk construction has no `new`. Allocation stra
 
 ---
 
-**Previous:** [← Constructors](./03-constructors.md) · **Next:** [`this` →](./05-this.md)
+**Previous:** [← Constructors](03-constructors.md) · **Next:** [ this](05-this.md)

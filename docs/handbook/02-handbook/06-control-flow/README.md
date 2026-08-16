@@ -14,4 +14,4 @@ Control flow decides which expressions run and how often. Zirk provides Boolean 
 
 ---
 
-**Previous:** [← Operator Overloading](../05-operators-and-expressions/11-operator-overloading.md) · **Next:** [`if` and `else` →](./01-if-and-else.md)
+**Previous:** [← Operator Overloading](../05-operators-and-expressions/11-operator-overloading.md) · **Next:** [ if and else](01-if-and-else.md)

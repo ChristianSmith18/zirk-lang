@@ -12,4 +12,4 @@ The runtime attempts a diagnostic and only cleanup that remains safe. It does no
 
 ---
 
-**Previous:** [← `finally`](./06-finally.md) · **Next:** [Assertions →](./08-assertions.md)
+**Previous:** [← finally](06-finally.md) · **Next:** [ Assertions](08-assertions.md)

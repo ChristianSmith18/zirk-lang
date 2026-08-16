@@ -6,4 +6,4 @@ Parse errors include source location, JSON path, and expected type. Depth and si
 
 ---
 
-**Previous:** [← `std.http`](./12-std-http.md) · **Next:** [`std.crypto` →](./14-std-crypto.md)
+**Previous:** [← std.http](12-std-http.md) · **Next:** [ std.crypto](14-std-crypto.md)

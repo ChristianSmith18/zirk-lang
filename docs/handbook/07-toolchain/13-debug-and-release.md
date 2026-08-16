@@ -4,4 +4,4 @@ Debug prioritizes complete symbols, minimal optimization, and source corresponde
 
 ---
 
-**Previous:** [← Debugger](./12-debugger.md) · **Next:** [Optimizations →](./14-optimizations.md)
+**Previous:** [← Debugger](12-debugger.md) · **Next:** [ Optimizations](14-optimizations.md)

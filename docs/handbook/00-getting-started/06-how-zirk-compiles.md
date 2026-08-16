@@ -49,4 +49,4 @@ The toolchain should diagnose a problem at the earliest stage with enough contex
 
 ---
 
-**Previous:** [← Your First Program](./05-first-program.md) · **Next:** [Next Steps →](./07-next-steps.md)
+**Previous:** [← Your First Zirk Program](05-first-program.md) · **Next:** [ Next Steps](07-next-steps.md)

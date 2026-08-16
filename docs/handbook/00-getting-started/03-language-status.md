@@ -106,4 +106,4 @@ The future implementation-status reference will collect those checks into a sing
 
 ---
 
-**Previous:** [← Why Zirk Exists](./02-why-zirk-exists.md) · **Next:** [Installation →](./04-installation.md)
+**Previous:** [← Why Zirk Exists](02-why-zirk-exists.md) · **Next:** [ Installation](04-installation.md)

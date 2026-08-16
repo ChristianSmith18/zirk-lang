@@ -6,4 +6,4 @@ The final build compiles package IR with application, stdlib, and runtime for on
 
 ---
 
-**Previous:** [← Public API](./02-public-api.md) · **Next:** [Add, Remove, and Install →](./04-add-remove-install.md)
+**Previous:** [← Public API](02-public-api.md) · **Next:** [ Add, Remove, and Install](04-add-remove-install.md)

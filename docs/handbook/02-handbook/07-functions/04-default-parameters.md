@@ -14,4 +14,4 @@ Defaults belong in APIs when one behavior is genuinely conventional. If choosing
 
 ---
 
-**Previous:** [← Optional Parameters](./03-optional-parameters.md) · **Next:** [Named Arguments →](./05-named-arguments.md)
+**Previous:** [← Optional Parameters](03-optional-parameters.md) · **Next:** [ Named Arguments](05-named-arguments.md)

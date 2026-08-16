@@ -6,4 +6,4 @@ Atomics protect individual operations, not multi-step invariants.
 
 ---
 
-**Previous:** [← Synchronization and Mutexes](./12-sync-and-mutex.md) · **Next:** [Data-Race Prevention →](./14-data-race-prevention.md)
+**Previous:** [← Synchronization and Mutexes](12-sync-and-mutex.md) · **Next:** [ Data-Race Prevention](14-data-race-prevention.md)

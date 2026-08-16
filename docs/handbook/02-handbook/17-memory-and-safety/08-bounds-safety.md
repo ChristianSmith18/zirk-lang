@@ -6,4 +6,4 @@ Out-of-range access produces a controlled error according to the collection API,
 
 ---
 
-**Previous:** [← `unsafe` Blocks](./07-unsafe-blocks.md) · **Next:** [Null Safety →](./09-null-safety.md)
+**Previous:** [← unsafe Blocks](07-unsafe-blocks.md) · **Next:** [ Null Safety](09-null-safety.md)

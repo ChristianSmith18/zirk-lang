@@ -6,4 +6,4 @@ Representation cannot change equality, identity, or observable lifetime. Objects
 
 ---
 
-**Previous:** [← Memory and Safety](./README.md) · **Next:** [Stack and Heap →](./02-stack-and-heap.md)
+**Previous:** [← Memory and Safety](README.md) · **Next:** [ Stack and Heap](02-stack-and-heap.md)

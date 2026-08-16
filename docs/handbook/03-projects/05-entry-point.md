@@ -10,4 +10,4 @@ fn main(): Void { /* ... */ }
 
 ---
 
-**Previous:** [← Libraries](./04-libraries.md) · **Next:** [Globals →](./06-globals.md)
+**Previous:** [← Libraries](04-libraries.md) · **Next:** [ Globals](06-globals.md)

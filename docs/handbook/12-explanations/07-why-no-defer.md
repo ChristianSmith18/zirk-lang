@@ -6,4 +6,4 @@ The exclusion narrows the language while strengthening one auditable resource pa
 
 ---
 
-**Previous:** [← Why No Traditional Overloading?](./06-why-no-traditional-overloading.md) · **Next:** [Why No Inline Assembly? →](./08-why-no-inline-assembly.md)
+**Previous:** [← Why No Traditional Overloading?](06-why-no-traditional-overloading.md) · **Next:** [ Why No Inline Assembly?](08-why-no-inline-assembly.md)

@@ -16,4 +16,4 @@ Do not assign from statement form; use expression form so branch result types ar
 
 ---
 
-**Previous:** [← Destructuring Patterns](./06-destructuring-patterns.md) · **Next:** [`match` as an Expression →](./08-match-as-expression.md)
+**Previous:** [← Destructuring Patterns](06-destructuring-patterns.md) · **Next:** [ match as an Expression](08-match-as-expression.md)

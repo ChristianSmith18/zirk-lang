@@ -26,4 +26,4 @@ The compiler should report that `message` is out of scope and point to its decla
 
 ---
 
-**Previous:** [← Statements and Semicolons](./04-statements-and-semicolons.md) · **Next:** [Naming Conventions →](./06-naming-conventions.md)
+**Previous:** [← Statements and Semicolons](04-statements-and-semicolons.md) · **Next:** [ Naming Conventions](06-naming-conventions.md)

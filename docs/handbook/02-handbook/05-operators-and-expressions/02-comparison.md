@@ -14,4 +14,4 @@ For text, ordering belongs to the documented string or locale API; do not assume
 
 ---
 
-**Previous:** [← Arithmetic](./01-arithmetic.md) · **Next:** [Structural Equality →](./03-structural-equality.md)
+**Previous:** [← Arithmetic](01-arithmetic.md) · **Next:** [ Structural Equality](03-structural-equality.md)

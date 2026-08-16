@@ -11,4 +11,4 @@ A managed thread cannot be abandoned at scope exit. Shared mutation requires syn
 
 ---
 
-**Previous:** [← `parallel for`](./09-parallel-for.md) · **Next:** [Workers by Composition →](./11-workers-by-composition.md)
+**Previous:** [← parallel for](09-parallel-for.md) · **Next:** [ Workers by Composition](11-workers-by-composition.md)

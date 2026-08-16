@@ -4,4 +4,4 @@ The official CLI covers `new`, `init`, `run`, `build`, `check`, `test`, `bench`,
 
 ---
 
-**Previous:** [← Diagnostics](./07-diagnostics.md) · **Next:** [Formatter →](./09-formatter.md)
+**Previous:** [← Diagnostics](07-diagnostics.md) · **Next:** [ Formatter](09-formatter.md)

@@ -6,4 +6,4 @@ Distributed `.zpkg` files also carry manifest, documentation, and license materi
 
 ---
 
-**Previous:** [← Applications](./03-applications.md) · **Next:** [Entry Point →](./05-entry-point.md)
+**Previous:** [← Applications](03-applications.md) · **Next:** [ Entry Point](05-entry-point.md)

@@ -21,6 +21,7 @@ the documentation is transplanted onto the latest `develop` revision.
 | --- | --- | --- |
 | Identity, scope, project minimum, foundational contracts | Master specification §§1–8 | Template §§0, 37–46 |
 | Syntax, bindings, types, control flow, functions, objects, errors, modules, metaprogramming, unsafe code | Language specification §§1–14 | Template §§1–16, 19, 25–35, 44–46 |
+| Type taxonomy, conversions, native operators, Unicode text and temporal semantics | Language specification §§2–4 and §8.1; standard-library specification §8 | Template §§3, 18, 28, 49–54 |
 | Memory, resources, tasks, scheduling, cancellation, I/O, threads, shutdown | Runtime specification | Template §§15–18, 22–24, 33–34 |
 | Standard-library modules and operational contracts | Standard-library specification | Template §§22–24, 30–31, 39 |
 | Compiler pipeline, IR, targets, diagnostics, CLI, formatter, linter, LSP, debugger | Compiler specification §§1–12 | Template §§21, 40–43 |
@@ -43,6 +44,18 @@ authorial correction audit on 2026-08-15:
 - **Implementation gaps:** the handbook distinguishes the normative Zirk 1.x language from current implementation availability. Known limitations and non-promises are collected in [Current Limitations](../13-appendices/07-current-limitations.md) and [Feature Status](../11-reference/12-feature-status.md).
 
 The current compiler is not yet a complete executable oracle for every normative example. Consequently, this audit verifies examples against the final specifications and their grammar rather than claiming that every example can already be compiled by the repository implementation.
+
+## Type-system canonical owners
+
+| Rule family | Canonical handbook owner |
+| --- | --- |
+| Type tree and categories | `02-handbook/03-everyday-types/01-object-and-type-hierarchy.md` and `01a-type-categories.md` |
+| Value/reference identity, aliases and cloning | `01b-value-and-reference-behavior.md` plus Bindings and Values |
+| Contracts and native operators | `01c-contracts-and-capabilities.md`, `01e-native-operators.md`, operator reference |
+| Numeric conversions and contextual evaluation | `01d-conversions-and-context.md`, signed/unsigned/Float chapters |
+| Unicode Char and mutable String | Char and String chapters |
+| Calendar and timeline types | `02-handbook/03a-temporal/` |
+| Domain value/reference choices | Data Types and Classes and Objects |
 
 ---
 

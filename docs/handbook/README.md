@@ -54,4 +54,4 @@ The chapters deliberately vary in length. Orientation pages should be concise; s
 
 ---
 
-**Previous:** Beginning of the handbook · **Next:** [What Is Zirk? →](./00-getting-started/01-what-is-zirk.md)
+**Previous:** Start · **Next:** [ Getting Started with Zirk](00-getting-started/README.md)

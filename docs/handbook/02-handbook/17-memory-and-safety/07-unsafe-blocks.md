@@ -10,4 +10,4 @@ unsafe { write_native(pointer, length); }
 
 ---
 
-**Previous:** [← Dereferencing](./06-dereferencing.md) · **Next:** [Bounds Safety →](./08-bounds-safety.md)
+**Previous:** [← Dereferencing](06-dereferencing.md) · **Next:** [ Bounds Safety](08-bounds-safety.md)

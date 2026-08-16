@@ -6,4 +6,4 @@ Choosing among them determines construction, equality, identity, exhaustiveness,
 
 ---
 
-**Previous:** [← Generics](../11-generics/README.md) · **Next:** [Records →](./01-records.md)
+**Previous:** [← Monomorphization](../11-generics/07-monomorphization.md) · **Next:** [ Records](01-records.md)

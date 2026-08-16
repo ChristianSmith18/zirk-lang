@@ -6,4 +6,4 @@ Audit compile permissions independently from runtime permissions: generated code
 
 ---
 
-**Previous:** [← Runtime Permissions](./07-runtime-permissions.md) · **Next:** [Library Requirements →](./09-library-requirements.md)
+**Previous:** [← Runtime Permissions](07-runtime-permissions.md) · **Next:** [ Library Requirements](09-library-requirements.md)

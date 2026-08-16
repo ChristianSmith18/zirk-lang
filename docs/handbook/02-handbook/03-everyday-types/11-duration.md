@@ -1,20 +1,13 @@
-# Duration
+# Duration Has Moved
 
-Duration literals attach a time unit directly to a numeric value:
+`Duration` is part of Zirk's complete temporal family. Its canonical chapter is
+[Duration](../03a-temporal/08-duration.md), beside `Instant`, `Period`, and the
+calendar/zone types needed to explain its arithmetic correctly.
 
-```zirk
-inmut retry_delay = 500ms;
-inmut timeout = 5s;
-inmut cache_age = 5m;
-inmut retention = 24h;
-```
-
-They are typed durations, not plain integers. APIs can therefore reject accidental mixing of milliseconds, counts, and timestamps.
-
-The runtime may normalize units internally, while formatting and comparison preserve duration semantics. Overflow and conversion follow the underlying duration contract.
-
-Use duration values for timeouts, delays, and intervals. Use timestamp types for points on a clock; subtracting timestamps may produce a duration, but the concepts are not interchangeable.
+This compatibility page preserves the original handbook destination. Continue
+to the canonical chapter for signed values, nanosecond precision, literals,
+operators, components, totals, rounding, formatting and timeout rules.
 
 ---
 
-**Previous:** [← Void, Never, Null, and Object](./10-void-never-null-object.md) · **Next:** [Nullability →](../04-nullability/README.md)
+**Previous:** [← Void, Never, Null, and Object](10-void-never-null-object.md) · **Next:** [ Temporal Types](../03a-temporal/README.md)

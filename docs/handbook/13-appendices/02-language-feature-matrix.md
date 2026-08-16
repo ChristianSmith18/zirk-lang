@@ -13,4 +13,4 @@
 
 ---
 
-**Previous:** [← Glossary](./01-glossary.md) · **Next:** [Valid and Invalid Examples →](./03-valid-and-invalid-examples.md)
+**Previous:** [← Glossary](01-glossary.md) · **Next:** [ Valid and Invalid Examples](03-valid-and-invalid-examples.md)

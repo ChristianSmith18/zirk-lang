@@ -4,4 +4,4 @@ The formatter is canonical and idempotent. It writes semicolons and normalizes w
 
 ---
 
-**Previous:** [← CLI](./08-cli.md) · **Next:** [Linter →](./10-linter.md)
+**Previous:** [← CLI](08-cli.md) · **Next:** [ Linter](10-linter.md)

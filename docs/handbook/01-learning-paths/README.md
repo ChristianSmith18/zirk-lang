@@ -13,4 +13,4 @@ Each path is a map, not a substitute for feature documentation. When familiar sy
 
 ---
 
-**Previous:** [← Getting Started: Next Steps](../00-getting-started/07-next-steps.md) · **Next:** [Zirk for New Programmers →](./01-zirk-for-new-programmers.md)
+**Previous:** [← Next Steps](../00-getting-started/07-next-steps.md) · **Next:** [ Zirk for New Programmers](01-zirk-for-new-programmers.md)

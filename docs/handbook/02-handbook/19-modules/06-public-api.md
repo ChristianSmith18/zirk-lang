@@ -8,4 +8,4 @@ Do not expose a type merely because an internal implementation happens to return
 
 ---
 
-**Previous:** [← `use` and Globals](./05-use-globals.md) · **Next:** [Circular Dependencies →](./07-circular-dependencies.md)
+**Previous:** [← use and Globals](05-use-globals.md) · **Next:** [ Circular Dependencies](07-circular-dependencies.md)

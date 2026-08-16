@@ -15,4 +15,4 @@ Named arguments are valuable for Boolean flags, similar adjacent types, and opti
 
 ---
 
-**Previous:** [← Default Parameters](./04-default-parameters.md) · **Next:** [Variadic Functions →](./06-variadic-functions.md)
+**Previous:** [← Default Parameters](04-default-parameters.md) · **Next:** [ Variadic Functions](06-variadic-functions.md)

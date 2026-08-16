@@ -10,4 +10,4 @@ use APP_NAME;
 
 ---
 
-**Previous:** [← Import Aliases](./04-import-aliases.md) · **Next:** [Public API →](./06-public-api.md)
+**Previous:** [← Import Aliases](04-import-aliases.md) · **Next:** [ Public API](06-public-api.md)

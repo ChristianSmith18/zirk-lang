@@ -17,4 +17,4 @@ Use ordinary calls when argument placement would be surprising or when a pipelin
 
 ---
 
-**Previous:** [← Compound Assignment](./08-compound-assignment.md) · **Next:** [Ranges →](./10-ranges.md)
+**Previous:** [← Compound Assignment](08-compound-assignment.md) · **Next:** [ Ranges](10-ranges.md)

@@ -18,4 +18,4 @@ The public Syntax API retains documentation metadata for tools and `zirk doc`. G
 
 ---
 
-**Previous:** [← Lexical Rules](./02-lexical-rules.md) · **Next:** [Statements and Semicolons →](./04-statements-and-semicolons.md)
+**Previous:** [← Lexical Rules](02-lexical-rules.md) · **Next:** [ Statements and Semicolons](04-statements-and-semicolons.md)

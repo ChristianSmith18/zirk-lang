@@ -6,4 +6,4 @@ It cannot mutate compiler memory, fabricate invalid nodes, skip type checking, o
 
 ---
 
-**Previous:** [← Decorator Targets](./03-decorator-targets.md) · **Next:** [Compile-Time Reflection →](./05-compile-time-reflection.md)
+**Previous:** [← Decorator Targets](03-decorator-targets.md) · **Next:** [ Compile-Time Reflection](05-compile-time-reflection.md)

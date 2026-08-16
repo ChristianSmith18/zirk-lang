@@ -6,4 +6,4 @@ Use them only when ordinary code cannot express the requirement; compiler optimi
 
 ---
 
-**Previous:** [← Native Permissions](./06-native-permissions.md) · **Next:** [Portable SIMD →](./08-portable-simd.md)
+**Previous:** [← Native Permissions](06-native-permissions.md) · **Next:** [ Portable SIMD](08-portable-simd.md)

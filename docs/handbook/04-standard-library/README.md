@@ -4,4 +4,4 @@ Zirk's initial standard library is deliberately small, typed, cross-platform, an
 
 ---
 
-**Previous:** [← Reproducible Builds](../03-projects/13-reproducible-builds.md) · **Next:** [Common API Contracts →](./01-common-api-contracts.md)
+**Previous:** [← Reproducible Builds](../03-projects/13-reproducible-builds.md) · **Next:** [ Common API Contracts](01-common-api-contracts.md)

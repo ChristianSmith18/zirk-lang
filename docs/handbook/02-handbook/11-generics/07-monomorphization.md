@@ -8,4 +8,4 @@ Monomorphization is not source-level copying and does not change type checking. 
 
 ---
 
-**Previous:** [← Specialization](./06-specialization.md) · **Next:** Data Types and Collections *(next handbook units)*
+**Previous:** [← Specialization](06-specialization.md) · **Next:** [ Data Types](../10-data-types/README.md)

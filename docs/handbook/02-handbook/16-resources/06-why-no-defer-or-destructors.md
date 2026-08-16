@@ -6,4 +6,4 @@ General `defer` is excluded from Zirk 1.x, and destructors are not the public re
 
 ---
 
-**Previous:** [← Cancellation and Cleanup](./05-cancellation-and-cleanup.md) · **Next:** Memory and Safety *(next unit)*
+**Previous:** [← Cancellation and Cleanup](05-cancellation-and-cleanup.md) · **Next:** [ Memory and Safety](../17-memory-and-safety/README.md)

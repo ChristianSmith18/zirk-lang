@@ -6,4 +6,4 @@ Define policy for invalid lines, partial output, flush failure, cancellation, an
 
 ---
 
-**Previous:** [← Build a CLI](./01-build-a-cli.md) · **Next:** [Build a Concurrent Worker Pool →](./03-build-a-concurrent-worker-pool.md)
+**Previous:** [← Build a CLI](01-build-a-cli.md) · **Next:** [ Build a Concurrent Worker Pool](03-build-a-concurrent-worker-pool.md)

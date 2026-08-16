@@ -6,4 +6,4 @@ When assembly is unavoidable, place it in an audited external native library beh
 
 ---
 
-**Previous:** [← Automatic Vectorization](./09-auto-vectorization.md) · **Next:** Metaprogramming *(next section)*
+**Previous:** [← Automatic Vectorization](09-auto-vectorization.md) · **Next:** [ Metaprogramming](../06-metaprogramming/README.md)

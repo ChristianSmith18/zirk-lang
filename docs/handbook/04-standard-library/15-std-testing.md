@@ -6,4 +6,4 @@ Assertions cover equality, identity, truth, nullability, results, exceptions, co
 
 ---
 
-**Previous:** [← `std.crypto`](./14-std-crypto.md) · **Next:** [`std.reflect` →](./16-std-reflect.md)
+**Previous:** [← std.crypto](14-std-crypto.md) · **Next:** [ std.reflect](16-std-reflect.md)

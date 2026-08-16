@@ -28,4 +28,4 @@ create untracked mutable aliasing.
 
 ---
 
-**Previous:** [← Indexing](./07-indexing.md) · **Next:** [Safe Access →](./09-safe-access.md)
+**Previous:** [← Indexing](07-indexing.md) · **Next:** [ Safe Collection Access](09-safe-access.md)

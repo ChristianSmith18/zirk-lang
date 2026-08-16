@@ -18,4 +18,4 @@ You will learn what Zirk is, which problems shaped it, how to distinguish the no
 
 ---
 
-**Previous:** [Handbook Home](../README.md) · **Next:** [What Is Zirk? →](./01-what-is-zirk.md)
+**Previous:** [← The Zirk Handbook](../README.md) · **Next:** [ What Is Zirk?](01-what-is-zirk.md)

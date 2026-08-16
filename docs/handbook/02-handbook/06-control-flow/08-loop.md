@@ -18,4 +18,4 @@ Long-running loops must still cooperate with cancellation and resource cleanup w
 
 ---
 
-**Previous:** [← `while`](./07-while.md) · **Next:** [`break` and `continue` →](./09-break-and-continue.md)
+**Previous:** [← while](07-while.md) · **Next:** [ break and continue](09-break-and-continue.md)

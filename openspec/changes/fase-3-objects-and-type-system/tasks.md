@@ -75,6 +75,7 @@
 - [ ] 5.12 Tests: una closure sigue funcionando en variable local e invocación (D9)
 - [ ] 5.13 Tests: un caso válido y uno inválido por cada regla nueva
 - [ ] 5.14 Rechazar shadowing ordinario y resolver una captura homónima únicamente mediante `this.nombre`
+- [ ] 5.15 Aplicar la matriz `mut`/`inmut`/`inmut::strict` a referencias de objeto y rechazar aliases que rompan strictness
 
 ## 6. Tipos — contratos
 
@@ -86,6 +87,7 @@
 - [ ] 6.6 Definir los contratos de operador y sus métodos reservados (`_add`, `_subtract`, etc.), impidiendo reabrir tipos nativos (D6)
 - [ ] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
 - [ ] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`
+- [ ] 6.8a Hacer que `String` implemente repetición checked en ambos órdenes (`String * Integer`, `Integer * String`)
 - [ ] 6.9 Definir `Iterable<T>` e `Iterator<T>` como contratos del lenguaje
 - [ ] 6.10 Hacer que `for ... in` exija `Iterable<T>`, y que rangos y `String` lo implementen (D8)
 - [ ] 6.11 Tests: un caso válido y uno inválido por cada regla nueva

@@ -6,4 +6,4 @@ Choose from domain semantics first; allow the compiler to optimize representatio
 
 ---
 
-**Previous:** [← Why Portable IR?](./11-why-portable-ir.md) · **Next:** [Appendices →](../13-appendices/README.md)
+**Previous:** [← Why Portable IR?](11-why-portable-ir.md) · **Next:** [ Appendices](../13-appendices/README.md)

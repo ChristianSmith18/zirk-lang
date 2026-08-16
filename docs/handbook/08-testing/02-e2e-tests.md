@@ -6,4 +6,4 @@ Isolate temporary state and report reproducible setup, command, output, and tear
 
 ---
 
-**Previous:** [← Unit Tests](./01-unit-tests.md) · **Next:** [`assert` and `expect` →](./03-assert-and-expect.md)
+**Previous:** [← Unit Tests](01-unit-tests.md) · **Next:** [ assert and expect](03-assert-and-expect.md)

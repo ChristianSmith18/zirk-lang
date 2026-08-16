@@ -14,4 +14,4 @@ Commands provide deterministic output and `--json` where automation requires it.
 
 ---
 
-**Previous:** [← Diagnostic Codes](./07-diagnostic-codes.md) · **Next:** [Target Matrix →](./09-target-matrix.md)
+**Previous:** [← Diagnostic Codes](07-diagnostic-codes.md) · **Next:** [ Target Matrix](09-target-matrix.md)

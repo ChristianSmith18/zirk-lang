@@ -6,4 +6,4 @@ Filesystem APIs accept `Path`; hostile input receives size/depth limits. Support
 
 ---
 
-**Previous:** [← Standard Library](./README.md) · **Next:** [`std.io` →](./02-std-io.md)
+**Previous:** [← Standard Library](README.md) · **Next:** [ std.io](02-std-io.md)

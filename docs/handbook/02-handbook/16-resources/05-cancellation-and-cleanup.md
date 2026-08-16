@@ -6,4 +6,4 @@ Cleanup should be bounded and cancellation-aware without abandoning invariants. 
 
 ---
 
-**Previous:** [← Close and Flush Errors](./04-close-and-flush-errors.md) · **Next:** [Why No General `defer` or Destructors? →](./06-why-no-defer-or-destructors.md)
+**Previous:** [← Close and Flush Errors](04-close-and-flush-errors.md) · **Next:** [ Why No General defer or Destructors?](06-why-no-defer-or-destructors.md)

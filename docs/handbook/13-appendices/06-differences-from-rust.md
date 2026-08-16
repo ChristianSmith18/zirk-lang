@@ -6,4 +6,4 @@ Resources use `match with`; concurrency distinguishes tasks, parallel CPU work, 
 
 ---
 
-**Previous:** [← Differences from Python](./05-differences-from-python.md) · **Next:** [Current Limitations →](./07-current-limitations.md)
+**Previous:** [← Differences from Python](05-differences-from-python.md) · **Next:** [ Current Limitations](07-current-limitations.md)

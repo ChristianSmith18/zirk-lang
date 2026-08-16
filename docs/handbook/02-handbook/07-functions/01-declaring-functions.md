@@ -14,4 +14,4 @@ A function returning `Void` completes without a value. Public functions should d
 
 ---
 
-**Previous:** [← Functions](./README.md) · **Next:** [Parameters and Return Types →](./02-parameters-and-return-types.md)
+**Previous:** [← Functions](README.md) · **Next:** [ Parameters and Return Types](02-parameters-and-return-types.md)

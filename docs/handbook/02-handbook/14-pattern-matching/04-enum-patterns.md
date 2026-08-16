@@ -15,4 +15,4 @@ Bindings inherit the associated field types. A pattern with the wrong arity or f
 
 ---
 
-**Previous:** [← Type Patterns](./03-type-patterns.md) · **Next:** [Union Patterns →](./05-union-patterns.md)
+**Previous:** [← Type Patterns](03-type-patterns.md) · **Next:** [ Union Patterns](05-union-patterns.md)

@@ -6,4 +6,4 @@ Document types, errors, cancellation, thread safety, and target constraints. Add
 
 ---
 
-**Previous:** [← Build an HTTP Service](./04-build-an-http-service.md) · **Next:** [Call a C Library →](./06-call-a-c-library.md)
+**Previous:** [← Build an HTTP Service](04-build-an-http-service.md) · **Next:** [ Call a C Library](06-call-a-c-library.md)

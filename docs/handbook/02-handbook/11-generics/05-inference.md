@@ -12,4 +12,4 @@ Public behavior cannot depend on which internal inference path happened to win. 
 
 ---
 
-**Previous:** [← Multiple Type Parameters](./04-multiple-type-parameters.md) · **Next:** [Specialization →](./06-specialization.md)
+**Previous:** [← Multiple Type Parameters](04-multiple-type-parameters.md) · **Next:** [ Specialization](06-specialization.md)

@@ -10,4 +10,4 @@ Path resolution is project-aware and must be deterministic across supported file
 
 ---
 
-**Previous:** [← Modules](./README.md) · **Next:** [`share` →](./02-share.md)
+**Previous:** [← Modules](README.md) · **Next:** [ share](02-share.md)

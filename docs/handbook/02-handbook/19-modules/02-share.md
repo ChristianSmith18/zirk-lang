@@ -10,4 +10,4 @@ Publication makes a name importable; it does not bypass member visibility or pac
 
 ---
 
-**Previous:** [← File Modules](./01-file-modules.md) · **Next:** [`import` →](./03-import.md)
+**Previous:** [← File Modules](01-file-modules.md) · **Next:** [ import](03-import.md)

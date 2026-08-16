@@ -10,6 +10,8 @@ Safe indexing cannot produce undefined behavior. An out-of-range position must p
 
 String indexing is semantically grapheme-aware; byte and code-point access require APIs that name those units. Do not assume one indexing operation has identical cost across all collection types.
 
+Indexing is capability-driven: arrays and lists use integers, maps use `K`, and String uses grapheme positions. Indexed assignment additionally requires the index-set capability, a compatible value, and a non-strict mutable referent.
+
 ---
 
-**Previous:** [← Ranges](./06-ranges.md) · **Next:** [Slicing →](./08-slicing.md)
+**Previous:** [← Ranges](06-ranges.md) · **Next:** [ Slicing](08-slicing.md)

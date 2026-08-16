@@ -6,4 +6,4 @@ The contract guarantees exactly-once closure when managed by `match with`. A gar
 
 ---
 
-**Previous:** [← Resources](./README.md) · **Next:** [`match with` →](./02-match-with.md)
+**Previous:** [← Resources](README.md) · **Next:** [ match with](02-match-with.md)

@@ -4,4 +4,4 @@ Zirk separates expected failure, exceptional recovery, and irreparable terminati
 
 ---
 
-**Previous:** [← Interface, Trait, or Class?](../09-interfaces-and-traits/05-interface-vs-trait-vs-class.md) · **Next:** [`Result` →](./01-result.md)
+**Previous:** [← Interface, Trait, or Class?](../09-interfaces-and-traits/05-interface-vs-trait-vs-class.md) · **Next:** [ Result](01-result.md)

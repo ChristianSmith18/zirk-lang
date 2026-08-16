@@ -14,4 +14,4 @@ Use iterator transformations for a clear data pipeline and `for ... in` when the
 
 ---
 
-**Previous:** [← `for`](./05-for.md) · **Next:** [`while` →](./07-while.md)
+**Previous:** [← for](05-for.md) · **Next:** [ while](07-while.md)

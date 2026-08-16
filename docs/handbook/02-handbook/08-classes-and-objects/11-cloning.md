@@ -31,6 +31,8 @@ Destructuring copies the extracted values according to their own semantics. It
 does not silently deep-clone nested class references. Reconstruct a new object
 from destructured values when a new identity is intended.
 
+`clone()` is the explicit escape from shared-reference behavior. Its contract must specify depth: a deep clone recursively produces independent mutable referents, while an explicitly documented shallow clone may retain nested aliases. `inmut::strict` does not itself clone; clone first, then choose the binding permission for the independent result.
+
 ---
 
-**Previous:** [← Object Identity](./10-object-identity.md) · **Next:** [Interfaces and Traits →](../09-interfaces-and-traits/README.md)
+**Previous:** [← Object Identity](10-object-identity.md) · **Next:** [ Interfaces and Traits](../09-interfaces-and-traits/README.md)

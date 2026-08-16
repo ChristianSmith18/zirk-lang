@@ -37,4 +37,4 @@ Zirk does not use special `capture` or `yield` syntax to extract a match result;
 
 ---
 
-**Previous:** [← `if` Expressions](./02-if-expressions.md) · **Next:** [Exhaustiveness →](./04-exhaustiveness.md)
+**Previous:** [← if Expressions](02-if-expressions.md) · **Next:** [ Exhaustiveness](04-exhaustiveness.md)

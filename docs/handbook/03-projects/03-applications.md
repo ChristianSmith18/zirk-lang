@@ -10,4 +10,4 @@ Application policy must satisfy library requirements without granting capabiliti
 
 ---
 
-**Previous:** [← `init.zrk`](./02-init-zrk.md) · **Next:** [Libraries →](./04-libraries.md)
+**Previous:** [← init.zrk](02-init-zrk.md) · **Next:** [ Libraries](04-libraries.md)

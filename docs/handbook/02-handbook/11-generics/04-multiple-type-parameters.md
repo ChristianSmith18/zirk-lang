@@ -14,4 +14,4 @@ Do not split one semantic type into several parameters merely to increase flexib
 
 ---
 
-**Previous:** [← Constraints with `from`](./03-constraints-with-from.md) · **Next:** [Generic Inference →](./05-inference.md)
+**Previous:** [← Constraints with from](03-constraints-with-from.md) · **Next:** [ Generic Inference](05-inference.md)
