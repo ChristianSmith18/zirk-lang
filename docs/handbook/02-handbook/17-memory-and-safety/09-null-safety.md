@@ -6,4 +6,4 @@ A null failure remains controlled and diagnostic; safe code cannot turn it into 
 
 ---
 
-**Previous:** [← Bounds Safety](./08-bounds-safety.md) · **Next:** [Use-After-Free Prevention →](./10-use-after-free.md)
+**Previous:** [← Bounds Safety](08-bounds-safety.md) · **Next:** [ Use-After-Free Prevention](10-use-after-free.md)

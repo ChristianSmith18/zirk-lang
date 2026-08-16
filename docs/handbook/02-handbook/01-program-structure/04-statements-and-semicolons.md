@@ -33,4 +33,4 @@ Run `zirk format` instead of debating local semicolon style. Formatter idempoten
 
 ---
 
-**Previous:** [← Comments and Documentation](./03-comments-and-documentation.md) · **Next:** [Blocks and Scope →](./05-blocks-and-scope.md)
+**Previous:** [← Comments and Documentation](03-comments-and-documentation.md) · **Next:** [ Blocks and Scope](05-blocks-and-scope.md)

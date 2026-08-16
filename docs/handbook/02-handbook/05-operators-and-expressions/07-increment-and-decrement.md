@@ -14,4 +14,4 @@ They require `mut` and remain subject to overflow rules. Dense expressions that 
 
 ---
 
-**Previous:** [← Ternary Operator](./06-ternary.md) · **Next:** [Compound Assignment →](./08-compound-assignment.md)
+**Previous:** [← Ternary Operator](06-ternary.md) · **Next:** [ Compound Assignment](08-compound-assignment.md)

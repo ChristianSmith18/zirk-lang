@@ -17,4 +17,4 @@ Exponentiation binds more tightly than multiplication. Its compound form is
 
 ---
 
-**Previous:** [← Operators and Expressions](./README.md) · **Next:** [Comparison →](./02-comparison.md)
+**Previous:** [← Operators and Expressions](README.md) · **Next:** [ Comparison](02-comparison.md)

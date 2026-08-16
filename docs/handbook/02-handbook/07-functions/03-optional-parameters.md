@@ -25,4 +25,4 @@ Avoid optional parameters when omission changes the operation into a different c
 
 ---
 
-**Previous:** [← Parameters and Return Types](./02-parameters-and-return-types.md) · **Next:** [Default Parameters →](./04-default-parameters.md)
+**Previous:** [← Parameters and Return Types](02-parameters-and-return-types.md) · **Next:** [ Default Parameters](04-default-parameters.md)

@@ -36,4 +36,4 @@ base signature so a subtype remains usable wherever its base is expected.
 
 ---
 
-**Previous:** [← Visibility](./06-visibility.md) · **Next:** [Abstract Classes →](./08-abstract-classes.md)
+**Previous:** [← Visibility](06-visibility.md) · **Next:** [ Abstract Classes](08-abstract-classes.md)

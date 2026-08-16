@@ -8,4 +8,4 @@ When a function conceptually produces a changed value, returning that value is o
 
 ---
 
-**Previous:** [← Closures and Capture](./08-closures-and-capture.md) · **Next:** [No Traditional Overloading →](./10-no-traditional-overloading.md)
+**Previous:** [← Closures and Capture](08-closures-and-capture.md) · **Next:** [ No Traditional Overloading](10-no-traditional-overloading.md)

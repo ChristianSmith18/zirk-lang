@@ -13,4 +13,4 @@ Translate errors at abstraction boundaries when callers need domain meaning; pre
 
 ---
 
-**Previous:** [← Handling `Result`](./02-handling-result.md) · **Next:** [Exceptions →](./04-exceptions.md)
+**Previous:** [← Handling Result](02-handling-result.md) · **Next:** [ Exceptions](04-exceptions.md)

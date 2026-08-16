@@ -14,4 +14,4 @@ An exception crosses frames until a compatible handler is found, while resource 
 
 ---
 
-**Previous:** [← Error Propagation](./03-error-propagation.md) · **Next:** [Typed `catch` →](./05-typed-catch.md)
+**Previous:** [← Error Propagation](03-error-propagation.md) · **Next:** [ Typed catch](05-typed-catch.md)

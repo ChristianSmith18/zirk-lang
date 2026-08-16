@@ -6,4 +6,4 @@ The specification defines the format but not a complete code registry. Until imp
 
 ---
 
-**Previous:** [← Attributes and Decorators](./06-attributes-and-decorators.md) · **Next:** [CLI Commands →](./08-cli-commands.md)
+**Previous:** [← Attributes and Decorators](06-attributes-and-decorators.md) · **Next:** [ CLI Commands](08-cli-commands.md)

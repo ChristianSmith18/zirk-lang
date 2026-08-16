@@ -14,4 +14,4 @@ Parameter bindings are local to the function. Mutation of a binding, mutation of
 
 ---
 
-**Previous:** [← Declaring Functions](./01-declaring-functions.md) · **Next:** [Optional Parameters →](./03-optional-parameters.md)
+**Previous:** [← Declaring Functions](01-declaring-functions.md) · **Next:** [ Optional Parameters](03-optional-parameters.md)

@@ -6,4 +6,4 @@ This unit covers declarations, parameter forms, callable values, capture, mutabi
 
 ---
 
-**Previous:** [← `match` as an Expression](../14-pattern-matching/08-match-as-expression.md) · **Next:** [Declaring Functions →](./01-declaring-functions.md)
+**Previous:** [← break and continue](../06-control-flow/09-break-and-continue.md) · **Next:** [ Declaring Functions](01-declaring-functions.md)

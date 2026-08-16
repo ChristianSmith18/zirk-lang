@@ -6,4 +6,4 @@ Garbage collection cannot guarantee timely close; `finally` does not itself mode
 
 ---
 
-**Previous:** [← Why `Result` and Exceptions?](./03-why-result-and-exceptions.md) · **Next:** [Why No `new`? →](./05-why-no-new.md)
+**Previous:** [← Why Result and Exceptions?](03-why-result-and-exceptions.md) · **Next:** [ Why No new?](05-why-no-new.md)

@@ -6,4 +6,4 @@ Handlers run as structured tasks; no thread is created per request. CPU-heavy ha
 
 ---
 
-**Previous:** [← `std.net`](./11-std-net.md) · **Next:** [`std.json` →](./13-std-json.md)
+**Previous:** [← std.net](11-std-net.md) · **Next:** [ std.json](13-std-json.md)

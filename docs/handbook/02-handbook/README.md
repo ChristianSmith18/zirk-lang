@@ -12,4 +12,4 @@ Every leaf chapter answers one focused question. Section overviews connect those
 
 ---
 
-**Previous:** [← Tooling in Five Minutes](../01-learning-paths/06-tooling-in-five-minutes.md) · **Next:** [Program Structure →](./01-program-structure/README.md)
+**Previous:** [← Tooling in Five Minutes](../01-learning-paths/06-tooling-in-five-minutes.md) · **Next:** [ Program Structure](01-program-structure/README.md)

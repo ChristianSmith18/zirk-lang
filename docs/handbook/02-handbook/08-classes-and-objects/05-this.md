@@ -20,4 +20,4 @@ Zirk uses `this`, not `self`.
 
 ---
 
-**Previous:** [← Instantiation](./04-instantiation.md) · **Next:** [Visibility →](./06-visibility.md)
+**Previous:** [← Instantiation](04-instantiation.md) · **Next:** [ Visibility](06-visibility.md)

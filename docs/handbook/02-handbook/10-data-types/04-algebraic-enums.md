@@ -5,7 +5,7 @@ An algebraic enum defines variants that may carry different typed data.
 ```zirk
 enum LoadState {
     Idle;
-    Loading(progress: Decimal64);
+    Loading(progress: Float64);
     Ready(value: Document);
     Failed(error: LoadError);
 }
@@ -18,7 +18,7 @@ Consider the object-shaped alternative:
 ```zirk
 record LooseLoadState {
     loading: Boolean;
-    progress: Decimal64?;
+    progress: Float64?;
     document: Document?;
     error: LoadError?;
 }
@@ -42,6 +42,8 @@ This is the same model used by `Result<T, E>`, iterator steps, application
 events, protocol messages, and state machines. A variant may carry zero, one,
 or several typed values.
 
+Two enum values are equal when they have the same variant and equal associated values. Equality can be derived only when every payload supports it. Ordering is never inferred from declaration order. Each `match` arm narrows its payload types.
+
 ---
 
-**Previous:** [← Traditional Enums](./03-traditional-enums.md) · **Next:** [Associated Values →](./05-associated-values.md)
+**Previous:** [← Traditional Enums](03-traditional-enums.md) · **Next:** [ Associated Values](05-associated-values.md)

@@ -10,4 +10,4 @@ Absence is part of a type in Zirk. `T` excludes `null`; `T?` means `T | Null`. T
 
 ---
 
-**Previous:** [← Duration](../03-everyday-types/11-duration.md) · **Next:** [Nullable Types →](./01-nullable-types.md)
+**Previous:** [← Temporal Errors](../03a-temporal/14-temporal-errors.md) · **Next:** [ Nullable Types](01-nullable-types.md)

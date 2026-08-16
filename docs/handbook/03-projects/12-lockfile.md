@@ -6,4 +6,4 @@ Commit application lockfiles. Never store secrets in them. Verification failure 
 
 ---
 
-**Previous:** [← Dependencies](./11-dependencies.md) · **Next:** [Reproducible Builds →](./13-reproducible-builds.md)
+**Previous:** [← Dependencies](11-dependencies.md) · **Next:** [ Reproducible Builds](13-reproducible-builds.md)

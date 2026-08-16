@@ -33,4 +33,4 @@ Focus on immutability levels, algebraic enums and matching, `Result`, resource-s
 
 ---
 
-**Previous:** [← Zirk for Rust, C, and C++ Programmers](./04-zirk-for-rust-c-cpp-programmers.md) · **Next:** [Tooling in Five Minutes →](./06-tooling-in-five-minutes.md)
+**Previous:** [← Zirk for Rust, C, and C++ Programmers](04-zirk-for-rust-c-cpp-programmers.md) · **Next:** [ Tooling in Five Minutes](06-tooling-in-five-minutes.md)

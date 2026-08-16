@@ -14,4 +14,4 @@ Numeric and object truthiness do not exist. Compare explicitly or ask the type f
 
 ---
 
-**Previous:** [← Object Identity](./04-object-identity.md) · **Next:** [Ternary Operator →](./06-ternary.md)
+**Previous:** [← Object Identity](04-object-identity.md) · **Next:** [ Ternary Operator](06-ternary.md)

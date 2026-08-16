@@ -20,4 +20,4 @@ Use lambdas for short behavior passed to collection, scheduling, or callback API
 
 ---
 
-**Previous:** [← Variadic Functions](./06-variadic-functions.md) · **Next:** [Closures and Capture →](./08-closures-and-capture.md)
+**Previous:** [← Variadic Functions](06-variadic-functions.md) · **Next:** [ Closures and Capture](08-closures-and-capture.md)

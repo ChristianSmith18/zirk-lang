@@ -20,6 +20,21 @@ Distributable package: `.zpkg`
 > convenience imports; and bound callable cloning. This checkpoint is
 > normative even where the current compiler has not implemented the surface.
 
+> **Authorial type-system checkpoint — 15 August 2026.** Zirk distinguishes
+> compiler primitives, native value types, native reference types,
+> user-defined value/reference types and special types under the conceptual
+> `Object` root. The binary floating family is `Float16`–`Float128` with
+> `Float == Float64`; `NaN` is not a valid value. Explicit `Float(...)` and
+> `String(...)` constructors establish deep contextual evaluation for their
+> contained arithmetic or concatenation tree. `Char` is exactly one Unicode
+> grapheme. `String` is a mutable shared reference governed by `mut`, `inmut`
+> and transitive `inmut::strict`, supports checked grapheme mutation and
+> slicing, cloning, concatenation and repetition. The sealed temporal family
+> contains `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`,
+> signed exact `Duration` and calendar `Period`. These decisions supersede all
+> earlier Decimal, immutable-String, code-point Char and undifferentiated Date
+> descriptions.
+
 > **Language of this document.** Every normative specification, and the codebase
 > itself, is written in English. See
 > [decisions/ADR-006-language-of-the-codebase.md](./decisions/ADR-006-language-of-the-codebase.md).
@@ -128,8 +143,9 @@ fn main(): Void {
 
 - Every value semantically belongs to a class; simple values may be represented
   inline.
-- `mut` allows reassignment, `inmut` prevents reassigning the reference, and
-  `inmut::strict` requires deep immutability.
+- On references, `mut` permits reassignment and referent mutation, `inmut`
+  prevents reassignment but permits referent mutation, and `inmut::strict`
+  requires deep immutability and forbids mutable aliases to the same referent.
 - `null` inhabits only `T?` types; there is no `undefined`.
 - `==` compares structurally and `is` checks identity on reference types.
 - `Result<T, E>` represents expected failures; exceptions represent recoverable

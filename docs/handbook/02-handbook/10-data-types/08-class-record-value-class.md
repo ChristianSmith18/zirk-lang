@@ -39,4 +39,4 @@ raw integer needs a distinct domain meaning without object identity.
 
 ---
 
-**Previous:** [← Union Types](./07-union-types.md) · **Next:** [Collections →](../12-collections/README.md)
+**Previous:** [← Union Types](07-union-types.md) · **Next:** [ Collections](../12-collections/README.md)

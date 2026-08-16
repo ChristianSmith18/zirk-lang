@@ -12,7 +12,7 @@ public mut name: String;
 Write the modifiers when they communicate a non-default guarantee:
 
 ```zirk
-private mut balance: Decimal64;
+private mut balance: Float64;
 public inmut account_id: UInt64;
 ```
 
@@ -20,4 +20,4 @@ Expose state directly only when its invariants survive every permitted assignmen
 
 ---
 
-**Previous:** [← Declaring Classes](./01-declaring-classes.md) · **Next:** [Constructors →](./03-constructors.md)
+**Previous:** [← Declaring Classes](01-declaring-classes.md) · **Next:** [ Constructors](03-constructors.md)

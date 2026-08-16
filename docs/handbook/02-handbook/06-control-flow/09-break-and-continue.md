@@ -16,4 +16,4 @@ Deeply nested control transfers are often clearer when extracted into a function
 
 ---
 
-**Previous:** [← `loop`](./08-loop.md) · **Next:** [Pattern Matching →](../14-pattern-matching/README.md)
+**Previous:** [← loop](08-loop.md) · **Next:** [ Functions](../07-functions/README.md)

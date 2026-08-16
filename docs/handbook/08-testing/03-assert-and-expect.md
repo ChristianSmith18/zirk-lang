@@ -6,4 +6,4 @@ Use one assertion vocabulary consistently; helper APIs should preserve the origi
 
 ---
 
-**Previous:** [← End-to-End Tests](./02-e2e-tests.md) · **Next:** [Test Permissions →](./04-test-permissions.md)
+**Previous:** [← End-to-End Tests](02-e2e-tests.md) · **Next:** [ Test Permissions](04-test-permissions.md)

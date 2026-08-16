@@ -68,6 +68,17 @@ El chequeador SHALL rechazar una declaración local que oculte otro local o par�
 - **WHEN** una lambda declara el parámetro `prefix` y lee `this.prefix`
 - **THEN** `prefix` resuelve al parámetro y `this.prefix` a la captura exterior
 
+### Requirement: Strictness de referencias de objeto
+
+En referencias de clase, `mut` SHALL permitir reasignar y mutar el objeto,
+`inmut` SHALL impedir solo la reasignación, e `inmut::strict` SHALL impedir la
+mutación alcanzable. Una referencia strict NO SHALL convertirse en alias
+mutable ni adquirirse mientras permanezca accesible un alias mutable.
+
+#### Scenario: Clon mutable desde referencia strict
+- **WHEN** un objeto strict implementa `Cloneable` y se clona a un binding `mut`
+- **THEN** el clon independiente puede mutarse sin alterar el objeto original
+
 ### Requirement: Resolución de constructores
 
 El chequeador SHALL seleccionar entre múltiples `construct` por aridad, tipos, opcionales y nombres, SHALL permitir reordenar argumentos nombrados y SHALL rechazar firmas efectivas duplicadas o llamadas ambiguas.

@@ -67,4 +67,4 @@ Treat the compiler version as a build input. Teams should agree on a version and
 
 ---
 
-**Previous:** [← Language Status](./03-language-status.md) · **Next:** [Your First Program →](./05-first-program.md)
+**Previous:** [← Language and Implementation Status](03-language-status.md) · **Next:** [ Your First Zirk Program](05-first-program.md)

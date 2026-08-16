@@ -4,4 +4,4 @@ The C ABI is Zirk 1.x's stable interoperability surface because operating system
 
 ---
 
-**Previous:** [← Native and Low-Level Programming](./README.md) · **Next:** [Importing C →](./02-importing-c.md)
+**Previous:** [← Native and Low-Level Programming](README.md) · **Next:** [ Importing C](02-importing-c.md)

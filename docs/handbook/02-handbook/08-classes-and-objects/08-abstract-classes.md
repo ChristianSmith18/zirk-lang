@@ -10,7 +10,7 @@ Use an interface for a pure contract and a trait for reusable behavior that need
 abstract class Shape {
     color: String;
 
-    abstract fn area(): Decimal64;
+    abstract fn area(): Float64;
 
     fn describe(): String {
         return "{this.color} shape with area {this.area()}";
@@ -18,9 +18,9 @@ abstract class Shape {
 }
 
 class Circle extends Shape {
-    radius: Decimal64;
+    radius: Float64;
 
-    fn area(): Decimal64 {
+    fn area(): Float64 {
         return 3.14159 * this.radius ** 2;
     }
 }
@@ -32,4 +32,4 @@ with a compatible signature.
 
 ---
 
-**Previous:** [← Inheritance](./07-inheritance.md) · **Next:** [Static Members →](./09-static-members.md)
+**Previous:** [← Inheritance](07-inheritance.md) · **Next:** [ Static Members](09-static-members.md)

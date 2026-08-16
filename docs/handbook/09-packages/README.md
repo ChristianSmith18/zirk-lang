@@ -4,4 +4,4 @@ Zirk packages distribute typed public API, portable IR, manifest metadata, docum
 
 ---
 
-**Previous:** [← Benchmarks](../08-testing/07-benchmarks.md) · **Next:** [Package Anatomy →](./01-package-anatomy.md)
+**Previous:** [← Benchmarks](../08-testing/07-benchmarks.md) · **Next:** [ Package Anatomy](01-package-anatomy.md)

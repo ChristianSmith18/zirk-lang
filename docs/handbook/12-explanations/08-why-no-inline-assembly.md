@@ -4,4 +4,4 @@ Textual assembly ties source to an assembler, target, registers, ABI, and optimi
 
 ---
 
-**Previous:** [← Why No General `defer`?](./07-why-no-defer.md) · **Next:** [Why the C ABI? →](./09-why-c-abi.md)
+**Previous:** [← Why No General defer?](07-why-no-defer.md) · **Next:** [ Why the C ABI?](09-why-c-abi.md)

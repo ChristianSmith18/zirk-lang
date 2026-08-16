@@ -6,4 +6,4 @@ Package compatibility relies on typed public API and IR versions, not reverse en
 
 ---
 
-**Previous:** [← Dynamic Libraries](./04-dynamic-libraries.md) · **Next:** [Native Permissions →](./06-native-permissions.md)
+**Previous:** [← Dynamic Libraries](04-dynamic-libraries.md) · **Next:** [ Native Permissions](06-native-permissions.md)

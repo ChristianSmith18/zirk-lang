@@ -23,4 +23,4 @@ The formatter normalizes layout but does not rename public APIs. Linters may war
 
 ---
 
-**Previous:** [← Blocks and Scope](./05-blocks-and-scope.md) · **Next:** [Bindings and Values →](../02-bindings-and-values/README.md)
+**Previous:** [← Blocks and Scope](05-blocks-and-scope.md) · **Next:** [ Bindings and Values](../02-bindings-and-values/README.md)

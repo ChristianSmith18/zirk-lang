@@ -10,4 +10,4 @@ Unresolved ambiguity is recorded rather than silently resolved.
 
 ---
 
-**Previous:** [← Roadmap](./08-roadmap.md) · **Next:** End of the handbook
+**Previous:** [← Roadmap](08-roadmap.md) · **Next:** End

@@ -6,4 +6,4 @@ Unsafe native integration must establish lifetime explicitly. A safe wrapper can
 
 ---
 
-**Previous:** [← Null Safety](./09-null-safety.md) · **Next:** [Undefined Behavior →](./11-undefined-behavior.md)
+**Previous:** [← Null Safety](09-null-safety.md) · **Next:** [ Undefined Behavior](11-undefined-behavior.md)

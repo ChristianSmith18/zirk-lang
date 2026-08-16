@@ -30,4 +30,4 @@ Use it for homogeneous repeated values. Prefer a list parameter when callers alr
 
 ---
 
-**Previous:** [← Named Arguments](./05-named-arguments.md) · **Next:** [Lambdas →](./07-lambdas.md)
+**Previous:** [← Named Arguments](05-named-arguments.md) · **Next:** [ Lambdas](07-lambdas.md)

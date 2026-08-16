@@ -161,8 +161,10 @@ bounds-checked; safe accessors returning an optional type are provided.
 
 ## 8. `std.time`
 
-Includes `Duration`, monotonic instants, civil date/time, time zones through
-versioned data, timers and cancellable sleep.
+Exports the sealed temporal family: `Date`, `Time`, `DateTime`, `Instant`,
+`ZonedDateTime`, `TimeZone`, signed exact `Duration`, calendar `Period`,
+`TimeShift`, weekday/unit enums, DST-resolution policies, clocks, timers and
+cancellable sleep. Values are immutable and transformations return new values.
 
 ```text
 await task.sleep(500ms);
@@ -171,6 +173,41 @@ await operation timeout 5s;
 
 Elapsed measurements use a monotonic clock. Civil date and duration are distinct
 types; they are not implicitly mixed.
+
+- `Date` validates 1-based calendar components, parses/formats explicit and ISO
+  forms, exposes calendar properties, compares chronologically and combines
+  with `Time`/`Period`.
+- `Time` exposes components through nanoseconds; arithmetic returns `TimeShift`
+  when crossing midnight so the day offset is not lost.
+- `DateTime` has no zone or absolute timeline meaning until `in_zone` resolves
+  it with an explicit ambiguity policy.
+- `Instant` supports Unix seconds/milliseconds/nanoseconds, ISO UTC forms and
+  exact `Duration` arithmetic.
+- `TimeZone` uses versioned IANA identities/rules; a fixed offset is not a zone.
+- `ZonedDateTime` preserves its instant when converted to another zone and
+  distinguishes exact `Duration` arithmetic from calendar `Period` arithmetic.
+- `Duration` supports `ns` through fixed weeks, ISO/compact parsing, components,
+  total/whole units, arithmetic, rounding, formatting and humanization.
+- `Period` supports years/months/weeks/days, ISO parsing and calendar-context
+  conversion; it has no context-free total seconds or ordering.
+
+Minimum controlled errors include `InvalidDate`, `InvalidTime`,
+`InvalidDateTime`, `InvalidTimeZone`, `AmbiguousLocalTime`,
+`NonexistentLocalTime`, `DurationOverflow`, `TemporalParseError` and
+`TemporalFormatError`. `task.sleep` and timeout APIs require non-negative
+`Duration` even though differences can produce signed values.
+
+### 8.1 Native scalar and text contracts
+
+Native numeric types expose documented checked/wrapping/saturating arithmetic,
+comparison, conversion and formatting operations. `Float` aliases `Float64`;
+there is no valid `NaN`. `Char` is one grapheme and exposes byte/code-point and
+Unicode classification methods; `ascii_code(): Int32` returns `-1` when the
+grapheme is not exactly ASCII. `String` exposes grapheme `length`, indexing,
+slicing, search, replacement, trim/case/split/line/normalization views,
+`bytes()`, `codepoints()`, `chars()`, explicit deep `clone()` and conversion.
+String mutation follows binding strictness and slice replacement requires equal
+grapheme counts.
 
 ## 9. `std.task`, `std.thread` and `std.sync`
 
@@ -261,7 +298,7 @@ zirk test --report json
 ```
 
 Minimum assertions: equality, identity, truth, nullability, result, exception,
-collection and decimal approximation. Every failure shows values, a diff and the
+collection and floating approximation. Every failure shows values, a diff and the
 source location.
 
 `@bench` defines benchmarks run by `zirk bench`, with warmup, multiple samples,

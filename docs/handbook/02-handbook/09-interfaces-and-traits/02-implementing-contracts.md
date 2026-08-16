@@ -14,4 +14,4 @@ Implementation does not automatically export a private class; file publication s
 
 ---
 
-**Previous:** [← Interfaces](./01-interfaces.md) · **Next:** [Traits →](./03-traits.md)
+**Previous:** [← Interfaces](01-interfaces.md) · **Next:** [ Traits](03-traits.md)

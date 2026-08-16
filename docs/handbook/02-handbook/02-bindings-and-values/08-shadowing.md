@@ -30,4 +30,4 @@ and the capture is addressed through `this.name`.
 
 ---
 
-**Previous:** [← Destructuring](./07-destructuring.md) · **Next:** [Value and Reference Semantics →](./09-value-and-reference-semantics.md)
+**Previous:** [← Destructuring](07-destructuring.md) · **Next:** [ Value and Reference Semantics](09-value-and-reference-semantics.md)

@@ -40,4 +40,4 @@ allocating an array.
 
 ---
 
-**Previous:** [← Pipe Operator](./09-pipe-operator.md) · **Next:** [Operator Overloading →](./11-operator-overloading.md)
+**Previous:** [← Pipe Operator](09-pipe-operator.md) · **Next:** [ Operator Overloading](11-operator-overloading.md)

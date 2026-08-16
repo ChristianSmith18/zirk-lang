@@ -10,4 +10,4 @@ No shell runs implicitly. Shell execution is a separate dangerous API. Process p
 
 ---
 
-**Previous:** [← `std.path`](./04-std-path.md) · **Next:** [`std.collections` →](./06-std-collections.md)
+**Previous:** [← std.path](04-std-path.md) · **Next:** [ std.collections](06-std-collections.md)

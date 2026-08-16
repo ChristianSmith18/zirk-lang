@@ -14,4 +14,4 @@ Place specific recovery before a default handler. A handler should recover, tran
 
 ---
 
-**Previous:** [← Exceptions](./04-exceptions.md) · **Next:** [`finally` →](./06-finally.md)
+**Previous:** [← Exceptions](04-exceptions.md) · **Next:** [ finally](06-finally.md)

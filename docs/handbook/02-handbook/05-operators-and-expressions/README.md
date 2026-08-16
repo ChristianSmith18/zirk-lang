@@ -6,4 +6,4 @@ This unit covers arithmetic, comparison, structural equality, identity, logic, c
 
 ---
 
-**Previous:** [← Common Nullability Errors](../04-nullability/05-common-nullability-errors.md) · **Next:** [Arithmetic →](./01-arithmetic.md)
+**Previous:** [← Common Nullability Errors](../04-nullability/05-common-nullability-errors.md) · **Next:** [ Arithmetic](01-arithmetic.md)

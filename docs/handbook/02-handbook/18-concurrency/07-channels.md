@@ -12,4 +12,4 @@ Channels distinguish closure from temporary absence and bounded forms apply back
 
 ---
 
-**Previous:** [← Timeouts](./06-timeouts.md) · **Next:** [`parallel` →](./08-parallel.md)
+**Previous:** [← Timeouts](06-timeouts.md) · **Next:** [ parallel](08-parallel.md)

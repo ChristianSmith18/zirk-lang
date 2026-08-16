@@ -6,4 +6,4 @@ Types also form the public package API and portable IR contract, enabling increm
 
 ---
 
-**Previous:** [← Explanations](./README.md) · **Next:** [Why Structured Concurrency? →](./02-why-structured-concurrency.md)
+**Previous:** [← Explanations](README.md) · **Next:** [ Why Structured Concurrency?](02-why-structured-concurrency.md)

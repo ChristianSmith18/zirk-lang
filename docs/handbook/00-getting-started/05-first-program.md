@@ -112,4 +112,4 @@ The compiler should report the argument location, explain that an integer is not
 
 ---
 
-**Previous:** [← Installation](./04-installation.md) · **Next:** [How Zirk Compiles →](./06-how-zirk-compiles.md)
+**Previous:** [← Installation](04-installation.md) · **Next:** [ How Zirk Compiles](06-how-zirk-compiles.md)

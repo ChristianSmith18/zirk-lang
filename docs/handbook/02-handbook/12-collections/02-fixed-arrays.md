@@ -9,7 +9,7 @@ Unlike a dynamic collection, it cannot grow. A size mismatch is a compile-time e
 
 ```zirk
 mut bytes: UInt8[16];
-mut matrix: Decimal64[4];
+mut matrix: Float64[4];
 ```
 
 `T[n]` is the official explicit-size convention. `Array<T>(n)` remains a
@@ -20,4 +20,4 @@ Fixed size does not waive bounds checking in safe code.
 
 ---
 
-**Previous:** [← Arrays](./01-arrays.md) · **Next:** [Lists →](./03-lists.md)
+**Previous:** [← Arrays](01-arrays.md) · **Next:** [ Lists](03-lists.md)

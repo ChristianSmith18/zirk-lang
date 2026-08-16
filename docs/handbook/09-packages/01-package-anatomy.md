@@ -6,4 +6,4 @@ The manifest records identity, version, dependencies, requirements, targets, and
 
 ---
 
-**Previous:** [← Packages](./README.md) · **Next:** [Public API →](./02-public-api.md)
+**Previous:** [← Packages](README.md) · **Next:** [ Public API](02-public-api.md)

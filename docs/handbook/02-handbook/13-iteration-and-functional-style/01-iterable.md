@@ -24,4 +24,4 @@ returning an `Iterator<T>` from `iterator()`.
 
 ---
 
-**Previous:** [← Iteration and Functional Style](./README.md) · **Next:** [`Iterator` →](./02-iterator.md)
+**Previous:** [← Iteration and Functional Style](README.md) · **Next:** [ Iterator](02-iterator.md)

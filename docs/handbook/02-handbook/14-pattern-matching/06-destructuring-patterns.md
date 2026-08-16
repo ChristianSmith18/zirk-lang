@@ -23,4 +23,4 @@ Destructure only the data the decision uses. Binding many fields can couple the 
 
 ---
 
-**Previous:** [← Union Patterns](./05-union-patterns.md) · **Next:** [`match` as a Statement →](./07-match-as-statement.md)
+**Previous:** [← Union Patterns](05-union-patterns.md) · **Next:** [ match as a Statement](07-match-as-statement.md)

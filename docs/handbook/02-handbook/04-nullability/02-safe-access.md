@@ -14,4 +14,4 @@ Avoid long chains when different missing links require different diagnostics; ex
 
 ---
 
-**Previous:** [← Nullable Types](./01-nullable-types.md) · **Next:** [Null Coalescing →](./03-null-coalescing.md)
+**Previous:** [← Nullable Types](01-nullable-types.md) · **Next:** [ Null Coalescing](03-null-coalescing.md)

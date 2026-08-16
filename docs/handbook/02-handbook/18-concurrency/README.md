@@ -4,4 +4,4 @@ Zirk names different work explicitly: `task` for structured concurrent work, `pa
 
 ---
 
-**Previous:** [← Undefined Behavior](../17-memory-and-safety/11-undefined-behavior.md) · **Next:** [Concurrency and Parallelism →](./01-concurrency-vs-parallelism.md)
+**Previous:** [← Undefined Behavior](../17-memory-and-safety/11-undefined-behavior.md) · **Next:** [ Concurrency and Parallelism](01-concurrency-vs-parallelism.md)

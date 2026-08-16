@@ -4,8 +4,8 @@ A record groups named fields into structural data.
 
 ```zirk
 record Point {
-    x: Decimal64;
-    y: Decimal64;
+    x: Float64;
+    y: Float64;
 }
 ```
 
@@ -30,8 +30,10 @@ Records have a nominal declared type but value-oriented, structural semantics:
 two records of different declared types are not interchangeable merely because
 their fields happen to look alike.
 
+Derived equality compares every field. Derived hashing is available only when every field is hashable and must agree with equality: equal records always hash equally. A record containing an unhashable field can still exist, but cannot derive hashing or serve as a hashed collection key.
+
 Prefer a class when observable identity, lifecycle, inheritance, or substantial encapsulated behavior is central. Prefer an algebraic enum when a value is one of several variants rather than one fixed product of fields.
 
 ---
 
-**Previous:** [← Data Types](./README.md) · **Next:** [Value Classes →](./02-value-classes.md)
+**Previous:** [← Data Types](README.md) · **Next:** [ Value Classes](02-value-classes.md)

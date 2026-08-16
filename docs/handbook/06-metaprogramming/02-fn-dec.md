@@ -13,4 +13,4 @@ External parameters configure use; target blocks receive fixed typed contextual 
 
 ---
 
-**Previous:** [← Decorators](./01-decorators.md) · **Next:** [Decorator Targets →](./03-decorator-targets.md)
+**Previous:** [← Decorators](01-decorators.md) · **Next:** [ Decorator Targets](03-decorator-targets.md)

@@ -133,4 +133,4 @@ That trade-off is the thread connecting the rest of this handbook.
 
 ---
 
-**Previous:** [Getting Started](./README.md) · **Next:** [Why Zirk Exists →](./02-why-zirk-exists.md)
+**Previous:** [← Getting Started with Zirk](README.md) · **Next:** [ Why Zirk Exists](02-why-zirk-exists.md)

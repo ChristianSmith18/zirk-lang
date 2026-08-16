@@ -6,4 +6,4 @@ Prefer channels or immutable values when ownership transfer expresses the design
 
 ---
 
-**Previous:** [← Workers by Composition](./11-workers-by-composition.md) · **Next:** [Atomics →](./13-atomics.md)
+**Previous:** [← Workers by Composition](11-workers-by-composition.md) · **Next:** [ Atomics](13-atomics.md)

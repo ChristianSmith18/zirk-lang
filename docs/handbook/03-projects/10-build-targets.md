@@ -6,4 +6,4 @@ Support depends on LLVM, linker, SDK, and native dependencies. Zirk 1.x targets 
 
 ---
 
-**Previous:** [← Library Requirements](./09-library-requirements.md) · **Next:** [Dependencies →](./11-dependencies.md)
+**Previous:** [← Library Requirements](09-library-requirements.md) · **Next:** [ Dependencies](11-dependencies.md)

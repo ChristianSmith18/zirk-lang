@@ -4,4 +4,4 @@ This section is optimized for lookup. It summarizes names and contracts and link
 
 ---
 
-**Previous:** [← Write a Decorator](../10-tutorials/07-write-a-decorator.md) · **Next:** [Keywords →](./01-keywords.md)
+**Previous:** [← Write a Decorator](../10-tutorials/07-write-a-decorator.md) · **Next:** [ Keywords](01-keywords.md)

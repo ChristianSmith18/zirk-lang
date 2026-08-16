@@ -8,4 +8,4 @@ Prefer the narrowest visibility consistent with the abstraction. Publishing a de
 
 ---
 
-**Previous:** [← `this`](./05-this.md) · **Next:** [Inheritance →](./07-inheritance.md)
+**Previous:** [← this](05-this.md) · **Next:** [ Inheritance](07-inheritance.md)

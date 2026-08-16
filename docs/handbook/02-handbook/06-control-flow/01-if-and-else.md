@@ -24,4 +24,4 @@ Write `pending_count > 0`; the diagnostic should state that `Int32` is not `Bool
 
 ---
 
-**Previous:** [← Control Flow](./README.md) · **Next:** [`if` Expressions →](./02-if-expressions.md)
+**Previous:** [← Control Flow](README.md) · **Next:** [ if Expressions](02-if-expressions.md)

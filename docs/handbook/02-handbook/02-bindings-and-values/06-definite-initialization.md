@@ -22,4 +22,4 @@ Definite initialization composes with `Never`: a branch that cannot return does 
 
 ---
 
-**Previous:** [← Default Values](./05-default-values.md) · **Next:** [Destructuring →](./07-destructuring.md)
+**Previous:** [← Default Values](05-default-values.md) · **Next:** [ Destructuring](07-destructuring.md)

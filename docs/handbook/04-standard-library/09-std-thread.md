@@ -6,4 +6,4 @@ Threads are managed resources and cannot be abandoned at scope exit. Shared muta
 
 ---
 
-**Previous:** [← `std.task`](./08-std-task.md) · **Next:** [`std.sync` →](./10-std-sync.md)
+**Previous:** [← std.task](08-std-task.md) · **Next:** [ std.sync](10-std-sync.md)

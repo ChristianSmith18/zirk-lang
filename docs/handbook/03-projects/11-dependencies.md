@@ -6,4 +6,4 @@ Resolution must be deterministic and auditable. A package's typed API, permissio
 
 ---
 
-**Previous:** [← Build Targets](./10-build-targets.md) · **Next:** [Lockfile →](./12-lockfile.md)
+**Previous:** [← Build Targets](10-build-targets.md) · **Next:** [ Lockfile](12-lockfile.md)

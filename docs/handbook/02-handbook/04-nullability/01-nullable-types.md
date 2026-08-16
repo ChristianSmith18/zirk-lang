@@ -19,4 +19,4 @@ The compiler should explain that `Null` is not assignable to `String` and sugges
 
 ---
 
-**Previous:** [← Nullability](./README.md) · **Next:** [Safe Access →](./02-safe-access.md)
+**Previous:** [← Nullability](README.md) · **Next:** [ Safe Access](02-safe-access.md)

@@ -8,4 +8,4 @@ A timeout requests cancellation and produces a recoverable typed timeout excepti
 
 ---
 
-**Previous:** [← Cancellation](./05-cancellation.md) · **Next:** [Channels →](./07-channels.md)
+**Previous:** [← Cancellation](05-cancellation.md) · **Next:** [ Channels](07-channels.md)

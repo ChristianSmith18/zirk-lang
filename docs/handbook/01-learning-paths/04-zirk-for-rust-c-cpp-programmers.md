@@ -26,4 +26,4 @@ Read the object and value model before memory and unsafe code. Then study resour
 
 ---
 
-**Previous:** [← Zirk for Python Programmers](./03-zirk-for-python-programmers.md) · **Next:** [Zirk for Java and C# Programmers →](./05-zirk-for-java-csharp-programmers.md)
+**Previous:** [← Zirk for Python Programmers](03-zirk-for-python-programmers.md) · **Next:** [ Zirk for Java and C# Programmers](05-zirk-for-java-csharp-programmers.md)

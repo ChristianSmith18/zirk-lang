@@ -6,4 +6,4 @@ Reserved literals/types include `true`, `false`, `null`, `Void`, `Never`, `Null`
 
 ---
 
-**Previous:** [← Reference](./README.md) · **Next:** [Operators and Precedence →](./02-operators-and-precedence.md)
+**Previous:** [← Reference](README.md) · **Next:** [ Operators and Precedence](02-operators-and-precedence.md)

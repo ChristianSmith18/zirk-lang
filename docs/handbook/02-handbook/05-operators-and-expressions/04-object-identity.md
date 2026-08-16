@@ -14,4 +14,4 @@ Do not use `is` as a performance shortcut for `==` unless the type contract expl
 
 ---
 
-**Previous:** [← Structural Equality](./03-structural-equality.md) · **Next:** [Logical Operators →](./05-logical-operators.md)
+**Previous:** [← Structural Equality](03-structural-equality.md) · **Next:** [ Logical Operators](05-logical-operators.md)

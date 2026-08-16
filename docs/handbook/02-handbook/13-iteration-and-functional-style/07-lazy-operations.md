@@ -8,4 +8,4 @@ Do not return a lazy sequence that depends on a resource already closed by `matc
 
 ---
 
-**Previous:** [← `reduce`](./06-reduce.md) · **Next:** [Pipelines →](./08-pipelines.md)
+**Previous:** [← reduce](06-reduce.md) · **Next:** [ Pipelines](08-pipelines.md)

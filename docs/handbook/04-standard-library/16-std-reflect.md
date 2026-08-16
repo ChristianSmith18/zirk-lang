@@ -6,4 +6,4 @@ Reflection cannot violate visibility or mutability. The compiler's immutable Syn
 
 ---
 
-**Previous:** [← `std.testing`](./15-std-testing.md) · **Next:** [`std.system` →](./17-std-system.md)
+**Previous:** [← std.testing](15-std-testing.md) · **Next:** [ std.system](17-std-system.md)

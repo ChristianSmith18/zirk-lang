@@ -6,4 +6,4 @@ An invalid pointer must not be converted into silent undefined behavior in safe 
 
 ---
 
-**Previous:** [← Pointers](./05-pointers.md) · **Next:** [`unsafe` Blocks →](./07-unsafe-blocks.md)
+**Previous:** [← Pointers](05-pointers.md) · **Next:** [ unsafe Blocks](07-unsafe-blocks.md)

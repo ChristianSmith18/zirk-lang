@@ -6,4 +6,4 @@ The lockfile is not a secret store and cannot authorize permissions absent from 
 
 ---
 
-**Previous:** [← Version Resolution](./05-version-resolution.md) · **Next:** [Publishing →](./07-publishing.md)
+**Previous:** [← Version Resolution](05-version-resolution.md) · **Next:** [ Publishing](07-publishing.md)

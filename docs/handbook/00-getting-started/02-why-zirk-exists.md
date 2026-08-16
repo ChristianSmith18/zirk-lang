@@ -111,4 +111,4 @@ Those questions explain why `T?` differs from `T`, why tasks differ from threads
 
 ---
 
-**Previous:** [← What Is Zirk?](./01-what-is-zirk.md) · **Next:** [Language Status →](./03-language-status.md)
+**Previous:** [← What Is Zirk?](01-what-is-zirk.md) · **Next:** [ Language and Implementation Status](03-language-status.md)

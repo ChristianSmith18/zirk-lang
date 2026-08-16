@@ -31,4 +31,4 @@ methods into file scope.
 
 ---
 
-**Previous:** [← `share`](./02-share.md) · **Next:** [Import Aliases →](./04-import-aliases.md)
+**Previous:** [← share](02-share.md) · **Next:** [ Import Aliases](04-import-aliases.md)

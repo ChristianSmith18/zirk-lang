@@ -14,4 +14,4 @@ Interfaces should remain cohesive; unrelated methods force implementers to claim
 
 ---
 
-**Previous:** [← Interfaces and Traits](./README.md) · **Next:** [Implementing Contracts →](./02-implementing-contracts.md)
+**Previous:** [← Interfaces and Traits](README.md) · **Next:** [ Implementing Contracts](02-implementing-contracts.md)

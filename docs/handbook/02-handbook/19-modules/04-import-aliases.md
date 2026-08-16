@@ -10,4 +10,4 @@ The alias changes only the local binding, not the exported API. Avoid aliases th
 
 ---
 
-**Previous:** [← `import`](./03-import.md) · **Next:** [`use` and Globals →](./05-use-globals.md)
+**Previous:** [← import](03-import.md) · **Next:** [ use and Globals](05-use-globals.md)

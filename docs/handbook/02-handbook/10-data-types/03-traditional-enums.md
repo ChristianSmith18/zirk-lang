@@ -42,6 +42,8 @@ The compiler may choose an efficient internal layout, but source mappings are
 observable values and must be preserved. Adding a case can require downstream
 exhaustive matches to change.
 
+Cases support equality within the same enum. Declaration or mapped-value order does not silently create `<` or `>`; ordering exists only through an explicit ordering contract. Matching is exhaustive, and an explicit mapping is data rather than an implicit conversion.
+
 ---
 
-**Previous:** [← Value Classes](./02-value-classes.md) · **Next:** [Algebraic Enums →](./04-algebraic-enums.md)
+**Previous:** [← Value Classes](02-value-classes.md) · **Next:** [ Algebraic Enums](04-algebraic-enums.md)

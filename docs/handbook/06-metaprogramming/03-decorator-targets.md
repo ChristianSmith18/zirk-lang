@@ -6,4 +6,4 @@ One decorator may support several targets, but each receives only operations val
 
 ---
 
-**Previous:** [← `fn dec`](./02-fn-dec.md) · **Next:** [Syntax API →](./04-syntax-api.md)
+**Previous:** [← fn dec](02-fn-dec.md) · **Next:** [ Syntax API](04-syntax-api.md)

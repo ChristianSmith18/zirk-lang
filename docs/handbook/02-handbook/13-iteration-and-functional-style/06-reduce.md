@@ -15,4 +15,4 @@ Use a dedicated aggregate such as `sum` when it communicates intent and numeric 
 
 ---
 
-**Previous:** [← `filter`](./05-filter.md) · **Next:** [Lazy Operations →](./07-lazy-operations.md)
+**Previous:** [← filter](05-filter.md) · **Next:** [ Lazy Operations](07-lazy-operations.md)

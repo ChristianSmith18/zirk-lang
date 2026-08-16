@@ -6,4 +6,4 @@ Review manifest and lockfile changes together.
 
 ---
 
-**Previous:** [← Portable IR](./03-portable-ir.md) · **Next:** [Version Resolution →](./05-version-resolution.md)
+**Previous:** [← Portable IR](03-portable-ir.md) · **Next:** [ Version Resolution](05-version-resolution.md)

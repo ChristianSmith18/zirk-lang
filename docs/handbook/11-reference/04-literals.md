@@ -1,9 +1,18 @@
 # Literals
 
-Zirk provides integer and decimal literals, scientific notation, `_` numeric separators, `true`, `false`, `null`, Unicode character literals, interpolated strings, collection literals where defined, and typed durations `ms`, `s`, `m`, and `h`.
+| Kind | Examples | Inference and validation |
+|---|---|---|
+| integer | `0`, `42`, `0xff`, `0b1010`, `1_000` | `Int` when representable unless context or suffix selects a width |
+| Float | `1.0`, `6.02e23`, `1.5f32` | `Float` (`Float64`) unless context or suffix selects a width |
+| Boolean | `true`, `false` | strict `Boolean` |
+| Char | `'a'`, `'é'`, `'👨‍👩‍👧‍👦'` | exactly one Unicode grapheme or compile error |
+| String | `"hello"`, `"value={value}"` | `String`; escapes and interpolation are validated |
+| Null | `null` | only compatible with nullable context |
+| collection | `[1, 2, 3]` and type-specific forms | elements require a compatible inferred type |
+| Duration | `250ms`, `-3s`, `2h` | exact signed `Duration` |
 
-Literal context may select width, but overflow and lossy conversion never truncate silently. `null` requires a nullable type. Duration literals are not plain integers.
+Numeric separators do not affect value. Integer and Float suffixes cannot force an out-of-range value, and lossy conversion never truncates silently. There is no `NaN` literal. Date and zone text remain String values until explicitly parsed or passed to a temporal constructor.
 
 ---
 
-**Previous:** [← Built-in Types](./03-built-in-types.md) · **Next:** [Grammar Summary →](./05-grammar-summary.md)
+**Previous:** [← Built-in Types](03-built-in-types.md) · **Next:** [ Grammar Summary](05-grammar-summary.md)

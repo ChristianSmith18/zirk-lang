@@ -6,4 +6,4 @@ Native ABI and unsafe code may expose layout obligations, but ordinary code shou
 
 ---
 
-**Previous:** [← Memory Model](./01-memory-model.md) · **Next:** [Automatic Memory Management →](./03-automatic-memory-management.md)
+**Previous:** [← Memory Model](01-memory-model.md) · **Next:** [ Automatic Memory Management](03-automatic-memory-management.md)

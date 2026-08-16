@@ -13,4 +13,4 @@ Evaluation of an addressable left side occurs according to the language's single
 
 ---
 
-**Previous:** [← Increment and Decrement](./07-increment-and-decrement.md) · **Next:** [Pipe Operator →](./09-pipe-operator.md)
+**Previous:** [← Increment and Decrement](07-increment-and-decrement.md) · **Next:** [ Pipe Operator](09-pipe-operator.md)

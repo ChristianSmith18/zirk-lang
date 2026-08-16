@@ -27,4 +27,4 @@ body always executes at least once; a `while` body may execute zero times.
 
 ---
 
-**Previous:** [← `for ... in`](./06-for-in.md) · **Next:** [`loop` →](./08-loop.md)
+**Previous:** [← for ... in](06-for-in.md) · **Next:** [ loop](08-loop.md)

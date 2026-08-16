@@ -12,4 +12,4 @@ Use ternary syntax for a short, symmetric choice. Prefer an `if` expression when
 
 ---
 
-**Previous:** [← Logical Operators](./05-logical-operators.md) · **Next:** [Increment and Decrement →](./07-increment-and-decrement.md)
+**Previous:** [← Logical Operators](05-logical-operators.md) · **Next:** [ Increment and Decrement](07-increment-and-decrement.md)

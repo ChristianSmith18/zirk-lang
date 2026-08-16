@@ -27,6 +27,8 @@ Validation can live at construction boundaries, making value classes useful for
 non-empty strings, normalized paths, positive quantities, currency amounts, and
 units that must not be mixed accidentally.
 
+Representation conversion is explicit unless the value class declares a safe public projection. Operator support is not inherited automatically from the representation: `value class Meters(Float)` must implement the relevant arithmetic contracts before `+` or comparison is legal.
+
 ---
 
-**Previous:** [← Records](./01-records.md) · **Next:** [Traditional Enums →](./03-traditional-enums.md)
+**Previous:** [← Records](01-records.md) · **Next:** [ Traditional Enums](03-traditional-enums.md)

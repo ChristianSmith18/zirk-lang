@@ -1,9 +1,7 @@
 ## Purpose
 
 Define how the complete Zirk language, runtime, standard library, project model, packages, and toolchain are organized into a discoverable public documentation system.
-
 ## Requirements
-
 ### Requirement: Complete language documentation taxonomy
 The documentation SHALL organize Zirk material under `docs/handbook/` into discoverable sections for orientation, audience-specific learning paths, progressive language syntax and semantics, the type system and object model, error handling, effects and permissions, concurrency and runtime behavior, projects and builds, the standard library, native and low-level programming, metaprogramming, tooling, testing, packages, tutorials, reference material, explanations, and appendices.
 
@@ -61,3 +59,24 @@ Documentation examples and claims MUST remain compatible with the normative Zirk
 #### Scenario: Historical and final documents conflict
 - **WHEN** `docs/01_plantilla_zirk.md` disagrees with a final language, runtime, standard-library, compiler, or consolidated specification
 - **THEN** the handbook follows the final specification unless a newer language-author correction explicitly supersedes that snapshot
+
+### Requirement: Progressive type-system learning path
+The handbook SHALL introduce the Zirk type taxonomy, conceptual tree, primitive/native/user-defined/special categories, value/reference behavior, contracts, conversions, and native operator model before relying on those concepts in individual type chapters.
+
+#### Scenario: Reader enters everyday types
+- **WHEN** a reader follows the canonical handbook sequence into the type-system unit
+- **THEN** the conceptual model precedes numeric, Boolean, Char, String, and special-type API chapters
+
+### Requirement: Dedicated temporal unit
+The handbook SHALL provide a dedicated ordered temporal unit covering `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`, and `Period`, followed by composition, arithmetic, parsing/formatting, DST, and error guidance.
+
+#### Scenario: Reader chooses temporal type
+- **WHEN** a developer needs to represent a birthday, local appointment, absolute event, timeout, or calendar recurrence
+- **THEN** the temporal overview directs them to a distinct appropriate type and explains why
+
+### Requirement: Canonical type cross-links
+Every detailed type chapter SHALL link to its conceptual owner, closely interacting types, operator reference, and adjacent previous/next handbook chapters without duplicating normative definitions inconsistently.
+
+#### Scenario: String reader follows semantics
+- **WHEN** a reader needs strict mutability or operator details from the String chapter
+- **THEN** direct links reach the binding model and operator reference while the String chapter remains the primary owner of String behavior

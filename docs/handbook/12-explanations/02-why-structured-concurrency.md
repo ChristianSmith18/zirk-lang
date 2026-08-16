@@ -6,4 +6,4 @@ The runtime may schedule through pools and reactors, but applications reason fro
 
 ---
 
-**Previous:** [← Why Static Types?](./01-why-static-types.md) · **Next:** [Why `Result` and Exceptions? →](./03-why-result-and-exceptions.md)
+**Previous:** [← Why Static Types?](01-why-static-types.md) · **Next:** [ Why Result and Exceptions?](03-why-result-and-exceptions.md)

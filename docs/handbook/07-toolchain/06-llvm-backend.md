@@ -4,4 +4,4 @@ LLVM is Zirk 1.x's only backend. It lowers portable IR to target objects while p
 
 ---
 
-**Previous:** [← Portable IR](./05-portable-ir.md) · **Next:** [Diagnostics →](./07-diagnostics.md)
+**Previous:** [← Portable IR](05-portable-ir.md) · **Next:** [ Diagnostics](07-diagnostics.md)

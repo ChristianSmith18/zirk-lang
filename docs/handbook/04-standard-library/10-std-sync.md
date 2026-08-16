@@ -6,4 +6,4 @@ Ordinary mutex guards must not cross `await` unless the type explicitly supports
 
 ---
 
-**Previous:** [← `std.thread`](./09-std-thread.md) · **Next:** [`std.net` →](./11-std-net.md)
+**Previous:** [← std.thread](09-std-thread.md) · **Next:** [ std.net](11-std-net.md)

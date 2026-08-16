@@ -34,4 +34,4 @@ more than one statement.
 
 ---
 
-**Previous:** [← `if` and `else`](./01-if-and-else.md) · **Next:** [`match` →](./03-match.md)
+**Previous:** [← if and else](01-if-and-else.md) · **Next:** [ match](03-match.md)

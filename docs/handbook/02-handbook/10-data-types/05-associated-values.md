@@ -17,4 +17,4 @@ Associated values are preferable to a class with several nullable fields because
 
 ---
 
-**Previous:** [← Algebraic Enums](./04-algebraic-enums.md) · **Next:** [Type Aliases →](./06-type-aliases.md)
+**Previous:** [← Algebraic Enums](04-algebraic-enums.md) · **Next:** [ Type Aliases](06-type-aliases.md)

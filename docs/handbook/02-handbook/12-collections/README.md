@@ -4,6 +4,8 @@ Collections store multiple typed values. Their contracts differ in size, orderin
 
 This unit covers arrays, fixed arrays, lists, maps, sets, ranges, indexing, slicing, and safe access.
 
+`Array`, `List`, `Map`, and `Set` are shared native reference types. Assignment creates an alias. `inmut` prevents rebinding while still allowing permitted referent mutation; `inmut::strict` freezes the reachable collection and forbids mutable aliases. Use `clone()` for an independent deep copy. Element and key types must satisfy each operation's generic contracts.
+
 ---
 
-**Previous:** [← Class, Record, or Value Class?](../10-data-types/08-class-record-value-class.md) · **Next:** [Arrays →](./01-arrays.md)
+**Previous:** [← Class, Record, or Value Class?](../10-data-types/08-class-record-value-class.md) · **Next:** [ Arrays](01-arrays.md)

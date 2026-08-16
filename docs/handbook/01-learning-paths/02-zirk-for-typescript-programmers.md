@@ -32,4 +32,4 @@ Read bindings, the type model, nullability, classes and traits, algebraic enums,
 
 ---
 
-**Previous:** [← Zirk for New Programmers](./01-zirk-for-new-programmers.md) · **Next:** [Zirk for Python Programmers →](./03-zirk-for-python-programmers.md)
+**Previous:** [← Zirk for New Programmers](01-zirk-for-new-programmers.md) · **Next:** [ Zirk for Python Programmers](03-zirk-for-python-programmers.md)

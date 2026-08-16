@@ -14,4 +14,4 @@ zirk build
 
 ---
 
-**Previous:** [← Tutorials](./README.md) · **Next:** [Build a File Processor →](./02-build-a-file-processor.md)
+**Previous:** [← Tutorials](README.md) · **Next:** [ Build a File Processor](02-build-a-file-processor.md)

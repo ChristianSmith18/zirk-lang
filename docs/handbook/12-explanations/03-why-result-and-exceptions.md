@@ -6,4 +6,4 @@ One mechanism for all three would either clutter every signature, hide ordinary 
 
 ---
 
-**Previous:** [← Why Structured Concurrency?](./02-why-structured-concurrency.md) · **Next:** [Why `match with`? →](./04-why-match-with.md)
+**Previous:** [← Why Structured Concurrency?](02-why-structured-concurrency.md) · **Next:** [ Why match with?](04-why-match-with.md)

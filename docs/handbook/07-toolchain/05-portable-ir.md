@@ -4,4 +4,4 @@ Typed target-independent IR preserves generic, identity, safety, escape, vectori
 
 ---
 
-**Previous:** [← Type Checker](./04-type-checker.md) · **Next:** [LLVM Backend →](./06-llvm-backend.md)
+**Previous:** [← Type Checker](04-type-checker.md) · **Next:** [ LLVM Backend](06-llvm-backend.md)

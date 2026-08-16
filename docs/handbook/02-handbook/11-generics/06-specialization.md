@@ -8,4 +8,4 @@ The initial language does not promise user-written overlapping specialization ru
 
 ---
 
-**Previous:** [← Generic Inference](./05-inference.md) · **Next:** [Monomorphization →](./07-monomorphization.md)
+**Previous:** [← Generic Inference](05-inference.md) · **Next:** [ Monomorphization](07-monomorphization.md)

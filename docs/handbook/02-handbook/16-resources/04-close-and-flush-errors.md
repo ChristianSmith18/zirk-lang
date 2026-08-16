@@ -8,4 +8,4 @@ Callers that require durability must distinguish “write accepted” from “fl
 
 ---
 
-**Previous:** [← Resource Transfer](./03-resource-transfer.md) · **Next:** [Cancellation and Cleanup →](./05-cancellation-and-cleanup.md)
+**Previous:** [← Resource Transfer](03-resource-transfer.md) · **Next:** [ Cancellation and Cleanup](05-cancellation-and-cleanup.md)

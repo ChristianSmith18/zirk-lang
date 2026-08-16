@@ -15,4 +15,4 @@ A broad fallback can be appropriate for open domains, but avoid it for closed en
 
 ---
 
-**Previous:** [← `match`](./03-match.md) · **Next:** [`for` →](./05-for.md)
+**Previous:** [← match](03-match.md) · **Next:** [ for](05-for.md)

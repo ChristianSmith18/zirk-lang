@@ -11,4 +11,4 @@ Do not confuse receiver-safe `?.` with bounds-safe indexing: `items?.first` hand
 
 ---
 
-**Previous:** [← Slicing](./08-slicing.md) · **Next:** [Iteration and Functional Style →](../13-iteration-and-functional-style/README.md)
+**Previous:** [← Slicing](08-slicing.md) · **Next:** [ Iteration and Functional Style](../13-iteration-and-functional-style/README.md)

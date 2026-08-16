@@ -4,4 +4,4 @@ Debug metadata maps native execution to `.zrk`, including tasks, awaits, threads
 
 ---
 
-**Previous:** [← Language Server](./11-lsp.md) · **Next:** [Debug and Release →](./13-debug-and-release.md)
+**Previous:** [← Language Server](11-lsp.md) · **Next:** [ Debug and Release](13-debug-and-release.md)

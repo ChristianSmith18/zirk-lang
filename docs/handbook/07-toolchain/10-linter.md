@@ -4,4 +4,4 @@ The linter shares parser, names, and types with the compiler. Default rules rema
 
 ---
 
-**Previous:** [← Formatter](./09-formatter.md) · **Next:** [Language Server →](./11-lsp.md)
+**Previous:** [← Formatter](09-formatter.md) · **Next:** [ Language Server](11-lsp.md)

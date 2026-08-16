@@ -4,4 +4,4 @@ The `zirk` toolchain shares one incremental frontend across checking, formatting
 
 ---
 
-**Previous:** [← Package Security](../09-packages/09-package-security.md) · **Next:** [Compiler Pipeline →](./01-compiler-pipeline.md)
+**Previous:** [← Security and Permissions](../06-metaprogramming/09-security-and-permissions.md) · **Next:** [ Compiler Pipeline](01-compiler-pipeline.md)

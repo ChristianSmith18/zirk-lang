@@ -13,4 +13,4 @@ The programmer must uphold alignment, validity, lifetime, aliasing, and native o
 
 ---
 
-**Previous:** [← Safe References](./04-safe-references.md) · **Next:** [Dereferencing →](./06-dereferencing.md)
+**Previous:** [← Safe References](04-safe-references.md) · **Next:** [ Dereferencing](06-dereferencing.md)

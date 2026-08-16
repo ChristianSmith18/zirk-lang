@@ -467,10 +467,10 @@ UInt16
 UInt32
 UInt64
 UInt128
-Decimal16
-Decimal32
-Decimal64
-Decimal128
+Float16
+Float32
+Float64
+Float128
 ```
 
 **Pregunta:** ¿Los tipos fundamentales podrán tener métodos?
@@ -504,13 +504,24 @@ Posible modelo:
 
 ```text
 Object
-├── String
-├── Boolean
-├── Char
-├── Number
-│   ├── Integer
-│   └── Decimal
-└── Collection
+├── Value
+│   ├── Numeric
+│   │   ├── Integer
+│   │   └── Float
+│   ├── Boolean
+│   ├── Char
+│   ├── Temporal
+│   ├── Record
+│   ├── ValueClass
+│   └── Enum
+├── Reference
+│   ├── String
+│   ├── Collection
+│   └── Class
+└── Special
+    ├── Null
+    ├── Void
+    └── Never
 ```
 
 **TypeScript equivalente conceptual:**
@@ -521,7 +532,10 @@ class User extends Object {}
 
 **Respuesta:**
 
-Sí. Todo heredará de `Object` y la jerarquía terminará conceptualmente en `null`. Además de `Number`, existirán `Text` como padre de `Char` y `String`, y `Collection` como padre de `Array` —de tamaño fijo—, `List` —dinámica—, `Map` y otras colecciones.
+Sí. `Object` será la raíz conceptual, sin obligar a que todos los valores se
+alojen o se empaqueten como objetos. Los tipos obtendrán sus capacidades por
+contratos. Se distinguirán valores, referencias y tipos especiales; `Char` es
+un valor grapheme mientras `String` es una referencia mutable.
 
 ---
 
@@ -564,10 +578,10 @@ Int
 Integer
 ```
 
-`Int` e `Integer` serán aliases exactos entre sí y equivaldrán a `Int64`:
+`Int` e `Integer` serán aliases exactos entre sí y equivaldrán a `Int32`:
 
 ```text
-Int == Integer == Int64
+Int == Integer == Int32
 ```
 
 Podrán utilizarse según la preferencia del desarrollador y su significado no dependerá del sistema operativo ni de la arquitectura. Los demás tamaños continuarán disponibles mediante `Int8`, `Int16`, `Int32` e `Int128`.
@@ -601,7 +615,7 @@ Sí. Existirán los mismos tamaños que para los enteros con signo: `UInt8`, `UI
 
 ---
 
-## 3.5 Decimales
+## 3.5 Floats
 
 **Pregunta:** ¿Qué tipos existirán?
 
@@ -616,45 +630,47 @@ long double c;
 Posible diseño:
 
 ```text
-Decimal16
-Decimal32
-Decimal64
-Decimal128
+Float16
+Float32
+Float64
+Float128
 ```
 
 O distinguir:
 
 ```text
-Decimal32
-Decimal64
-Decimal128
+Float32
+Float64
+Float128
 ```
 
 **Respuesta:**
 
-Se fusionan `Float` y `Double` en una sola familia llamada `Decimal`, diferenciada por tamaño:
+Se utilizará una sola familia binaria llamada `Float`, diferenciada por tamaño:
 
 ```text
-Decimal16
-Decimal32
-Decimal64
-Decimal128
+Float16
+Float32
+Float64
+Float128
 ```
 
-La forma sin tamaño tendrá dos nombres equivalentes:
+La forma sin tamaño será:
 
 ```text
-Dec
-Decimal
+Float
 ```
 
-`Dec` y `Decimal` serán aliases exactos entre sí y equivaldrán a `Decimal64`:
+`Float` será alias exacto de `Float64`:
 
 ```text
-Dec == Decimal == Decimal64
+Float == Float64
 ```
 
-Podrán utilizarse según la preferencia del desarrollador y su significado no dependerá del target. Los demás tamaños continuarán disponibles mediante `Decimal16`, `Decimal32` y `Decimal128`.
+Los demás tamaños continuarán disponibles mediante `Float16`, `Float32` y
+`Float128`. `NaN` no será un valor válido: una operación indeterminada dará un
+error controlado. Un tipo decimal base diez exacto podrá añadirse después en la
+biblioteca estándar para dominios como dinero.
 
 ---
 
@@ -683,7 +699,7 @@ O:
 
 ```text
 Int8(10)
-Decimal64(3.14)
+Float64(3.14)
 ```
 
 **Respuesta:**
@@ -692,7 +708,7 @@ Se utilizará el segundo formato, mediante construcción explícita del tipo:
 
 ```text
 Int8(10)
-Decimal64(3.14)
+Float64(3.14)
 ```
 
 También existirá notación científica decimal:
@@ -705,7 +721,7 @@ También existirá notación científica decimal:
 6.022e23
 ```
 
-`e` representará una potencia de diez. El formatter normalizará `E` a `e`. Un literal con notación científica se inferirá como miembro de la familia `Decimal`, incluso cuando su valor matemático sea entero.
+`e` representará una potencia de diez. El formatter normalizará `E` a `e`. Un literal con notación científica se inferirá como miembro de la familia `Float`, incluso cuando su valor matemático sea entero.
 
 Los literales numéricos admitirán `_` como separador visual:
 
@@ -798,6 +814,14 @@ const message = `Hola ${name}`;
 
 Para acelerar el acceso por graphemes, `String` mantendrá internamente un índice o caché. Su mantenimiento será responsabilidad del runtime y no formará parte de la semántica pública.
 
+`String` será una referencia compartida. `mut` permitirá reasignar y editar;
+`inmut` impedirá reasignar pero permitirá editar el contenido; y
+`inmut::strict` impedirá ambas cosas y no podrá coexistir con aliases mutables.
+`clone()` producirá una copia lógica independiente. La asignación de slices
+exigirá igual cantidad de graphemes. `String + String` concatenará y
+`"ja" * 3`/`3 * "ja"` producirán `"jajaja"`; conteos negativos o no enteros
+serán errores controlados.
+
 ---
 
 ## 3.9 Char
@@ -825,7 +849,11 @@ mut letter: Char = 'A';
 
 **Respuesta:**
 
-`Char` representará un único grapheme. Al igual que `String`, ofrecerá métodos para acceder a representaciones de más bajo nivel cuando se necesiten optimización o control.
+`Char` representará un único grapheme. Al igual que `String`, ofrecerá métodos
+para acceder a bytes y code points cuando se necesite control.
+`ascii_code(): Int32` retornará el código cuando el grapheme sea exactamente un
+carácter ASCII y `-1` en cualquier otro caso. Las conversiones de mayúsculas y
+minúsculas retornarán `String`, porque Unicode puede producir varios graphemes.
 
 ---
 
@@ -1844,7 +1872,7 @@ Posible:
 
 ```text
 class MathUtil {
-    static inmut PI: Decimal64 = 3.14;
+    static inmut PI: Float64 = 3.14;
 }
 ```
 
@@ -3047,12 +3075,14 @@ Las cantidades de tiempo serán valores `Duration` con literales legibles:
 250us
 5_000ms
 5s
-5min
+5m
 2h
 1d
+2w
 ```
 
-Los sufijos serán `ns`, `us`, `ms`, `s`, `min`, `h` y `d`. Se utilizará `min` en lugar de `m` para mantener claridad.
+Los sufijos serán `ns`, `us`, `ms`, `s`, `m`, `h`, `d` y `w`. Meses y años
+pertenecerán a `Period`, por lo que `m` no será ambiguo con mes.
 
 ```text
 mut wait_limit: Duration = 5s;
@@ -3062,9 +3092,15 @@ await operation timeout wait_limit;
 task.sleep(interval);
 ```
 
-`Duration` representará una cantidad de tiempo y utilizará relojes monotónicos para esperas. Su semántica pública no se comprometerá a una representación interna en milisegundos: el runtime podrá utilizar nanosegundos enteros u otra representación suficientemente precisa y eficiente, detectando overflow y conversiones no representables.
+`Duration` será una cantidad exacta signed con precisión de nanosegundos y rango
+conceptual `Int128`. Los valores negativos expresarán dirección en diferencias;
+las APIs de espera exigirán valores no negativos. `Period` representará
+años/meses/semanas/días de calendario sin total de segundos independiente.
 
-Fechas y horas de calendario pertenecerán a tipos diferentes, como `DateTime`.
+La familia sellada `Temporal` distinguirá `Date`, `Time`, `DateTime`, `Instant`,
+`ZonedDateTime`, `TimeZone`, `Duration` y `Period`, permitiendo solo
+composiciones con significado. Las zonas serán IANA y las ambigüedades DST se
+rechazarán por defecto salvo política explícita.
 
 ---
 
@@ -3642,7 +3678,7 @@ Inicialmente incluirá:
 - Boolean
 - Int8, Int16, Int32, Int64 e Int128
 - UInt8, UInt16, UInt32, UInt64 y UInt128
-- Decimal16, Decimal32, Decimal64 y Decimal128
+- Float16, Float32, Float64 y Float128
 - Array<T>
 - List<T>
 - Map<K, V>
@@ -4586,8 +4622,20 @@ Las conversiones garantizadas podrán expresarse mediante un constructor o un m�
 
 ```text
 mut text: String = value.to_string();
-mut decimal: Decimal64 = Decimal64(count);
+mut decimal: Float64 = Float64(count);
 ```
+
+Un constructor explícito aplicado a un árbol de operadores establecerá el
+dominio contextual antes de ejecutar esos operadores:
+
+```text
+Float(3 / 4)                 // 0.75, no 0.0
+String("value=" + 42)       // "value=42"
+Float((a + 1) / (b * 2))
+```
+
+El contexto atravesará solo el árbol aritmético o de concatenación contenido;
+no modificará operandos ni entrará al cuerpo de funciones llamadas.
 
 ---
 
@@ -4602,7 +4650,7 @@ double value = (double)count;
 Posible:
 
 ```text
-mut value: Decimal64 = count as Decimal64;
+mut value: Float64 = count as Float64;
 ```
 
 **Respuesta:**
@@ -4617,8 +4665,8 @@ value as Type
 Ejemplos:
 
 ```text
-mut decimal = count as Decimal64;
-mut decimal = <Decimal64>count;
+mut decimal = count as Float64;
+mut decimal = <Float64>count;
 ```
 
 La forma prefija aplicará el cast a la expresión que aparezca a continuación. Los paréntesis delimitarán expresiones compuestas y permitirán continuar accediendo al resultado casteado:
@@ -5291,7 +5339,7 @@ Esto permitirá consumir directamente bibliotecas C. Las bibliotecas C++ deberá
 
 Las bibliotecas Rust utilizarán igualmente funciones `extern "C"` y representaciones compatibles, porque la ABI nativa de Rust no es estable. Por tanto, C++ y Rust serán interoperables mediante adaptadores C sin necesitar una ABI especial para cada lenguaje.
 
-Solo cruzarán directamente la frontera tipos con representación compatible: enteros y decimales de tamaño explícito, punteros, estructuras compatibles y handles opacos. Strings, clases, colecciones y exceptions requerirán adaptadores.
+Solo cruzarán directamente la frontera tipos con representación compatible: enteros y floats de tamaño explícito, punteros, estructuras compatibles y handles opacos. Strings, clases, colecciones y exceptions requerirán adaptadores.
 
 FFI requerirá el permiso correspondiente. El tooling podrá incorporar posteriormente generación de bindings desde headers C.
 
@@ -6599,7 +6647,10 @@ fn rename(user: User): Void {
 
 La administración de memoria será automática. El runtime garantizará que el objeto continúe vivo mientras exista una referencia válida.
 
-`inmut` impedirá reasignar la referencia, pero no hará inmutable el objeto. `inmut::strict` aplicará inmutabilidad profunda mediante esa referencia.
+`inmut` impedirá reasignar la referencia, pero no hará inmutable el objeto.
+`inmut::strict` aplicará inmutabilidad profunda y prohibirá crear un alias
+mutable o adquirirse mientras siga accesible uno. Un `clone()` independiente
+podrá recibir un binding mutable.
 
 ---
 
@@ -6697,8 +6748,8 @@ Posible:
 
 ```text
 value class Point {
-    inmut x: Decimal32;
-    inmut y: Decimal32;
+    inmut x: Float32;
+    inmut y: Float32;
 }
 ```
 
@@ -6742,8 +6793,8 @@ Posible:
 
 ```text
 record Point(
-    x: Decimal32,
-    y: Decimal32
+    x: Float32,
+    y: Float32
 );
 ```
 
@@ -7168,7 +7219,7 @@ Las operaciones no portables o que requieran instrucciones exactas se implementa
 Posible:
 
 ```text
-mut vector: SIMD<Decimal32, 4>;
+mut vector: SIMD<Float32, 4>;
 ```
 
 **Respuesta:**
@@ -7188,8 +7239,8 @@ El desarrollador no necesitará conocer SIMD para beneficiarse de estas optimiza
 Para casos especializados existirá un tipo explícito y portable:
 
 ```text
-mut left: Vector<Decimal32, 4>;
-mut right: Vector<Decimal32, 4>;
+mut left: Vector<Float32, 4>;
+mut right: Vector<Float32, 4>;
 
 mut result = left + right;
 ```

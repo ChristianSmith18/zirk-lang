@@ -6,4 +6,4 @@ These tutorials assemble language features into complete projects. Each begins w
 
 ---
 
-**Previous:** [← Performance Goals](../07-toolchain/18-performance-goals.md) · **Next:** [Build a CLI →](./01-build-a-cli.md)
+**Previous:** [← Package Security](../09-packages/09-package-security.md) · **Next:** [ Build a CLI](01-build-a-cli.md)

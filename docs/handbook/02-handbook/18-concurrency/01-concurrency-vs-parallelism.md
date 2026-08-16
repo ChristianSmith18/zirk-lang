@@ -4,4 +4,4 @@ Concurrency structures overlapping work; parallelism requests simultaneous CPU e
 
 ---
 
-**Previous:** [← Concurrency](./README.md) · **Next:** [Tasks →](./02-tasks.md)
+**Previous:** [← Concurrency](README.md) · **Next:** [ Tasks](02-tasks.md)

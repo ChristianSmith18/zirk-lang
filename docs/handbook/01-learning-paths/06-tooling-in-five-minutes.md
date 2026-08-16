@@ -57,4 +57,4 @@ The language server uses incremental snapshots and supports diagnostics, complet
 
 ---
 
-**Previous:** [← Zirk for Java and C# Programmers](./05-zirk-for-java-csharp-programmers.md) · **Next:** The Language Handbook *(next section)*
+**Previous:** [← Zirk for Java and C# Programmers](05-zirk-for-java-csharp-programmers.md) · **Next:** [ The Zirk Language Handbook](../02-handbook/README.md)

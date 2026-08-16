@@ -10,4 +10,4 @@ A task propagates its result or error and cannot become implicitly orphaned. Sco
 
 ---
 
-**Previous:** [← Concurrency and Parallelism](./01-concurrency-vs-parallelism.md) · **Next:** [`await` →](./03-await.md)
+**Previous:** [← Concurrency and Parallelism](01-concurrency-vs-parallelism.md) · **Next:** [ await](03-await.md)

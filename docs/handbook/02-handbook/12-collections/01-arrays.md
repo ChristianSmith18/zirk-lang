@@ -26,6 +26,8 @@ All Zirk arrays are fixed-size. A declaration that makes the size part of its
 type communicates an additional compile-time contract; it does not select a
 different resizable collection.
 
+Array equality is element-wise when `T` supports equality. Assignment aliases the same array; it does not copy elements. Slices and iterators preserve bounds and alias permissions, and mutation through any view is rejected when the source is `inmut::strict`.
+
 ---
 
-**Previous:** [← Collections](./README.md) · **Next:** [Fixed Arrays →](./02-fixed-arrays.md)
+**Previous:** [← Collections](README.md) · **Next:** [ Fixed Arrays](02-fixed-arrays.md)

@@ -6,4 +6,4 @@ Wrap it in a safe Zirk function that validates inputs, returns `Result`, manages
 
 ---
 
-**Previous:** [← Build and Publish a Library](./05-build-and-publish-a-library.md) · **Next:** [Write a Decorator →](./07-write-a-decorator.md)
+**Previous:** [← Build and Publish a Library](05-build-and-publish-a-library.md) · **Next:** [ Write a Decorator](07-write-a-decorator.md)

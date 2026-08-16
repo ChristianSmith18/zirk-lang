@@ -4,4 +4,4 @@ Zirk separates unit, end-to-end, and benchmark workloads. Tests use ordinary pub
 
 ---
 
-**Previous:** [← Metaprogramming Security](../06-metaprogramming/09-security-and-permissions.md) · **Next:** [Unit Tests →](./01-unit-tests.md)
+**Previous:** [← Performance Goals](../07-toolchain/18-performance-goals.md) · **Next:** [ Unit Tests](01-unit-tests.md)

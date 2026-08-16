@@ -6,4 +6,4 @@ Missing permission produces a clear error, never an interactive grant during `zi
 
 ---
 
-**Previous:** [← Globals](./06-globals.md) · **Next:** [Compile Permissions →](./08-compile-permissions.md)
+**Previous:** [← Globals](06-globals.md) · **Next:** [ Compile Permissions](08-compile-permissions.md)

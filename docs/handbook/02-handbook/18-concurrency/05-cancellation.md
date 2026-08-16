@@ -6,4 +6,4 @@ Children receive parent cancellation, close resources, and finish with a typed r
 
 ---
 
-**Previous:** [← Structured Concurrency](./04-structured-concurrency.md) · **Next:** [Timeouts →](./06-timeouts.md)
+**Previous:** [← Structured Concurrency](04-structured-concurrency.md) · **Next:** [ Timeouts](06-timeouts.md)

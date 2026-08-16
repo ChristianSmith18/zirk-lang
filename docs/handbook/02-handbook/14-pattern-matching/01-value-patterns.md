@@ -30,4 +30,4 @@ always prove that two arbitrary regular expressions overlap.
 
 ---
 
-**Previous:** [← Pattern Matching](./README.md) · **Next:** [Multiple Patterns →](./02-multiple-patterns.md)
+**Previous:** [← Pattern Matching](README.md) · **Next:** [ Multiple Patterns](02-multiple-patterns.md)

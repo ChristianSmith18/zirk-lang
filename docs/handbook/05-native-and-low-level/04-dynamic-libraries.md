@@ -6,4 +6,4 @@ Function pointers cannot outlive the loaded library. Prefer build-time linked de
 
 ---
 
-**Previous:** [← Exporting Zirk](./03-exporting-zirk.md) · **Next:** [Name Mangling →](./05-name-mangling.md)
+**Previous:** [← Exporting Zirk](03-exporting-zirk.md) · **Next:** [ Name Mangling](05-name-mangling.md)

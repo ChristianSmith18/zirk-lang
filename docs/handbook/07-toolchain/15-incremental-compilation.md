@@ -4,4 +4,4 @@ Content-addressed caches and a fine dependency graph reuse tokens, syntax, types
 
 ---
 
-**Previous:** [← Optimizations](./14-optimizations.md) · **Next:** [Cross-Compilation →](./16-cross-compilation.md)
+**Previous:** [← Optimizations](14-optimizations.md) · **Next:** [ Cross-Compilation](16-cross-compilation.md)

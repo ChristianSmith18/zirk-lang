@@ -8,4 +8,4 @@ Call static members through the type so ownership stays visible at the call site
 
 ---
 
-**Previous:** [← Abstract Classes](./08-abstract-classes.md) · **Next:** [Object Identity →](./10-object-identity.md)
+**Previous:** [← Abstract Classes](08-abstract-classes.md) · **Next:** [ Object Identity](10-object-identity.md)

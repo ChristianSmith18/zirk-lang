@@ -4,4 +4,4 @@ Zirk 1.x has no standalone `worker` primitive. Build a dedicated worker from a s
 
 ---
 
-**Previous:** [← Threads](./10-threads.md) · **Next:** [Synchronization and Mutexes →](./12-sync-and-mutex.md)
+**Previous:** [← Threads](10-threads.md) · **Next:** [ Synchronization and Mutexes](12-sync-and-mutex.md)

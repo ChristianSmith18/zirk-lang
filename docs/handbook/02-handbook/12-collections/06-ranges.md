@@ -35,4 +35,4 @@ array. Ranges are independent from slicing.
 
 ---
 
-**Previous:** [← Sets](./05-sets.md) · **Next:** [Indexing →](./07-indexing.md)
+**Previous:** [← Sets](05-sets.md) · **Next:** [ Indexing](07-indexing.md)

@@ -17,4 +17,4 @@ Avoid a wildcard when each union member deserves distinct domain behavior; expli
 
 ---
 
-**Previous:** [← Enum Patterns](./04-enum-patterns.md) · **Next:** [Destructuring Patterns →](./06-destructuring-patterns.md)
+**Previous:** [← Enum Patterns](04-enum-patterns.md) · **Next:** [ Destructuring Patterns](06-destructuring-patterns.md)

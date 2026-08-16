@@ -6,4 +6,4 @@ CI must fail rather than grant a missing permission interactively.
 
 ---
 
-**Previous:** [← `assert` and `expect`](./03-assert-and-expect.md) · **Next:** [Concurrent Test Safety →](./05-concurrent-test-safety.md)
+**Previous:** [← assert and expect](03-assert-and-expect.md) · **Next:** [ Concurrent Test Safety](05-concurrent-test-safety.md)

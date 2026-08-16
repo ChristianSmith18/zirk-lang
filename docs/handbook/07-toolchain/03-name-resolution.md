@@ -4,4 +4,4 @@ Resolution connects identifiers to declarations across scopes, files, modules, i
 
 ---
 
-**Previous:** [← Lexer and Parser](./02-lexer-and-parser.md) · **Next:** [Type Checker →](./04-type-checker.md)
+**Previous:** [← Lexer and Parser](02-lexer-and-parser.md) · **Next:** [ Type Checker](04-type-checker.md)

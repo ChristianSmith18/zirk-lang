@@ -14,4 +14,4 @@ Choose a fallback only when it represents valid domain behavior. If missing conf
 
 ---
 
-**Previous:** [← Safe Access](./02-safe-access.md) · **Next:** [Flow Analysis →](./04-flow-analysis.md)
+**Previous:** [← Safe Access](02-safe-access.md) · **Next:** [ Flow Analysis](04-flow-analysis.md)

@@ -8,4 +8,4 @@ Break a cycle by extracting a shared contract, reversing a dependency through an
 
 ---
 
-**Previous:** [← Public API](./06-public-api.md) · **Next:** [Projects →](../../03-projects/README.md)
+**Previous:** [← Public API](06-public-api.md) · **Next:** [ Projects](../../03-projects/README.md)

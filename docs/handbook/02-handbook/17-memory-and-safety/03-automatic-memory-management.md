@@ -6,4 +6,4 @@ Memory reclamation does not close files, sockets, locks, or processes. Those ext
 
 ---
 
-**Previous:** [← Stack and Heap](./02-stack-and-heap.md) · **Next:** [Safe References →](./04-safe-references.md)
+**Previous:** [← Stack and Heap](02-stack-and-heap.md) · **Next:** [ Safe References](04-safe-references.md)

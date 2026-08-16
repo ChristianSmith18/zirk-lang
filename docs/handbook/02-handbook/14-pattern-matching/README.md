@@ -13,4 +13,4 @@ Patterns describe the shape a value must have and bind the data inside that shap
 
 ---
 
-**Previous:** [← `break` and `continue`](../06-control-flow/09-break-and-continue.md) · **Next:** [Value Patterns →](./01-value-patterns.md)
+**Previous:** [← Pipelines](../13-iteration-and-functional-style/08-pipelines.md) · **Next:** [ Value Patterns](01-value-patterns.md)

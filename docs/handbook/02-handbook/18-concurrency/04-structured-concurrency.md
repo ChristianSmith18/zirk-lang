@@ -6,4 +6,4 @@ Detached work is not part of the initial contract; a future form would require e
 
 ---
 
-**Previous:** [← `await`](./03-await.md) · **Next:** [Cancellation →](./05-cancellation.md)
+**Previous:** [← await](03-await.md) · **Next:** [ Cancellation](05-cancellation.md)

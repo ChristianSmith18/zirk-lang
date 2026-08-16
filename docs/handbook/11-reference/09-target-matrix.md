@@ -6,4 +6,4 @@ Actual availability depends on LLVM, linker, SDK, runtime, stdlib, and native de
 
 ---
 
-**Previous:** [← CLI Commands](./08-cli-commands.md) · **Next:** [Permission Catalog →](./10-permission-catalog.md)
+**Previous:** [← CLI Commands](08-cli-commands.md) · **Next:** [ Permission Catalog](10-permission-catalog.md)

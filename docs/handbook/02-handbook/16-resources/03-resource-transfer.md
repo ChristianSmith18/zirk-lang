@@ -8,4 +8,4 @@ Prefer returning processed data rather than a live handle when callers do not ne
 
 ---
 
-**Previous:** [← `match with`](./02-match-with.md) · **Next:** [Close and Flush Errors →](./04-close-and-flush-errors.md)
+**Previous:** [← match with](02-match-with.md) · **Next:** [ Close and Flush Errors](04-close-and-flush-errors.md)

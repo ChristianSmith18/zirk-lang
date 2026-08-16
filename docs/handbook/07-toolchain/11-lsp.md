@@ -4,4 +4,4 @@ The LSP uses cancelable incremental snapshots for diagnostics, completion, hover
 
 ---
 
-**Previous:** [← Linter](./10-linter.md) · **Next:** [Debugger →](./12-debugger.md)
+**Previous:** [← Linter](10-linter.md) · **Next:** [ Debugger](12-debugger.md)

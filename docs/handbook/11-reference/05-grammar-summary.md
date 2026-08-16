@@ -15,6 +15,8 @@ one shared `=>` body. Traditional enums may map cases with `->`; algebraic enum
 patterns may destructure nested records. This summary does not replace the
 machine-readable grammar or its complete precedence and recovery rules.
 
+Type expressions include named types, generic application (`List<String>`), fixed arrays (`Float64[4]`), unions (`A | B`), nullable shorthand (`T?`), and callable types where their language phase defines them. Conversion uses type construction syntax. Postfix assignment targets must be places; indexed or sliced assignment also obeys referent permissions and element-width rules.
+
 ---
 
-**Previous:** [← Literals](./04-literals.md) · **Next:** [Attributes and Decorators →](./06-attributes-and-decorators.md)
+**Previous:** [← Literals](04-literals.md) · **Next:** [ Attributes and Decorators](06-attributes-and-decorators.md)

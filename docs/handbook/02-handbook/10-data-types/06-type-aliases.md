@@ -10,6 +10,8 @@ Aliases improve readability for long generic, union, or callable types. Because 
 
 Use a value class or record when accidental interchange must be rejected. Avoid chains of aliases that obscure the actual public contract.
 
+An alias preserves the complete operator and member set of its target because it is the same static type. It cannot hide an unsafe operation or add a capability.
+
 ---
 
-**Previous:** [← Associated Values](./05-associated-values.md) · **Next:** [Union Types →](./07-union-types.md)
+**Previous:** [← Associated Values](05-associated-values.md) · **Next:** [ Union Types](07-union-types.md)

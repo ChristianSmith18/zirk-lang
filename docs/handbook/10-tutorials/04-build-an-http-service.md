@@ -6,4 +6,4 @@ Handlers run as structured tasks and inherit disconnect cancellation. Stream lar
 
 ---
 
-**Previous:** [← Build a Concurrent Worker Pool](./03-build-a-concurrent-worker-pool.md) · **Next:** [Build and Publish a Library →](./05-build-and-publish-a-library.md)
+**Previous:** [← Build a Concurrent Worker Pool](03-build-a-concurrent-worker-pool.md) · **Next:** [ Build and Publish a Library](05-build-and-publish-a-library.md)

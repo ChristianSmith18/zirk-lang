@@ -33,4 +33,4 @@ Whichever path you choose, remember that the handbook teaches the normative Zirk
 
 ---
 
-**Previous:** [← How Zirk Compiles](./06-how-zirk-compiles.md) · **Next:** [Learning Paths →](../01-learning-paths/README.md)
+**Previous:** [← How Zirk Compiles](06-how-zirk-compiles.md) · **Next:** [ Learning Paths](../01-learning-paths/README.md)

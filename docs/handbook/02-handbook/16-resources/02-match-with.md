@@ -13,4 +13,4 @@ The file closes before the expression delivers its value. Closure occurs on ever
 
 ---
 
-**Previous:** [← The Resource Contract](./01-resource-contract.md) · **Next:** [Resource Transfer →](./03-resource-transfer.md)
+**Previous:** [← The Resource Contract](01-resource-contract.md) · **Next:** [ Resource Transfer](03-resource-transfer.md)

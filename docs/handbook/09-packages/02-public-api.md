@@ -6,4 +6,4 @@ Permission and error behavior are part of the public promise even when not encod
 
 ---
 
-**Previous:** [← Package Anatomy](./01-package-anatomy.md) · **Next:** [Portable IR →](./03-portable-ir.md)
+**Previous:** [← Package Anatomy](01-package-anatomy.md) · **Next:** [ Portable IR](03-portable-ir.md)

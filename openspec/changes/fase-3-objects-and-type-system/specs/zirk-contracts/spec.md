@@ -40,6 +40,10 @@ La sobrecarga de un operador SHALL ocurrir únicamente implementando el contrato
 
 Los contratos usan métodos reservados como `_add` y `_subtract`. Los tipos definidos por el usuario MAY implementarlos en código seguro; los tipos nativos NO SHALL poder reabrirse desde código de aplicación.
 
+`String` SHALL implement native concatenation and checked repetition contracts:
+`String * Integer` and `Integer * String` return a new String, reject negative
+counts, and diagnose unrepresentable allocation sizes.
+
 #### Scenario: Concatenación de cadenas
 - **WHEN** se evalúa `"a" + "b"`
 - **THEN** el resultado es `"ab"`

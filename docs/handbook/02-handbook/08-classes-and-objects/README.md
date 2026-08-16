@@ -4,4 +4,4 @@ Classes model values with observable identity, encapsulated state, and behavior.
 
 ---
 
-**Previous:** [← Pipelines](../13-iteration-and-functional-style/08-pipelines.md) · **Next:** [Declaring Classes →](./01-declaring-classes.md)
+**Previous:** [← match as an Expression](../14-pattern-matching/08-match-as-expression.md) · **Next:** [ Declaring Classes](01-declaring-classes.md)

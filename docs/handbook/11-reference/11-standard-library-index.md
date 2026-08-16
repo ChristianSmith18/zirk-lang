@@ -6,4 +6,4 @@ See the [Standard Library](../04-standard-library/README.md) for per-module perm
 
 ---
 
-**Previous:** [← Permission Catalog](./10-permission-catalog.md) · **Next:** [Feature Status →](./12-feature-status.md)
+**Previous:** [← Permission Catalog](10-permission-catalog.md) · **Next:** [ Feature Status](12-feature-status.md)

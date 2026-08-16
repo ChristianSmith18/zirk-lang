@@ -6,4 +6,4 @@ Use unique fixtures and `--seed` for reproducibility. A failure must report the 
 
 ---
 
-**Previous:** [← Test Permissions](./04-test-permissions.md) · **Next:** [Test Runner →](./06-test-runner.md)
+**Previous:** [← Test Permissions](04-test-permissions.md) · **Next:** [ Test Runner](06-test-runner.md)

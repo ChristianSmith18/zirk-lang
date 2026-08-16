@@ -49,4 +49,4 @@ At each checkpoint, write a small program, run `zirk check`, deliberately introd
 
 ---
 
-**Previous:** [← Learning Paths](./README.md) · **Next:** [Zirk for TypeScript Programmers →](./02-zirk-for-typescript-programmers.md)
+**Previous:** [← Learning Paths](README.md) · **Next:** [ Zirk for TypeScript Programmers](02-zirk-for-typescript-programmers.md)

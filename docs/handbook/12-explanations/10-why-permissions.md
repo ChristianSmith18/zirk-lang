@@ -6,4 +6,4 @@ Libraries request; applications grant. Compile-time permissions are separate bec
 
 ---
 
-**Previous:** [← Why the C ABI?](./09-why-c-abi.md) · **Next:** [Why Portable IR? →](./11-why-portable-ir.md)
+**Previous:** [← Why the C ABI?](09-why-c-abi.md) · **Next:** [ Why Portable IR?](11-why-portable-ir.md)

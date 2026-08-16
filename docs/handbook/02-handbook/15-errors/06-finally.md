@@ -8,4 +8,4 @@ Cleanup failure must not silently replace the primary failure; the governing API
 
 ---
 
-**Previous:** [← Typed `catch`](./05-typed-catch.md) · **Next:** [`fatalError` →](./07-fatal-error.md)
+**Previous:** [← Typed catch](05-typed-catch.md) · **Next:** [ fatalError](07-fatal-error.md)

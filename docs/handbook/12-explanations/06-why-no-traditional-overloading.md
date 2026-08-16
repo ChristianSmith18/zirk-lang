@@ -6,4 +6,4 @@ Contract-governed operator overloading remains narrow because arity and preceden
 
 ---
 
-**Previous:** [← Why No `new`?](./05-why-no-new.md) · **Next:** [Why No General `defer`? →](./07-why-no-defer.md)
+**Previous:** [← Why No new?](05-why-no-new.md) · **Next:** [ Why No General defer?](07-why-no-defer.md)

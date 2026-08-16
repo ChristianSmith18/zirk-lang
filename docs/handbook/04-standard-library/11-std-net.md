@@ -6,4 +6,4 @@ Sockets are resources; connect, read, write, shutdown, DNS errors, timeouts, and
 
 ---
 
-**Previous:** [← `std.sync`](./10-std-sync.md) · **Next:** [`std.http` →](./12-std-http.md)
+**Previous:** [← std.sync](10-std-sync.md) · **Next:** [ std.http](12-std-http.md)

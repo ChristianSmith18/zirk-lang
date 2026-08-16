@@ -6,4 +6,4 @@ Applications grant runtime permissions; libraries declare requirements; decorato
 
 ---
 
-**Previous:** [← Target Matrix](./09-target-matrix.md) · **Next:** [Standard Library Index →](./11-standard-library-index.md)
+**Previous:** [← Target Matrix](09-target-matrix.md) · **Next:** [ Standard Library Index](11-standard-library-index.md)

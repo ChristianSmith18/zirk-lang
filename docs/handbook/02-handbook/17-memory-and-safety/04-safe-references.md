@@ -6,4 +6,4 @@ A reference derived inside `match with` cannot escape after the resource closes.
 
 ---
 
-**Previous:** [← Automatic Memory Management](./03-automatic-memory-management.md) · **Next:** [Pointers →](./05-pointers.md)
+**Previous:** [← Automatic Memory Management](03-automatic-memory-management.md) · **Next:** [ Pointers](05-pointers.md)
