@@ -20,6 +20,11 @@ There is no universal `None`-like inhabitant and no `undefined`. `null` is valid
 
 Classes, interfaces, traits, records, value classes, and enums serve different purposes. Prefer algebraic enums and `match` when the set of variants is closed. Prefer an interface or trait when multiple types share a behavior contract. Do not rely on accidental duck typing.
 
+Slices accept Python-shaped omitted components, including `[::]`, `[n:w]`, and
+`[::-1]`, but explicit out-of-range bounds are errors rather than clamped. A
+slice is always an independent deep copy. Callable annotations use `Fn(P...) =>
+R`, and closed-domain `match` is exhaustive with no pattern guards.
+
 ## Effects belong to the project
 
 Filesystem, network, process, environment, and compile-time access are declared capabilities. A library declares requirements; the final application grants permissions. Native resources also have explicit cleanup contracts rather than depending on nondeterministic object finalization.

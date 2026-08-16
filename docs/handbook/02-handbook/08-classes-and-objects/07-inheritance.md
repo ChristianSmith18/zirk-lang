@@ -14,7 +14,7 @@ class User {
         this.name = name;
     }
 
-    fn label(): String {
+    override fn label(): String {
         return this.name;
     }
 }
@@ -31,8 +31,11 @@ inmut user: User = Admin("Cristian");
 stdout.println(user.label()); // Dynamic dispatch calls `Admin.label`.
 ```
 
-Inherited fields keep their visibility. A redefining method must preserve the
-base signature so a subtype remains usable wherever its base is expected.
+Inherited attributes keep their visibility. Public and protected instance
+methods dispatch virtually by default; private and static methods do not. A
+redefinition must use `override fn`, preserve parameter types exactly, and may
+narrow its result covariantly. Use `super(...)` for base construction and
+`super.method()` for inherited behavior.
 
 ---
 

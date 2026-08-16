@@ -1,34 +1,30 @@
 # Abstract Classes
 
-An `abstract` class defines shared state or behavior while requiring subclasses to complete selected methods.
+An `abstract` class defines a nominal requirement set. It may require attributes
+and abstract functions, but cannot contain state, layout, a constructor, or a
+method body.
 
-Abstract classes cannot be instantiated until a concrete subtype satisfies every required member. They are useful when variants share identity and implementation, not merely a behavior signature.
+Abstract classes cannot be instantiated. A concrete class adopts the
+requirements with `implements`, not `extends`.
 
 Use an interface for a pure contract and a trait for reusable behavior that need not establish a single class lineage.
 
 ```zirk
 abstract class Shape {
-    color: String;
-
     abstract fn area(): Float64;
-
-    fn describe(): String {
-        return "{this.color} shape with area {this.area()}";
-    }
 }
 
-class Circle extends Shape {
+class Circle implements Shape {
     radius: Float64;
 
-    fn area(): Float64 {
+    override fn area(): Float64 {
         return 3.14159 * this.radius ** 2;
     }
 }
 ```
 
-`Shape()` is invalid because an abstract class is not complete. A concrete
-subclass is also invalid until it implements every inherited abstract method
-with a compatible signature.
+`Shape()` is invalid, as are `class Circle extends Shape` and an abstract method
+body. A concrete implementer is invalid until it provides every requirement.
 
 ---
 

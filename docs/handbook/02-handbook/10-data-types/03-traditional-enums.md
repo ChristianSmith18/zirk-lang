@@ -44,6 +44,12 @@ exhaustive matches to change.
 
 Cases support equality within the same enum. Declaration or mapped-value order does not silently create `<` or `>`; ordering exists only through an explicit ordering contract. Matching is exhaustive, and an explicit mapping is data rather than an implicit conversion.
 
+Every case exposes `.name` and `.value`. The type supplies `to_string()`,
+`from_name()`, and `from_value()`; lookup reports controlled failure and
+mappings must be unique. Enums are data-only and cannot declare user methods.
+Put domain behavior in an external function and select cases with exhaustive
+`match`.
+
 ---
 
 **Previous:** [← Value Classes](02-value-classes.md) · **Next:** [ Algebraic Enums](04-algebraic-enums.md)

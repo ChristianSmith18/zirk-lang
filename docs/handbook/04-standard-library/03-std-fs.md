@@ -3,7 +3,7 @@
 `File` implements `Resource<FileError>` and supports typed open/create options, text/byte/line I/O, append, metadata, flush, and async variants.
 
 ```zirk
-inmut text = match with File.open(path) {
+inmut text = match File.open(path) with file {
     Ok(file) => file.read_text();
     Error(error) => return Error(error);
 };

@@ -1,8 +1,9 @@
-# Fields and Properties
+# Attributes and Accessor Methods
 
-Fields store instance state. Visibility and `mut`/`inmut` determine who can access or rebind it.
+Attributes store instance state. Visibility and `mut`/`inmut` determine who can
+access or rebind it. Zirk has no `property` declaration.
 
-Class fields are `public mut` by default. These declarations are equivalent:
+Class attributes are `public mut` by default. These declarations are equivalent:
 
 ```zirk
 name: String;
@@ -16,7 +17,17 @@ private mut balance: Float64;
 public inmut account_id: UInt64;
 ```
 
-Expose state directly only when its invariants survive every permitted assignment. Properties or methods should validate changes, represent computed values, or hide storage. `inmut` fixes a field binding; `inmut::strict` is required for transitive immutability.
+An attribute without an initializer receives the default value of its declared
+type; there is no reserved `default` expression. Validation, computed access,
+and storage hiding use ordinary methods named by convention:
+
+```zirk
+fn get_balance(): Float64 { return this.balance; }
+fn set_balance(value: Float64): Void { ... }
+```
+
+They are called with parentheses. `inmut` fixes an attribute binding;
+`inmut::strict` is required for transitive immutability.
 
 ---
 

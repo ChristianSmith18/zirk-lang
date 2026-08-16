@@ -4,9 +4,11 @@ The handbook synthesizes repository documents with different roles and ages. Thi
 
 ## Authority order
 
-1. [`ZIRK_SPEC_FINAL.md`](../../ZIRK_SPEC_FINAL.md) defines Zirk 1.x identity, scope, exclusions, foundational contracts, and conflict resolution.
-2. [`ZIRK_LANGUAGE_SPEC.md`](../../ZIRK_LANGUAGE_SPEC.md), [`ZIRK_RUNTIME_SPEC.md`](../../ZIRK_RUNTIME_SPEC.md), [`ZIRK_STDLIB_SPEC.md`](../../ZIRK_STDLIB_SPEC.md), and [`ZIRK_COMPILER_SPEC.md`](../../ZIRK_COMPILER_SPEC.md) define their specialized areas.
-3. [`01_plantilla_zirk.md`](../../01_plantilla_zirk.md) is the exhaustive historical topic inventory. It helps find questions the handbook must address, but it is not allowed to restore features excluded by the master specification.
+1. [`ZIRK_SPEC_FINAL.md`](../../ZIRK_SPEC_FINAL.md) defines authority, scope, exclusions, foundational contracts, and conflict resolution.
+2. [`CORE_LANGUAGE_SEMANTICS.md`](../../CORE_LANGUAGE_SEMANTICS.md) consolidates accepted cross-feature semantics for contributors.
+3. [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](../../ERROR_RESOURCE_PERMISSION_SEMANTICS.md) consolidates accepted failure, deterministic-cleanup, and authority semantics.
+4. [`ZIRK_LANGUAGE_SPEC.md`](../../ZIRK_LANGUAGE_SPEC.md), [`ZIRK_RUNTIME_SPEC.md`](../../ZIRK_RUNTIME_SPEC.md), [`ZIRK_STDLIB_SPEC.md`](../../ZIRK_STDLIB_SPEC.md), and [`ZIRK_COMPILER_SPEC.md`](../../ZIRK_COMPILER_SPEC.md) define their specialized areas.
+5. [`01_plantilla_zirk.md`](../../01_plantilla_zirk.md) is the exhaustive historical topic inventory. It helps find questions but cannot restore superseded behavior.
 
 When final documents remain ambiguous, the handbook records the ambiguity or defers the claim. It does not invent a silent resolution.
 
@@ -26,6 +28,7 @@ the documentation is transplanted onto the latest `develop` revision.
 | Standard-library modules and operational contracts | Standard-library specification | Template §§22–24, 30–31, 39 |
 | Compiler pipeline, IR, targets, diagnostics, CLI, formatter, linter, LSP, debugger | Compiler specification §§1–12 | Template §§21, 40–43 |
 | Projects, packages, permissions, distribution | Master and specialized specifications | Template §§20, 38, 46 |
+| Result, exceptions, resources, permission approval and audit | Failure/resource/permission checkpoint plus language/runtime/compiler/stdlib specifications | Template §§14, 16, 20, 46, 63 |
 
 ## Explicit Zirk 1.x exclusions
 
@@ -56,6 +59,13 @@ The current compiler is not yet a complete executable oracle for every normative
 | Unicode Char and mutable String | Char and String chapters |
 | Calendar and timeline types | `02-handbook/03a-temporal/` |
 | Domain value/reference choices | Data Types and Classes and Objects |
+| Callable types, closure capture and bound methods | Functions, especially `12-function-types-and-callable-values.md` |
+| Projection copy versus whole-reference aliasing | Bindings and Values `09-value-and-reference-semantics.md` |
+| Generic variance, recursion and runtime identity | Generics `08-variance-recursion-and-runtime.md` |
+| Collection APIs, slicing and iterator invalidation | Collections `10-collection-contracts-and-complexity.md` |
+| Result, explicit/implicit exceptions and provenance | Errors unit |
+| Resource responsibility and combined cleanup failure | Resources unit |
+| Grants, phases, signed consent and incremental audit | Projects `07`–`09` and `14-permission-approval-and-audit.md` |
 
 ---
 

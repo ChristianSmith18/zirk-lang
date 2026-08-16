@@ -18,7 +18,10 @@ These stages power `zirk check`, formatting, linting, and language-server featur
 
 Decorators and tools use a public, immutable, versioned Syntax API rather than mutating compiler internals. Generated transformations return to parsing, resolution, typing, and validation. Diagnostics retain a relationship between original and generated source.
 
-Compile-time code does not receive unrestricted filesystem, network, or process access. A package must declare `compile_permissions`, and the application build audits the resulting capability set.
+Compile-time code does not receive unrestricted filesystem, network, or process
+access. A package declares narrow `requires`; the application grants matching
+`permissions` operations with `during: build`. Signed approval is checked
+before expansion, and unchanged fingerprints take an incremental fast path.
 
 ## Portable typed IR
 

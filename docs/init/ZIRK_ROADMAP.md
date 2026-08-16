@@ -159,7 +159,8 @@ the minimum guarantees the spec promises.
 ## Phase 6 — Project system and CLI
 
 - `init.zrk` as a declarative DSL (its own parser, not reusing the Zirk parser).
-- `project`, `build_targets`, `globals`, `permissions`, `compile_permissions`.
+- `project`, `build_targets`, `globals`, library `requires`, and application
+  `permissions` with per-operation `during: build | runtime | both`.
 - CLI: `new`, `init`, `run`, `build`, `check`, `test`.
 - Real cross-compilation to the targets of the spec (`COMPILER_SPEC.md`
   section 6).

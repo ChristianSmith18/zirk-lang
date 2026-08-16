@@ -14,4 +14,4 @@ Use `Never` only for real non-returning behavior such as fatal termination or an
 
 ---
 
-**Previous:** [← No Traditional Overloading](10-no-traditional-overloading.md) · **Next:** [ Generics](../11-generics/README.md)
+**Previous:** [← No Traditional Overloading](10-no-traditional-overloading.md) · **Next:** [Function Types and Callable Values →](12-function-types-and-callable-values.md)

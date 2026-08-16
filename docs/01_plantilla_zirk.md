@@ -21,6 +21,33 @@
 > **Checkpoint de revisión autoral del handbook — 15 de agosto de 2026.** Las 37 acotaciones del autor corrigen respuestas anteriores de esta plantilla. Quedan confirmados `**`/`**=`, ranges descendentes y con `step`, bounds interpolados, `if` de una sola sentencia, `do ... while`, regex `re'...'`, alternativas de `match` separadas por coma, parámetros opcionales siempre tipados, variadics iterables, `fn` opcional en lambdas, capturas desambiguadas con `this`, campos `public mut` por defecto, múltiples `construct` por firma, enums tradicionales con valor string nominal o mapping explícito, arrays siempre fijos, slicing `[inicio:fin:salto]`, strings iterables, generators, pipelines de funciones puras, miembros convenientes de la stdlib y cloning de callables ligados. Este checkpoint prevalece sobre respuestas incompatibles más abajo.
 >
 
+> **Checkpoint semántico del núcleo — 16 de agosto de 2026.** La fuente
+> normativa consolidada es `docs/CORE_LANGUAGE_SEMANTICS.md`. Se aceptan
+> `Function(P...) => R` y el alias preferido `Fn(P...) => R`, closures
+> escapables, alias solo al mover una referencia completa y copia profunda al
+> proyectar atributos/índices/slices/patrones, atributos sin construcción
+> `property`, abstract classes adoptadas con `implements`, traits sin estado,
+> constraints múltiples, variance explícita, `Box<T>`, tuples por `result[n]`,
+> enums sin métodos, match exhaustivo sin guards, slices independientes con
+> defaults tipo Python pero bounds explícitos estrictos, e iteración por
+> `Iteration<T>`. Las preguntas y respuestas históricas que contradigan este
+> checkpoint se conservan únicamente como procedencia, no como diseño vigente.
+>
+
+> **Checkpoint de errores, recursos y permisos — 16 de agosto de 2026.** La
+> fuente normativa consolidada es `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`.
+> `Result` exige manejo, las excepciones explícitas usan `throws`, los errores
+> runtime implícitos siguen siendo tipados/capturables, y `catch` usa patrones.
+> `match with` conserva errores de cuerpo/cierre, soporta transferencia explícita
+> y prohíbe clonar handles. El modelo público de autoridad contiene solo
+> `requires` y `permissions`, con `during` por operación; `compile_permissions`
+> queda reemplazado. El consentimiento no vive en `init.zrk`: es una aprobación
+> firmada fuera del repo, ligada al nombre y ubicación canónica del proyecto y a
+> cada dependencia solicitante. Mover/renombrar, ampliar permisos o actualizar
+> solicitantes exige nueva aprobación; el estado idéntico usa validación
+> incremental. Las respuestas incompatibles posteriores son históricas.
+>
+
 > **Checkpoint de recursos — 12 de agosto de 2026.** Se formalizó `match with` para la adquisición y cierre automático de `Resource<E>`, manteniendo `match` sin `with` para la transferencia manual.
 >
 
@@ -4280,7 +4307,11 @@ fn dec route(path: String) {
 }
 ```
 
-Dentro del decorador se incluirá un bloque por cada clase de elemento que soporte. Un mismo decorador podrá ofrecer implementaciones para `class`, `function`, `method`, `property`, `parameter`, `constructor` y `accessor`.
+Dentro del decorador se incluirá un bloque por cada clase de elemento que
+soporte. Un mismo decorador podrá ofrecer implementaciones para `class`,
+`function`, `method`, `attribute`, `parameter` y `constructor`. `property` y
+`accessor` no son targets del lenguaje porque Zirk expresa acceso controlado con
+métodos ordinarios `get_`/`set_`.
 
 ```text
 @route("/users")

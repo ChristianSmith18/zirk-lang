@@ -1,23 +1,19 @@
 # Destructuring Patterns
 
-Destructuring patterns match a composite shape and bind selected fields.
+Direct destructuring supports records and tuples. It binds independent
+projected values.
 
 ```zirk
-match event {
-    UserCreated({ id, name }) => {
-        audit(id, name);
-    }
-    _ => ignore(event);
-}
+inmut { id, name } = user_record;
+inmut (status, count) = response_tuple;
 ```
 
-`UserCreated(user)` would bind the complete payload as `user`.
-`UserCreated({ id, name })` instead matches that payload and binds only its
-selected fields. This resembles the value handed to a JavaScript callback, but
-it is a pattern binding: the names exist only in the selected branch and no
-function call occurs.
+An algebraic enum is not destructured directly. Its payload is selected and
+extracted only inside `match`; a nested record or tuple pattern may then inspect
+that payload.
 
-Field names and types are checked against the matched record or enum variant. Bindings remain local to the branch and may be renamed with `field -> local_name`.
+Attribute names and types are checked. Bindings remain local and may be renamed
+with `attribute -> local_name`. Rest destructuring is not in the initial model.
 
 Destructure only the data the decision uses. Binding many fields can couple the branch to representation details unnecessarily.
 

@@ -26,6 +26,12 @@ Zirk 1.x deliberately has no `async fn`. `task` and `await` express structured c
 
 Expected failure uses `Result<T, E>` and exhaustive `match`. Exceptions remain for exceptional recoverable conditions, while `fatalError` terminates an irreparable state. Resources add `match with`, which guarantees closure across return, failure, exception, and cancellation.
 
+Zirk callable annotations use `Fn(P...) => R`, not TypeScript's arrow type
+syntax. Objects expose attributes and ordinary `get_`/`set_` methods rather
+than a `property` construct. Assigning a complete reference aliases it, but
+reading an attribute, index, slice, or destructured part returns an independent
+deep projection; this differs from JavaScript's usual nested-reference sharing.
+
 ## Recommended route
 
 Read bindings, the type model, nullability, classes and traits, algebraic enums, errors, resources, concurrency, modules, and project permissions. Then study packages: `.zpkg` carries typed public API and portable IR, not JavaScript source plus declaration files.

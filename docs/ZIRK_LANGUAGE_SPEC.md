@@ -39,6 +39,14 @@ Uppercase is a convention, not semantics encoded in the name.
 Inference is allowed where it is unambiguous. Every type has a default value;
 flow analysis prevents reading a variable that is not yet available.
 
+Reference boundaries are syntactic and observable. Assigning, passing,
+returning or capturing a variable that contains a complete reference shares
+that reference. Reading a projection such as `user.name`, `users[index]`, a
+slice, destructured component or pattern binding produces an independent
+logical value; a reference-valued projection therefore performs a deep clone
+and requires `Clone`. A projection used as a place, as in
+`users[index].name = "Grace"`, retains direct access to original storage.
+
 There are block, function, file and module scopes. A file symbol does not leave
 it unless published with `share`.
 
@@ -159,7 +167,9 @@ if closed return;
 The traditional loop is `for mut i = 0; i < 10; i++ { ... }`. A post-condition
 loop is `do { ... } while condition;` and always executes its body once.
 
-`match` is exhaustive when used as an expression:
+`match` over a closed domain is exhaustive in both statement and expression
+form. A statement produces `Void`; an expression unifies branch results, with
+`Never` compatible with every result:
 
 ```text
 mut message: String = match result {
@@ -168,9 +178,13 @@ mut message: String = match result {
 };
 ```
 
-As a statement it controls flow and produces no value. It admits values, types,
-associated enums, unions and destructuring. There are no special `capture` or
-`yield` forms for recovering its result.
+Patterns admit compatible values, types, enum variants, unions, complete-match
+regex literals, comma-grouped alternatives, wildcards and nested record/payload
+forms. Pattern guards are not part of Zirk: conditional logic belongs in the
+branch body. A demonstrably unreachable branch is an error. Pattern bindings
+are projection reads and therefore independent values. Records and tuples may
+be destructured directly when irrefutable; an algebraic enum is unpacked only
+inside `match`, and rest destructuring is not initially supported.
 
 Commas group alternative patterns before one `=>` body. A regex literal is a
 string pattern, and nested patterns compose:
@@ -191,7 +205,7 @@ match event {
 branch ends, including error, exception, `return` or cancellation:
 
 ```text
-mut first_line: String = match with File.open("data.txt") {
+mut first_line: String = match File.open("data.txt") with file {
     Ok(file) => file.read_line();
     Error(error) => "";
 };
@@ -207,6 +221,14 @@ fn add(a: Int32, b: Int32): Int32 {
     return a + b;
 }
 ```
+
+The native callable type is `Function(P...) => R`; `Fn(P...) => R` is its exact
+alias and the conventional spelling. Parameter labels may be written when a
+callable publishes named invocation. Optional parameters use `name?: T`, a
+variadic uses `...values: T`, and defaults belong to the concrete function, not
+the callable type. Parameters are contravariant and results covariant; expected
+failure remains explicit in a result such as
+`Fn(String) => Result<User, ParseError>`.
 
 Local inference, typed optional parameters (`name?: String`), nullable types
 (`String?`), default values, named parameters and variadics (`...values`) are
@@ -225,12 +247,24 @@ inmut ACTION = (): Void => {
 };
 ```
 
-A closure captures immutable values safely. Shared mutable capture requires that
-concurrency analysis prove it safe, or that explicit synchronization be used.
+A contextually typed lambda may omit parameter/result annotations; without a
+complete context its parameters and block result must be explicit. Closures may
+escape through parameters, returns, attributes and collections. Immutable
+value captures are snapshots, a whole reference capture shares its referent,
+a projected capture snapshots the independent projected value, and a mutable
+binding written by closures is lifted into one shared compiler-managed cell.
+Escape analysis selects inline/stack or managed storage without changing
+behavior. Assignment shares a closure environment; `clone()` deep-clones it
+when all captures are cloneable. Callables have identity through `is` and no
+structural equality.
+
 The leading `fn` is optional on a lambda. When a lambda-local name collides with
-a capture, `this.name` selects the capture. `clone(receiver.method)` creates a
-local callable bound to the same receiver and preserves its complete callable
-contract without cloning that receiver or an external handle.
+a capture, `this.name` selects the capture. Naming a function produces its
+callable directly. `receiver.method` binds the evaluated receiver;
+`Type.method` exposes an unbound receiver as the first parameter. A bound
+callable preserves receiver mutation requirements internally. Partial
+application is never implicit. A class may adapt to `Fn` only through the
+explicit callable contract.
 
 ## 7. Objects and data types
 
@@ -251,37 +285,70 @@ mut named_user = User(name: "Cristian", id: 1);
 
 The constructor is called `construct`; there is no `new`; the current instance
 is `this`. Visibility is `public`, `private` or `protected`. An unmodified class
-field is `public mut`; either modifier may be written to state a non-default
-contract explicitly.
+attribute is `public mut`; either modifier may be written explicitly. Every
+omitted attribute receives its type default before explicit initializers and
+constructor execution. A constructor may finalize an `inmut` attribute before
+the instance becomes available. There is no property declaration or implicit
+accessor dispatch; APIs use ordinary `get_` and `set_` methods.
 
 A class may declare multiple `construct` members when their effective
 parameter signatures differ. Resolution uses arity, type and argument labels,
 including reordered named arguments, and rejects duplicate or ambiguous sets.
 This exception does not enable ordinary function or method overloading.
 
-A class may extend one class and combine multiple interfaces and traits. Classes
-are inheritable by default; `abstract` classes and methods exist, but `final`
-does not. Traits may include reusable implementation.
+A concrete class may `extends` one concrete class and uses ordinary `super(...)`
+or `super.method()`. Public/protected instance methods dispatch virtually by
+default; private/static methods do not. Replacement must be written
+`override fn`, keep exact parameter contracts and may narrow the result.
+Classes are inheritable by default and `final` does not exist.
 
-Generics use `<T>` and constraints use `from`:
+An `abstract class` is instead a nominal set of required attributes and
+`abstract fn` signatures with no constructor, body, allocated state or layout
+contribution; a class adopts it with `implements`. Interfaces contain behavior
+signatures only. Traits contain behavior requirements and reusable bodies but
+no attributes or constructors. Interfaces, traits and abstract classes compose
+through `implements`; cycles/incompatible requirements fail, and a class
+resolves competing trait defaults with `override fn` and
+`TraitName.super.method()`. Capability derivation is always requested
+explicitly.
+
+Generics use `<T>` and combined constraints use `from A & B`:
 
 ```text
-fn serialize<T from Serializable>(value: T): String { ... }
+fn serialize<T from Clone & Serializable>(value: T): String { ... }
 ```
 
-They are specialized for concrete types where appropriate.
+Trailing generic defaults are allowed. Inference uses arguments, receiver,
+expected result, callable context and constraints but never guesses. Parameters
+are invariant by default; `out T` is restricted to output positions and `in T`
+to input positions, while mutable storage requires invariance. Recursive
+constraints are allowed when verifiable; `Box<T>` supplies managed indirection
+for otherwise infinite inline values. Associated and higher-kinded types are
+not initially included. Generic bodies are checked once against constraints;
+portable IR retains complete instantiation identity and final builds may
+monomorphize or share code only without observable or ABI change.
 
 Additional data types:
 
 - traditional enums, whose unmapped cases expose their exact names as default
   string values and may map with `->` to compatible string or numeric values;
-- algebraic enums with zero or more associated typed values;
+- algebraic enums with zero or more associated typed values, unpacked only by
+  `match`; enums are data-only and declare no user methods;
 - aliases via `type`;
 - unions `A | B`;
-- immutable records with structural semantics;
+- immutable nominal records with named construction, type defaults, methods
+  without mutation and structural field equality;
+- immutable heterogeneous tuples typed `Tuple(A, B)`, constructed `(a, b)` and
+  indexed only by compile-time constant `tuple[n]` (including negative indexes);
 - value classes without observable identity, storable inline;
 - fixed-length arrays written as `T[]`, canonically sized as `T[n]`, or
   constructed as `Array<T>(n)`; resizable `List<T>`; `Map<K,V>` and `Set<T>`.
+
+A union is order-independent and removes duplicates, `Never`, and alternatives
+subsumed by a supertype; before narrowing it exposes only common compatible
+capabilities. A traditional enum exposes native `.name` and `.value`, plus
+explicit name/value lookup, without implicit mapping conversion or declaration
+order. Domain behavior for any enum is an external function using `match`.
 
 A normal class has identity and state; a record represents data; a value class
 represents a compact value. `clone()` exists only through an explicit trait and
@@ -289,7 +356,14 @@ may be derived when every field is cloneable.
 
 ## 8. Iteration and functional style
 
-`Iterable<T>` and `Iterator<T>` define iteration. Generators use `fn gen`,
+`Iterable<out T>` and `Iterator<T>` define iteration. `Iterator.next()` returns
+the native data-only enum `Iteration<T>` with `Item(value)` and `Done`, avoiding
+nullable ambiguity. Ordinary iteration binds independent projected copies.
+Structural container mutation invalidates an existing iterator and its next
+operation raises a controlled invalidation error. Explicit `view(slice)` is a
+read-only bounded-lifetime shared view; ordinary access and slicing copy.
+
+Generators use `fn gen`,
 produce values in a suspendable way, preserve locals between `yield` points,
 and implement both iteration contracts. `String` is iterable over its public
 character units. Collections offer `map`, `filter` and `reduce` without
@@ -301,7 +375,12 @@ the end; `start..=end` includes it. Direction follows the relative bounds,
 `.step(distance)` uses a positive non-zero distance, `.reverse()` inverts a
 range, and an inline computed bound may be `0..{number}`. Slicing uses
 `[start:end:step]`, permits omitted or negative components, applies to ordered
-collections and `String`, and excludes its end.
+collections and `String`, and excludes its end. With positive/omitted step,
+omitted `(start,end,step)` default to `(0,length,1)`; with negative step they
+default to `(last,before-first,step)`. Thus `[::]` copies all and `[::-1]`
+copies in reverse. A zero step or explicitly out-of-range bound is a controlled
+error. A slice is a deep independent collection; slice assignment requires the
+same number of elements and never resizes.
 
 ## 8.1 Temporal values
 
@@ -327,21 +406,36 @@ controlled typed errors.
 
 ## 9. Errors
 
-`Result<T,E>` is the primary mechanism for expected failures. It is handled
-explicitly with `match`; there is no `?`.
+`Result<T,E>` is `Ok(T) | Error(E)` and is the primary mechanism for expected
+failure, analogous to Go's visible value/error outcome without an invalid
+two-value state. It must be consumed through exhaustive `match` or a Result
+method. Ignoring it is a compile error; `_ = operation()` is explicit discard.
+There is no `?` and no implicit conversion to or from an exception. Result
+combinators preserve a callback's declared exception effect; wrong-variant
+`unwrap` invokes `fatalError`.
 
-Exceptions are exceptional but recoverable:
+Explicit extraordinary exceptions are checked and must be caught or declared
+with `throws`. Declared sets participate in `Fn` compatibility. Compiler-known
+`RuntimeError` safety failures remain typed and catchable without mandatory
+signature declaration.
 
 ```text
 try {
     execute();
-} catch<HttpError> error {
-    stderr.println(error);
-} default error {
+} catch HttpError.Timeout(duration) {
+    retry_after(duration);
+} catch HttpError(error) {
     stderr.println(error);
 } finally {
+    metrics.flush();
 }
 ```
+
+Catch uses guard-free patterns and exhausts explicit exceptions not propagated.
+`throw;` exactly rethrows the current exception; wrapping creates a new
+`Throwable` with the original as `cause`. Thrown values are deeply immutable
+identities with code/message, cause, suppressed failures and lazy structured
+trace. Direct control transfer in `finally` cannot replace an active outcome.
 
 `fatalError(message)` represents an unrecoverable state and terminates the
 process after the diagnostic and whatever safe shutdown is possible. An index
@@ -366,9 +460,18 @@ convenience members directly when unambiguous. After
 package objects do not inject methods into file scope.
 
 `init.zrk` is a declarative DSL, not executable code. It contains `project`,
-`build_targets`, `globals`, `permissions`, `compile_permissions`, `requires` and
-dependencies according to the project type. It contains no global imports and no
+`build_targets`, `globals`, `permissions`, `requires` and dependencies according
+to project type. Libraries request authority with `requires`; applications grant
+it with `permissions`. Each operation uses `during: build`, `runtime` or `both`;
+there is no separate `compile_permissions` block. It contains no global imports and no
 arbitrary compiler/runtime configuration.
+
+Permission needs propagate through calls and callable metadata without
+appearing in `Fn` syntax. Source declaration is not consent: commands require a
+signed external approval bound to project name, canonical location and exact
+requester fingerprints. Moves, renames, widening and requester updates require
+reapproval; unchanged fingerprints use an incremental fast path. Deployed
+programs never prompt and dynamic denial returns typed `PermissionDeniedError`.
 
 ## 11. Conversion and casts
 

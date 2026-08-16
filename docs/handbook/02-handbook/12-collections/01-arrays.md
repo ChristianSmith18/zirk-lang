@@ -26,7 +26,11 @@ All Zirk arrays are fixed-size. A declaration that makes the size part of its
 type communicates an additional compile-time contract; it does not select a
 different resizable collection.
 
-Array equality is element-wise when `T` supports equality. Assignment aliases the same array; it does not copy elements. Slices and iterators preserve bounds and alias permissions, and mutation through any view is rejected when the source is `inmut::strict`.
+Array equality is element-wise when `T` supports equality. Assignment of the
+whole variable aliases the same array. Index reads, slices, and iterator items
+are independent projections; slices deep-copy their elements. Only an explicit
+read-only view shares a subregion, and no mutable view may weaken an
+`inmut::strict` source.
 
 ---
 

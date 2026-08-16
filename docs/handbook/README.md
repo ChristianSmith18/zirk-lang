@@ -46,7 +46,7 @@ When an example is intentionally invalid, the chapter labels it and explains the
 
 ## Source authority
 
-The handbook derives its topic inventory from [`docs/01_plantilla_zirk.md`](../01_plantilla_zirk.md), but final specifications are authoritative. The master specification defines scope and exclusions; each specialized final specification governs its own area. See the [source map](./_editorial/source-map.md) for the complete precedence rule.
+The handbook derives its topic inventory from [`docs/01_plantilla_zirk.md`](../01_plantilla_zirk.md), but final specifications are authoritative. Begin with the master specification, then the [core semantics checkpoint](../CORE_LANGUAGE_SEMANTICS.md) and [error/resource/permission checkpoint](../ERROR_RESOURCE_PERMISSION_SEMANTICS.md) before specialized specifications. See the [source map](./_editorial/source-map.md) for complete precedence.
 
 ## Contributing to the handbook
 

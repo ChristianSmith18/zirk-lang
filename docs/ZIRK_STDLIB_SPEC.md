@@ -65,8 +65,9 @@ mut line = stdin.read_line();
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
 - an unqualified convenience call resolves through the imported standard object
   when unique; a collision requires `stdout.println(...)`.
-- `clone(stdout.println)` produces a callable bound to `stdout` without cloning
-  the stream or its native handle.
+- `mut print: Fn(String) => Void = stdout.println` produces a callable bound to
+  `stdout` without cloning the stream or native handle; cloning the callable
+  preserves the receiver unless the receiver is explicitly cloned first.
 
 `stdin` offers line, char and byte reads. EOF is not an exception: it is
 represented through `ReadResult<T>` or an equivalent algebraic result that
@@ -80,7 +81,7 @@ The async variants suspend a task without blocking a thread.
 ```text
 import { File } from std.fs;
 
-mut content: String = match with File.open("data.txt") {
+mut content: String = match File.open("data.txt") with file {
     Ok(file) => file.read_text();
     Error(error) => return Error(error);
 };
@@ -156,8 +157,26 @@ Minimum types:
 - iterators and views.
 
 Collections offer `map`, `filter`, `reduce`, search, sorting and explicit
-conversion. Functional operations do not mutate the source. Index access is
-bounds-checked; safe accessors returning an optional type are provided.
+conversion. Functional operations do not mutate the source. Whole collection
+assignment shares the container; index, slice, iterator, key/value/entry and
+view materialization reads produce deep independent values and require `Clone`
+where necessary. A projection used as a mutation place writes original storage.
+
+Index access is bounds-checked and accepts negative positions for ordered
+families. Direct absence raises a typed controlled error; `get` returns a typed
+`Result`, while `get_or_null` deliberately collapses absence with nullability.
+Slices use direction-sensitive Python-style omitted defaults, reject explicit
+out-of-range bounds, deep-copy results and require equal-length replacement.
+List resizing uses explicit add/insert/remove/splice APIs; Array never resizes.
+
+Iteration uses `Iterable<out T>`, `Iterator<T>` and
+`Iteration<T>.Item/Done`, yields independent values and fails deterministically
+after structural invalidation. Read-only `view` is explicit shared storage with
+a bounded lifetime; mutable iteration waits for the memory/reference model.
+Array/List equality is ordered, Map equality compares mappings, Set equality
+compares membership and Range equality compares its definition. Public API
+tables document mutation, constraints, complexity and capacity/allocation
+errors.
 
 ## 8. `std.time`
 
@@ -328,6 +347,29 @@ Public stdlib APIs must:
 - offer limits against hostile inputs;
 - keep equivalent behaviour across supported targets or declare explicit
   differences.
+
+`Result<T,E>` provides `is_ok`, `is_error`, nullable extraction, `get_or`,
+`get_or_else`, `map`, `map_error`, `and_then`, `or_else`, `unwrap`,
+`unwrap_error` and `or_throw`. `Error`, `Throwable`, `RuntimeError`,
+`StackTrace`, `Resource<E>`, `ResourceFailure<B,C>`, `SecretString`,
+`Environment` and exact preferred alias `Env` are standard contracts.
+
+`Env` exposes static `get`, `get_or_null`, `get_or`, `require`, `get_secret`,
+`contains` and `list_names`. Every operation checks its named environment or
+secret grant; broad listing needs broad authority. Secrets redact from
+diagnostics, logs and traces and require deliberate reveal. Environment
+mutation is not in the initial API.
+
+Filesystem, network and process APIs use scoped permissions and return typed
+permission denial. Process execution validates canonical executable and
+allowed argument forms; shell execution is separate high-risk authority.
+
+`Function(P...) => R` is the long callable type and `Fn(P...) => R` its
+preferred alias. `Clone` means deep logical independence, is required for a
+reference-valued projection read, and is never inserted for whole-reference
+assignment. Enums are data-only; enum domain transformations are ordinary
+external functions, while native name/mapping lookup remains part of the enum
+runtime contract.
 
 ## 17. Exclusions
 

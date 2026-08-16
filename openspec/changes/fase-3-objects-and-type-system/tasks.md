@@ -64,7 +64,7 @@
 - [ ] 4.5 Parsear casts postfijos (`as`) y prefijos (`<T>`)
 - [ ] 4.6 Rechazar los casts que exigen `unsafe`, indicando la fase que los trae
 - [ ] 4.7 Parsear `?.`, retirando el diagnóstico de fase de la fase anterior
-- [ ] 4.8 Rechazar la sintaxis de tipo función en posición de tipo, indicando la fase que la trae (D9)
+- [ ] 4.8 Rechazar temporalmente `Function(...) => R` y `Fn(...) => R` en posición de tipo, indicando la fase que los implementa (D9)
 - [ ] 4.9 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 5. Tipos — nominalidad y miembros
@@ -180,4 +180,4 @@
 - [ ] 14.2 Registrar en ADRs las decisiones durables: layout de objetos y forma del despacho
 - [ ] 14.3 Resolver o registrar como pendientes las preguntas abiertas del design
 - [ ] 14.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha
-- [ ] 14.5 Confirmar que D9 sigue en pie al cerrar: ninguna closure escapa ni se anota
+- [ ] 14.5 Confirmar el límite de Fase 3 de D9 sin presentarlo como semántica final: ninguna closure escapa ni se anota todavía

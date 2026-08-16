@@ -53,11 +53,19 @@ The public API allows:
 
 It does not allow mutating internal memory, fabricating invalid nodes, bypassing
 the type checker, or reaching the filesystem, network or processes without
-`compile_permissions`.
+an application `permissions` grant whose operation is marked `during: build`.
 
 Transformations are re-parsed, re-resolved, re-typed and re-validated. The
 compiler preserves traceability between original and generated code for
 diagnostics and debugging.
+
+Permission effects are inferred through declarations and higher-order callable
+metadata. Before executing compile-time or runtime code, the CLI compares
+signed project-location, manifest, lockfile, permission, requester-subgraph and
+approval fingerprints. Exact matches take the no-change fast path; only changed
+graph segments are recomputed. A moved or renamed project, widened grant, new
+or updated requester, changed integrity/path/phase, or invalid approval stops
+before code execution and requires explicit consent.
 
 ## 4. IR and packages
 

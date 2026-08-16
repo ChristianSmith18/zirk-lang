@@ -1,6 +1,9 @@
 # Standard Library Index
 
-Initial modules are `std.io`, `std.fs`, `std.path`, `std.process`, `std.net`, `std.http`, `std.json`, `std.crypto`, `std.time`, `std.task`, `std.thread`, `std.sync`, `std.collections`, `std.testing`, `std.reflect`, and `std.system`.
+Initial modules are `std.io`, `std.fs`, `std.path`, `std.process`, `std.net`,
+`std.http`, `std.json`, `std.crypto`, `std.time`, `std.task`, `std.thread`,
+`std.sync`, `std.collections`, `std.testing`, `std.reflect`, `std.system`, and
+`std.environment` (`Environment`, preferred alias `Env`).
 
 See the [Standard Library](../04-standard-library/README.md) for per-module permissions, failure, blocking, cancellation, resource, and security contracts.
 

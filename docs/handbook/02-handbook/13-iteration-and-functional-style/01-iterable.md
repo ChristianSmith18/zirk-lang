@@ -22,6 +22,18 @@ for character in "Zirk" {
 A user-defined class becomes iterable by implementing `Iterable<T>` and
 returning an `Iterator<T>` from `iterator()`.
 
+The contract is covariant and yields independent projections:
+
+```zirk
+interface Iterable<out T> {
+    fn iterator(): Iterator<T>;
+}
+```
+
+Consequently, mutating a loop variable that contains a reference-backed value
+does not mutate the collection element. Use an indexed place or another
+explicit collection mutation operation to change storage.
+
 ---
 
 **Previous:** [← Iteration and Functional Style](README.md) · **Next:** [ Iterator](02-iterator.md)

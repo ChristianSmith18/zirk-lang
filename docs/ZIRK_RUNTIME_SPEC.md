@@ -197,6 +197,13 @@ resource and must not silently hide a primary error.
 There is no `defer` in 1.x. The compiler prevents a managed resource or a
 dependent reference from escaping the scope.
 
+Grouped acquisitions proceed left-to-right and unwind right-to-left. A body
+`Result.Error` and close error compose as `ResourceFailure.BodyAndClose`; a
+close error during exception propagation is suppressed on the primary
+throwable. Transfer invalidates the old responsibility. Resources are not
+ordinarily cloneable, dependent resources cannot outlive parents, and dynamic
+closed/transferred misuse is a typed runtime failure.
+
 ## 11. Signals and ordered shutdown
 
 The stdlib translates supported signals (`SIGINT`, `SIGTERM` or equivalents)
@@ -220,6 +227,18 @@ The runtime enforces declared permissions for filesystem, network, processes,
 environment and other capabilities. A library declares requirements; the
 application grants the final set. The absence of a permission produces a clear
 error, not an automatic grant.
+
+The effective grant is the intersection of signed developer approval and the
+application declaration. Approval is external and bound to project name,
+canonical location, user/device, scope/phase and exact requester
+versions/integrity/paths. Filesystem targets are canonicalized with symlink
+escape protection; network redirects and DNS results remain in origin scope;
+process arguments and shell authority are checked separately; secrets redact.
+Runtime never prompts or self-edits a manifest.
+
+Explicit throwables preserve identity, cause and suppressed failures. Traces
+materialize lazily, reconstruct logical task/generator frames where metadata
+permits, and never capture locals or secrets by default.
 
 `unsafe` does not bypass permissions or operating-system validations.
 

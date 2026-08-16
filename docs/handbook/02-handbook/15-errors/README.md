@@ -1,6 +1,10 @@
 # Errors
 
-Zirk separates expected failure, exceptional recovery, and irreparable termination. `Result<T, E>` is primary for expected outcomes; exceptions handle exceptional but recoverable conditions; `fatalError` terminates an invalid process state.
+Zirk has four deliberately separate failure channels: `Result<T,E>` for
+expected operational failure, checked `throws` for explicit extraordinary
+recovery, implicit typed `RuntimeError` for safe runtime checks, and
+`fatalError` for irreparable state. There is no implicit conversion between
+them. This unit defines handling, propagation, provenance and boundaries.
 
 ---
 

@@ -28,6 +28,11 @@ Generators implement `Iterator<T>` and `Iterable<T>`. Stopping iteration closes
 the generator and performs its required cleanup. Errors, cancellation, captures,
 and resources remain governed by the same contracts as ordinary functions.
 
+A failure-capable generator declares a `Result`-shaped contract. It does not
+turn failure into normal `Iteration.Done`. Calling a generator is lazy; the
+body starts on the first request and abandonment deterministically runs its
+iterator cleanup.
+
 ---
 
 **Previous:** [← Iterator](02-iterator.md) · **Next:** [ map](04-map.md)

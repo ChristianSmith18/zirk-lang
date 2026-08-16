@@ -6,6 +6,11 @@ An assertion failure reports the expression, source location, and useful actual 
 
 Use `Result` or a typed exception when callers can recover.
 
+Thrown values implement `Throwable`, are deeply immutable reference identities,
+and expose stable `message`, `code`, `cause`, `suppressed`, and `stack_trace`
+contracts. C ABI, process, serialization, and other exception-free boundaries
+must catch and translate them explicitly.
+
 ---
 
 **Previous:** [← fatalError](07-fatal-error.md) · **Next:** [ Resources](../16-resources/README.md)

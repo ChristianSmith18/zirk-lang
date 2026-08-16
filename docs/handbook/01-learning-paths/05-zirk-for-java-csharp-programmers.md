@@ -19,6 +19,11 @@ mut message: String = match result {
 
 Expected failure uses `Result<T, E>`. Exceptions represent exceptional but recoverable situations. `fatalError` is reserved for irreparable states. Learn the decision rule before translating exception-heavy APIs.
 
+Zirk explicit exceptions are checked with `throws`; built-in safe-runtime
+exceptions remain catchable but need not pollute every signature. Catch uses
+pattern form `catch Type(binding)`. Resource close errors and suppressed
+failures are typed instead of relying on finalizers.
+
 ## Concurrency is structured
 
 There is no public global event loop and no `async fn` in Zirk 1.x. A `task` belongs to a scope, cancellation propagates through the structure, `parallel` requests multicore CPU work, and `thread` represents a real system thread.

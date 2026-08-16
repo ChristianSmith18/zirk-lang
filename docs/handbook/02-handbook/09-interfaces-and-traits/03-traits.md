@@ -6,6 +6,10 @@ Traits suit cross-cutting capabilities such as display, cloning, iteration, or s
 
 When combined traits provide incompatible members, the type must resolve the conflict explicitly; declaration order must not silently choose semantics.
 
+Traits cannot declare attributes, constructors, or stored state. Resolve a
+conflict with an explicit `override fn`; its body can select one reusable
+implementation with `TraitName.super.method()`.
+
 ```zirk
 trait Loggable {
     fn log_prefix(): String;

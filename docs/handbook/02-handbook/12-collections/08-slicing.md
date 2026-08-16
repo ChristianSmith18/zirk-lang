@@ -20,11 +20,14 @@ The end is exclusive. Negative indices count from the end, and a negative step
 walks backward. Slicing is available to ordered collections and `String`, with
 string indices operating on its public grapheme semantics.
 
-Whether slicing returns a view or an independent collection affects mutation, allocation, and escape behavior and must be documented by each type.
+Omitted positive-step bounds mean start `0` and end `length`; omitted
+negative-step bounds mean start at the last element and stop just before the
+first. Step zero and explicitly out-of-bounds values are errors. Zirk does not
+clamp explicit bounds as Python does.
 
-Each concrete type documents whether a slice is a safe view or an independent
-value. That representation choice cannot allow a slice to outlive its storage or
-create untracked mutable aliasing.
+Every slice is a deep independent collection. Slice assignment requires an
+equal-sized replacement. Use an explicit view API to share storage, or a named
+structural operation such as `splice` when a list must change length.
 
 ---
 

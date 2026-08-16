@@ -6,4 +6,4 @@
 
 ---
 
-**Previous:** [← std.reflect](16-std-reflect.md) · **Next:** [ Native and Low-Level Programming](../05-native-and-low-level/README.md)
+**Previous:** [← std.reflect](16-std-reflect.md) · **Next:** [`std.environment` →](18-std-environment.md)
