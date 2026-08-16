@@ -526,6 +526,27 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Class);
 
         let name = self.expect_identifier("after `class`")?;
+
+        // A class extends at most one class. Several bases would need a rule
+        // for which one a repeated member comes from, and the spec has none.
+        let extends = if self.eat_keyword(Keyword::Extends) {
+            let base = self.expect_identifier("after `extends`")?;
+            if matches!(self.peek(), TokenKind::Comma) {
+                let span = self.peek_span();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "a class extends a single class",
+                    "multiple inheritance is not part of the language",
+                    Some("combine contracts with `implements` instead".into()),
+                );
+                return None;
+            }
+            Some(base)
+        } else {
+            None
+        };
+
         self.expect(&TokenKind::LBrace, "after the class name");
 
         let mut fields = Vec::new();
@@ -549,6 +570,7 @@ impl<'a> Parser<'a> {
 
         Some(ClassDecl {
             name,
+            extends,
             fields,
             constructors,
             methods,

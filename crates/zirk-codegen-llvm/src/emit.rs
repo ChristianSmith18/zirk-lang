@@ -98,6 +98,40 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         })
         .collect();
 
+    // One descriptor per class: its method table, in index order. A subclass's
+    // starts with its base's entries, so a method's slot is the same whoever
+    // is looking — which is what makes an indirect call one load and one jump.
+    let descriptors: Vec<PointerValue> = module
+        .objects
+        .iter()
+        .map(|layout| {
+            let ptr = context.ptr_type(AddressSpace::default());
+            let entries: Vec<BasicValueEnum> = layout
+                .methods
+                .iter()
+                .map(|symbol| {
+                    functions[symbol]
+                        .as_global_value()
+                        .as_pointer_value()
+                        .into()
+                })
+                .collect();
+
+            let table = ptr.const_array(
+                &entries
+                    .iter()
+                    .map(|e| e.into_pointer_value())
+                    .collect::<Vec<_>>(),
+            );
+            let global =
+                llvm.add_global(table.get_type(), None, &format!("zk.type.{}", layout.name));
+            global.set_initializer(&table);
+            global.set_constant(true);
+            global.set_linkage(Linkage::Private);
+            global.as_pointer_value()
+        })
+        .collect();
+
     for function in &module.functions {
         FunctionEmitter {
             context,
@@ -107,6 +141,7 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             runtime: &runtime,
             functions: &functions,
             strings: &strings,
+            descriptors: &descriptors,
             values: HashMap::new(),
             value_types: HashMap::new(),
             slots: HashMap::new(),
@@ -266,6 +301,8 @@ struct FunctionEmitter<'ctx, 'a> {
     runtime: &'a runtime::Runtime<'ctx>,
     functions: &'a HashMap<String, FunctionValue<'ctx>>,
     strings: &'a [PointerValue<'ctx>],
+    /// The type descriptor of each class, by layout id.
+    descriptors: &'a [PointerValue<'ctx>],
 
     values: HashMap<ir::ValueId, BasicValueEnum<'ctx>>,
     /// The IR type of each emitted value, which a pointer alone does not carry.
@@ -368,6 +405,53 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .const_int(*value as u64, false)
                     .into(),
             ),
+            ir::InstKind::CallVirtual {
+                object,
+                index,
+                args,
+            } => {
+                let receiver = self.operand(*object).into_pointer_value();
+                let id = self.object_layout_of(*object);
+                let layout = &self.module.objects[id as usize];
+
+                // The descriptor lives in the header, so which body runs is
+                // decided by the object itself and not by the static type of
+                // whoever is holding it.
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let descriptor = self
+                    .builder
+                    .build_load(ptr, receiver, "descriptor")
+                    .expect("load the descriptor")
+                    .into_pointer_value();
+
+                // The table is an array of pointers, so the slot is the base
+                // displaced by the index.
+                let offset = self.context.i32_type().const_int(u64::from(*index), false);
+                let slot = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(ptr, descriptor, &[offset], "method_slot")
+                        .expect("a verified module calls a method the table has")
+                };
+                let target = self
+                    .builder
+                    .build_load(ptr, slot, "method")
+                    .expect("load the method")
+                    .into_pointer_value();
+
+                let signature = self.functions[&layout.methods[*index as usize]].get_type();
+                let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
+                arguments.extend(
+                    args.iter()
+                        .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
+                );
+
+                let call = self
+                    .builder
+                    .build_indirect_call(signature, target, &arguments, "call")
+                    .expect("call through the table");
+                call.try_as_basic_value().basic()
+            }
+
             ir::InstKind::Alloc(id) => {
                 let layout = &self.module.objects[*id as usize];
                 let struct_type = object_struct(self.context, layout, &self.module.closures);
@@ -378,12 +462,23 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let size = struct_type.size_of().expect("a sized object");
                 let align = struct_type.get_alignment();
 
-                let call = self
+                let object = self
                     .builder
                     .build_call(self.runtime.alloc, &[size.into(), align.into()], "object")
-                    .expect("call the allocator");
+                    .expect("call the allocator")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the allocator returns a pointer")
+                    .into_pointer_value();
 
-                call.try_as_basic_value().basic()
+                // The descriptor goes into the header right away: it is what
+                // makes the object know its own type, which is what every
+                // dynamic dispatch reads.
+                self.builder
+                    .build_store(object, self.descriptors[*id as usize])
+                    .expect("store the descriptor");
+
+                Some(object.into())
             }
 
             ir::InstKind::LoadField { object, index } => {

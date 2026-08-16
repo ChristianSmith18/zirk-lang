@@ -164,6 +164,13 @@ pub struct ObjectLayout {
     /// The name of the class, which the descriptor is emitted under.
     pub name: String,
     pub fields: Vec<ObjectField>,
+    /// The method table, one symbol per index.
+    ///
+    /// A subclass's table starts with its base's entries, in the same order,
+    /// with an override replacing the entry it overrides. That is what keeps a
+    /// method's index from moving as the hierarchy grows, and what makes an
+    /// indirect call one load and one jump. Decision D3.
+    pub methods: Vec<String>,
 }
 
 impl ObjectLayout {
@@ -311,6 +318,15 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
+    /// Calls method `index` through the object's own table.
+    ///
+    /// Emitted only where the target is not statically known — that is, where
+    /// some subclass redefines the method. Anything else is an ordinary call.
+    CallVirtual {
+        object: Operand,
+        index: u32,
+        args: Vec<Operand>,
+    },
     /// Reads field `index` of an object, header excluded.
     LoadField {
         object: Operand,

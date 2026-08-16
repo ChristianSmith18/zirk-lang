@@ -1,0 +1,48 @@
+// Herencia simple: campos heredados, `protected`, redefinición y el despacho
+// que hace que la redefinición se vea a través del tipo de la base.
+
+class User {
+    name: String;
+    protected role: String;
+
+    construct(name: String) {
+        this.name = name;
+        this.role = "user";
+    }
+
+    fn describe(): String { return this.name; }
+
+    // Nadie la redefine: se llama directo.
+    fn label(): String { return this.role; }
+}
+
+class Manager extends User {
+    team: Int32;
+
+    construct(name: String, team: Int32) {
+        this.name = name;
+        this.role = "manager";
+        this.team = team;
+    }
+
+    // `protected` alcanza a la subclase.
+    fn describe(): String { return this.role; }
+}
+
+// Recibe la base y despacha sobre lo que realmente le llega.
+fn describe_any(u: User): String { return u.describe(); }
+
+fn main(): Void {
+    mut u = User("Ana");
+    mut m = Manager("Cristian", 4);
+
+    stdout.println(u.describe());
+    stdout.println(m.describe());
+    stdout.println(m.name);
+    stdout.println(m.team);
+    stdout.println(m.label());
+
+    // La misma llamada, dos cuerpos distintos.
+    stdout.println(describe_any(u));
+    stdout.println(describe_any(m));
+}

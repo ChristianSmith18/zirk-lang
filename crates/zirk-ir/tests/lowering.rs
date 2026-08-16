@@ -773,3 +773,119 @@ fn a_method_without_a_body_is_not_emitted() {
             .is_some()
     );
 }
+
+// --- Herencia ----------------------------------------------------------------
+
+const HIERARCHY: &str = "class Base {
+    x: Int32;
+    construct() { this.x = 0; }
+    fn overridden(): Int32 { return this.x; }
+    fn only_here(): Int32 { return this.x; }
+}
+class Derived extends Base {
+    y: Int32;
+    construct() { this.x = 0; this.y = 1; }
+    fn overridden(): Int32 { return this.y; }
+}";
+
+#[test]
+fn a_subclass_layout_starts_with_its_base() {
+    let module = compile(&format!("{HIERARCHY}\nfn main(): Void {{ }}"));
+    let base = module.objects.iter().find(|o| o.name == "Base").unwrap();
+    let derived = module.objects.iter().find(|o| o.name == "Derived").unwrap();
+
+    // Reaching an inherited field is the same offset whoever is looking.
+    assert_eq!(derived.fields[0], base.fields[0]);
+    assert_eq!(derived.fields[1].name, "y");
+}
+
+#[test]
+fn an_override_keeps_the_slot_it_replaces() {
+    let module = compile(&format!("{HIERARCHY}\nfn main(): Void {{ }}"));
+    let base = module.objects.iter().find(|o| o.name == "Base").unwrap();
+    let derived = module.objects.iter().find(|o| o.name == "Derived").unwrap();
+
+    let slot = base
+        .methods
+        .iter()
+        .position(|m| m.contains("overridden"))
+        .expect("the base declares it");
+
+    // Same slot, different body: that is what makes an indirect call one load
+    // and one jump.
+    assert_eq!(
+        derived.methods[slot],
+        zirk_ir::method_symbol("Derived", "overridden")
+    );
+    assert_eq!(
+        base.methods[slot],
+        zirk_ir::method_symbol("Base", "overridden")
+    );
+}
+
+#[test]
+fn an_inherited_method_keeps_pointing_at_its_owner() {
+    let module = compile(&format!("{HIERARCHY}\nfn main(): Void {{ }}"));
+    let derived = module.objects.iter().find(|o| o.name == "Derived").unwrap();
+
+    // The body lives where it was declared, not where it is reached from.
+    assert!(
+        derived
+            .methods
+            .contains(&zirk_ir::method_symbol("Base", "only_here"))
+    );
+}
+
+#[test]
+fn a_call_through_the_base_goes_through_the_table() {
+    let module = compile(&format!(
+        "{HIERARCHY}\n\
+         fn value(b: Base): Int32 {{ return b.overridden(); }}\n\
+         fn main(): Void {{ mut d = Derived(); mut n = value(d); }}"
+    ));
+    let through_base = module.function("value").expect("the function exists");
+
+    assert!(
+        instructions(through_base)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallVirtual { .. })),
+        "seen as a `Base`, which body runs is not statically known"
+    );
+}
+
+#[test]
+fn a_call_on_the_class_that_declares_it_stays_direct() {
+    // Devirtualization by construction: on a `Derived` nothing below redefines
+    // it, so the target is known and the indirection buys nothing.
+    let module = compile(&format!(
+        "{HIERARCHY}\nfn main(): Void {{ mut d = Derived(); mut n = d.overridden(); }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        !instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallVirtual { .. })),
+    );
+}
+
+#[test]
+fn a_method_nobody_redefines_is_called_directly() {
+    let module = compile(&format!(
+        "{HIERARCHY}\nfn main(): Void {{ mut d = Derived(); mut n = d.only_here(); }}"
+    ));
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CallVirtual { .. })),
+        "paying an indirection for a generality the program cannot use is paying for nothing"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::Call { callee, .. } if callee.contains("only_here"))),
+    );
+}

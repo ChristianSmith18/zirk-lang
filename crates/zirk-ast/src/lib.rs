@@ -116,6 +116,11 @@ pub struct EnumDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,
+    /// The class this one extends, if any.
+    ///
+    /// At most one: `ZIRK_LANGUAGE_SPEC.md` section 7 admits a single base
+    /// class, and several contracts.
+    pub extends: Option<Ident>,
     pub fields: Vec<FieldDecl>,
     /// Every `construct` the class declares. More than one is allowed when
     /// their effective signatures differ (`ZIRK_LANGUAGE_SPEC.md` section 7).
