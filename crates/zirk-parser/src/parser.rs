@@ -1978,28 +1978,42 @@ impl<'a> Parser<'a> {
         Some(Expr::Path(ident))
     }
 
-    /// `.name` and `?.name` chains hanging off an already-parsed expression.
+    /// The postfix chain hanging off an already-parsed expression: `.name`,
+    /// `?.name` and `(args)`, in any order and any number of times.
     ///
     /// `Direction.North` and `user.name` are the same shape, and telling them
     /// apart means knowing whether `Direction` is a type or a value — which is
     /// resolution, not parsing. Both produce a field access and the checker
-    /// decides which one it is.
+    /// decides which one it is. The same goes for `u.greeting()`: it is a call
+    /// whose callee happens to be an access.
     fn parse_member_chain(&mut self, mut object: Expr) -> Option<Expr> {
         loop {
-            let safe = match self.peek() {
-                TokenKind::Dot => false,
-                TokenKind::QuestionDot => true,
-                _ => return Some(object),
-            };
-            self.pos += 1;
+            match self.peek() {
+                TokenKind::Dot | TokenKind::QuestionDot => {
+                    let safe = matches!(self.peek(), TokenKind::QuestionDot);
+                    self.pos += 1;
 
-            let name = self.expect_identifier("after the access operator")?;
-            object = Expr::Field(FieldExpr {
-                span: object.span().to(name.span),
-                object: Box::new(object),
-                name,
-                safe,
-            });
+                    let name = self.expect_identifier("after the access operator")?;
+                    object = Expr::Field(FieldExpr {
+                        span: object.span().to(name.span),
+                        object: Box::new(object),
+                        name,
+                        safe,
+                    });
+                }
+                TokenKind::LParen => {
+                    let args = self.parse_args()?;
+                    let end = self.peek_span();
+                    self.expect(&TokenKind::RParen, "to close the argument list");
+
+                    object = Expr::Call(CallExpr {
+                        span: object.span().to(end),
+                        callee: Box::new(object),
+                        args,
+                    });
+                }
+                _ => return Some(object),
+            }
         }
     }
 

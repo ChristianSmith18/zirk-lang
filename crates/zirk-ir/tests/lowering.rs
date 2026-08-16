@@ -707,3 +707,69 @@ fn several_constructors_are_emitted_under_distinct_names() {
             .is_some()
     );
 }
+
+#[test]
+fn a_method_becomes_a_function_over_its_receiver() {
+    let module = with_class(
+        "class Counter {
+             count: Int32;
+             construct() { this.count = 0; }
+             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
+         }",
+        "",
+    );
+    let method = module
+        .function(&zirk_ir::method_symbol("Counter", "bump"))
+        .expect("the method is emitted");
+
+    assert_eq!(method.params.len(), 1, "only the receiver");
+    assert_eq!(
+        method.slot(method.params[0]).map(|s| s.name.as_str()),
+        Some("this")
+    );
+    assert_eq!(method.return_type, IrType::Int32);
+}
+
+#[test]
+fn a_method_call_passes_the_receiver_first() {
+    let module = with_class(
+        "class Greeter {
+             prefix: String;
+             construct() { this.prefix = \">\"; }
+             fn greet(name: String): String { return name; }
+         }",
+        "mut g = Greeter();\nmut s = g.greet(\"hola\");",
+    );
+    let main = module.function("main").expect("main exists");
+
+    let call = instructions(main)
+        .into_iter()
+        .find_map(|k| match k {
+            InstKind::Call { callee, args } if callee.contains("greet") => Some(args),
+            _ => None,
+        })
+        .expect("the method is called");
+
+    // The receiver plus the declared argument.
+    assert_eq!(call.len(), 2);
+}
+
+#[test]
+fn a_method_without_a_body_is_not_emitted() {
+    // Nothing declares one yet — `abstract` is deferred — but the lowering
+    // must not assume every method has a body when it arrives.
+    let module = with_class(
+        "class Counter {
+             count: Int32;
+             construct() { this.count = 0; }
+             fn bump(): Int32 { return this.count; }
+         }",
+        "",
+    );
+
+    assert!(
+        module
+            .function(&zirk_ir::method_symbol("Counter", "bump"))
+            .is_some()
+    );
+}

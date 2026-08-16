@@ -45,7 +45,7 @@
 - [x] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
 - [ ] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
 - [ ] 2.6 Parsear `trait`, admitiendo cuerpos
-- [ ] 2.7 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 2.7 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 3. Gramática — genéricos
 
@@ -75,7 +75,7 @@
 - [x] 5.4 Verificar visibilidad, distinguiendo miembro oculto de miembro inexistente
 - [ ] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
 - [x] 5.6 Verificar `construct`: que exista, resolver por aridad e inicializar todo campo. Falta desempatar firmas de igual aridad por tipo y por etiqueta, que llega con los argumentos nombrados reordenados
-- [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere
+- [ ] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere — llega con `extends`, que es lo que hace posible redefinir
 - [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
 - [ ] 5.10 Rechazar anotar una closure como parámetro, retorno o campo (D9)
@@ -136,7 +136,7 @@
 - [ ] 10.2 Colocar los campos heredados antes que los propios (D2)
 - [x] 10.3 Bajar la construcción a alocación abstracta más inicialización
 - [x] 10.4 Bajar el acceso a campo a lectura por desplazamiento
-- [ ] 10.5 Bajar la llamada directa cuando el método no es redefinible (D3)
+- [x] 10.5 Bajar la llamada directa cuando el método no es redefinible (D3). Sin herencia ninguno lo es, así que hoy toda llamada es directa
 - [ ] 10.6 Bajar la llamada indirecta por tabla cuando lo es (D3)
 - [ ] 10.7 Bajar el despacho a través de un contrato por la tabla de la interfaz (D3)
 - [ ] 10.8 Bajar `?.` a comprobación de nulidad con dos bloques (D7)

@@ -66,6 +66,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             module.functions.push(lowered);
             module.functions.extend(lifted);
         }
+
+        // A method is the same shape as a constructor: a function whose first
+        // parameter is the receiver.
+        for (index, method) in class.methods.iter().enumerate() {
+            let Some(body) = &method.body else { continue };
+            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
+            let (lowered, lifted) = lowering.run_method(class, method, body, id as u32, index);
+            module.functions.push(lowered);
+            module.functions.extend(lifted);
+        }
     }
 
     for function in &program.functions {
@@ -87,6 +97,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 /// appear in a Zirk identifier, so a user function can never take the name.
 pub fn constructor_symbol(class: &str, index: usize) -> String {
     format!("{class}$construct${index}")
+}
+
+/// The name a method is emitted under.
+///
+/// Its own name suffices: a class cannot declare two methods with the same
+/// one, since there is no overloading.
+pub fn method_symbol(class: &str, method: &str) -> String {
+    format!("{class}${method}")
 }
 
 /// Converts a frontend type into an IR type.
@@ -489,6 +507,67 @@ impl<'a> FunctionLowering<'a> {
         (lowered, lifted)
     }
 
+    /// Lowers one method into a function whose first parameter is the receiver.
+    fn run_method(
+        mut self,
+        class: &ast::ClassDecl,
+        method: &ast::MethodDecl,
+        body: &ast::Block,
+        id: u32,
+        index: usize,
+    ) -> (Function, Vec<Function>) {
+        self.return_type = self.ir_type_from_ref(&method.return_type);
+
+        let entry = self.new_block();
+        self.current = entry;
+        self.scopes.push(HashMap::new());
+
+        let this = self.declare_slot("this", IrType::Object(id), class.name.span);
+
+        let resolved: Vec<IrType> = self
+            .checked
+            .classes
+            .get(id as usize)
+            .and_then(|c| c.methods.iter().find(|m| m.index == index))
+            .map(|m| m.params.iter().map(|p| ir_type(p.ty)).collect())
+            .expect("the checker records every method");
+
+        let mut params = vec![this];
+        params.extend(
+            method
+                .params
+                .iter()
+                .zip(resolved)
+                .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span)),
+        );
+
+        self.lower_block(body);
+
+        // Same rule as an ordinary function: a `Void` one may end without an
+        // explicit return, and in any other the checker already proved every
+        // path returns.
+        if self.return_type == IrType::Void {
+            self.terminate(Terminator::Return(None));
+        } else {
+            self.terminate(Terminator::Unreachable);
+        }
+
+        self.scopes.pop();
+
+        let lifted = std::mem::take(&mut self.lifted);
+        let lowered = Function {
+            name: method_symbol(&class.name.name, &method.name.name),
+            params,
+            return_type: self.return_type,
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span: method.span,
+        };
+
+        (lowered, lifted)
+    }
+
     fn lower_block(&mut self, block: &ast::Block) {
         self.scopes.push(HashMap::new());
         for stmt in &block.statements {
@@ -886,6 +965,9 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let Some(operand) = self.lower_method_call(e, span) {
+                    return operand;
+                }
                 let name = self.callee_name(e);
                 if let Some(id) = self.class_id(&name) {
                     return self.lower_construction(e, id, span);
@@ -1387,6 +1469,51 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), ty, span)
     }
 
+    /// The method a call invokes, if it is a method call.
+    fn method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::MethodInfo> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
+        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+        self.checked.classes[id as usize].method(&field.name.name)
+    }
+
+    /// Lowers `object.method(...)` into a direct call with the receiver first.
+    ///
+    /// Direct because no method is redefinable yet: without inheritance every
+    /// call has exactly one target, and paying an indirection for a generality
+    /// the program cannot use would be paying for nothing (D3).
+    fn lower_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
+        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+
+        let class = &self.checked.classes[id as usize];
+        let method = class.method(&field.name.name)?;
+        let name = method_symbol(&class.name, &method.name);
+        let returns = ir_type(method.returns);
+        let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+
+        let receiver = self.lower_expr(&field.object);
+        let mut args = vec![receiver];
+        for (arg, ty) in call.args.iter().zip(params) {
+            args.push(self.lower_expr_as(&arg.value, ty));
+        }
+
+        Some(self.emit(InstKind::Call { callee: name, args }, returns, span))
+    }
+
     /// The layout id of a class, if the name is one.
     fn class_id(&self, name: &str) -> Option<u32> {
         self.module
@@ -1594,6 +1721,11 @@ impl<'a> FunctionLowering<'a> {
                 let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
             }
+            // A method call knows its own target and its own return type, so
+            // it needs none of the name resolution the arm below does.
+            ast::Expr::Call(e) if self.method_of(e).is_some() => {
+                self.lower_method_call(e, expr.span());
+            }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
@@ -1714,6 +1846,12 @@ impl<'a> FunctionLowering<'a> {
 
     /// Whether a call goes through a closure value rather than a name.
     fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
+        // A method call is not a closure call, and asking for the type of its
+        // callee would ask for the type of a method — which is not a value.
+        if self.method_of(call).is_some() {
+            return false;
+        }
+
         match &*call.callee {
             ast::Expr::Path(ident) => self
                 .scopes
@@ -1769,6 +1907,9 @@ impl<'a> FunctionLowering<'a> {
                 self.module.closures[id as usize].returns
             }
             ast::Expr::Call(e) => {
+                if let Some(method) = self.method_of(e) {
+                    return ir_type(method.returns);
+                }
                 let name = self.callee_name(e);
                 match self.class_id(&name) {
                     Some(id) => IrType::Object(id),

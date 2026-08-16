@@ -33,5 +33,5 @@ pub use ir::{
     Nullable, ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp,
     ValueId,
 };
-pub use lower::{constructor_symbol, lower};
+pub use lower::{constructor_symbol, lower, method_symbol};
 pub use verify::{IrError, verify};
