@@ -251,6 +251,7 @@ pub struct ClassType {
     /// One entry per `construct`. More than one is admissible when their
     /// effective signatures differ.
     pub constructors: Vec<Vec<crate::scope::ParamInfo>>,
+    pub methods: Vec<MethodInfo>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
     /// Where it was declared, which is also which file owns it.
@@ -261,6 +262,23 @@ impl ClassType {
     pub fn field(&self, name: &str) -> Option<&FieldInfo> {
         self.fields.iter().find(|f| f.name == name)
     }
+
+    pub fn method(&self, name: &str) -> Option<&MethodInfo> {
+        self.methods.iter().find(|m| m.name == name)
+    }
+}
+
+/// One method of a class, as the checker sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodInfo {
+    pub name: String,
+    pub params: Vec<crate::scope::ParamInfo>,
+    pub returns: Type,
+    pub visibility: zirk_ast::Visibility,
+    pub span: zirk_diagnostics::Span,
+    /// Its position among the class's methods, which is the name it is
+    /// emitted under.
+    pub index: usize,
 }
 
 /// One field of a class, as the checker sees it.

@@ -1,0 +1,10 @@
+class Counter {
+    count: Int32;
+
+    construct() { this.count = 0; }
+}
+
+fn main(): Void {
+    mut c = Counter();
+    stdout.println(c.count());
+}

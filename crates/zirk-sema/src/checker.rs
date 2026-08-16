@@ -9,7 +9,8 @@
 use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
-    Base, ClassType, EnumType, FieldInfo, FnType, Type, TypeNames, describe, pending_type,
+    Base, ClassType, EnumType, FieldInfo, FnType, MethodInfo, Type, TypeNames, describe,
+    pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
@@ -415,6 +416,7 @@ impl<'a> Checker<'a> {
             name: decl.name.name.clone(),
             fields: Vec::new(),
             constructors: Vec::new(),
+            methods: Vec::new(),
             shared: decl.shared,
             span: decl.name.span,
         });
@@ -459,8 +461,51 @@ impl<'a> Checker<'a> {
             .map(|c| c.params.iter().map(|p| self.resolve_param(p)).collect())
             .collect();
 
+        let mut methods: Vec<MethodInfo> = Vec::new();
+        for (index, method) in decl.methods.iter().enumerate() {
+            if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
+                let where_ = self.declared_at(previous.span, method.name.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    method.name.span,
+                    format!("method `{}` is already defined", method.name.name),
+                    format!("a previous definition exists {where_}"),
+                    Some("rename one of the two: there is no overloading".into()),
+                );
+                continue;
+            }
+
+            // A method and a field cannot share a name: `u.name` would have to
+            // mean both.
+            if let Some(field) = fields.iter().find(|f| f.name == method.name.name) {
+                let where_ = self.declared_at(field.span, method.name.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    method.name.span,
+                    format!("`{}` is already a field of this class", method.name.name),
+                    format!("the field is declared {where_}"),
+                    Some("a member is a field or a method, not both".into()),
+                );
+                continue;
+            }
+
+            methods.push(MethodInfo {
+                name: method.name.name.clone(),
+                params: method
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_param(p))
+                    .collect(),
+                returns: self.resolve_type(&method.return_type),
+                visibility: method.visibility,
+                span: method.name.span,
+                index,
+            });
+        }
+
         self.classes[id as usize].fields = fields;
         self.classes[id as usize].constructors = constructors;
+        self.classes[id as usize].methods = methods;
     }
 
     /// Checks the bodies of a class: its constructors and its methods.
@@ -2164,6 +2209,75 @@ impl<'a> Checker<'a> {
         Type::of(Base::Function(fn_type))
     }
 
+    /// `object.method(...)`.
+    ///
+    /// The receiver is checked once, by the caller, so a method call does not
+    /// evaluate it twice.
+    fn check_method_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
+        let class = &self.classes[id as usize];
+        let class_name = class.name.clone();
+        let Some(method) = class.method(&field.name.name) else {
+            // Naming a field where a method is called is its own mistake, and
+            // saying "not callable" would send the reader looking for a typo.
+            if class.field(&field.name.name).is_some() {
+                self.error(
+                    codes::NOT_CALLABLE,
+                    field.name.span,
+                    format!("`{}` is a field, not a method", field.name.name),
+                    format!("`{class_name}` declares it as data"),
+                    Some("read it without parentheses".into()),
+                );
+            } else {
+                let known: Vec<&str> = class.methods.iter().map(|m| m.name.as_str()).collect();
+                let help = if known.is_empty() {
+                    format!("`{class_name}` declares no methods")
+                } else {
+                    format!("its methods are: {}", known.join(", "))
+                };
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    field.name.span,
+                    format!("`{class_name}` has no method `{}`", field.name.name),
+                    help,
+                    None,
+                );
+            }
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let signature = Signature {
+            name: method.name.clone(),
+            params: method.params.clone(),
+            returns: method.returns,
+            shared: true,
+            span: method.span,
+        };
+        let visibility = method.visibility;
+        let declared = method.span;
+
+        // Same rule as for a field: inside its own class everything is
+        // reachable.
+        let from_inside = self.this_type == Some(Type::of(Base::Class(id)));
+        if visibility != Visibility::Public && !from_inside {
+            let line = self.sources.location(declared).line;
+            self.error(
+                codes::INACCESSIBLE_MEMBER,
+                field.name.span,
+                format!("`{}` is not accessible here", field.name.name),
+                format!(
+                    "it is declared `{}` in `{class_name}`, on line {line}",
+                    visibility.as_str()
+                ),
+                Some("only `public` members are reachable from outside the class".into()),
+            );
+        }
+
+        self.check_direct_call(expr, &signature)
+    }
+
     /// `User(...)`, which builds an instance.
     ///
     /// A class may declare several constructors, so this picks the one whose
@@ -2230,6 +2344,24 @@ impl<'a> Checker<'a> {
     }
 
     fn check_call(&mut self, expr: &CallExpr) -> Type {
+        // `u.greeting()` calls a method. It is decided here and not by the
+        // parser for the same reason `u.name` is: the shape does not say
+        // whether the base is a value with members.
+        if let Expr::Field(field) = &*expr.callee
+            && !self.variant_accesses.contains(&field.span)
+        {
+            let object = self.check_expr(&field.object);
+            if let Base::Class(id) = object.base {
+                return self.check_method_call(expr, field, id);
+            }
+            if object.is_unknown() {
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::UNKNOWN;
+            }
+        }
+
         // A call to a name resolves against the declared functions first, so a
         // named function keeps its optional and variadic parameters. Calling a
         // value goes through its function type, which has none of that.

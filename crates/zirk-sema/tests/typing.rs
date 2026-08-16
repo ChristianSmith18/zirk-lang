@@ -720,3 +720,126 @@ fn valid_a_class_names_its_own_type_in_a_field() {
         "",
     ));
 }
+
+// --- Métodos -----------------------------------------------------------------
+
+const COUNTER: &str = "class Counter {
+    count: Int32;
+    private step: Int32;
+
+    construct(step: Int32) { this.count = 0; this.step = step; }
+
+    fn bump(): Int32 { this.count = this.count + this.step; return this.count; }
+    private fn secret(): Int32 { return this.step; }
+}";
+
+#[test]
+fn valid_method_call() {
+    accepted(&with_class(
+        COUNTER,
+        "mut c = Counter(1);\nmut n = c.bump();",
+    ));
+}
+
+#[test]
+fn valid_method_calls_another_through_this() {
+    accepted(&with_class(
+        "class Counter {
+             count: Int32;
+             construct() { this.count = 0; }
+             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
+             fn twice(): Int32 { this.bump(); return this.bump(); }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn invalid_method_that_does_not_exist() {
+    let output = rejected(&with_class(
+        COUNTER,
+        "mut c = Counter(1);\nmut n = c.jump();",
+    ));
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains("its methods are"), "{output}");
+}
+
+#[test]
+fn invalid_calling_a_field() {
+    // Naming a field where a method is called is its own mistake: saying "not
+    // callable" would send the reader looking for a typo.
+    let output = rejected(&with_class(
+        COUNTER,
+        "mut c = Counter(1);\nmut n = c.count();",
+    ));
+    assert!(output.contains(codes::NOT_CALLABLE.as_str()), "{output}");
+    assert!(output.contains("is a field, not a method"), "{output}");
+}
+
+#[test]
+fn invalid_private_method_from_outside() {
+    let output = rejected(&with_class(
+        COUNTER,
+        "mut c = Counter(1);\nmut n = c.secret();",
+    ));
+    assert!(
+        output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_private_method_from_inside_its_class() {
+    accepted(&with_class(
+        "class Counter {
+             count: Int32;
+             construct() { this.count = 0; }
+             private fn secret(): Int32 { return this.count; }
+             fn public_view(): Int32 { return this.secret(); }
+         }",
+        "",
+    ));
+}
+
+#[test]
+fn invalid_method_call_with_the_wrong_argument_type() {
+    let output = rejected(&with_class(
+        "class Greeter {
+             prefix: String;
+             construct() { this.prefix = \">\"; }
+             fn greet(name: String): String { return name; }
+         }",
+        "mut g = Greeter();\nmut s = g.greet(1);",
+    ));
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_method_and_field_sharing_a_name() {
+    // `u.name` would have to mean both.
+    let output = rejected(&with_class(
+        "class User {
+             name: String;
+             construct() { this.name = \"x\"; }
+             fn name(): String { return this.name; }
+         }",
+        "",
+    ));
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_method_without_a_return_on_every_path() {
+    let output = rejected(&with_class(
+        "class Broken {
+             flag: Boolean;
+             construct() { this.flag = true; }
+             fn value(): Int32 { if this.flag { return 1; } }
+         }",
+        "",
+    ));
+    assert!(output.contains(codes::MISSING_RETURN.as_str()), "{output}");
+}

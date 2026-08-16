@@ -12,10 +12,22 @@ class User {
 
 class Counter {
     count: Int32;
+    private step: Int32;
 
     // Varios `construct`: se resuelven por aridad.
-    construct(start: Int32) { this.count = start; }
-    construct() { this.count = 0; }
+    construct(start: Int32) { this.count = start; this.step = 1; }
+    construct() { this.count = 0; this.step = 1; }
+
+    fn bump(): Int32 {
+        this.count = this.count + this.step;
+        return this.count;
+    }
+
+    // Un método alcanza lo privado de su propia clase, y a otro por `this`.
+    fn twice(): Int32 {
+        this.bump();
+        return this.bump();
+    }
 }
 
 fn main(): Void {
@@ -31,6 +43,9 @@ fn main(): Void {
     mut from_ten = Counter(10);
     stdout.println(from_zero.count);
     stdout.println(from_ten.count);
+
+    stdout.println(from_zero.bump());
+    stdout.println(from_zero.twice());
 
     // Dos objetos distintos no comparten estado.
     mut a = User(1, "a");
