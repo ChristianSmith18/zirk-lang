@@ -1,0 +1,11 @@
+class User {
+    name: String;
+
+    construct(name: String) {
+        this.name = name;
+    }
+
+    fn broken(): String { return this.nombre; }
+}
+
+fn main(): Void { }

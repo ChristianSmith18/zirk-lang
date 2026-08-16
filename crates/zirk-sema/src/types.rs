@@ -37,6 +37,12 @@ pub enum Base {
     Enum(u32),
     /// A function value, identified by its index in the checker's table.
     Function(u32),
+    /// A declared class, identified by its index in the checker's table.
+    ///
+    /// Nominal: two classes with identical members are different types, which
+    /// is what `ZIRK_LANGUAGE_SPEC.md` section 7 means by a class having
+    /// identity. Structural equality is what records are for.
+    Class(u32),
     /// The result of `a..b`, iterable by `for ... in`.
     Range,
     /// Assigned to expressions whose type could not be determined.
@@ -191,6 +197,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Unknown => "<unknown>".to_string(),
         Base::Enum(id) => names.enum_name(id),
         Base::Function(id) => names.function_type(id),
+        Base::Class(id) => names.class_name(id),
     };
 
     if ty.nullable {
@@ -204,6 +211,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
 pub trait TypeNames {
     fn enum_name(&self, id: u32) -> String;
     fn function_type(&self, id: u32) -> String;
+    fn class_name(&self, id: u32) -> String;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -233,6 +241,36 @@ impl EnumType {
             .position(|v| v == variant)
             .map(|i| i as u32)
     }
+}
+
+/// A declared class: a nominal type with fields, constructors and methods.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassType {
+    pub name: String,
+    pub fields: Vec<FieldInfo>,
+    /// One entry per `construct`. More than one is admissible when their
+    /// effective signatures differ.
+    pub constructors: Vec<Vec<crate::scope::ParamInfo>>,
+    /// Marked `share`, so files that import it may name it.
+    pub shared: bool,
+    /// Where it was declared, which is also which file owns it.
+    pub span: zirk_diagnostics::Span,
+}
+
+impl ClassType {
+    pub fn field(&self, name: &str) -> Option<&FieldInfo> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+}
+
+/// One field of a class, as the checker sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldInfo {
+    pub name: String,
+    pub ty: Type,
+    pub visibility: zirk_ast::Visibility,
+    pub mutability: zirk_ast::Mutability,
+    pub span: zirk_diagnostics::Span,
 }
 
 /// A type of the language that exists in the spec but not in this subset.
