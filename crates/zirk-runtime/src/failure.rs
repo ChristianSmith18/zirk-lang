@@ -39,3 +39,13 @@ pub extern "C" fn zirk_rt_overflow() -> ! {
 pub extern "C" fn zirk_rt_division_by_zero() -> ! {
     fatal("division by zero")
 }
+
+/// Reports that an object could not be allocated and terminates.
+///
+/// Returning null instead would hand the generated code a pointer it has no
+/// way to check: there is no nullable object type at the point an object is
+/// built, so nothing downstream would look.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_allocation_failed() -> ! {
+    fatal("could not allocate an object")
+}

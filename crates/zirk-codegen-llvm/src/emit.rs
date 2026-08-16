@@ -108,6 +108,7 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             functions: &functions,
             strings: &strings,
             values: HashMap::new(),
+            value_types: HashMap::new(),
             slots: HashMap::new(),
             blocks: HashMap::new(),
         }
@@ -139,6 +140,10 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Boolean => context.bool_type().into(),
         // `String` is an opaque pointer. Its layout belongs to the runtime.
         ir::IrType::String => context.ptr_type(AddressSpace::default()).into(),
+        // An object is reached through its address: identity *is* the address,
+        // so the value carried around is a pointer. The struct behind it is
+        // only needed where a field is addressed.
+        ir::IrType::Object(_) => context.ptr_type(AddressSpace::default()).into(),
         // A present flag next to the value. The flag comes first so the struct
         // has the same shape whatever the payload is.
         ir::IrType::Nullable(base) => {
@@ -164,6 +169,30 @@ fn llvm_type_in<'ctx>(
         }
     })
 }
+
+/// The struct an object of this layout occupies.
+///
+/// ```text
+///    [ type descriptor | field₁ | field₂ | … ]
+/// ```
+///
+/// The descriptor comes first so every object starts the same way, whatever
+/// its fields — which is what will let a subclass share its base's prefix.
+fn object_struct<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::ObjectLayout,
+    closures: &[ir::ClosureLayout],
+) -> inkwell::types::StructType<'ctx> {
+    let mut fields: Vec<BasicTypeEnum> = vec![context.ptr_type(AddressSpace::default()).into()];
+    for field in &layout.fields {
+        fields
+            .push(llvm_type_in(context, field.ty, closures).expect("an object field is not Void"));
+    }
+    context.struct_type(&fields, false)
+}
+
+/// Where a field sits inside the struct, header included.
+const OBJECT_HEADER_FIELDS: u32 = 1;
 
 fn declare_function<'ctx>(
     context: &'ctx Context,
@@ -239,6 +268,8 @@ struct FunctionEmitter<'ctx, 'a> {
     strings: &'a [PointerValue<'ctx>],
 
     values: HashMap<ir::ValueId, BasicValueEnum<'ctx>>,
+    /// The IR type of each emitted value, which a pointer alone does not carry.
+    value_types: HashMap<ir::ValueId, ir::IrType>,
     slots: HashMap<ir::SlotId, PointerValue<'ctx>>,
     blocks: HashMap<ir::BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
 }
@@ -299,6 +330,30 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.values[&operand.0]
     }
 
+    /// The address of one field inside an object.
+    fn field_pointer(&self, object: ir::Operand, index: u32) -> PointerValue<'ctx> {
+        let id = self.object_layout_of(object);
+        let layout = &self.module.objects[id as usize];
+        let struct_type = object_struct(self.context, layout, &self.module.closures);
+
+        self.builder
+            .build_struct_gep(
+                struct_type,
+                self.operand(object).into_pointer_value(),
+                index + OBJECT_HEADER_FIELDS,
+                "field_ptr",
+            )
+            .expect("a verified module addresses a field the layout has")
+    }
+
+    /// The layout an object operand belongs to.
+    fn object_layout_of(&self, operand: ir::Operand) -> u32 {
+        let ir::IrType::Object(id) = self.value_types[&operand.0] else {
+            unreachable!("a verified field access reads an object")
+        };
+        id
+    }
+
     fn emit_instruction(&mut self, instruction: &ir::Instruction, function: FunctionValue<'ctx>) {
         let value: Option<BasicValueEnum> = match &instruction.kind {
             ir::InstKind::ConstInt(value) => Some(
@@ -313,6 +368,47 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .const_int(*value as u64, false)
                     .into(),
             ),
+            ir::InstKind::Alloc(id) => {
+                let layout = &self.module.objects[*id as usize];
+                let struct_type = object_struct(self.context, layout, &self.module.closures);
+
+                // The size and alignment come from LLVM's own data layout, so
+                // the runtime is told what the target actually needs rather
+                // than what a hand-written table guessed.
+                let size = struct_type.size_of().expect("a sized object");
+                let align = struct_type.get_alignment();
+
+                let call = self
+                    .builder
+                    .build_call(self.runtime.alloc, &[size.into(), align.into()], "object")
+                    .expect("call the allocator");
+
+                call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::LoadField { object, index } => {
+                let pointer = self.field_pointer(*object, *index);
+                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures)
+                    .expect("a field is not Void");
+                Some(
+                    self.builder
+                        .build_load(ty, pointer, "field")
+                        .expect("load a field"),
+                )
+            }
+
+            ir::InstKind::StoreField {
+                object,
+                index,
+                value,
+            } => {
+                let pointer = self.field_pointer(*object, *index);
+                self.builder
+                    .build_store(pointer, self.operand(*value))
+                    .expect("store a field");
+                None
+            }
+
             ir::InstKind::ConstString(id) => {
                 // The literal becomes a `String` through the runtime: the
                 // compiler never builds one itself (ADR-005).
@@ -546,6 +642,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
         if let (Some(result), Some(value)) = (instruction.result, value) {
             self.values.insert(result, value);
+            // An object is an opaque pointer once emitted, so which layout it
+            // belongs to has to be remembered from the IR: it is what a field
+            // access needs to know where to point.
+            self.value_types.insert(result, instruction.ty);
         }
     }
 

@@ -64,6 +64,8 @@ fn the_lifecycle_symbols_carry_no_mangling() {
         "zirk_io_println",
         "zirk_rt_overflow",
         "zirk_rt_division_by_zero",
+        "zirk_rt_alloc",
+        "zirk_rt_allocation_failed",
     ] {
         assert!(
             contains(&bytes, symbol.as_bytes()),

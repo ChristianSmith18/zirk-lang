@@ -30,7 +30,8 @@ mod verify;
 
 pub use ir::{
     BinaryOp, Block, BlockId, ClosureLayout, Function, InstKind, Instruction, IrType, Module,
-    Nullable, Operand, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId,
+    Nullable, ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp,
+    ValueId,
 };
-pub use lower::lower;
+pub use lower::{constructor_symbol, lower};
 pub use verify::{IrError, verify};

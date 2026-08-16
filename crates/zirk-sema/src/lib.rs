@@ -23,7 +23,7 @@ mod types;
 
 pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
-pub use types::{Base, EnumType, FnType, PendingType, Type, pending_type};
+pub use types::{Base, ClassType, EnumType, FieldInfo, FnType, PendingType, Type, pending_type};
 
 /// Diagnostic codes of the checker.
 pub mod codes {

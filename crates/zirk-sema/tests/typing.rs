@@ -660,10 +660,7 @@ fn invalid_construction_with_the_wrong_argument_type() {
 
 #[test]
 fn valid_several_constructors_resolve_by_arity() {
-    // Both calls resolve. What they still report is that building an object
-    // does not reach code generation yet, which is a different thing from the
-    // call not matching a constructor.
-    let output = rejected(&with_class(
+    accepted(&with_class(
         "class Point {
              x: Int32;
              construct(x: Int32) { this.x = x; }
@@ -671,11 +668,6 @@ fn valid_several_constructors_resolve_by_arity() {
          }",
         "mut a = Point(1);\nmut b = Point();",
     ));
-    assert!(
-        !output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
-        "both arities must resolve:\n{output}"
-    );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]
