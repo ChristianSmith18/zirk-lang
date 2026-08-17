@@ -521,8 +521,8 @@ under provably safe optimization.
 
 ```text
 unsafe {
-    mut pointer: Pointer<Int32> = &value;
-    *pointer = 20;
+    mut pointer: Pointer<Int32> = Pointer.from(value);
+    pointer.write(20);
 }
 ```
 
@@ -531,8 +531,35 @@ scopes, mutability or permissions. Safe references are non-null and respect
 verified lifetimes. Native interoperability uses the C ABI as its stable
 boundary; C++ and Rust expose `extern "C"` wrappers.
 
+Unsafe operations form a closed set: pointer construction/dereference/
+arithmetic/casts, unsafe native calls, unchecked native construction, untagged
+native-union access, weak atomic ordering, and manual internal safety contracts.
+An `unsafe fn` requires unsafe at the call site and still uses visible unsafe
+blocks around dangerous expressions in its body.
+
+Ordinary unsafe blocks transactionally isolate writes to managed state and
+validated `NativeSliceMut<T>` ranges. Controlled `Error`, exception, checked
+trap, or pre-commit cancellation closes newly acquired resources and rolls
+those writes back. The compiler/runtime may optimize the journal but cannot
+remove the observable atomicity.
+
+Irreversible effects require `commit {}` inside unsafe. Entering the region
+publishes pending writes; filesystem/network/process/device effects, unknown
+FFI, volatile writes, manual release, concurrent publication, and unbounded raw
+writes cannot be promised rollback. Reversible transactions cannot `await`,
+spawn work, or expose tentative state. Permissions remain enforced. Full rules
+are in `MEMORY_AND_UNSAFE_SEMANTICS.md`.
+
 ## 14. Syntax reserved for concurrency
 
-`task`, `await`, `parallel`, `parallel for`, `thread`, `Channel<T>`, `sync` and
-`Atomic<T>` are defined normatively in the runtime specification. There is no
-`async fn` and no independent `worker`.
+`task`, `task scope`, `await`, `cancellation shield`, `select`, `parallel`,
+`parallel for`, `thread`, `Channel<T>`, `sync` and `Atomic<T>` are defined
+normatively in `STRUCTURED_CONCURRENCY_SEMANTICS.md` and the runtime
+specification. `Task<T>` awaits to exactly `T`; there is no `async fn`, general
+detach, or independent `worker`.
+
+`select` chooses one ready task, channel, timer, or cancellation branch fairly,
+supports `default`, and leaves losing operations alive. `Task.all`,
+`Task.first`, and `Task.settled` make aggregation failure policy explicit.
+Internal `Transfer`/`Share` properties are compiler-derived and never ordinary
+user-implemented contracts.

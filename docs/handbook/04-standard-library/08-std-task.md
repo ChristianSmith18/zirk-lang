@@ -1,8 +1,14 @@
 # `std.task`
 
-`std.task` provides `Task<T>` handles, scopes, cancellation reasons, sleep, timeouts, typed channels, and support for language `task`/`await`. It does not create a second async model or expose a user-controlled event loop.
+`std.task` provides `Task<T>` handles, scopes, `TaskSettlement<T>`, cancellation
+reasons, sleep, timeouts, typed channels, blocking adapters, and support for
+language `task`/`await`/`select`. It does not create a second async model or
+expose a user-controlled event loop.
 
-Waiting is task-suspending; scope exit joins or cancels children. Channel operations document capacity, backpressure, closure, and cancellation.
+Waiting is task-suspending; scope exit joins or cancels children.
+`Task.all/first/settled` expose distinct failure policies. `task.blocking`
+isolates legacy blocking calls. Channel operations document capacity,
+backpressure, closure, cancellation, and typed temporary-unavailable results.
 
 ---
 

@@ -14,6 +14,22 @@
 - **Portable IR:** typed target-independent package implementation.
 - **Resource:** external handle with typed acquisition and exactly-once close.
 - **Structured concurrency:** child work bounded by a parent scope.
+- **Task settlement:** ordered record of a task as `Fulfilled`, `Rejected`, or
+  `Cancelled`; a returned `Result.Error` is still fulfilled.
+- **Selection:** fair waiting for one ready task, channel operation, timer, or
+  cancellation signal while leaving losing operations alive.
+- **Transfer:** compiler-derived permission to move a value or responsibility
+  into another concurrent execution context without retaining a mutable alias.
+- **Share:** compiler-derived permission for concurrent contexts to use the same
+  referent safely, normally through strict immutability or synchronization.
+- **Weak reference:** non-owning `Weak<T>` observation that upgrades through
+  `Option<T>` and does not keep its referent alive.
+- **Dependent reference:** view or handle whose safe lifetime is bounded by an
+  owner and checked internally without public lifetime syntax.
+- **Unsafe transaction:** an unsafe block whose managed and validated-range
+  writes commit together or roll back on controlled pre-commit failure.
+- **Commit boundary:** explicit region that publishes reversible writes before
+  an external, volatile, native, or otherwise irreversible effect.
 - **Value class:** distinct value abstraction without observable identity.
 - **Normative:** required by the final specification rather than historical discussion.
 - **Implementation status:** evidence-based availability in a repository revision.

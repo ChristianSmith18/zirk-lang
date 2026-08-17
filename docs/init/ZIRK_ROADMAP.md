@@ -124,7 +124,12 @@ implementing each one twice.
 - `Result<T, E>` with exhaustive `match`.
 - `try`/`catch`/`finally`, `fatalError`.
 - Full implementation of the memory strategy decided in Phase 0.
-- `unsafe {}`, `Pointer<T>`, memory-safety guarantees enforced by the compiler.
+- safe/weak/dependent references, deep clone graph semantics and automatic
+  bounded native pinning;
+- `unsafe {}`, `Pointer<T>`, native slices, and memory-safety guarantees
+  enforced by the compiler;
+- transactional write journals and rollback for managed/validated ranges,
+  followed by explicit irreversible `commit` effects;
 - `Resource<E>` and `match with`.
 - `inmut::strict`: deep immutability with alias analysis. It lands here and not
   with the other two mutability forms because it is not a local read-only flag —
@@ -142,17 +147,21 @@ with tests.
 This is the phase of highest technical risk in the project — build it in
 sub-steps, not in one go:
 
-1. `task`/`await` on a custom single-threaded executor first (structured
-   concurrency without real parallelism yet).
-2. `Channel<T>`, `sync`, `Atomic<T>`.
-3. `thread` (real OS threads).
-4. `parallel`/`parallel for` on a multicore pool.
-5. Static analysis of unsafe mutable captures in `parallel`/`thread` (the
-   data-race-freedom guarantee of the spec, bounded to globals — this is not
-   general data-race freedom).
+1. `Task<T>`, `task scope`, `await`, sibling-failure propagation, cancellation,
+   shield and timeout on a custom single-threaded executor first.
+2. `Task.all`/`first`/`settled`, `TaskSettlement<T>`, fair `select`, and
+   bounded/unbounded `Channel<T>` with closure/backpressure.
+3. Compiler-derived transfer/share and capture analysis sufficient to enforce
+   the safe-code data-race guarantee across every supported boundary.
+4. `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, and safe-default
+   `Atomic<T>`; weak atomic ordering remains unsafe.
+5. scoped `thread`, `task.blocking`, and application root supervision.
+6. ordered/unordered `parallel` operations and associative/deterministic
+   reductions on a multicore pool.
 
-**Output:** the five concurrency primitives of `RUNTIME_SPEC.md` working with
-the minimum guarantees the spec promises.
+**Output:** the structured concurrency contract of
+`STRUCTURED_CONCURRENCY_SEMANTICS.md`, including cleanup, selection, transfer,
+and data-race guarantees, working end to end.
 
 ---
 

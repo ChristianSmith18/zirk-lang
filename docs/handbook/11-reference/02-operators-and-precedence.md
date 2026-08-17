@@ -6,7 +6,7 @@ Operators are grouped below from strongest to weakest binding. Parentheses alway
 |---:|---|---|
 | 1 | `()`, `[]`, `.`, `?.` | grouping/call, indexing, member and safe access |
 | 2 | postfix `++`, `--` | mutable numeric place only |
-| 3 | prefix `!`, `+`, `-`, `~`, `++`, `--` | Boolean not; numeric sign; integer complement; mutable numeric place |
+| 3 | prefix `!`, `+`, `-`, `~`, `++`, `--`, unsafe `*` | Boolean not; numeric sign; integer complement; mutable numeric place; raw pointer dereference |
 | 4 | `**` | numeric power; right-associative |
 | 5 | `*`, `/`, `%` | numeric; String repetition for `String * Integer` and reverse form |
 | 6 | `+`, `-` | numeric; `String + String`; temporal combinations listed below |
@@ -40,6 +40,12 @@ Operators are grouped below from strongest to weakest binding. Parentheses alway
 | Period | `+`, `-`, integer scale, equality | no context-free ordering or total duration |
 | nullable | `?.`, `??`, equality with `Null` | narrowed or fallback result |
 | reference | `is` | identity; structural `==` only with equality capability |
+| `Pointer<T>` + integer | `+`, `-`, unsafe prefix `*` | element-measured address offset or raw dereference; requires `unsafe` |
+
+`Pointer<T>.read()`/`write()` are the preferred auditable equivalents of raw
+dereference syntax. Byte offsets use `Pointer<Byte>` or `offset_bytes`; pointer
+representation casts use `cast<T>()`. None of these operations bypasses
+transaction, `commit`, lifetime, or permission rules.
 
 Compound assignment is equivalent in type behavior to reading the left value, applying the operator, validating the result, and writing it back once. It never relaxes conversion or mutability rules.
 

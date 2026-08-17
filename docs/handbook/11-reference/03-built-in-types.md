@@ -16,6 +16,10 @@ This catalog is the quick lookup for Zirk's compiler-known types. For semantics 
 | Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Range<T>` | native reference containers except value-like `Range` | empty where meaningful |
 | Callable | `Function(P...) => R`; `Fn(P...) => R` | signature-compatible callable identity with compiler-managed environment | no implicit default |
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[]` access | component defaults where explicitly constructed |
+| Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `Option<T>` | no implicit default |
+| Native memory | `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>` | unsafe raw address or bounded dependent native view | null only for raw pointer |
+| Concurrency | `Task<T>`, `TaskSettlement<T>`, `Channel<T>`, `Thread<T>` | scoped execution and typed coordination | no implicit default |
+| Synchronization | `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `Atomic<T>` | contract-controlled shared state | type-specific |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
 `Decimal*` is not a Zirk type family. Exact base-ten arithmetic may later be supplied as a distinct standard-library type; it must not be confused with `Float`.
@@ -27,6 +31,10 @@ User programs add nominal reference `class` types, immutable structural `record`
 Complete reference variables alias when moved. Reads through an attribute,
 index, slice, destructuring, pattern, iterator, argument, return, or closure
 capture are independent projections and require `Clone` when reference-backed.
+
+`Task<T>` awaits to exactly `T`. `TaskSettlement<T>` is
+`Fulfilled(T) | Rejected(Throwable) | Cancelled(CancelledError)`. Internal
+transfer/share properties are compiler-derived rather than user-declared types.
 
 ## Universal and conditional members
 

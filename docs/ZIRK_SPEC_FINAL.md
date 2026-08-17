@@ -64,6 +64,18 @@ Distributable package: `.zpkg`
 > not grant authority. Validation is incremental and reapproval follows any
 > permission widening, requester update, project rename, or project move.
 
+> **Authorial memory and concurrency checkpoint — 17 August 2026.** Managed
+> memory remains strategy-neutral and safe references use compiler-checked
+> dependent lifetimes without public lifetime syntax. `Weak<T>` upgrades to
+> `Option<T>`; bounded native views are preferred to raw pointers; deep cloning
+> preserves graph topology. Ordinary `unsafe` blocks transactionally journal
+> managed and validated-range writes and roll them back on controlled failure;
+> irreversible effects require an explicit `commit` boundary. Tasks are typed,
+> scoped and never orphaned. Failure cancels siblings, cancellation and timeouts
+> await cleanup, `Task.settled` preserves every outcome, and fair `select`
+> coordinates tasks, channels, timers and cancellation. Transfer/share safety
+> is compiler-derived, and safe code is data-race free.
+
 Contributors implementing these decisions must next read the consolidated
 [`CORE_LANGUAGE_SEMANTICS.md`](CORE_LANGUAGE_SEMANTICS.md) checkpoint before
 consulting phase plans or historical inventories.
@@ -71,6 +83,13 @@ consulting phase plans or historical inventories.
 Then read [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md)
 before implementing failures, cleanup, external effects, manifests, packages,
 or permission tooling.
+
+Read [`MEMORY_AND_UNSAFE_SEMANTICS.md`](MEMORY_AND_UNSAFE_SEMANTICS.md) before
+implementing allocation, references, cloning, native interop, pointers, unsafe
+operations, or rollback. Read
+[`STRUCTURED_CONCURRENCY_SEMANTICS.md`](STRUCTURED_CONCURRENCY_SEMANTICS.md)
+before implementing tasks, channels, parallelism, threads, synchronization, or
+race analysis.
 
 > **Language of this document.** Every normative specification, and the codebase
 > itself, is written in English. See
@@ -142,6 +161,14 @@ This specification is split into:
   scheduler, I/O, threads, resources, cancellation and shutdown.
 - [ZIRK_STDLIB_SPEC.md](./ZIRK_STDLIB_SPEC.md): modules and minimum contracts of
   the standard library.
+- [CORE_LANGUAGE_SEMANTICS.md](./CORE_LANGUAGE_SEMANTICS.md): consolidated
+  callables, references, objects, generics, data, and collection semantics.
+- [ERROR_RESOURCE_PERMISSION_SEMANTICS.md](./ERROR_RESOURCE_PERMISSION_SEMANTICS.md):
+  consolidated failure, cleanup, resource, and authority semantics.
+- [MEMORY_AND_UNSAFE_SEMANTICS.md](./MEMORY_AND_UNSAFE_SEMANTICS.md): managed
+  memory, references, native views, pointers, unsafe rollback, and commit.
+- [STRUCTURED_CONCURRENCY_SEMANTICS.md](./STRUCTURED_CONCURRENCY_SEMANTICS.md):
+  tasks, cancellation, aggregation, select, channels, parallelism, and races.
 
 If two documents contradict each other, this master specification defines scope
 and exclusions; the specialized document defines the semantics of its own area.

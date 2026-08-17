@@ -1,5 +1,10 @@
 ## Context
 
+> Later authority: cancellation cleanup, task aggregation, concurrent resource
+> transfer, and irreversible unsafe effects are specialized by
+> `document-memory-and-structured-concurrency`; this change remains authoritative
+> for failure/resource/permission semantics at those interaction points.
+
 Zirk's existing documents name `Result`, exceptions, `fatalError`, `Resource<E>`, `match with`, and manifest permissions, but leave critical composition rules open. The accepted authorial rounds now define a single model spanning source syntax, type/effect checking, deterministic cleanup, package requirements, runtime enforcement, and developer consent. The design must preserve the previously accepted callable, projection-copy, strict-alias, and structured-concurrency foundations while remaining documentation-only in this change.
 
 ## Goals / Non-Goals

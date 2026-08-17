@@ -6,7 +6,10 @@
 mut result = await operation;
 ```
 
-It is a cancellation-safe point and propagates the operation's typed outcome. Zirk 1.x has no `async fn`; `task` makes concurrent execution explicit.
+It is a cancellation-safe point and returns exactly the task's `T`. Awaiting
+`Task<Result<User, LoadError>>` yields `Result<User, LoadError>`; it adds no
+implicit wrapper. Zirk 1.x has no `async fn`; `task` makes concurrent execution
+explicit.
 
 ---
 

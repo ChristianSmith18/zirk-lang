@@ -1,12 +1,15 @@
 # `parallel`
 
-`parallel` requests potentially simultaneous CPU work.
+`parallel` requests potentially simultaneous finite CPU work.
 
 ```zirk
 parallel { process_a(); process_b(); }
 ```
 
-The runtime chooses workers and scheduling. Unsafe mutable capture is rejected; error handling cancels remaining work cooperatively and waits for closure.
+The runtime chooses workers and scheduling. Ordered map-like operations preserve
+input order; completion-order variants are explicitly unordered. Unmanaged
+blocking I/O and unsafe mutable capture are rejected. Error handling cancels
+remaining work cooperatively and awaits cleanup.
 
 ---
 
