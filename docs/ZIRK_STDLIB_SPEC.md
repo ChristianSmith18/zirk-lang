@@ -233,15 +233,25 @@ grapheme counts.
 These modules expose supporting types for the language constructs:
 
 - `Task<T>` handles and scopes;
-- cancellation and cancellation reasons;
+- `TaskSettlement<T>` with `Fulfilled`, `Rejected`, and `Cancelled`;
+- `Task.all`, `Task.first`, `Task.settled`, fair select support, cancellation
+  and cancellation reasons;
 - bounded/unbounded `Channel<T>` and closing;
 - `Thread<T>` and `join`;
-- `Mutex<T>`, read/write locks, semaphores and barriers where justified;
+- `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>`;
 - `Atomic<T>` and memory orderings;
-- parallel reduction primitives.
+- ordered/unordered parallel operations and deterministic/associative reduction
+  primitives;
+- `task.blocking` for legacy blocking work.
 
 The `task`, `await`, `parallel` and `thread` syntax belongs to the language; the
 stdlib does not create an alternative model.
+
+The low-level type family includes `Weak<T>`, `Pointer<T>`,
+`NativeSlice<T>`, and `NativeSliceMut<T>`. Weak references upgrade through
+`Option<T>`; native views carry checked extent and dependent lifetime. Raw
+pointer and weak atomic operations remain governed by unsafe semantics rather
+than being made safe merely because a library method exposes them.
 
 ## 10. `std.net` and `std.http`
 

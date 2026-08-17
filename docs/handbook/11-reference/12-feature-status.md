@@ -13,6 +13,11 @@ typed runtime exceptions, patterned catch, resource responsibility, combined
 cleanup failure, the two-block permission model, signed location-bound consent,
 and incremental requester-aware validation.
 
+Managed-memory strategy neutrality, weak/dependent references, deep graph
+clone, transactional unsafe rollback, irreversible commit, typed structured
+tasks, aggregation, fair selection, transfer/share derivation, and safe-code
+data-race freedom are also final definitions even where delivery is pending.
+
 | Area | Language definition | Implementation tracking |
 |---|---|---|
 | scalar and special types | defined | compiler roadmap and phases |
@@ -25,6 +30,9 @@ and incremental requester-aware validation.
 | Result and exception model | defined | later compiler/runtime phase |
 | deterministic resources | defined | later compiler/runtime phase |
 | permissions and secure approval | defined | later compiler/package tooling phase |
+| memory, native views and transactional unsafe | defined | Phase 4 compiler/runtime work |
+| tasks, channels, select and cancellation | defined | Phase 5 compiler/runtime work |
+| parallelism, threads, synchronization and atomics | defined | Phase 5 staged work |
 
 Explicit Zirk 1.x exclusions include browser/WebAssembly, public runtime directives, standalone `worker`, `async fn`, public event loop, textual inline assembly, general `comptime`, general `defer`, multiple class inheritance, traditional function overloading, `Result` propagation `?`, and public ownership/RC semantics.
 

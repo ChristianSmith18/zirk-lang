@@ -182,6 +182,14 @@ Provable leaks, duplicate close, escape, and use-after-transfer are compile
 errors; dynamic closed/transferred misuse raises typed runtime failure. Runtime
 leak reporting is defense, never successful cleanup.
 
+Crossing a task, channel, or thread boundary also requires the compiler-derived
+concurrent `Transfer` property. `TransferableResource` expresses the resource's
+explicit responsibility handoff; concurrent `Transfer` proves that the complete
+handoff is safe across execution contexts. Neither permits aliasing one live
+responsibility. Cancellation and task aggregation await resource cleanup before
+propagating their final outcome; see
+[`STRUCTURED_CONCURRENCY_SEMANTICS.md`](STRUCTURED_CONCURRENCY_SEMANTICS.md).
+
 ## 5. Permission declarations
 
 Zirk exposes only two authority blocks:

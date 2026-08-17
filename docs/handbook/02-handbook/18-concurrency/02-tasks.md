@@ -1,12 +1,17 @@
 # Tasks
 
-`task` creates typed managed work in the current structured scope.
+`task` creates typed managed work in the current structured scope and returns
+`Task<T>`.
 
 ```zirk
-mut operation = task { load_data(); };
+mut operation: Task<Result<Data, LoadError>> = task load_data();
+mut result: Result<Data, LoadError> = await operation;
 ```
 
-A task propagates its result or error and cannot become implicitly orphaned. Scope exit waits for completion or requests cancellation and then waits for cleanup.
+The callable form is shorthand for a task block. A task cannot become implicitly
+orphaned. Scope exit waits for completion or requests cancellation and then
+waits for cleanup. Ignoring a must-use task result requires explicit `_ =`; it
+does not detach the work.
 
 ---
 

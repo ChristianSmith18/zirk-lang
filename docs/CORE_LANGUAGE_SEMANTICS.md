@@ -9,10 +9,12 @@ cannot redefine it. Older examples, inventories, and phase notes are
 non-normative when they conflict with this checkpoint.
 
 Errors, `Result`, resources, permissions, unsafe memory, and concurrency are
-outside this checkpoint. The first four are now finalized by
-[`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md);
-memory/unsafe and concurrency retain their existing specifications until their
-pending authorial rounds are accepted.
+outside this checkpoint. They are finalized respectively by
+[`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md),
+[`MEMORY_AND_UNSAFE_SEMANTICS.md`](MEMORY_AND_UNSAFE_SEMANTICS.md), and
+[`STRUCTURED_CONCURRENCY_SEMANTICS.md`](STRUCTURED_CONCURRENCY_SEMANTICS.md).
+Those later checkpoints supersede shorter historical descriptions at their
+interaction boundaries.
 
 ## 1. Values, references, places, and projections
 

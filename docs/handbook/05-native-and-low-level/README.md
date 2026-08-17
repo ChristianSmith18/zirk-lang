@@ -1,6 +1,11 @@
 # Native and Low-Level Programming
 
-Zirk uses the C ABI as its stable native boundary. Raw pointers and ABI-sensitive operations remain inside `unsafe`; native dependencies declare targets and permissions explicitly. Portable intrinsics and SIMD provide controlled performance without textual inline assembly.
+Zirk uses the C ABI as its stable native boundary. Raw pointers and
+ABI-sensitive operations remain inside `unsafe`; reversible managed and bounded
+native writes are transactional, while external or unbounded effects require
+`commit`. Native dependencies still declare targets and permissions explicitly.
+Portable intrinsics and SIMD provide controlled performance without textual
+inline assembly.
 
 ---
 

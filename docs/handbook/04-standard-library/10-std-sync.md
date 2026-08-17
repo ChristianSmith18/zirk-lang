@@ -1,8 +1,12 @@
 # `std.sync`
 
-The module supplies `Mutex<T>`, read/write locks, justified semaphores and barriers, `Atomic<T>`, memory orders, and parallel reductions.
+The module supplies `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`,
+`Atomic<T>`, memory orders, and parallel reductions.
 
-Ordinary mutex guards must not cross `await` unless the type explicitly supports it. Atomics cover supported operations but do not automatically protect multi-step invariants. Defaults choose safe ordering.
+`Mutex<T>.with(...)` scopes writable access; an ordinary guard cannot cross
+`await`. Atomics cover supported operations but do not automatically protect
+multi-step invariants. Sequential consistency is the default, and explicitly
+weaker orderings require `unsafe`.
 
 ---
 

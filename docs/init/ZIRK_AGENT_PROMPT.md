@@ -43,9 +43,19 @@ sounds reasonable"**:
 - `docs/ZIRK_COMPILER_SPEC.md` — pipeline, IR, LLVM, targets, diagnostics, CLI.
 - `docs/ZIRK_RUNTIME_SPEC.md` — memory, tasks, scheduler, threads, resources.
 - `docs/ZIRK_STDLIB_SPEC.md` — modules and contracts of the standard library.
+- `docs/CORE_LANGUAGE_SEMANTICS.md` — callables, projections, objects,
+  generics, data, collections, and iteration.
+- `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` — expected/exceptional failure,
+  resources, permissions, and approval.
+- `docs/MEMORY_AND_UNSAFE_SEMANTICS.md` — managed memory, dependent references,
+  pointers, transactional unsafe rollback, and irreversible commit.
+- `docs/STRUCTURED_CONCURRENCY_SEMANTICS.md` — tasks, scopes, cancellation,
+  aggregation, selection, transfer, parallelism, and synchronization.
 
 If two documents contradict each other: `ZIRK_SPEC_FINAL.md` defines scope and
 exclusions; the specialized document defines the semantics of its own area.
+The four consolidated semantic documents are the newest authoritative
+checkpoints for their named areas and supersede shorter historical examples.
 
 **Explicit rule from the spec itself, and a working rule here:** every ambiguity
 must produce a question or be documented — never resolved silently by inventing

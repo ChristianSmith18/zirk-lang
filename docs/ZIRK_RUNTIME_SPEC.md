@@ -77,8 +77,16 @@ Tasks are typed, propagate result/error and belong to a scope. On leaving the
 scope, their children must have finished or must receive cooperative
 cancellation and be awaited. No task may be implicitly orphaned.
 
-A future detached operation, if introduced, must be explicit and transfer
-ownership to a root supervisor; it is not part of the initial contract.
+An unhandled child exception cancels siblings, awaits their cleanup and
+propagates as the primary failure with additional failures suppressed. A
+`Result.Error` is an ordinary fulfilled value. Long-lived work transfers to an
+application root supervisor; general detachment is not part of the contract.
+
+`Task.all` cancels remaining work on the first unhandled exception;
+`Task.first` returns the first completion and cancels the rest; `Task.settled`
+waits for all and preserves input order as `Fulfilled`, `Rejected`, or
+`Cancelled`. Fair `select` waits for one task/channel/timer/cancellation branch,
+supports `default`, and does not cancel losing operations.
 
 ## 5. Cancellation and timeout
 
@@ -95,6 +103,8 @@ await load_data() timeout 5s;
 ```
 
 A timeout requests cancellation and produces a recoverable timeout exception.
+It awaits cleanup before `TimeoutError` escapes. `cancellation shield` defers a
+pending cancellation for bounded cleanup and delivers it immediately afterward.
 Durations admit `ms`, `s`, `m` and `h` and are represented internally with
 sufficient precision, even if they may be normalized.
 
@@ -123,7 +133,9 @@ order. If an iteration returns a `Result`, the first relevant error is kept,
 remaining work is cancelled cooperatively and its shutdown is awaited.
 
 Unsafe mutable captures are a compile error. Reductions must use explicit
-primitives or safe accumulators.
+associative primitives or safe accumulators. Ordered map-like operations
+preserve input order; completion-order variants are explicitly unordered.
+Grouping-sensitive reductions use a deterministic variant.
 
 ## 7. Threads
 
@@ -141,6 +153,9 @@ A thread has an optional name, a result, `join` and a cooperative cancellation
 request where applicable. It cannot be implicitly abandoned when its scope ends.
 Sharing mutable memory requires `sync`, a mutex or atomics.
 
+Legacy blocking APIs invoked from tasks use `task.blocking`, which runs them on
+a pool separate from scheduler threads.
+
 There is no `worker` as a language entity. An isolated or dedicated worker is
 built from a supervised thread/task and one or more channels.
 
@@ -155,18 +170,25 @@ messages.send("ok");
 mut message = await messages.receive();
 ```
 
-`receive` suspends efficiently inside a task. `try_receive` returns `Option<T>`
-or the optional type defined by the stdlib. Channels must support explicit
-closing, distinguish closure from temporary absence and apply backpressure on
-bounded channels.
+`receive` suspends efficiently inside a task. Try operations return typed
+outcomes that distinguish success, closure, and temporary absence/fullness.
+Channels support explicit closing,
+wake waiters, drain queued values, and apply backpressure on bounded channels.
+
+At concurrent boundaries values and projections copy, strict immutable
+references may share, exclusive mutable references may transfer, clones become
+independent, and synchronization-aware references may share. `Transfer` and
+`Share` are internal compiler-derived properties, not forgeable user traits.
 
 `sync` delimits protected access. Mutexes must not be held across `await` except
 for a type expressly designed for it; the compiler/linter diagnoses this.
 
 `Atomic<T>` exists only for supported types and operations. It exposes
 load/store, exchange, compare-exchange and numeric operations such as increment.
-The default memory ordering must be safe; weaker orderings are explicit and
-advanced.
+The default memory ordering is sequentially consistent; weaker orderings are
+explicit unsafe operations. `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>`
+are library types. Safe code rejects every supported unsynchronized concurrent
+access where at least one access mutates shared state.
 
 ## 9. Memory
 
@@ -182,9 +204,23 @@ Requirements:
 - pauses and consumption must be measured;
 - value types may be stored inline;
 - objects with identity keep a stable identity even if physically moved.
+- `Weak<T>` does not keep a referent alive and upgrades through `Option<T>`;
+- dependent native/resource/internal views cannot escape their owner;
+- deep cloning preserves internal sharing and cycles in a new identity graph.
 
 There are no general-purpose destructors whose timing is observable. Memory
 release is not used to manage files, sockets, locks or processes.
+
+Raw `Pointer<T>` may be null and requires unsafe for construction,
+dereference, arithmetic, casts, and volatile access. Bounded
+`NativeSlice<T>`/`NativeSliceMut<T>` views carry checked extent and lifetime.
+
+An ordinary unsafe block journals managed and validated-range writes. It commits
+on success and rolls back on controlled failure before commit. External I/O,
+unknown FFI, volatile/device effects, manual release, concurrent publication,
+and unproven raw writes require `commit {}`. Reversible transactions cannot
+suspend or spawn work. Arbitrary corruption and true undefined behavior are not
+recoverable guarantees. `MEMORY_AND_UNSAFE_SEMANTICS.md` is normative.
 
 ## 10. Resources
 

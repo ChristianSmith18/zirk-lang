@@ -7,8 +7,10 @@ The handbook synthesizes repository documents with different roles and ages. Thi
 1. [`ZIRK_SPEC_FINAL.md`](../../ZIRK_SPEC_FINAL.md) defines authority, scope, exclusions, foundational contracts, and conflict resolution.
 2. [`CORE_LANGUAGE_SEMANTICS.md`](../../CORE_LANGUAGE_SEMANTICS.md) consolidates accepted cross-feature semantics for contributors.
 3. [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](../../ERROR_RESOURCE_PERMISSION_SEMANTICS.md) consolidates accepted failure, deterministic-cleanup, and authority semantics.
-4. [`ZIRK_LANGUAGE_SPEC.md`](../../ZIRK_LANGUAGE_SPEC.md), [`ZIRK_RUNTIME_SPEC.md`](../../ZIRK_RUNTIME_SPEC.md), [`ZIRK_STDLIB_SPEC.md`](../../ZIRK_STDLIB_SPEC.md), and [`ZIRK_COMPILER_SPEC.md`](../../ZIRK_COMPILER_SPEC.md) define their specialized areas.
-5. [`01_plantilla_zirk.md`](../../01_plantilla_zirk.md) is the exhaustive historical topic inventory. It helps find questions but cannot restore superseded behavior.
+4. [`MEMORY_AND_UNSAFE_SEMANTICS.md`](../../MEMORY_AND_UNSAFE_SEMANTICS.md) consolidates managed memory, dependent references, pointers, rollback, and irreversible effects.
+5. [`STRUCTURED_CONCURRENCY_SEMANTICS.md`](../../STRUCTURED_CONCURRENCY_SEMANTICS.md) consolidates tasks, cancellation, selection, transfer, parallelism, and synchronization.
+6. [`ZIRK_LANGUAGE_SPEC.md`](../../ZIRK_LANGUAGE_SPEC.md), [`ZIRK_RUNTIME_SPEC.md`](../../ZIRK_RUNTIME_SPEC.md), [`ZIRK_STDLIB_SPEC.md`](../../ZIRK_STDLIB_SPEC.md), and [`ZIRK_COMPILER_SPEC.md`](../../ZIRK_COMPILER_SPEC.md) define their specialized areas.
+7. [`01_plantilla_zirk.md`](../../01_plantilla_zirk.md) is the exhaustive historical topic inventory. It helps find questions but cannot restore superseded behavior.
 
 When final documents remain ambiguous, the handbook records the ambiguity or defers the claim. It does not invent a silent resolution.
 
@@ -29,6 +31,8 @@ the documentation is transplanted onto the latest `develop` revision.
 | Compiler pipeline, IR, targets, diagnostics, CLI, formatter, linter, LSP, debugger | Compiler specification §§1–12 | Template §§21, 40–43 |
 | Projects, packages, permissions, distribution | Master and specialized specifications | Template §§20, 38, 46 |
 | Result, exceptions, resources, permission approval and audit | Failure/resource/permission checkpoint plus language/runtime/compiler/stdlib specifications | Template §§14, 16, 20, 46, 63 |
+| Managed memory, weak/dependent references, pointers and unsafe transactions | Memory/unsafe checkpoint plus language/runtime/compiler specifications | Template §§15, 25, 33–34 |
+| Tasks, select, channels, parallelism, threads and race prevention | Structured-concurrency checkpoint plus runtime/compiler/stdlib specifications | Template §§17, 22–24 |
 
 ## Explicit Zirk 1.x exclusions
 
@@ -66,6 +70,8 @@ The current compiler is not yet a complete executable oracle for every normative
 | Result, explicit/implicit exceptions and provenance | Errors unit |
 | Resource responsibility and combined cleanup failure | Resources unit |
 | Grants, phases, signed consent and incremental audit | Projects `07`–`09` and `14-permission-approval-and-audit.md` |
+| Managed memory, native views, unsafe rollback and commit | Memory and Safety unit, especially `12-transactional-unsafe-and-commit.md` |
+| Task aggregation, selection and transfer/share | Concurrency unit, especially chapters `15`–`17` |
 
 ---
 

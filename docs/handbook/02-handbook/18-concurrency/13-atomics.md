@@ -1,6 +1,9 @@
 # Atomics
 
-`Atomic<T>` exists only for supported types and operations: load, store, exchange, compare-exchange, and selected numeric updates. The default memory order is safe; weaker orders are explicit advanced tools whose proof obligation belongs to the programmer.
+`Atomic<T>` exists only for supported types and operations: load, store,
+exchange, compare-exchange, and selected numeric updates. The default ordering
+is sequentially consistent. Weaker ordering is an explicit operation inside
+`unsafe`; its proof obligation belongs to the programmer.
 
 Atomics protect individual operations, not multi-step invariants.
 

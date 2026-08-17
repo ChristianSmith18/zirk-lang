@@ -73,6 +73,12 @@ The IR is typed, target-independent and versioned. It preserves enough
 information for generic specialization, devirtualization, escape analysis,
 safety checks, vectorization and debug info generation.
 
+The frontend/IR also preserve reference provenance and dependent lifetime,
+unsafe transaction boundaries, reversible write/effect classification,
+irreversible commit points, structured task scope, cancellation edges,
+selection guards, and compiler-derived transfer/share facts. Optimization may
+remove journals or checks only after proving the same observable safety.
+
 A `.zpkg` conceptually contains:
 
 ```text
@@ -163,6 +169,13 @@ Every diagnostic must include a severity, a stable code, a location, a cause and
 help where a clear fix exists. Errors produced by decorators show both the
 original source and the relevant expansion.
 
+Safety diagnostics identify the owner and escape path for an invalid dependent
+reference, the exact unsafe operation lacking a boundary, an irreversible
+effect lacking `commit`, and any suspension/publication inside a reversible
+transaction. Concurrency diagnostics identify both conflicting accesses and
+suggest exclusive transfer, `inmut::strict`, synchronization, a channel, or
+`clone()` as applicable.
+
 Warnings do not change semantics. Configurable categories include unreachable
 code, unused symbol, confusing shadowing, redundant cast, unnecessary permission
 and ignored operation result. `--warnings-as-errors` may promote them.
@@ -221,3 +234,8 @@ safety, IR, codegen per target, ABI, incrementality, reproducibility, formatter
 idempotence, fuzzing and differential debug/release tests where applicable.
 
 Every rule of the language must have at least one valid and one invalid case.
+Required safety suites cover clone graph topology, weak-reference upgrade,
+dependent escapes, transactional rollback, commit effects, task sibling
+failure, cancellation cleanup, settled aggregation, fair select, channel
+closure/backpressure, transfer/share derivation, mutex-across-await, atomic
+ordering, and data-race rejection.

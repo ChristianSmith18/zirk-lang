@@ -9,6 +9,24 @@ expression/declaration forms, braced or single-statement `if`, traditional
 `for`, `for ... in`, `while`, `do ... while`, control transfer, `try`, and unsafe
 or concurrent constructs.
 
+Low-level syntax includes `unsafe { ... }`, `unsafe fn`, and irreversible
+`commit { ... }` regions inside unsafe. Concurrent syntax includes task blocks
+or callable sugar, `task scope`, `await expression timeout duration`,
+`cancellation shield`, `parallel`, `parallel for`, `thread`, and `select`.
+
+```zirk
+select {
+    value = await operation => use(value),
+    after 5s => timeout(),
+    cancelled => cleanup(),
+    default => continue_work(),
+}
+```
+
+`select` runs one ready branch fairly and leaves losing operations alive.
+`commit` is invalid outside unsafe, and reversible unsafe regions cannot await
+or spawn concurrent work.
+
 Failure syntax includes `throws T | U`, `throw expression`, exact `throw;`
 inside catch, `try`, guard-free `catch Type(binding)` patterns, and `finally`.
 Resources use `match acquisition with binding`, including grouped acquisition.

@@ -1,5 +1,10 @@
 ## Context
 
+> Later authority: memory/unsafe and concurrent crossing behavior are finalized
+> by `document-memory-and-structured-concurrency`. This design remains
+> authoritative for core projection/callable/object semantics only where the
+> later change does not specialize a safety or concurrency boundary.
+
 The current handbook combines mature type-system documentation with phase-limited callable and object rules, shallow generic/collection chapters, and examples that predate the authorial decisions accepted in August 2026. Agents are already implementing Phase 3, so documentation must distinguish final language semantics from temporary delivery limits without forcing later memory or concurrency choices into the current compiler phase.
 
 ## Goals / Non-Goals

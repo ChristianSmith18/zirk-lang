@@ -48,6 +48,19 @@
 > incremental. Las respuestas incompatibles posteriores son históricas.
 >
 
+> **Checkpoint de memoria y concurrencia — 17 de agosto de 2026.** Las fuentes
+> normativas consolidadas son `docs/MEMORY_AND_UNSAFE_SEMANTICS.md` y
+> `docs/STRUCTURED_CONCURRENCY_SEMANTICS.md`. La memoria administrada no expone
+> ownership/lifetimes públicos; `Weak<T>` y las vistas nativas tienen contratos
+> explícitos; el deep clone conserva la topología. Los bloques `unsafe` comunes
+> revierten escrituras administradas y rangos validados ante fallos controlados,
+> y `commit` delimita efectos irreversibles. Las tasks son tipadas y
+> estructuradas, `Task.settled` preserva todos los outcomes, `select` espera de
+> forma justa, canales aplican backpressure, y transferencia/compartición se
+> derivan internamente para garantizar ausencia de data races en código seguro.
+> Toda respuesta histórica incompatible más abajo queda reemplazada.
+>
+
 > **Checkpoint de recursos — 12 de agosto de 2026.** Se formalizó `match with` para la adquisición y cierre automático de `Resource<E>`, manteniendo `match` sin `with` para la transferencia manual.
 >
 

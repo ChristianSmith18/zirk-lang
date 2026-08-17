@@ -56,6 +56,55 @@ inmut deadline = Instant.now() + Duration.minutes(30);
 
 Adding a `Period` to an `Instant`, localizing a DST overlap without a policy, or passing a negative Duration to a non-negative wait API is invalid.
 
+Valid transactional native mutation:
+
+```zirk
+unsafe {
+    state.status = "updating";
+    mut view = match pointer.as_slice_mut(length) {
+        Ok(validated) => validated,
+        Error(error) => return Error(error),
+    };
+    view[0] = marker;
+    match validate(view) {
+        Ok(_) => {},
+        Error(error) => return Error(error), // restores both writes
+    }
+}
+```
+
+Invalid: `await`, task/thread creation, socket/file/process effects, or an
+unbounded raw write inside that reversible region. Irreversible effects require
+an explicit boundary after validation:
+
+```zirk
+unsafe {
+    mut packet = match validate_packet(pointer, length) {
+        Ok(validated) => validated,
+        Error(error) => return Error(error),
+    };
+    commit {
+        socket.send(packet.bytes());
+    }
+}
+```
+
+Valid structured aggregation and selection:
+
+```zirk
+mut outcomes = await Task.settled(tasks);
+
+select {
+    message = await messages.receive() => process(message),
+    after 5s => report_timeout(),
+}
+```
+
+Invalid: assuming `Task.settled` cancels siblings, assuming `select` cancels
+losing operations, detaching a task without an application supervisor, holding
+an ordinary mutex across `await`, or sharing a writable `List<T>` between tasks
+without transfer or synchronization.
+
 ---
 
 **Previous:** [← Language Feature Matrix](02-language-feature-matrix.md) · **Next:** [ Differences from TypeScript](04-differences-from-typescript.md)
