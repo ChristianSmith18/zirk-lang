@@ -80,3 +80,45 @@ Every detailed type chapter SHALL link to its conceptual owner, closely interact
 #### Scenario: String reader follows semantics
 - **WHEN** a reader needs strict mutability or operator details from the String chapter
 - **THEN** direct links reach the binding model and operator reference while the String chapter remains the primary owner of String behavior
+
+### Requirement: Completed core-language learning route
+The handbook SHALL provide an ordered, linked route through callables, objects/contracts, generics, tuples/records/enums/unions, collections/iteration, and pattern matching, with conceptual pages before detailed APIs and reference tables after explanatory chapters.
+
+#### Scenario: Agent follows implementation route
+- **WHEN** an implementation agent starts from SUMMARY or the core-language overview
+- **THEN** it can reach every normative owner, explanatory chapter, API/operator table, valid/invalid example, and implementation-status note without relying on planned placeholders
+
+### Requirement: Obsolete placeholders are resolved
+Unlinked planned entries that duplicate published units SHALL be removed or converted into intentional links, while genuinely future areas SHALL remain clearly identified as planned rather than appearing complete.
+
+#### Scenario: Duplicate type-model placeholder
+- **WHEN** the type model already has a published canonical unit
+- **THEN** SUMMARY does not retain a second unlinked placeholder for the same material
+
+### Requirement: Canonical ownership includes failures resources and authority
+The documentation source map SHALL place accepted error/resource/permission semantics after the master and consolidated contributor checkpoint, assign normative ownership across language/runtime/stdlib/compiler specifications, and classify template and old phase answers as historical when conflicting.
+
+#### Scenario: Agent resolves permission conflict
+- **WHEN** an agent finds `compile_permissions` in an older document and `permissions` with `during` in the current checkpoint
+- **THEN** the source map directs the agent to use the current two-block model
+
+### Requirement: Navigation exposes the complete implementation path
+The handbook summary, reference indexes, glossary, feature status, and contributor reading order SHALL link error, resource, permission, environment/secret, CLI approval, and security chapters without duplicate placeholders.
+
+#### Scenario: Runtime implementer follows reading order
+- **WHEN** a runtime contributor begins at the consolidated checkpoint
+- **THEN** they can reach normative failure propagation, resource cleanup, permission enforcement, and handbook examples through explicit links
+
+### Requirement: Complete memory and unsafe path
+The documentation SHALL lead from public automatic memory and reference behavior through weak/dependent references, native views, pointers, transactional unsafe rollback, irreversible commit, and undefined-behavior limits with valid and invalid examples.
+
+#### Scenario: Developer prepares native interop
+- **WHEN** a reader follows the memory and safety unit
+- **THEN** they can identify which operations are safe, unsafe but reversible, irreversible, or fundamentally unrecoverable
+
+### Requirement: Complete structured concurrency path
+The documentation SHALL lead from tasks and await through scopes, failure, cancellation, timeout, aggregation, select, channels, transfer/share rules, parallel work, threads, synchronization, atomics, and data-race prevention.
+
+#### Scenario: Developer designs concurrent workflow
+- **WHEN** a reader follows the concurrency unit
+- **THEN** they can choose an appropriate primitive and predict its lifetime, failure, cancellation, ordering, and sharing behavior

@@ -82,3 +82,38 @@ Completion SHALL include repository-wide checks for obsolete `Decimal*` naming, 
 #### Scenario: Superseded claim remains
 - **WHEN** an audit finds a published page calling String immutable
 - **THEN** the change remains incomplete until the page is corrected or explicitly scoped to a different value
+
+### Requirement: Cross-cutting core semantics remain synchronized
+Every accepted callable, projection, object, generic, algebraic-data, collection, iteration, and matching rule SHALL be updated consistently in normative documents, owning handbook chapters, reference indexes, examples, source maps, and affected active planning artifacts. Historical archives SHALL remain historical.
+
+#### Scenario: Projection rule audit
+- **WHEN** projection-copy documentation is completed
+- **THEN** repository-wide checks find no current claim that nested reference extraction aliases its container
+
+### Requirement: Final semantics and implementation status are separate
+Documentation SHALL state final language semantics independently from the compiler phase that delivers them and SHALL link undelivered features to status/roadmap material without weakening or contradicting the final rule.
+
+#### Scenario: Escaping closures before implementation
+- **WHEN** readers inspect Fn before its compiler phase ships
+- **THEN** they see both the final legal behavior and an explicit implementation-status notice
+
+### Requirement: Failure, resource, and permission chapters teach complete contracts
+The handbook SHALL document the accepted model with mental models, syntax, valid and invalid examples, API/exception/permission tables, composition behavior, diagnostics, security rationale, implementation status, and previous/next links. It SHALL distinguish final semantics from historical syntax and current compiler availability.
+
+#### Scenario: Contributor reads error unit
+- **WHEN** a contributor follows the error handbook unit
+- **THEN** they can determine whether a failure uses `Result`, declared `throws`, implicit `RuntimeError`, or `fatalError`, and how it composes with cleanup
+
+### Requirement: Security-sensitive prompts and policies have worked examples
+Permission documentation SHALL show manifest requests/grants, dependency paths, moved-project reapproval, update reapproval, incremental fast paths, broad-grant confirmation, CI policy, runtime denial, audit history, and tamper scenarios.
+
+#### Scenario: Malicious manifest edit is explained
+- **WHEN** a reader examines the permission-security chapter
+- **THEN** it explicitly demonstrates that changing `init.zrk` cannot create a valid signed approval
+
+### Requirement: Safety and concurrency source synchronization
+The editorial system SHALL identify canonical owners for memory/unsafe and concurrency semantics and SHALL update all derivative handbook, reference, roadmap, example, and agent-context pages when those rules change.
+
+#### Scenario: Unsafe rollback rule changes
+- **WHEN** the canonical transactional unsafe rule is edited
+- **THEN** pointer, unsafe, runtime, compiler, example, and reference pages are checked for contradictory wording

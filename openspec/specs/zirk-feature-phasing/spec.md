@@ -5,7 +5,6 @@
 Defines the discipline that keeps the compiler honest about what it does not implement yet.
 
 The language is documented in full while it is built in phases. That gap is deliberate, and it is only safe as long as every documented feature has an owning phase and the compiler names that phase instead of failing as if the feature did not exist.
-
 ## Requirements
 ### Requirement: Toda característica documentada tiene una fase dueña
 
@@ -60,3 +59,10 @@ enseña un lenguaje que no existe.
 #### Scenario: Fase declarada correcta
 - **WHEN** una anotación nombra un tipo pendiente
 - **THEN** la fase indicada por el diagnóstico coincide con la que el roadmap le asigna
+
+### Requirement: Memory and concurrency implementation order
+The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured task semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
+
+#### Scenario: Phase planning reaches concurrency
+- **WHEN** implementation work starts task scheduling
+- **THEN** typed scopes, cancellation, transfer/share analysis, and cleanup behavior are already specified as prerequisites

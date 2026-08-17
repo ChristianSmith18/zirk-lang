@@ -5,9 +5,7 @@
 Defines the C ABI contract of the runtime for standard output and for the representation of `String`.
 
 The layout of a `String` is private to the runtime, which is what allows adding grapheme indexing later without touching the compiler.
-
 ## Requirements
-
 ### Requirement: Representación opaca de String
 
 El runtime SHALL exponer `String` como un handle opaco cuyo layout es privado,
@@ -116,3 +114,31 @@ hash.
 #### Scenario: Hash de formas equivalentes
 - **WHEN** se calcula el hash de una cadena en NFC y el de su equivalente en NFD
 - **THEN** ambos hashes coinciden
+
+### Requirement: Runtime preserves typed failure and cleanup
+The runtime SHALL represent implicit safety failures as typed `RuntimeError` exceptions, preserve exact rethrows, lazily materialize structured traces, redact secrets, attach suppressed cleanup failures, and execute managed resource close exactly once on every exit path.
+
+#### Scenario: Exception and close both fail
+- **WHEN** a throwable is propagating and resource close reports an error
+- **THEN** the throwable remains primary and the close failure appears in its suppressed list
+
+### Requirement: Environment and external I/O enforce effective grants
+Runtime I/O, environment, secret, network, process, and shell operations SHALL validate the signed effective policy and normalized dynamic target before performing an external effect. Denial SHALL produce the operation's typed permission error and SHALL NOT prompt or modify project files.
+
+#### Scenario: Redirect leaves network scope
+- **WHEN** an authorized HTTP request redirects to an unauthorized host
+- **THEN** the redirect is denied before connecting to the new host
+
+### Requirement: Task-aware I/O and blocking isolation
+Runtime I/O SHALL suspend tasks without occupying scheduler threads where the platform permits, SHALL support cancellation-safe cleanup, and SHALL route explicitly wrapped legacy blocking work to a separate pool.
+
+#### Scenario: Task waits for file or socket readiness
+- **WHEN** an authorized asynchronous I/O operation cannot complete immediately
+- **THEN** the task suspends and the scheduler thread remains available for other work
+
+### Requirement: Irreversible effects preserve permission enforcement
+External effects issued from an unsafe commit region MUST still satisfy normal project permissions and operating-system validation.
+
+#### Scenario: Unsafe network send lacks permission
+- **WHEN** an unsafe commit region attempts a network send outside the approved scope
+- **THEN** permission enforcement rejects it before the external effect occurs
