@@ -413,3 +413,49 @@ El ternario es la forma compacta preferida para elegir un valor corto, y NO SHAL
 #### Scenario: Ternario sin rama alternativa
 - **WHEN** falta `:` y su expresión
 - **THEN** se emite un diagnóstico que señala el ternario incompleto
+
+### Requirement: Refined core syntax surface
+The parser SHALL recognize `Fn(P...) => R` and `Function(P...) => R`, `override fn`, abstract classes adopted with `implements`, combined `from A & B` constraints, `in/out` generic variance, Tuple type/index syntax, collection literals, `as?`, and the accepted guard-free pattern forms. It SHALL reject property declarations, standalone override, enum user methods, match guards, and enum destructuring bindings.
+
+#### Scenario: Callable type annotation
+- **WHEN** source contains `mut print: Fn(String) => Void = stdout.println`
+- **THEN** the parser produces a mutable binding whose annotation is a callable type
+
+#### Scenario: Removed property syntax
+- **WHEN** source declares `property name: String`
+- **THEN** it receives a targeted diagnostic recommending an attribute plus `get_name`/`set_name` methods
+
+### Requirement: Slice omission syntax
+The parser SHALL preserve independently omitted start, end, and step components in `[:]`, `[::]`, `[n:]`, `[:w]`, `[n:w]`, `[::k]`, and reverse forms so semantic analysis can apply direction-sensitive defaults.
+
+#### Scenario: Fully omitted slice
+- **WHEN** `[::]` is parsed
+- **THEN** start, end, and step are represented as omitted rather than fabricated source literals
+
+### Requirement: Failure and resource syntax is unambiguous
+The grammar SHALL accept `throws T | U` after a return type, `throw expression`, exact `throw;` inside a catch, `try` followed by pattern-shaped `catch Type(binding)` clauses and optional `finally`, and `match acquisition with binding` including grouped acquisitions. Historical `catch<Type> name` SHALL be rejected with migration guidance.
+
+#### Scenario: Typed catch parses
+- **WHEN** source contains `catch NetworkError.Timeout(duration) { retry(duration); }`
+- **THEN** the parser produces a typed variant catch pattern without a guard
+
+### Requirement: Permission manifests use requires and permissions
+The manifest grammar SHALL accept library `requires`, application `permissions`, operation-specific scopes, and `during: build | runtime | both`. It SHALL reject a top-level `compile_permissions` block with guidance to move the phase into the relevant grant.
+
+#### Scenario: Build-only filesystem grant
+- **WHEN** `init.zrk` grants a filesystem read operation with `during: build`
+- **THEN** the manifest AST preserves the operation, scope, and phase separately
+
+### Requirement: Safety and concurrency grammar
+The grammar SHALL parse unsafe function modifiers and blocks, `commit` regions, `task` blocks and callable sugar, `task scope`, `cancellation shield`, await timeouts, and `select` branches with `after`, `default`, and cancellation cases without introducing `async fn`.
+
+#### Scenario: Select statement is parsed
+- **WHEN** source contains task, channel, timer, and default select branches
+- **THEN** the parser produces distinct guarded branches and their result bindings
+
+### Requirement: Contextual safety restrictions
+The parser and semantic frontend SHALL preserve enough contextual information to diagnose `await`, task/thread creation, or irreversible effects in a reversible unsafe transaction and unsafe-only operations outside an unsafe boundary.
+
+#### Scenario: Commit appears outside unsafe
+- **WHEN** source places `commit {}` outside an unsafe block
+- **THEN** compilation fails with a contextual syntax or semantic diagnostic

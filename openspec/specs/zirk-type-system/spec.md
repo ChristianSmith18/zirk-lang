@@ -512,3 +512,59 @@ distintos.
 #### Scenario: Coherencia entre hash e igualdad
 - **WHEN** dos cadenas iguales por `==` se usan como claves de un mapa
 - **THEN** se resuelven a la misma entrada
+
+### Requirement: Projection copy and whole-reference aliasing
+The checker SHALL classify reference expressions as whole references, projection reads, or places. Whole-reference assignment/passing/return/capture SHALL preserve aliasing; projection reads SHALL require deep Clone and produce independence; places SHALL preserve access to original storage. Destructuring, matching, callable capture, collection extraction, and generic T SHALL follow the same rule.
+
+#### Scenario: Generic projection needs Clone
+- **WHEN** a generic function returns `values[0]` for unconstrained T
+- **THEN** the checker requires `T from Clone` or rejects extraction
+
+### Requirement: Final callable and object typing supersedes delivery limits
+The final language type system SHALL support structural `Fn` adaptation, escaping closures, compiler-managed capture environments, abstract-class implementation, explicit overrides, declared generic variance, normalized unions, constant tuple indexes, copied iteration, and exhaustive guard-free matching. Feature phasing MAY diagnose an undelivered construct but SHALL NOT describe the final construct as semantically forbidden.
+
+#### Scenario: Phase-limited closure
+- **WHEN** the current compiler phase does not yet implement escaping closures
+- **THEN** its diagnostic identifies the delivery phase while documentation retains the final legal Fn semantics
+
+### Requirement: Default initialization and immutable data
+Every omitted attribute SHALL receive its type default. Construction MAY finalize an `inmut` attribute before the object becomes available. Records and tuples SHALL remain immutable values; enums SHALL remain closed data without user methods; collections SHALL enforce referent permissions and strict aliases.
+
+#### Scenario: Omitted class attribute
+- **WHEN** an Int32 class attribute has no initializer and construct does not replace it
+- **THEN** its value is zero after construction
+
+### Requirement: Failure effects and Result consumption are checked
+The checker SHALL require explicit exceptions to be handled or declared, SHALL propagate declared exception sets through calls and callable compatibility, SHALL permit documented implicit `RuntimeError` exceptions without signature declaration, and SHALL reject an unconsumed `Result` except through explicit discard.
+
+#### Scenario: Callable throws too broadly
+- **WHEN** a callable declaring `throws StorageError` is assigned to `Fn() => Void`
+- **THEN** assignment fails because the target does not permit that explicit exception
+
+### Requirement: Resource responsibility is flow-sensitive
+The checker SHALL track managed, transferred, closed, dependent, and abandoned resource responsibility through branches, returns, containers, closures, tasks, and exceptional exits. It SHALL reject statically provable duplicate close, use-after-transfer, illegal escape, non-cloneable projection, and leak paths.
+
+#### Scenario: Every branch transfers or closes
+- **WHEN** all control-flow paths either close or transfer one resource responsibility
+- **THEN** the function satisfies resource lifetime checking
+
+### Requirement: Permission effects propagate outside surface callable syntax
+The checker SHALL retain compiler-internal permission-effect metadata on declarations and callable values, infer it transitively through higher-order calls, and report a path from entry point to privileged API. Permission effects SHALL NOT alter the written `Fn(P...) => R` grammar.
+
+#### Scenario: Higher-order permission propagation
+- **WHEN** a permission-free wrapper invokes a callback whose concrete value reads a secret
+- **THEN** the call site and application acquire the secret-read requirement in compiler metadata
+
+### Requirement: Memory and task type family
+The type system SHALL define `Weak<T>`, `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>`, `Task<T>`, `TaskSettlement<T>`, `Channel<T>`, synchronization types, and their capability constraints without exposing mandatory ownership or lifetime parameters.
+
+#### Scenario: Await type is inferred
+- **WHEN** an expression has type `Task<Result<User, LoadError>>`
+- **THEN** awaiting it has type `Result<User, LoadError>`
+
+### Requirement: Derived concurrent capabilities
+Transferability and shareability SHALL be compiler-derived, non-forgeable properties based on the complete reachable type graph, mutability, resource ownership, and synchronization contract.
+
+#### Scenario: Class contains mutex
+- **WHEN** a class safely encapsulates mutable state behind a supported mutex
+- **THEN** the compiler may derive sharing without exposing an ordinary user-implemented marker
