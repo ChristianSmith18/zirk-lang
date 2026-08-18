@@ -1,5 +1,9 @@
 # Zirk — Language specification
 
+<p align="center">
+  <img src="assets/zirk-clean.svg" alt="Zirk Logo" width="160" height="160" />
+</p>
+
 This document defines the public semantics of `.zrk` source code.
 
 ## 1. Lexical structure

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 440" width="100%" height="100%" role="img" aria-labelledby="title">
+  <title id="title">Zirk Logo - App Icon</title>
+  
+  <defs>
+    <!-- Background Card Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="50%" stop-color="#311042"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+
+    <!-- Zirk Mark Gradient -->
+    <linearGradient id="zirkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="40%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <!-- Slash Gradient -->
+    <linearGradient id="slashGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+
+    <!-- Card Edge Highlight (Clean original vertical gradient) -->
+    <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+
+    <!-- Drop Shadow Filter for 3D Depth -->
+    <filter id="fluentShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.55"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+
+    <!-- Drop Shadow for the Z-Mark itself -->
+    <filter id="markShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- Glowing Aura behind the squircle -->
+  <circle cx="220" cy="210" r="160" fill="#a78bfa" opacity="0.12" filter="blur(60px)"/>
+
+  <!-- Squircle Base Card (Without background black canvas, fully transparent borders) -->
+  <rect x="40" y="30" width="360" height="360" rx="90" fill="url(#bgGrad)" filter="url(#fluentShadow)"/>
+  
+  <!-- Glassmorphic Card Inner Border (Acrylic Effect) -->
+  <rect x="41" y="31" width="358" height="358" rx="89" fill="none" stroke="url(#edgeGrad)" stroke-width="2"/>
+
+  <!-- Zirk Logo Mark Group with Filter applied in 440px space -->
+  <g filter="url(#markShadow)">
+    <g transform="translate(28, 18) scale(8)">
+      <!-- Base Z Shape (Symmetric horizontal scale to 80% width, uniform stroke thickness) -->
+      <path fill="none" stroke="url(#zirkGrad)" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.25" d="M12.8 12h20L14.4 36h20.8"/>
+
+      <!-- Antigravity Crossing Slash (Symmetric horizontal scale to 80% width, uniform stroke thickness) -->
+      <path fill="none" stroke="url(#slashGrad)" stroke-linecap="round" stroke-width="5.25" d="M16 8l16 32"/>
+    </g>
+  </g>
+</svg>
