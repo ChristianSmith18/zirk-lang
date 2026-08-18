@@ -40,6 +40,12 @@ pub extern "C" fn zirk_rt_division_by_zero() -> ! {
     fatal("division by zero")
 }
 
+/// Reports an invalid string repetition count and terminates.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_invalid_repeat() -> ! {
+    fatal("a string can only be repeated a non-negative number of times")
+}
+
 /// Reports that an object does not carry a contract it was said to satisfy.
 ///
 /// Unreachable in a well-formed program: the checker proved conformance and

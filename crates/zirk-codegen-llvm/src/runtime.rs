@@ -37,6 +37,12 @@ pub mod symbols {
     pub const ALLOC: &str = "zirk_rt_alloc";
     /// Reports that an object could not be allocated and terminates.
     pub const ALLOCATION_FAILED: &str = "zirk_rt_allocation_failed";
+    /// Concatenates two strings.
+    pub const STR_CONCAT: &str = "zirk_str_concat";
+    /// Repeats a string a non-negative number of times.
+    pub const STR_REPEAT: &str = "zirk_str_repeat";
+    /// Reports an invalid repetition count and terminates.
+    pub const INVALID_REPEAT: &str = "zirk_rt_invalid_repeat";
     /// Finds the dispatch table a descriptor holds for a contract.
     pub const CONTRACT_TABLE: &str = "zirk_rt_contract_table";
     /// Reports a descriptor missing a contract it was said to satisfy.
@@ -56,6 +62,8 @@ pub struct Runtime<'ctx> {
     pub division_by_zero: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
+    pub str_concat: FunctionValue<'ctx>,
+    pub str_repeat: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -123,6 +131,19 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
+    let str_concat = module.add_function(
+        symbols::STR_CONCAT,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let str_repeat = module.add_function(
+        symbols::STR_REPEAT,
+        ptr.fn_type(&[ptr.into(), context.i32_type().into()], false),
+        external,
+    );
+    let invalid_repeat =
+        module.add_function(symbols::INVALID_REPEAT, void.fn_type(&[], false), external);
+
     let contract_table = module.add_function(
         symbols::CONTRACT_TABLE,
         ptr.fn_type(&[ptr.into(), i64.into()], false),
@@ -139,6 +160,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         division_by_zero,
         allocation_failed,
         missing_contract,
+        invalid_repeat,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -159,5 +181,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         division_by_zero,
         alloc,
         contract_table,
+        str_concat,
+        str_repeat,
     }
 }

@@ -374,6 +374,15 @@ impl<'a> FunctionLowering<'a> {
             ir_type(ty)
         } else if self.checked.enums.iter().any(|e| e.name == declared) {
             IrType::Int32
+        } else if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
+            IrType::Object(id as u32)
+        } else if let Some(id) = self
+            .checked
+            .contracts
+            .iter()
+            .position(|c| c.name == declared)
+        {
+            IrType::Contract(id as u32)
         } else {
             unreachable!("a verified program only names known types")
         };
@@ -1117,6 +1126,63 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_short_circuit(e, span)
             }
 
+            // A user type supplies the operator through its reserved method,
+            // so the call is what the operator *is* — not a special form the
+            // backend would need to know about.
+            ast::Expr::Binary(e) if self.operator_method_of(e).is_some() => {
+                let (id, name) = self.operator_method_of(e).expect("checked above");
+                let class = &self.checked.classes[id as usize];
+                let method = class.method(&name).expect("the checker resolved it");
+                let symbol = body_symbol(self.checked, method);
+                let returns = ir_type(method.returns);
+                let param = method
+                    .params
+                    .first()
+                    .map(|p| ir_type(p.ty))
+                    .expect("an operator method takes one operand");
+
+                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
+                let right = self.lower_expr_as(&e.right, param);
+                let left = self.reload(held, e.left.span());
+
+                self.emit(
+                    InstKind::Call {
+                        callee: symbol,
+                        args: vec![left, right],
+                    },
+                    returns,
+                    span,
+                )
+            }
+
+            ast::Expr::Binary(e)
+                if is_string_operator(
+                    self.type_of(&e.left, e.left.span()),
+                    self.type_of(&e.right, e.right.span()),
+                    e.op,
+                ) =>
+            {
+                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
+                let right = self.lower_expr(&e.right);
+                let left = self.reload(held, e.left.span());
+
+                let kind = if e.op == ast::BinaryOp::Add {
+                    InstKind::Concat { left, right }
+                } else if self.type_of(&e.left, e.left.span()) == IrType::String {
+                    InstKind::Repeat {
+                        string: left,
+                        count: right,
+                    }
+                } else {
+                    // `3 * "ja"`: the same request, written the other way.
+                    InstKind::Repeat {
+                        string: right,
+                        count: left,
+                    }
+                };
+                self.emit(kind, IrType::String, span)
+            }
+
             ast::Expr::Binary(e) => {
                 let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
                 let right = self.lower_expr(&e.right);
@@ -1724,6 +1790,18 @@ impl<'a> FunctionLowering<'a> {
         self.checked.classes.get(id as usize)?.base
     }
 
+    /// The reserved method an operator resolves to, if its left operand is a
+    /// class that supplies one.
+    fn operator_method_of(&self, expr: &ast::BinaryExpr) -> Option<(u32, String)> {
+        let IrType::Object(id) = self.type_of(&expr.left, expr.left.span()) else {
+            return None;
+        };
+        let name = operator_method(expr.op)?;
+        self.checked.classes[id as usize]
+            .method(name)
+            .map(|_| (id, name.to_string()))
+    }
+
     /// The contract method a call invokes, if the receiver is a contract.
     fn contract_method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::ContractMethod> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -2238,6 +2316,24 @@ impl<'a> FunctionLowering<'a> {
                     left
                 }
             }
+            ast::Expr::Binary(e) if self.operator_method_of(e).is_some() => {
+                let (id, name) = self.operator_method_of(e).expect("checked above");
+                ir_type(
+                    self.checked.classes[id as usize]
+                        .method(&name)
+                        .expect("the checker resolved it")
+                        .returns,
+                )
+            }
+            ast::Expr::Binary(e)
+                if is_string_operator(
+                    self.type_of(&e.left, e.left.span()),
+                    self.type_of(&e.right, e.right.span()),
+                    e.op,
+                ) =>
+            {
+                IrType::String
+            }
             ast::Expr::Binary(e) => {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
@@ -2285,6 +2381,29 @@ impl<'a> FunctionLowering<'a> {
             .copied()
             .expect("every emitted value records its type")
     }
+}
+
+/// The reserved method an operator resolves to on a user type.
+fn operator_method(op: ast::BinaryOp) -> Option<&'static str> {
+    use ast::BinaryOp::*;
+    Some(match op {
+        Add => "_add",
+        Sub => "_subtract",
+        Mul => "_multiply",
+        Div => "_divide",
+        Rem => "_remainder",
+        _ => return None,
+    })
+}
+
+/// Whether an operator on these operands is one of `String`'s.
+fn is_string_operator(left: IrType, right: IrType, op: ast::BinaryOp) -> bool {
+    matches!(
+        (left, right, op),
+        (IrType::String, IrType::String, ast::BinaryOp::Add)
+            | (IrType::String, IrType::Int32, ast::BinaryOp::Mul)
+            | (IrType::Int32, IrType::String, ast::BinaryOp::Mul)
+    )
 }
 
 fn binary_op(op: ast::BinaryOp) -> BinaryOp {

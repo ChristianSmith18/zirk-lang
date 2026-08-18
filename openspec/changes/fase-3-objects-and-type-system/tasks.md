@@ -103,13 +103,13 @@
 - [x] 6.3 Copiar en la clase los métodos de trait con cuerpo que no redefine (D4)
 - [ ] 6.4 Rechazar el conflicto entre dos traits que aportan el mismo método (D4)
 - [x] 6.5 Admitir una implementación donde se espera su contrato
-- [ ] 6.6 Definir los contratos de operador y sus métodos reservados (`_add`, `_subtract`, etc.), impidiendo reabrir tipos nativos (D6)
-- [ ] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
-- [ ] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`
-- [ ] 6.8a Hacer que `String` implemente repetición checked en ambos órdenes (`String * Integer`, `Integer * String`)
+- [x] 6.6 Definir los contratos de operador y sus métodos reservados (`_add`, `_subtract`, etc.), impidiendo reabrir tipos nativos (D6)
+- [x] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
+- [x] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`
+- [x] 6.8a Hacer que `String` implemente repetición checked en ambos órdenes (`String * Integer`, `Integer * String`)
 - [ ] 6.9 Definir `Iterable<T>` e `Iterator<T>` como contratos del lenguaje
 - [ ] 6.10 Hacer que `for ... in` exija `Iterable<T>`, y que rangos y `String` lo implementen (D8)
-- [ ] 6.11 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 6.11 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 7. Tipos — genéricos
 
