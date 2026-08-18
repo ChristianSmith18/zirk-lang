@@ -910,6 +910,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // `String` the operands are opaque handles, so comparing them as
         // integers would compare identity — which is what `is` means, not `==`.
         if left.is_pointer_value() {
+            // `is` compares the references themselves, whatever they point at:
+            // identity is the address, so there is nothing to call into.
+            if op == ir::BinaryOp::Identical {
+                let l = self
+                    .builder
+                    .build_ptr_to_int(left.into_pointer_value(), self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r = self
+                    .builder
+                    .build_ptr_to_int(right.into_pointer_value(), self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                return self.compare(IntPredicate::EQ, l, r);
+            }
             return self.compare_strings(op, left, right);
         }
 
@@ -933,6 +946,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             LtEq => self.compare(IntPredicate::SLE, l, r),
             Gt => self.compare(IntPredicate::SGT, l, r),
             GtEq => self.compare(IntPredicate::SGE, l, r),
+            // A value has no identity to compare, and the checker said so.
+            Identical => unreachable!("`is` needs a reference"),
 
             // `&&` and `||` do not short-circuit in this phase: both operands
             // were already evaluated when the IR was lowered. Short-circuiting

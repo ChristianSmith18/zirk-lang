@@ -861,6 +861,12 @@ pub enum BinaryOp {
     GtEq,
     And,
     Or,
+    /// `is`, which asks whether two references name the same instance.
+    ///
+    /// Distinct from `==`: that one compares content, and two objects may hold
+    /// the same content while being different objects — which is exactly the
+    /// difference this operator exists to make visible.
+    Is,
     /// `??`, which yields the left operand unless it is null.
     Coalesce,
 }
@@ -869,6 +875,7 @@ impl BinaryOp {
     pub const fn as_str(self) -> &'static str {
         use BinaryOp::*;
         match self {
+            Is => "is",
             Add => "+",
             Sub => "-",
             Mul => "*",

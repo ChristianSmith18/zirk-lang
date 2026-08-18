@@ -2038,10 +2038,30 @@ impl<'a> Checker<'a> {
             }
 
             // Equality is structural and requires both sides to share a type.
+            // `is` asks about identity, so it needs types with identity and
+            // nothing else: no contract, no structure, no content.
+            Is => {
+                self.expect_same(left, right, expr);
+                if !matches!(left.base, Base::Class(_) | Base::Contract(_) | Base::String)
+                    && !left.is_unknown()
+                {
+                    let name = self.name(left);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.op_span,
+                        format!("`{name}` has no identity to compare"),
+                        "`is` asks whether two references name the same instance, and a value is not a reference",
+                        Some("compare content with `==`".into()),
+                    );
+                }
+                Type::BOOLEAN
+            }
+
             Eq | NotEq => {
                 self.expect_same(left, right, expr);
                 self.reject_nullable_comparison(left, right, expr);
                 self.reject_closure_comparison(left, right, expr);
+                self.reject_unstructured_comparison(left, expr);
                 Type::BOOLEAN
             }
 
@@ -2054,6 +2074,42 @@ impl<'a> Checker<'a> {
 
             Add | Sub | Mul | Div | Rem => self.check_arithmetic(left, right, expr),
         }
+    }
+
+    /// Rejects `==` on a type that has not said what equality means for it.
+    ///
+    /// `ZIRK_LANGUAGE_SPEC.md` section 4 makes `==` structural, and section 7
+    /// says equality exists only through an explicit contract. Without one
+    /// there is nothing to compare structurally: answering by address would be
+    /// `is` wearing the wrong operator, and answering `true` because the types
+    /// match would be worse still.
+    fn reject_unstructured_comparison(&mut self, left: Type, expr: &BinaryExpr) {
+        let (Base::Class(_) | Base::Contract(_)) = left.base else {
+            return;
+        };
+
+        // A user type says what equality means through the reserved method,
+        // the same way it supplies any other operator.
+        if let Base::Class(id) = left.base
+            && self.classes[id as usize].method("_equals").is_some()
+        {
+            return;
+        }
+
+        let name = self.name(left);
+        let help = match left.base {
+            Base::Class(_) => format!(
+                "implement `fn _equals(other: {name}): Boolean`, or compare identity with `is`"
+            ),
+            _ => "compare identity with `is`, or require an equality contract".to_string(),
+        };
+        self.error(
+            codes::TYPE_MISMATCH,
+            expr.op_span,
+            format!("`{name}` does not define equality"),
+            "`==` compares content, and this type has not said what its content comparison is",
+            Some(help),
+        );
     }
 
     /// An arithmetic operator, resolved by what its operands support.
@@ -2655,14 +2711,7 @@ impl<'a> Checker<'a> {
         }
 
         if object.nullable {
-            let name = self.name(object);
-            self.error(
-                codes::TYPE_MISMATCH,
-                object_span,
-                format!("`{name}` may be absent"),
-                "reading a member of a value that may be null is not allowed",
-                Some("use `?.`, or provide a value with `??` first".into()),
-            );
+            self.reject_absent_receiver(object, object_span);
             return Type::UNKNOWN;
         }
 
@@ -2710,6 +2759,18 @@ impl<'a> Checker<'a> {
         }
 
         ty
+    }
+
+    /// Reports reaching a member through a value that may be absent.
+    fn reject_absent_receiver(&mut self, object: Type, at: Span) {
+        let name = self.name(object);
+        self.error(
+            codes::TYPE_MISMATCH,
+            at,
+            format!("`{name}` may be absent"),
+            "reaching a member through a value that may be null is not allowed",
+            Some("use `?.`, or provide a value with `??` first".into()),
+        );
     }
 
     /// Whether the code being checked may see a member with this visibility.
@@ -3198,6 +3259,17 @@ impl<'a> Checker<'a> {
             && !self.variant_accesses.contains(&field.span)
         {
             let object = self.check_expr(&field.object);
+
+            // Calling through a value that may be absent is the same mistake
+            // as reading through one, and gets the same answer.
+            if object.nullable && matches!(object.base, Base::Class(_) | Base::Contract(_)) {
+                self.reject_absent_receiver(object, field.object.span());
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::UNKNOWN;
+            }
+
             if let Base::Class(id) = object.base {
                 return self.check_method_call(expr, field, id);
             }

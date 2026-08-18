@@ -64,6 +64,13 @@ pub enum Nullable {
     Int32,
     Boolean,
     String,
+    /// A reference that may be absent, by layout id.
+    ///
+    /// It carries the flag like every other nullable rather than reusing the
+    /// null address: `T??` does not exist, but a rule that only works for
+    /// pointers is one more rule, and one shape needs none.
+    Object(u32),
+    Contract(u32),
 }
 
 impl Nullable {
@@ -72,6 +79,8 @@ impl Nullable {
             Nullable::Int32 => IrType::Int32,
             Nullable::Boolean => IrType::Boolean,
             Nullable::String => IrType::String,
+            Nullable::Object(id) => IrType::Object(id),
+            Nullable::Contract(id) => IrType::Contract(id),
         }
     }
 
@@ -81,6 +90,8 @@ impl Nullable {
             IrType::Int32 => Nullable::Int32,
             IrType::Boolean => Nullable::Boolean,
             IrType::String => Nullable::String,
+            IrType::Object(id) => Nullable::Object(id),
+            IrType::Contract(id) => Nullable::Contract(id),
             _ => return None,
         })
     }
@@ -100,6 +111,8 @@ impl IrType {
                 Nullable::Int32 => "Int32?",
                 Nullable::Boolean => "Boolean?",
                 Nullable::String => "String?",
+                Nullable::Object(_) => "object?",
+                Nullable::Contract(_) => "contract?",
             },
         }
     }
@@ -472,6 +485,11 @@ pub enum BinaryOp {
     GtEq,
     And,
     Or,
+    /// `is`: whether two references name the same instance.
+    ///
+    /// A comparison of addresses, which is why it needs no contract and no
+    /// runtime call: identity *is* the address.
+    Identical,
 }
 
 impl BinaryOp {
@@ -480,7 +498,7 @@ impl BinaryOp {
         use BinaryOp::*;
         match self {
             Add | Sub | Mul | Div | Rem => operand,
-            Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or => IrType::Boolean,
+            Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or | Identical => IrType::Boolean,
         }
     }
 }

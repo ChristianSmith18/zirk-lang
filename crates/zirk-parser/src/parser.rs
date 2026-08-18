@@ -2283,6 +2283,9 @@ fn precedence(kind: &TokenKind) -> Option<(BinaryOp, u8)> {
         T::AndAnd => (And, 2),
         T::Eq => (BinaryOp::Eq, 3),
         T::NotEq => (NotEq, 3),
+        // Same level as `==`: they answer neighbouring questions about the
+        // same two values.
+        T::Keyword(Keyword::Is) => (Is, 3),
         T::Lt => (Lt, 4),
         T::LtEq => (LtEq, 4),
         T::Gt => (Gt, 4),

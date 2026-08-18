@@ -88,7 +88,7 @@
 - [x] 5.6 Verificar `construct`: que exista, resolver por aridad e inicializar todo campo. Falta desempatar firmas de igual aridad por tipo y por etiqueta, que llega con los argumentos nombrados reordenados
 - [x] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere — llega con `extends`, que es lo que hace posible redefinir
 - [ ] 5.8 Verificar `abstract class` como conjunto de requisitos adoptado con `implements`: sin constructor, sin estado y sin contribución al layout
-- [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
+- [x] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
 - [ ] 5.10 Rechazar anotar una closure como parámetro, retorno o campo (D9)
 - [ ] 5.11 Rechazar que una closure escape de la función que la crea (D9)
 - [ ] 5.12 Tests: una closure sigue funcionando en variable local e invocación (D9)

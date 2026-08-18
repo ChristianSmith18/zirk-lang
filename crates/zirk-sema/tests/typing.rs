@@ -1312,3 +1312,72 @@ fn invalid_reopening_a_native_type() {
         );
     }
 }
+
+// --- Identidad e igualdad ----------------------------------------------------
+
+#[test]
+fn invalid_equality_on_a_type_that_has_not_defined_it() {
+    // Answering by address would be `is` wearing the wrong operator, and
+    // answering `true` because the types match would be worse still.
+    let output = rejected(
+        "class U { name: String; construct() { this.name = \"a\"; } }
+         fn main(): Void { mut a = U(); mut b = U(); stdout.println(a == b); }",
+    );
+    assert!(output.contains("does not define equality"), "{output}");
+    assert!(output.contains("_equals"), "{output}");
+}
+
+#[test]
+fn valid_equality_through_the_reserved_method() {
+    accepted(
+        "class Point {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
+             fn _equals(other: Point): Boolean { return this.x == other.x; }
+         }
+         fn main(): Void { mut a = Point(1); stdout.println(a == Point(1)); }",
+    );
+}
+
+#[test]
+fn valid_identity_needs_no_contract() {
+    // Identity *is* the address, so there is nothing to define.
+    accepted(
+        "class U { construct() { } }
+         fn main(): Void { mut a = U(); mut b = a; stdout.println(a is b); }",
+    );
+}
+
+#[test]
+fn invalid_identity_on_a_value() {
+    let output = rejected_body("mut x = 1 is 2;");
+    assert!(output.contains("no identity to compare"), "{output}");
+}
+
+#[test]
+fn invalid_reaching_a_member_through_a_nullable_receiver() {
+    // Calling through a value that may be absent is the same mistake as
+    // reading through one.
+    for body in [
+        "mut u: U? = null;\nstdout.println(u.name);",
+        "mut u: U? = null;\nstdout.println(u.describe());",
+    ] {
+        let output = rejected(&format!(
+            "class U {{ name: String; construct() {{ this.name = \"a\"; }} \
+             fn describe(): String {{ return this.name; }} }}\n\
+             fn main(): Void {{ {body} }}"
+        ));
+        assert!(output.contains("may be absent"), "for `{body}`:\n{output}");
+    }
+}
+
+#[test]
+fn valid_a_nullable_contract_is_a_type() {
+    // It reaches lowering as an ordinary nullable, which is what the uniform
+    // representation buys.
+    accepted(
+        "interface D { fn describe(): String; }
+         class R implements D { construct() { } fn describe(): String { return \"r\"; } }
+         fn main(): Void { mut d: D? = R(); mut e: D? = null; }",
+    );
+}
