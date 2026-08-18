@@ -26,3 +26,6 @@
 
 # VS Code packaging
 *.vsix
+
+# Local variants directory
+/variants/
