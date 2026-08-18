@@ -95,7 +95,7 @@
               }
             },
             {
-              "name": "meta.embedded.line-interpolation.zirk",
+              "name": "source.zirk",
               "begin": "\\{",
               "end": "\\}",
               "beginCaptures": {

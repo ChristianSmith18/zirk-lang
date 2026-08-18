@@ -2,7 +2,7 @@
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
   "description": "Syntax highlighting and language support for the Zirk programming language",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "cristian",
   "engines": {
     "vscode": "^1.75.0"
