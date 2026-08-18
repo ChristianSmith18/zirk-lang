@@ -24,7 +24,8 @@ mod types;
 pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
-    Base, ClassType, EnumType, FieldInfo, FnType, MethodInfo, PendingType, Type, pending_type,
+    Base, ClassType, ContractMethod, ContractType, EnumType, FieldInfo, FnType, MethodInfo,
+    PendingType, Type, pending_type,
 };
 
 /// Diagnostic codes of the checker.
@@ -83,6 +84,8 @@ pub mod codes {
     pub const UNKNOWN_MEMBER: Code = Code::new("E0426");
     /// A member the type has but that this code may not see.
     pub const INACCESSIBLE_MEMBER: Code = Code::new("E0427");
+    /// A class that does not supply what a contract requires.
+    pub const MISSING_IMPLEMENTATION: Code = Code::new("E0429");
     /// A method that replaces an inherited one without saying so, or that says
     /// so without replacing anything.
     pub const MISSING_OVERRIDE: Code = Code::new("E0428");

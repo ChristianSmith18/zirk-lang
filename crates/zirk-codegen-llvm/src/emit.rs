@@ -106,26 +106,43 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         .iter()
         .map(|layout| {
             let ptr = context.ptr_type(AddressSpace::default());
-            let entries: Vec<BasicValueEnum> = layout
-                .methods
-                .iter()
-                .map(|symbol| {
-                    functions[symbol]
-                        .as_global_value()
-                        .as_pointer_value()
-                        .into()
-                })
-                .collect();
 
-            let table = ptr.const_array(
-                &entries
+            let table_of = |symbols: &[String], name: &str| {
+                let entries: Vec<PointerValue> = symbols
                     .iter()
-                    .map(|e| e.into_pointer_value())
-                    .collect::<Vec<_>>(),
+                    .map(|symbol| functions[symbol].as_global_value().as_pointer_value())
+                    .collect();
+                let array = ptr.const_array(&entries);
+                let global = llvm.add_global(array.get_type(), None, name);
+                global.set_initializer(&array);
+                global.set_constant(true);
+                global.set_linkage(Linkage::Private);
+                global.as_pointer_value()
+            };
+
+            let methods = table_of(&layout.methods, &format!("zk.vtable.{}", layout.name));
+
+            // The descriptor is the method table, how many contracts follow,
+            // and one (id, table) pair each. The runtime searches those pairs;
+            // the shape is fixed between the two and nothing else reads it.
+            let word = context.i64_type();
+            let mut fields: Vec<BasicValueEnum> = vec![
+                methods.into(),
+                word.const_int(layout.contracts.len() as u64, false).into(),
+            ];
+            for table in &layout.contracts {
+                let symbol = format!("zk.itable.{}.{}", layout.name, table.contract);
+                fields.push(word.const_int(u64::from(table.contract), false).into());
+                fields.push(table_of(&table.methods, &symbol).into());
+            }
+
+            let descriptor = context.const_struct(&fields, false);
+            let global = llvm.add_global(
+                descriptor.get_type(),
+                None,
+                &format!("zk.type.{}", layout.name),
             );
-            let global =
-                llvm.add_global(table.get_type(), None, &format!("zk.type.{}", layout.name));
-            global.set_initializer(&table);
+            global.set_initializer(&descriptor);
             global.set_constant(true);
             global.set_linkage(Linkage::Private);
             global.as_pointer_value()
@@ -179,6 +196,9 @@ fn llvm_type_in<'ctx>(
         // so the value carried around is a pointer. The struct behind it is
         // only needed where a field is addressed.
         ir::IrType::Object(_) => context.ptr_type(AddressSpace::default()).into(),
+        // Reached through the contract, but still just the object's address:
+        // the descriptor it already carries answers which body to run.
+        ir::IrType::Contract(_) => context.ptr_type(AddressSpace::default()).into(),
         // A present flag next to the value. The flag comes first so the struct
         // has the same shape whatever the payload is.
         ir::IrType::Nullable(base) => {
@@ -383,6 +403,28 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("a verified module addresses a field the layout has")
     }
 
+    /// The signature of one contract method, taken from any class that
+    /// supplies it.
+    ///
+    /// Every implementation shares it — that is what conformance checked — so
+    /// the first one found describes them all.
+    fn contract_signature(&self, contract: u32, index: u32) -> inkwell::types::FunctionType<'ctx> {
+        let symbol = self
+            .module
+            .objects
+            .iter()
+            .find_map(|layout| {
+                layout
+                    .contracts
+                    .iter()
+                    .find(|t| t.contract == contract)
+                    .and_then(|t| t.methods.get(index as usize))
+            })
+            .expect("a verified module has an implementation of every reachable contract");
+
+        self.functions[symbol].get_type()
+    }
+
     /// The layout an object operand belongs to.
     fn object_layout_of(&self, operand: ir::Operand) -> u32 {
         let ir::IrType::Object(id) = self.value_types[&operand.0] else {
@@ -405,6 +447,67 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .const_int(*value as u64, false)
                     .into(),
             ),
+            ir::InstKind::CallContract {
+                object,
+                contract,
+                index,
+                args,
+            } => {
+                let receiver = self.operand(*object).into_pointer_value();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+
+                let descriptor = self
+                    .builder
+                    .build_load(ptr, receiver, "descriptor")
+                    .expect("load the descriptor")
+                    .into_pointer_value();
+
+                // Which table answers for this contract is not statically
+                // known — that is what a contract is for — so the runtime
+                // finds it in the descriptor.
+                let id = self
+                    .context
+                    .i64_type()
+                    .const_int(u64::from(*contract), false);
+                let table = self
+                    .builder
+                    .build_call(
+                        self.runtime.contract_table,
+                        &[descriptor.into(), id.into()],
+                        "itable",
+                    )
+                    .expect("find the contract table")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the lookup returns a pointer")
+                    .into_pointer_value();
+
+                let offset = self.context.i32_type().const_int(u64::from(*index), false);
+                let slot = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(ptr, table, &[offset], "method_slot")
+                        .expect("a verified module calls a method the table has")
+                };
+                let target = self
+                    .builder
+                    .build_load(ptr, slot, "method")
+                    .expect("load the method")
+                    .into_pointer_value();
+
+                let signature = self.contract_signature(*contract, *index);
+                let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
+                arguments.extend(
+                    args.iter()
+                        .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
+                );
+
+                let call = self
+                    .builder
+                    .build_indirect_call(signature, target, &arguments, "call")
+                    .expect("call through the contract table");
+                call.try_as_basic_value().basic()
+            }
+
             ir::InstKind::CallVirtual {
                 object,
                 index,
@@ -416,12 +519,17 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
                 // The descriptor lives in the header, so which body runs is
                 // decided by the object itself and not by the static type of
-                // whoever is holding it.
+                // whoever is holding it. Its first field is the method table.
                 let ptr = self.context.ptr_type(AddressSpace::default());
                 let descriptor = self
                     .builder
                     .build_load(ptr, receiver, "descriptor")
                     .expect("load the descriptor")
+                    .into_pointer_value();
+                let table = self
+                    .builder
+                    .build_load(ptr, descriptor, "vtable")
+                    .expect("load the method table")
                     .into_pointer_value();
 
                 // The table is an array of pointers, so the slot is the base
@@ -429,7 +537,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let offset = self.context.i32_type().const_int(u64::from(*index), false);
                 let slot = unsafe {
                     self.builder
-                        .build_in_bounds_gep(ptr, descriptor, &[offset], "method_slot")
+                        .build_in_bounds_gep(ptr, table, &[offset], "method_slot")
                         .expect("a verified module calls a method the table has")
                 };
                 let target = self

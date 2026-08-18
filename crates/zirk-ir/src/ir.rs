@@ -39,6 +39,12 @@ pub enum IrType {
     /// is the address. Two bindings holding the same object hold the same
     /// address, which is what `is` compares.
     Object(u32),
+    /// A value reached through a contract rather than through its own class.
+    ///
+    /// Represented as the object's address, exactly like a class reference:
+    /// which class is behind it is what a contract exists not to say, and the
+    /// object already carries its own descriptor to answer that at the call.
+    Contract(u32),
     /// `T?`: a value that may be absent.
     ///
     /// Represented uniformly as a present flag next to the value, rather than
@@ -89,6 +95,7 @@ impl IrType {
             IrType::String => "String",
             IrType::Closure(_) => "closure",
             IrType::Object(_) => "object",
+            IrType::Contract(_) => "contract",
             IrType::Nullable(n) => match n {
                 Nullable::Int32 => "Int32?",
                 Nullable::Boolean => "Boolean?",
@@ -164,6 +171,12 @@ pub struct ObjectLayout {
     /// The name of the class, which the descriptor is emitted under.
     pub name: String,
     pub fields: Vec<ObjectField>,
+    /// The contracts this layout satisfies, and the table for each.
+    ///
+    /// One table per contract, because a class satisfies several and each
+    /// would want its own indices. The descriptor keeps the list so a call
+    /// through a contract can find its table (D3).
+    pub contracts: Vec<ContractTable>,
     /// The method table, one symbol per index.
     ///
     /// A subclass's table starts with its base's entries, in the same order,
@@ -182,6 +195,15 @@ impl ObjectLayout {
     pub fn field(&self, name: &str) -> Option<&ObjectField> {
         self.fields.iter().find(|f| f.name == name)
     }
+}
+
+/// The dispatch table of one contract, as one class satisfies it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractTable {
+    /// Which contract this table answers for.
+    pub contract: u32,
+    /// One symbol per contract method, in the contract's own order.
+    pub methods: Vec<String>,
 }
 
 /// One field inside an object layout.
@@ -318,6 +340,16 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
+    /// Calls method `index` of `contract` through the object's table for it.
+    ///
+    /// Which table that is cannot be known statically — the whole point of a
+    /// contract — so the descriptor is searched at the call.
+    CallContract {
+        object: Operand,
+        contract: u32,
+        index: u32,
+        args: Vec<Operand>,
+    },
     /// Calls method `index` through the object's own table.
     ///
     /// Emitted only where the target is not statically known — that is, where

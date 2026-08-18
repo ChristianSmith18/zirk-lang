@@ -43,8 +43,8 @@
 - [x] 2.2 Parsear los modificadores de visibilidad y `abstract` sobre clases y miembros
 - [x] 2.3 Parsear `extends` con una sola clase. `implements` llega con los contratos
 - [x] 2.4 Parsear `this` como expresión, rechazándolo fuera de una clase
-- [ ] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
-- [ ] 2.6 Parsear `trait`, admitiendo cuerpos
+- [x] 2.5 Parsear `interface`, rechazando cuerpos en sus métodos
+- [x] 2.6 Parsear `trait`, admitiendo cuerpos
 - [x] 2.7 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 3. Gramática — genéricos
@@ -98,11 +98,11 @@
 
 ## 6. Tipos — contratos
 
-- [ ] 6.1 Registrar interfaces y traits como contratos, con sus métodos
-- [ ] 6.2 Verificar que una declaración implemente por completo lo que dice implementar
-- [ ] 6.3 Copiar en la clase los métodos de trait con cuerpo que no redefine (D4)
+- [x] 6.1 Registrar interfaces y traits como contratos, con sus métodos
+- [x] 6.2 Verificar que una declaración implemente por completo lo que dice implementar
+- [x] 6.3 Copiar en la clase los métodos de trait con cuerpo que no redefine (D4)
 - [ ] 6.4 Rechazar el conflicto entre dos traits que aportan el mismo método (D4)
-- [ ] 6.5 Admitir una implementación donde se espera su contrato
+- [x] 6.5 Admitir una implementación donde se espera su contrato
 - [ ] 6.6 Definir los contratos de operador y sus métodos reservados (`_add`, `_subtract`, etc.), impidiendo reabrir tipos nativos (D6)
 - [ ] 6.7 Resolver los operadores por contrato en vez de por lista fija de tipos
 - [ ] 6.8 Hacer que `String` implemente el contrato de concatenación, cerrando la deuda de `+`

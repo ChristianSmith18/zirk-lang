@@ -1,0 +1,9 @@
+interface Describable {
+    fn describe(): String;
+}
+
+class Robot implements Describable {
+    construct() { }
+}
+
+fn main(): Void { }

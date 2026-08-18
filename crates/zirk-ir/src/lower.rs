@@ -37,11 +37,29 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             methods: {
                 let mut table = vec![String::new(); class.methods.len()];
                 for method in &class.methods {
-                    let owner = &checked.classes[method.owner as usize].name;
-                    table[method.index] = method_symbol(owner, &method.name);
+                    table[method.index] = body_symbol(checked, method);
                 }
                 table
             },
+            // One table per contract, in the contract's own method order, so
+            // a call through it indexes the same way whatever class answers.
+            contracts: class
+                .contracts
+                .iter()
+                .map(|id| ContractTable {
+                    contract: *id,
+                    methods: checked.contracts[*id as usize]
+                        .methods
+                        .iter()
+                        .map(|required| {
+                            let supplied = class
+                                .method(&required.name)
+                                .expect("the checker verified conformance");
+                            body_symbol(checked, supplied)
+                        })
+                        .collect(),
+                })
+                .collect(),
         })
         .collect();
 
@@ -88,6 +106,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         }
     }
 
+    // A trait's default body belongs to the contract, not to any class that
+    // adopts it: one body, however many classes reuse it.
+    for contract in &program.contracts {
+        let Some(id) = checked
+            .contracts
+            .iter()
+            .position(|c| c.name == contract.name.name)
+        else {
+            continue;
+        };
+        for method in &contract.methods {
+            let Some(body) = &method.body else { continue };
+            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
+            let (lowered, lifted) =
+                lowering.run_contract_default(contract, method, body, id as u32);
+            module.functions.push(lowered);
+            module.functions.extend(lifted);
+        }
+    }
+
     for function in &program.functions {
         let lowering = FunctionLowering::new(&mut module, checked, &declarations);
         let (lowered, lifted) = lowering.run(function);
@@ -117,6 +155,27 @@ pub fn method_symbol(class: &str, method: &str) -> String {
     format!("{class}${method}")
 }
 
+/// The name a trait's own default body is emitted under.
+///
+/// It belongs to the contract, not to any class that adopts it: one body,
+/// however many classes reuse it.
+pub fn contract_method_symbol(contract: &str, method: &str) -> String {
+    format!("{contract}$default${method}")
+}
+
+/// The symbol whose body a method entry actually reaches.
+///
+/// A class that adopted a trait's default has an entry of its own, but the
+/// body belongs to the trait: one body, however many classes reuse it.
+fn body_symbol(checked: &CheckedProgram, method: &zirk_sema::MethodInfo) -> String {
+    match method.from_contract {
+        Some(contract) => {
+            contract_method_symbol(&checked.contracts[contract as usize].name, &method.name)
+        }
+        None => method_symbol(&checked.classes[method.owner as usize].name, &method.name),
+    }
+}
+
 /// Converts a frontend type into an IR type.
 fn ir_type(ty: Type) -> IrType {
     let base = match ty.base {
@@ -129,6 +188,7 @@ fn ir_type(ty: Type) -> IrType {
         Base::Enum(_) => IrType::Int32,
         // An object is reached through its address: that is its identity.
         Base::Class(id) => IrType::Object(id),
+        Base::Contract(id) => IrType::Contract(id),
         // A verified program contains none of these: the checker reports and
         // the pipeline stops before reaching lowering.
         Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
@@ -518,6 +578,65 @@ impl<'a> FunctionLowering<'a> {
         (lowered, lifted)
     }
 
+    /// Lowers a trait's default body into a function over the receiver.
+    ///
+    /// Its `this` is typed by the contract rather than by any class: the body
+    /// was written knowing only what the contract declares, which is exactly
+    /// what it may reach.
+    fn run_contract_default(
+        mut self,
+        contract: &ast::ContractDecl,
+        method: &ast::MethodDecl,
+        body: &ast::Block,
+        id: u32,
+    ) -> (Function, Vec<Function>) {
+        self.return_type = self.ir_type_from_ref(&method.return_type);
+
+        let entry = self.new_block();
+        self.current = entry;
+        self.scopes.push(HashMap::new());
+
+        let this = self.declare_slot("this", IrType::Contract(id), contract.name.span);
+
+        let resolved: Vec<IrType> = self
+            .checked
+            .contracts
+            .get(id as usize)
+            .and_then(|c| c.method(&method.name.name))
+            .map(|m| m.params.iter().map(|p| ir_type(p.ty)).collect())
+            .expect("the checker records every contract method");
+
+        let mut params = vec![this];
+        params.extend(
+            method
+                .params
+                .iter()
+                .zip(resolved)
+                .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span)),
+        );
+
+        self.lower_block(body);
+        if self.return_type == IrType::Void {
+            self.terminate(Terminator::Return(None));
+        } else {
+            self.terminate(Terminator::Unreachable);
+        }
+        self.scopes.pop();
+
+        let lifted = std::mem::take(&mut self.lifted);
+        let lowered = Function {
+            name: contract_method_symbol(&contract.name.name, &method.name.name),
+            params,
+            return_type: self.return_type,
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span: method.span,
+        };
+
+        (lowered, lifted)
+    }
+
     /// Writes every attribute's type default into a fresh object.
     ///
     /// `ZIRK_LANGUAGE_SPEC.md` section 7: an omitted attribute receives its
@@ -563,7 +682,9 @@ impl<'a> FunctionLowering<'a> {
             }
             // Absence is exactly what a nullable type defaults to.
             IrType::Nullable(base) => self.emit(InstKind::NullValue(base), ty, span),
-            IrType::Void | IrType::Closure(_) | IrType::Object(_) => return None,
+            IrType::Void | IrType::Closure(_) | IrType::Object(_) | IrType::Contract(_) => {
+                return None;
+            }
         })
     }
 
@@ -1026,6 +1147,9 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Call(e) => {
                 if let Some(operand) = self.lower_super_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_contract_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
@@ -1547,8 +1671,7 @@ impl<'a> FunctionLowering<'a> {
         {
             let class = &self.checked.classes[base as usize];
             let method = class.method(&field.name.name)?;
-            let owner = &self.checked.classes[method.owner as usize].name;
-            let name = method_symbol(owner, &method.name);
+            let name = body_symbol(self.checked, method);
             let returns = ir_type(method.returns);
             let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
 
@@ -1601,6 +1724,17 @@ impl<'a> FunctionLowering<'a> {
         self.checked.classes.get(id as usize)?.base
     }
 
+    /// The contract method a call invokes, if the receiver is a contract.
+    fn contract_method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::ContractMethod> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+        self.checked.contracts[id as usize].method(&field.name.name)
+    }
+
     /// The method a call invokes, if it is a method call.
     fn method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::MethodInfo> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -1613,6 +1747,39 @@ impl<'a> FunctionLowering<'a> {
             return None;
         };
         self.checked.classes[id as usize].method(&field.name.name)
+    }
+
+    /// Lowers `value.method(...)` where the receiver is reached by contract.
+    fn lower_contract_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+
+        let contract = &self.checked.contracts[id as usize];
+        let method = contract.method(&field.name.name)?;
+        let index = method.index as u32;
+        let returns = ir_type(method.returns);
+        let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+
+        let receiver = self.lower_expr(&field.object);
+        let mut args = Vec::new();
+        for (arg, ty) in call.args.iter().zip(params) {
+            args.push(self.lower_expr_as(&arg.value, ty));
+        }
+
+        Some(self.emit(
+            InstKind::CallContract {
+                object: receiver,
+                contract: id,
+                index,
+                args,
+            },
+            returns,
+            span,
+        ))
     }
 
     /// Lowers `object.method(...)` into a direct call with the receiver first.
@@ -1633,10 +1800,10 @@ impl<'a> FunctionLowering<'a> {
 
         let class = &self.checked.classes[id as usize];
         let method = class.method(&field.name.name)?;
-        // The body lives in the class that declares it, which is not always
-        // the one being called through: an inherited method keeps its owner.
-        let owner = &self.checked.classes[method.owner as usize].name;
-        let name = method_symbol(owner, &method.name);
+        // The body lives where it was declared, which is not always the class
+        // being called through: an inherited method keeps its owner, and an
+        // adopted trait default belongs to the trait.
+        let name = body_symbol(self.checked, method);
         let returns = ir_type(method.returns);
         let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
 
@@ -1890,6 +2057,9 @@ impl<'a> FunctionLowering<'a> {
             {
                 self.lower_super_call(e, expr.span());
             }
+            ast::Expr::Call(e) if self.contract_method_of(e).is_some() => {
+                self.lower_contract_call(e, expr.span());
+            }
             ast::Expr::Call(e) if self.method_of(e).is_some() => {
                 self.lower_method_call(e, expr.span());
             }
@@ -2016,7 +2186,10 @@ impl<'a> FunctionLowering<'a> {
         // A method or `super` call is not a closure call, and asking for the
         // type of its callee would ask for the type of a method — which is not
         // a value.
-        if self.method_of(call).is_some() || matches!(&*call.callee, ast::Expr::Super(_)) {
+        if self.method_of(call).is_some()
+            || self.contract_method_of(call).is_some()
+            || matches!(&*call.callee, ast::Expr::Super(_))
+        {
             return false;
         }
 
@@ -2076,6 +2249,9 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Call(e) if matches!(&*e.callee, ast::Expr::Super(_)) => IrType::Void,
             ast::Expr::Call(e) => {
+                if let Some(method) = self.contract_method_of(e) {
+                    return ir_type(method.returns);
+                }
                 if let Some(method) = self.method_of(e) {
                     return ir_type(method.returns);
                 }

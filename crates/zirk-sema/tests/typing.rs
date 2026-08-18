@@ -1099,3 +1099,135 @@ fn valid_a_class_may_extend_one_declared_later() {
          fn main(): Void { }",
     );
 }
+
+// --- Contratos ---------------------------------------------------------------
+
+const CONTRACTS: &str = "interface Describable {
+    fn describe(): String;
+}
+
+trait Labelled {
+    fn label(): String;
+    fn shout(): String { return this.label(); }
+}
+
+class User implements Describable, Labelled {
+    name: String;
+    construct(name: String) { this.name = name; }
+    fn describe(): String { return this.name; }
+    fn label(): String { return \"user\"; }
+}";
+
+#[test]
+fn valid_class_implements_an_interface_and_a_trait() {
+    accepted(&with_class(CONTRACTS, ""));
+}
+
+#[test]
+fn valid_a_class_stands_where_its_contract_is_expected() {
+    accepted(&format!(
+        "{CONTRACTS}\nfn announce(d: Describable): String {{ return d.describe(); }}\n\
+         fn main(): Void {{ mut u = User(\"x\"); stdout.println(announce(u)); }}"
+    ));
+}
+
+#[test]
+fn valid_a_trait_default_body_is_adopted() {
+    // The class never writes `shout`, and still has it.
+    accepted(&format!(
+        "{CONTRACTS}\nfn main(): Void {{ mut u = User(\"x\"); stdout.println(u.shout()); }}"
+    ));
+}
+
+#[test]
+fn invalid_class_missing_what_a_contract_requires() {
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         class Robot implements Describable { construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("describe"), "{output}");
+}
+
+#[test]
+fn invalid_implementation_with_a_different_signature() {
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         class Robot implements Describable {
+             construct() { }
+             fn describe(): Int32 { return 1; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_implementation_that_is_not_public() {
+    // A contract declares behaviour anyone may reach.
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         class Robot implements Describable {
+             construct() { }
+             private fn describe(): String { return \"x\"; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_reaching_a_member_the_contract_does_not_declare() {
+    // Which class is behind it is what a contract exists not to say.
+    let output = rejected(&format!(
+        "{CONTRACTS}\nfn announce(d: Describable): String {{ return d.label(); }}\n\
+         fn main(): Void {{ }}"
+    ));
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_constructing_a_contract() {
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         fn main(): Void { mut d = Describable(); }",
+    );
+    assert!(output.contains(codes::NOT_CALLABLE.as_str()), "{output}");
+    assert!(output.contains("describes behaviour"), "{output}");
+}
+
+#[test]
+fn invalid_implementing_something_that_is_not_a_contract() {
+    let output = rejected(
+        "class Base { construct() { } }
+         class Other implements Base { construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
+}
+
+#[test]
+fn valid_a_subclass_satisfies_what_its_base_satisfies() {
+    accepted(&format!(
+        "{CONTRACTS}
+         class Admin extends User {{ construct(name: String) {{ super(name); }} }}
+         fn announce(d: Describable): String {{ return d.describe(); }}
+         fn main(): Void {{ mut a = Admin(\"x\"); stdout.println(announce(a)); }}"
+    ));
+}
+
+#[test]
+fn invalid_interface_method_with_a_body() {
+    // A trait is the one that may carry implementation.
+    let output = rejected(
+        "interface Describable { fn describe(): String { return \"x\"; } }\nfn main(): Void { }",
+    );
+    assert!(output.contains("has no body"), "{output}");
+}

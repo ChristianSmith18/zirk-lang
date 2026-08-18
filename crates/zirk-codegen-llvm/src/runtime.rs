@@ -37,6 +37,10 @@ pub mod symbols {
     pub const ALLOC: &str = "zirk_rt_alloc";
     /// Reports that an object could not be allocated and terminates.
     pub const ALLOCATION_FAILED: &str = "zirk_rt_allocation_failed";
+    /// Finds the dispatch table a descriptor holds for a contract.
+    pub const CONTRACT_TABLE: &str = "zirk_rt_contract_table";
+    /// Reports a descriptor missing a contract it was said to satisfy.
+    pub const MISSING_CONTRACT: &str = "zirk_rt_missing_contract";
 }
 
 /// The runtime functions available to generated code.
@@ -51,6 +55,7 @@ pub struct Runtime<'ctx> {
     pub overflow: FunctionValue<'ctx>,
     pub division_by_zero: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
+    pub contract_table: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -118,7 +123,23 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
-    for handler in [overflow, division_by_zero, allocation_failed] {
+    let contract_table = module.add_function(
+        symbols::CONTRACT_TABLE,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let missing_contract = module.add_function(
+        symbols::MISSING_CONTRACT,
+        void.fn_type(&[], false),
+        external,
+    );
+
+    for handler in [
+        overflow,
+        division_by_zero,
+        allocation_failed,
+        missing_contract,
+    ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
             0,
@@ -137,5 +158,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         overflow,
         division_by_zero,
         alloc,
+        contract_table,
     }
 }

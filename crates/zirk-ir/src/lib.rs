@@ -29,9 +29,9 @@ mod lower;
 mod verify;
 
 pub use ir::{
-    BinaryOp, Block, BlockId, ClosureLayout, Function, InstKind, Instruction, IrType, Module,
-    Nullable, ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp,
-    ValueId,
+    BinaryOp, Block, BlockId, ClosureLayout, ContractTable, Function, InstKind, Instruction,
+    IrType, Module, Nullable, ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId,
+    Terminator, UnaryOp, ValueId,
 };
-pub use lower::{constructor_symbol, lower, method_symbol};
+pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use verify::{IrError, verify};
