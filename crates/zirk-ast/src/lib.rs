@@ -198,6 +198,9 @@ pub struct ConstructDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
     pub name: Ident,
+    /// Written `override fn`, which replacing an inherited method requires
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 7).
+    pub is_override: bool,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
     /// Absent on an `abstract` method, which declares a signature and no body.
@@ -539,6 +542,9 @@ pub enum Expr {
     Increment(IncrementExpr),
     /// `this`, the instance a method or constructor runs on.
     This(ThisExpr),
+    /// `super`, which reaches the base class rather than the object's own
+    /// type. Only meaningful as `super(...)` or `super.method()`.
+    Super(SuperExpr),
     /// `object.field`, and `object?.field` for the safe form.
     ///
     /// Enum variants have their own node because `Direction.North` names a
@@ -576,6 +582,7 @@ impl Expr {
             Expr::Range(e) => e.span,
             Expr::If(e) => e.span,
             Expr::This(e) => e.span,
+            Expr::Super(e) => e.span,
             Expr::Field(e) => e.span,
             Expr::Ternary(e) => e.span,
             Expr::Increment(e) => e.span,
@@ -605,6 +612,12 @@ pub struct RangeExpr {
 /// `this`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThisExpr {
+    pub span: Span,
+}
+
+/// `super`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuperExpr {
     pub span: Span,
 }
 

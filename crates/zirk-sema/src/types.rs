@@ -152,6 +152,28 @@ impl Type {
         })
     }
 
+    /// Whether the type has a default value, per
+    /// `docs/handbook/11-reference/03-built-in-types.md`.
+    ///
+    /// An omitted attribute receives it before any explicit initializer or
+    /// constructor runs (`ZIRK_LANGUAGE_SPEC.md` section 7), so a constructor
+    /// only has to write what has no default.
+    ///
+    /// A class has none: it is a reference with identity, and there is no
+    /// instance to default to. Nullable types default to `null`, which is
+    /// exactly what absence means.
+    ///
+    /// An enum has none either. Its only candidate would be the first declared
+    /// variant, and `ZIRK_LANGUAGE_SPEC.md` section 7 states that a traditional
+    /// enum exposes no declaration order — so a default derived from it would
+    /// make observable exactly what the spec says is not.
+    pub const fn has_default(self) -> bool {
+        if self.nullable {
+            return true;
+        }
+        matches!(self.base, Base::Int32 | Base::Boolean | Base::String)
+    }
+
     /// Range of values representable by the type, for integer literals.
     pub const fn integer_range(self) -> Option<(i128, i128)> {
         match self.base {

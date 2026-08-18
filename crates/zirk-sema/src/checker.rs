@@ -641,6 +641,21 @@ impl<'a> Checker<'a> {
 
             match methods.iter().position(|m| m.name == method.name.name) {
                 Some(position) if methods[position].owner != id => {
+                    // Replacing an inherited method has to say so
+                    // (`ZIRK_LANGUAGE_SPEC.md` section 7): otherwise adding a
+                    // method to a base silently changes what a subclass means.
+                    if !method.is_override {
+                        let owner = self.classes[methods[position].owner as usize].name.clone();
+                        let line = self.sources.location(methods[position].span).line;
+                        self.error(
+                            codes::MISSING_OVERRIDE,
+                            method.name.span,
+                            format!("`{}` replaces an inherited method", method.name.name),
+                            format!("`{owner}` declares it on line {line}"),
+                            Some(format!("write `override fn {}`", method.name.name)),
+                        );
+                    }
+
                     // An override replaces the entry it overrides, keeping its
                     // index: that is what lets a subclass's table start with
                     // its base's, so a method's slot does not move.
@@ -660,6 +675,18 @@ impl<'a> Checker<'a> {
                     );
                 }
                 None => {
+                    // `override` on something that overrides nothing is the
+                    // mirror mistake, and just as worth catching: it usually
+                    // means a typo in the name.
+                    if method.is_override {
+                        self.error(
+                            codes::MISSING_OVERRIDE,
+                            method.name.span,
+                            format!("`{}` overrides nothing", method.name.name),
+                            "no base class declares a method with that name and signature",
+                            Some("remove `override`, or check the spelling".into()),
+                        );
+                    }
                     let index = methods.len();
                     methods.push(MethodInfo { index, ..resolved });
                 }
@@ -846,17 +873,20 @@ impl<'a> Checker<'a> {
             return;
         };
 
-        // Inherited fields count too. The language has no way to run a base's
-        // constructor from a subclass — `ZIRK_LANGUAGE_SPEC.md` section 7
-        // describes neither `super` nor constructor chaining — so the only
-        // constructor that runs is this one, and every field it leaves unset
-        // would stay unset. Requiring all of them is the rule that cannot be
-        // wrong: if chaining is added later it relaxes this, it does not
-        // change what any existing program means.
+        // Only a field with no type default has to be written: an omitted
+        // attribute receives its default before any initializer or constructor
+        // runs (`ZIRK_LANGUAGE_SPEC.md` section 7), so leaving one out is not
+        // leaving it undefined.
+        // A `super(...)` runs the base's constructor, so everything the base
+        // declares is its responsibility rather than this one's.
+        let delegates = calls_super(&constructor.body);
+        let base = self.classes[id as usize].base;
+
         let unset: Vec<FieldInfo> = self.classes[id as usize]
             .fields
             .iter()
-            .filter(|f| !assigned.contains(&f.name))
+            .filter(|f| !f.ty.has_default() && !assigned.contains(&f.name))
+            .filter(|f| !(delegates && base.is_some() && f.owner != id))
             .cloned()
             .collect();
 
@@ -1610,6 +1640,16 @@ impl<'a> Checker<'a> {
                     Type::UNKNOWN
                 }
             },
+            Expr::Super(e) => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    e.span,
+                    "`super` is not a value",
+                    "it selects where to look, so it only means something in `super(...)` or `super.method()`",
+                    Some("write `this` to refer to the instance".into()),
+                );
+                Type::UNKNOWN
+            }
             Expr::Field(e) => self.check_field(e),
             Expr::Ternary(e) => self.check_ternary(e),
             Expr::Increment(e) => self.check_increment(e),
@@ -2545,6 +2585,108 @@ impl<'a> Checker<'a> {
         Type::of(Base::Function(fn_type))
     }
 
+    /// `super(...)`, which runs the base's constructor on this instance.
+    fn check_super_construction(&mut self, expr: &CallExpr) -> Type {
+        let Some(base) = self.enclosing_base(expr.span, "super(...)") else {
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::VOID;
+        };
+
+        if !self.in_constructor {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`super(...)` is only available inside a constructor",
+                "it runs the base's constructor, which happens while the instance is built",
+                Some("use `super.method()` to reach inherited behavior".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::VOID;
+        }
+
+        let class = &self.classes[base as usize];
+        let name = class.name.clone();
+        let span = class.span;
+        let constructors = class.constructors.clone();
+
+        let arity = expr.args.len();
+        let Some(params) = constructors
+            .iter()
+            .find(|params| admits_arity(params, arity))
+            .cloned()
+        else {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("no constructor of `{name}` takes {arity} arguments"),
+                "`super(...)` selects a constructor of the base class",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::VOID;
+        };
+
+        let signature = Signature {
+            name,
+            params,
+            returns: Type::VOID,
+            shared: true,
+            span,
+        };
+        self.check_direct_call(expr, &signature);
+        Type::VOID
+    }
+
+    /// `super.method(...)`, which reaches the base's body rather than the
+    /// object's own.
+    fn check_super_method(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        let Some(base) = self.enclosing_base(field.span, "super.method()") else {
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+        self.check_method_call(expr, field, base)
+    }
+
+    /// The base of the class whose body is being checked, reporting when there
+    /// is none to reach.
+    fn enclosing_base(&mut self, at: Span, what: &str) -> Option<u32> {
+        let Some(Type {
+            base: Base::Class(id),
+            ..
+        }) = self.this_type
+        else {
+            self.error(
+                codes::UNDECLARED_NAME,
+                at,
+                format!("`{what}` is only available inside a class"),
+                "it reaches the base of the class being defined",
+                None,
+            );
+            return None;
+        };
+
+        let base = self.classes[id as usize].base;
+        if base.is_none() {
+            let name = self.classes[id as usize].name.clone();
+            self.error(
+                codes::UNDECLARED_NAME,
+                at,
+                format!("`{name}` has no base class"),
+                format!("`{what}` needs an `extends` to reach"),
+                None,
+            );
+        }
+        base
+    }
+
     /// `object.method(...)`.
     ///
     /// The receiver is checked once, by the caller, so a method call does not
@@ -2680,6 +2822,16 @@ impl<'a> Checker<'a> {
     }
 
     fn check_call(&mut self, expr: &CallExpr) -> Type {
+        if matches!(&*expr.callee, Expr::Super(_)) {
+            return self.check_super_construction(expr);
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && matches!(&*field.object, Expr::Super(_))
+        {
+            return self.check_super_method(expr, field);
+        }
+
         // `u.greeting()` calls a method. It is decided here and not by the
         // parser for the same reason `u.name` is: the shape does not say
         // whether the base is a value with members.
@@ -3102,6 +3254,16 @@ fn assigned_fields(body: &Block) -> std::collections::HashSet<String> {
     let mut found = std::collections::HashSet::new();
     collect_assigned_fields(&body.statements, &mut found);
     found
+}
+
+/// Whether a constructor body delegates to its base with `super(...)`.
+fn calls_super(body: &Block) -> bool {
+    body.statements.iter().any(|statement| match statement {
+        Stmt::Expr(e) => {
+            matches!(&e.expr, Expr::Call(call) if matches!(&*call.callee, Expr::Super(_)))
+        }
+        _ => false,
+    })
 }
 
 fn collect_assigned_fields(statements: &[Stmt], found: &mut std::collections::HashSet<String>) {

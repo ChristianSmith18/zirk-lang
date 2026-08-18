@@ -1,0 +1,14 @@
+class Base {
+    fn value(): Int32 { return 1; }
+
+    construct() { }
+}
+
+class Derived extends Base {
+    // Reemplaza un método heredado sin decirlo.
+    fn value(): Int32 { return 2; }
+
+    construct() { }
+}
+
+fn main(): Void { }

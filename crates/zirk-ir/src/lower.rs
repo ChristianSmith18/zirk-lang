@@ -481,6 +481,7 @@ impl<'a> FunctionLowering<'a> {
         self.scopes.push(HashMap::new());
 
         let this = self.declare_slot("this", IrType::Object(id), class.name.span);
+        self.initialize_defaults(this, id, class.name.span);
 
         let resolved: Vec<IrType> = self
             .checked
@@ -515,6 +516,55 @@ impl<'a> FunctionLowering<'a> {
         };
 
         (lowered, lifted)
+    }
+
+    /// Writes every attribute's type default into a fresh object.
+    ///
+    /// `ZIRK_LANGUAGE_SPEC.md` section 7: an omitted attribute receives its
+    /// default *before* any explicit initializer or the constructor runs.
+    ///
+    /// Zeroed memory is not a substitute. It happens to spell `0` and `false`,
+    /// but a zeroed `String` is a null handle, not the empty string — and the
+    /// difference shows the moment anyone compares it to `""`.
+    fn initialize_defaults(&mut self, this: SlotId, id: u32, span: Span) {
+        let fields: Vec<(u32, IrType)> = self.module.objects[id as usize]
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| (index as u32, field.ty))
+            .collect();
+
+        for (index, ty) in fields {
+            let Some(value) = self.default_value(ty, span) else {
+                // No default: the checker already required the constructor to
+                // write it.
+                continue;
+            };
+            let object = self.emit(InstKind::Load(this), IrType::Object(id), span);
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index,
+                    value,
+                },
+                span,
+            );
+        }
+    }
+
+    /// The default value of a type, if it has one.
+    fn default_value(&mut self, ty: IrType, span: Span) -> Option<Operand> {
+        Some(match ty {
+            IrType::Int32 => self.emit(InstKind::ConstInt(0), ty, span),
+            IrType::Boolean => self.emit(InstKind::ConstBool(false), ty, span),
+            IrType::String => {
+                let id = self.module.intern_string("");
+                self.emit(InstKind::ConstString(id), ty, span)
+            }
+            // Absence is exactly what a nullable type defaults to.
+            IrType::Nullable(base) => self.emit(InstKind::NullValue(base), ty, span),
+            IrType::Void | IrType::Closure(_) | IrType::Object(_) => return None,
+        })
     }
 
     /// Lowers one method into a function whose first parameter is the receiver.
@@ -975,6 +1025,9 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let Some(operand) = self.lower_super_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_method_call(e, span) {
                     return operand;
                 }
@@ -989,7 +1042,9 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
             ast::Expr::Field(e) => self.lower_field(e, span),
-            ast::Expr::This(_) => {
+            ast::Expr::This(_) | ast::Expr::Super(_) => {
+                // `super` names where to look, not what to look at: the value
+                // is the same instance.
                 let slot = self.lookup_slot("this");
                 self.emit(InstKind::Load(slot), self.slot_type(slot), span)
             }
@@ -1479,6 +1534,73 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), ty, span)
     }
 
+    /// Lowers `super(...)` and `super.method(...)`.
+    ///
+    /// Both are direct calls: `super` names a body statically, which is the
+    /// whole point of writing it instead of letting dispatch decide.
+    fn lower_super_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let base = self.enclosing_base()?;
+
+        // `super.method(...)`
+        if let ast::Expr::Field(field) = &*call.callee
+            && matches!(&*field.object, ast::Expr::Super(_))
+        {
+            let class = &self.checked.classes[base as usize];
+            let method = class.method(&field.name.name)?;
+            let owner = &self.checked.classes[method.owner as usize].name;
+            let name = method_symbol(owner, &method.name);
+            let returns = ir_type(method.returns);
+            let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+
+            let this = self.lookup_slot("this");
+            let receiver = self.emit(InstKind::Load(this), self.slot_type(this), span);
+            let mut args = vec![receiver];
+            for (arg, ty) in call.args.iter().zip(params) {
+                args.push(self.lower_expr_as(&arg.value, ty));
+            }
+            return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
+        }
+
+        if !matches!(&*call.callee, ast::Expr::Super(_)) {
+            return None;
+        }
+
+        // `super(...)`: the base's constructor, on this same instance.
+        let index = self.constructor_index(base, call.args.len());
+        let params: Vec<IrType> = self.checked.classes[base as usize].constructors[index]
+            .iter()
+            .map(|p| ir_type(p.ty))
+            .collect();
+
+        let this = self.lookup_slot("this");
+        let receiver = self.emit(InstKind::Load(this), self.slot_type(this), span);
+        let mut args = vec![receiver];
+        for (arg, ty) in call.args.iter().zip(params) {
+            args.push(self.lower_expr_as(&arg.value, ty));
+        }
+
+        let name = self.checked.classes[base as usize].name.clone();
+        self.emit_effect(
+            InstKind::Call {
+                callee: constructor_symbol(&name, index),
+                args,
+            },
+            span,
+        );
+
+        // `super(...)` produces nothing: it is run for its effect on `this`.
+        Some(self.emit(InstKind::ConstBool(false), IrType::Boolean, span))
+    }
+
+    /// The base of the class whose body is being lowered.
+    fn enclosing_base(&self) -> Option<u32> {
+        let slot = self.scopes.iter().rev().find_map(|s| s.get("this"))?;
+        let IrType::Object(id) = self.slot_type(*slot) else {
+            return None;
+        };
+        self.checked.classes.get(id as usize)?.base
+    }
+
     /// The method a call invokes, if it is a method call.
     fn method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::MethodInfo> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -1760,8 +1882,14 @@ impl<'a> FunctionLowering<'a> {
                 let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
             }
-            // A method call knows its own target and its own return type, so
-            // it needs none of the name resolution the arm below does.
+            // `super(...)` and a method call know their own target, so they
+            // need none of the name resolution the arm below does.
+            ast::Expr::Call(e)
+                if matches!(&*e.callee, ast::Expr::Super(_))
+                    || matches!(&*e.callee, ast::Expr::Field(f) if matches!(&*f.object, ast::Expr::Super(_))) =>
+            {
+                self.lower_super_call(e, expr.span());
+            }
             ast::Expr::Call(e) if self.method_of(e).is_some() => {
                 self.lower_method_call(e, expr.span());
             }
@@ -1885,9 +2013,10 @@ impl<'a> FunctionLowering<'a> {
 
     /// Whether a call goes through a closure value rather than a name.
     fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
-        // A method call is not a closure call, and asking for the type of its
-        // callee would ask for the type of a method — which is not a value.
-        if self.method_of(call).is_some() {
+        // A method or `super` call is not a closure call, and asking for the
+        // type of its callee would ask for the type of a method — which is not
+        // a value.
+        if self.method_of(call).is_some() || matches!(&*call.callee, ast::Expr::Super(_)) {
             return false;
         }
 
@@ -1945,6 +2074,7 @@ impl<'a> FunctionLowering<'a> {
                 };
                 self.module.closures[id as usize].returns
             }
+            ast::Expr::Call(e) if matches!(&*e.callee, ast::Expr::Super(_)) => IrType::Void,
             ast::Expr::Call(e) => {
                 if let Some(method) = self.method_of(e) {
                     return ir_type(method.returns);
@@ -1957,7 +2087,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
             ast::Expr::Field(e) => self.field_type_of(e),
-            ast::Expr::This(_) => self.slot_type(self.lookup_slot("this")),
+            ast::Expr::This(_) | ast::Expr::Super(_) => self.slot_type(self.lookup_slot("this")),
             ast::Expr::Ternary(e) => self.type_of(&e.when_true, e.when_true.span()),
             // Both forms yield the type of the operand they update.
             ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(e.target.name())),

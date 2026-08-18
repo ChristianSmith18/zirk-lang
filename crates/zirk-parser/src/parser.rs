@@ -636,9 +636,11 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let Some(method) =
-                self.parse_contract_method(kind, visibility.unwrap_or(Visibility::Public), member_start)
-            else {
+            let Some(method) = self.parse_contract_method(
+                kind,
+                visibility.unwrap_or(Visibility::Public),
+                member_start,
+            ) else {
                 self.synchronize_member();
                 continue;
             };
@@ -696,6 +698,7 @@ impl<'a> Parser<'a> {
 
         Some(MethodDecl {
             name,
+            is_override: false,
             params,
             return_type,
             body,
@@ -712,12 +715,13 @@ impl<'a> Parser<'a> {
         // The modifiers come first and apply to whatever follows.
         let visibility = self.parse_visibility();
 
-        // `abstract` needs the inheritance it constrains, which this slice of
-        // the phase does not have yet.
+        // `abstract class` is a requirement set adopted with `implements`, not
+        // something this slice supports yet.
         if self.check_keyword(Keyword::Abstract) && self.report_if_from_another_phase() {
             return None;
         }
         let is_abstract = false;
+        let is_override = self.eat_keyword(Keyword::Override);
 
         if self.check_keyword(Keyword::Construct) {
             return self
@@ -727,7 +731,12 @@ impl<'a> Parser<'a> {
 
         if self.check_keyword(Keyword::Fn) {
             return self
-                .parse_method(visibility.unwrap_or(Visibility::Public), is_abstract, start)
+                .parse_method(
+                    visibility.unwrap_or(Visibility::Public),
+                    is_abstract,
+                    is_override,
+                    start,
+                )
                 .map(ClassMember::Method);
         }
 
@@ -801,6 +810,7 @@ impl<'a> Parser<'a> {
         &mut self,
         visibility: Visibility,
         is_abstract: bool,
+        is_override: bool,
         start: Span,
     ) -> Option<MethodDecl> {
         self.eat_keyword(Keyword::Fn);
@@ -834,6 +844,7 @@ impl<'a> Parser<'a> {
 
         Some(MethodDecl {
             name,
+            is_override,
             params,
             return_type,
             body,
@@ -2041,6 +2052,10 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::This) => {
                 self.pos += 1;
                 Some(Expr::This(ThisExpr { span }))
+            }
+            TokenKind::Keyword(Keyword::Super) => {
+                self.pos += 1;
+                Some(Expr::Super(SuperExpr { span }))
             }
             TokenKind::LParen => {
                 self.pos += 1;
