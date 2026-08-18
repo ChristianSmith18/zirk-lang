@@ -49,12 +49,63 @@ Filesystem access SHALL validate canonical paths and symlink escape; network acc
 - **WHEN** a project authorized for `git status` attempts `git clean -fd`
 - **THEN** execution is denied before the child process starts
 
+### Requirement: Network connect and listen authority remain distinct
+Outbound authority SHALL use scoped `network.connect.origins`; inbound bind
+authority SHALL use scoped `network.listen.addresses`. DNS answers SHALL NOT
+grant authority: every resolved address SHALL be checked immediately before
+each connect attempt. Redirects, reconnects, proxies, TLS server names,
+broadcast, multicast, custom resolvers, local sockets, and interface inspection
+SHALL be checked at their corresponding dynamic boundary.
+
+#### Scenario: Authorized host resolves to a forbidden private address
+- **WHEN** an authorized origin resolves or is rebound to an IP outside its effective grant
+- **THEN** connection is denied before opening the socket
+- **AND** the operation returns a typed `NetworkPermissionError`
+
+#### Scenario: Connect permission is used to bind a listener
+- **WHEN** code with outbound origin authority but no matching listen address attempts to bind
+- **THEN** the bind is denied before the operating-system socket begins listening
+
+### Requirement: HTTP authority is revalidated across protocol transitions
+HTTP clients SHALL validate every redirect, DNS result, reconnect, proxy hop,
+TLS server name, and WebSocket destination against the effective outbound
+grant. HTTP servers SHALL validate their bind address against inbound authority.
+Credentials, cookies, authorization fields, and pool entries SHALL NOT cross an
+origin, proxy, or TLS identity boundary unless the applicable protocol policy
+and permission explicitly allow it.
+
+#### Scenario: Redirect changes origin
+- **WHEN** an authorized request receives a redirect to another origin
+- **THEN** sensitive headers and credentials are removed as required
+- **AND** the new origin, resolved addresses, and TLS identity are checked before connecting
+
 ### Requirement: Environment access is typed and secret-safe
-The standard library SHALL provide `Environment` and exact alias `Env` with static getters, nullable/default/required access, secret access, containment, and name listing. Secret reads SHALL return `SecretString`, and secrets SHALL be redacted from diagnostics, logs, stack traces, and tooling output unless deliberately revealed under an authorized boundary.
+The standard library SHALL provide `Environment` and exact preferred alias
+`Env` with static getters, nullable/default/required access, compile-time
+constrained typed parsing, secret access, containment, and name listing. Every
+operation SHALL preserve permission failure through `Result`; unauthorized
+lookup SHALL NOT disclose whether a name exists. Broad listing SHALL require
+broad authority and SHALL return names without values. Secret reads SHALL
+return `SecretString`, which SHALL have no general string conversion and SHALL
+remain redacted unless passed directly to an authorized sink boundary.
 
 #### Scenario: Unapproved environment variable
 - **WHEN** `Env.get("DATABASE_URL")` executes without a matching runtime grant
 - **THEN** it returns `Error(PermissionDeniedError)` and does not reveal the variable
+
+#### Scenario: Typed variable has invalid content
+- **WHEN** an authorized present variable is read through `Env.get<Int>` and is not a valid `Int`
+- **THEN** the result is `Error(EnvironmentParseError)` distinct from absence and denial
+
+### Requirement: Fingerprinting information is not ambient authority
+The runtime MUST keep detailed CPU and memory identity, user and host names,
+device serials, stable machine identifiers, and hardware inventories out of
+freely readable `System` or `Platform` properties. Any API that needs such
+information MUST require a narrow permission and return typed denial.
+
+#### Scenario: Library attempts to identify the machine
+- **WHEN** library code requests a stable machine identifier without an effective grant
+- **THEN** the operation is denied without returning a substitute fingerprint
 
 ### Requirement: Permission approval is inspectable and revocable
 The CLI SHALL provide show, diff, approve, revoke, and history operations. History SHALL identify project name/location, requester, scope, phase, approver, and timestamp without storing or displaying secrets. Revocation SHALL take effect before the next privileged execution.
@@ -62,4 +113,3 @@ The CLI SHALL provide show, diff, approve, revoke, and history operations. Histo
 #### Scenario: Approval is revoked
 - **WHEN** the developer revokes a project's permission fingerprint
 - **THEN** the next authority-bearing command requires fresh approval before executing privileged code
-

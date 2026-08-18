@@ -321,6 +321,7 @@ impl<'a> Parser<'a> {
         let mut uses = Vec::new();
         let mut enums = Vec::new();
         let mut classes = Vec::new();
+        let mut contracts = Vec::new();
         let mut functions = Vec::new();
 
         while !self.at_eof() {
@@ -366,6 +367,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if self.check_keyword(Keyword::Interface) || self.check_keyword(Keyword::Trait) {
+                if let Some(c) = self.parse_contract(shared_at.is_some()) {
+                    contracts.push(c);
+                }
+                continue;
+            }
+
             if self.report_if_from_another_phase() {
                 continue;
             }
@@ -375,12 +383,12 @@ impl<'a> Parser<'a> {
             let (cause, help) = if shared_at.is_some() {
                 (
                     format!("found {found} after `share`"),
-                    "`share` applies to a `fn`, an `enum` or a `class`",
+                    "`share` applies to a `fn`, an `enum`, a `class` or a contract",
                 )
             } else {
                 (
                     format!("found {found} at the top level of the file"),
-                    "a file contains `import`, `use`, `enum`, `class` and `fn` declarations",
+                    "a file contains `import`, `use`, `enum`, `class`, `interface`, `trait` and `fn` declarations",
                 )
             };
             self.error(
@@ -402,6 +410,7 @@ impl<'a> Parser<'a> {
             uses,
             enums,
             classes,
+            contracts,
             functions,
             span: start.to(end),
         }
@@ -547,6 +556,21 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Several contracts, at most one base class: the spec allows combining
+        // any number of contracts precisely because they carry no state.
+        let mut implements = Vec::new();
+        if self.eat_keyword(Keyword::Implements) {
+            loop {
+                let Some(contract) = self.expect_identifier("after `implements`") else {
+                    break;
+                };
+                implements.push(contract);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
         self.expect(&TokenKind::LBrace, "after the class name");
 
         let mut fields = Vec::new();
@@ -570,11 +594,113 @@ impl<'a> Parser<'a> {
 
         Some(ClassDecl {
             name,
+            implements,
             extends,
             fields,
             constructors,
             methods,
             shared,
+            span: start.to(end),
+        })
+    }
+
+    /// `interface Name { ... }` or `trait Name { ... }`
+    fn parse_contract(&mut self, shared: bool) -> Option<ContractDecl> {
+        let start = self.peek_span();
+        let kind = if self.eat_keyword(Keyword::Interface) {
+            ContractKind::Interface
+        } else {
+            self.eat_keyword(Keyword::Trait);
+            ContractKind::Trait
+        };
+
+        let name = self.expect_identifier(&format!("after `{}`", kind.as_str()))?;
+        self.expect(&TokenKind::LBrace, "after the contract name");
+
+        let mut methods = Vec::new();
+        while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
+            let member_start = self.peek_span();
+            let visibility = self.parse_visibility();
+
+            if !self.check_keyword(Keyword::Fn) {
+                let span = self.peek_span();
+                let found = self.peek().description();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    format!("a {} declares methods", kind.as_str()),
+                    format!("found {found}"),
+                    Some("a contract has no fields: it describes behaviour, not state".into()),
+                );
+                self.synchronize_member();
+                continue;
+            }
+
+            let Some(method) =
+                self.parse_contract_method(kind, visibility.unwrap_or(Visibility::Public), member_start)
+            else {
+                self.synchronize_member();
+                continue;
+            };
+            methods.push(method);
+        }
+
+        let end = self.peek_span();
+        self.expect(&TokenKind::RBrace, "to close the contract body");
+
+        Some(ContractDecl {
+            name,
+            kind,
+            methods,
+            shared,
+            span: start.to(end),
+        })
+    }
+
+    /// One method of a contract: a signature, and a body only in a `trait`.
+    fn parse_contract_method(
+        &mut self,
+        kind: ContractKind,
+        visibility: Visibility,
+        start: Span,
+    ) -> Option<MethodDecl> {
+        self.eat_keyword(Keyword::Fn);
+
+        let name = self.expect_identifier("after `fn`")?;
+        self.expect(&TokenKind::LParen, "after the method name");
+        let params = self.parse_params();
+        self.expect(&TokenKind::RParen, "to close the parameter list");
+        let return_type = self.parse_return_type(&name)?;
+
+        let has_body = matches!(self.peek(), TokenKind::LBrace);
+
+        if has_body && kind == ContractKind::Interface {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "an `interface` method has no body",
+                "an interface declares signatures; a `trait` is the one that may carry implementation",
+                Some("write `trait` instead, or remove the body".into()),
+            );
+            return None;
+        }
+
+        let body = if has_body {
+            Some(self.parse_block()?)
+        } else {
+            self.eat(&TokenKind::Semicolon);
+            None
+        };
+        let end = body.as_ref().map(|b| b.span).unwrap_or(name.span);
+
+        Some(MethodDecl {
+            name,
+            params,
+            return_type,
+            body,
+            visibility,
+            is_abstract: false,
             span: start.to(end),
         })
     }

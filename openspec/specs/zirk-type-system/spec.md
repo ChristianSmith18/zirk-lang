@@ -6,6 +6,34 @@ Defines the types of the language, name resolution, mutability, inference and fl
 
 This is where the rules of `ZIRK_LANGUAGE_SPEC.md` that most often surprise someone coming from another language are enforced: no numeric truthiness, no implicit conversions and no function overloading.
 ## Requirements
+
+### Requirement: Runtime type identity is safe and representation-independent
+Every value and declared type MUST expose compiler-provided `Type` identity.
+Identity SHALL distinguish constructed generic arguments and provide broad
+`TypeKind`, safe names, and declared implements/extends relationships without
+exposing layout, private members, or optimized representation. Value type
+observation and checked casts SHALL remain separate operations.
+
+#### Scenario: Interface value contains a concrete class
+- **WHEN** `value` is declared as an interface and contains an implementing class instance
+- **THEN** `value.type()` identifies the concrete class
+- **AND** the interface's own kind remains available through `InterfaceName.type()`
+
+#### Scenario: Constructed generic types share optimized code
+- **WHEN** two constructed generic types reuse an implementation representation
+- **THEN** their `Type` identities remain distinct when their type arguments differ
+
+### Requirement: Structural runtime metadata is explicitly generated
+General runtime reflection MUST NOT enumerate members, invoke string-named
+methods, access fields dynamically, retain decorators automatically, or expose
+compiler syntax. A library requiring runtime structure SHALL generate or author
+an ordinary typed descriptor, registry, factory, or accessor that obeys normal
+visibility, typing, public API, compatibility, permission, and dead-code rules.
+
+#### Scenario: Framework requires route metadata
+- **WHEN** a decorator-backed framework needs routes after compilation
+- **THEN** expansion generates an ordinary typed route registry
+- **AND** runtime code does not rediscover erased decorator applications
 ### Requirement: Tipos del subset
 
 El chequeador SHALL soportar los tipos `Void`, `Int32`, `Boolean`, `String`,

@@ -1,8 +1,10 @@
 # Decorator Targets
 
-Each target block declares which syntax category the decorator supports, such as class or method. Applying it elsewhere is a compile-time error at the use site.
+Zirk 1.x supports exactly `class`, `attribute`, `function`, `method`, and `parameter` target blocks. Parameter includes initialization parameters. Method permits inspection of bodyless abstract, interface, and trait signatures, but wrapping requires a body.
 
-One decorator may support several targets, but each receives only operations valid for that category. This prevents unchecked casts into compiler internals.
+There are no module, interface, trait, record, value-class, enum, enum-case, property, accessor, or constructor targets. `@Module`, `@Controller`, `@Entity`, and `@Component` are framework roles implemented as class decorators. Records and value classes expose stored data through attribute targets. Construction injection uses parameter targets or a generated typed factory.
+
+One decorator may declare several supported target blocks. Each receives only operations valid for its category; applying it elsewhere is a focused compile-time error.
 
 ---
 

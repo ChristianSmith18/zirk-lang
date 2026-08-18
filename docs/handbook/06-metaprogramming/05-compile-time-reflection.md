@@ -1,9 +1,10 @@
 # Compile-Time Reflection
 
-Decorators can inspect explicitly authorized declarations and metadata through the Syntax API. Compile-time reflection is scoped to this model; general `comptime {}` is excluded from Zirk 1.x.
+Decorators inspect typed declarations through the target-specific Syntax API; they do not receive the compiler's private AST. All compiler-provided values originate in visible target bindings or match payloads. General `comptime {}` remains excluded.
 
-Reflection must preserve visibility and cannot read arbitrary project files
-without an application `permissions` grant marked `during: build`.
+A generic decorator expands once against its declaration and constraints, then specializes normally. Explicitly generated decorator applications enter a bounded later round; generated declarations are not decorated implicitly. Structural cycle detection and resource limits stop recursive expansion.
+
+Expansion is incrementally cached by decorator implementation/version, arguments, typed target, configuration, grants, observed build inputs, and transitive dependencies. Unchanged fingerprints reuse validated output. External inspection requires matching application permission with `during: build` or `both`.
 
 ---
 

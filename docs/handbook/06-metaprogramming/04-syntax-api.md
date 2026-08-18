@@ -1,8 +1,14 @@
 # Syntax API
 
-The public Syntax API is immutable, versioned, and validated. It exposes tokens, nodes, types, signatures, attributes, locations, traversal, typed builders, and source-bound diagnostics.
+The public Syntax API is immutable, versioned, and validated. A target block uses `match target.transform` in the fixed order `Inspect -> Augment -> Wrap`.
 
-It cannot mutate compiler memory, fabricate invalid nodes, skip type checking, or access external systems without declared compile permissions.
+- `Inspect(context)` validates typed structure and emits diagnostics without committing mutations.
+- `Augment(builder)` adds compatible declarations or contracts with target-specific hygienic builders.
+- `Wrap(wrapper)` wraps a callable with a body.
+
+Within `Wrap`, `match target.wrap` exposes `Before()`, `After(result)`, `After(result, transform)`, `Catch(error)`, or exclusive `Around(next)`. `After(result)` observes; its second form can invoke the non-escaping one-shot `transform` capability. `Void` uses `After()`. `Catch` may recover or rethrow but cannot hide unhandled errors. `_` consumes an explicit payload position and variant arity remains exact.
+
+Wrappers preserve callable identity, signature, generics, receiver mutability, override slot, documentation, and source maps. New error and permission effects remain visible. Builders cannot delete user API, reduce visibility, silently rename declarations, weaken safety, or create public conflicts. Private generated names are hygienic; public collisions are errors.
 
 ---
 

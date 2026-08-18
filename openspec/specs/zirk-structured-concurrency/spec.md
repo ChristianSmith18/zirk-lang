@@ -3,6 +3,27 @@
 ## Purpose
 TBD - created by archiving change document-memory-and-structured-concurrency. Update Purpose after archive.
 ## Requirements
+
+### Requirement: Task results have one consumer
+Creating a task SHALL start it immediately as a child of the current structured
+scope, and awaiting its `Task<T>` handle SHALL consume the result exactly once.
+A second await SHALL be a compile-time use-after-consume error; multiple
+observers SHALL use an explicit watch, broadcast, channel, or shared deeply
+immutable value rather than implicit result cloning.
+
+#### Scenario: Task is awaited twice
+- **WHEN** a program awaits one task handle and later attempts to await it again
+- **THEN** compilation rejects the second await and identifies the first consume
+
+### Requirement: Cancellation metadata and scheduling remain safe
+Task cancellation SHALL be idempotent, MAY carry an optional typed reason whose
+default is `Cancelled`, and SHALL NOT expose user-controlled task priority.
+The runtime SHALL schedule fairly and prevent starvation as an implementation
+responsibility.
+
+#### Scenario: Cancellation omits a reason
+- **WHEN** source invokes `operation.cancel()`
+- **THEN** observers receive the default `CancellationReason.Cancelled`
 ### Requirement: Typed structured tasks
 `task` SHALL create a child in the current structured scope and return `Task<T>`, while `await` SHALL produce exactly `T` and scope exit MUST NOT abandon unfinished children.
 
@@ -60,11 +81,22 @@ A fulfilled `Task<Result<T,E>>` SHALL contain either `Ok` or `Error` inside `Tas
 - **THEN** the message branch executes and the timer branch does not
 
 ### Requirement: Typed channels and closure
-`Channel<T>` SHALL support bounded and unbounded construction, suspendible send/receive, nonblocking try operations, explicit close, observable capacity/length, backpressure, and an unambiguous distinction between closure and temporary absence.
+`Channel<T>` SHALL support explicit bounded construction, zero-capacity
+rendezvous, defensively limited dynamically growing construction, suspendible
+send/receive, nonblocking try operations, idempotent close, backpressure, and an
+unambiguous distinction between value, closure, failure, and temporary absence.
+Queued values SHALL drain before closure is observed. Standard broadcast,
+latest-value watch, and one-shot channel families SHALL preserve the same
+transfer and cancellation rules.
 
 #### Scenario: Bounded channel is full
 - **WHEN** a sender uses suspendible send on a full bounded channel
 - **THEN** the sender suspends without blocking an OS thread until capacity or closure is observed
+
+#### Scenario: Dynamic channel reaches its defense limit
+- **WHEN** `Channel.unbounded(limit:)` reaches the mandatory configured limit
+- **THEN** sending applies backpressure or returns the documented typed failure
+  rather than allocating without bound
 
 ### Requirement: Derived transfer and sharing
 The compiler SHALL derive non-user-forgeable `Transfer` and `Share` properties: values and projections copy, strict immutable references may share, exclusive mutable references may transfer, cloned references become independent, and synchronization-aware references may share.
@@ -121,4 +153,3 @@ Safe Zirk SHALL reject concurrent unsynchronized accesses when at least one acce
 #### Scenario: Two tasks mutate shared list
 - **WHEN** two concurrent tasks mutate one ordinary `List<T>` without transfer or synchronization
 - **THEN** compilation fails regardless of whether testing happened to avoid overlap
-

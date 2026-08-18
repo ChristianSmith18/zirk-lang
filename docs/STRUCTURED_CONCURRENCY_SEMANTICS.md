@@ -39,6 +39,10 @@ mut second = task load_user(2);
 
 `await` suspends the current task, not an OS thread, and produces exactly `T`.
 It does not introduce implicit `Result`, nullability, or exception wrapping.
+Task creation starts the child immediately. Await consumes its `Task<T>` result
+exactly once; a second await is a compile-time use-after-consume error. Multiple
+observers use explicit watch/broadcast/channel contracts or a deliberately
+shared deeply immutable value.
 
 ## 3. Structured scopes
 
@@ -60,6 +64,10 @@ waits for child cleanup, and only then propagates.
 Ignoring a `Task<T>` result is diagnosed under the same explicit-ignore policy
 as other must-use results. `_ = task_handle` acknowledges that only completion
 and structured cleanup matter; it does not detach the task.
+
+`cancel()` is idempotent and accepts an optional typed reason whose default is
+`CancellationReason.Cancelled`. Task names are diagnostic metadata. Scheduling
+priority and fairness are runtime-managed rather than user-controlled knobs.
 
 ## 4. Failure propagation
 

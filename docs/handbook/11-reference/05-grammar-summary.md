@@ -2,6 +2,8 @@
 
 A source file contains declarations and imports. Blocks use braces; parser semicolons may be omitted when unambiguous, while formatting writes them. Declarations include bindings, functions, object/data types, contracts, implementations, decorators, and published declarations.
 
+Decorator grammar includes `fn dec Name(parameters) { target-blocks }`, `repeatable fn dec`, `@Name`/`@Name(arguments)`, and optional `requires decorators [...]`, `before decorators [...]`, and `after decorators [...]`. Target blocks are limited to `class`, `attribute`, `function`, `method`, and `parameter`. Transform and wrapper variants use ordinary exact-arity match patterns; repeatable `applications` is never introduced implicitly.
+
 Expressions include literals (including `re'pattern'` regex literals), names,
 calls, member/index access, lambdas with optional leading `fn`, unary, binary and
 conditional operators, `if`, and `match`. Statements include

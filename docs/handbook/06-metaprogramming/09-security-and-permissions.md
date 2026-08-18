@@ -1,15 +1,10 @@
 # Security and Permissions
 
-Decorator execution is a build-time supply-chain boundary. Filesystem, network,
-and process access require finite application grants marked `during: build`;
-runtime grants do not imply them. A dependency update requires fresh approval
-before the new code receives existing authority.
+Decorator argument evaluation and expansion are build-time supply-chain boundaries. Filesystem, environment, network, process, and other privileged effects require finite application grants marked `during: build` or `both`; runtime grants do not imply them. Libraries request authority but cannot grant it.
 
-Generated source returns through normal validation. Secrets must not enter generated diagnostics, cached IR, manifests, or lockfiles.
+Every observed external value becomes part of the expansion fingerprint. Changed permissions, requester versions, dependency paths, or observations invalidate affected cache nodes. Approval remains signed outside the repository, bound to project location and requester integrity, and is checked before execution.
 
-Repository source cannot approve itself. Consent is signed outside the project,
-bound to its canonical location and exact requester, and checked before any
-decorator executes.
+Generated source returns through normal validation. Secrets must not enter public generated structure, source, IR, diagnostics, logs, cache keys, manifests, or lockfiles. Missing or unverifiable authority fails closed.
 
 ---
 

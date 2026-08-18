@@ -123,6 +123,7 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
         uses: Vec::new(),
         enums: Vec::new(),
         classes: Vec::new(),
+        contracts: Vec::new(),
         functions: Vec::new(),
         span: loaded.sources.entry().span(0, 0),
     };
@@ -132,6 +133,9 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
         program.uses.extend(unit.program.uses.iter().cloned());
         program.enums.extend(unit.program.enums.iter().cloned());
         program.classes.extend(unit.program.classes.iter().cloned());
+        program
+            .contracts
+            .extend(unit.program.contracts.iter().cloned());
         program
             .functions
             .extend(unit.program.functions.iter().cloned());

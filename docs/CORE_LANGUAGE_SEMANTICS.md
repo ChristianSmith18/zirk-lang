@@ -176,7 +176,11 @@ interface Iterator<out T> { fn next() => Iteration<T> }
 Ordinary loops yield independent projected values. Structural mutation
 invalidates active iterators deterministically. Explicit read-only views may
 share storage for a checked lifetime; mutable iteration is deferred. `Range`
-is a lazy reusable value iterable.
+is a finite lazy reusable value iterable. Collection transformations are eager;
+iterator adapters are single-pass/lazy and require an explicit materialization
+terminal. Task-aware streams remain a separate contract so iteration never
+hides `await`. List growth is automatic and allocation capacity is not a public
+source-level API.
 
 ## 7. Mandatory contributor reading order
 

@@ -3,6 +3,28 @@
 ## Purpose
 TBD - created by archiving change document-complete-zirk-type-system. Update Purpose after archive.
 ## Requirements
+
+### Requirement: Current-time APIs separate values from clock sources
+`Instant`, `Date`, `Time`, `DateTime`, and `ZonedDateTime` SHALL expose friendly
+current-value construction with an optional injectable clock; civil values
+SHALL require an explicit zone or a fallible explicitly local helper.
+`Clock.system`, `Clock.monotonic`, and virtual test clocks SHALL remain distinct,
+and virtual clocks SHALL NOT mutate host-global time.
+
+#### Scenario: Current local time is unavailable
+- **WHEN** `Time.now_local()` cannot discover a valid host time zone
+- **THEN** it returns a typed timezone error rather than silently using UTC
+
+### Requirement: Timer resources report scheduling behavior
+One-shot timers and repeating tickers SHALL suspend tasks, observe structured
+cancellation, require non-negative durations, and support explicit fixed-rate
+and fixed-delay policies. Fixed-rate ticks SHALL report missed intervals rather
+than enqueueing an unbounded backlog.
+
+#### Scenario: Fixed-rate consumer misses ticks
+- **WHEN** a ticker consumer resumes after multiple scheduled intervals
+- **THEN** the next tick reports its scheduled and observed instants plus the
+  missed count
 ### Requirement: Distinct temporal value types
 Zirk SHALL define `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`, and `Period` as distinct immutable value types in a sealed `Temporal` capability family. Membership in that family SHALL NOT make unsupported cross-type operations valid.
 
@@ -68,4 +90,3 @@ Every temporal type SHALL provide appropriate ISO serialization, explicit-patter
 #### Scenario: ISO duration
 - **WHEN** `Duration("PT2H30M")` is parsed
 - **THEN** the result equals two hours and thirty minutes
-
