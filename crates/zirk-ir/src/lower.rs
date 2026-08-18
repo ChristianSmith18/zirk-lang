@@ -1145,14 +1145,26 @@ impl<'a> FunctionLowering<'a> {
                 let right = self.lower_expr_as(&e.right, param);
                 let left = self.reload(held, e.left.span());
 
-                self.emit(
+                let result = self.emit(
                     InstKind::Call {
                         callee: symbol,
                         args: vec![left, right],
                     },
                     returns,
                     span,
-                )
+                );
+
+                if e.op == ast::BinaryOp::NotEq {
+                    return self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::Not,
+                            operand: result,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                }
+                result
             }
 
             ast::Expr::Binary(e)
@@ -2316,6 +2328,12 @@ impl<'a> FunctionLowering<'a> {
                     left
                 }
             }
+            ast::Expr::Binary(e)
+                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && self.operator_method_of(e).is_some() =>
+            {
+                IrType::Boolean
+            }
             ast::Expr::Binary(e) if self.operator_method_of(e).is_some() => {
                 let (id, name) = self.operator_method_of(e).expect("checked above");
                 ir_type(
@@ -2392,6 +2410,9 @@ fn operator_method(op: ast::BinaryOp) -> Option<&'static str> {
         Mul => "_multiply",
         Div => "_divide",
         Rem => "_remainder",
+        // `!=` is `==` negated: one method answers both, so a type cannot
+        // define them inconsistently.
+        Eq | NotEq => "_equals",
         _ => return None,
     })
 }
@@ -2422,6 +2443,7 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         A::GtEq => BinaryOp::GtEq,
         A::And => BinaryOp::And,
         A::Or => BinaryOp::Or,
+        A::Is => BinaryOp::Identical,
         // `??` is expanded by the lowering into a null check with two blocks,
         // so it never reaches the IR as an operator.
         A::Coalesce => unreachable!("`??` is lowered into branches, not an operator"),
