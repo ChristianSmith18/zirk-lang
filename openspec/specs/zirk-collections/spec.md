@@ -3,6 +3,30 @@
 ## Purpose
 TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
 ## Requirements
+
+### Requirement: Standard collection families are deterministic and ergonomic
+The standard library SHALL provide fixed `Array`, automatically growing `List`,
+insertion-ordered `Map`/`Set`, `Deque`, `PriorityQueue`, restricted
+`Queue`/`Stack`, and finite `Range`. List allocation capacity, reservation, and
+shrinking SHALL remain implementation details rather than public source APIs;
+exact fixed storage SHALL use `Array`.
+
+#### Scenario: List grows
+- **WHEN** values are added beyond the list's current internal allocation
+- **THEN** the runtime grows storage automatically or returns a typed allocation
+  failure without requiring a capacity operation from source code
+
+### Requirement: Eager collections and lazy iterators have an explicit boundary
+Collection transformations SHALL materialize eagerly, iterator adapters SHALL
+remain single-pass and lazy, and materialization SHALL require explicit
+`collect` or a typed `to_*` terminal. Task-aware streams SHALL NOT implement an
+iterator contract that hides `await`, and standard `Range` SHALL require a
+finite end.
+
+#### Scenario: Lazy map becomes a list
+- **WHEN** an iterator pipeline ends with `collect()` in a `List<T>` context
+- **THEN** it consumes once, materializes a list, and reports allocation failure
+  through the documented channel
 ### Requirement: Collection families and alias boundary
 Array and fixed `T[n]` SHALL be ordered fixed-size references, List an ordered dynamic reference, Map a key/value reference without implicit order, Set a unique-membership reference without implicit order, Range a lazy value, and Tuple a heterogeneous value. Whole reference assignment SHALL alias; extraction SHALL deep-clone.
 
@@ -45,4 +69,3 @@ Iteration SHALL use `Iteration<T>.Item/Done`, yield independent copies, and make
 #### Scenario: Structural invalidation
 - **WHEN** a List grows after an iterator is created and that iterator advances
 - **THEN** it produces IteratorInvalidatedError rather than observing stale storage
-

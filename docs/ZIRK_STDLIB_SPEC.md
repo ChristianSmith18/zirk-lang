@@ -21,9 +21,12 @@ functionality may ship as official packages without extending the language.
 
 ```text
 std.io
+std.terminal
+std.encoding
 std.fs
 std.path
 std.process
+std.text
 std.net
 std.http
 std.json
@@ -32,6 +35,7 @@ std.time
 std.task
 std.thread
 std.sync
+std.parallel
 std.collections
 std.testing
 std.reflect
@@ -40,6 +44,11 @@ std.system
 
 Implementations may subdivide them without changing their public imports.
 
+`std.terminal` owns `Terminal`, `Style`, `Color`, cursor control, progress and
+live regions; `std.io` re-exports the common console-facing types for ordinary
+printing. `std.encoding` owns the `Encoding` enum and codecs used explicitly by
+text I/O; strict UTF-8 is the default interchange encoding.
+
 ## 3. `std.io`
 
 Exposes three streams:
@@ -47,16 +56,18 @@ Exposes three streams:
 ```text
 import { stdin, stdout, stderr } from std.io;
 
-stdout.print("Hola");
-stdout.println("Mundo");
+stdout.print("Hola", 42);
+stdout.println("Mundo", user);
 stdout.println();
 println("Direct convenience call");
 stderr.println("Diagnóstico");
 mut line = stdin.read_line();
 ```
 
-- `print(value)` writes without a line break.
-- `println(value)` writes with the platform line break.
+- `print(values..., separator: " ")` converts each value through `to_string()`,
+  joins them with the separator and writes without a line break.
+- `println(values..., separator: " ")` performs the same conversion and adds
+  exactly the platform line break. Neither operation has an `end` parameter.
 - `println()` writes just a line break.
 - `stdout` and `stderr` share the same formatting operations but different
   destinations.
@@ -65,16 +76,26 @@ mut line = stdin.read_line();
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
 - an unqualified convenience call resolves through the imported standard object
   when unique; a collision requires `stdout.println(...)`.
-- `mut print: Fn(String) => Void = stdout.println` produces a callable bound to
-  `stdout` without cloning the stream or native handle; cloning the callable
-  preserves the receiver unless the receiver is explicitly cloned first.
+- `style` controls terminal presentation while `format` constructs text;
+  cursor movement, progress and live regions belong to `Terminal`.
+- `write` is the exact text/byte stream primitive and does not insert
+  separators, line endings, styles or arbitrary object conversions.
+- convenience printing propagates catchable `IoError`; `try_print` and
+  `try_println` expose an explicit `Result` for expected output failure.
+- `mut print: Fn(String) => Void = stdout.println` creates an independent safe
+  callable capability. Compiler-known standard-library extraction performs the
+  necessary internal clone/attenuation without exposing mutable authority over
+  the original standard object or cloning its native handle.
 
-`stdin` offers line, char and byte reads. EOF is not an exception: it is
-represented through `ReadResult<T>` or an equivalent algebraic result that
-distinguishes `Data`, `Eof` and `Error`. Invalid stream states are typed errors;
-exceptional system failures may become exceptions per contract.
+`stdin` offers byte, Unicode code-point, grapheme and line reads. EOF is not an
+exception: `ReadResult<T>` distinguishes `Value(T)`, `End` and
+`Error(IoError)`. `read_line` removes the terminator and `Value("")` remains
+distinct from `End`. Exact-count reads use `Result` because premature EOF
+violates their requested contract.
 
-The async variants suspend a task without blocking a thread.
+Blocking operations may offer `_async` variants that return `Task<T>` and
+suspend without blocking a thread. There is no `async fn`; inherently
+task-aware APIs do not need the suffix.
 
 ## 4. `std.fs`
 
@@ -87,13 +108,30 @@ mut content: String = match File.open("data.txt") with file {
 };
 ```
 
-`File` implements `Resource<FileError>`. Minimum operations:
+`File` implements `Resource<FileError>`. `OpenOptions` starts with every flag
+false, rejects an option set with no capability, and provides typed presets such
+as `read_only`, `write_only`, `read_and_write`, `append`, `create`,
+`create_new` and `truncate`. Minimum operations:
 
 - `open`, `create` and opening with typed options;
 - `read_text`, `read_bytes`, `read_line`;
 - `write_text`, `write_bytes`, `append`;
 - `flush`, `metadata` and managed idempotent closing;
 - async variants for operations that may wait.
+
+Whole-file reads have size limits; streams/chunks/lines cover large data. Text
+defaults to strict UTF-8 while explicit `Encoding` values cover endian-specific
+UTF-16/UTF-32, ASCII and Latin-1. Direct and atomic writes are distinct. Append
+guarantees apply per call where supported; grouped writes use advisory
+`FileLock`. `flush`, `sync_data` and `sync_all` expose progressively stronger
+and more expensive buffering/durability boundaries.
+
+The module includes complete file/directory manipulation, metadata, links,
+temporary files/directories, shared/exclusive advisory locks and native change
+watchers. Recursive operations do not follow symlinks by default. Watcher
+notification is consumed with `await watcher.next()` inside the current task or
+a concurrent `task` block; no `async for` construct exists. Overflow is an
+explicit event requiring a rescan.
 
 Modes do not use magic strings: they are expressed through options/enums. Errors
 distinguish not found, permission denied, already exists, invalid path, wrong
@@ -114,10 +152,17 @@ FILE_PATH.name();
 FILE_PATH.extension();
 ```
 
-`Path` is a semantic representation of paths, not a `String`. It supports
+`Path` is an immutable semantic value, not a `String` or open resource. It
+supports
 `join`, lexical normalization, components, name, extension, parent,
 absolute/canonical through operations that touch the system, and explicit
 conversion to a string.
+
+Lexical equality is distinct from the fallible `same_file` query. Native
+non-Unicode path data is preserved; strict string conversion may fail and lossy
+conversion is explicit. One optimized `Path` type is used rather than a public
+`PathBuf` split. Cross-target generation uses explicit path style and dynamic
+platform behavior comes from `std.system.Platform`.
 
 It must preserve platform rules and avoid unsafe textual concatenation. Building
 or manipulating a path does not touch the filesystem; canonicalizing may, and
@@ -134,7 +179,7 @@ mut result = await Process.run("git", ["status"]);
 The API separates executable from arguments; it does not invoke a shell by
 default. It offers:
 
-- `run` to await a result;
+- `run` to obtain task-aware completion and a `ProcessResult`;
 - `spawn` to obtain a `ChildProcess` resource;
 - configurable stdin/stdout/stderr;
 - explicit environment and working directory;
@@ -143,8 +188,22 @@ default. It offers:
 
 Shell execution is a different and visibly dangerous API. It requires the
 process permission; extra environment requires its corresponding capability.
+Nonzero exit is a successfully observed process result, not an API failure.
+Output capture is explicit and bounded; inherited I/O is the CLI-oriented
+default, and pipes stream with backpressure. Children inherit only a safe
+functional environment unless `inherit_environment()` is explicitly requested.
+Scope exit terminates, waits, force-kills after a grace duration if necessary,
+reaps and closes handles so no zombie is abandoned. Typed pipelines preserve
+each stage result and clean the full structure on cancellation.
 
-## 7. `std.collections`
+## 7. `std.text` and `std.collections`
+
+`std.text` owns `StringBuilder`, checked `format`/`format_dynamic`, linear-time
+`Regex`, and Unicode normalization algorithms. Native interpolation remains
+`"{expression}"`; formatting uses `:name`, positional `:0`, `\:` escape and
+typed `:name|format` specifiers. Regex literals use canonical `re'pattern'` and
+dynamic patterns use a fallible parser. Locale-heavy internationalization and
+text diff remain packages/tooling.
 
 Minimum types:
 
@@ -155,6 +214,12 @@ Minimum types:
 - `Set<T>`;
 - `Range<T>`;
 - iterators and views.
+
+The family also includes `Deque<T>`, `PriorityQueue<T>`, and restricted
+`Queue<T>`/`Stack<T>` interfaces. Map/Set iteration preserves insertion order
+while hashing uses a defensive process seed. List growth is automatic;
+capacity/reserve/shrink are not public APIs, and exact fixed storage uses
+`Array`.
 
 Collections offer `map`, `filter`, `reduce`, search, sorting and explicit
 conversion. Functional operations do not mutate the source. Whole collection
@@ -178,6 +243,11 @@ compares membership and Range equality compares its definition. Public API
 tables document mutation, constraints, complexity and capacity/allocation
 errors.
 
+Collection transformations are eager; iterator adapters are lazy and require
+explicit `collect` or a typed `to_*` terminal. Iterators are single-pass and
+remain `Done` after completion. Task-aware streams stay separate so iteration
+never hides `await`. Every `Range` has a finite end.
+
 ## 8. `std.time`
 
 Exports the sealed temporal family: `Date`, `Time`, `DateTime`, `Instant`,
@@ -192,6 +262,13 @@ await operation timeout 5s;
 
 Elapsed measurements use a monotonic clock. Civil date and duration are distinct
 types; they are not implicitly mixed.
+
+Friendly current-time calls live on temporal types (`Instant.now` and
+`Date`/`Time`/`ZonedDateTime.now(zone:)`) with an optional injectable clock.
+Local-zone discovery is fallible. System, monotonic and virtual test clocks
+never mutate the host clock. Timer/Ticker are cancelable resources;
+fixed-rate/fixed-delay policies are explicit and ticks report missed intervals.
+Cron/calendar scheduling is an official package.
 
 - `Date` validates 1-based calendar components, parses/formats explicit and ISO
   forms, exposes calendar properties, compares chronologically and combines
@@ -236,8 +313,8 @@ These modules expose supporting types for the language constructs:
 - `TaskSettlement<T>` with `Fulfilled`, `Rejected`, and `Cancelled`;
 - `Task.all`, `Task.first`, `Task.settled`, fair select support, cancellation
   and cancellation reasons;
-- bounded/unbounded `Channel<T>` and closing;
-- `Thread<T>` and `join`;
+- bounded channels, rendezvous, defensively limited dynamic channels, closing,
+  broadcast/watch/one-shot variants;
 - `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>`;
 - `Atomic<T>` and memory orderings;
 - ordered/unordered parallel operations and deterministic/associative reduction
@@ -247,6 +324,15 @@ These modules expose supporting types for the language constructs:
 The `task`, `await`, `parallel` and `thread` syntax belongs to the language; the
 stdlib does not create an alternative model.
 
+A `Task<T>` starts immediately and its result is consumed by exactly one
+`await`; multiple observers use the corresponding channel family. Cancellation
+reason is optional with a default, and scheduling priority is automatic.
+Threads cancel cooperatively and are never killed at arbitrary instructions.
+Safe `Mutex<T>.with` prevents guard escape and `await`; callback failure releases
+the lock without rollback or poisoning. `std.parallel` uses one managed worker
+pool, preserves order for map, requires associative reduction, avoids nested
+oversubscription and mirrors task failure/settlement cleanup.
+
 The low-level type family includes `Weak<T>`, `Pointer<T>`,
 `NativeSlice<T>`, and `NativeSliceMut<T>`. Weak references upgrade through
 `Option<T>`; native views carry checked extent and dependent lifetime. Raw
@@ -255,49 +341,162 @@ than being made safe merely because a library method exposes them.
 
 ## 10. `std.net` and `std.http`
 
-`std.net` provides addresses, DNS, TCP and UDP through typed, cancellable APIs
-compatible with the reactor. Every connection respects `permissions.network`.
+`std.net` provides immutable `IPAddress`/`IPv4Address`/`IPv6Address`,
+`HostName`, `Port`, `SocketAddress`, and `NetworkPrefix` values together with
+DNS, TCP, UDP, local sockets, network-interface snapshots, and TLS. Both the
+`Net.*` namespace and direct imports expose the same symbols; TLS additionally
+uses `Net.TLS.*` and `std.net.tls`. IP parsing never performs DNS, host names use
+IDNA2008, IPv6 scopes are preserved, and ports validate `0..65535`.
 
-`std.http` initially includes a basic native client and server, with:
+DNS uses the system resolver by default, bounded positive/negative TTL caches,
+task-aware cancellation, and typed A/AAAA/CNAME/MX/TXT/SRV/reverse results.
+DoT/DoH are explicit configurations. Each resolved IP is revalidated against
+the permission grant immediately before each connection attempt, preventing
+cached answers or DNS rebinding from escaping scope. Host-name connections use
+Happy Eyeballs v2 behavior.
 
-- typed request/response;
-- headers with validation;
-- streaming and backpressure;
-- configurable timeouts and limits;
-- TLS through an audited implementation;
-- cancellation tied to disconnection;
-- handlers executed as structured tasks.
+TCP is an ordered byte stream with `ReadResult<Bytes>`, partial `write`,
+backpressured `write_all`, half-close, bounded buffers, listeners, and
+cancellation-safe reactor waits. UDP preserves datagram source, size, and
+boundaries and never silently truncates. Broadcast and multicast are explicit.
+TLS defaults to TLS 1.3 with mandatory chain/host validation; TLS 1.2 requires
+explicit interoperability configuration and older versions are forbidden.
+Custom trust, mTLS, SNI, ALPN, and resumption are typed. No general-purpose
+certificate-validation bypass exists.
 
-No thread is created per request. The reactor handles I/O and the scheduler runs
-handlers; heavy CPU work must move to `parallel`.
+`permissions.network.connect.origins` and
+`permissions.network.listen.addresses` are distinct scopes. Resolutions,
+redirects, reconnects, proxies, TLS names, binds, multicast/broadcast, custom
+resolvers, local sockets, and interface inspection are validated at their
+dynamic boundary. Network waits suspend tasks rather than allocating one thread
+per socket, and all queues, buffers, attempts, and handshake work have safe
+bounds.
+
+`std.http` provides equivalent `HTTP.*` and direct-import surfaces, immutable
+`URL`, validated `HTTPHeaders`, integer-backed `HTTPStatus`, one-shot calls,
+`HTTPClient.create`, and `HTTPServer`. Dedicated method calls coexist with
+`request(HTTPMethod, ...)`. `HTTPMethod.Query`, `client.query`, and
+`server.query` implement RFC 10008 QUERY as a safe, idempotent, cacheable method
+with required typed content semantics and `Accept-Query` discovery.
+
+Requests accept exactly one of JSON, text, bytes, form, multipart, or streaming
+content. Responses expose one consumable body through text, bytes, typed JSON,
+or a bounded stream. Headers are case-insensitive, preserve multiple values,
+accept lists of pairs, and reject invalid/framing-conflicting fields. Redirects
+are bounded and revalidate credentials, permissions, DNS, and TLS at every hop;
+cookies require an explicit bounded `CookieJar` on reusable clients.
+
+Clients own isolated origin/proxy/TLS pools, safe retry/cache policy, typed
+timeouts, and bounded decompression. Servers offer `route(HTTPMethod, ...)` plus
+method conveniences, structured handlers, ordered middleware, streaming
+multipart, graceful shutdown, SSE, and WebSocket upgrades. HTTP/1.1 and HTTP/2
+share one API; HTTP/3 remains an official QUIC package implementing the same
+contracts.
+
+Protocol parsing is strict against request smuggling and response splitting.
+All URLs, fields, compressed/decoded bodies, parts, connections, queues,
+streams, retries, redirects, handlers, and timeouts have safe bounds. A peer
+disconnect cancels owned structured work. No thread is created per request; the
+reactor handles I/O, the scheduler runs handlers, and heavy CPU work moves to
+`parallel`.
 
 Frameworks, advanced routing, ORM and templating stay in packages, not in the
 core.
 
 ## 11. `std.json`
 
-Offers a typed JSON tree and generic encode/decode. Serializer derivation may be
-done through decorators or requested reflection. Errors include location, path
-and expected type. Depth/size limits must prevent hostile consumption.
+Every public JSON type uses the uppercase acronym: `JSONValue`, `JSONNumber`,
+`JSONCodec<T>`, `JSONLimits`, `JSONPath`, `JSONPointer`, and `JSON*Error`.
+`JSONValue` is a mutable in-memory Zirk tree with Null, Boolean, exact
+`JSONNumber`, String, Array and insertion-ordered Object variants.
+
+The conversion surface is `JSON.parse` (text to tree), `JSON.stringify` (tree or
+typed value to text), `JSON.decode<T>` (text to typed value), `JSON.to_value`
+and `JSON.from_value<T>`; there is no redundant `JSON.encode`. Parse is strict
+UTF-8 standard JSON, rejects duplicate keys unconditionally, preserves exact
+number text, and rejects NaN/infinity. Errors include stable code, location,
+path and bounded redacted context. Configurable safe defaults limit bytes,
+depth, strings, collection members and number length.
+
+Typed conversion uses compiler-generated or manually implemented ordinary
+`JSONCodec<T>` values and never runtime field scanning. Supported class and
+attribute decorators configure generated codecs without adding record as a
+decorator target or retaining decorator applications. Missing/unknown fields
+are errors unless nullable/optional/default or explicitly allowed. Traditional
+enums become JSON strings; algebraic enums use discriminated objects; temporal
+and byte values require explicit codecs. Constructors and invariants are never
+bypassed.
+
+Compact, pretty and canonical output are distinct. Cycles return
+`JSONCycleError`. `JSONReader`/`JSONWriter` support bounded streaming and expose
+task-aware underlying I/O without hiding `await`. JSON Pointer is included;
+JSON5, Schema, advanced JSONPath, Patch, other formats, ORM and domain validation
+remain packages.
 
 ## 12. `std.crypto`
 
-Only modern, audited algorithms, with safe defaults, constant-time comparison
-where appropriate, the system CSPRNG and types that make it hard to mix keys,
-nonces and hashes. Obsolete algorithms are not enabled for convenience. The APIs
-may be backed by verified native libraries.
+`Crypto` is the canonical namespace and algorithms may also be imported
+directly as the same symbols. Extended acronym names include `SHA_256`,
+`AES_256_GCM`, `HMAC_SHA_256`, `ML_KEM_768`, and `ML_DSA_65`. Algorithm-bound
+secret/key/nonce/digest/signature/envelope types prevent category confusion;
+secrets redact, avoid ordinary clone/string/equality, clear storage where the
+target permits, and require explicit duplicate/export operations.
+
+`SecureRandom` uses only the unseedable system CSPRNG and unbiased ranges.
+Hashing includes SHA-2/SHA-3 and non-FIPS performance-oriented BLAKE3; MD5/SHA-1
+are absent. Password storage defaults to versioned Argon2id with automatic salt,
+optional pepper and rehash detection; an explicit FIPS build profile uses
+PBKDF2-HMAC-SHA256. HKDF-SHA256/512 and HMAC-SHA256/512 use mandatory context
+separation where applicable.
+
+Authenticated encryption only exposes `AES_256_GCM` and
+`ChaCha20_Poly1305`, generates nonces automatically, returns a versioned
+`SealedMessage<A>`, collapses authentication failure, and frames large streams
+without releasing unauthenticated plaintext. Signatures/key establishment use
+Ed25519, ECDSA-P256, X25519, explicit RSA-PSS interoperability and finalized
+ML-KEM-768/ML-DSA-65/SLH-DSA; protocol layers own hybrid composition.
+
+PKCS#8, SPKI and PEM are standard key formats; JWK uses JSON codecs. KeyStore,
+HSM/KMS and X.509/TLS are separate effectful layers. Standard/FIPS profiles
+reject disallowed algorithms at build time without runtime substitution.
+Family-specific typed errors, constant-time verification, official test vectors,
+provider pinning and transparent equivalent hardware acceleration are mandatory.
+Pure CPU crypto/CSPRNG needs no permission; storage/network providers carry
+their normal authority.
 
 ## 13. `std.reflect`
 
-Exposes basic type identity, always available, and structural metadata only
-where it was preserved. It does not allow breaking visibility or mutability.
-Dynamic reflection requiring absent metadata produces an explicit
-result/diagnostic.
+Exposes compiler-provided basic `Type` identity through both `value.type()` and
+`T.type()`. `Type` provides value equality, `is(T)`, short and package/module-
+qualified diagnostic names, compiler-produced `TypeKind`, immutable generic
+arguments, and declared `implements`/`extends` relationships. Constructed
+generic types remain distinct even when optimized representations share code.
+
+`Type` does not expose fields, methods, constructors, attributes, decorators,
+layout, offsets, dynamic construction, string-named invocation, or dynamic
+get/set. Casts remain the language's separate checked operation. Package
+versions/integrity and native compatibility are metadata, not parts of the
+display name.
+
+Library-defined structural descriptors are ordinary typed values explicitly
+generated or authored by a program and reached through ordinary static methods
+such as `User.descriptor()`. Each library owns its minimal descriptor shape;
+there is no universal descriptor revealing all structure. `std.reflect` does
+not discover retained decorator applications and provides no
+`Reflection.decorators(...)`. Descriptors do not break visibility or
+mutability, grant permissions, or evade public API/compatibility checks.
 
 The compiler Syntax API does not belong to `std.reflect`; it is a separate
 tooling API.
 
 ## 14. `std.testing`
+
+`assert` and `expect` are explicit imports. Official examples prefer direct,
+lower-snake-case `assert` calls; fluent `expect` is available for multiple
+readable expectations about one subject. A test should use one vocabulary
+consistently. Assertions cover equality, identity, truth, nullability, results,
+throwables, collections, ordered sequences, explicit-tolerance floating
+approximation, and explicitly grouped `assert.all` failures.
 
 Unit tests use `@test` exclusively in `.spec.zrk`:
 
@@ -309,8 +508,22 @@ fn creates_user(): Void {
 }
 ```
 
-Using `@test` outside `.spec.zrk` is a compile error. Tests do not enter release
-binaries and receive no automatic private access.
+Tests may return `Void`, `Result<Void,E>`, `Task<Void>`, or
+`Task<Result<Void,E>>`; the runner awaits task results without `async fn`.
+Optional decorator arguments provide display name, tags, `Duration` timeout,
+and compile-time-checked parameter tuples through `cases`.
+
+`@suite` on a test class is the compile-time grouping equivalent of `describe`.
+It owns `@before_all`, `@before_each`, `@after_each`, and `@after_all` hooks;
+cleanup runs on success, failure, throw, and cancellation with standard composed
+failure semantics. `@fixture` defines typed, dependency-checked fixture
+producers. Missing/ambiguous fixtures, dependency cycles, invalid hook
+signatures, and case arity/type mismatches are compile-time diagnostics.
+
+Using testing decorators outside their recognized files/targets is a compile
+error. Tests do not enter release binaries and receive no automatic private
+access. General monkey patching and global symbol replacement are excluded;
+tests use explicit interfaces, functions, dependencies, fakes, or typed spies.
 
 E2E tests live in `test/*.e2e.zrk` and use `@e2e`. Commands:
 
@@ -323,25 +536,47 @@ zirk test --file <path>
 zirk test --tag <tag>
 zirk test --seed <seed>
 zirk test --jobs <n>
-zirk test --report json
+zirk test --report human|json|junit
+zirk test --update-snapshots
 ```
 
-Minimum assertions: equality, identity, truth, nullability, result, exception,
-collection and floating approximation. Every failure shows values, a diff and the
-source location.
+Tags filter declared labels; seed reproduces runner-controlled randomness but
+never cryptographic randomness; jobs bounds concurrency; reports preserve
+stable human/tool/CI formats with secret redaction. Snapshot comparison is
+read-only by default and updates only through the explicit flag after showing
+diffs. Every failure shows source, actual/expected values, an appropriate diff,
+suite/case identity and reproduction seed where applicable.
+
+Tests have exactly ordinary source visibility and no implicit filesystem,
+network, process, environment, secret, native, or shell permission. They do not
+mutate the real process environment. Runner isolation is provided through
+explicit typed fixtures, and permission/sandbox/infrastructure failures remain
+distinct from assertion failures.
 
 `@bench` defines benchmarks run by `zirk bench`, with warmup, multiple samples,
 statistics, dead-code-elimination prevention and machine-readable output.
 
 ## 15. `std.system`
 
-Exposes portable information about the process, target and signals without
-turning internal runtime details into stable API. `exit(code)` is immediate and
-should be reserved for boundaries; returning normally from `main` allows an
-ordered shutdown.
+`System` exposes non-sensitive current-process information and operations;
+`Platform` exposes read-only host and target descriptors. Platform properties
+include `OperatingSystem` (`MacOS`, not a differently cased spelling),
+`Architecture`, family, ABI, separators, executable/library extensions, and
+Unix/Windows family predicates. `Platform.host` describes the toolchain
+execution machine while `Platform.target` describes generated code.
 
-Environment variables, signals and sensitive data require permissions according
-to their capability.
+`System.process_id`, arguments, executable and available parallelism are safe
+read-only snapshots. `System.current_directory()` is fallible. Detailed CPU,
+memory, user, host, device and machine identifiers are not ambient API because
+they enable fingerprinting; any specialized access requires a narrow
+permission. Process-wide current-directory mutation is excluded.
+
+`System.exit(code)` and directly imported `exit(code)` are the same immediate
+boundary operation and do not promise structured cleanup. Normal return from
+`main` remains preferred. `Signals.shutdown_events()` provides bounded,
+task-aware `Signal.Interrupt`/`Signal.Terminate` events without executing Zirk
+inside native signal handlers. The root supervisor always owns shutdown; a
+second signal or exhausted deadline forces controlled exit.
 
 ## 16. Common contracts
 
@@ -358,6 +593,11 @@ Public stdlib APIs must:
 - keep equivalent behaviour across supported targets or declare explicit
   differences.
 
+Intrinsic timeouts are `Duration` parameters, such as
+`client.get(url, timeout: 5s)`. A same-named visible identifier can be passed as
+the named shorthand `url:`, meaning `url: url`; it is never inferred from a
+reordered positional argument.
+
 `Result<T,E>` provides `is_ok`, `is_error`, nullable extraction, `get_or`,
 `get_or_else`, `map`, `map_error`, `and_then`, `or_else`, `unwrap`,
 `unwrap_error` and `or_throw`. `Error`, `Throwable`, `RuntimeError`,
@@ -365,10 +605,17 @@ Public stdlib APIs must:
 `Environment` and exact preferred alias `Env` are standard contracts.
 
 `Env` exposes static `get`, `get_or_null`, `get_or`, `require`, `get_secret`,
-`contains` and `list_names`. Every operation checks its named environment or
-secret grant; broad listing needs broad authority. Secrets redact from
-diagnostics, logs and traces and require deliberate reveal. Environment
-mutation is not in the initial API.
+`contains` and `list_names`. Every operation returns `Result` so absence cannot
+hide permission, encoding, or platform failure. Generic `get<T>` and `get_or<T>`
+use a compile-time-constrained ordinary parsing contract, not reflection, and
+distinguish missing, invalid, and unauthorized values.
+
+Every operation checks its named environment or secret grant; broad listing
+needs broad authority and returns only visible names, never values. Unauthorized
+lookup does not disclose existence. `SecretString` has no general `to_string()`
+and can be revealed only to an authorized sink boundary. Environment mutation
+is not in the initial API; child configuration belongs to `std.process` and
+tests use isolated runner environments.
 
 Filesystem, network and process APIs use scoped permissions and return typed
 permission denial. Process execution validates canonical executable and

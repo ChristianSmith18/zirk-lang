@@ -408,8 +408,6 @@ fn invalid_other_stdout_method() {
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
         ("record Point { }", "record", "Phase 3"),
-        ("interface Serializable { }", "interface", "Phase 3"),
-        ("trait Printable { }", "trait", "Phase 3"),
         ("fn main(): Void { try { } }", "try", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),

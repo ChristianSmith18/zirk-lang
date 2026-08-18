@@ -1,6 +1,6 @@
 # Debugger
 
-Debug metadata maps native execution to `.zrk`, including tasks, awaits, threads, channels, and decorator expansions. Breakpoints, stepping, variables, stacks, and concurrent entities remain inspectable; release optimization may limit visibility explicitly.
+Debug metadata maps native execution to `.zrk`, including tasks, awaits, threads, channels, generated wrappers, decorator applications and expansion paths. Decorator objects are not present at runtime; source maps connect generated behavior to its original application. Release optimization may limit visibility explicitly.
 
 ---
 

@@ -296,6 +296,13 @@ parameter signatures differ. Resolution uses arity, type and argument labels,
 including reordered named arguments, and rejects duplicate or ambiguous sets.
 This exception does not enable ordinary function or method overloading.
 
+Named calls use `name: value`. When a simple visible identifier has exactly the
+parameter name, `name:` abbreviates `name: name`, so
+`client.get(timeout:, url:)` is explicit, reorderable named binding rather than
+positional inference. After the first named argument, every remaining argument
+must be named. Repeated labels, missing shorthand variables and shorthand on a
+member expression are compile-time errors.
+
 A concrete class may `extends` one concrete class and uses ordinary `super(...)`
 or `super.method()`. Public/protected instance methods dispatch virtually by
 default; private/static methods do not. Replacement must be written
@@ -489,29 +496,44 @@ remove guarantees require `unsafe {}`.
 
 ## 12. Decorators and reflection
 
-A native decorator is declared with `fn dec`. Its outer parameters configure the
-decorator and its inner blocks determine the admissible targets:
+A non-repeatable decorator uses `fn dec`; grouped decorators use
+`repeatable fn dec`. Configuration parameters describe each application and
+inner blocks select the only five Zirk 1.x targets: `class`, `attribute`,
+`function`, `method`, and `parameter`. Parameter includes initialization
+parameters; bodyless method signatures can be inspected but not wrapped.
 
 ```text
-fn dec route(path: String) {
+fn dec Route(path: String) {
     class(target) {
-        // logic for classes
-    }
-
-    method(target) {
-        // logic for methods
+        match target.transform {
+            Inspect(context) => { validate_path(path); }
+            Augment(builder) => { builder.register_route(path); }
+            _ => {}
+        }
     }
 }
 ```
 
-One decorator may implement several targets. Each block receives a fixed, typed
-contextual API. Decorators run at compile time, may read metadata and perform
-transformations through a controlled Syntax API; they receive no arbitrary
-access to the internal AST or to the system.
+Expansion follows `Inspect -> Augment -> Wrap`. `match target.wrap` selects
+`Before()`, `After(result)`, `After(result, transform)`, `Catch(error)`, or
+exclusive `Around(next)`. Compiler values exist only through explicit target,
+payload, or local bindings. Wrappers preserve callable contracts and expose any
+new error or permission effect.
 
-Basic type identity always exists. Advanced structural reflection is preserved
-only when a type or decorator requests it. General compile-time reflection
-happens inside decorators; there is no general `comptime {}` in 1.x.
+Applications evaluate top-to-bottom and compose outer-to-inner. Optional
+`requires decorators [...]`, `before decorators [...]`, and
+`after decorators [...]` validate visible source order without reordering it.
+Self-reference and dependency cycles are invalid. Contiguous applications of a
+`repeatable fn dec` form one ordered expansion with explicit `applications`
+payloads and typed `application.arguments`.
+
+Decorators use an immutable validated Syntax API. Expansion is hygienic,
+bounded, source-mapped, deterministic and incrementally fingerprinted. External
+effects require approved `during: build` authority. Decorators are erased after
+expansion: there is no `runtime fn dec`, automatic annotation retention, or
+general `Reflection.decorators(...)`. Frameworks explicitly generate ordinary
+typed descriptors and registries. General `comptime {}` remains excluded. The
+complete normative contract is `DECORATOR_SEMANTICS.md`.
 
 ## 13. Safety and low level
 

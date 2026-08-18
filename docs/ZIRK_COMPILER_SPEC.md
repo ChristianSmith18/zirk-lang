@@ -25,6 +25,7 @@ module and name resolution
 type checker and flow analysis
     ↓
 validated decorator expansion
+    (Inspect → Augment → Wrap → revalidation)
     ↓
 typed, portable IR
     ↓
@@ -49,7 +50,7 @@ The public API allows:
 - walking public declarations and authorized metadata;
 - building transformations through typed builders;
 - emitting diagnostics attached to source spans;
-- requesting explicit reflection.
+- generating explicit typed descriptors or registries when runtime structure is required.
 
 It does not allow mutating internal memory, fabricating invalid nodes, bypassing
 the type checker, or reaching the filesystem, network or processes without
@@ -58,6 +59,29 @@ an application `permissions` grant whose operation is marked `during: build`.
 Transformations are re-parsed, re-resolved, re-typed and re-validated. The
 compiler preserves traceability between original and generated code for
 diagnostics and debugging.
+
+Decorator target blocks are limited to class, attribute, function, method and
+parameter. The compiler completes inspection, commits compatible augmentation,
+and then wraps executable bodies. Every compiler service is an explicit variant
+payload. Hygienic private identities prevent capture; public generated-name
+collisions fail and identify all origins.
+
+Decorator expressions preserve source order and compose with the nearest
+application innermost. `requires`, `before`, and `after` validate that visible
+order without rewriting it. Self-edges and graph cycles fail with the complete
+cycle. Contiguous repeatable applications form one typed group with explicit
+`applications` payloads.
+
+Explicitly generated decorator applications enter bounded later rounds;
+structural cycle detection rejects recursion. Expansion fingerprints cover the
+decorator implementation/version, arguments, typed target, configuration,
+permission grants, observed build inputs and transitive dependencies. Changed
+fingerprints invalidate affected expansions only.
+
+Decorator applications are erased. Runtime descriptors and framework
+registries are ordinary generated typed API, participate in `public.api`,
+documentation and compatibility analysis, and remain eligible for dead-code
+elimination.
 
 Permission effects are inferred through declarations and higher-order callable
 metadata. Before executing compile-time or runtime code, the CLI compares
@@ -166,8 +190,10 @@ error[E1234]: precise description
 ```
 
 Every diagnostic must include a severity, a stable code, a location, a cause and
-help where a clear fix exists. Errors produced by decorators show both the
-original source and the relevant expansion.
+help where a clear fix exists. Decorator errors show the generated declaration,
+decorator declaration/application, target, expansion path and actionable source
+span. Missing dependencies, invalid order, cycles and public conflicts name all
+relevant origins. Decorators cannot suppress compiler diagnostics.
 
 Safety diagnostics identify the owner and escape path for an invalid dependent
 reference, the exact unsafe operation lacking a boundary, an irreversible

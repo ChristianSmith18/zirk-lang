@@ -1,8 +1,8 @@
-# Reflection Retention
+# Decorator Erasure and Generated Descriptors
 
-Retention is opt-in so binaries need not carry every private field and annotation. The requesting type, decorator, or application defines the required metadata scope.
+Decorator retention is not a Zirk 1.x feature. The compiler keeps validated generated behavior and removes the decorator machinery. This makes binaries smaller, startup static, and framework contracts visible during compilation.
 
-Retention affects binary size and compatibility but does not publish private members or grant reflective mutation.
+When runtime data is truly needed, the decorator must generate an ordinary descriptor explicitly. That descriptor contains only library-defined typed data and cannot reveal private structure or grant mutation by implication. Public generated descriptors appear in `public.api`, documentation, compatibility checks, and tooling; private unused descriptors can be eliminated.
 
 ---
 

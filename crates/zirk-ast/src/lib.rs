@@ -38,6 +38,7 @@ pub struct Program {
     pub uses: Vec<UseDecl>,
     pub enums: Vec<EnumDecl>,
     pub classes: Vec<ClassDecl>,
+    pub contracts: Vec<ContractDecl>,
     pub functions: Vec<FnDecl>,
     pub span: Span,
 }
@@ -116,6 +117,8 @@ pub struct EnumDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,
+    /// The contracts this class says it satisfies.
+    pub implements: Vec<Ident>,
     /// The class this one extends, if any.
     ///
     /// At most one: `ZIRK_LANGUAGE_SPEC.md` section 7 admits a single base
@@ -129,6 +132,41 @@ pub struct ClassDecl {
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
     pub span: Span,
+}
+
+/// `interface Serializable { ... }` or `trait Printable { ... }`
+///
+/// One node for both: `ZIRK_LANGUAGE_SPEC.md` section 7 separates them by a
+/// single thing — a trait may carry implementation. Everything else about them
+/// is identical, and modelling them apart would duplicate every rule to say
+/// the same. The keyword is kept because the spec distinguishes them and so
+/// must the diagnostic: writing a body in an `interface` is a mistake that
+/// deserves to be named as one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractDecl {
+    pub name: Ident,
+    pub kind: ContractKind,
+    pub methods: Vec<MethodDecl>,
+    /// Marked `share`, so other files of the crate may name it.
+    pub shared: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractKind {
+    /// Signatures only.
+    Interface,
+    /// Signatures, and bodies for the ones it chooses to supply.
+    Trait,
+}
+
+impl ContractKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContractKind::Interface => "interface",
+            ContractKind::Trait => "trait",
+        }
+    }
 }
 
 /// A field of a class.

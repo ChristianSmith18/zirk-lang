@@ -77,3 +77,28 @@ The CLI SHALL provide `zirk permissions show`, `diff`, `approve`, `revoke`, and 
 #### Scenario: Noninteractive build lacks approval
 - **WHEN** CI encounters a permission fingerprint absent from its protected policy
 - **THEN** the command fails without prompting and prints a machine-readable authorization diff
+
+### Requirement: Test selection and reporting are reproducible
+The CLI MUST provide `zirk test` unit, E2E, all, file, tag, seed, and bounded-job
+selection together with human, JSON, and JUnit reports. Filtering SHALL NOT
+change test semantics or grant permissions. Every failure affected by
+runner-controlled randomness SHALL report a reproduction seed; that seed SHALL
+NOT control cryptographic randomness.
+
+#### Scenario: Seeded test fails
+- **WHEN** a test using runner-controlled randomization fails under `--seed 48291`
+- **THEN** the report includes `48291` and a reproducible command
+
+#### Scenario: CI requests JUnit output
+- **WHEN** `zirk test --report junit` is executed
+- **THEN** the runner emits stable interoperable test records with the same secret redaction as human output
+
+### Requirement: Snapshot updates are explicit
+The test runner SHALL compare snapshots without rewriting them by default.
+Snapshot writes MUST require `--update-snapshots`, show changes, enforce test
+filesystem permission, and preserve secret redaction.
+
+#### Scenario: Snapshot differs in a normal test run
+- **WHEN** an observed snapshot differs without the update flag
+- **THEN** the test fails with a diff
+- **AND** the stored snapshot remains unchanged

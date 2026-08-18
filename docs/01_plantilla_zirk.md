@@ -4321,10 +4321,11 @@ fn dec route(path: String) {
 ```
 
 Dentro del decorador se incluirá un bloque por cada clase de elemento que
-soporte. Un mismo decorador podrá ofrecer implementaciones para `class`,
-`function`, `method`, `attribute`, `parameter` y `constructor`. `property` y
-`accessor` no son targets del lenguaje porque Zirk expresa acceso controlado con
-métodos ordinarios `get_`/`set_`.
+soporte. Los únicos targets de Zirk 1.x son `class`, `attribute`, `function`,
+`method` y `parameter`; este último incluye parámetros de inicialización.
+`constructor`, `property` y `accessor` no son targets. La construcción se
+resuelve con parámetros, atributos o factories tipadas generadas por un
+decorador de clase, y el acceso controlado usa métodos `get_`/`set_`.
 
 ```text
 @route("/users")
@@ -4338,7 +4339,19 @@ class UserController {
 
 El compilador seleccionará estáticamente el bloque correspondiente. Aplicar un decorador a una clase de elemento que este no soporte producirá un error de compilación.
 
-Cada bloque recibirá parámetros fijos proporcionados por el compilador:
+Cada bloque recibe un `target` tipado e inmutable. Los demás valores del
+compilador nunca son implícitos: se introducen en los payloads de
+`Inspect(context)`, `Augment(builder)` y `Wrap(wrapper)`. En decoradores
+`repeatable`, cada fase que lo necesite enlaza explícitamente `applications` y
+cada elemento se consulta como `application.arguments.<nombre>`.
+
+La expansión sigue `Inspect -> Augment -> Wrap`. Dentro de `Wrap`,
+`match target.wrap` ofrece `Before`, `After`, `Catch` o `Around`. El orden
+visible compone desde el decorador superior hacia el inferior; `requires`,
+`before` y `after` validan ese orden sin modificarlo. Autorreferencias y ciclos
+son errores.
+
+Cada bloque recibe valores fijos proporcionados por el compilador:
 
 - `target`: representación tipada del elemento decorado y API de inspección o transformación permitida.
 - `context`: propietario, ubicación, metadata y mecanismos para emitir diagnósticos.
@@ -4377,9 +4390,11 @@ User.fields();
 
 **Pregunta:** ¿Existe reflection en runtime?
 
-**Respuesta:**
+**Respuesta actualizada:**
 
-Sí. Existirá reflection en runtime, pero será controlada para evitar aumentar innecesariamente el tamaño de todos los binarios o romper la privacidad de los tipos.
+La identidad básica de tipos puede existir según el contrato general de tipos,
+pero los decoradores no se conservan automáticamente en runtime. Zirk 1.x no
+incluye `runtime fn dec` ni `Reflection.decorators(...)`.
 
 Todos los valores permitirán consultar la identidad básica de su tipo:
 
@@ -4390,10 +4405,11 @@ stdout.println(type.name);
 stdout.println(type.is(User));
 ```
 
-La inspección avanzada de campos, métodos, decoradores y metadata será opt-in:
+Cuando una librería necesite información estructural en runtime, su decorador
+genera explícitamente un descriptor o registry ordinario y tipado:
 
 ```text
-@reflect
+@Serializable()
 class User {
     mut name: String;
     mut age: UInt8;
@@ -4401,16 +4417,15 @@ class User {
 ```
 
 ```text
-for field in User.type().fields() {
+for field in User::descriptor().fields {
     stdout.println(field.name);
 }
 ```
 
-La identidad básica del tipo siempre estará disponible. La información estructural avanzada solo se conservará cuando el tipo o un decorador soliciten reflection.
-
-Reflection no ignorará automáticamente la visibilidad `private`. Leer o modificar miembros privados requerirá autorización explícita del propio tipo. Inicialmente no se permitirá modificar campos ni ejecutar métodos arbitrariamente por su nombre.
-
-Los decoradores podrán registrar metadata destinada a runtime. El compilador eliminará metadata que pueda demostrar que no será utilizada.
+El descriptor contiene solo la estructura requerida por la librería, obedece
+visibilidad y mutabilidad, participa en `public.api` si es público y puede ser
+eliminado si es privado y no se usa. La identidad y los argumentos del
+decorador desaparecen después de la expansión.
 
 ---
 

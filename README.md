@@ -67,6 +67,7 @@ cargo test --workspace
 
 - [ZIRK_SPEC_FINAL.md](docs/ZIRK_SPEC_FINAL.md) — alcance, exclusiones, filosofía
 - [ZIRK_LANGUAGE_SPEC.md](docs/ZIRK_LANGUAGE_SPEC.md) — sintaxis, tipos, objetos, errores
+- [DECORATOR_SEMANTICS.md](docs/DECORATOR_SEMANTICS.md) — decoradores, expansión validada y generación estática
 - [ZIRK_COMPILER_SPEC.md](docs/ZIRK_COMPILER_SPEC.md) — pipeline, IR, LLVM, targets, CLI
 - [ZIRK_RUNTIME_SPEC.md](docs/ZIRK_RUNTIME_SPEC.md) — memoria, tasks, scheduler, recursos
 - [ZIRK_STDLIB_SPEC.md](docs/ZIRK_STDLIB_SPEC.md) — biblioteca estándar
