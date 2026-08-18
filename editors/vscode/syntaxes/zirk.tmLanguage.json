@@ -4,6 +4,7 @@
   "scopeName": "source.zirk",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#imports" },
     { "include": "#strings" },
     { "include": "#durations" },
     { "include": "#numbers" },
@@ -12,6 +13,7 @@
     { "include": "#keywords" },
     { "include": "#constants" },
     { "include": "#types" },
+    { "include": "#named-arguments" },
     { "include": "#operators" },
     { "include": "#builtins" }
   ],
@@ -29,8 +31,51 @@
         }
       ]
     },
+    "imports": {
+      "begin": "\\bimport\\b",
+      "end": ";",
+      "beginCaptures": {
+        "0": { "name": "keyword.control.import.zirk" }
+      },
+      "patterns": [
+        {
+          "name": "keyword.control.import.zirk",
+          "match": "\\bfrom\\b"
+        },
+        {
+          "name": "support.class.zirk",
+          "match": "\\bstd\\.[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)*\\b"
+        },
+        {
+          "name": "keyword.operator.alias.zirk",
+          "match": "->"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "name": "punctuation.section.braces.zirk",
+          "match": "\\{|\\}"
+        }
+      ]
+    },
     "strings": {
       "patterns": [
+        {
+          "name": "string.regexp.zirk",
+          "begin": "re'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zirk",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "constant.character.zirk",
+          "match": "'([^'\\\\]|\\\\(n|t|r|\\\\|'))'"
+        },
         {
           "name": "string.quoted.double.zirk",
           "begin": "\"",
@@ -38,7 +83,16 @@
           "patterns": [
             {
               "name": "constant.character.escape.zirk",
-              "match": "\\\\(n|t|r|\\\\|\")"
+              "match": "\\\\(n|t|r|\\\\|\"|:)"
+            },
+            {
+              "match": "(?<!\\\\)(:)([a-zA-Z_][a-zA-Z0-9_]*|[0-9]+)(?:(\\|)([a-zA-Z0-9_\\-\\.\\#\\*\\+\\%]+))?",
+              "captures": {
+                "1": { "name": "punctuation.definition.placeholder.zirk" },
+                "2": { "name": "variable.other.placeholder.zirk" },
+                "3": { "name": "punctuation.separator.placeholder.zirk" },
+                "4": { "name": "constant.other.format-specifier.zirk" }
+              }
             },
             {
               "name": "meta.embedded.line-interpolation.zirk",
@@ -90,18 +144,40 @@
         }
       ]
     },
+    "named-arguments": {
+      "patterns": [
+        {
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(:)(?=\\s*[,)])",
+          "captures": {
+            "1": { "name": "variable.parameter.zirk" },
+            "2": { "name": "punctuation.separator.key-value.zirk" }
+          }
+        },
+        {
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(:)(?!\\s*:)",
+          "captures": {
+            "1": { "name": "variable.parameter.zirk" },
+            "2": { "name": "punctuation.separator.key-value.zirk" }
+          }
+        }
+      ]
+    },
     "decorators": {
       "patterns": [
         {
           "name": "meta.decorator.zirk",
-          "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+          "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.decorator.zirk" },
+            "2": { "name": "entity.name.function.decorator.zirk" }
+          }
         }
       ]
     },
     "function-declarations": {
       "patterns": [
         {
-          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
+          "match": "\\b(fn\\s+dec|fn|gen)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\b",
           "captures": {
             "1": { "name": "storage.type.function.zirk" },
             "2": { "name": "entity.name.function.zirk" }
@@ -113,11 +189,11 @@
       "patterns": [
         {
           "name": "keyword.control.zirk",
-          "match": "\\b(if|else|return|match|with|default|try|catch|finally|loop|while|for|in|break|continue|task|await|parallel|thread)\\b"
+          "match": "\\b(if|else|return|match|with|for|in|while|do|loop|break|continue|try|catch|finally|throw|throws|task|await|select|parallel|thread|during|requires|permissions|scope|shield|after|cancelled|before|default|timeout|cancellation|from)\\b"
         },
         {
-          "name": "storage.modifier.zirk",
-          "match": "\\b(mut|inmut::strict|inmut|sync|public|private|protected|abstract|unsafe|share|import|from|use|type|class|construct|implements|extends|interface|trait|record|enum|gen|dec)\\b"
+          "name": "keyword.control.zirk",
+          "match": "\\b(mut|inmut::strict|inmut|strict|sync|public|private|protected|abstract|unsafe|share|import|use|type|class|construct|implements|extends|override|repeatable|dec|commit|decorators|attribute|function|method|parameter|interface|trait|record|enum|gen)\\b"
         }
       ]
     },
@@ -125,7 +201,7 @@
       "patterns": [
         {
           "name": "constant.language.zirk",
-          "match": "\\b(true|false|null)\\b"
+          "match": "\\b(true|false|null|Ok|Err|Some|None)\\b"
         },
         {
           "name": "variable.language.zirk",
@@ -137,19 +213,23 @@
       "patterns": [
         {
           "name": "storage.type.zirk",
-          "match": "\\b(Int8|Int16|Int32|Int64|Int128|Int|Integer|UInt8|UInt16|UInt32|UInt64|UInt128|Decimal16|Decimal32|Decimal64|Decimal128|Dec|Decimal|Boolean|Char|String|Void|Never|Null|Object|List|Map|Set|Range|Pointer)\\b"
+          "match": "\\b(Int8|Int16|Int32|Int64|Int128|Int|UInt8|UInt16|UInt32|UInt64|UInt128|UInt|Float16|Float32|Float64|Float128|Float|Boolean|Char|String|Date|Time|DateTime|Instant|ZonedDateTime|TimeZone|Duration|Period|Array|List|Set|Map|Range|Function|Fn|Tuple|Weak|Pointer|NativeSlice|NativeSliceMut|Task|TaskSettlement|Channel|Thread|Mutex|RwLock|Semaphore|Barrier|Once|Atomic|Null|Void|Never|Object|Result|Option|Throwable)\\b"
         }
       ]
     },
     "operators": {
       "patterns": [
         {
+          "name": "keyword.operator.pipe.zirk",
+          "match": "\\|>"
+        },
+        {
           "name": "keyword.operator.cast.zirk",
-          "match": "\\b(as|is)\\b"
+          "match": "\\bis\\b"
         },
         {
           "name": "keyword.operator.zirk",
-          "match": "\\+\\+|--|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|=>|\\?\\?|\\?\\.|\\|>|&&|\\|\\||\\+|-|\\*|/|%|<|>|=|!|\\?|:|&"
+          "match": "\\+\\+|--|\\+=|-=|\\*=|/=|%=|==|!=|<=|>=|=>|->|\\?\\?|\\?\\.|\\*\\*|\\+|-|\\*|/|%|<|>|=|!|\\?|:|&|\\||\\^|~"
         }
       ]
     },
@@ -161,7 +241,7 @@
         },
         {
           "name": "support.function.zirk",
-          "match": "\\b(print|println|to_string|assert|equal)\\b"
+          "match": "\\b(print|println|to_string|assert|equal|expect|fatalError)\\b"
         }
       ]
     }
