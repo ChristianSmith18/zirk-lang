@@ -37,6 +37,13 @@ pub enum Base {
     Enum(u32),
     /// A function value, identified by its index in the checker's table.
     Function(u32),
+    /// A declared interface or trait, identified by its index in the checker's
+    /// table.
+    ///
+    /// A value of this type is reached through the contract rather than
+    /// through its own class: what it can do is what the contract declares,
+    /// and which body runs is decided at the call.
+    Contract(u32),
     /// A declared class, identified by its index in the checker's table.
     ///
     /// Nominal: two classes with identical members are different types, which
@@ -220,6 +227,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Enum(id) => names.enum_name(id),
         Base::Function(id) => names.function_type(id),
         Base::Class(id) => names.class_name(id),
+        Base::Contract(id) => names.contract_name(id),
     };
 
     if ty.nullable {
@@ -234,6 +242,7 @@ pub trait TypeNames {
     fn enum_name(&self, id: u32) -> String;
     fn function_type(&self, id: u32) -> String;
     fn class_name(&self, id: u32) -> String;
+    fn contract_name(&self, id: u32) -> String;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -285,6 +294,8 @@ pub struct ClassType {
     /// Every method, inherited ones first, with an override replacing the
     /// entry it overrides so its index does not move.
     pub methods: Vec<MethodInfo>,
+    /// The contracts this class satisfies, its base's included.
+    pub contracts: Vec<u32>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
     /// Where it was declared, which is also which file owns it.
@@ -314,12 +325,50 @@ pub struct MethodInfo {
     pub index: usize,
     /// The class that declares the body this call reaches.
     pub owner: u32,
+    /// The contract whose default body this entry adopts, if it is one.
+    pub from_contract: Option<u32>,
     /// Whether some subclass redefines it.
     ///
     /// A method nobody overrides is called directly: that is most calls, and
     /// paying an indirection for all of them would be paying for a generality
     /// the program does not use. Decision D3.
     pub overridden: bool,
+}
+
+/// A declared interface or trait.
+///
+/// One type for both: `ZIRK_LANGUAGE_SPEC.md` section 7 separates them by a
+/// single thing — a trait may supply bodies. Everything else is identical, and
+/// two types would duplicate every rule to say the same.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractType {
+    pub name: String,
+    pub kind: zirk_ast::ContractKind,
+    pub methods: Vec<ContractMethod>,
+    pub shared: bool,
+    pub span: zirk_diagnostics::Span,
+}
+
+impl ContractType {
+    pub fn method(&self, name: &str) -> Option<&ContractMethod> {
+        self.methods.iter().find(|m| m.name == name)
+    }
+}
+
+/// One method a contract declares.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractMethod {
+    pub name: String,
+    pub params: Vec<crate::scope::ParamInfo>,
+    pub returns: Type,
+    pub span: zirk_diagnostics::Span,
+    /// Whether the contract supplies a body, which only a trait may do.
+    ///
+    /// A class that does not declare the method adopts this one, so it is what
+    /// makes a trait reusable rather than merely required.
+    pub has_default: bool,
+    /// Its position in the contract, which is its slot in the dispatch table.
+    pub index: usize,
 }
 
 /// One field of a class, as the checker sees it.

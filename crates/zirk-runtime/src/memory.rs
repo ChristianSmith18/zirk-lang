@@ -56,6 +56,48 @@ pub unsafe extern "C" fn zirk_rt_alloc(size: usize, align: usize) -> *mut c_void
     pointer as *mut c_void
 }
 
+/// Finds the dispatch table a descriptor holds for a contract.
+///
+/// A class satisfies several contracts and each needs its own indices, so the
+/// descriptor keeps one table per contract and the call finds it here. The
+/// search is linear over what one class implements — a handful of entries, not
+/// a data structure.
+///
+/// The descriptor layout is fixed by codegen:
+///
+/// ```text
+///    [ method_table | contract_count | (contract_id, table)* ]
+/// ```
+///
+/// # Safety
+///
+/// `descriptor` must be one this compiler emitted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_contract_table(
+    descriptor: *const c_void,
+    contract: u64,
+) -> *const c_void {
+    if descriptor.is_null() {
+        crate::failure::zirk_rt_missing_contract()
+    }
+
+    let words = descriptor as *const usize;
+    // Slot 0 is the method table; slot 1 is how many contracts follow.
+    let count = unsafe { *words.add(1) };
+
+    for entry in 0..count {
+        let base = 2 + entry * 2;
+        let id = unsafe { *words.add(base) } as u64;
+        if id == contract {
+            return unsafe { *words.add(base + 1) } as *const c_void;
+        }
+    }
+
+    // The checker proved the value satisfies the contract, so reaching here is
+    // a compiler bug rather than a program error.
+    crate::failure::zirk_rt_missing_contract()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

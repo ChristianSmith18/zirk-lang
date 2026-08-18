@@ -158,6 +158,28 @@ fn verify_instruction(
             Some(_) => expect(inst.ty, IrType::Object(*id), position, "Alloc", report),
         },
 
+        InstKind::CallContract {
+            object,
+            contract,
+            index,
+            ..
+        } => {
+            let reachable = match type_of(object) {
+                Some(IrType::Contract(id)) => id == *contract,
+                // A class reaches a contract it satisfies.
+                Some(IrType::Object(id)) => module
+                    .objects
+                    .get(id as usize)
+                    .is_some_and(|o| o.contracts.iter().any(|t| t.contract == *contract)),
+                _ => false,
+            };
+            if !reachable {
+                report(format!(
+                    "{position}: calls method {index} of contract {contract} through something that does not satisfy it"
+                ));
+            }
+        }
+
         InstKind::CallVirtual { object, index, .. } => {
             let known = match type_of(object) {
                 Some(IrType::Object(id)) => module
@@ -538,6 +560,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
+        InstKind::CallContract { object, args, .. } => {
+            let mut operands = vec![*object];
+            operands.extend(args.iter().copied());
+            operands
+        }
         InstKind::CallVirtual { object, args, .. } => {
             let mut operands = vec![*object];
             operands.extend(args.iter().copied());

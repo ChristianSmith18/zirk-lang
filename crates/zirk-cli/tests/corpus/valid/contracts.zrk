@@ -1,0 +1,37 @@
+interface Describable {
+    fn describe(): String;
+}
+
+trait Labelled {
+    fn label(): String;
+
+    // Cuerpo reutilizable: quien no lo escriba, lo adopta.
+    fn shout(): String { return this.label(); }
+}
+
+class User implements Describable, Labelled {
+    name: String;
+
+    construct(name: String) { this.name = name; }
+
+    fn describe(): String { return this.name; }
+    fn label(): String { return "user"; }
+}
+
+class Robot implements Describable {
+    construct() { }
+    fn describe(): String { return "beep"; }
+}
+
+// Recibe cualquiera que satisfaga el contrato.
+fn announce(d: Describable): String { return d.describe(); }
+
+fn main(): Void {
+    mut u = User("Cristian");
+    mut r = Robot();
+
+    stdout.println(announce(u));
+    stdout.println(announce(r));
+    stdout.println(u.label());
+    stdout.println(u.shout());
+}

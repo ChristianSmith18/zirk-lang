@@ -9,8 +9,8 @@
 use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
-    Base, ClassType, EnumType, FieldInfo, FnType, MethodInfo, Type, TypeNames, describe,
-    pending_type,
+    Base, ClassType, ContractMethod, ContractType, EnumType, FieldInfo, FnType, MethodInfo, Type,
+    TypeNames, describe, pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
@@ -24,6 +24,8 @@ pub struct CheckedProgram {
     pub enums: Vec<EnumType>,
     /// Declared classes, indexed by the id their [`Base::Class`] carries.
     pub classes: Vec<ClassType>,
+    /// Declared contracts, indexed by the id their [`Base::Contract`] carries.
+    pub contracts: Vec<ContractType>,
     /// Function types, indexed by the id their [`Base::Function`] carries.
     pub fn_types: Vec<FnType>,
     /// What each lambda captures, keyed by the lambda's span.
@@ -76,6 +78,7 @@ struct Names<'t> {
     enums: &'t [EnumType],
     fn_types: &'t [FnType],
     classes: &'t [ClassType],
+    contracts: &'t [ContractType],
 }
 
 impl TypeNames for Names<'_> {
@@ -91,6 +94,13 @@ impl TypeNames for Names<'_> {
             .get(id as usize)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "<class>".into())
+    }
+
+    fn contract_name(&self, id: u32) -> String {
+        self.contracts
+            .get(id as usize)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "<contract>".into())
     }
 
     fn function_type(&self, id: u32) -> String {
@@ -109,6 +119,7 @@ struct Checker<'a> {
     functions: HashMap<String, Signature>,
     enums: Vec<EnumType>,
     classes: Vec<ClassType>,
+    contracts: Vec<ContractType>,
     fn_types: Vec<FnType>,
     lambdas: HashMap<Span, LambdaInfo>,
     matches: HashMap<Span, Type>,
@@ -141,6 +152,7 @@ impl<'a> Checker<'a> {
             functions: HashMap::new(),
             enums: Vec::new(),
             classes: Vec::new(),
+            contracts: Vec::new(),
             fn_types: Vec::new(),
             lambdas: HashMap::new(),
             matches: HashMap::new(),
@@ -183,6 +195,7 @@ impl<'a> Checker<'a> {
                 enums: &self.enums,
                 fn_types: &self.fn_types,
                 classes: &self.classes,
+                contracts: &self.contracts,
             },
         )
     }
@@ -200,11 +213,18 @@ impl<'a> Checker<'a> {
         // Classes before signatures: a parameter may name one. In three
         // passes, because a class may extend one declared later in the file
         // and its members depend on its base's.
+        // Contracts before classes: a class says which it satisfies, and a
+        // field or signature may name one.
+        for c in &program.contracts {
+            self.declare_contract(c);
+        }
+
         for c in &program.classes {
             self.register_class(c);
         }
         self.resolve_bases(program);
         self.declare_members(program);
+        self.check_conformance(program);
 
         // Signatures next, so a function can call another declared later.
         for f in &program.functions {
@@ -226,6 +246,7 @@ impl<'a> Checker<'a> {
             functions: self.functions,
             enums: self.enums,
             classes: self.classes,
+            contracts: self.contracts,
             fn_types: self.fn_types,
             lambdas: self.lambdas,
             matches: self.matches,
@@ -400,6 +421,208 @@ impl<'a> Checker<'a> {
     ///
     /// Declaration comes before checking so a field, a parameter or another
     /// class may name it regardless of the order the file declares them in.
+    /// Registers a contract with its method signatures.
+    fn declare_contract(&mut self, decl: &ContractDecl) {
+        if let Some(previous) = self.contracts.iter().find(|c| c.name == decl.name.name) {
+            let where_ = self.declared_at(previous.span, decl.name.span);
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("`{}` is already defined", decl.name.name),
+                format!("a previous definition exists {where_}"),
+                Some("rename one of the two".into()),
+            );
+            return;
+        }
+
+        let mut methods: Vec<ContractMethod> = Vec::new();
+        for (index, method) in decl.methods.iter().enumerate() {
+            if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
+                let where_ = self.declared_at(previous.span, method.name.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    method.name.span,
+                    format!("method `{}` is already defined", method.name.name),
+                    format!("a previous definition exists {where_}"),
+                    Some("rename one of the two: there is no overloading".into()),
+                );
+                continue;
+            }
+
+            methods.push(ContractMethod {
+                name: method.name.name.clone(),
+                params: method
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_param(p))
+                    .collect(),
+                returns: self.resolve_type(&method.return_type),
+                span: method.name.span,
+                has_default: method.body.is_some(),
+                index,
+            });
+        }
+
+        self.contracts.push(ContractType {
+            name: decl.name.name.clone(),
+            kind: decl.kind,
+            methods,
+            shared: decl.shared,
+            span: decl.name.span,
+        });
+    }
+
+    fn contract_id(&self, name: &str) -> Option<u32> {
+        self.contracts
+            .iter()
+            .position(|c| c.name == name)
+            .map(|i| i as u32)
+    }
+
+    /// Verifies that every class satisfies what it says it does.
+    fn check_conformance(&mut self, program: &Program) {
+        for decl in &program.classes {
+            let Some(id) = self.class_id(&decl.name.name) else {
+                continue;
+            };
+
+            // A class satisfies what its base satisfies: that is what makes a
+            // subclass usable wherever the base was.
+            let mut satisfied: Vec<u32> = self.classes[id as usize]
+                .base
+                .map(|b| self.classes[b as usize].contracts.clone())
+                .unwrap_or_default();
+
+            for named in &decl.implements {
+                let resolved = self.resolved_name(&named.name, named.span);
+                let Some(contract) = self.contract_id(&resolved) else {
+                    self.error(
+                        codes::UNKNOWN_TYPE,
+                        named.span,
+                        format!("`{}` is not a declared contract", named.name),
+                        "`implements` names an interface or a trait",
+                        None,
+                    );
+                    continue;
+                };
+
+                let declared = self.contracts[contract as usize].span;
+                let shared = self.contracts[contract as usize].shared;
+                self.require_visible(declared, shared, named, "contract");
+
+                if satisfied.contains(&contract) {
+                    let name = self.contracts[contract as usize].name.clone();
+                    self.error(
+                        codes::DUPLICATE_DECLARATION,
+                        named.span,
+                        format!("`{name}` is listed more than once"),
+                        "a class satisfies a contract once, its base's included",
+                        None,
+                    );
+                    continue;
+                }
+
+                self.require_conformance(id, contract, named.span);
+                satisfied.push(contract);
+            }
+
+            self.classes[id as usize].contracts = satisfied;
+        }
+    }
+
+    /// Checks that a class supplies everything a contract requires.
+    fn require_conformance(&mut self, class: u32, contract: u32, at: Span) {
+        let required = self.contracts[contract as usize].methods.clone();
+        let contract_name = self.contracts[contract as usize].name.clone();
+        let class_name = self.classes[class as usize].name.clone();
+
+        for method in &required {
+            let Some(supplied) = self.classes[class as usize].method(&method.name).cloned() else {
+                // A trait's own body stands in for the one the class did not
+                // write: that is the whole of what a trait adds.
+                if method.has_default {
+                    self.adopt_default(class, contract, method);
+                    continue;
+                }
+
+                self.error(
+                    codes::MISSING_IMPLEMENTATION,
+                    at,
+                    format!("`{class_name}` does not implement `{}`", method.name),
+                    format!("`{contract_name}` requires it"),
+                    Some(format!(
+                        "add `fn {}(...): ...` to `{class_name}`",
+                        method.name
+                    )),
+                );
+                continue;
+            };
+
+            self.require_matching_signature(&supplied, method, &contract_name, at);
+        }
+    }
+
+    /// Copies a trait's default body into the class that did not write it.
+    ///
+    /// The class ends up with an ordinary method pointing at the trait's body,
+    /// so nothing downstream has to know the difference — which is what makes
+    /// the dispatch table need no new shape.
+    fn adopt_default(&mut self, class: u32, contract: u32, method: &ContractMethod) {
+        let index = self.classes[class as usize].methods.len();
+        self.classes[class as usize].methods.push(MethodInfo {
+            name: method.name.clone(),
+            params: method.params.clone(),
+            returns: method.returns,
+            visibility: Visibility::Public,
+            span: method.span,
+            index,
+            owner: class,
+            overridden: false,
+            from_contract: Some(contract),
+        });
+    }
+
+    /// A supplied method has to match what the contract asked for.
+    fn require_matching_signature(
+        &mut self,
+        supplied: &MethodInfo,
+        required: &ContractMethod,
+        contract: &str,
+        at: Span,
+    ) {
+        let same_params = supplied.params.len() == required.params.len()
+            && supplied
+                .params
+                .iter()
+                .zip(&required.params)
+                .all(|(a, b)| a.ty == b.ty);
+
+        if same_params && supplied.returns == required.returns {
+            if supplied.visibility != Visibility::Public {
+                let name = supplied.name.clone();
+                self.error(
+                    codes::INACCESSIBLE_MEMBER,
+                    supplied.span,
+                    format!("`{name}` implements a contract, so it must be public"),
+                    format!("`{contract}` declares it as behaviour anyone may reach"),
+                    Some("remove the visibility modifier".into()),
+                );
+            }
+            return;
+        }
+
+        let name = supplied.name.clone();
+        let line = self.sources.location(required.span).line;
+        self.error(
+            codes::TYPE_MISMATCH,
+            supplied.span,
+            format!("`{name}` does not match what `{contract}` requires"),
+            format!("the signature it declares is on line {line}"),
+            Some("keep the parameters and the return type the contract asked for".into()),
+        );
+        let _ = at;
+    }
+
     /// Registers a class by name, before anything about it is resolved.
     fn register_class(&mut self, decl: &ClassDecl) {
         if let Some(previous) = self.classes.iter().find(|c| c.name == decl.name.name) {
@@ -420,6 +643,7 @@ impl<'a> Checker<'a> {
             fields: Vec::new(),
             constructors: Vec::new(),
             methods: Vec::new(),
+            contracts: Vec::new(),
             shared: decl.shared,
             span: decl.name.span,
         });
@@ -637,6 +861,7 @@ impl<'a> Checker<'a> {
                 index: 0,
                 owner: id,
                 overridden: false,
+                from_contract: None,
             };
 
             match methods.iter().position(|m| m.name == method.name.name) {
@@ -716,21 +941,29 @@ impl<'a> Checker<'a> {
     /// Nullability follows the same rule as everywhere: `T` fits `T?`, and the
     /// other way needs `??`.
     fn is_subclass_of(&self, actual: Type, expected: Type) -> bool {
-        let (Base::Class(mut current), Base::Class(target)) = (actual.base, expected.base) else {
-            return false;
-        };
         if actual.nullable && !expected.nullable {
             return false;
         }
 
-        while let Some(base) = self.classes[current as usize].base {
-            if base == target {
-                return true;
-            }
-            current = base;
-        }
+        let Base::Class(current) = actual.base else {
+            return false;
+        };
 
-        false
+        match expected.base {
+            // A class satisfies a contract by saying so and supplying it.
+            Base::Contract(target) => self.classes[current as usize].contracts.contains(&target),
+            Base::Class(target) => {
+                let mut current = current;
+                while let Some(base) = self.classes[current as usize].base {
+                    if base == target {
+                        return true;
+                    }
+                    current = base;
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Marks a method as redefined, all the way up the chain.
@@ -1088,6 +1321,11 @@ impl<'a> Checker<'a> {
                 let shared = self.classes[index].shared;
                 self.require_visible(declared, shared, &named, "class");
                 Some(Type::of(Base::Class(index as u32)))
+            } else if let Some(index) = self.contracts.iter().position(|c| c.name == resolved) {
+                let declared = self.contracts[index].span;
+                let shared = self.contracts[index].shared;
+                self.require_visible(declared, shared, &named, "contract");
+                Some(Type::of(Base::Contract(index as u32)))
             } else {
                 None
             }
@@ -2585,6 +2823,43 @@ impl<'a> Checker<'a> {
         Type::of(Base::Function(fn_type))
     }
 
+    /// `value.method(...)` where `value` is reached through a contract.
+    ///
+    /// Only what the contract declares is available: which class is behind it
+    /// is exactly what a contract exists not to say.
+    fn check_contract_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
+        let contract = &self.contracts[id as usize];
+        let contract_name = contract.name.clone();
+        let Some(method) = contract.method(&field.name.name) else {
+            let known: Vec<&str> = contract.methods.iter().map(|m| m.name.as_str()).collect();
+            let help = if known.is_empty() {
+                format!("`{contract_name}` declares no methods")
+            } else {
+                format!("its methods are: {}", known.join(", "))
+            };
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!("`{contract_name}` has no method `{}`", field.name.name),
+                help,
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let signature = Signature {
+            name: method.name.clone(),
+            params: method.params.clone(),
+            returns: method.returns,
+            shared: true,
+            span: method.span,
+        };
+        self.check_direct_call(expr, &signature)
+    }
+
     /// `super(...)`, which runs the base's constructor on this instance.
     fn check_super_construction(&mut self, expr: &CallExpr) -> Type {
         let Some(base) = self.enclosing_base(expr.span, "super(...)") else {
@@ -2842,6 +3117,9 @@ impl<'a> Checker<'a> {
             if let Base::Class(id) = object.base {
                 return self.check_method_call(expr, field, id);
             }
+            if let Base::Contract(id) = object.base {
+                return self.check_contract_call(expr, field, id);
+            }
             if object.is_unknown() {
                 for arg in &expr.args {
                     self.check_expr(&arg.value);
@@ -2866,6 +3144,21 @@ impl<'a> Checker<'a> {
             // name is the constructor (`LANGUAGE_SPEC` section 7).
             if let Some(id) = self.classes.iter().position(|c| c.name == declared) {
                 return self.check_construction(expr, id as u32, callee);
+            }
+
+            if let Some(id) = self.contract_id(&declared) {
+                let kind = self.contracts[id as usize].kind;
+                self.error(
+                    codes::NOT_CALLABLE,
+                    callee.span,
+                    format!("`{}` cannot be constructed", callee.name),
+                    format!("a {} describes behaviour, not an instance", kind.as_str()),
+                    Some("build a class that implements it".into()),
+                );
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::of(Base::Contract(id));
             }
         }
 

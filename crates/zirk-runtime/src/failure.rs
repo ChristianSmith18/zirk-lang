@@ -40,6 +40,16 @@ pub extern "C" fn zirk_rt_division_by_zero() -> ! {
     fatal("division by zero")
 }
 
+/// Reports that an object does not carry a contract it was said to satisfy.
+///
+/// Unreachable in a well-formed program: the checker proved conformance and
+/// codegen emitted the table. It exists so a compiler bug fails loudly instead
+/// of jumping through whatever the memory happened to hold.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_missing_contract() -> ! {
+    fatal("internal error: an object does not carry a contract it satisfies")
+}
+
 /// Reports that an object could not be allocated and terminates.
 ///
 /// Returning null instead would hand the generated code a pointer it has no
