@@ -64,6 +64,10 @@ pub enum Keyword {
     Class,
     Construct,
     This,
+    /// `super(...)` for base construction, `super.method()` for inherited
+    /// behavior.
+    Super,
+    Override,
     Record,
     Type,
     Public,
@@ -120,6 +124,8 @@ impl Keyword {
             "class" => Class,
             "construct" => Construct,
             "this" => This,
+            "super" => Super,
+            "override" => Override,
             "enum" => Enum,
             "record" => Record,
             "type" => Type,
@@ -179,6 +185,8 @@ impl Keyword {
             Class => "class",
             Construct => "construct",
             This => "this",
+            Super => "super",
+            Override => "override",
             Enum => "enum",
             Record => "record",
             Type => "type",

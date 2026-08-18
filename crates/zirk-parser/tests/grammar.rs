@@ -112,6 +112,7 @@ fn shape(e: &Expr) -> String {
             IncrementFix::Postfix => format!("({}{})", i.target.name(), i.op.as_str()),
         },
         Expr::This(_) => "this".to_string(),
+        Expr::Super(_) => "super".to_string(),
         Expr::Field(f) => format!(
             "{}{}{}",
             shape(&f.object),

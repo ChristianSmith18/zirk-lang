@@ -83,6 +83,9 @@ pub mod codes {
     pub const UNKNOWN_MEMBER: Code = Code::new("E0426");
     /// A member the type has but that this code may not see.
     pub const INACCESSIBLE_MEMBER: Code = Code::new("E0427");
+    /// A method that replaces an inherited one without saying so, or that says
+    /// so without replacing anything.
+    pub const MISSING_OVERRIDE: Code = Code::new("E0428");
     /// A construct of the language that this phase does not implement.
     ///
     /// Distinct from [`NOT_LOWERED`]: that one is checked and merely not

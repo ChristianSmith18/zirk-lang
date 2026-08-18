@@ -784,8 +784,8 @@ const HIERARCHY: &str = "class Base {
 }
 class Derived extends Base {
     y: Int32;
-    construct() { this.x = 0; this.y = 1; }
-    fn overridden(): Int32 { return this.y; }
+    construct() { super(); this.y = 1; }
+    override fn overridden(): Int32 { return this.y; }
 }";
 
 #[test]

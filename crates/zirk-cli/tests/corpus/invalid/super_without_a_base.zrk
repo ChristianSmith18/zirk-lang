@@ -1,0 +1,5 @@
+class Alone {
+    construct() { super(); }
+}
+
+fn main(): Void { }

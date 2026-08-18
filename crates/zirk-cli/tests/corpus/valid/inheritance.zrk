@@ -1,13 +1,17 @@
-// Herencia simple: campos heredados, `protected`, redefinición y el despacho
+// Herencia simple: `super(...)` para construir la base, `override fn` para
+// reemplazar, `super.method()` para alcanzar el cuerpo heredado, y el despacho
 // que hace que la redefinición se vea a través del tipo de la base.
 
 class User {
     name: String;
     protected role: String;
+    // Privado de la base: solo su propio constructor puede darle valor.
+    private id: Int32;
 
     construct(name: String) {
         this.name = name;
         this.role = "user";
+        this.id = 1;
     }
 
     fn describe(): String { return this.name; }
@@ -20,13 +24,17 @@ class Manager extends User {
     team: Int32;
 
     construct(name: String, team: Int32) {
-        this.name = name;
+        // Alcanza incluso lo privado de la base, que de otro modo no tendría
+        // forma de inicializarse.
+        super(name);
         this.role = "manager";
         this.team = team;
     }
 
-    // `protected` alcanza a la subclase.
-    fn describe(): String { return this.role; }
+    override fn describe(): String {
+        // El cuerpo heredado, sin pasar por el despacho.
+        return super.describe();
+    }
 }
 
 // Recibe la base y despacha sobre lo que realmente le llega.
@@ -42,7 +50,6 @@ fn main(): Void {
     stdout.println(m.team);
     stdout.println(m.label());
 
-    // La misma llamada, dos cuerpos distintos.
     stdout.println(describe_any(u));
     stdout.println(describe_any(m));
 }

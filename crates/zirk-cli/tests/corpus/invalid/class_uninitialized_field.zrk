@@ -1,10 +1,13 @@
-class User {
-    id: Int32;
-    name: String;
+class Inner {
+    construct() { }
+}
 
-    construct(id: Int32) {
-        this.id = id;
-    }
+class Outer {
+    // Una clase es una referencia con identidad: no hay instancia por defecto,
+    // así que el constructor tiene que darle una.
+    inner: Inner;
+
+    construct() { }
 }
 
 fn main(): Void { }

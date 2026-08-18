@@ -67,6 +67,17 @@
 - [ ] 4.8 Rechazar temporalmente `Function(...) => R` y `Fn(...) => R` en posición de tipo, indicando la fase que los implementa (D9)
 - [ ] 4.9 Tests: un caso válido y uno inválido por cada regla nueva
 
+> **El spec de objetos se actualizó el 17 de agosto de 2026 y varias reglas de
+> este grupo cambiaron de contenido.** Lo ya implementado se realineó:
+>
+> - Todo atributo omitido recibe el default de su tipo antes del constructor, así
+>   que este solo debe escribir lo que no tiene default (una clase no lo tiene).
+> - `super(...)` y `super.method()` existen, lo que retira la regla provisional
+>   de que una subclase inicializara los campos heredados.
+> - Reemplazar un método heredado exige `override fn`.
+> - `abstract class` dejó de ser algo que se extiende: es un conjunto de
+>   requisitos que se adopta con `implements`, sin constructor ni layout.
+
 ## 5. Tipos — nominalidad y miembros
 
 - [x] 5.1 Representar clases, records, value classes y enums como tipos nominales
@@ -76,7 +87,7 @@
 - [x] 5.5 Admitir subclase donde se espera la base, y rechazar la dirección contraria
 - [x] 5.6 Verificar `construct`: que exista, resolver por aridad e inicializar todo campo. Falta desempatar firmas de igual aridad por tipo y por etiqueta, que llega con los argumentos nombrados reordenados
 - [x] 5.7 Verificar la redefinición de métodos: misma firma, y rechazo si difiere — llega con `extends`, que es lo que hace posible redefinir
-- [ ] 5.8 Verificar `abstract`: no instanciable, sin cuerpo, e implementada por toda clase concreta
+- [ ] 5.8 Verificar `abstract class` como conjunto de requisitos adoptado con `implements`: sin constructor, sin estado y sin contribución al layout
 - [ ] 5.9 Tipar `?.` como el tipo del miembro en forma nulable (D7)
 - [ ] 5.10 Rechazar anotar una closure como parámetro, retorno o campo (D9)
 - [ ] 5.11 Rechazar que una closure escape de la función que la crea (D9)

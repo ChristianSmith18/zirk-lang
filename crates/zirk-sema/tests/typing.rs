@@ -585,20 +585,34 @@ fn valid_private_member_from_inside_its_class() {
 }
 
 #[test]
-fn invalid_constructor_leaves_a_field_without_a_value() {
-    let output = rejected(&with_class(
-        "class User {
-             id: Int32;
+fn valid_omitted_attributes_take_their_type_default() {
+    // `LANGUAGE_SPEC` section 7: an omitted attribute receives its type
+    // default before any initializer or the constructor runs, so a constructor
+    // only has to write what has none.
+    accepted(&with_class(
+        "class Config {
              name: String;
-             construct(id: Int32) { this.id = id; }
+             count: Int32;
+             on: Boolean;
+             construct() { }
          }",
         "",
     ));
+}
+
+#[test]
+fn invalid_constructor_leaves_a_field_that_has_no_default() {
+    // A class is a reference with identity: there is no instance to default to.
+    let output = rejected(
+        "class Inner { construct() { } }
+         class Outer { inner: Inner; construct() { } }
+         fn main(): Void { }",
+    );
     assert!(
         output.contains(codes::UNINITIALIZED_FIELD.as_str()),
         "{output}"
     );
-    assert!(output.contains("name"), "{output}");
+    assert!(output.contains("inner"), "{output}");
 }
 
 #[test]
@@ -859,12 +873,12 @@ class Manager extends User {
     team: Int32;
 
     construct(name: String, team: Int32) {
-        this.name = name;
+        super(name);
         this.role = \"manager\";
         this.team = team;
     }
 
-    fn describe(): String { return this.role; }
+    override fn describe(): String { return this.role; }
 }";
 
 #[test]
@@ -942,8 +956,8 @@ fn invalid_override_with_a_different_signature() {
              fn value(): Int32 { return this.x; }
          }
          class Derived extends Base {
-             construct() { this.x = 0; }
-             fn value(): String { return \"x\"; }
+             construct() { super(); }
+             override fn value(): String { return \"x\"; }
          }
          fn main(): Void { }",
     );
@@ -983,18 +997,98 @@ fn invalid_redeclaring_an_inherited_field() {
 
 #[test]
 fn invalid_subclass_constructor_leaving_an_inherited_field_unset() {
-    // The language has no way to run a base's constructor from a subclass, so
-    // every field this one leaves unset would stay unset.
+    // Without `super(...)` the base's constructor never runs, so a field with
+    // no default would stay unset.
     let output = rejected(
-        "class Base { x: Int32; construct() { this.x = 0; } }
-         class Derived extends Base { y: Int32; construct() { this.y = 1; } }
+        "class Inner { construct() { } }
+         class Base { inner: Inner; construct() { this.inner = Inner(); } }
+         class Derived extends Base { construct() { } }
          fn main(): Void { }",
     );
     assert!(
         output.contains(codes::UNINITIALIZED_FIELD.as_str()),
         "{output}"
     );
-    assert!(output.contains('x'), "{output}");
+}
+
+#[test]
+fn valid_super_covers_what_the_base_declares() {
+    accepted(
+        "class Inner { construct() { } }
+         class Base { inner: Inner; construct() { this.inner = Inner(); } }
+         class Derived extends Base { construct() { super(); } }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn valid_super_initializes_a_private_field_of_the_base() {
+    // The one thing a subclass could not do before: reach what only the base's
+    // own constructor may write.
+    accepted(
+        "class Base {
+             private secret: Inner;
+             construct() { this.secret = Inner(); }
+         }
+         class Inner { construct() { } }
+         class Derived extends Base { construct() { super(); } }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn valid_super_method_reaches_the_inherited_body() {
+    accepted(
+        "class Base { fn describe(): String { return \"base\"; } construct() { } }
+         class Derived extends Base {
+             construct() { }
+             override fn describe(): String { return super.describe(); }
+         }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_super_outside_a_class() {
+    let output = rejected_body("super();");
+    assert!(output.contains(codes::UNDECLARED_NAME.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_super_without_a_base() {
+    let output = rejected("class Alone { construct() { super(); } }\nfn main(): Void { }");
+    assert!(output.contains("no base class"), "{output}");
+}
+
+#[test]
+fn invalid_override_without_the_keyword() {
+    // Otherwise adding a method to a base silently changes what a subclass
+    // means.
+    let output = rejected(
+        "class Base { fn value(): Int32 { return 1; } construct() { } }
+         class Derived extends Base { fn value(): Int32 { return 2; } construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::MISSING_OVERRIDE.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("override fn value"), "{output}");
+}
+
+#[test]
+fn invalid_override_that_overrides_nothing() {
+    // The mirror mistake, and usually a typo in the name.
+    let output = rejected(
+        "class Base { fn value(): Int32 { return 1; } construct() { } }
+         class Derived extends Base { override fn valeu(): Int32 { return 2; } construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::MISSING_OVERRIDE.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("overrides nothing"), "{output}");
 }
 
 #[test]
