@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">Zirk Logo - Clean Vector</title>
+  
+  <defs>
+    <!-- Zirk Mark Gradient -->
+    <linearGradient id="zirkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="40%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <!-- Slash Gradient -->
+    <linearGradient id="slashGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base Z Shape (Symmetric horizontal scale to 80% width, uniform stroke thickness) -->
+  <path fill="none" stroke="url(#zirkGrad)" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.25" d="M12.8 12h20L14.4 36h20.8"/>
+
+  <!-- Antigravity Crossing Slash (Symmetric horizontal scale to 80% width, uniform stroke thickness) -->
+  <path fill="none" stroke="url(#slashGrad)" stroke-linecap="round" stroke-width="5.25" d="M16 8l16 32"/>
+</svg>

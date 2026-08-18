@@ -2,7 +2,7 @@
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
   "description": "Syntax highlighting and language support for the Zirk programming language",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "cristian",
   "engines": {
     "vscode": "^1.75.0"
@@ -28,7 +28,11 @@
         "filenames": [
           "init.zrk"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/logo.svg",
+          "dark": "./images/logo.svg"
+        }
       }
     ],
     "grammars": [
