@@ -421,6 +421,15 @@ impl<'a> Checker<'a> {
     ///
     /// Declaration comes before checking so a field, a parameter or another
     /// class may name it regardless of the order the file declares them in.
+    /// Whether a name is one of the language's own types.
+    ///
+    /// Declaring a class with it is how application code would try to reopen a
+    /// native type, and `ZIRK_LANGUAGE_SPEC.md` section 4 forbids exactly that:
+    /// a program cannot replace what `String` or `Int32` mean.
+    fn is_native_type_name(name: &str) -> bool {
+        Type::from_name(name).is_some() || pending_type(name).is_some()
+    }
+
     /// Registers a contract with its method signatures.
     fn declare_contract(&mut self, decl: &ContractDecl) {
         if let Some(previous) = self.contracts.iter().find(|c| c.name == decl.name.name) {
@@ -625,6 +634,17 @@ impl<'a> Checker<'a> {
 
     /// Registers a class by name, before anything about it is resolved.
     fn register_class(&mut self, decl: &ClassDecl) {
+        if Self::is_native_type_name(&decl.name.name) {
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("`{}` is a type of the language", decl.name.name),
+                "application code cannot reopen a native type or replace what it means",
+                Some("pick a different name".into()),
+            );
+            return;
+        }
+
         if let Some(previous) = self.classes.iter().find(|c| c.name == decl.name.name) {
             let where_ = self.declared_at(previous.span, decl.name.span);
             self.error(
@@ -2032,16 +2052,80 @@ impl<'a> Checker<'a> {
                 Type::BOOLEAN
             }
 
-            Add | Sub | Mul | Div | Rem => {
-                self.expect_numeric(left, expr.left.span(), expr.op);
-                self.expect_numeric(right, expr.right.span(), expr.op);
-                if left.is_unknown() || right.is_unknown() {
-                    Type::UNKNOWN
-                } else {
-                    Type::INT32
+            Add | Sub | Mul | Div | Rem => self.check_arithmetic(left, right, expr),
+        }
+    }
+
+    /// An arithmetic operator, resolved by what its operands support.
+    ///
+    /// The checker no longer holds a fixed list of types per operator: it asks
+    /// what the operands offer. Integers still resolve directly — they belong
+    /// to the language, not to a library — but through the same path a user
+    /// type takes, which is what makes the two indistinguishable at the use
+    /// site (decision D6).
+    fn check_arithmetic(&mut self, left: Type, right: Type, expr: &BinaryExpr) -> Type {
+        if left.is_unknown() || right.is_unknown() {
+            return Type::UNKNOWN;
+        }
+
+        if let Some(ty) = native_arithmetic(left, right, expr.op) {
+            return ty;
+        }
+
+        // A user type supplies the operator through its reserved method.
+        if let Base::Class(id) = left.base
+            && !left.nullable
+        {
+            let reserved = operator_method(expr.op);
+            if let Some(method) = self.classes[id as usize].method(reserved).cloned() {
+                let expected = method.params.first().map(|p| p.ty);
+                if method.params.len() == 1
+                    && expected
+                        .is_some_and(|ty| ty.accepts(right) || self.is_subclass_of(right, ty))
+                {
+                    return method.returns;
                 }
+
+                let class = self.name(left);
+                let r = self.name(right);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.op_span,
+                    format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
+                    format!("`{reserved}` declares a different operand"),
+                    None,
+                );
+                return Type::UNKNOWN;
             }
         }
+
+        self.reject_operator(left, right, expr);
+        Type::UNKNOWN
+    }
+
+    /// Reports an operator neither operand supplies.
+    fn reject_operator(&mut self, left: Type, right: Type, expr: &BinaryExpr) {
+        let l = self.name(left);
+        let r = self.name(right);
+        let op = expr.op.as_str();
+
+        // Naming the reserved method turns "this does not work" into
+        // "here is what would make it work".
+        let help = match left.base {
+            Base::Class(_) => Some(format!(
+                "implement `fn {}(other: {r}): ...` on `{l}`",
+                operator_method(expr.op)
+            )),
+            _ => None,
+        };
+
+        self.error(
+            codes::TYPE_MISMATCH,
+            expr.op_span,
+            format!("`{op}` is not available on {l} and {r}"),
+            "an operator comes from what its operands support",
+            help,
+        );
     }
 
     fn check_coalesce(&mut self, left: Type, right: Type, expr: &BinaryExpr) -> Type {
@@ -3602,4 +3686,46 @@ fn admits_arity(params: &[ParamInfo], arity: usize) -> bool {
     let variadic = params.iter().any(|p| p.variadic);
 
     arity >= required && (variadic || arity <= params.len())
+}
+
+/// The result of a native arithmetic operator, if the operands are native and
+/// the operator is one they offer.
+///
+/// This is the whole table `ZIRK_LANGUAGE_SPEC.md` section 4 fixes for the
+/// types the language owns. Anything outside it goes to a contract.
+fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
+    use BinaryOp::*;
+
+    if left.nullable || right.nullable {
+        return None;
+    }
+
+    match (left.base, right.base, op) {
+        (Base::Int32, Base::Int32, Add | Sub | Mul | Div | Rem) => Some(Type::INT32),
+        // `String + String` concatenates.
+        (Base::String, Base::String, Add) => Some(Type::STRING),
+        // `String * Integer` repeats, in either order: `"ja" * 3` and
+        // `3 * "ja"` are the same request written two ways.
+        (Base::String, Base::Int32, Mul) | (Base::Int32, Base::String, Mul) => Some(Type::STRING),
+        _ => None,
+    }
+}
+
+/// The reserved method an operator resolves to on a user type.
+///
+/// `ZIRK_LANGUAGE_SPEC.md` section 4: an operator is overloaded only through
+/// contracts of the language, and the overload changes neither precedence nor
+/// arity — which is exactly what naming a method rather than the operator
+/// guarantees.
+fn operator_method(op: BinaryOp) -> &'static str {
+    use BinaryOp::*;
+    match op {
+        Add => "_add",
+        Sub => "_subtract",
+        Mul => "_multiply",
+        Div => "_divide",
+        Rem => "_remainder",
+        // The rest are not arithmetic and never reach here.
+        _ => "_unsupported",
+    }
 }

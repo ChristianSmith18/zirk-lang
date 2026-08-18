@@ -126,6 +126,63 @@ pub extern "C" fn zirk_str_from_bool(value: bool) -> *mut c_void {
     owned_handle(if value { "true" } else { "false" }.to_string())
 }
 
+/// Concatenates two strings.
+///
+/// `ZIRK_LANGUAGE_SPEC.md` section 4: `String + String` concatenates. The
+/// result is a fresh string; neither operand is touched, which is what makes
+/// `+` an expression rather than a mutation.
+///
+/// # Safety
+///
+/// Both handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_concat(left: *const c_void, right: *const c_void) -> *mut c_void {
+    let left = unsafe { borrow(left) };
+    let right = unsafe { borrow(right) };
+
+    let mut joined = String::new();
+    if let Some(s) = left {
+        joined.push_str(unsafe { s.as_str() });
+    }
+    if let Some(s) = right {
+        joined.push_str(unsafe { s.as_str() });
+    }
+
+    owned_handle(joined)
+}
+
+/// Repeats a string a non-negative number of times.
+///
+/// `"ja" * 3 == "jajaja"`. A negative count is a controlled error rather than
+/// an empty string: asking for `-1` copies is a mistake, and quietly answering
+/// `""` would hide it (`ZIRK_LANGUAGE_SPEC.md` section 4).
+///
+/// # Safety
+///
+/// The handle must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *mut c_void {
+    if count < 0 {
+        crate::failure::zirk_rt_invalid_repeat()
+    }
+
+    let Some(string) = (unsafe { borrow(handle) }) else {
+        return owned_handle(String::new());
+    };
+    let text = unsafe { string.as_str() };
+
+    // The size is checked before asking for it: a count that overflows what
+    // can be addressed is a controlled error, not an allocator surprise.
+    let Some(size) = text.len().checked_mul(count as usize) else {
+        crate::failure::zirk_rt_invalid_repeat()
+    };
+    if size > isize::MAX as usize {
+        crate::failure::zirk_rt_invalid_repeat()
+    }
+
+    owned_handle(text.repeat(count as usize))
+}
+
 /// Content equality of two strings.
 ///
 /// `ZIRK_LANGUAGE_SPEC.md` section 4: `==` compares content. Comparing the

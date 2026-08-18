@@ -158,6 +158,40 @@ fn verify_instruction(
             Some(_) => expect(inst.ty, IrType::Object(*id), position, "Alloc", report),
         },
 
+        InstKind::Concat { left, right } => {
+            expect(inst.ty, IrType::String, position, "Concat", report);
+            for operand in [left, right] {
+                if let Some(ty) = type_of(operand)
+                    && ty != IrType::String
+                {
+                    report(format!(
+                        "{position}: concatenates {}, which is not a String",
+                        ty.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::Repeat { string, count } => {
+            expect(inst.ty, IrType::String, position, "Repeat", report);
+            if let Some(ty) = type_of(string)
+                && ty != IrType::String
+            {
+                report(format!(
+                    "{position}: repeats {}, which is not a String",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(count)
+                && ty != IrType::Int32
+            {
+                report(format!(
+                    "{position}: repeats by {}, which is not a count",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::CallContract {
             object,
             contract,
@@ -560,6 +594,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
+        InstKind::Concat { left, right } => vec![*left, *right],
+        InstKind::Repeat { string, count } => vec![*string, *count],
         InstKind::CallContract { object, args, .. } => {
             let mut operands = vec![*object];
             operands.extend(args.iter().copied());

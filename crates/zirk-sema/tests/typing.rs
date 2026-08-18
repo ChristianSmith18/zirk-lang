@@ -1231,3 +1231,84 @@ fn invalid_interface_method_with_a_body() {
     );
     assert!(output.contains("has no body"), "{output}");
 }
+
+// --- Contratos de operador ---------------------------------------------------
+
+#[test]
+fn valid_string_concatenation() {
+    // La deuda de la Fase 2, cerrada.
+    accepted_body("mut greeting: String = \"hello\" + \" \" + \"world\";");
+}
+
+#[test]
+fn valid_string_repetition_in_either_order() {
+    accepted_body("mut a: String = \"ja\" * 3;\nmut b: String = 3 * \"ja\";");
+}
+
+#[test]
+fn invalid_string_minus_string() {
+    // Native types expose no undocumented operator.
+    let output = rejected_body("mut x = \"a\" - \"b\";");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_string_plus_a_number_without_a_conversion() {
+    // There is no implicit conversion: `String("count=" + 4)` is the form that
+    // works, and it arrives with contextual conversion.
+    let output = rejected_body("mut x = \"count=\" + 4;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_user_type_supplies_an_operator() {
+    accepted(
+        "class Money {
+             amount: Int32;
+             construct(amount: Int32) { this.amount = amount; }
+             fn _add(other: Money): Money { return Money(this.amount + other.amount); }
+         }
+         fn main(): Void { mut total = Money(30) + Money(12); }",
+    );
+}
+
+#[test]
+fn invalid_operator_a_user_type_does_not_supply() {
+    // The diagnostic names the method that would make it work.
+    let output = rejected(
+        "class Money {
+             amount: Int32;
+             construct(amount: Int32) { this.amount = amount; }
+         }
+         fn main(): Void { mut total = Money(1) + Money(2); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("_add"), "{output}");
+}
+
+#[test]
+fn invalid_operator_method_with_the_wrong_operand() {
+    let output = rejected(
+        "class Money {
+             amount: Int32;
+             construct(amount: Int32) { this.amount = amount; }
+             fn _add(other: Int32): Money { return this; }
+         }
+         fn main(): Void { mut total = Money(1) + Money(2); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_reopening_a_native_type() {
+    // Application code cannot replace what `String` means.
+    for name in ["String", "Int32", "Boolean", "Float"] {
+        let output = rejected(&format!(
+            "class {name} {{ construct() {{ }} }}\nfn main(): Void {{ }}"
+        ));
+        assert!(
+            output.contains("type of the language"),
+            "for `{name}`:\n{output}"
+        );
+    }
+}

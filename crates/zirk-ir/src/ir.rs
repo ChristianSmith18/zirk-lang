@@ -314,9 +314,11 @@ impl Instruction {
     ///
     /// See [`IrType::needs_allocation`] for why this is expressed abstractly.
     pub fn allocates(&self) -> bool {
-        matches!(self.kind, InstKind::Alloc(_))
-            || (matches!(self.kind, InstKind::ConstString(_) | InstKind::ToString(_))
-                && self.ty.needs_allocation())
+        matches!(
+            self.kind,
+            InstKind::Alloc(_) | InstKind::Concat { .. } | InstKind::Repeat { .. }
+        ) || (matches!(self.kind, InstKind::ConstString(_) | InstKind::ToString(_))
+            && self.ty.needs_allocation())
     }
 }
 
@@ -340,6 +342,16 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
+    /// `String + String`.
+    Concat {
+        left: Operand,
+        right: Operand,
+    },
+    /// `String * Integer`, in either operand order.
+    Repeat {
+        string: Operand,
+        count: Operand,
+    },
     /// Calls method `index` of `contract` through the object's table for it.
     ///
     /// Which table that is cannot be known statically — the whole point of a

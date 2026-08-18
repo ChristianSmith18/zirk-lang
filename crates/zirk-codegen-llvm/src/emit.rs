@@ -447,6 +447,30 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .const_int(*value as u64, false)
                     .into(),
             ),
+            ir::InstKind::Concat { left, right } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_concat,
+                        &[self.operand(*left).into(), self.operand(*right).into()],
+                        "concat",
+                    )
+                    .expect("concatenate");
+                call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::Repeat { string, count } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_repeat,
+                        &[self.operand(*string).into(), self.operand(*count).into()],
+                        "repeat",
+                    )
+                    .expect("repeat");
+                call.try_as_basic_value().basic()
+            }
+
             ir::InstKind::CallContract {
                 object,
                 contract,
