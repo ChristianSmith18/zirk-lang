@@ -2,7 +2,7 @@
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
   "description": "Syntax highlighting and language support for the Zirk programming language",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "ChristianSmith",
   "author": "Christian Smith",
   "icon": "images/icon.png",
@@ -10,12 +10,12 @@
     "vscode": "^1.75.0"
   },
   "main": "./extension.js",
-  "activationEvents": [
-    "onLanguage:zirk"
-  ],
   "categories": [
-    "Programming Languages",
-    "zirk"
+    "Programming Languages"
+  ],
+  "keywords": [
+    "zirk",
+    "zirk-lang"
   ],
   "contributes": {
     "languages": [
