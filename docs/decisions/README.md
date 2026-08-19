@@ -17,6 +17,8 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-009](./ADR-009-eliminacion-de-codigo-muerto-al-enlazar.md) | Eliminación de código muerto al enlazar | aceptada |
 | [ADR-010](./ADR-010-ubicaciones-multiarchivo.md) | Ubicaciones a través de varios archivos | aceptada |
 | [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) | Identidad, igualdad y normalización de `String` | aceptada |
+| [ADR-012](./ADR-012-layout-de-objetos.md) | Layout de objetos: cabecera separada, records/value classes inline sin ella | aceptada |
+| [ADR-013](./ADR-013-forma-del-despacho.md) | Forma del despacho: directo por defecto, tabla propia o de contrato solo si hace falta | aceptada |
 
 ## Estado de los pendientes de Fase 0
 

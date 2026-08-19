@@ -54,6 +54,8 @@ Queda anotado como deuda con fecha: el requisito lo declara y la Fase 4 lo retir
 
 ### D2 — Un objeto es una cabecera más sus campos, y la cabecera empieza siendo solo el tipo
 
+> Registrada como decisión durable al cierre de la fase: [ADR-012](../../../docs/decisions/ADR-012-layout-de-objetos.md).
+
 ```
    objeto  =  [ descriptor de tipo | campo₁ | campo₂ | … ]
 ```
@@ -65,6 +67,8 @@ Los campos heredados van **antes** que los propios, en el orden en que la jerarq
 La cabecera lleva **solo** el descriptor por ahora. Lo que la Fase 4 necesite para la memoria —marcas, contadores, lo que la estrategia pida— se añade ahí, y por eso existe como concepto separado desde el principio en vez de aparecer cuando haga falta.
 
 ### D3 — Los métodos virtuales se despachan por una tabla en el descriptor de tipo
+
+> Registrada como decisión durable al cierre de la fase: [ADR-013](../../../docs/decisions/ADR-013-forma-del-despacho.md).
 
 El descriptor apunta a una tabla de métodos, y una llamada a un método virtual es una carga indirecta a través de ella. Es la representación que la herencia simple hace barata: la tabla de la subclase empieza con las entradas de la superclase, en el mismo orden, así que el índice de un método no cambia al heredar.
 
@@ -190,8 +194,8 @@ La pregunta sobre los tipos función se resolvió antes de empezar y pasó a ser
 
 - **¿Una value class puede tener métodos virtuales?** Sección 7 dice que no tienen identidad observable y que se almacenan inline. Un método virtual necesita un descriptor de tipo en tiempo de ejecución, y guardarlo en algo que se almacena inline contradice "compacto".
 
-  Propuesta: no. Una value class implementa contratos, pero sus métodos se resuelven estáticamente. Se confirma durante la implementación.
+  **Confirmado al cierre (14.3):** no. Un método propio de un record o value class se despacha siempre de forma estática — `IrType::Value` se resuelve por el mismo `method_of` que un objeto, pero como ninguno de los dos admite `extends`, `method.overridden` nunca es verdadero y jamás pasa por `CallVirtual`. `implements` sí se acepta y su conformidad se verifica igual que para una clase, pero alcanzar el método a través del tipo del contrato (la única razón por la que el despacho dinámico importaría para un tipo sin identidad) queda bloqueado con `NOT_LOWERED` en la propia declaración: no hay descriptor donde guardar la tabla del contrato. Encontrado y corregido en el cierre: llamar un método directo de un record crasheaba (nunca se había probado, `Self::method_of`/`lower_method_call` solo reconocían `IrType::Object`); corpus en `value_class_methods.zrk` (llamada directa, baja) y `record_implements_not_lowered.zrk` (a través del contrato, gateado).
 
 - **¿Qué pasa al comparar dos records con `==`?** Sección 7 dice que un record tiene semántica estructural, lo que sugiere igualdad campo a campo derivada. La sección 4 dice que `==` ya es igualdad estructural para todos.
 
-  Propuesta: para un record se deriva automáticamente; para una clase con identidad, `==` compara identidad salvo que la clase implemente el contrato. Se confirma al implementar los contratos de operador.
+  **Decidido, pendiente de bajar (14.3/14.4):** para un record o value class se deriva automáticamente, sin `_equals`; para una clase con identidad, `==` compara identidad salvo que la clase implemente el contrato de operador — esta segunda mitad ya baja (D6). La primera type-checks (`check_equality` acepta `==`/`!=` sobre un record sin exigir `_equals`) pero su lowering —recorrer campo a campo, incluyendo un record anidado dentro de otro— queda gateado con `NOT_LOWERED` propio (`reject_unstructured_comparison`, roadmap task 11.5): construir el valor inline (11.5) fue una pieza; comparar dos de esos valores estructuralmente es otra que ninguna tarea de esta fase reclamó como propia. Queda como deuda viva sin fase asignada todavía — ver 14.4.

@@ -2683,8 +2683,13 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
         }
-        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
-            return None;
+        // A record or value class's own method is reached the same way an
+        // ordinary class's is: `IrType::Value` only changes how the
+        // receiver is represented (inline, no header), not that it resolves
+        // to a `MethodInfo` the same table an object's does.
+        let id = match self.type_of(&field.object, field.object.span()) {
+            IrType::Object(id) | IrType::Value(id) => id,
+            _ => return None,
         };
         self.checked.classes[id as usize].method(&field.name.name)
     }
@@ -2737,8 +2742,15 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
         }
-        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
-            return None;
+        // A record or value class's own method call is the same shape as an
+        // ordinary object's — see `Self::method_of`. `extends` is rejected
+        // for either kind, so no subclass can ever redefine one of its
+        // methods: `virtual_index` below always comes out `None`, which is
+        // what keeps this call direct rather than through a table a value
+        // has no header to carry.
+        let id = match self.type_of(&field.object, field.object.span()) {
+            IrType::Object(id) | IrType::Value(id) => id,
+            _ => return None,
         };
 
         let class = &self.checked.classes[id as usize];
