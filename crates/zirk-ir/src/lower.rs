@@ -15,7 +15,7 @@ use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, CheckedProgram, ClassType, EnumType, EnumVariantInfo, FieldInfo,
-    MethodInfo, ParamInfo, Type,
+    IntWidth as SemaIntWidth, MethodInfo, ParamInfo, Type,
 };
 
 /// Lowers a verified program into an IR module.
@@ -580,6 +580,24 @@ fn body_symbol(checked: &CheckedProgram, method: &zirk_sema::MethodInfo) -> Stri
 
 /// Whether any variant of this enum carries associated data — the line
 /// between the plain `Int32` representation and `IrType::Enum` (task 11.3).
+/// The IR's own `IntWidth` for the checker's — two separate types, on
+/// purpose (see `IntWidth`'s own doc comment in `zirk-ir/src/ir.rs`), so
+/// this is the one place that translates between them.
+const fn ir_int_width(width: SemaIntWidth) -> IntWidth {
+    match width {
+        SemaIntWidth::I8 => IntWidth::I8,
+        SemaIntWidth::I16 => IntWidth::I16,
+        SemaIntWidth::I32 => IntWidth::I32,
+        SemaIntWidth::I64 => IntWidth::I64,
+        SemaIntWidth::I128 => IntWidth::I128,
+        SemaIntWidth::U8 => IntWidth::U8,
+        SemaIntWidth::U16 => IntWidth::U16,
+        SemaIntWidth::U32 => IntWidth::U32,
+        SemaIntWidth::U64 => IntWidth::U64,
+        SemaIntWidth::U128 => IntWidth::U128,
+    }
+}
+
 fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
     checked.enums[id as usize]
         .variants
@@ -606,14 +624,14 @@ fn ir_type(
 ) -> IrType {
     let base = match ty.base {
         Base::Void => IrType::Void,
-        Base::Int32 => IrType::Int32,
+        Base::Int(width) => IrType::Int(ir_int_width(width)),
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
         // A traditional enum — none of its variants carry data — is exactly
         // its discriminant. One with at least one algebraic variant gets a
         // representation of its own (roadmap task 11.3).
         Base::Enum(id) if enum_has_payload(checked, id) => IrType::Enum(id),
-        Base::Enum(_) => IrType::Int32,
+        Base::Enum(_) => IrType::Int(IntWidth::I32),
         // A record or value class is a value, not a reference: neither has
         // identity (roadmap task 11.5). An ordinary class is reached through
         // its address, which is its identity.
@@ -649,7 +667,7 @@ fn ir_type(
             if enum_has_payload(checked, specialized) {
                 IrType::Enum(specialized)
             } else {
-                IrType::Int32
+                IrType::Int(IntWidth::I32)
             }
         }
         // A verified program contains none of these: the checker reports and
@@ -938,7 +956,10 @@ impl<'a> FunctionLowering<'a> {
         let mut held = Vec::with_capacity(args.len());
 
         for (position, arg) in args.iter().enumerate() {
-            let ty = expected.get(position).copied().unwrap_or(IrType::Int32);
+            let ty = expected
+                .get(position)
+                .copied()
+                .unwrap_or(IrType::Int(IntWidth::I32));
             let branches_later = args[position + 1..]
                 .iter()
                 .any(|later| opens_blocks(&later.value));
@@ -1029,13 +1050,18 @@ impl<'a> FunctionLowering<'a> {
 
             // A bare `T` widens to `T?` by wrapping; a subclass or contract
             // implementation additionally needs its declared type retagged
-            // first (mirrors the non-nullable branch below), since `Wrap`
-            // itself only adds the present flag, not the widening.
-            let value = if actual != base.inner()
-                && matches!(actual, IrType::Object(_) | IrType::Contract(_))
+            // first, and a narrower integer needs its bits actually
+            // extended first (both mirror the non-nullable branch below),
+            // since `Wrap` itself only adds the present flag, not the
+            // widening.
+            let value = if actual == base.inner() {
+                value
+            } else if matches!(actual, IrType::Object(_) | IrType::Contract(_))
                 && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
             {
                 self.emit(InstKind::Retype(value), base.inner(), expr.span())
+            } else if matches!(actual, IrType::Int(_)) && matches!(base, Nullable::Int(_)) {
+                self.emit(InstKind::IntCast(value), base.inner(), expr.span())
             } else {
                 value
             };
@@ -1057,6 +1083,15 @@ impl<'a> FunctionLowering<'a> {
         // relation is not proven ahead of time (roadmap task 11.6).
         if matches!(expected, IrType::Object(_) | IrType::Contract(_)) {
             return self.emit(InstKind::Retype(value), expected, expr.span());
+        }
+
+        // The checker's own safe-widening rule (`Type::accepts`, roadmap
+        // Phase 3b task 4.3): a narrower integer of the same signedness
+        // fits a wider one implicitly, but the bits still need to be
+        // sign/zero-extended at the IR level — unlike an object reference,
+        // an integer's representation does change size.
+        if matches!(expected, IrType::Int(_)) {
+            return self.emit(InstKind::IntCast(value), expected, expr.span());
         }
 
         value
@@ -1272,7 +1307,10 @@ impl<'a> FunctionLowering<'a> {
     /// The default value of a type, if it has one.
     fn default_value(&mut self, ty: IrType, span: Span) -> Option<Operand> {
         Some(match ty {
-            IrType::Int32 => self.emit(InstKind::ConstInt(0), ty, span),
+            // `0` needs no width-specific bit pattern, so one `ConstInt`
+            // serves every width — only `ty` (already the right one) says
+            // which.
+            IrType::Int(_) => self.emit(InstKind::ConstInt(0), ty, span),
             IrType::Boolean => self.emit(InstKind::ConstBool(false), ty, span),
             IrType::String => {
                 let id = self.module.intern_string("");
@@ -1587,13 +1625,17 @@ impl<'a> FunctionLowering<'a> {
         self.scopes.push(HashMap::new());
 
         let start = self.lower_expr(&range.start);
-        let binding = self.declare_slot(&stmt.binding.name, IrType::Int32, stmt.binding.span);
+        let binding = self.declare_slot(
+            &stmt.binding.name,
+            IrType::Int(IntWidth::I32),
+            stmt.binding.span,
+        );
         self.emit_effect(InstKind::Store(binding, start), stmt.span);
 
         // The end is evaluated once, before the loop: re-evaluating it each
         // iteration would call any function in it repeatedly.
         let end = self.lower_expr(&range.end);
-        let limit = self.declare_slot("<range end>", IrType::Int32, range.end.span());
+        let limit = self.declare_slot("<range end>", IrType::Int(IntWidth::I32), range.end.span());
         self.emit_effect(InstKind::Store(limit, end), stmt.span);
 
         let header = self.new_block();
@@ -1604,8 +1646,12 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(header));
 
         self.current = header;
-        let current = self.emit(InstKind::Load(binding), IrType::Int32, stmt.span);
-        let bound = self.emit(InstKind::Load(limit), IrType::Int32, stmt.span);
+        let current = self.emit(
+            InstKind::Load(binding),
+            IrType::Int(IntWidth::I32),
+            stmt.span,
+        );
+        let bound = self.emit(InstKind::Load(limit), IrType::Int(IntWidth::I32), stmt.span);
         let op = if range.inclusive {
             BinaryOp::LtEq
         } else {
@@ -1638,15 +1684,19 @@ impl<'a> FunctionLowering<'a> {
         self.loops.pop();
 
         self.current = step_block;
-        let value = self.emit(InstKind::Load(binding), IrType::Int32, stmt.span);
-        let one = self.emit(InstKind::ConstInt(1), IrType::Int32, stmt.span);
+        let value = self.emit(
+            InstKind::Load(binding),
+            IrType::Int(IntWidth::I32),
+            stmt.span,
+        );
+        let one = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), stmt.span);
         let next = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Add,
                 left: value,
                 right: one,
             },
-            IrType::Int32,
+            IrType::Int(IntWidth::I32),
             stmt.span,
         );
         self.emit_effect(InstKind::Store(binding, next), stmt.span);
@@ -1734,8 +1784,16 @@ impl<'a> FunctionLowering<'a> {
         self.emit_effect(InstKind::Store(iteration_slot, iteration), stmt.span);
 
         let held = self.emit(InstKind::Load(iteration_slot), iteration_ty, stmt.span);
-        let discriminant = self.emit(InstKind::Discriminant(held), IrType::Int32, stmt.span);
-        let expected = self.emit(InstKind::ConstInt(item as i32), IrType::Int32, stmt.span);
+        let discriminant = self.emit(
+            InstKind::Discriminant(held),
+            IrType::Int(IntWidth::I32),
+            stmt.span,
+        );
+        let expected = self.emit(
+            InstKind::ConstInt(item as i32),
+            IrType::Int(IntWidth::I32),
+            stmt.span,
+        );
         let is_item = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Eq,
@@ -1827,9 +1885,11 @@ impl<'a> FunctionLowering<'a> {
         let span = expr.span();
 
         match expr {
-            ast::Expr::Int(lit) => {
-                self.emit(InstKind::ConstInt(lit.value as i32), IrType::Int32, span)
-            }
+            ast::Expr::Int(lit) => self.emit(
+                InstKind::ConstInt(lit.value as i32),
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
             ast::Expr::Bool(lit) => {
                 self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
             }
@@ -1847,9 +1907,9 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Unary(e) => {
                 let operand = self.lower_expr(&e.operand);
                 let (op, ty) = match e.op {
-                    ast::UnaryOp::Neg => (UnaryOp::Neg, IrType::Int32),
+                    ast::UnaryOp::Neg => (UnaryOp::Neg, IrType::Int(IntWidth::I32)),
                     ast::UnaryOp::Not => (UnaryOp::Not, IrType::Boolean),
-                    ast::UnaryOp::BitNot => (UnaryOp::BitNot, IrType::Int32),
+                    ast::UnaryOp::BitNot => (UnaryOp::BitNot, IrType::Int(IntWidth::I32)),
                 };
                 self.emit(InstKind::Unary { op, operand }, ty, span)
             }
@@ -2004,7 +2064,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Match(e) => self.lower_match(e, span),
             ast::Expr::Variant(e) => {
                 let value = self.discriminant(&e.enum_name, &e.variant.name);
-                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
+                self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
             }
 
             ast::Expr::Println(e) => {
@@ -2406,7 +2466,7 @@ impl<'a> FunctionLowering<'a> {
                 ast::ArmBody::Expr(e) => self.lower_expr(e),
                 ast::ArmBody::Block(b) if result_type == IrType::Void => {
                     self.lower_block(b);
-                    self.emit(InstKind::ConstInt(0), IrType::Int32, span)
+                    self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
                 }
                 ast::ArmBody::Block(b) => self.lower_block_value(b),
             };
@@ -2437,7 +2497,7 @@ impl<'a> FunctionLowering<'a> {
             Some(slot) => self.emit(InstKind::Load(slot), result_type, span),
             // Nothing reads the result of a statement `match`; a placeholder
             // keeps the signature of `lower_expr` total.
-            None => self.emit(InstKind::ConstInt(0), IrType::Int32, span),
+            None => self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span),
         }
     }
 
@@ -2450,9 +2510,11 @@ impl<'a> FunctionLowering<'a> {
         span: Span,
     ) -> Operand {
         let expected = match pattern {
-            ast::Pattern::Int(lit) => {
-                self.emit(InstKind::ConstInt(lit.value as i32), IrType::Int32, span)
-            }
+            ast::Pattern::Int(lit) => self.emit(
+                InstKind::ConstInt(lit.value as i32),
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
             ast::Pattern::Bool(lit) => {
                 self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
             }
@@ -2462,7 +2524,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Pattern::Variant(v) => {
                 let value = self.discriminant(&v.enum_name, &v.variant.name);
-                self.emit(InstKind::ConstInt(value), IrType::Int32, span)
+                self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
             }
             // `null` tests absence rather than a value, so it is the one
             // pattern that does not compare against anything.
@@ -2480,7 +2542,11 @@ impl<'a> FunctionLowering<'a> {
         // the discriminant alone (roadmap task 11.3) — a variant pattern
         // still tests only the discriminant, so it is read out first.
         let left = if let IrType::Enum(_) = scrutinee_type {
-            self.emit(InstKind::Discriminant(left), IrType::Int32, span)
+            self.emit(
+                InstKind::Discriminant(left),
+                IrType::Int(IntWidth::I32),
+                span,
+            )
         } else {
             left
         };
@@ -3009,6 +3075,10 @@ impl<'a> FunctionLowering<'a> {
             return value;
         }
 
+        if let (IrType::Int(_), IrType::Int(_)) = (actual_ty, target_ty) {
+            return self.emit(InstKind::IntCast(value), target_ty, span);
+        }
+
         let IrType::Object(target_class) = target_ty else {
             unreachable!(
                 "the checker only lowers a cast whose target is a class, once identity is ruled out"
@@ -3072,7 +3142,11 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             } else {
-                self.emit(InstKind::ConstInt(discriminant), IrType::Int32, span)
+                self.emit(
+                    InstKind::ConstInt(discriminant),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                )
             };
         }
 
@@ -3315,7 +3389,7 @@ impl<'a> FunctionLowering<'a> {
             return if enum_has_payload(self.checked, enum_id) {
                 IrType::Enum(enum_id)
             } else {
-                IrType::Int32
+                IrType::Int(IntWidth::I32)
             };
         }
         let field_ty = self.field_position(&expr.object, &expr.name.name).1;
@@ -3403,7 +3477,7 @@ impl<'a> FunctionLowering<'a> {
         let ty = self.slot_type(slot);
 
         let previous = self.emit(InstKind::Load(slot), ty, span);
-        let one = self.emit(InstKind::ConstInt(1), IrType::Int32, span);
+        let one = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), span);
         let updated = self.emit(
             InstKind::Binary {
                 op: binary_op(expr.op.as_binary()),
@@ -3711,14 +3785,14 @@ impl<'a> FunctionLowering<'a> {
     /// the checker would have rejected never reaches this point.
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
         match expr {
-            ast::Expr::Int(_) => IrType::Int32,
+            ast::Expr::Int(_) => IrType::Int(IntWidth::I32),
             ast::Expr::Bool(_) => IrType::Boolean,
             ast::Expr::Str(_) => IrType::String,
             ast::Expr::Path(ident) => self.slot_type(self.lookup_slot(&ident.name)),
             ast::Expr::Unary(e) => match e.op {
-                ast::UnaryOp::Neg => IrType::Int32,
+                ast::UnaryOp::Neg => IrType::Int(IntWidth::I32),
                 ast::UnaryOp::Not => IrType::Boolean,
-                ast::UnaryOp::BitNot => IrType::Int32,
+                ast::UnaryOp::BitNot => IrType::Int(IntWidth::I32),
             },
             // `??` yields its operands' shared type, not a boolean or an
             // arithmetic result: it is the one binary operator that is not an
@@ -3797,7 +3871,7 @@ impl<'a> FunctionLowering<'a> {
             // Both forms yield the type of the operand they update.
             ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(e.target.name())),
             ast::Expr::Match(e) => self.arm_value_type(e),
-            ast::Expr::Variant(_) => IrType::Int32,
+            ast::Expr::Variant(_) => IrType::Int(IntWidth::I32),
             ast::Expr::Println(_) => IrType::Void,
             // A lambda's type is the closure layout it produced, which only
             // exists once it has been lowered: the caller asks the value.
@@ -3839,8 +3913,16 @@ fn is_string_operator(left: IrType, right: IrType, op: ast::BinaryOp) -> bool {
     matches!(
         (left, right, op),
         (IrType::String, IrType::String, ast::BinaryOp::Add)
-            | (IrType::String, IrType::Int32, ast::BinaryOp::Mul)
-            | (IrType::Int32, IrType::String, ast::BinaryOp::Mul)
+            | (
+                IrType::String,
+                IrType::Int(IntWidth::I32),
+                ast::BinaryOp::Mul
+            )
+            | (
+                IrType::Int(IntWidth::I32),
+                IrType::String,
+                ast::BinaryOp::Mul
+            )
     )
 }
 

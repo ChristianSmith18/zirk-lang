@@ -1,0 +1,6 @@
+// Narrowing is always explicit (roadmap Phase 3b, task 4.3): an Int32 does
+// not implicitly fit an Int8, even when the runtime value would.
+fn main(): Void {
+    mut a: Int32 = 100;
+    mut b: Int8 = a;
+}

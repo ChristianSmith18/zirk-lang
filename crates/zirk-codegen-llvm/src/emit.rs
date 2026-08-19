@@ -201,7 +201,16 @@ fn llvm_type_in<'ctx>(
 ) -> Option<BasicTypeEnum<'ctx>> {
     Some(match ty {
         ir::IrType::Void => return None,
-        ir::IrType::Int32 => context.i32_type().into(),
+        // LLVM already has a native type for any integer width (roadmap
+        // Phase 3b) — signedness is not part of an `IntType` at all in
+        // LLVM, only of the operation performed on it (`sdiv` vs `udiv`,
+        // `sext` vs `zext`), so nothing here needs to know it.
+        ir::IrType::Int(width) => context
+            .custom_width_int_type(
+                std::num::NonZeroU32::new(width.bits()).expect("every IntWidth is nonzero"),
+            )
+            .expect("every IntWidth is a valid LLVM integer width")
+            .into(),
         // `Boolean` is `i1`: LLVM's natural type for a condition, and what a
         // conditional branch expects.
         ir::IrType::Boolean => context.bool_type().into(),
@@ -671,6 +680,46 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // from here on.
             ir::InstKind::Retype(operand) => Some(self.operand(*operand)),
 
+            // `value as <a different integer width>` (roadmap Phase 3b,
+            // task 4.3) — truncate, or sign/zero-extend by the *source*
+            // operand's own signedness (LLVM's `IntType` itself carries no
+            // sign; only the operation choosing sext vs zext does). Equal
+            // width is a pure reinterpretation — the same bits, so no
+            // instruction is needed at all.
+            ir::InstKind::IntCast(operand) => {
+                let value = self.operand(*operand).into_int_value();
+                let source_signed = self.is_signed(self.value_types[&operand.0]);
+                let ir::IrType::Int(target_width) = instruction.ty else {
+                    unreachable!("IntCast always declares an integer destination")
+                };
+                let target_ty = self
+                    .context
+                    .custom_width_int_type(
+                        std::num::NonZeroU32::new(target_width.bits())
+                            .expect("every IntWidth is nonzero"),
+                    )
+                    .expect("every IntWidth is a valid LLVM integer width");
+
+                let src_bits = value.get_type().get_bit_width();
+                let dst_bits = target_width.bits();
+                let converted = match src_bits.cmp(&dst_bits) {
+                    std::cmp::Ordering::Equal => value,
+                    std::cmp::Ordering::Less if source_signed => self
+                        .builder
+                        .build_int_s_extend(value, target_ty, "sext")
+                        .expect("sign extension"),
+                    std::cmp::Ordering::Less => self
+                        .builder
+                        .build_int_z_extend(value, target_ty, "zext")
+                        .expect("zero extension"),
+                    std::cmp::Ordering::Greater => self
+                        .builder
+                        .build_int_truncate(value, target_ty, "trunc")
+                        .expect("truncation"),
+                };
+                Some(converted.into())
+            }
+
             ir::InstKind::CallVirtual {
                 object,
                 index,
@@ -936,11 +985,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Unary { op, operand } => {
-                Some(self.emit_unary(*op, self.operand(*operand), function))
+                let signed = self.is_signed(self.value_types[&operand.0]);
+                Some(self.emit_unary(*op, self.operand(*operand), signed, function))
             }
 
             ir::InstKind::Binary { op, left, right } => {
-                Some(self.emit_binary(*op, self.operand(*left), self.operand(*right), function))
+                // The left operand's own width/signedness — the checker
+                // already required both sides to share it for every
+                // operator except a shift's own amount (roadmap Phase 3b,
+                // task 4.3/4.4), which is `right_signed` below.
+                let signed = self.is_signed(self.value_types[&left.0]);
+                let right_signed = self.is_signed(self.value_types[&right.0]);
+                Some(self.emit_binary(
+                    *op,
+                    self.operand(*left),
+                    self.operand(*right),
+                    signed,
+                    right_signed,
+                    function,
+                ))
             }
 
             ir::InstKind::Call { callee, args } => {
@@ -1156,18 +1219,29 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
     }
 
+    /// Whether an `IrType::Int` is signed — `false` for anything else,
+    /// which never matters: only an integer operand ever asks.
+    fn is_signed(&self, ty: ir::IrType) -> bool {
+        matches!(ty, ir::IrType::Int(width) if width.signed())
+    }
+
     fn emit_unary(
         &mut self,
         op: ir::UnaryOp,
         operand: BasicValueEnum<'ctx>,
+        signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         match op {
             // Negation is a subtraction from zero, so it goes through the same
-            // overflow check: `-Int32.MIN` does not fit in Int32.
+            // overflow check: `-Int32.MIN` does not fit in Int32. The
+            // checker only ever lets this reach a signed width (roadmap
+            // Phase 3b): negating unsigned has no result in its own type.
             ir::UnaryOp::Neg => {
-                let zero = self.context.i32_type().const_zero();
-                self.checked_arithmetic("ssub", zero, operand.into_int_value(), function)
+                debug_assert!(signed, "the checker only allows `-` on a signed width");
+                let value = operand.into_int_value();
+                let zero = value.get_type().const_zero();
+                self.checked_arithmetic("ssub", zero, value, function)
             }
             // `not` is bitwise complement at the LLVM level regardless of
             // whether the checker calls it logical negation or `~`: `!true`
@@ -1185,6 +1259,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         op: ir::BinaryOp,
         left: BasicValueEnum<'ctx>,
         right: BasicValueEnum<'ctx>,
+        signed: bool,
+        right_signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
@@ -1217,18 +1293,50 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // controlled error. The wrapping variants are explicit operations
             // that do not exist in this subset, so every arithmetic operation
             // is checked.
-            Add => self.checked_arithmetic("sadd", l, r, function),
-            Sub => self.checked_arithmetic("ssub", l, r, function),
-            Mul => self.checked_arithmetic("smul", l, r, function),
+            Add => self.checked_arithmetic(if signed { "sadd" } else { "uadd" }, l, r, function),
+            Sub => self.checked_arithmetic(if signed { "ssub" } else { "usub" }, l, r, function),
+            Mul => self.checked_arithmetic(if signed { "smul" } else { "umul" }, l, r, function),
 
-            Div | Rem => self.checked_division(op, l, r, function),
+            Div | Rem => self.checked_division(op, l, r, signed, function),
 
             Eq => self.compare(IntPredicate::EQ, l, r),
             NotEq => self.compare(IntPredicate::NE, l, r),
-            Lt => self.compare(IntPredicate::SLT, l, r),
-            LtEq => self.compare(IntPredicate::SLE, l, r),
-            Gt => self.compare(IntPredicate::SGT, l, r),
-            GtEq => self.compare(IntPredicate::SGE, l, r),
+            Lt => self.compare(
+                if signed {
+                    IntPredicate::SLT
+                } else {
+                    IntPredicate::ULT
+                },
+                l,
+                r,
+            ),
+            LtEq => self.compare(
+                if signed {
+                    IntPredicate::SLE
+                } else {
+                    IntPredicate::ULE
+                },
+                l,
+                r,
+            ),
+            Gt => self.compare(
+                if signed {
+                    IntPredicate::SGT
+                } else {
+                    IntPredicate::UGT
+                },
+                l,
+                r,
+            ),
+            GtEq => self.compare(
+                if signed {
+                    IntPredicate::SGE
+                } else {
+                    IntPredicate::UGE
+                },
+                l,
+                r,
+            ),
             // A value has no identity to compare, and the checker said so.
             Identical => unreachable!("`is` needs a reference"),
 
@@ -1259,12 +1367,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .expect("bitxor")
                 .into(),
 
-            // `<< `/`>>` on `Int32` only for now (roadmap Phase 3b, task
-            // 4.4) — an amount outside `0..32` is undefined at the LLVM
-            // level, so it is rejected before the native instruction runs,
-            // the same shape `checked_division` uses for its own guards.
-            Shl => self.checked_shift(op, l, r, function),
-            Shr => self.checked_shift(op, l, r, function),
+            // An amount outside the operand's own bit width is undefined at
+            // the LLVM level, so it is rejected before the native
+            // instruction runs, the same shape `checked_division` uses for
+            // its own guards (roadmap Phase 3b, task 4.4).
+            Shl => self.checked_shift(op, l, r, signed, right_signed, function),
+            Shr => self.checked_shift(op, l, r, signed, right_signed, function),
         }
     }
 
@@ -1325,9 +1433,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             inkwell::intrinsics::Intrinsic::find(&format!("llvm.{operation}.with.overflow"))
                 .expect("LLVM provides the overflow intrinsics");
 
+        // The overflow intrinsics are parameterized by width alone — `left`
+        // already carries the operand's real one (roadmap Phase 3b); the
+        // signed/unsigned choice lives in `operation`'s own name (`sadd` vs
+        // `uadd`, chosen by the caller), not in this declaration.
         let declaration = intrinsic
-            .get_declaration(self.llvm, &[self.context.i32_type().into()])
-            .expect("the intrinsic accepts i32");
+            .get_declaration(self.llvm, &[left.get_type().into()])
+            .expect("the intrinsic accepts this integer width");
 
         let call = self
             .builder
@@ -1364,9 +1476,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         op: ir::BinaryOp,
         left: inkwell::values::IntValue<'ctx>,
         right: inkwell::values::IntValue<'ctx>,
+        signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let zero = self.context.i32_type().const_zero();
+        let int_ty = left.get_type();
+        let zero = int_ty.const_zero();
         let is_zero = self
             .builder
             .build_int_compare(IntPredicate::EQ, right, zero, "is_zero")
@@ -1374,65 +1488,102 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
         self.trap_if(is_zero, self.runtime.division_by_zero, function);
 
-        let min = self.context.i32_type().const_int(i32::MIN as u64, true);
-        let minus_one = self.context.i32_type().const_all_ones();
+        // The one pair that overflows a division: `MIN / -1`, one past the
+        // widest value the width can hold. Unsigned has no such minimum —
+        // its `MIN` is `0`, and `0 / anything nonzero` never overflows — so
+        // the check only applies to a signed width.
+        if signed {
+            // The signed minimum's bit pattern is a lone `1` at the top bit
+            // — `2^(bits-1)` — built from 64-bit words since `Int128`
+            // itself does not fit in one (`const_int_arbitrary_precision`,
+            // little-endian words).
+            let bits = int_ty.get_bit_width();
+            let words: Vec<u64> = if bits <= 64 {
+                vec![1u64 << (bits - 1)]
+            } else {
+                vec![0, 1u64 << (bits - 65)]
+            };
+            let min = int_ty.const_int_arbitrary_precision(&words);
+            let minus_one = int_ty.const_all_ones();
 
-        let left_is_min = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, left, min, "is_min")
-            .expect("dividend comparison");
-        let right_is_minus_one = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, right, minus_one, "is_minus_one")
-            .expect("divisor comparison");
-        let overflows = self
-            .builder
-            .build_and(left_is_min, right_is_minus_one, "div_overflows")
-            .expect("conjunction");
+            let left_is_min = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, left, min, "is_min")
+                .expect("dividend comparison");
+            let right_is_minus_one = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, right, minus_one, "is_minus_one")
+                .expect("divisor comparison");
+            let overflows = self
+                .builder
+                .build_and(left_is_min, right_is_minus_one, "div_overflows")
+                .expect("conjunction");
 
-        self.trap_if(overflows, self.runtime.overflow, function);
+            self.trap_if(overflows, self.runtime.overflow, function);
+        }
 
-        match op {
-            ir::BinaryOp::Div => self
+        match (op, signed) {
+            (ir::BinaryOp::Div, true) => self
                 .builder
                 .build_int_signed_div(left, right, "div")
                 .expect("division")
                 .into(),
-            _ => self
+            (ir::BinaryOp::Div, false) => self
+                .builder
+                .build_int_unsigned_div(left, right, "div")
+                .expect("division")
+                .into(),
+            (_, true) => self
                 .builder
                 .build_int_signed_rem(left, right, "rem")
+                .expect("remainder")
+                .into(),
+            (_, false) => self
+                .builder
+                .build_int_unsigned_rem(left, right, "rem")
                 .expect("remainder")
                 .into(),
         }
     }
 
     /// `<<`/`>>`, checked against the one thing that makes either undefined
-    /// at the LLVM level: an amount outside `0..32` for an `Int32` operand
-    /// (roadmap Phase 3b, task 4.4/10.4 — the check itself generalizes to
-    /// any width once the rest of the integer family lands; only the
-    /// literal `32` here is specific to today's single width).
+    /// at the LLVM level: an amount outside `0..bits` of the *shifted*
+    /// operand's own width — its amount may be a different, independent
+    /// width (roadmap Phase 3b, task 4.4), so the bound comes from `left`
+    /// and the comparison's own signedness comes from `right`.
     fn checked_shift(
         &mut self,
         op: ir::BinaryOp,
         left: inkwell::values::IntValue<'ctx>,
         right: inkwell::values::IntValue<'ctx>,
+        signed: bool,
+        right_signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let zero = self.context.i32_type().const_zero();
-        let width = self.context.i32_type().const_int(32, false);
+        let amount_ty = right.get_type();
+        let zero = amount_ty.const_zero();
+        let width = amount_ty.const_int(u64::from(left.get_type().get_bit_width()), false);
 
-        let is_negative = self
-            .builder
-            .build_int_compare(IntPredicate::SLT, right, zero, "shift_negative")
-            .expect("shift amount comparison");
-        let is_too_wide = self
-            .builder
-            .build_int_compare(IntPredicate::SGE, right, width, "shift_too_wide")
-            .expect("shift amount comparison");
-        let invalid = self
-            .builder
-            .build_or(is_negative, is_too_wide, "shift_invalid")
-            .expect("disjunction");
+        // An unsigned amount is never negative by construction — the check
+        // is only meaningful, and only well-typed as a signed comparison,
+        // when the amount's own type is signed.
+        let invalid = if right_signed {
+            let is_negative = self
+                .builder
+                .build_int_compare(IntPredicate::SLT, right, zero, "shift_negative")
+                .expect("shift amount comparison");
+            let is_too_wide = self
+                .builder
+                .build_int_compare(IntPredicate::SGE, right, width, "shift_too_wide")
+                .expect("shift amount comparison");
+            self.builder
+                .build_or(is_negative, is_too_wide, "shift_invalid")
+                .expect("disjunction")
+        } else {
+            self.builder
+                .build_int_compare(IntPredicate::UGE, right, width, "shift_too_wide")
+                .expect("shift amount comparison")
+        };
 
         self.trap_if(invalid, self.runtime.invalid_shift, function);
 
@@ -1442,9 +1593,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .build_left_shift(left, right, "shl")
                 .expect("left shift")
                 .into(),
+            // A logical shift for unsigned, arithmetic (sign-extending) for
+            // signed — the value being shifted decides, not the amount.
             _ => self
                 .builder
-                .build_right_shift(left, right, true, "shr")
+                .build_right_shift(left, right, signed, "shr")
                 .expect("right shift")
                 .into(),
         }

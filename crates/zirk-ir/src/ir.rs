@@ -14,6 +14,61 @@
 
 use zirk_diagnostics::Span;
 
+/// Every integer width the IR represents (roadmap Phase 3b) — its own type,
+/// not `zirk_sema::IntWidth`, for the same reason `IrType` itself stays
+/// independent of `zirk_sema::Type`: this is the boundary a `.zpkg`
+/// distributes, and it must not move every time the frontend's own
+/// representation changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntWidth {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+}
+
+impl IntWidth {
+    pub const fn bits(self) -> u32 {
+        use IntWidth::*;
+        match self {
+            I8 | U8 => 8,
+            I16 | U16 => 16,
+            I32 | U32 => 32,
+            I64 | U64 => 64,
+            I128 | U128 => 128,
+        }
+    }
+
+    pub const fn signed(self) -> bool {
+        matches!(
+            self,
+            IntWidth::I8 | IntWidth::I16 | IntWidth::I32 | IntWidth::I64 | IntWidth::I128
+        )
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        use IntWidth::*;
+        match self {
+            I8 => "Int8",
+            I16 => "Int16",
+            I32 => "Int32",
+            I64 => "Int64",
+            I128 => "Int128",
+            U8 => "UInt8",
+            U16 => "UInt16",
+            U32 => "UInt32",
+            U64 => "UInt64",
+            U128 => "UInt128",
+        }
+    }
+}
+
 /// A type of the IR.
 ///
 /// Deliberately independent of `zirk_sema::Type`: the IR is the boundary that
@@ -22,7 +77,11 @@ use zirk_diagnostics::Span;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrType {
     Void,
-    Int32,
+    /// `Int8`…`UInt128` (roadmap Phase 3b) — width plus signedness as data,
+    /// not one variant per width: LLVM already models any integer width
+    /// natively, so nothing downstream needs a different *shape* per width,
+    /// only the right one substituted in.
+    Int(IntWidth),
     Boolean,
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
@@ -80,7 +139,7 @@ pub enum IrType {
 /// there is to express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nullable {
-    Int32,
+    Int(IntWidth),
     Boolean,
     String,
     /// A reference that may be absent, by layout id.
@@ -97,7 +156,7 @@ pub enum Nullable {
 impl Nullable {
     pub const fn inner(self) -> IrType {
         match self {
-            Nullable::Int32 => IrType::Int32,
+            Nullable::Int(width) => IrType::Int(width),
             Nullable::Boolean => IrType::Boolean,
             Nullable::String => IrType::String,
             Nullable::Object(id) => IrType::Object(id),
@@ -110,7 +169,7 @@ impl Nullable {
     /// The nullable form of a type, if it has one.
     pub const fn of(ty: IrType) -> Option<Self> {
         Some(match ty {
-            IrType::Int32 => Nullable::Int32,
+            IrType::Int(width) => Nullable::Int(width),
             IrType::Boolean => Nullable::Boolean,
             IrType::String => Nullable::String,
             IrType::Object(id) => Nullable::Object(id),
@@ -126,7 +185,7 @@ impl IrType {
     pub const fn as_str(self) -> &'static str {
         match self {
             IrType::Void => "Void",
-            IrType::Int32 => "Int32",
+            IrType::Int(width) => width.as_str(),
             IrType::Boolean => "Boolean",
             IrType::String => "String",
             IrType::Closure(_) => "closure",
@@ -135,7 +194,11 @@ impl IrType {
             IrType::Value(_) => "value",
             IrType::Enum(_) => "enum",
             IrType::Nullable(n) => match n {
-                Nullable::Int32 => "Int32?",
+                // A width's own name plus `?` is not `const`-friendly (no
+                // `const` string concatenation), so nullable integers share
+                // one spelling regardless of which width — a diagnostic
+                // that needs the exact width reads `inner()` instead.
+                Nullable::Int(_) => "Int?",
                 Nullable::Boolean => "Boolean?",
                 Nullable::String => "String?",
                 Nullable::Object(_) => "object?",
@@ -471,6 +534,14 @@ pub enum InstKind {
     /// implements is. No runtime work: an object's address does not change
     /// shape, only which methods a static type promises change with it.
     Retype(Operand),
+    /// `value as <a different integer width>` (roadmap Phase 3b, task 4.3):
+    /// truncates or sign/zero-extends to the destination's own width,
+    /// exactly like Rust's own `as` between integers — unchecked, the
+    /// explicit half of the widening/narrowing rule (`Type::accepts`
+    /// covers the implicit, always-safe half). Codegen reads the *source*
+    /// operand's own signedness from its recorded type to choose sign- vs
+    /// zero-extension when widening; truncation needs no such choice.
+    IntCast(Operand),
     /// `String + String`.
     Concat {
         left: Operand,
@@ -666,20 +737,23 @@ mod tests {
     #[test]
     fn only_string_needs_allocation_in_this_subset() {
         assert!(IrType::String.needs_allocation());
-        assert!(!IrType::Int32.needs_allocation());
+        assert!(!IrType::Int(IntWidth::I32).needs_allocation());
         assert!(!IrType::Boolean.needs_allocation());
         assert!(!IrType::Void.needs_allocation());
     }
 
     #[test]
     fn arithmetic_preserves_the_operand_type() {
-        assert_eq!(BinaryOp::Add.result_type(IrType::Int32), IrType::Int32);
+        assert_eq!(
+            BinaryOp::Add.result_type(IrType::Int(IntWidth::I32)),
+            IrType::Int(IntWidth::I32)
+        );
     }
 
     #[test]
     fn comparison_and_logic_yield_boolean() {
         for op in [BinaryOp::Eq, BinaryOp::Lt, BinaryOp::And, BinaryOp::Or] {
-            assert_eq!(op.result_type(IrType::Int32), IrType::Boolean);
+            assert_eq!(op.result_type(IrType::Int(IntWidth::I32)), IrType::Boolean);
         }
     }
 

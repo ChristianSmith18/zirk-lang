@@ -163,7 +163,7 @@ fn using_a_value_before_defining_it_is_rejected() {
                     ty: IrType::Void,
                     span: S,
                 },
-                value(0, InstKind::ConstInt(1), IrType::Int32),
+                value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32)),
             ],
             terminator: Some(Terminator::Return(None)),
         }],
@@ -186,7 +186,7 @@ fn a_value_crossing_blocks_is_rejected() {
         vec![
             Block {
                 id: BlockId(0),
-                instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int32)],
+                instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32))],
                 terminator: Some(Terminator::Jump(BlockId(1))),
             },
             Block {
@@ -217,8 +217,8 @@ fn defining_the_same_value_twice_is_rejected() {
         vec![Block {
             id: BlockId(0),
             instructions: vec![
-                value(0, InstKind::ConstInt(1), IrType::Int32),
-                value(0, InstKind::ConstInt(2), IrType::Int32),
+                value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32)),
+                value(0, InstKind::ConstInt(2), IrType::Int(IntWidth::I32)),
             ],
             terminator: Some(Terminator::Return(None)),
         }],
@@ -262,7 +262,7 @@ fn a_binary_operation_between_different_types_is_rejected() {
             blocks: vec![Block {
                 id: BlockId(0),
                 instructions: vec![
-                    value(0, InstKind::ConstInt(1), IrType::Int32),
+                    value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32)),
                     value(1, InstKind::ConstString(StringId(0)), IrType::String),
                     value(
                         2,
@@ -271,7 +271,7 @@ fn a_binary_operation_between_different_types_is_rejected() {
                             left: Operand(ValueId(0)),
                             right: Operand(ValueId(1)),
                         },
-                        IrType::Int32,
+                        IrType::Int(IntWidth::I32),
                     ),
                 ],
                 terminator: Some(Terminator::Return(None)),
@@ -301,7 +301,7 @@ fn branching_on_a_non_boolean_is_rejected() {
         vec![
             Block {
                 id: BlockId(0),
-                instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int32)],
+                instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32))],
                 terminator: Some(Terminator::Branch {
                     condition: Operand(ValueId(0)),
                     then_block: BlockId(1),
@@ -330,7 +330,7 @@ fn returning_the_wrong_type_is_rejected() {
     let module = module_with(
         vec![Block {
             id: BlockId(0),
-            instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int32)],
+            instructions: vec![value(0, InstKind::ConstInt(1), IrType::Int(IntWidth::I32))],
             terminator: Some(Terminator::Return(Some(Operand(ValueId(0))))),
         }],
         IrType::Boolean,
@@ -352,7 +352,7 @@ fn println_over_a_non_string_is_rejected() {
         vec![Block {
             id: BlockId(0),
             instructions: vec![
-                value(0, InstKind::ConstInt(3), IrType::Int32),
+                value(0, InstKind::ConstInt(3), IrType::Int(IntWidth::I32)),
                 Instruction {
                     result: None,
                     kind: InstKind::Println(Operand(ValueId(0))),
@@ -379,8 +379,12 @@ fn a_conversion_that_does_not_produce_a_string_is_rejected() {
         vec![Block {
             id: BlockId(0),
             instructions: vec![
-                value(0, InstKind::ConstInt(3), IrType::Int32),
-                value(1, InstKind::ToString(Operand(ValueId(0))), IrType::Int32),
+                value(0, InstKind::ConstInt(3), IrType::Int(IntWidth::I32)),
+                value(
+                    1,
+                    InstKind::ToString(Operand(ValueId(0))),
+                    IrType::Int(IntWidth::I32),
+                ),
             ],
             terminator: Some(Terminator::Return(None)),
         }],
@@ -399,7 +403,11 @@ fn reading_a_nonexistent_slot_is_rejected() {
     let module = module_with(
         vec![Block {
             id: BlockId(0),
-            instructions: vec![value(0, InstKind::Load(SlotId(9)), IrType::Int32)],
+            instructions: vec![value(
+                0,
+                InstKind::Load(SlotId(9)),
+                IrType::Int(IntWidth::I32),
+            )],
             terminator: Some(Terminator::Return(None)),
         }],
         IrType::Void,
@@ -432,7 +440,7 @@ fn storing_the_wrong_type_into_a_slot_is_rejected() {
         IrType::Void,
         vec![Slot {
             name: "x".into(),
-            ty: IrType::Int32,
+            ty: IrType::Int(IntWidth::I32),
             span: S,
         }],
     );
