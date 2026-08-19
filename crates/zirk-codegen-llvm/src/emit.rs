@@ -1144,29 +1144,89 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 call.try_as_basic_value().basic()
             }
 
+            // Converts a native scalar to `String` (roadmap Phase 3b, task
+            // 8) — always through the runtime, since the compiler does not
+            // know how a `String` is built (ADR-005). A class/record/value
+            // class with its own `to_string()` method never reaches this
+            // instruction at all: `zirk-ir/lower.rs`'s `lower_to_string`
+            // emits a real method call for those instead, the same shape any
+            // other method call is (`lower_method_call`) — this dispatches
+            // purely by the operand's own recorded width/signedness, the
+            // same pattern `is_signed`/`emit_binary` already established.
             ir::InstKind::ToString(operand) => {
-                // The conversion goes through the runtime: the compiler does
-                // not know how a `String` is built (ADR-005).
-                let value = self.operand(*operand);
-                let converter = match value {
-                    BasicValueEnum::IntValue(int) if int.get_type().get_bit_width() == 1 => {
-                        self.runtime.str_from_bool
-                    }
-                    BasicValueEnum::IntValue(_) => self.runtime.str_from_i32,
-                    // A `String` needs no conversion; the lowering does not emit
-                    // `ToString` over one, so reaching here means malformed IR.
-                    other => unreachable!("ToString over {other:?}"),
-                };
+                // `Char` shares `String`'s representation bit for bit
+                // (ADR-014): "converting" one is retagging the same pointer,
+                // no runtime call at all.
+                if self.value_types[&operand.0] == ir::IrType::Char {
+                    Some(self.operand(*operand))
+                } else {
+                    let value = self.operand(*operand);
+                    let converter = match self.value_types[&operand.0] {
+                        ir::IrType::Boolean => self.runtime.str_from_bool,
+                        ir::IrType::Int(width) => {
+                            use ir::IntWidth::*;
+                            match width {
+                                I8 => self.runtime.str_from_i8,
+                                U8 => self.runtime.str_from_u8,
+                                I16 => self.runtime.str_from_i16,
+                                U16 => self.runtime.str_from_u16,
+                                I32 => self.runtime.str_from_i32,
+                                U32 => self.runtime.str_from_u32,
+                                I64 => self.runtime.str_from_i64,
+                                U64 => self.runtime.str_from_u64,
+                                I128 => self.runtime.str_from_i128,
+                                U128 => self.runtime.str_from_u128,
+                            }
+                        }
+                        ir::IrType::Float(width) => match width {
+                            ir::FloatWidth::F32 => self.runtime.str_from_f32,
+                            ir::FloatWidth::F64 => self.runtime.str_from_f64,
+                            // The checker's `is_printable` never accepts
+                            // `Float16`/`Float128` (no stable Rust primitive
+                            // to format either through, roadmap Phase 3b
+                            // task 8.3's own documented gap), so a verified
+                            // program never reaches this arm with one.
+                            ir::FloatWidth::F16 | ir::FloatWidth::F128 => {
+                                unreachable!("ToString over Float16/Float128")
+                            }
+                        },
+                        // A `String` needs no conversion; the lowering does
+                        // not emit `ToString` over one, so reaching here
+                        // means malformed IR.
+                        other => unreachable!("ToString over {other:?}"),
+                    };
 
-                let call = self
-                    .builder
-                    .build_call(converter, &[value.into()], "str")
-                    .expect("call to the converter");
-                Some(
-                    call.try_as_basic_value()
-                        .basic()
-                        .expect("the converter returns a value"),
-                )
+                    // `Int128`/`UInt128` cross the runtime boundary by
+                    // pointer, not by value (no stable cross-target ABI for
+                    // a by-value 128-bit integer — see the converter's own
+                    // doc comment in `zirk-runtime/src/string.rs`).
+                    let argument: BasicMetadataValueEnum = if matches!(
+                        self.value_types[&operand.0],
+                        ir::IrType::Int(ir::IntWidth::I128 | ir::IntWidth::U128)
+                    ) {
+                        let int_value = value.into_int_value();
+                        let slot = self
+                            .builder
+                            .build_alloca(int_value.get_type(), "to_string.i128")
+                            .expect("stack slot for a 128-bit conversion");
+                        self.builder
+                            .build_store(slot, int_value)
+                            .expect("store the value to convert");
+                        slot.into()
+                    } else {
+                        value.into()
+                    };
+
+                    let call = self
+                        .builder
+                        .build_call(converter, &[argument], "str")
+                        .expect("call to the converter");
+                    Some(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("the converter returns a value"),
+                    )
+                }
             }
 
             ir::InstKind::Println(operand) => {

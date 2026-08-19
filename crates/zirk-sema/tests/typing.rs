@@ -676,6 +676,36 @@ fn invalid_string_interpolation_of_a_type_without_a_text_form() {
     assert!(output.contains("cannot be printed"));
 }
 
+#[test]
+fn valid_printing_of_the_new_scalars() {
+    accepted_body(
+        "mut a: Int8 = 1 as Int8;\nmut b: UInt64 = 1 as UInt64;\nmut c: Float64 = 1.5;\nmut d: Char = 'z';\nstdout.println(a);\nstdout.println(b);\nstdout.println(c);\nstdout.println(d);",
+    );
+}
+
+#[test]
+fn invalid_printing_of_float16() {
+    let output = rejected_body("mut a: Float16 = 1.5f16;\nstdout.println(a);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("cannot be printed"));
+}
+
+#[test]
+fn valid_printing_of_a_class_with_to_string() {
+    accepted(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } fn to_string(): String { return \"{this.x}\"; } }
+         fn main(): Void { mut p = Point(1); stdout.println(p); }",
+    );
+}
+
+#[test]
+fn valid_interpolation_of_a_class_with_to_string() {
+    accepted(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } fn to_string(): String { return \"{this.x}\"; } }
+         fn main(): Void { mut p = Point(1); mut s = \"p: {p}\"; }",
+    );
+}
+
 // --- Error recovery ---------------------------------------------------------
 
 #[test]

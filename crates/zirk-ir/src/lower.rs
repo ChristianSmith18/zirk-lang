@@ -3677,8 +3677,56 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Lowers the argument of a `println`, converting it when it is not a
-    /// `String`.
+    /// Converts an already-lowered value to `String` via `to_string()`
+    /// (`ZIRK_STDLIB_SPEC.md` section 3, roadmap Phase 3b task 8) — the
+    /// shared conversion `println`'s argument and each `{expr}` of an
+    /// interpolation both go through.
+    ///
+    /// A native scalar goes through `InstKind::ToString`, which codegen
+    /// dispatches by the operand's own recorded width (`emit.rs`). A
+    /// class/record/value class with its own `to_string()` method is called
+    /// directly instead — the exact shape any other method call is
+    /// (`lower_method_call`), because it needs a real symbol/table lookup
+    /// `InstKind::ToString` alone cannot express; the checker already
+    /// confirmed the method exists with the right signature
+    /// (`Checker::is_printable`), so this only has to find it again, not
+    /// re-validate it.
+    fn lower_to_string(&mut self, operand: Operand, ty: IrType, span: Span) -> Operand {
+        if ty == IrType::String {
+            return operand;
+        }
+
+        if let IrType::Object(id) | IrType::Value(id) = ty
+            && let Some(method) = self.checked.classes[id as usize].method("to_string")
+        {
+            let name = body_symbol(self.checked, method);
+            let virtual_index = method.overridden.then_some(method.index as u32);
+            return match virtual_index {
+                Some(index) => self.emit(
+                    InstKind::CallVirtual {
+                        object: operand,
+                        index,
+                        args: Vec::new(),
+                    },
+                    IrType::String,
+                    span,
+                ),
+                None => self.emit(
+                    InstKind::Call {
+                        callee: name,
+                        args: vec![operand],
+                    },
+                    IrType::String,
+                    span,
+                ),
+            };
+        }
+
+        self.emit(InstKind::ToString(operand), IrType::String, span)
+    }
+
+    /// Lowers the argument of a `println`, converting it via `to_string()`
+    /// when it is not already a `String`.
     ///
     /// `ZIRK_STDLIB_SPEC.md` section 3: every printable value goes through
     /// `to_string()`. Without this the runtime would read an `Int32` as if it
@@ -3686,12 +3734,7 @@ impl<'a> FunctionLowering<'a> {
     fn lower_println_argument(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
         let operand = self.lower_expr(&expr.arg);
         let ty = self.type_of(&expr.arg, expr.arg.span());
-
-        if ty == IrType::String {
-            return operand;
-        }
-
-        self.emit(InstKind::ToString(operand), IrType::String, span)
+        self.lower_to_string(operand, ty, span)
     }
 
     /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each
@@ -3719,11 +3762,7 @@ impl<'a> FunctionLowering<'a> {
                 ast::InterpolatedPart::Expr(inner) => {
                     let operand = self.lower_expr(inner);
                     let ty = self.type_of(inner, inner.span());
-                    if ty == IrType::String {
-                        operand
-                    } else {
-                        self.emit(InstKind::ToString(operand), IrType::String, span)
-                    }
+                    self.lower_to_string(operand, ty, span)
                 }
             };
 

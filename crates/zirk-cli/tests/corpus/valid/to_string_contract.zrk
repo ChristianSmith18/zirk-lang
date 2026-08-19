@@ -1,0 +1,60 @@
+// `to_string()` (roadmap Phase 3b, task 8): `print`/`println` and string
+// interpolation now route through it for every native scalar this phase
+// added — the ten integer widths, `Float32`/`Float64`, `Char` — and for a
+// user class that implements it. `Float16`/`Float128` are a known,
+// documented gap (no stable Rust primitive to format through yet) and are
+// not exercised here.
+class Point {
+    x: Int32;
+    y: Int32;
+
+    construct(x: Int32, y: Int32) {
+        this.x = x;
+        this.y = y;
+    }
+
+    fn to_string(): String {
+        return "({this.x}, {this.y})";
+    }
+}
+
+fn main(): Void {
+    mut i8: Int8 = (-5) as Int8;
+    mut i16: Int16 = 1000 as Int16;
+    mut i64: Int64 = 2000000000 as Int64;
+    mut i128: Int128 = 2000000000 as Int128;
+    mut wide128: Int128 = i128 * i128 * i128;
+
+    mut u8: UInt8 = 200 as UInt8;
+    mut u16: UInt16 = 40000 as UInt16;
+    mut u32: UInt32 = 2000000000 as UInt32;
+    mut u64: UInt64 = 999 as UInt64;
+    mut u128: UInt128 = 2000000000 as UInt128;
+    mut wide_u128: UInt128 = u128 * u128 * u128;
+
+    mut f32: Float32 = 1.5f32;
+    mut f64: Float64 = 3.14;
+    mut ch: Char = 'z';
+
+    stdout.println(i8);
+    stdout.println(i16);
+    stdout.println(i64);
+    stdout.println(wide128);
+    stdout.println(u8);
+    stdout.println(u16);
+    stdout.println(u32);
+    stdout.println(u64);
+    stdout.println(wide_u128);
+    stdout.println(f32);
+    stdout.println(f64);
+    stdout.println(ch);
+
+    // Interpolation dispatches through the exact same conversion.
+    stdout.println("{i8} {u8} {f64} {ch}");
+
+    // A class supplying its own `to_string()` — called directly by
+    // `println` and reached implicitly through interpolation.
+    mut p = Point(3, 4);
+    stdout.println(p);
+    stdout.println("point is {p}");
+}

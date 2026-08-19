@@ -107,13 +107,102 @@ pub unsafe extern "C" fn zirk_str_from_utf8(bytes: *const u8, len: usize) -> *mu
     handle(bytes, len)
 }
 
+/// Converts an `Int8` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_i8(value: i8) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts an `Int16` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_i16(value: i16) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
 /// Converts an `Int32` into a `String`.
 ///
 /// `ZIRK_STDLIB_SPEC.md` section 3 states that every printable value goes
-/// through `to_string(): String`. Until traits exist in Phase 3, the compiler
-/// reaches these conversions directly.
+/// through `to_string(): String`. The compiler dispatches directly to one of
+/// these per-width conversions (roadmap Phase 3b, task 8) rather than through
+/// a real trait call, since native scalars have no method table to call
+/// through — codegen picks the right one from the value's own recorded width.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_i32(value: i32) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts an `Int64` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_i64(value: i64) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts an `Int128` into a `String`.
+///
+/// Taken by pointer rather than by value: an `i128` has no stable, uniform
+/// extern "C" calling convention across targets (MSVC does not even have a
+/// native 128-bit integer type), while a pointer's ABI is never in question.
+/// Codegen stores the value to a stack slot and passes its address.
+///
+/// # Safety
+///
+/// `value` must point at a readable, initialized `i128`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_from_i128(value: *const i128) -> *mut c_void {
+    owned_handle(unsafe { value.read_unaligned() }.to_string())
+}
+
+/// Converts a `UInt8` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_u8(value: u8) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts a `UInt16` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_u16(value: u16) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts a `UInt32` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_u32(value: u32) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts a `UInt64` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_u64(value: u64) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts a `UInt128` into a `String`. See [`zirk_str_from_i128`] for why
+/// it is taken by pointer.
+///
+/// # Safety
+///
+/// `value` must point at a readable, initialized `u128`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
+    owned_handle(unsafe { value.read_unaligned() }.to_string())
+}
+
+/// Converts a `Float32` into a `String`.
+///
+/// `Float16`/`Float128` have no equivalent: neither is a stable Rust
+/// primitive type (`f16`/`f128` are unstable as of this compiler's toolchain
+/// pin), so there is no `Display` implementation to reach for either without
+/// a hand-rolled decimal conversion this task does not build. Printing
+/// either width is a known, tracked gap (roadmap Phase 3b, task 8.3),
+/// consistent with `Float128` arithmetic's own portability gap on Windows.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
+    owned_handle(value.to_string())
+}
+
+/// Converts a `Float64` into a `String`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_str_from_f64(value: f64) -> *mut c_void {
     owned_handle(value.to_string())
 }
 
