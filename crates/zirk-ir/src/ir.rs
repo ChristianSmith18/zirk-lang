@@ -110,6 +110,15 @@ impl FloatWidth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrType {
     Void,
+    /// The bottom type (roadmap Phase 4a) — no instruction ever produces a
+    /// real value of it; only `InstKind::FatalError` declares it, and the
+    /// block it is in always ends in `Terminator::Unreachable` right after,
+    /// never a normal `Store`/`Jump`. It exists in the IR's own type table
+    /// purely so a diverging branch of `if`/ternary can be recognized and
+    /// skipped at lowering, mirroring how the checker's `Type::unify`
+    /// already lets it disappear at a branch join instead of poisoning the
+    /// join's type.
+    Never,
     /// `Int8`…`UInt128` (roadmap Phase 3b) — width plus signedness as data,
     /// not one variant per width: LLVM already models any integer width
     /// natively, so nothing downstream needs a different *shape* per width,
@@ -232,6 +241,7 @@ impl IrType {
     pub const fn as_str(self) -> &'static str {
         match self {
             IrType::Void => "Void",
+            IrType::Never => "Never",
             IrType::Int(width) => width.as_str(),
             IrType::Float(width) => width.as_str(),
             IrType::Boolean => "Boolean",
@@ -544,6 +554,15 @@ pub enum InstKind {
     /// so the verifier can keep telling a `Char` value apart from a `String`
     /// one by the instruction that produced it, not only by `inst.ty`.
     ConstChar(StringId),
+    /// `fatalError(message)` (roadmap Phase 4a, `ZIRK_LANGUAGE_SPEC.md`
+    /// section 9): reports `message` and terminates the process — the same
+    /// controlled-abort pattern every checked arithmetic/cast operation has
+    /// used since Phase 1, generalized to an arbitrary program-supplied
+    /// message instead of a fixed compiler-chosen cause. Declares
+    /// `IrType::Never`; the block it is in always ends in
+    /// `Terminator::Unreachable` immediately after, since control never
+    /// returns to whatever instruction would otherwise follow.
+    FatalError(Operand),
     /// Byte length of the grapheme at `offset` within `string`, or `-1` past
     /// the end (roadmap Phase 3b, task 6.3: `for ... in` over `String`
     /// produces `Char`). `offset` is threaded as an ordinary `Int64`

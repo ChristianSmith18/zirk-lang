@@ -89,6 +89,9 @@ pub mod symbols {
     /// type, not after the fact — an infinite result is a valid value,
     /// unlike `NaN`).
     pub const FLOAT_NAN: &str = "zirk_rt_float_nan";
+    /// Reports a program-supplied `fatalError(message)` and terminates
+    /// (roadmap Phase 4a).
+    pub const FATAL_ERROR: &str = "zirk_rt_fatal_error";
 }
 
 /// The runtime functions available to generated code.
@@ -122,6 +125,7 @@ pub struct Runtime<'ctx> {
     pub check_cast: FunctionValue<'ctx>,
     pub invalid_shift: FunctionValue<'ctx>,
     pub float_nan: FunctionValue<'ctx>,
+    pub fatal_error: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -292,6 +296,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let invalid_cast =
         module.add_function(symbols::INVALID_CAST, void.fn_type(&[], false), external);
     let float_nan = module.add_function(symbols::FLOAT_NAN, void.fn_type(&[], false), external);
+    let fatal_error = module.add_function(
+        symbols::FATAL_ERROR,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
 
     for handler in [
         overflow,
@@ -302,6 +311,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         invalid_cast,
         invalid_shift,
         float_nan,
+        fatal_error,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -340,5 +350,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         check_cast,
         invalid_shift,
         float_nan,
+        fatal_error,
     }
 }

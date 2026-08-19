@@ -1,0 +1,30 @@
+// `Never`, the bottom type, and `fatalError(message: String): Never`
+// (roadmap Phase 4a, `ZIRK_LANGUAGE_SPEC.md` section 9). No value of `Never`
+// exists, so it is assignable anywhere and unifies with any type at a
+// branch join — `cond ? 5 : fatalError("...")` types `Int32`, not `Never`.
+// The diverging branch itself is not exercised for its abort here (that
+// terminates the process, verified manually with a real program: exit code
+// 70) — only that the non-diverging paths compile and run correctly around
+// it.
+fn pick(cond: Boolean): Int32 {
+    return cond ? 5 : fatalError("unreachable in this test");
+}
+
+fn pick_reversed(cond: Boolean): Int32 {
+    return cond ? fatalError("unreachable in this test") : 7;
+}
+
+fn pick_if(cond: Boolean): Int32 {
+    mut r: Int32 = if cond {
+        9
+    } else {
+        fatalError("unreachable in this test")
+    };
+    return r;
+}
+
+fn main(): Void {
+    stdout.println(pick(true));
+    stdout.println(pick_reversed(false));
+    stdout.println(pick_if(true));
+}

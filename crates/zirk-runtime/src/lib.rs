@@ -37,7 +37,9 @@ mod io;
 mod memory;
 mod string;
 
-pub use failure::{zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_overflow};
+pub use failure::{
+    zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error, zirk_rt_overflow,
+};
 pub use io::zirk_io_println;
 pub use memory::zirk_rt_alloc;
 pub use string::{

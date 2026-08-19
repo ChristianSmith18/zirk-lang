@@ -1,0 +1,7 @@
+// An enum with no variants is rejected at compile time — write `Never`
+// instead (roadmap Phase 4a).
+enum Impossible {
+}
+
+fn main(): Void {
+}

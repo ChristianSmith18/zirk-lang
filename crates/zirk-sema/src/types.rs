@@ -242,6 +242,12 @@ pub enum Base {
     Union(u32),
     /// The result of `a..b`, iterable by `for ... in`.
     Range,
+    /// The bottom type (roadmap Phase 4a): no value of it exists, so an
+    /// expression of this type is assignable anywhere and unifies with any
+    /// type at a branch join (`cond ? 5 : fatalError("...")` types `Int32`,
+    /// not `Never`). `fatalError`'s own return type — a call that never
+    /// returns normally has no result to give a concrete type to.
+    Never,
     /// Assigned to expressions whose type could not be determined.
     ///
     /// It exists so one type error does not cascade into a dozen derived ones:
@@ -307,6 +313,14 @@ impl Type {
             return true;
         }
 
+        // No value of `Never` exists (roadmap Phase 4a), so a `Never`
+        // expression fits anywhere — checked ahead of the `null` rule since
+        // it is unconditional, unlike `null`'s "only where absence is
+        // admitted".
+        if matches!(other.base, Base::Never) {
+            return true;
+        }
+
         // `null` fits anything that admits absence, and nothing else.
         if matches!(other.base, Base::Null) {
             return self.admits_null();
@@ -350,6 +364,18 @@ impl Type {
             return Some(other);
         }
         if other.is_unknown() {
+            return Some(self);
+        }
+
+        // `Never` contributes nothing at a branch join — `cond ? 5 :
+        // fatalError("...")` types `Int32`, not `Never` and not `Int32?`
+        // (unlike `Null`, `Never` does not make the other side nullable:
+        // there is no absent value to represent, the branch just never
+        // completes).
+        if matches!(self.base, Base::Never) {
+            return Some(other);
+        }
+        if matches!(other.base, Base::Never) {
             return Some(self);
         }
 
@@ -434,6 +460,7 @@ impl Type {
             "Char" => Type::of(Base::Char),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
+            "Never" => Type::of(Base::Never),
             _ => return None,
         })
     }
@@ -454,6 +481,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::String => "String".to_string(),
         Base::Null => "Null".to_string(),
         Base::Range => "Range".to_string(),
+        Base::Never => "Never".to_string(),
         Base::Unknown => "<unknown>".to_string(),
         Base::Enum(id) => names.enum_name(id),
         Base::Function(id) => names.function_type(id),
@@ -725,7 +753,10 @@ pub struct PendingType {
 /// name the language does not have would teach a language that does not exist.
 pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 3 brings user-defined types and the roots they hang from.
-    const PHASE_3: &[&str] = &["Object", "Never"];
+    // `Never` is implemented now (roadmap Phase 4a, `Type::from_name`,
+    // checked ahead of this list) — it is not new debt of Phase 3 left
+    // open, just a type whose real home turned out to be here.
+    const PHASE_3: &[&str] = &["Object"];
     // Phase 3b brings the rest of the scalars. The integer widths, the
     // binary floating family and `Char` are all implemented (`Type::from_name`,
     // checked ahead of this list) — `UInt` stays here on its own: the spec

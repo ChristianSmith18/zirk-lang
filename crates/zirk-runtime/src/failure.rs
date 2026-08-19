@@ -101,3 +101,23 @@ pub extern "C" fn zirk_rt_invalid_cast() -> ! {
 pub extern "C" fn zirk_rt_float_nan() -> ! {
     fatal("Float operation produced an indeterminate result (NaN)")
 }
+
+/// Reports a program-supplied `fatalError(message)` and terminates (roadmap
+/// Phase 4a, `ZIRK_LANGUAGE_SPEC.md` section 9).
+///
+/// The only handler in this module whose message comes from the program
+/// rather than a fixed compiler-chosen cause — every other one already knows
+/// exactly what went wrong (an overflow, a division by zero, …) and says so
+/// on the caller's behalf.
+///
+/// # Safety
+///
+/// `message` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_fatal_error(message: *const std::ffi::c_void) -> ! {
+    let text = match unsafe { crate::string::borrow(message) } {
+        Some(string) => unsafe { string.as_str() }.to_string(),
+        None => String::new(),
+    };
+    fatal(&text)
+}

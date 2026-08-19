@@ -288,10 +288,13 @@ the phase:
   it is not a stable Rust primitive in this toolchain either way. Printing or
   interpolating one is rejected at compile time with a clear diagnostic, not
   silently wrong.
-- **An enum cannot implement `to_string()`**, or any method at all — enums
-  have no method table yet (`EnumType` has no `methods` field, unlike
-  `ClassType`). Pre-existing debt from Phase 3, not new here, and larger than
-  a `to_string()`-specific fix — it needs enum methods to exist at all.
+- **An enum cannot implement `to_string()`.** Corrected from an earlier,
+  wrong characterization of this as debt: `ZIRK_LANGUAGE_SPEC.md` section 7
+  is explicit — "enums are data-only and declare no user methods" — the same
+  rule `ZIRK_STDLIB_SPEC.md` and the handbook's enum pages restate
+  independently. `EnumType` having no `methods` field (unlike `ClassType`)
+  is correct on purpose, not an omission; domain behavior for an enum is an
+  external function using `match`, by design.
 
 ## Next phase: Zirk 0.4 — errors and memory
 
