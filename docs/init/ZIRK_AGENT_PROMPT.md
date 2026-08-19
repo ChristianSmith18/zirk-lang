@@ -216,12 +216,16 @@ reaches a backend that cannot compile it:
 - **`unsafe {}` and reinterpreting casts** stay out of scope, same as
   Phase 2's `?.`: they need machinery later phases own.
 
-One more, carried over unchanged from Phase 2 because nothing in this phase
-touched it: **ordinary shadowing vs. `this.name` disambiguating a captured
-name colliding with a lambda parameter** has a real, unresolved contradiction
-between `design.md`'s D10 and the corpus program `capture_by_value.zrk`,
-which already documents and tests the opposite rule. It needs a team decision
-before either side is touched again (`tasks.md` task 5.14).
+A note on something this phase resolved rather than left pending: **there is
+no ordinary shadowing.** A lambda parameter that shares a name with a
+variable it would otherwise capture is rejected (`codes::ORDINARY_SHADOWING`,
+D10) — `ZIRK_SPEC_FINAL.md` section 6 is the normative source ("Ordinary
+local shadowing is rejected; an explicit lambda capture collision uses
+`this.name`"), which settles what had been, until closeout, an open
+contradiction between `design.md`'s D10 and an older Phase 2 corpus program
+that tested the opposite. A field is never affected — it is always read as
+`this.name`, never a bare name, so there is nothing for a parameter to
+shadow.
 
 ## Next phase: Zirk 0.3b — complete scalars, conversions and text
 

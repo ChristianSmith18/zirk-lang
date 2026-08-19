@@ -1,0 +1,8 @@
+// There is no ordinary shadowing (D10): a lambda parameter that shares a
+// name with a variable it would otherwise capture is rejected, rather than
+// silently hiding the outer one for the rest of the lambda's body.
+fn main(): Void {
+    inmut outer = 5;
+    inmut g = (outer: Int32): Int32 => outer * 2;
+    stdout.println(g(3));
+}

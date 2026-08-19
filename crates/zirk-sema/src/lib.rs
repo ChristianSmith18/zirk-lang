@@ -99,4 +99,8 @@ pub mod codes {
     /// An `inmut::strict` reference used where it would gain or come from a
     /// mutable alias of the same reachable graph (D11).
     pub const STRICT_ALIAS_VIOLATION: Code = Code::new("E0430");
+    /// A lambda parameter that shares a name with a variable it would
+    /// otherwise capture (D10): there is no ordinary shadowing, only
+    /// `this.name` disambiguating a field from a colliding parameter.
+    pub const ORDINARY_SHADOWING: Code = Code::new("E0431");
 }
