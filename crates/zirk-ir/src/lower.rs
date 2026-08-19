@@ -13,58 +13,228 @@ use crate::ir::*;
 use std::collections::HashMap;
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
-use zirk_sema::{Base, CheckedProgram, Type};
+use zirk_sema::{
+    AssociatedFieldInfo, Base, CheckedProgram, ClassType, EnumType, EnumVariantInfo, FieldInfo,
+    MethodInfo, ParamInfo, Type,
+};
 
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
+    // Specialization comes first (roadmap task 11.1, D5): one concrete copy
+    // of a generic class per combination of type arguments the program
+    // actually uses (`checked.generic_instances`, deduplicated by the
+    // checker's own interning — task 11.2's "reuse when repeated" is already
+    // free there). Appended after every ordinary class, so `instance_base`
+    // is where `Base::Instance(id)` always lands: `instance_base + id`.
+    let instance_base = checked.classes.len() as u32;
+    let mut checked = checked.clone();
+    let specialized: Vec<ClassType> = checked
+        .generic_instances
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(index, instance)| specialize_class(&checked, instance, index))
+        .collect();
+    checked.classes.extend(specialized);
+
+    // The same specialization, for a generic enum's own instantiations
+    // (roadmap task 13.5: `Iteration<T>` is the only one a program can name
+    // today, `resolve_enum_reference`'s own `NOT_LOWERED` gate keeps any
+    // other generic enum from reaching this point). Unlike a contract's
+    // dispatch table, an enum's representation depends on `T` — its payload
+    // is inline — so it needs a concrete `EnumLayout` the same way a generic
+    // class's fields do.
+    let enum_instance_base = checked.enums.len() as u32;
+    let specialized_enums: Vec<EnumType> = checked
+        .enum_instances
+        .clone()
+        .into_iter()
+        .enumerate()
+        .map(|(index, instance)| specialize_enum(&checked, instance, index))
+        .collect();
+    checked.enums.extend(specialized_enums);
+    let checked = &checked;
+
     // The layouts come first: a function that builds an object needs the
     // layout it allocates, and a field access needs its offsets.
+    //
+    // A record or value class lives in `values`, not `objects` — its
+    // `ObjectLayout` entry here is an empty placeholder that is never read
+    // (`IrType::Value`, not `Object`, is what a value-kind class resolves
+    // to; see `ir_type`), the same way a still-generic template's is.
     let objects = checked
         .classes
         .iter()
-        .map(|class| ObjectLayout {
-            name: class.name.clone(),
-            fields: class
-                .fields
+        .enumerate()
+        .map(|(id, class)| {
+            let id = id as u32;
+            // A generic class's own template — as opposed to one of the
+            // specialized copies just appended, which have none of their
+            // own — is never instantiated as itself: `this` inside a
+            // specialized copy's body resolves through that copy's id, not
+            // the template's (see `run_constructor`/`run_method` below), so
+            // nothing ever addresses this layout. Left empty rather than
+            // built: its fields still name `T` (`Base::Param`), which
+            // `ir_type` has nothing to substitute here, and its methods'
+            // bodies are never lowered (skipped in the loop below), so a
+            // symbol in its table would name a function that does not exist.
+            if !class.type_params.is_empty()
+                || matches!(class.kind, ast::ClassKind::Record | ast::ClassKind::ValueClass)
+            {
+                return ObjectLayout {
+                    name: class.name.clone(),
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                    contracts: Vec::new(),
+                    ancestors: Vec::new(),
+                };
+            }
+
+            // Itself, then every base transitively — what a checked cast
+            // searches (roadmap task 11.6). A specialized generic copy
+            // never `extends` (gated at its own declaration, task 11.1), so
+            // this is always just itself for one.
+            let mut ancestors = vec![id];
+            let mut current = class.base;
+            while let Some(base_id) = current {
+                ancestors.push(base_id);
+                current = checked.classes[base_id as usize].base;
+            }
+
+            ObjectLayout {
+                name: class.name.clone(),
+                ancestors,
+                fields: class
+                    .fields
+                    .iter()
+                    .map(|field| ObjectField {
+                        name: field.name.clone(),
+                        ty: ir_type(field.ty, instance_base, enum_instance_base, checked),
+                    })
+                    .collect(),
+                // Ordered by index, which is what makes the table of a
+                // subclass start with its base's.
+                methods: {
+                    let mut table = vec![String::new(); class.methods.len()];
+                    for method in &class.methods {
+                        table[method.index] = body_symbol(checked, method);
+                    }
+                    table
+                },
+                // One table per contract, in the contract's own method
+                // order, so a call through it indexes the same way whatever
+                // class answers.
+                contracts: class
+                    .contracts
+                    .iter()
+                    .map(|id| ContractTable {
+                        contract: *id,
+                        methods: checked.contracts[*id as usize]
+                            .methods
+                            .iter()
+                            .map(|required| {
+                                let supplied = class
+                                    .method(&required.name)
+                                    .expect("the checker verified conformance");
+                                body_symbol(checked, supplied)
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    // A record or value class's own layout — indexed the same way `objects`
+    // is, sharing `checked.classes`' id space (roadmap task 11.5); an
+    // ordinary class's or a still-generic template's entry here is the
+    // empty placeholder, symmetric with `objects` above.
+    let values = checked
+        .classes
+        .iter()
+        .map(|class| {
+            if !class.type_params.is_empty()
+                || !matches!(class.kind, ast::ClassKind::Record | ast::ClassKind::ValueClass)
+            {
+                return ValueLayout {
+                    name: class.name.clone(),
+                    fields: Vec::new(),
+                };
+            }
+            ValueLayout {
+                name: class.name.clone(),
+                fields: class
+                    .fields
+                    .iter()
+                    .map(|field| ObjectField {
+                        name: field.name.clone(),
+                        ty: ir_type(field.ty, instance_base, enum_instance_base, checked),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    // An algebraic enum's own layout, indexed the same way `checked.enums`
+    // is (roadmap task 11.3). A traditional enum (no payload anywhere) or a
+    // still-generic one gets the empty placeholder: neither is ever
+    // addressed as `IrType::Enum` — `ir_type` only produces that once
+    // `enum_has_payload` is true, and a generic enum is separately gated at
+    // its own declaration.
+    let enums = checked
+        .enums
+        .iter()
+        .map(|e| {
+            // A specialized copy whose own argument was itself still a bare
+            // `T` (roadmap task 13.5) is not a real instantiation: the
+            // native `Iterable`/`Iterator` contracts intern one for their
+            // own template signatures (`iterator(): Iterator<T>`,
+            // `next(): Iteration<T>`) unconditionally, before any program
+            // is checked, so it exists in the table whether or not a
+            // program ever names a concrete `Iteration<T>` — nothing real
+            // ever addresses it as `Base::EnumInstance`, so it gets the
+            // same empty placeholder a still-generic template does.
+            let unresolved = e
+                .variants
                 .iter()
-                .map(|field| ObjectField {
-                    name: field.name.clone(),
-                    ty: ir_type(field.ty),
-                })
-                .collect(),
-            // Ordered by index, which is what makes the table of a subclass
-            // start with its base's.
-            methods: {
-                let mut table = vec![String::new(); class.methods.len()];
-                for method in &class.methods {
-                    table[method.index] = body_symbol(checked, method);
+                .flat_map(|v| &v.associated)
+                .any(|f| matches!(f.ty.base, Base::Param(_)));
+            if !e.type_params.is_empty()
+                || unresolved
+                || !e.variants.iter().any(|v| !v.associated.is_empty())
+            {
+                return EnumLayout {
+                    name: e.name.clone(),
+                    fields: Vec::new(),
+                    variants: Vec::new(),
+                };
+            }
+
+            let mut fields = Vec::new();
+            let mut variants = Vec::new();
+            for variant in &e.variants {
+                let mut indices = Vec::new();
+                for field in &variant.associated {
+                    indices.push(fields.len() as u32);
+                    fields.push(ObjectField {
+                        name: field.name.clone(),
+                        ty: ir_type(field.ty, instance_base, enum_instance_base, checked),
+                    });
                 }
-                table
-            },
-            // One table per contract, in the contract's own method order, so
-            // a call through it indexes the same way whatever class answers.
-            contracts: class
-                .contracts
-                .iter()
-                .map(|id| ContractTable {
-                    contract: *id,
-                    methods: checked.contracts[*id as usize]
-                        .methods
-                        .iter()
-                        .map(|required| {
-                            let supplied = class
-                                .method(&required.name)
-                                .expect("the checker verified conformance");
-                            body_symbol(checked, supplied)
-                        })
-                        .collect(),
-                })
-                .collect(),
+                variants.push(indices);
+            }
+            EnumLayout {
+                name: e.name.clone(),
+                fields,
+                variants,
+            }
         })
         .collect();
 
     let mut module = Module {
         objects,
+        values,
+        enums,
         ..Module::default()
     };
 
@@ -88,22 +258,40 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         else {
             continue;
         };
-        for (index, constructor) in class.constructors.iter().enumerate() {
-            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
-            let (lowered, lifted) = lowering.run_constructor(class, constructor, id as u32, index);
-            module.functions.push(lowered);
-            module.functions.extend(lifted);
+
+        // The template itself is never lowered — see the comment on its
+        // (empty) `ObjectLayout` above. Each specialization below lowers
+        // this same declaration's AST again, once per instantiation, under
+        // its own id: the type-level substitution already happened when
+        // `specialize_class` built its `ClassType`, so what changes here is
+        // only which class id `this`/a field/a method resolves against.
+        if !checked.classes[id].type_params.is_empty() {
+            continue;
         }
 
-        // A method is the same shape as a constructor: a function whose first
-        // parameter is the receiver.
-        for (index, method) in class.methods.iter().enumerate() {
-            let Some(body) = &method.body else { continue };
-            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
-            let (lowered, lifted) = lowering.run_method(class, method, body, id as u32, index);
-            module.functions.push(lowered);
-            module.functions.extend(lifted);
-        }
+        lower_class_body(
+            &mut module,
+            checked,
+            &declarations,
+            class,
+            id as u32,
+            instance_base,
+            enum_instance_base,
+        );
+    }
+
+    for (index, instance) in checked.generic_instances.iter().enumerate() {
+        let specialized_id = instance_base + index as u32;
+        let original = &program.classes[class_ast_index(program, checked, instance.class)];
+        lower_class_body(
+            &mut module,
+            checked,
+            &declarations,
+            original,
+            specialized_id,
+            instance_base,
+            enum_instance_base,
+        );
     }
 
     // A trait's default body belongs to the contract, not to any class that
@@ -118,7 +306,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         };
         for method in &contract.methods {
             let Some(body) = &method.body else { continue };
-            let lowering = FunctionLowering::new(&mut module, checked, &declarations);
+            let lowering =
+                FunctionLowering::new(&mut module, checked, &declarations, instance_base, enum_instance_base);
             let (lowered, lifted) =
                 lowering.run_contract_default(contract, method, body, id as u32);
             module.functions.push(lowered);
@@ -127,7 +316,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     for function in &program.functions {
-        let lowering = FunctionLowering::new(&mut module, checked, &declarations);
+        let lowering =
+                FunctionLowering::new(&mut module, checked, &declarations, instance_base, enum_instance_base);
         let (lowered, lifted) = lowering.run(function);
         module.functions.push(lowered);
         // Lambdas become module functions of their own: the closure value only
@@ -136,6 +326,192 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     module
+}
+
+/// Lowers every constructor and method of one class declaration under `id` —
+/// shared between an ordinary class and a generic one's specialized copy,
+/// which relowers the same AST under its own id (see callers).
+fn lower_class_body<'a>(
+    module: &mut Module,
+    checked: &'a CheckedProgram,
+    declarations: &HashMap<&'a str, &'a ast::FnDecl>,
+    class: &ast::ClassDecl,
+    id: u32,
+    instance_base: u32,
+    enum_instance_base: u32,
+) {
+    for (index, constructor) in class.constructors.iter().enumerate() {
+        let lowering =
+            FunctionLowering::new(module, checked, declarations, instance_base, enum_instance_base);
+        let (lowered, lifted) = lowering.run_constructor(class, constructor, id, index);
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
+    }
+
+    // A method is the same shape as a constructor: a function whose first
+    // parameter is the receiver.
+    for (index, method) in class.methods.iter().enumerate() {
+        let Some(body) = &method.body else { continue };
+        let lowering =
+            FunctionLowering::new(module, checked, declarations, instance_base, enum_instance_base);
+        let (lowered, lifted) = lowering.run_method(class, method, body, id, index);
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
+    }
+}
+
+/// The AST declaration a checked class id names, by matching its name — the
+/// same lookup the ordinary (non-generic) loop above does.
+fn class_ast_index(program: &ast::Program, checked: &CheckedProgram, id: u32) -> usize {
+    let name = &checked.classes[id as usize].name;
+    program
+        .classes
+        .iter()
+        .position(|c| &c.name.name == name)
+        .expect("a checked class is declared in the program")
+}
+
+/// One generic class's own `T` replaced by one instantiation's concrete
+/// arguments (roadmap task 11.1) — a specialized `ClassType` lowering treats
+/// exactly like an ordinary, non-generic one from here on.
+///
+/// Only a direct reference substitutes (`T` itself): the checker's
+/// `generic_class_is_directly_specializable` guarantees nothing here is
+/// nested inside another generic type, so no recursion is needed the way the
+/// checker's own `substitute_type` (for `Iterable<T>` and friends) needs.
+fn specialize_class(
+    checked: &CheckedProgram,
+    instance: zirk_sema::GenericInstance,
+    index: usize,
+) -> ClassType {
+    let original = &checked.classes[instance.class as usize];
+    let subst: Vec<(u32, Type)> = original
+        .type_params
+        .iter()
+        .copied()
+        .zip(instance.args.iter().copied())
+        .collect();
+    let specialized_id = checked.classes.len() as u32 + index as u32;
+
+    let substitute = |ty: Type| -> Type {
+        if let Base::Param(id) = ty.base
+            && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
+        {
+            return if ty.nullable {
+                replacement.as_nullable()
+            } else {
+                replacement
+            };
+        }
+        ty
+    };
+
+    ClassType {
+        name: format!("{}${}", original.name, index),
+        kind: original.kind,
+        base: None,
+        fields: original
+            .fields
+            .iter()
+            .map(|f| FieldInfo {
+                ty: substitute(f.ty),
+                owner: specialized_id,
+                ..f.clone()
+            })
+            .collect(),
+        constructors: original
+            .constructors
+            .iter()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|p| ParamInfo {
+                        ty: substitute(p.ty),
+                        ..p.clone()
+                    })
+                    .collect()
+            })
+            .collect(),
+        methods: original
+            .methods
+            .iter()
+            .map(|m| MethodInfo {
+                params: m
+                    .params
+                    .iter()
+                    .map(|p| ParamInfo {
+                        ty: substitute(p.ty),
+                        ..p.clone()
+                    })
+                    .collect(),
+                returns: substitute(m.returns),
+                owner: specialized_id,
+                from_contract: None,
+                overridden: false,
+                ..m.clone()
+            })
+            .collect(),
+        contracts: Vec::new(),
+        abstract_bases: Vec::new(),
+        contract_instances: Vec::new(),
+        type_params: Vec::new(),
+        shared: original.shared,
+        span: original.span,
+    }
+}
+
+/// One generic enum's own `T` replaced by one instantiation's concrete
+/// arguments (roadmap task 13.5) — the enum equivalent of
+/// [`specialize_class`], for the same reason: `Iteration<T>`'s payload is
+/// inline, so its representation genuinely depends on `T` the way a
+/// contract's dispatch table never does.
+fn specialize_enum(
+    checked: &CheckedProgram,
+    instance: zirk_sema::GenericEnumInstance,
+    index: usize,
+) -> EnumType {
+    let original = &checked.enums[instance.enum_id as usize];
+    let subst: Vec<(u32, Type)> = original
+        .type_params
+        .iter()
+        .copied()
+        .zip(instance.args.iter().copied())
+        .collect();
+
+    let substitute = |ty: Type| -> Type {
+        if let Base::Param(id) = ty.base
+            && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
+        {
+            return if ty.nullable {
+                replacement.as_nullable()
+            } else {
+                replacement
+            };
+        }
+        ty
+    };
+
+    EnumType {
+        name: format!("{}${}", original.name, index),
+        variants: original
+            .variants
+            .iter()
+            .map(|v| EnumVariantInfo {
+                associated: v
+                    .associated
+                    .iter()
+                    .map(|f| AssociatedFieldInfo {
+                        ty: substitute(f.ty),
+                        ..f.clone()
+                    })
+                    .collect(),
+                ..v.clone()
+            })
+            .collect(),
+        type_params: Vec::new(),
+        shared: original.shared,
+        span: original.span,
+    }
 }
 
 /// The name a constructor is emitted under.
@@ -176,22 +552,83 @@ fn body_symbol(checked: &CheckedProgram, method: &zirk_sema::MethodInfo) -> Stri
     }
 }
 
+/// Whether any variant of this enum carries associated data — the line
+/// between the plain `Int32` representation and `IrType::Enum` (task 11.3).
+fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
+    checked.enums[id as usize]
+        .variants
+        .iter()
+        .any(|v| !v.associated.is_empty())
+}
+
 /// Converts a frontend type into an IR type.
-fn ir_type(ty: Type) -> IrType {
+///
+/// `instance_base` is where the specialized copies of generic classes start
+/// in `module.objects`/`checked.classes`: one is appended per entry of
+/// `checked.generic_instances`, in the same order, so `Base::Instance(id)`
+/// is always at `instance_base + id` (roadmap task 11.1). Every other class
+/// keeps its own stable index ahead of that point, untouched.
+///
+/// `enum_instance_base` is the same idea for `specialize_enum`'s copies —
+/// one per `checked.enum_instances` entry, so `Base::EnumInstance(id)` is
+/// always at `enum_instance_base + id` (roadmap task 13.5).
+fn ir_type(ty: Type, instance_base: u32, enum_instance_base: u32, checked: &CheckedProgram) -> IrType {
     let base = match ty.base {
         Base::Void => IrType::Void,
         Base::Int32 => IrType::Int32,
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
-        // An enum without associated data is exactly its discriminant. Phase 3
-        // gives it a payload and with it a representation of its own.
+        // A traditional enum — none of its variants carry data — is exactly
+        // its discriminant. One with at least one algebraic variant gets a
+        // representation of its own (roadmap task 11.3).
+        Base::Enum(id) if enum_has_payload(checked, id) => IrType::Enum(id),
         Base::Enum(_) => IrType::Int32,
-        // An object is reached through its address: that is its identity.
+        // A record or value class is a value, not a reference: neither has
+        // identity (roadmap task 11.5). An ordinary class is reached through
+        // its address, which is its identity.
+        Base::Class(id)
+            if matches!(
+                checked.classes[id as usize].kind,
+                ast::ClassKind::Record | ast::ClassKind::ValueClass
+            ) =>
+        {
+            IrType::Value(id)
+        }
         Base::Class(id) => IrType::Object(id),
         Base::Contract(id) => IrType::Contract(id),
+        // A contract's dispatch table never depended on its own type
+        // arguments — only the id and the method index do (task 10.7) — so
+        // naming a generic contract instantiation resolves to exactly the
+        // same `IrType::Contract` an unparameterized reference would
+        // (roadmap task 13.5, `Iterator<T>`).
+        Base::ContractInstance(id) => IrType::Contract(checked.contract_instances[id as usize].contract),
+        // The specialized copy this instantiation lowered to — see
+        // `instance_base` above.
+        Base::Instance(id) => IrType::Object(instance_base + id),
+        // The specialized copy `specialize_enum` built for this
+        // instantiation — see `enum_instance_base` above (roadmap task
+        // 13.5, `Iteration<T>`). A payload-free instantiation would stay
+        // `Int32`, the same rule an ordinary generic-free enum follows,
+        // though nothing yet interns one: every native variant here carries
+        // data.
+        Base::EnumInstance(id) => {
+            let specialized = enum_instance_base + id;
+            if enum_has_payload(checked, specialized) {
+                IrType::Enum(specialized)
+            } else {
+                IrType::Int32
+            }
+        }
         // A verified program contains none of these: the checker reports and
-        // the pipeline stops before reaching lowering.
-        Base::Unknown | Base::Null | Base::Function(_) | Base::Range => {
+        // the pipeline stops before reaching lowering. A bare generic type
+        // parameter is among them: a class's own `T` only reaches lowering
+        // once substituted into a concrete argument, by the specialization
+        // pass that builds the entries `Base::Instance` above indexes into
+        // — and a class not simple enough for that pass to specialize is
+        // unconditionally reported with `NOT_LOWERED` at its own declaration
+        // (`Self::generic_class_is_directly_specializable` in the checker),
+        // so its body never reaches here either.
+        Base::Unknown | Base::Null | Base::Function(_) | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -207,6 +644,10 @@ struct FunctionLowering<'a> {
     module: &'a mut Module,
     checked: &'a CheckedProgram,
     declarations: &'a HashMap<&'a str, &'a ast::FnDecl>,
+    /// See `ir_type`'s `instance_base` parameter.
+    instance_base: u32,
+    /// See `ir_type`'s `enum_instance_base` parameter.
+    enum_instance_base: u32,
 
     slots: Vec<Slot>,
     blocks: Vec<Block>,
@@ -238,11 +679,15 @@ impl<'a> FunctionLowering<'a> {
         module: &'a mut Module,
         checked: &'a CheckedProgram,
         declarations: &'a HashMap<&'a str, &'a ast::FnDecl>,
+        instance_base: u32,
+        enum_instance_base: u32,
     ) -> Self {
         Self {
             module,
             checked,
             declarations,
+            instance_base,
+            enum_instance_base,
             slots: Vec::new(),
             blocks: Vec::new(),
             current: BlockId(0),
@@ -253,6 +698,11 @@ impl<'a> FunctionLowering<'a> {
             lifted: Vec::new(),
             value_types: HashMap::new(),
         }
+    }
+
+    /// [`ir_type`], with this lowering's own `instance_base`/`enum_instance_base` applied.
+    fn ir_type(&self, ty: Type) -> IrType {
+        ir_type(ty, self.instance_base, self.enum_instance_base, self.checked)
     }
 
     // --- Construction helpers ---------------------------------------------
@@ -369,28 +819,47 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
-        let declared = self.declaration_of(&reference.name, reference.span);
-        let base = if let Some(ty) = Type::from_name(&reference.name) {
-            ir_type(ty)
-        } else if self.checked.enums.iter().any(|e| e.name == declared) {
-            IrType::Int32
-        } else if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
-            IrType::Object(id as u32)
-        } else if let Some(id) = self
-            .checked
-            .contracts
-            .iter()
-            .position(|c| c.name == declared)
-        {
-            IrType::Contract(id as u32)
-        } else {
-            unreachable!("a verified program only names known types")
-        };
+        let mut ty = self.resolve_written_type(reference);
+        ty.nullable = reference.nullable;
+        self.ir_type(ty)
+    }
 
-        if !reference.nullable {
-            return base;
+    /// Resolves a written type reference the same way the checker's own
+    /// `resolve_type` did, but against lowering's tables — needed because a
+    /// generic class's annotation (`Box<Int32>`) names its arguments in the
+    /// source, and only the checker's `generic_instances` table (already
+    /// deduplicated by content) says which specialized copy that is
+    /// (roadmap task 11.1). A bare `Box` without arguments is the ordinary,
+    /// unspecialized class it always was.
+    fn resolve_written_type(&self, reference: &ast::TypeRef) -> Type {
+        let declared = self.declaration_of(&reference.name, reference.span);
+        if let Some(ty) = Type::from_name(&reference.name) {
+            return ty;
         }
-        IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
+        if let Some(id) = self.checked.enums.iter().position(|e| e.name == declared) {
+            return Type::of(Base::Enum(id as u32));
+        }
+        if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
+            if reference.arguments.is_empty() {
+                return Type::of(Base::Class(id as u32));
+            }
+            let args: Vec<Type> = reference
+                .arguments
+                .iter()
+                .map(|a| self.resolve_written_type(a))
+                .collect();
+            let instance = self
+                .checked
+                .generic_instances
+                .iter()
+                .position(|gi| gi.class == id as u32 && gi.args == args)
+                .expect("the checker interned every instantiation it type-checked");
+            return Type::of(Base::Instance(instance as u32));
+        }
+        if let Some(id) = self.checked.contracts.iter().position(|c| c.name == declared) {
+            return Type::of(Base::Contract(id as u32));
+        }
+        unreachable!("a verified program only names known types")
     }
 
     /// Lowers an expression whose value must survive lowering a later one.
@@ -456,25 +925,93 @@ impl<'a> FunctionLowering<'a> {
 
     /// Lowers an expression into the type its destination expects.
     ///
-    /// `T` is accepted where `T?` is expected, and `null` fits any nullable
-    /// type. Neither is a conversion the IR performs implicitly: this is where
-    /// the widening becomes an instruction.
+    /// `T` is accepted where `T?` is expected, `null` fits any nullable type,
+    /// and a subclass or a contract implementation is accepted where a base
+    /// class or that contract is expected (D5's ordinary subtyping — an
+    /// object's own address does not change shape between the two, only
+    /// which methods a static type promises). None of those is a conversion
+    /// the IR performs implicitly: this is where the widening becomes an
+    /// instruction.
     fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
-        let IrType::Nullable(base) = expected else {
-            return self.lower_expr(expr);
-        };
+        // A bare variant access with no associated data (`Iteration.Done`)
+        // resolves here against the destination's own enum id, rather than
+        // through `lower_expr`'s ordinary path (below): the checker types
+        // it against the enum's own bare declaration (`Self::check_variant`
+        // never learns which instantiation a caller has in mind — that is
+        // exactly what `bare_enum_matches_instance` exists to sidestep on
+        // the checking side), so building it against that bare id would use
+        // a still-generic enum's empty, unspecialized layout (roadmap task
+        // 13.5, `Iteration<T>`'s `Done`). The destination already knows the
+        // concrete one.
+        if let ast::Expr::Field(field) = expr
+            && self.checked.variant_accesses.contains(&field.span)
+            && let IrType::Enum(enum_id) = expected.unwrapped()
+        {
+            let variant = self.checked.enums[enum_id as usize]
+                .discriminant(&field.name.name)
+                .expect("the checker resolved this variant");
+            let value = self.emit(
+                InstKind::BuildEnum {
+                    enum_id,
+                    variant,
+                    fields: Vec::new(),
+                },
+                IrType::Enum(enum_id),
+                field.span,
+            );
+            return match expected {
+                IrType::Nullable(base) => {
+                    self.emit(InstKind::Wrap { base, value }, expected, field.span)
+                }
+                _ => value,
+            };
+        }
 
-        // `null` has no type of its own: the destination supplies it.
-        if matches!(expr, ast::Expr::Null(_)) {
-            return self.emit(InstKind::NullValue(base), expected, expr.span());
+        if let IrType::Nullable(base) = expected {
+            // `null` has no type of its own: the destination supplies it.
+            if matches!(expr, ast::Expr::Null(_)) {
+                return self.emit(InstKind::NullValue(base), expected, expr.span());
+            }
+
+            let value = self.lower_expr(expr);
+            let actual = self.type_of(expr, expr.span());
+            if actual == expected {
+                return value;
+            }
+
+            // A bare `T` widens to `T?` by wrapping; a subclass or contract
+            // implementation additionally needs its declared type retagged
+            // first (mirrors the non-nullable branch below), since `Wrap`
+            // itself only adds the present flag, not the widening.
+            let value = if actual != base.inner()
+                && matches!(actual, IrType::Object(_) | IrType::Contract(_))
+                && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
+            {
+                self.emit(InstKind::Retype(value), base.inner(), expr.span())
+            } else {
+                value
+            };
+
+            return self.emit(InstKind::Wrap { base, value }, expected, expr.span());
         }
 
         let value = self.lower_expr(expr);
-        if self.type_of(expr, expr.span()) == expected {
+        if self.type_of_operand(value) == expected {
             return value;
         }
 
-        self.emit(InstKind::Wrap { base, value }, expected, expr.span())
+        // The checker already proved this is a subclass, or a contract
+        // implementation, of what is expected — that is the only way the
+        // types could differ here without `expect_assignable` having
+        // rejected the program. Both share the same representation (an
+        // object's own address), so there is nothing to check at runtime,
+        // only the declared type changes from here on — unlike `as`, whose
+        // relation is not proven ahead of time (roadmap task 11.6).
+        if matches!(expected, IrType::Object(_) | IrType::Contract(_)) {
+            return self.emit(InstKind::Retype(value), expected, expr.span());
+        }
+
+        value
     }
 
     // --- Function ---------------------------------------------------------
@@ -493,7 +1030,7 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .functions
             .get(&function.name.name)
-            .map(|s| s.params.iter().map(|p| ir_type(p.ty)).collect())
+            .map(|s| s.params.iter().map(|p| self.ir_type(p.ty)).collect())
             .expect("the checker records every declared function");
 
         let params: Vec<SlotId> = function
@@ -557,7 +1094,7 @@ impl<'a> FunctionLowering<'a> {
             .classes
             .get(id as usize)
             .and_then(|c| c.constructors.get(index))
-            .map(|params| params.iter().map(|p| ir_type(p.ty)).collect())
+            .map(|params| params.iter().map(|p| self.ir_type(p.ty)).collect())
             .expect("the checker records every constructor");
 
         let mut params = vec![this];
@@ -575,7 +1112,11 @@ impl<'a> FunctionLowering<'a> {
 
         let lifted = std::mem::take(&mut self.lifted);
         let lowered = Function {
-            name: constructor_symbol(&class.name.name, index),
+            // The checked class's own name, not the written declaration's:
+            // a specialized copy's is `Box$0`, not `Box` (roadmap task
+            // 11.1) — using the AST's bare name here would collide every
+            // instantiation's constructor onto the same symbol.
+            name: constructor_symbol(&self.checked.classes[id as usize].name, index),
             params,
             return_type: IrType::Void,
             slots: self.slots,
@@ -612,7 +1153,7 @@ impl<'a> FunctionLowering<'a> {
             .contracts
             .get(id as usize)
             .and_then(|c| c.method(&method.name.name))
-            .map(|m| m.params.iter().map(|p| ir_type(p.ty)).collect())
+            .map(|m| m.params.iter().map(|p| self.ir_type(p.ty)).collect())
             .expect("the checker records every contract method");
 
         let mut params = vec![this];
@@ -691,7 +1232,12 @@ impl<'a> FunctionLowering<'a> {
             }
             // Absence is exactly what a nullable type defaults to.
             IrType::Nullable(base) => self.emit(InstKind::NullValue(base), ty, span),
-            IrType::Void | IrType::Closure(_) | IrType::Object(_) | IrType::Contract(_) => {
+            IrType::Void
+            | IrType::Closure(_)
+            | IrType::Object(_)
+            | IrType::Contract(_)
+            | IrType::Value(_)
+            | IrType::Enum(_) => {
                 return None;
             }
         })
@@ -706,21 +1252,28 @@ impl<'a> FunctionLowering<'a> {
         id: u32,
         index: usize,
     ) -> (Function, Vec<Function>) {
-        self.return_type = self.ir_type_from_ref(&method.return_type);
+        // Read from the checked class rather than the written annotation: a
+        // specialized copy's method returns `Int32` where the AST still says
+        // `T` (roadmap task 11.1) — `checked.classes[id]` already carries
+        // the substituted type, the same table `resolved` below reads for
+        // the parameters.
+        let found = self
+            .checked
+            .classes
+            .get(id as usize)
+            .and_then(|c| c.methods.iter().find(|m| m.index == index))
+            .expect("the checker records every method");
+        self.return_type = self.ir_type(found.returns);
+        let resolved: Vec<IrType> = found.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let entry = self.new_block();
         self.current = entry;
         self.scopes.push(HashMap::new());
 
-        let this = self.declare_slot("this", IrType::Object(id), class.name.span);
-
-        let resolved: Vec<IrType> = self
-            .checked
-            .classes
-            .get(id as usize)
-            .and_then(|c| c.methods.iter().find(|m| m.index == index))
-            .map(|m| m.params.iter().map(|p| ir_type(p.ty)).collect())
-            .expect("the checker records every method");
+        // A record or value class's method receives `this` by value too
+        // (roadmap task 11.5): there is nothing to point at.
+        let this_ty = self.ir_type(Type::of(Base::Class(id)));
+        let this = self.declare_slot("this", this_ty, class.name.span);
 
         let mut params = vec![this];
         params.extend(
@@ -746,7 +1299,8 @@ impl<'a> FunctionLowering<'a> {
 
         let lifted = std::mem::take(&mut self.lifted);
         let lowered = Function {
-            name: method_symbol(&class.name.name, &method.name.name),
+            // See the identical note in `run_constructor`.
+            name: method_symbol(&self.checked.classes[id as usize].name, &method.name.name),
             params,
             return_type: self.return_type,
             slots: self.slots,
@@ -979,7 +1533,7 @@ impl<'a> FunctionLowering<'a> {
     /// protocol the language does not define yet. Decision D3.
     fn lower_for_in(&mut self, stmt: &ast::ForInStmt) {
         let ast::Expr::Range(range) = &stmt.iterable else {
-            unreachable!("a verified program only iterates ranges in this phase")
+            return self.lower_for_in_iterable(stmt);
         };
 
         self.scopes.push(HashMap::new());
@@ -1052,6 +1606,139 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.scopes.pop();
+    }
+
+    /// Lowers `for x in it { ... }` over a type's own `Iterable<T>` (roadmap
+    /// task 13.5, D8) — `it.iterator()` runs once, then `next()` runs at the
+    /// head of every pass, matched against `Iteration<T>`'s two variants the
+    /// same way an ordinary `match` on it would (`lower_match`'s own
+    /// discriminant-plus-payload pattern): `Item` extracts its associated
+    /// value and enters the body, `Done` exits.
+    ///
+    /// ```text
+    ///   it.iterator() ──▶ header: next() ──(Item)──▶ body ──┐
+    ///                            │(Done)                    │
+    ///                            ▼                          │
+    ///                        continue ◀─────────────────────┘
+    /// ```
+    fn lower_for_in_iterable(&mut self, stmt: &ast::ForInStmt) {
+        let iterable_contract = self.native_contract_id("Iterable");
+        let iterator_contract = self.native_contract_id("Iterator");
+
+        let &instance = self.checked.for_in_iteration.get(&stmt.iterable.span()).expect(
+            "the checker records which `Iteration<T>` a loop over a type's own `Iterable<T>` needs",
+        );
+        let iteration_id = self.enum_instance_base + instance;
+        let item = self.checked.enums[iteration_id as usize]
+            .discriminant("Item")
+            .expect("the native `Iteration<T>` always has an `Item` variant");
+        let item_field = self.module.enums[iteration_id as usize].variants[item as usize][0];
+        let element_ty = self.module.enums[iteration_id as usize].fields[item_field as usize].ty;
+
+        // `it.iterator()`, called once — not on every pass, the same reason
+        // an ordinary range's own end is evaluated once above.
+        let iterable = self.lower_expr(&stmt.iterable);
+        let iterator_index = self.checked.contracts[iterable_contract as usize]
+            .method("iterator")
+            .expect("`Iterable<T>` always declares `iterator`")
+            .index as u32;
+        let iterator_ty = IrType::Contract(iterator_contract);
+        let iterator = self.emit(
+            InstKind::CallContract {
+                object: iterable,
+                contract: iterable_contract,
+                index: iterator_index,
+                args: Vec::new(),
+            },
+            iterator_ty,
+            stmt.span,
+        );
+        let iterator_slot = self.declare_slot("<iterator>", iterator_ty, stmt.span);
+        self.emit_effect(InstKind::Store(iterator_slot, iterator), stmt.span);
+
+        self.scopes.push(HashMap::new());
+        let binding = self.declare_slot(&stmt.binding.name, element_ty, stmt.binding.span);
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+
+        let next_index = self.checked.contracts[iterator_contract as usize]
+            .method("next")
+            .expect("`Iterator<T>` always declares `next`")
+            .index as u32;
+        let held_iterator = self.emit(InstKind::Load(iterator_slot), iterator_ty, stmt.span);
+        let iteration_ty = IrType::Enum(iteration_id);
+        let iteration = self.emit(
+            InstKind::CallContract {
+                object: held_iterator,
+                contract: iterator_contract,
+                index: next_index,
+                args: Vec::new(),
+            },
+            iteration_ty,
+            stmt.span,
+        );
+        let iteration_slot = self.declare_slot("<iteration>", iteration_ty, stmt.span);
+        self.emit_effect(InstKind::Store(iteration_slot, iteration), stmt.span);
+
+        let held = self.emit(InstKind::Load(iteration_slot), iteration_ty, stmt.span);
+        let discriminant = self.emit(InstKind::Discriminant(held), IrType::Int32, stmt.span);
+        let expected = self.emit(InstKind::ConstInt(item as i32), IrType::Int32, stmt.span);
+        let is_item = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: discriminant,
+                right: expected,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_item,
+            then_block: body_block,
+            else_block: continue_block,
+        });
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: header,
+        });
+
+        self.current = body_block;
+        let held = self.emit(InstKind::Load(iteration_slot), iteration_ty, stmt.span);
+        let value = self.emit(
+            InstKind::LoadField {
+                object: held,
+                index: item_field,
+            },
+            element_ty,
+            stmt.binding.span,
+        );
+        self.emit_effect(InstKind::Store(binding, value), stmt.binding.span);
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(header));
+
+        self.loops.pop();
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    /// The id of a contract the language itself registers, by name — the
+    /// language never lets application code reopen `Iterable`/`Iterator`
+    /// (`Self::is_native_contract_name` on the checker side), so each is
+    /// registered exactly once, unconditionally, before any program
+    /// declaration is checked (task 6.9).
+    fn native_contract_id(&self, name: &str) -> u32 {
+        self.checked
+            .contracts
+            .iter()
+            .position(|c| c.name == name)
+            .expect("the language registers this contract unconditionally") as u32
     }
 
     fn lower_break(&mut self, _stmt: &ast::JumpStmt) {
@@ -1134,11 +1821,11 @@ impl<'a> FunctionLowering<'a> {
                 let class = &self.checked.classes[id as usize];
                 let method = class.method(&name).expect("the checker resolved it");
                 let symbol = body_symbol(self.checked, method);
-                let returns = ir_type(method.returns);
+                let returns = self.ir_type(method.returns);
                 let param = method
                     .params
                     .first()
-                    .map(|p| ir_type(p.ty))
+                    .map(|p| self.ir_type(p.ty))
                     .expect("an operator method takes one operand");
 
                 let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
@@ -1233,10 +1920,23 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_method_call(e, span) {
                     return operand;
                 }
-                let name = self.callee_name(e);
-                if let Some(id) = self.class_id(&name) {
-                    return self.lower_construction(e, id, span);
+                if let Some(operand) = self.lower_safe_method_call(e, span) {
+                    return operand;
                 }
+                if let Some((enum_id, variant)) = self.variant_construction(e) {
+                    return self.lower_variant_construction(e, enum_id, variant, span);
+                }
+                if let Some(id) = self.construction_class_id(e) {
+                    return if matches!(
+                        self.checked.classes[id as usize].kind,
+                        ast::ClassKind::Record | ast::ClassKind::ValueClass
+                    ) {
+                        self.lower_record_construction(e, id, span)
+                    } else {
+                        self.lower_construction(e, id, span)
+                    };
+                }
+                let name = self.callee_name(e);
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
                 self.emit(InstKind::Call { callee: name, args }, returns, span)
@@ -1266,6 +1966,8 @@ impl<'a> FunctionLowering<'a> {
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
             ast::Expr::Lambda(e) => self.lower_lambda(e, span),
+
+            ast::Expr::Cast(e) => self.lower_cast(e, span),
 
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
@@ -1421,8 +2123,8 @@ impl<'a> FunctionLowering<'a> {
             .map(|slot| self.slot_type(*slot))
             .collect();
         let signature = &self.checked.fn_types[info.fn_type as usize];
-        let param_types: Vec<IrType> = signature.params.iter().map(|t| ir_type(*t)).collect();
-        let returns = ir_type(signature.returns);
+        let param_types: Vec<IrType> = signature.params.iter().map(|t| self.ir_type(*t)).collect();
+        let returns = self.ir_type(signature.returns);
 
         // The name reaches the object file as a symbol, so it may only use
         // characters every target's assembler accepts. `#` starts a comment in
@@ -1479,7 +2181,14 @@ impl<'a> FunctionLowering<'a> {
         types: &[IrType],
         returns: IrType,
     ) -> Function {
-        let mut inner = FunctionLowering::new(self.module, self.checked, self.declarations);
+        let mut inner =
+            FunctionLowering::new(
+                self.module,
+                self.checked,
+                self.declarations,
+                self.instance_base,
+                self.enum_instance_base,
+            );
         inner.return_type = returns;
 
         let entry = inner.new_block();
@@ -1531,6 +2240,16 @@ impl<'a> FunctionLowering<'a> {
             .expect("a verified program only names declared variants") as i32
     }
 
+    /// The id a variant pattern's or construction's enum name resolves to.
+    fn enum_id_of(&self, enum_name: &ast::Ident) -> u32 {
+        let declared = self.declaration_of(&enum_name.name, enum_name.span);
+        self.checked
+            .enums
+            .iter()
+            .position(|e| e.name == declared)
+            .expect("a verified program only names declared enums") as u32
+    }
+
     /// Lowers a `match` into a chain of comparisons.
     ///
     /// ```text
@@ -1554,8 +2273,19 @@ impl<'a> FunctionLowering<'a> {
         self.emit_effect(InstKind::Store(scrutinee, value), span);
 
         // A `match` used as a statement produces nothing, and a slot has no
-        // `Void` form to hold it.
+        // `Void` form to hold it. `arm_value_type` needs the first arm's own
+        // bound names in scope before any block for its body exists — a
+        // binding pattern's body may read the very name it binds, the same
+        // way a variant destructure's may read a field it names — so those
+        // are registered here, type-only, with nothing emitted for them:
+        // the real bindings for that arm are made again inside the loop
+        // below, where there is a body block for a load to belong to.
+        self.scopes.push(HashMap::new());
+        if let Some(first) = expr.arms.first() {
+            self.declare_pattern_types(&first.pattern, scrutinee_type);
+        }
         let result_type = self.arm_value_type(expr);
+        self.scopes.pop();
         let result =
             (result_type != IrType::Void).then(|| self.declare_slot("<match>", result_type, span));
 
@@ -1592,6 +2322,32 @@ impl<'a> FunctionLowering<'a> {
                 let current = self.emit(InstKind::Load(scrutinee), scrutinee_type, ident.span);
                 let slot = self.declare_slot(&ident.name, scrutinee_type, ident.span);
                 self.emit_effect(InstKind::Store(slot, current), ident.span);
+            }
+            // A variant pattern destructures its own associated fields, each
+            // into the name its sub-pattern binds (roadmap task 11.4) — the
+            // checker only accepts a binding or a wildcard here, so a
+            // wildcard is the only other shape this sees.
+            if let ast::Pattern::Variant(v) = &arm.pattern
+                && !v.bindings.is_empty()
+            {
+                let enum_id = self.enum_id_of(&v.enum_name);
+                let variant = self
+                    .checked
+                    .enums
+                    .get(enum_id as usize)
+                    .and_then(|e| e.discriminant(&v.variant.name))
+                    .expect("the checker resolved this variant");
+                let indices = self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                for (sub_pattern, index) in v.bindings.iter().zip(indices) {
+                    let ast::Pattern::Binding(ident) = sub_pattern else {
+                        continue;
+                    };
+                    let field_ty = self.module.enums[enum_id as usize].fields[index as usize].ty;
+                    let value = self.emit(InstKind::LoadField { object, index }, field_ty, ident.span);
+                    let slot = self.declare_slot(&ident.name, field_ty, ident.span);
+                    self.emit_effect(InstKind::Store(slot, value), ident.span);
+                }
             }
 
             let value = match &arm.body {
@@ -1668,6 +2424,14 @@ impl<'a> FunctionLowering<'a> {
         };
 
         let left = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+        // An algebraic enum's own value is discriminant plus payload, not
+        // the discriminant alone (roadmap task 11.3) — a variant pattern
+        // still tests only the discriminant, so it is read out first.
+        let left = if let IrType::Enum(_) = scrutinee_type {
+            self.emit(InstKind::Discriminant(left), IrType::Int32, span)
+        } else {
+            left
+        };
         self.emit(
             InstKind::Binary {
                 op: BinaryOp::Eq,
@@ -1677,6 +2441,35 @@ impl<'a> FunctionLowering<'a> {
             IrType::Boolean,
             span,
         )
+    }
+
+    /// Registers a pattern's own bound names against the current scope,
+    /// without emitting anything — see the call site in [`Self::lower_match`].
+    fn declare_pattern_types(&mut self, pattern: &ast::Pattern, scrutinee_type: IrType) {
+        match pattern {
+            ast::Pattern::Binding(ident) => {
+                self.declare_slot(&ident.name, scrutinee_type, ident.span);
+            }
+            ast::Pattern::Variant(v) if !v.bindings.is_empty() => {
+                let enum_id = self.enum_id_of(&v.enum_name);
+                let Some(variant) = self
+                    .checked
+                    .enums
+                    .get(enum_id as usize)
+                    .and_then(|e| e.discriminant(&v.variant.name))
+                else {
+                    return;
+                };
+                let indices = self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                for (sub_pattern, index) in v.bindings.iter().zip(indices) {
+                    if let ast::Pattern::Binding(ident) = sub_pattern {
+                        let field_ty = self.module.enums[enum_id as usize].fields[index as usize].ty;
+                        self.declare_slot(&ident.name, field_ty, ident.span);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The type the arms of a `match` produce.
@@ -1750,8 +2543,8 @@ impl<'a> FunctionLowering<'a> {
             let class = &self.checked.classes[base as usize];
             let method = class.method(&field.name.name)?;
             let name = body_symbol(self.checked, method);
-            let returns = ir_type(method.returns);
-            let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+            let returns = self.ir_type(method.returns);
+            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
             let this = self.lookup_slot("this");
             let receiver = self.emit(InstKind::Load(this), self.slot_type(this), span);
@@ -1770,7 +2563,7 @@ impl<'a> FunctionLowering<'a> {
         let index = self.constructor_index(base, call.args.len());
         let params: Vec<IrType> = self.checked.classes[base as usize].constructors[index]
             .iter()
-            .map(|p| ir_type(p.ty))
+            .map(|p| self.ir_type(p.ty))
             .collect();
 
         let this = self.lookup_slot("this");
@@ -1819,6 +2612,12 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             return None;
         };
+        // Otherwise this asks for the type of a value that is not one: the
+        // object names an enum, not a variable (task 11.3's variant
+        // construction is the same shape a method call is, up to here).
+        if self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
         };
@@ -1844,6 +2643,9 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             return None;
         };
+        if self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
         };
@@ -1851,8 +2653,8 @@ impl<'a> FunctionLowering<'a> {
         let contract = &self.checked.contracts[id as usize];
         let method = contract.method(&field.name.name)?;
         let index = method.index as u32;
-        let returns = ir_type(method.returns);
-        let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+        let returns = self.ir_type(method.returns);
+        let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let receiver = self.lower_expr(&field.object);
         let mut args = Vec::new();
@@ -1894,8 +2696,8 @@ impl<'a> FunctionLowering<'a> {
         // being called through: an inherited method keeps its owner, and an
         // adopted trait default belongs to the trait.
         let name = body_symbol(self.checked, method);
-        let returns = ir_type(method.returns);
-        let params: Vec<IrType> = method.params.iter().map(|p| ir_type(p.ty)).collect();
+        let returns = self.ir_type(method.returns);
+        let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let virtual_index = method.overridden.then_some(method.index as u32);
 
@@ -1941,6 +2743,20 @@ impl<'a> FunctionLowering<'a> {
             .map(|i| i as u32)
     }
 
+    /// The layout id a construction call builds.
+    ///
+    /// A generic class's own bare name (`Box`) cannot tell `Box<Int32>` from
+    /// `Box<String>` apart the way `class_id` resolves an ordinary class —
+    /// the checker records which instantiation each call site inferred
+    /// (`Self::checked`'s `generic_constructions`, roadmap task 11.1), and
+    /// that takes priority whenever this call's span is one.
+    fn construction_class_id(&self, call: &ast::CallExpr) -> Option<u32> {
+        if let Some(&instance) = self.checked.generic_constructions.get(&call.span) {
+            return Some(self.instance_base + instance);
+        }
+        self.class_id(&self.callee_name(call))
+    }
+
     /// Lowers `User(...)` into an allocation plus a call to its constructor.
     ///
     /// The two steps are what separates identity from initialization: the
@@ -1955,7 +2771,7 @@ impl<'a> FunctionLowering<'a> {
             .classes
             .get(id as usize)
             .and_then(|c| c.constructors.get(index))
-            .map(|p| p.iter().map(|param| ir_type(param.ty)).collect())
+            .map(|p| p.iter().map(|param| self.ir_type(param.ty)).collect())
             .expect("the checker resolved the constructor");
 
         let mut args = vec![object];
@@ -1973,6 +2789,166 @@ impl<'a> FunctionLowering<'a> {
         );
 
         object
+    }
+
+    /// Lowers `Point(x: 1, y: 2)`: a record or value class's implicit
+    /// construction (roadmap task 11.5), packaging every field's value in
+    /// declaration order rather than obtaining storage and calling into it
+    /// — there is no `construct` to call, and nothing here allocates.
+    ///
+    /// Arguments are always named (the checker requires it), and match a
+    /// field the same way regardless of the order they were written in; an
+    /// omitted field — one the checker confirmed has a default — takes it.
+    fn lower_record_construction(&mut self, call: &ast::CallExpr, id: u32, span: Span) -> Operand {
+        let field_names: Vec<String> = self.module.values[id as usize]
+            .fields
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        let field_types: Vec<IrType> = self.module.values[id as usize]
+            .fields
+            .iter()
+            .map(|f| f.ty)
+            .collect();
+
+        let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
+        for arg in &call.args {
+            let name = &arg
+                .name
+                .as_ref()
+                .expect("the checker requires named arguments for a record")
+                .name;
+            let index = field_names
+                .iter()
+                .position(|n| n == name)
+                .expect("the checker resolved the field against this layout");
+            given[index] = Some(self.lower_expr_as(&arg.value, field_types[index]));
+        }
+
+        let fields: Vec<Operand> = given
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.unwrap_or_else(|| {
+                    self.default_value(field_types[index], span)
+                        .expect("the checker required a default for an omitted field")
+                })
+            })
+            .collect();
+
+        self.emit(InstKind::BuildValue { class: id, fields }, IrType::Value(id), span)
+    }
+
+    /// The enum and discriminant a call constructs, if it names a variant
+    /// with associated data (`Shape.Circle(radius: 5)`) — the checker marks
+    /// such a call's callee span the same way it marks a bare variant
+    /// reference's (`self.checked.variant_accesses`), so this is the call
+    /// equivalent of that check.
+    fn variant_construction(&self, call: &ast::CallExpr) -> Option<(u32, u32)> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
+        let ast::Expr::Path(enum_name) = &*field.object else {
+            return None;
+        };
+        // A generic enum's variant construction resolves against the
+        // specific instantiation the checker inferred from this call's own
+        // arguments (roadmap task 13.5, `CheckedProgram::variant_constructions`)
+        // — the enum construction equivalent of `Self::construction_class_id`
+        // consulting `generic_constructions` first. Every other enum's bare
+        // name is unambiguous, the same way a non-generic class's is.
+        let enum_id = match self.checked.variant_constructions.get(&call.span) {
+            Some(&instance) => self.enum_instance_base + instance,
+            None => {
+                let declared = self.declaration_of(&enum_name.name, enum_name.span);
+                self.checked.enums.iter().position(|e| e.name == declared)? as u32
+            }
+        };
+        let variant = self.checked.enums[enum_id as usize].discriminant(&field.name.name)?;
+        Some((enum_id, variant))
+    }
+
+    /// Lowers `Shape.Circle(radius: 5)`: an algebraic enum's variant
+    /// construction (roadmap task 11.3), packaging the discriminant plus
+    /// this variant's own associated fields — the checker requires every
+    /// variant with data to have some (`Self::variant_construction` only
+    /// returns one that does), so there is nothing to default the way a
+    /// record's omitted field can be.
+    ///
+    /// Arguments may be positional or named, the same as an ordinary call
+    /// (unlike a record, which the checker requires named-only): a bare
+    /// position matches the associated field at that position, a named one
+    /// matches by name regardless of where it was written.
+    fn lower_variant_construction(
+        &mut self,
+        call: &ast::CallExpr,
+        enum_id: u32,
+        variant: u32,
+        span: Span,
+    ) -> Operand {
+        let associated = &self.checked.enums[enum_id as usize].variants[variant as usize].associated;
+        let field_names: Vec<String> = associated.iter().map(|f| f.name.clone()).collect();
+        let field_types: Vec<IrType> = associated.iter().map(|f| self.ir_type(f.ty)).collect();
+
+        let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
+        for (position, arg) in call.args.iter().enumerate() {
+            let index = match &arg.name {
+                Some(name) => field_names
+                    .iter()
+                    .position(|n| n == &name.name)
+                    .expect("the checker resolved the field against this variant"),
+                None => position,
+            };
+            given[index] = Some(self.lower_expr_as(&arg.value, field_types[index]));
+        }
+
+        let fields: Vec<Operand> = given
+            .into_iter()
+            .map(|value| value.expect("the checker required every associated field"))
+            .collect();
+
+        self.emit(
+            InstKind::BuildEnum {
+                enum_id,
+                variant,
+                fields,
+            },
+            IrType::Enum(enum_id),
+            span,
+        )
+    }
+
+    /// Lowers `value as Target` (roadmap task 11.6).
+    ///
+    /// The identity shape — same base on both sides, whatever kind it is —
+    /// needs no runtime check at all: the value already is the target, so
+    /// it passes through unchanged. The checker's `cast_is_directly_lowerable`
+    /// only accepts that shape or a class/contract value checked against a
+    /// class's descriptor, so a target that is not itself already the
+    /// operand's type is always `IrType::Object` here.
+    fn lower_cast(&mut self, expr: &ast::CastExpr, span: Span) -> Operand {
+        let target_ty = self.ir_type_from_ref(&expr.target);
+        let value = self.lower_expr(&expr.expr);
+        let actual_ty = self.type_of_operand(value);
+
+        if actual_ty == target_ty {
+            return value;
+        }
+
+        let IrType::Object(target_class) = target_ty else {
+            unreachable!("the checker only lowers a cast whose target is a class, once identity is ruled out")
+        };
+        self.emit(
+            InstKind::CheckedCast {
+                object: value,
+                target_class,
+            },
+            target_ty,
+            span,
+        )
     }
 
     /// Which `construct` a call of this arity resolves to.
@@ -2000,8 +2976,35 @@ impl<'a> FunctionLowering<'a> {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
             };
-            let value = self.discriminant(enum_name, &expr.name.name);
-            return self.emit(InstKind::ConstInt(value), IrType::Int32, span);
+            let enum_id = self.enum_id_of(enum_name);
+            let discriminant = self.discriminant(enum_name, &expr.name.name);
+            // A bare access only ever names a variant with no associated
+            // data (the checker rejects any other shape) — but the enum it
+            // belongs to may still carry a payload elsewhere (`Shape.Empty`
+            // alongside `Shape.Circle(radius: Int32)`), which is what
+            // decides its representation: the discriminant alone, or the
+            // same `discriminant`-plus-payload shape every other value of
+            // that enum has (with nothing to fill in for this variant's own
+            // fields). This is the standalone counterpart of the
+            // destination-driven build `lower_expr_as` does for a generic
+            // enum, where a bare id is not the specialized one needed.
+            return if enum_has_payload(self.checked, enum_id) {
+                self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: discriminant as u32,
+                        fields: Vec::new(),
+                    },
+                    IrType::Enum(enum_id),
+                    span,
+                )
+            } else {
+                self.emit(InstKind::ConstInt(discriminant), IrType::Int32, span)
+            };
+        }
+
+        if expr.safe {
+            return self.lower_safe_field(expr, span);
         }
 
         let object = self.lower_expr(&expr.object);
@@ -2009,25 +3012,262 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::LoadField { object, index }, ty, span)
     }
 
+    /// Lowers `object?.field`: a null check with two blocks, the same shape
+    /// `??` uses (D7). The absent branch answers null; the present branch
+    /// unwraps the receiver, reads the field, and wraps the result — a
+    /// non-nullable field read through `?.` still comes back nullable.
+    fn lower_safe_field(&mut self, expr: &ast::FieldExpr, span: Span) -> Operand {
+        let (index, field_ty) = self.field_position(&expr.object, &expr.name.name);
+        let result_type = match field_ty {
+            IrType::Nullable(_) => field_ty,
+            _ => IrType::Nullable(
+                Nullable::of(field_ty).expect("a field reachable through `?.` has a nullable form"),
+            ),
+        };
+        let result = self.declare_slot("<safe_field>", result_type, span);
+
+        let object_ty = self.type_of(&expr.object, expr.object.span());
+        let receiver = self.lower_expr(&expr.object);
+        let test = self.emit(InstKind::IsNull(receiver), IrType::Boolean, span);
+
+        // The receiver is needed again in the block that unwraps it, and
+        // values do not cross blocks (ADR-007).
+        let holder = self.declare_slot("<safe_receiver>", object_ty, span);
+        self.emit_effect(InstKind::Store(holder, receiver), span);
+
+        let absent_block = self.new_block();
+        let present_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Branch {
+            condition: test,
+            then_block: absent_block,
+            else_block: present_block,
+        });
+
+        self.current = absent_block;
+        let IrType::Nullable(base) = result_type else {
+            unreachable!("computed above")
+        };
+        let absent = self.emit(InstKind::NullValue(base), result_type, span);
+        self.emit_effect(InstKind::Store(result, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = present_block;
+        let held = self.emit(InstKind::Load(holder), object_ty, span);
+        let unwrapped = self.emit(InstKind::Unwrap(held), object_ty.unwrapped(), span);
+        let value = self.emit(InstKind::LoadField { object: unwrapped, index }, field_ty, span);
+        let value = if matches!(field_ty, IrType::Nullable(_)) {
+            value
+        } else {
+            self.emit(InstKind::Wrap { base, value }, result_type, span)
+        };
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), result_type, span)
+    }
+
+    /// Which body a safe method call (`u?.greet()`) reaches, once the
+    /// receiver turns out to be present — an object (direct or through its
+    /// own table) or a contract. Shared between [`Self::lower_safe_method_call`]
+    /// and `type_of`, so a call's type is known before it is lowered.
+    fn safe_method_call_info(
+        &self,
+        call: &ast::CallExpr,
+    ) -> Option<(IrType, Vec<IrType>, SafeDispatch, IrType)> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !field.safe || self.checked.variant_accesses.contains(&field.span) {
+            return None;
+        }
+        let IrType::Nullable(inner) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+
+        match inner.inner() {
+            IrType::Object(id) => {
+                let class = &self.checked.classes[id as usize];
+                let method = class.method(&field.name.name)?;
+                let name = body_symbol(self.checked, method);
+                let returns = self.ir_type(method.returns);
+                let params = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
+                let dispatch = SafeDispatch::Object {
+                    name,
+                    virtual_index: method.overridden.then_some(method.index as u32),
+                };
+                Some((returns, params, dispatch, inner.inner()))
+            }
+            IrType::Contract(id) => {
+                let contract = &self.checked.contracts[id as usize];
+                let method = contract.method(&field.name.name)?;
+                let returns = self.ir_type(method.returns);
+                let params = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
+                let dispatch = SafeDispatch::Contract {
+                    contract: id,
+                    index: method.index as u32,
+                };
+                Some((returns, params, dispatch, inner.inner()))
+            }
+            // A generic parameter's constraint has no concrete body to call
+            // yet — gated at the checker (`Self::check_call`'s `?.` branch).
+            _ => None,
+        }
+    }
+
+    /// Lowers `u?.greet()`: the same absent/present split
+    /// [`Self::lower_safe_field`] uses for a field, with the call itself —
+    /// direct, through the object's own table, or through a contract's —
+    /// inside the present block (roadmap task 10.8).
+    fn lower_safe_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let (returns, params, dispatch, unwrapped_ty) = self.safe_method_call_info(call)?;
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("checked by `safe_method_call_info`")
+        };
+
+        let result_type = match returns {
+            IrType::Nullable(_) => returns,
+            _ => IrType::Nullable(
+                Nullable::of(returns).expect("a method reachable through `?.` has a nullable form"),
+            ),
+        };
+        let result = self.declare_slot("<safe_call>", result_type, span);
+
+        let object_ty = self.type_of(&field.object, field.object.span());
+        let receiver = self.lower_expr(&field.object);
+        let test = self.emit(InstKind::IsNull(receiver), IrType::Boolean, span);
+
+        let holder = self.declare_slot("<safe_receiver>", object_ty, span);
+        self.emit_effect(InstKind::Store(holder, receiver), span);
+
+        let absent_block = self.new_block();
+        let present_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Branch {
+            condition: test,
+            then_block: absent_block,
+            else_block: present_block,
+        });
+
+        self.current = absent_block;
+        let IrType::Nullable(base) = result_type else {
+            unreachable!("computed above")
+        };
+        let absent = self.emit(InstKind::NullValue(base), result_type, span);
+        self.emit_effect(InstKind::Store(result, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = present_block;
+        let held = self.emit(InstKind::Load(holder), object_ty, span);
+        let unwrapped = self.emit(InstKind::Unwrap(held), unwrapped_ty, span);
+
+        // Arguments are lowered here, inside the present block: they are
+        // only ever evaluated once the receiver is known to exist.
+        let mut args = Vec::new();
+        for (arg, ty) in call.args.iter().zip(params) {
+            args.push(self.lower_expr_as(&arg.value, ty));
+        }
+
+        let value = match dispatch {
+            SafeDispatch::Object {
+                name,
+                virtual_index,
+            } => match virtual_index {
+                Some(index) => self.emit(
+                    InstKind::CallVirtual {
+                        object: unwrapped,
+                        index,
+                        args,
+                    },
+                    returns,
+                    span,
+                ),
+                None => {
+                    let mut all = vec![unwrapped];
+                    all.extend(args);
+                    self.emit(InstKind::Call { callee: name, args: all }, returns, span)
+                }
+            },
+            SafeDispatch::Contract { contract, index } => self.emit(
+                InstKind::CallContract {
+                    object: unwrapped,
+                    contract,
+                    index,
+                    args,
+                },
+                returns,
+                span,
+            ),
+        };
+        let value = if matches!(returns, IrType::Nullable(_)) {
+            value
+        } else {
+            self.emit(InstKind::Wrap { base, value }, result_type, span)
+        };
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        Some(self.emit(InstKind::Load(result), result_type, span))
+    }
+
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
         if self.checked.variant_accesses.contains(&expr.span) {
-            // A variant without associated data is exactly its discriminant.
-            return IrType::Int32;
+            let ast::Expr::Path(enum_name) = &*expr.object else {
+                unreachable!("a variant access names its enum")
+            };
+            let enum_id = self.enum_id_of(enum_name);
+            // A variant without associated data is exactly its discriminant
+            // — unless the enum it belongs to carries a payload elsewhere,
+            // in which case every value of it shares that representation
+            // (see `Self::lower_field`).
+            return if enum_has_payload(self.checked, enum_id) {
+                IrType::Enum(enum_id)
+            } else {
+                IrType::Int32
+            };
         }
-        self.field_position(&expr.object, &expr.name.name).1
+        let field_ty = self.field_position(&expr.object, &expr.name.name).1;
+        if !expr.safe || matches!(field_ty, IrType::Nullable(_)) {
+            return field_ty;
+        }
+        // `?.` makes the result nullable even when the field itself is not
+        // (D7) — the same widening `Self::lower_safe_field` performs.
+        IrType::Nullable(
+            Nullable::of(field_ty).expect("a field reachable through `?.` has a nullable form"),
+        )
     }
 
     /// Where a field sits in its object, and what type it holds.
+    ///
+    /// Unwraps a nullable object type first: `?.`'s own lowering already
+    /// established that the receiver is not null before this runs, the same
+    /// way `??`'s does for its right-hand side.
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
-        let IrType::Object(id) = self.type_of(object, object.span()) else {
-            unreachable!("a verified field access reads an object")
-        };
-        let layout = &self.module.objects[id as usize];
-        let index = layout
-            .field_index(name)
-            .expect("the checker resolved the field against this layout");
-        (index as u32, layout.fields[index].ty)
+        match self.type_of(object, object.span()).unwrapped() {
+            IrType::Object(id) => {
+                let layout = &self.module.objects[id as usize];
+                let index = layout
+                    .field_index(name)
+                    .expect("the checker resolved the field against this layout");
+                (index as u32, layout.fields[index].ty)
+            }
+            // A record or value class reads the same way (roadmap task
+            // 11.5): `LoadField` does not care whether its operand is a
+            // pointer or an inline value, only the LLVM backend does.
+            IrType::Value(id) => {
+                let layout = &self.module.values[id as usize];
+                let index = layout
+                    .field_index(name)
+                    .expect("the checker resolved the field against this layout");
+                (index as u32, layout.fields[index].ty)
+            }
+            _ => unreachable!("a verified field access reads an object or a value"),
+        }
     }
 
     /// Lowers `cond ? a : b`.
@@ -2153,6 +3393,11 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) if self.method_of(e).is_some() => {
                 self.lower_method_call(e, expr.span());
             }
+            // `u?.greet();` as a bare statement still needs the absent/present
+            // split — only the value it produces goes unused.
+            ast::Expr::Call(e) if self.safe_method_call_info(e).is_some() => {
+                self.lower_safe_method_call(e, expr.span());
+            }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
@@ -2204,7 +3449,7 @@ impl<'a> FunctionLowering<'a> {
         let params: Vec<(String, IrType)> = signature
             .params
             .iter()
-            .map(|p| (p.name.clone(), ir_type(p.ty)))
+            .map(|p| (p.name.clone(), self.ir_type(p.ty)))
             .collect();
 
         let mut slots: Vec<Option<Held>> = (0..params.len()).map(|_| None).collect();
@@ -2278,6 +3523,8 @@ impl<'a> FunctionLowering<'a> {
         // a value.
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
+            || self.safe_method_call_info(call).is_some()
+            || self.variant_construction(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
             return false;
@@ -2298,7 +3545,7 @@ impl<'a> FunctionLowering<'a> {
         self.checked
             .functions
             .get(name)
-            .map(|s| ir_type(s.returns))
+            .map(|s| self.ir_type(s.returns))
             .expect("a verified program only calls declared functions")
     }
 
@@ -2336,7 +3583,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Binary(e) if self.operator_method_of(e).is_some() => {
                 let (id, name) = self.operator_method_of(e).expect("checked above");
-                ir_type(
+                self.ir_type(
                     self.checked.classes[id as usize]
                         .method(&name)
                         .expect("the checker resolved it")
@@ -2364,15 +3611,26 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) if matches!(&*e.callee, ast::Expr::Super(_)) => IrType::Void,
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {
-                    return ir_type(method.returns);
+                    return self.ir_type(method.returns);
                 }
                 if let Some(method) = self.method_of(e) {
-                    return ir_type(method.returns);
+                    return self.ir_type(method.returns);
                 }
-                let name = self.callee_name(e);
-                match self.class_id(&name) {
-                    Some(id) => IrType::Object(id),
-                    None => self.signature_return(&name),
+                if let Some((returns, ..)) = self.safe_method_call_info(e) {
+                    return match returns {
+                        IrType::Nullable(_) => returns,
+                        _ => IrType::Nullable(
+                            Nullable::of(returns)
+                                .expect("a method reachable through `?.` has a nullable form"),
+                        ),
+                    };
+                }
+                if let Some((enum_id, _)) = self.variant_construction(e) {
+                    return self.ir_type(Type::of(Base::Enum(enum_id)));
+                }
+                match self.construction_class_id(e) {
+                    Some(id) => self.ir_type(Type::of(Base::Class(id))),
+                    None => self.signature_return(&self.callee_name(e)),
                 }
             }
             ast::Expr::If(e) => self.block_value_type(&e.then_branch),
@@ -2389,6 +3647,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Lambda(_) | ast::Expr::Null(_) | ast::Expr::Range(_) => {
                 unreachable!("the type of this expression comes from the value it produced")
             }
+            ast::Expr::Cast(e) => self.ir_type_from_ref(&e.target),
         }
     }
 
@@ -2448,6 +3707,19 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         // so it never reaches the IR as an operator.
         A::Coalesce => unreachable!("`??` is lowered into branches, not an operator"),
     }
+}
+
+/// How a safe method call (`u?.greet()`) reaches its body, once the
+/// receiver is known to be present.
+enum SafeDispatch {
+    /// Through the object's own class: direct if nobody overrides it,
+    /// through its table (`virtual_index`) if some subclass does.
+    Object {
+        name: String,
+        virtual_index: Option<u32>,
+    },
+    /// Through a contract's table.
+    Contract { contract: u32, index: u32 },
 }
 
 /// Where a value waits while a later expression is lowered.

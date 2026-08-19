@@ -1,0 +1,24 @@
+// `?.` (safe navigation) on field access is lowered end to end (task 10.8):
+// a present receiver reads through, an absent one short-circuits to null,
+// and a field that is already nullable isn't double-wrapped.
+class User {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+class Profile {
+    nickname: String?;
+    construct(nickname: String?) { this.nickname = nickname; }
+}
+
+fn main(): Void {
+    mut present: User? = User("ana");
+    mut absent: User? = null;
+    stdout.println(present?.name ?? "none");
+    stdout.println(absent?.name ?? "absent");
+
+    mut noNickname: Profile? = Profile(null);
+    mut withNickname: Profile? = Profile("zeta");
+    stdout.println(noNickname?.nickname ?? "no nickname");
+    stdout.println(withNickname?.nickname ?? "no nickname");
+}

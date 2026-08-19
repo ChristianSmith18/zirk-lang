@@ -49,4 +49,6 @@ pub mod codes {
     pub const INVALID_IMPORT_SOURCE: Code = Code::new("E0310");
     /// Nesting deep enough to threaten the parser's own stack.
     pub const NESTING_TOO_DEEP: Code = Code::new("E0311");
+    /// `abstract` used on a member of a class that is not itself `abstract`.
+    pub const ABSTRACT_OUTSIDE_ABSTRACT_CLASS: Code = Code::new("E0312");
 }

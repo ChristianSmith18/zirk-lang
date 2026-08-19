@@ -1,0 +1,33 @@
+// A checked cast (`as`, and its prefix form `<Type>`) verifies the runtime
+// type against a descriptor's ancestor list and terminates on a mismatch
+// (roadmap task 11.6). Also exercises the widening this task's fix found:
+// an ordinary upcast via an explicit annotation was silently mistyping the
+// IR before this — `mut a: Animal = Dog();` is exactly that shape.
+class Animal { construct() { } fn speak(): String { return "..."; } }
+class Dog extends Animal {
+    construct() { super(); }
+    override fn speak(): String { return "woof"; }
+}
+class Cat extends Animal {
+    construct() { super(); }
+    override fn speak(): String { return "meow"; }
+}
+
+interface Shape { fn area(): Int32; }
+class Circle implements Shape { construct() { } fn area(): Int32 { return 1; } }
+
+fn main(): Void {
+    mut a: Animal = Dog();
+    mut d = a as Dog;
+    stdout.println(d.speak());
+
+    mut back = <Animal>d;
+    stdout.println(back.speak());
+
+    mut s: Shape = Circle();
+    mut c = s as Circle;
+    stdout.println(c.area());
+
+    mut n = 5 as Int32;
+    stdout.println(n);
+}

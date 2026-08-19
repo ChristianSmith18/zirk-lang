@@ -1,0 +1,50 @@
+// Records and value classes lower inline, with no allocation and no
+// indirection (roadmap task 11.5, ADR-003): construction, field access,
+// passing to and returning from a function, nesting one inside another,
+// and living behind a nullable all work the same as any other value.
+record Point {
+    x: Int32;
+    y: Int32;
+}
+
+record Line {
+    start: Point;
+    end: Point;
+}
+
+value class Money(amount: Int32, currency: String);
+
+record Config {
+    name: String;
+    count: Int32;
+}
+
+fn doubleMoney(m: Money): Money {
+    return Money(amount: m.amount * 2, currency: m.currency);
+}
+
+fn main(): Void {
+    mut p = Point(x: 1, y: 2);
+    stdout.println(p.x);
+    stdout.println(p.y);
+
+    mut l = Line(start: Point(x: 0, y: 0), end: Point(x: 3, y: 4));
+    stdout.println(l.start.x);
+    stdout.println(l.end.y);
+
+    mut m = Money(amount: 100, currency: "USD");
+    mut doubled = doubleMoney(m);
+    stdout.println(doubled.amount);
+    stdout.println(doubled.currency);
+
+    // Omitted fields take their type's default.
+    mut c = Config(name: "x");
+    stdout.println(c.name);
+    stdout.println(c.count);
+
+    // Nullable, including safe navigation.
+    mut present: Point? = Point(x: 7, y: 8);
+    mut absent: Point? = null;
+    stdout.println(present?.x ?? 0);
+    stdout.println(absent?.x ?? 0);
+}

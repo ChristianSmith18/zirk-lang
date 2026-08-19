@@ -66,7 +66,7 @@ pub unsafe extern "C" fn zirk_rt_alloc(size: usize, align: usize) -> *mut c_void
 /// The descriptor layout is fixed by codegen:
 ///
 /// ```text
-///    [ method_table | contract_count | (contract_id, table)* ]
+///    [ method_table | ancestor_count | ancestor_id* | contract_count | (contract_id, table)* ]
 /// ```
 ///
 /// # Safety
@@ -82,11 +82,15 @@ pub unsafe extern "C" fn zirk_rt_contract_table(
     }
 
     let words = descriptor as *const usize;
-    // Slot 0 is the method table; slot 1 is how many contracts follow.
-    let count = unsafe { *words.add(1) };
+    // Slot 0 is the method table; slot 1 is how many ancestor ids follow —
+    // see `zirk_rt_check_cast`, which reads those same slots. The contract
+    // count sits right after them.
+    let ancestor_count = unsafe { *words.add(1) };
+    let contract_count_slot = 2 + ancestor_count;
+    let count = unsafe { *words.add(contract_count_slot) };
 
     for entry in 0..count {
-        let base = 2 + entry * 2;
+        let base = contract_count_slot + 1 + entry * 2;
         let id = unsafe { *words.add(base) } as u64;
         if id == contract {
             return unsafe { *words.add(base + 1) } as *const c_void;
@@ -96,6 +100,36 @@ pub unsafe extern "C" fn zirk_rt_contract_table(
     // The checker proved the value satisfies the contract, so reaching here is
     // a compiler bug rather than a program error.
     crate::failure::zirk_rt_missing_contract()
+}
+
+/// Confirms a checked cast (`as`) against a descriptor's ancestor list,
+/// terminating if the runtime type is not one of them (roadmap task 11.6).
+///
+/// "Ancestor" includes the class itself: an identity cast (`x as SameClass`)
+/// is checked the same way a real up- or downcast is, rather than being a
+/// special case codegen has to recognize. The search is linear over one
+/// class's own chain — short, not a data structure — the same shape
+/// [`zirk_rt_contract_table`] searches its own list with.
+///
+/// # Safety
+///
+/// `descriptor` must be one this compiler emitted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_check_cast(descriptor: *const c_void, target: u64) {
+    if descriptor.is_null() {
+        crate::failure::zirk_rt_invalid_cast()
+    }
+
+    let words = descriptor as *const usize;
+    let count = unsafe { *words.add(1) };
+    for entry in 0..count {
+        let id = unsafe { *words.add(2 + entry) } as u64;
+        if id == target {
+            return;
+        }
+    }
+
+    crate::failure::zirk_rt_invalid_cast()
 }
 
 #[cfg(test)]

@@ -1,0 +1,19 @@
+// A closure created inside a method can read `this` as a capture, the same
+// way it reads any other name from the enclosing scope. `this` does not go
+// through ordinary name resolution, so it needs its own path to end up in
+// the closure's captures.
+class Counter {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+
+    fn makeAdder(): Int32 {
+        mut extra: Int32 = 100;
+        inmut add = (n: Int32): Int32 => n + this.value + extra;
+        return add(1);
+    }
+}
+
+fn main(): Void {
+    mut c = Counter(5);
+    stdout.println(c.makeAdder());
+}

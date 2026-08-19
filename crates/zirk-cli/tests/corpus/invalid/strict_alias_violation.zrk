@@ -1,0 +1,10 @@
+// A strict reference cannot produce a mutable alias of its object (D11).
+class User {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+fn main(): Void {
+    inmut::strict s = User("ana");
+    mut alias = s;
+}

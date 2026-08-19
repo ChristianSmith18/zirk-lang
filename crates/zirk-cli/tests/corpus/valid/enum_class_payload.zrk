@@ -1,0 +1,30 @@
+// An algebraic variant's associated data may name a class (roadmap task
+// 13.6, probing a cross between enums and classes): `declare_enum` used to
+// run before any class was registered, so `User` here was never a resolvable
+// type no matter where in the file it was written — a real, preexisting bug
+// found while probing cross-cutting combinations, fixed by registering every
+// class's name (not yet its members) before enums resolve their own fields.
+class User {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+enum Event {
+    Login(user: User),
+    Logout(user: User),
+    Idle,
+}
+
+fn describe(e: Event): String {
+    match e {
+        Event.Login(user) => { return user.name + " logged in"; }
+        Event.Logout(user) => { return user.name + " logged out"; }
+        Event.Idle => { return "idle"; }
+    }
+}
+
+fn main(): Void {
+    stdout.println(describe(Event.Login(user: User("ana"))));
+    stdout.println(describe(Event.Idle));
+    stdout.println(describe(Event.Logout(user: User("leo"))));
+}

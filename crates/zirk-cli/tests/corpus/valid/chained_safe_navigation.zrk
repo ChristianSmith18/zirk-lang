@@ -1,0 +1,23 @@
+// `?.` chains through more than one level (roadmap task 13.6, probing `?.`
+// against itself): a field read through `?.` feeding another `?.` method
+// call, short-circuiting at whichever link is absent.
+class Engine {
+    horsepower: Int32;
+    construct(horsepower: Int32) { this.horsepower = horsepower; }
+    fn power(): Int32 { return this.horsepower; }
+}
+
+class Car {
+    engine: Engine?;
+    construct(engine: Engine?) { this.engine = engine; }
+}
+
+fn main(): Void {
+    mut withEngine: Car? = Car(Engine(300));
+    mut withoutEngine: Car? = Car(null);
+    mut noCar: Car? = null;
+
+    stdout.println(withEngine?.engine?.power() ?? -1);
+    stdout.println(withoutEngine?.engine?.power() ?? -1);
+    stdout.println(noCar?.engine?.power() ?? -1);
+}

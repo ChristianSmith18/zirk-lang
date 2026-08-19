@@ -50,6 +50,47 @@ pub enum Base {
     /// is what `ZIRK_LANGUAGE_SPEC.md` section 7 means by a class having
     /// identity. Structural equality is what records are for.
     Class(u32),
+    /// A generic type parameter in scope where it is declared, identified by
+    /// its index in the checker's table.
+    ///
+    /// Opaque: it is equal only to itself, so a body can pass a `T` around and
+    /// compare two `T`s, but cannot assume anything a `from` constraint does
+    /// not promise. Verifying that promise is a later pass (`ZIRK_ROADMAP.md`
+    /// Phase 3's generics slice); today the parameter is tracked so its own
+    /// declaration type-checks instead of reporting an unknown type.
+    Param(u32),
+    /// A generic class instantiated with concrete type arguments, such as
+    /// `Box<Int32>`, identified by its index in the checker's table.
+    ///
+    /// Interned like [`Base::Function`]: `Box<Int32>` written twice resolves
+    /// to the same id, which is what makes two such references the same type
+    /// by `==` instead of merely by structure.
+    ///
+    /// A value of this type cannot yet be constructed — there is no
+    /// expression syntax for it — so today it exists only to let a
+    /// declaration name the type and have its arguments checked against `T`'s
+    /// constraints (roadmap task 7.3). Reading a member through one is not
+    /// implemented.
+    Instance(u32),
+    /// A declared interface or trait instantiated with concrete type
+    /// arguments, such as `Iterable<Int32>`, identified by its index in the
+    /// checker's table. See [`Base::Instance`], its class equivalent.
+    ContractInstance(u32),
+    /// A declared enum instantiated with concrete type arguments, such as
+    /// `Iteration<Int32>`, identified by its index in the checker's table.
+    /// See [`Base::Instance`], its class equivalent.
+    EnumInstance(u32),
+    /// `A | B`, identified by its index in the checker's table.
+    ///
+    /// The table holds the normalized alternative list: order-independent,
+    /// deduplicated, with a subtype alternative already collapsed into its
+    /// supertype (`ZIRK_LANGUAGE_SPEC.md` section 4) — two unions with the
+    /// same effective members are the same id no matter how each was
+    /// written. `T | Null` is not stored this way at all: it folds into the
+    /// ordinary `nullable` bit any [`Type`] already carries, the same as
+    /// every other type's `?`, so a `Union` always has at least two
+    /// alternatives.
+    Union(u32),
     /// The result of `a..b`, iterable by `for ... in`.
     Range,
     /// Assigned to expressions whose type could not be determined.
@@ -228,6 +269,11 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Function(id) => names.function_type(id),
         Base::Class(id) => names.class_name(id),
         Base::Contract(id) => names.contract_name(id),
+        Base::Param(id) => names.type_param_name(id),
+        Base::Instance(id) => names.instance_name(id),
+        Base::ContractInstance(id) => names.contract_instance_name(id),
+        Base::EnumInstance(id) => names.enum_instance_name(id),
+        Base::Union(id) => names.union_name(id),
     };
 
     if ty.nullable {
@@ -243,6 +289,11 @@ pub trait TypeNames {
     fn function_type(&self, id: u32) -> String;
     fn class_name(&self, id: u32) -> String;
     fn contract_name(&self, id: u32) -> String;
+    fn type_param_name(&self, id: u32) -> String;
+    fn instance_name(&self, id: u32) -> String;
+    fn contract_instance_name(&self, id: u32) -> String;
+    fn enum_instance_name(&self, id: u32) -> String;
+    fn union_name(&self, id: u32) -> String;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -252,13 +303,39 @@ pub struct FnType {
     pub returns: Type,
 }
 
-/// A declared enum: a closed set of names, without associated data.
-///
-/// Associated data is the extension Phase 3 adds, per decision D1.
+/// A generic class instantiated with concrete type arguments, as the checker
+/// sees it. See [`Base::Instance`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericInstance {
+    pub class: u32,
+    pub args: Vec<Type>,
+}
+
+/// A generic contract instantiated with concrete type arguments, as the
+/// checker sees it. See [`Base::ContractInstance`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericContractInstance {
+    pub contract: u32,
+    pub args: Vec<Type>,
+}
+
+/// A generic enum instantiated with concrete type arguments, as the checker
+/// sees it. See [`Base::EnumInstance`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericEnumInstance {
+    pub enum_id: u32,
+    pub args: Vec<Type>,
+}
+
+/// A declared enum: traditional (a closed set of bare names) or algebraic
+/// (each variant carries zero or more named, typed associated values).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumType {
     pub name: String,
-    pub variants: Vec<String>,
+    pub variants: Vec<EnumVariantInfo>,
+    /// Its own `<T>`, empty when the enum is not generic. Each id indexes the
+    /// checker's type-parameter table, the same as [`ClassType::type_params`].
+    pub type_params: Vec<u32>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
     /// Where it was declared, which is also which file owns it.
@@ -269,15 +346,38 @@ impl EnumType {
     pub fn discriminant(&self, variant: &str) -> Option<u32> {
         self.variants
             .iter()
-            .position(|v| v == variant)
+            .position(|v| v.name == variant)
             .map(|i| i as u32)
     }
+
+    pub fn variant(&self, name: &str) -> Option<&EnumVariantInfo> {
+        self.variants.iter().find(|v| v.name == name)
+    }
+}
+
+/// One variant of an [`EnumType`], as the checker sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariantInfo {
+    pub name: String,
+    /// Empty for a traditional variant or a bare algebraic one.
+    pub associated: Vec<AssociatedFieldInfo>,
+    pub span: zirk_diagnostics::Span,
+}
+
+/// One named, typed value an algebraic variant carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssociatedFieldInfo {
+    pub name: String,
+    pub ty: Type,
 }
 
 /// A declared class: a nominal type with fields, constructors and methods.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassType {
     pub name: String,
+    /// `Class`, `Record` or `ValueClass` — what rules apply, per
+    /// `zirk_ast::ClassKind`.
+    pub kind: zirk_ast::ClassKind,
     /// The class this one extends, by its id.
     pub base: Option<u32>,
     /// Every field, inherited ones first, in the order the hierarchy declares
@@ -296,6 +396,24 @@ pub struct ClassType {
     pub methods: Vec<MethodInfo>,
     /// The contracts this class satisfies, its base's included.
     pub contracts: Vec<u32>,
+    /// The specific instantiation this class satisfies, for each generic
+    /// contract in `contracts` it implements with concrete type arguments
+    /// (task 6.9, e.g. `Iterable<Int32>`) — ids into the checker's
+    /// `contract_instances` table. A class satisfying a non-generic contract
+    /// has nothing here for it; `for ... in` reads this to find `T`.
+    pub contract_instances: Vec<u32>,
+    /// The `abstract class` requirement sets this class adopts with
+    /// `implements`, by their id in this same table — its base's included.
+    /// Separate from `contracts`: an abstract class is a `ClassType`, not a
+    /// `ContractType`, so its id lives in a different space.
+    pub abstract_bases: Vec<u32>,
+    /// Its own `<T from A & B, U>`, empty when the class is not generic.
+    ///
+    /// Each id indexes the checker's type-parameter table, minted once when
+    /// the class is registered — ahead of its members and ahead of any other
+    /// class's fields, which may name `Box<Int32>` before `Box` itself is
+    /// declared later in the file.
+    pub type_params: Vec<u32>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
     /// Where it was declared, which is also which file owns it.
@@ -345,6 +463,10 @@ pub struct ContractType {
     pub name: String,
     pub kind: zirk_ast::ContractKind,
     pub methods: Vec<ContractMethod>,
+    /// Its own `<T>`, empty when the contract is not generic. Each id indexes
+    /// the checker's type-parameter table, the same as
+    /// [`ClassType::type_params`].
+    pub type_params: Vec<u32>,
     pub shared: bool,
     pub span: zirk_diagnostics::Span,
 }
@@ -381,6 +503,19 @@ pub struct FieldInfo {
     pub span: zirk_diagnostics::Span,
     /// The class that declares it, which is not always the one that has it.
     pub owner: u32,
+}
+
+/// A generic type parameter, as the checker sees it.
+///
+/// It exists so a class's or function's own `<T from A & B>` is a real type
+/// (`Base::Param`) inside its declaration rather than an unknown name.
+/// `constraints` is recorded for later passes — verifying them at the use
+/// site and inside the body is not implemented yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParamInfo {
+    pub name: String,
+    pub constraints: Vec<Type>,
+    pub span: zirk_diagnostics::Span,
 }
 
 /// A type of the language that exists in the spec but not in this subset.
@@ -606,9 +741,15 @@ mod tests {
 
     #[test]
     fn an_enum_knows_the_discriminant_of_its_variants() {
+        let variant = |name: &str| EnumVariantInfo {
+            name: name.into(),
+            associated: Vec::new(),
+            span: zirk_diagnostics::Span::new(0, 0),
+        };
         let e = EnumType {
             name: "Direction".into(),
-            variants: vec!["North".into(), "South".into()],
+            variants: vec![variant("North"), variant("South")],
+            type_params: Vec::new(),
             shared: false,
             span: zirk_diagnostics::Span::new(0, 0),
         };

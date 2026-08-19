@@ -1,0 +1,39 @@
+// A generic class specializes per combination of type arguments used
+// (roadmap task 11.1, D5): each instantiation gets its own layout and
+// method bodies, reused when the same combination repeats (11.2).
+class Box<T> {
+    value: T;
+    construct(value: T) { this.value = value; }
+    fn get(): T { return this.value; }
+    fn set(value: T): Void { this.value = value; }
+}
+
+class Animal { construct() { } fn speak(): String { return "..."; } }
+class Dog extends Animal {
+    construct() { super(); }
+    override fn speak(): String { return "woof"; }
+}
+class Cage<T from Animal> {
+    value: T;
+    construct(value: T) { this.value = value; }
+    fn peek(): T { return this.value; }
+}
+
+fn makeBox(v: Int32): Box<Int32> {
+    return Box(v);
+}
+
+fn main(): Void {
+    mut a: Box<Int32> = Box(5);
+    mut b: Box<String> = Box("hello");
+    a.set(10);
+    stdout.println(a.get());
+    stdout.println(b.get());
+
+    // Repeating the same instantiation reuses the same specialization.
+    mut c = makeBox(2);
+    stdout.println(c.get());
+
+    mut cage: Cage<Dog> = Cage(Dog());
+    stdout.println(cage.peek().speak());
+}

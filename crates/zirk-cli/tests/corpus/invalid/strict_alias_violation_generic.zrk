@@ -1,0 +1,15 @@
+// A strict reference cannot produce a mutable alias of its object (D11),
+// and a generic class's own specialized instance is no exception (roadmap
+// task 13.6, probing a cross between strict aliasing and generics):
+// `is_reference_type` never recognized `Base::Instance` at all, so this used
+// to compile and run — a real, preexisting bug found while probing
+// cross-cutting combinations.
+class Box<T> {
+    value: T;
+    construct(value: T) { this.value = value; }
+}
+
+fn main(): Void {
+    inmut::strict a = Box(5);
+    mut b = a;
+}

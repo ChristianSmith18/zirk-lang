@@ -1,0 +1,17 @@
+// The `mut`/`inmut`/`inmut::strict` matrix on object references (D11, task
+// 5.15): sharing a plain `inmut` alias of a mutable object is unrestricted,
+// and a strict reference can alias another strict reference.
+class User {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+fn main(): Void {
+    mut owner = User("ana");
+    inmut alias = owner;
+    inmut::strict frozen = User("ceci");
+    inmut::strict frozenAlias = frozen;
+
+    stdout.println(alias.name);
+    stdout.println(frozenAlias.name);
+}

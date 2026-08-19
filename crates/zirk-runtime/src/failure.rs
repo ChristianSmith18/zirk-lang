@@ -65,3 +65,15 @@ pub extern "C" fn zirk_rt_missing_contract() -> ! {
 pub extern "C" fn zirk_rt_allocation_failed() -> ! {
     fatal("could not allocate an object")
 }
+
+/// Reports a checked cast (`as`) whose runtime type does not match and
+/// terminates (roadmap task 11.6).
+///
+/// There is no exception machinery yet — `try`/`catch` is Phase 4 — so a
+/// failed cast is a controlled process termination, the same as any other
+/// checked invariant this module guards, per `ZIRK_LANGUAGE_SPEC.md` section
+/// 13's promise that an invalid state never becomes undefined behaviour.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_invalid_cast() -> ! {
+    fatal("invalid cast: the value's runtime type is not the target type")
+}

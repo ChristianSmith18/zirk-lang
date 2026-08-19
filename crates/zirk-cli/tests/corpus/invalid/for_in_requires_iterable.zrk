@@ -1,0 +1,10 @@
+// `for ... in` requires `Iterable<T>` (D8, task 6.9/6.10): the closed set of
+// Phase 2 no longer applies, and a type that never implements it is rejected.
+class Foo {
+    construct() { }
+}
+
+fn main(): Void {
+    mut f = Foo();
+    for x in f { }
+}

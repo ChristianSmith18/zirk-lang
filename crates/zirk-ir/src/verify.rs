@@ -158,6 +158,134 @@ fn verify_instruction(
             Some(_) => expect(inst.ty, IrType::Object(*id), position, "Alloc", report),
         },
 
+        InstKind::CheckedCast {
+            object,
+            target_class,
+        } => match module.objects.get(*target_class as usize) {
+            None => report(format!(
+                "{position}: casts to object layout {target_class}, which is not in the module table"
+            )),
+            Some(_) => {
+                expect(
+                    inst.ty,
+                    IrType::Object(*target_class),
+                    position,
+                    "CheckedCast",
+                    report,
+                );
+                if let Some(ty) = type_of(object)
+                    && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+                {
+                    report(format!(
+                        "{position}: casts {}, which is neither an object nor a contract",
+                        ty.as_str()
+                    ));
+                }
+            }
+        },
+
+        InstKind::Retype(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: retypes {}, which is neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Object(_) | IrType::Contract(_)) {
+                report(format!(
+                    "{position}: Retype declares {}, which is neither an object nor a contract",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::BuildValue { class, fields } => match module.values.get(*class as usize) {
+            None => report(format!(
+                "{position}: builds value layout {class}, which is not in the module table"
+            )),
+            Some(layout) => {
+                expect(inst.ty, IrType::Value(*class), position, "BuildValue", report);
+                if fields.len() != layout.fields.len() {
+                    report(format!(
+                        "{position}: builds {} with {} field{}, not {}",
+                        layout.name,
+                        fields.len(),
+                        if fields.len() == 1 { "" } else { "s" },
+                        layout.fields.len()
+                    ));
+                }
+                for (field, given) in layout.fields.iter().zip(fields) {
+                    if let Some(actual) = type_of(given)
+                        && actual != field.ty
+                    {
+                        report(format!(
+                            "{position}: builds field `{}` of type {} from a {}",
+                            field.name,
+                            field.ty.as_str(),
+                            actual.as_str()
+                        ));
+                    }
+                }
+            }
+        },
+
+        InstKind::BuildEnum {
+            enum_id,
+            variant,
+            fields,
+        } => match module.enums.get(*enum_id as usize) {
+            None => report(format!(
+                "{position}: builds enum layout {enum_id}, which is not in the module table"
+            )),
+            Some(layout) => match layout.variants.get(*variant as usize) {
+                None => report(format!(
+                    "{position}: builds {}, which has no variant {variant}",
+                    layout.name
+                )),
+                Some(indices) => {
+                    expect(inst.ty, IrType::Enum(*enum_id), position, "BuildEnum", report);
+                    if fields.len() != indices.len() {
+                        report(format!(
+                            "{position}: builds variant {variant} of {} with {} field{}, not {}",
+                            layout.name,
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" },
+                            indices.len()
+                        ));
+                    }
+                    for (&index, given) in indices.iter().zip(fields) {
+                        let Some(field) = layout.fields.get(index as usize) else {
+                            continue;
+                        };
+                        if let Some(actual) = type_of(given)
+                            && actual != field.ty
+                        {
+                            report(format!(
+                                "{position}: builds field `{}` of type {} from a {}",
+                                field.name,
+                                field.ty.as_str(),
+                                actual.as_str()
+                            ));
+                        }
+                    }
+                }
+            },
+        },
+
+        InstKind::Discriminant(operand) => {
+            expect(inst.ty, IrType::Int32, position, "Discriminant", report);
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Enum(_))
+            {
+                report(format!(
+                    "{position}: reads the discriminant of {}, which is not an algebraic enum",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::Concat { left, right } => {
             expect(inst.ty, IrType::String, position, "Concat", report);
             for operand in [left, right] {
@@ -576,15 +704,27 @@ fn expect(
 
 /// The type of field `index` of an object, if the operand is one and has it.
 fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrType> {
-    let IrType::Object(id) = object? else {
-        return None;
-    };
-    module
-        .objects
-        .get(id as usize)?
-        .fields
-        .get(index as usize)
-        .map(|f| f.ty)
+    match object? {
+        IrType::Object(id) => module
+            .objects
+            .get(id as usize)?
+            .fields
+            .get(index as usize)
+            .map(|f| f.ty),
+        IrType::Value(id) => module
+            .values
+            .get(id as usize)?
+            .fields
+            .get(index as usize)
+            .map(|f| f.ty),
+        IrType::Enum(id) => module
+            .enums
+            .get(id as usize)?
+            .fields
+            .get(index as usize)
+            .map(|f| f.ty),
+        _ => None,
+    }
 }
 
 /// Operands an instruction reads.
@@ -594,6 +734,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
+        InstKind::BuildValue { fields, .. } => fields.clone(),
+        InstKind::BuildEnum { fields, .. } => fields.clone(),
+        InstKind::Discriminant(operand) => vec![*operand],
+        InstKind::CheckedCast { object, .. } => vec![*object],
+        InstKind::Retype(operand) => vec![*operand],
         InstKind::Concat { left, right } => vec![*left, *right],
         InstKind::Repeat { string, count } => vec![*string, *count],
         InstKind::CallContract { object, args, .. } => {

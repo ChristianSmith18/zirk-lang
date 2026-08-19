@@ -9,15 +9,16 @@
 use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
-    Base, ClassType, ContractMethod, ContractType, EnumType, FieldInfo, FnType, MethodInfo, Type,
-    TypeNames, describe, pending_type,
+    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType,
+    EnumVariantInfo, FieldInfo, FnType, GenericContractInstance, GenericEnumInstance,
+    GenericInstance, MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceMap, Span};
 
 /// The result of checking, for later stages.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
     pub functions: HashMap<String, Signature>,
     /// Declared enums, indexed by the id their [`Base::Enum`] carries.
@@ -52,6 +53,47 @@ pub struct CheckedProgram {
     /// Recording the answer here means lowering resolves it once, here, rather
     /// than repeating the decision with the same tables.
     pub variant_accesses: std::collections::HashSet<Span>,
+    /// Declared generic type parameters, indexed by the id their
+    /// [`Base::Param`] carries.
+    pub type_params: Vec<TypeParamInfo>,
+    /// Interned generic instantiations, indexed by the id their
+    /// [`Base::Instance`] carries.
+    pub generic_instances: Vec<GenericInstance>,
+    /// Interned generic contract instantiations, indexed by the id their
+    /// [`Base::ContractInstance`] carries.
+    pub contract_instances: Vec<GenericContractInstance>,
+    /// Interned generic enum instantiations, indexed by the id their
+    /// [`Base::EnumInstance`] carries.
+    pub enum_instances: Vec<GenericEnumInstance>,
+    /// Interned unions, indexed by the id their [`Base::Union`] carries.
+    pub unions: Vec<Vec<Base>>,
+    /// Which `Base::Instance` a generic class's construction call resolved
+    /// to, keyed by the call's span — an id into `generic_instances`.
+    ///
+    /// Lowering derives every other type from the shape of the AST plus
+    /// these tables, but a construction call's own instantiation is inferred
+    /// from its arguments (task 7.6's mechanism) and lives nowhere else: the
+    /// callee's bare name alone (`Box`) cannot tell `Box<Int32>` from
+    /// `Box<String>` apart the way an annotation or a field's resolved type
+    /// can (roadmap task 11.1).
+    pub generic_constructions: std::collections::HashMap<Span, u32>,
+    /// Which `Iteration<T>` instantiation a `for ... in` loop over a type's
+    /// own `Iterable<T>` resolves to, keyed by the iterable expression's
+    /// span — an id into `enum_instances` (roadmap task 13.5).
+    ///
+    /// The element `T` is a class's own `contract_instances` entry, not
+    /// anything a written annotation names, so nothing else records which
+    /// concrete `Iteration<T>` a given loop needs — the same reason a
+    /// generic construction's instantiation needs `generic_constructions`.
+    /// Absent for a loop whose iterable is a range: those need none of the
+    /// `iterator()`/`next()` protocol.
+    pub for_in_iteration: std::collections::HashMap<Span, u32>,
+    /// Which `Base::EnumInstance` a generic enum's variant construction
+    /// resolved to (`Iteration.Item(value: v)`), keyed by the call's span —
+    /// an id into `enum_instances`. The `implements`/construction
+    /// equivalent for a generic enum's own `T`, the same reason
+    /// `generic_constructions` exists for a generic class's.
+    pub variant_constructions: std::collections::HashMap<Span, u32>,
 }
 
 /// What the checker learned about one lambda.
@@ -79,6 +121,11 @@ struct Names<'t> {
     fn_types: &'t [FnType],
     classes: &'t [ClassType],
     contracts: &'t [ContractType],
+    type_params: &'t [TypeParamInfo],
+    generic_instances: &'t [GenericInstance],
+    contract_instances: &'t [GenericContractInstance],
+    enum_instances: &'t [GenericEnumInstance],
+    unions: &'t [Vec<Base>],
 }
 
 impl TypeNames for Names<'_> {
@@ -109,6 +156,51 @@ impl TypeNames for Names<'_> {
         };
         let params: Vec<String> = f.params.iter().map(|t| describe(*t, self)).collect();
         format!("({}) => {}", params.join(", "), describe(f.returns, self))
+    }
+
+    fn type_param_name(&self, id: u32) -> String {
+        self.type_params
+            .get(id as usize)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "<type parameter>".into())
+    }
+
+    fn instance_name(&self, id: u32) -> String {
+        let Some(instance) = self.generic_instances.get(id as usize) else {
+            return "<generic instance>".into();
+        };
+        let class = self.class_name(instance.class);
+        let args: Vec<String> = instance.args.iter().map(|t| describe(*t, self)).collect();
+        format!("{class}<{}>", args.join(", "))
+    }
+
+    fn contract_instance_name(&self, id: u32) -> String {
+        let Some(instance) = self.contract_instances.get(id as usize) else {
+            return "<generic contract instance>".into();
+        };
+        let contract = self.contract_name(instance.contract);
+        let args: Vec<String> = instance.args.iter().map(|t| describe(*t, self)).collect();
+        format!("{contract}<{}>", args.join(", "))
+    }
+
+    fn enum_instance_name(&self, id: u32) -> String {
+        let Some(instance) = self.enum_instances.get(id as usize) else {
+            return "<generic enum instance>".into();
+        };
+        let enum_name = self.enum_name(instance.enum_id);
+        let args: Vec<String> = instance.args.iter().map(|t| describe(*t, self)).collect();
+        format!("{enum_name}<{}>", args.join(", "))
+    }
+
+    fn union_name(&self, id: u32) -> String {
+        let Some(members) = self.unions.get(id as usize) else {
+            return "<union>".into();
+        };
+        let names: Vec<String> = members
+            .iter()
+            .map(|&base| describe(Type::of(base), self))
+            .collect();
+        names.join(" | ")
     }
 }
 
@@ -141,6 +233,68 @@ struct Checker<'a> {
     loop_depth: u32,
     /// Captures collected for the lambda being checked, innermost last.
     capture_stack: Vec<Vec<Capture>>,
+    /// Declared generic type parameters, indexed by the id their
+    /// [`Base::Param`] carries.
+    type_params: Vec<TypeParamInfo>,
+    /// Type-parameter names in scope, innermost last: a class's own frame,
+    /// then a generic method's or function's on top of it.
+    type_param_scope: Vec<HashMap<String, u32>>,
+    /// The id already minted for a `TypeParam`, keyed by its span.
+    ///
+    /// A class's or function's signature is resolved twice — once to declare
+    /// it, once to check its body — and each pass calls
+    /// [`Self::enter_type_params`] with the same AST list. Its span is stable
+    /// across both calls, so this is what makes the second pass reuse `T`'s id
+    /// instead of minting a second, unrelated `T`.
+    type_param_ids: HashMap<Span, u32>,
+    /// Interned generic instantiations, indexed by the id their
+    /// [`Base::Instance`] carries.
+    generic_instances: Vec<GenericInstance>,
+    /// Interned generic contract instantiations, indexed by the id their
+    /// [`Base::ContractInstance`] carries.
+    contract_instances: Vec<GenericContractInstance>,
+    /// Interned generic enum instantiations, indexed by the id their
+    /// [`Base::EnumInstance`] carries.
+    enum_instances: Vec<GenericEnumInstance>,
+    /// `type` aliases, by name, holding the target written rather than a
+    /// resolved `Type`: an alias is transparent (`Base::Class` and friends
+    /// already say what it means), so there is nothing of its own to store —
+    /// resolving a reference to it just resolves `target` instead, lazily,
+    /// the same way a forward-referenced class does.
+    type_aliases: HashMap<String, TypeRef>,
+    /// Aliases currently being resolved, to catch `type A = B; type B = A;`
+    /// before it recurses forever.
+    resolving_aliases: Vec<String>,
+    /// Interned unions, indexed by the id their [`Base::Union`] carries —
+    /// already normalized: sorted, deduplicated, subsumed alternatives
+    /// removed.
+    unions: Vec<Vec<Base>>,
+    /// See [`CheckedProgram::generic_constructions`].
+    generic_constructions: HashMap<Span, u32>,
+    /// Ids of the language's own `Iterable<T>` and `Iterator<T>` contracts
+    /// and `Iteration<T>` enum, minted by
+    /// [`Self::register_native_iteration_contracts`] before anything in the
+    /// program is declared (task 6.9, D8).
+    native_iteration: Option<NativeIteration>,
+    /// See [`CheckedProgram::for_in_iteration`].
+    for_in_iteration: HashMap<Span, u32>,
+    /// See [`CheckedProgram::variant_constructions`].
+    variant_constructions: HashMap<Span, u32>,
+}
+
+/// Ids of the contracts and enum `for ... in` checks a type against, once
+/// [`Checker::register_native_iteration_contracts`] has run.
+///
+/// `iterable` finds `T` for `for ... in` (task 6.9); `iteration` finds which
+/// `Iteration<T>` a given loop needs (roadmap task 13.5). `iterator` is not
+/// read outside registration: lowering finds the `Iterator` contract by name
+/// instead, the same way it finds `Iterable`/`Iteration`.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct NativeIteration {
+    iterable: u32,
+    iterator: u32,
+    iteration: u32,
 }
 
 impl<'a> Checker<'a> {
@@ -164,6 +318,19 @@ impl<'a> Checker<'a> {
             in_constructor: false,
             loop_depth: 0,
             capture_stack: Vec::new(),
+            type_params: Vec::new(),
+            type_param_scope: Vec::new(),
+            type_param_ids: HashMap::new(),
+            generic_instances: Vec::new(),
+            contract_instances: Vec::new(),
+            enum_instances: Vec::new(),
+            type_aliases: HashMap::new(),
+            resolving_aliases: Vec::new(),
+            unions: Vec::new(),
+            generic_constructions: HashMap::new(),
+            native_iteration: None,
+            for_in_iteration: HashMap::new(),
+            variant_constructions: HashMap::new(),
         }
     }
 
@@ -196,6 +363,11 @@ impl<'a> Checker<'a> {
                 fn_types: &self.fn_types,
                 classes: &self.classes,
                 contracts: &self.contracts,
+                type_params: &self.type_params,
+                generic_instances: &self.generic_instances,
+                contract_instances: &self.contract_instances,
+                enum_instances: &self.enum_instances,
+                unions: &self.unions,
             },
         )
     }
@@ -203,27 +375,40 @@ impl<'a> Checker<'a> {
     // --- Program ----------------------------------------------------------
 
     fn run(mut self, program: &Program) -> CheckedProgram {
+        self.register_native_iteration_contracts();
         self.record_imports(program);
+        self.declare_type_aliases(program);
 
-        // Enums come first: a signature may name one.
-        for e in &program.enums {
-            self.declare_enum(e);
-        }
-
-        // Classes before signatures: a parameter may name one. In three
-        // passes, because a class may extend one declared later in the file
-        // and its members depend on its base's.
         // Contracts before classes: a class says which it satisfies, and a
         // field or signature may name one.
         for c in &program.contracts {
             self.declare_contract(c);
         }
 
+        // A class's own name (and how many type parameters it takes) is
+        // registered before enums resolve their associated field types
+        // below: an algebraic variant may carry a class as its payload
+        // (`Event.Login(user: User)`), the same way a class's own field may
+        // name an enum. `register_class` only mints the name and arity here
+        // — nothing that resolves a type, so nothing about it needs enums,
+        // contracts or another class's own members to exist yet.
         for c in &program.classes {
             self.register_class(c);
         }
+
+        // Enums next: a class's own signature may name one below, and now a
+        // class is nameable from an enum's associated data too.
+        for e in &program.enums {
+            self.declare_enum(e);
+        }
+
+        // Classes' members last, in three passes, because a class may
+        // extend one declared later in the file and its members depend on
+        // its base's.
         self.resolve_bases(program);
+        self.resolve_class_type_param_constraints(program);
         self.declare_members(program);
+        self.check_generic_class_lowering(program);
         self.check_conformance(program);
 
         // Signatures next, so a function can call another declared later.
@@ -252,6 +437,14 @@ impl<'a> Checker<'a> {
             matches: self.matches,
             variant_accesses: self.variant_accesses,
             aliases: self.aliases,
+            type_params: self.type_params,
+            generic_instances: self.generic_instances,
+            contract_instances: self.contract_instances,
+            enum_instances: self.enum_instances,
+            unions: self.unions,
+            generic_constructions: self.generic_constructions,
+            for_in_iteration: self.for_in_iteration,
+            variant_constructions: self.variant_constructions,
         }
     }
 
@@ -430,8 +623,133 @@ impl<'a> Checker<'a> {
         Type::from_name(name).is_some() || pending_type(name).is_some()
     }
 
+    /// Registers `Iterable<T>`, `Iterator<T>` and `Iteration<T>` as if they
+    /// were declared by the language itself (D8, task 6.9): `for ... in`
+    /// requires `Iterable<T>`, and this is what lets a user's own type
+    /// implement it exactly like a range or `String` would, rather than the
+    /// closed set the Phase 2 subset had.
+    ///
+    /// Injected directly into the tables instead of parsed from source, so
+    /// registering them never reports anything on its own — [`Self::declare_contract`]
+    /// and [`Self::declare_enum`]'s `NOT_LOWERED` gate for a *user's* generic
+    /// declaration would otherwise fire for every program, whether it ever
+    /// names these or not. What is genuinely not lowered — dispatching
+    /// through a contract's table (roadmap task 10.7) and a generic enum with
+    /// associated data (11.3) — is gated where a program actually names a
+    /// concrete instantiation, in [`Self::resolve_contract_reference`] and
+    /// [`Self::resolve_enum_reference`].
+    fn register_native_iteration_contracts(&mut self) {
+        let at = Span::empty(0);
+
+        let iterable_t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            span: at,
+        });
+        let iterable = self.contracts.len() as u32;
+        self.contracts.push(ContractType {
+            name: "Iterable".into(),
+            kind: ContractKind::Interface,
+            methods: Vec::new(),
+            type_params: vec![iterable_t],
+            shared: true,
+            span: at,
+        });
+
+        let iterator_t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            span: at,
+        });
+        let iterator = self.contracts.len() as u32;
+        self.contracts.push(ContractType {
+            name: "Iterator".into(),
+            kind: ContractKind::Interface,
+            methods: Vec::new(),
+            type_params: vec![iterator_t],
+            shared: true,
+            span: at,
+        });
+
+        let iteration_t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            span: at,
+        });
+        let iteration = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "Iteration".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Item".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "value".into(),
+                        ty: Type::of(Base::Param(iteration_t)),
+                    }],
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Done".into(),
+                    associated: Vec::new(),
+                    span: at,
+                },
+            ],
+            type_params: vec![iteration_t],
+            shared: true,
+            span: at,
+        });
+
+        // `iterator(): Iterator<T>`
+        let returns_iterator = self.intern_contract_instance(GenericContractInstance {
+            contract: iterator,
+            args: vec![Type::of(Base::Param(iterable_t))],
+        });
+        self.contracts[iterable as usize].methods.push(ContractMethod {
+            name: "iterator".into(),
+            params: Vec::new(),
+            returns: Type::of(Base::ContractInstance(returns_iterator)),
+            span: at,
+            has_default: false,
+            index: 0,
+        });
+
+        // `next(): Iteration<T>`
+        let returns_iteration = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: iteration,
+            args: vec![Type::of(Base::Param(iterator_t))],
+        });
+        self.contracts[iterator as usize].methods.push(ContractMethod {
+            name: "next".into(),
+            params: Vec::new(),
+            returns: Type::of(Base::EnumInstance(returns_iteration)),
+            span: at,
+            has_default: false,
+            index: 0,
+        });
+
+        self.native_iteration = Some(NativeIteration {
+            iterable,
+            iterator,
+            iteration,
+        });
+    }
+
     /// Registers a contract with its method signatures.
     fn declare_contract(&mut self, decl: &ContractDecl) {
+        if Self::is_native_contract_name(&decl.name.name) {
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("`{}` is a contract of the language", decl.name.name),
+                "application code cannot reopen a native contract or replace what it means",
+                Some("pick a different name".into()),
+            );
+            return;
+        }
+
         if let Some(previous) = self.contracts.iter().find(|c| c.name == decl.name.name) {
             let where_ = self.declared_at(previous.span, decl.name.span);
             self.error(
@@ -444,6 +762,7 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        let type_params = self.enter_type_params(&decl.type_params);
         let mut methods: Vec<ContractMethod> = Vec::new();
         for (index, method) in decl.methods.iter().enumerate() {
             if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
@@ -472,13 +791,23 @@ impl<'a> Checker<'a> {
             });
         }
 
+        self.leave_type_params();
+
         self.contracts.push(ContractType {
             name: decl.name.name.clone(),
             kind: decl.kind,
             methods,
+            type_params,
             shared: decl.shared,
             span: decl.name.span,
         });
+    }
+
+    /// Whether `name` is one of the contracts the language itself registers
+    /// (task 6.9): `Iterable` and `Iterator`, injected directly into the
+    /// tables rather than parsed, so application code cannot reopen them.
+    fn is_native_contract_name(name: &str) -> bool {
+        matches!(name, "Iterable" | "Iterator")
     }
 
     fn contract_id(&self, name: &str) -> Option<u32> {
@@ -501,49 +830,316 @@ impl<'a> Checker<'a> {
                 .base
                 .map(|b| self.classes[b as usize].contracts.clone())
                 .unwrap_or_default();
+            let mut abstract_bases: Vec<u32> = self.classes[id as usize]
+                .base
+                .map(|b| self.classes[b as usize].abstract_bases.clone())
+                .unwrap_or_default();
+            let mut contract_instances: Vec<u32> = self.classes[id as usize]
+                .base
+                .map(|b| self.classes[b as usize].contract_instances.clone())
+                .unwrap_or_default();
 
             for named in &decl.implements {
                 let resolved = self.resolved_name(&named.name, named.span);
-                let Some(contract) = self.contract_id(&resolved) else {
-                    self.error(
-                        codes::UNKNOWN_TYPE,
-                        named.span,
-                        format!("`{}` is not a declared contract", named.name),
-                        "`implements` names an interface or a trait",
-                        None,
-                    );
-                    continue;
-                };
 
-                let declared = self.contracts[contract as usize].span;
-                let shared = self.contracts[contract as usize].shared;
-                self.require_visible(declared, shared, named, "contract");
+                if let Some(contract) = self.contract_id(&resolved) {
+                    let declared = self.contracts[contract as usize].span;
+                    let shared = self.contracts[contract as usize].shared;
+                    let ident = Ident::new(named.name.clone(), named.span);
+                    self.require_visible(declared, shared, &ident, "contract");
 
-                if satisfied.contains(&contract) {
-                    let name = self.contracts[contract as usize].name.clone();
-                    self.error(
-                        codes::DUPLICATE_DECLARATION,
-                        named.span,
-                        format!("`{name}` is listed more than once"),
-                        "a class satisfies a contract once, its base's included",
-                        None,
-                    );
+                    if satisfied.contains(&contract) {
+                        let name = self.contracts[contract as usize].name.clone();
+                        self.error(
+                            codes::DUPLICATE_DECLARATION,
+                            named.span,
+                            format!("`{name}` is listed more than once"),
+                            "a class satisfies a contract once, its base's included",
+                            None,
+                        );
+                        continue;
+                    }
+
+                    // A generic contract (task 6.9, `Iterable<T>` chief among
+                    // them): the type arguments replace its own `<T>` before
+                    // comparing what the class wrote against what is
+                    // required, the same way `Box<Int32>` would for a class.
+                    let (subst, instance) = self.resolve_implements_args(contract, named);
+                    self.require_conformance(id, contract, named.span, &subst);
+                    satisfied.push(contract);
+                    if let Some(instance) = instance {
+                        contract_instances.push(instance);
+                    }
                     continue;
                 }
 
-                self.require_conformance(id, contract, named.span);
-                satisfied.push(contract);
+                if let Some(abstract_id) = self
+                    .classes
+                    .iter()
+                    .position(|c| c.name == resolved && c.kind == ClassKind::Abstract)
+                    .map(|i| i as u32)
+                {
+                    let declared = self.classes[abstract_id as usize].span;
+                    let shared = self.classes[abstract_id as usize].shared;
+                    let ident = Ident::new(named.name.clone(), named.span);
+                    self.require_visible(declared, shared, &ident, "abstract class");
+                    self.reject_type_arguments(named);
+
+                    if abstract_bases.contains(&abstract_id) {
+                        let name = self.classes[abstract_id as usize].name.clone();
+                        self.error(
+                            codes::DUPLICATE_DECLARATION,
+                            named.span,
+                            format!("`{name}` is listed more than once"),
+                            "a class adopts an abstract class once, its base's included",
+                            None,
+                        );
+                        continue;
+                    }
+
+                    self.require_abstract_conformance(id, abstract_id, named.span, decl);
+                    abstract_bases.push(abstract_id);
+                    continue;
+                }
+
+                self.error(
+                    codes::UNKNOWN_TYPE,
+                    named.span,
+                    format!("`{}` is not a declared contract or abstract class", named.name),
+                    "`implements` names an interface, a trait or an abstract class",
+                    None,
+                );
             }
 
             self.classes[id as usize].contracts = satisfied;
+            self.classes[id as usize].abstract_bases = abstract_bases;
+            self.classes[id as usize].contract_instances = contract_instances;
+        }
+    }
+
+    /// Resolves the type arguments an `implements` clause writes for a
+    /// generic contract, returning the substitution its type parameter(s)
+    /// need before comparing what the class supplies against what is
+    /// required (task 6.9), plus the interned instantiation id — the
+    /// `implements` equivalent of [`Self::resolve_contract_reference`].
+    fn resolve_implements_args(
+        &mut self,
+        contract: u32,
+        reference: &TypeRef,
+    ) -> (Vec<(u32, Type)>, Option<u32>) {
+        let expected = self.contracts[contract as usize].type_params.clone();
+
+        if expected.is_empty() {
+            self.reject_type_arguments(reference);
+            return (Vec::new(), None);
+        }
+
+        if reference.arguments.len() != expected.len() {
+            let name = self.contracts[contract as usize].name.clone();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!(
+                    "`{name}` takes {} type argument{}, not {}",
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" },
+                    reference.arguments.len()
+                ),
+                format!("`{name}` is declared with {} of its own", expected.len()),
+                None,
+            );
+            for arg in &reference.arguments {
+                self.resolve_type(arg);
+            }
+            return (Vec::new(), None);
+        }
+
+        let args: Vec<Type> = reference
+            .arguments
+            .iter()
+            .map(|a| self.resolve_type(a))
+            .collect();
+
+        for (&param_id, &arg) in expected.iter().zip(&args) {
+            let constraints = self.type_params[param_id as usize].constraints.clone();
+            for constraint in &constraints {
+                if self.satisfies_constraint(arg, *constraint) {
+                    continue;
+                }
+                let param_name = self.type_params[param_id as usize].name.clone();
+                let arg_name = self.name(arg);
+                let constraint_name = self.name(*constraint);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    reference.span,
+                    format!("`{arg_name}` does not satisfy `{param_name}`"),
+                    format!(
+                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
+                    ),
+                    None,
+                );
+            }
+        }
+
+        // `implements Iterable<T>` and `implements Iterator<T>` are the
+        // generic contract instantiations that lower (roadmap task 13.5,
+        // `for ... in` over a type's own iterator, which needs both halves
+        // of the protocol implemented): any other stays gated, since
+        // nothing else specializes a class's own generic contract table yet.
+        if self
+            .native_iteration
+            .is_none_or(|n| contract != n.iterable && contract != n.iterator)
+        {
+            self.not_lowered(
+                reference.span,
+                "an implementation of a generic contract",
+                "implement it manually per concrete type for now, without naming the contract's own type parameter",
+            );
+        }
+
+        let instance = self.intern_contract_instance(GenericContractInstance {
+            contract,
+            args: args.clone(),
+        });
+        (expected.into_iter().zip(args).collect(), Some(instance))
+    }
+
+    /// Checks that a class supplies every required attribute and
+    /// `abstract fn` an `abstract class` declares.
+    ///
+    /// Unlike a contract's method, an abstract class's is only satisfied by
+    /// an explicit `override fn` — `ZIRK_LANGUAGE_SPEC.md`'s scenario for
+    /// this spells it out for both a field and a method at once.
+    fn require_abstract_conformance(
+        &mut self,
+        class: u32,
+        abstract_id: u32,
+        at: Span,
+        decl: &ClassDecl,
+    ) {
+        let required_fields = self.classes[abstract_id as usize].fields.clone();
+        let required_methods = self.classes[abstract_id as usize].methods.clone();
+        let abstract_name = self.classes[abstract_id as usize].name.clone();
+        let class_name = self.classes[class as usize].name.clone();
+
+        for field in &required_fields {
+            let Some(supplied) = self.classes[class as usize].field(&field.name).cloned() else {
+                self.error(
+                    codes::MISSING_IMPLEMENTATION,
+                    at,
+                    format!("`{class_name}` does not implement `{}`", field.name),
+                    format!("`{abstract_name}` requires this attribute"),
+                    Some(format!("add `{}: ...;` to `{class_name}`", field.name)),
+                );
+                continue;
+            };
+            if supplied.ty != field.ty {
+                let expected = self.name(field.ty);
+                let actual = self.name(supplied.ty);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    supplied.span,
+                    format!("`{}` does not match what `{abstract_name}` requires", field.name),
+                    format!("`{abstract_name}` declares it `{expected}`, not `{actual}`"),
+                    None,
+                );
+            }
+        }
+
+        for method in &required_methods {
+            let Some(supplied) = self.classes[class as usize].method(&method.name).cloned() else {
+                self.error(
+                    codes::MISSING_IMPLEMENTATION,
+                    at,
+                    format!("`{class_name}` does not implement `{}`", method.name),
+                    format!("`{abstract_name}` requires it"),
+                    Some(format!(
+                        "add `override fn {}(...): ...` to `{class_name}`",
+                        method.name
+                    )),
+                );
+                continue;
+            };
+
+            let same_params = supplied.params.len() == method.params.len()
+                && supplied
+                    .params
+                    .iter()
+                    .zip(&method.params)
+                    .all(|(a, b)| a.ty == b.ty);
+            if !same_params || supplied.returns != method.returns {
+                let line = self.sources.location(method.span).line;
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    supplied.span,
+                    format!("`{}` does not match what `{abstract_name}` requires", method.name),
+                    format!("the one declared on line {line} has a different signature"),
+                    Some(
+                        "keep the parameters and the return type the abstract class declared"
+                            .into(),
+                    ),
+                );
+                continue;
+            }
+
+            // Unlike a contract method, an abstract class's requirement is
+            // only satisfied by an explicit `override fn`
+            // (`ZIRK_LANGUAGE_SPEC.md`'s conformance scenario).
+            let written_override = decl
+                .methods
+                .iter()
+                .find(|m| m.name.name == method.name)
+                .is_some_and(|m| m.is_override);
+            if !written_override {
+                self.error(
+                    codes::MISSING_OVERRIDE,
+                    supplied.span,
+                    format!("`{}` implements an abstract class's requirement", method.name),
+                    format!("`{abstract_name}` requires it, the same as an inherited method"),
+                    Some(format!("write `override fn {}(...): ...`", method.name)),
+                );
+            }
+        }
+    }
+
+    /// Replaces a contract method's own type parameters with the concrete
+    /// arguments of one `implements` instantiation.
+    fn substitute_contract_method(&mut self, method: &ContractMethod, subst: &[(u32, Type)]) -> ContractMethod {
+        ContractMethod {
+            name: method.name.clone(),
+            params: method
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    ty: self.substitute_type(p.ty, subst),
+                    ..p.clone()
+                })
+                .collect(),
+            returns: self.substitute_type(method.returns, subst),
+            span: method.span,
+            has_default: method.has_default,
+            index: method.index,
         }
     }
 
     /// Checks that a class supplies everything a contract requires.
-    fn require_conformance(&mut self, class: u32, contract: u32, at: Span) {
+    fn require_conformance(&mut self, class: u32, contract: u32, at: Span, subst: &[(u32, Type)]) {
         let required = self.contracts[contract as usize].methods.clone();
         let contract_name = self.contracts[contract as usize].name.clone();
         let class_name = self.classes[class as usize].name.clone();
+
+        // A generic contract's own `<T>` is substituted before anything below
+        // compares against it, so `Iterable<Int32>` is checked against
+        // `iterator(): Iterator<Int32>`, not the unsubstituted `Iterator<T>`
+        // every instantiation shares in the table (task 6.9).
+        let required: Vec<ContractMethod> = if subst.is_empty() {
+            required
+        } else {
+            required
+                .iter()
+                .map(|m| self.substitute_contract_method(m, subst))
+                .collect()
+        };
 
         for method in &required {
             let Some(supplied) = self.classes[class as usize].method(&method.name).cloned() else {
@@ -566,6 +1162,28 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
+
+            // Two traits offering their own default for the same name is the
+            // diamond problem (D4): the class never wrote a choice, so
+            // whichever trait happened to be adopted first would otherwise
+            // win silently, by declaration order alone.
+            if method.has_default
+                && let Some(previous_contract) = supplied.from_contract
+                && previous_contract != contract
+            {
+                let name = method.name.clone();
+                let previous_name = self.contracts[previous_contract as usize].name.clone();
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    at,
+                    format!("`{class_name}` inherits two defaults for `{name}`"),
+                    format!(
+                        "`{contract_name}` and `{previous_name}` each supply their own `{name}`"
+                    ),
+                    Some(format!("add `fn {name}(...): ...` to `{class_name}` to choose one")),
+                );
+                continue;
+            }
 
             self.require_matching_signature(&supplied, method, &contract_name, at);
         }
@@ -657,16 +1275,194 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        // Minted here, ahead of every other pass: a field elsewhere in the
+        // file may write `Box<Int32>` before `Box` itself is declared, and
+        // resolving that needs to know how many parameters `Box` takes.
+        // Constraints are filled in later, by `resolve_class_type_param_constraints`,
+        // once every class and contract they might name is registered too.
+        let type_params = self.mint_type_param_ids(&decl.type_params);
+
         self.classes.push(ClassType {
             name: decl.name.name.clone(),
+            kind: decl.kind,
             base: None,
             fields: Vec::new(),
             constructors: Vec::new(),
             methods: Vec::new(),
             contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params,
             shared: decl.shared,
             span: decl.name.span,
         });
+    }
+
+    /// Mints an id for each `TypeParam`, without resolving its constraints.
+    ///
+    /// Shared by [`Self::register_class`], which needs a class's arity known
+    /// before any field in the file is resolved, and by
+    /// [`Self::enter_type_params`], which mints on first use for a function
+    /// or method — nothing outside its own declaration ever names its
+    /// parameter, so there is no equivalent ordering hazard there.
+    fn mint_type_param_ids(&mut self, params: &[TypeParam]) -> Vec<u32> {
+        params
+            .iter()
+            .map(|p| {
+                if let Some(&id) = self.type_param_ids.get(&p.span) {
+                    return id;
+                }
+                let id = self.type_params.len() as u32;
+                self.type_params.push(TypeParamInfo {
+                    name: p.name.name.clone(),
+                    constraints: Vec::new(),
+                    span: p.span,
+                });
+                self.type_param_ids.insert(p.span, id);
+                id
+            })
+            .collect()
+    }
+
+    /// Resolves the `from` constraints of every class's own type parameters,
+    /// and reports its variance and its `NOT_LOWERED` status, once each.
+    ///
+    /// Separate from `register_class` because a constraint may name a class
+    /// or contract declared later in the file: this runs only after every
+    /// class is registered and `resolve_bases` has run.
+    fn resolve_class_type_param_constraints(&mut self, program: &Program) {
+        for decl in &program.classes {
+            if decl.type_params.is_empty() {
+                continue;
+            }
+            // Whether this class's own `T` lowers per instantiation is
+            // decided once its members exist (`Self::check_generic_class_lowering`,
+            // which needs field and method types, not yet available here).
+            self.report_declared_variance(&decl.type_params);
+
+            self.type_param_scope.push(
+                decl.type_params
+                    .iter()
+                    .map(|p| (p.name.name.clone(), self.type_param_ids[&p.span]))
+                    .collect(),
+            );
+            for p in &decl.type_params {
+                let constraints: Vec<Type> =
+                    p.constraints.iter().map(|c| self.resolve_type(c)).collect();
+                let id = self.type_param_ids[&p.span];
+                self.type_params[id as usize].constraints = constraints;
+            }
+            self.type_param_scope.pop();
+        }
+    }
+
+    /// Gates a generic class with `NOT_LOWERED` unless its own `T` is used
+    /// simply enough to specialize per instantiation (roadmap task 11.1,
+    /// D5): lowering builds one specialized copy per combination of type
+    /// arguments used, substituting `T` directly in fields, constructor
+    /// parameters and method signatures. What that pass does not build yet —
+    /// `extends` on a generic class, a type parameter nested inside another
+    /// generic type (`Box<T>`, `T | Int32`, `Iterable<T>`) rather than named
+    /// directly, or a method with type parameters of its own — stays gated.
+    fn check_generic_class_lowering(&mut self, program: &Program) {
+        for decl in &program.classes {
+            if decl.type_params.is_empty() {
+                continue;
+            }
+            let Some(id) = self.class_id(&decl.name.name) else {
+                continue;
+            };
+            if self.generic_class_is_directly_specializable(id) {
+                continue;
+            }
+            self.not_lowered(
+                decl.type_params[0].span,
+                "a generic type parameter",
+                "declare it without `<...>` for now, or instantiate it manually per concrete type",
+            );
+        }
+    }
+
+    /// See [`Self::check_generic_class_lowering`].
+    fn generic_class_is_directly_specializable(&self, id: u32) -> bool {
+        let class = &self.classes[id as usize];
+        // `extends` and `implements` both stay out of scope for this pass:
+        // a specialized copy's own dispatch tables (its method table for
+        // `extends`, a contract table for `implements`) are a separate
+        // concern this pass does not build.
+        if class.base.is_some() || !class.contracts.is_empty() || !class.abstract_bases.is_empty()
+        {
+            return false;
+        }
+
+        let ids = &class.type_params;
+        let direct_or_absent = |ty: Type| {
+            matches!(ty.base, Base::Param(pid) if ids.contains(&pid))
+                || !self.type_references_any_param(ty, ids)
+        };
+
+        class.fields.iter().all(|f| direct_or_absent(f.ty))
+            && class
+                .constructors
+                .iter()
+                .all(|params| params.iter().all(|p| direct_or_absent(p.ty)))
+            && class.methods.iter().all(|m| {
+                m.params.iter().all(|p| direct_or_absent(p.ty)) && direct_or_absent(m.returns)
+                // A method with type parameters of its own is already gated
+                // independently: `enter_type_params` reports `NOT_LOWERED`
+                // for it the same way a generic function's would, regardless
+                // of what this check decides for the class's own `T`.
+            })
+    }
+
+    /// Whether `ty` names any of `ids` anywhere within it, including nested
+    /// inside another generic instantiation or a union.
+    fn type_references_any_param(&self, ty: Type, ids: &[u32]) -> bool {
+        match ty.base {
+            Base::Param(pid) => ids.contains(&pid),
+            Base::Instance(inst) => self.generic_instances[inst as usize]
+                .args
+                .iter()
+                .any(|&a| self.type_references_any_param(a, ids)),
+            Base::ContractInstance(inst) => self.contract_instances[inst as usize]
+                .args
+                .iter()
+                .any(|&a| self.type_references_any_param(a, ids)),
+            Base::EnumInstance(inst) => self.enum_instances[inst as usize]
+                .args
+                .iter()
+                .any(|&a| self.type_references_any_param(a, ids)),
+            Base::Union(union_id) => self.unions[union_id as usize]
+                .iter()
+                .any(|&b| self.type_references_any_param(Type::of(b), ids)),
+            _ => false,
+        }
+    }
+
+    /// Reports each `in`/`out` on a list of type parameters, once.
+    ///
+    /// Its own diagnostic rather than folding it into `not_lowered`: task 7.5
+    /// of the generics slice asks for variance to say so distinctly, since
+    /// subtyping between instantiations — what variance would mean — needs
+    /// more than "generics do not lower yet" to explain.
+    fn report_declared_variance(&mut self, params: &[TypeParam]) {
+        for p in params {
+            let keyword = match p.variance {
+                Variance::Invariant => continue,
+                Variance::In => "in",
+                Variance::Out => "out",
+            };
+            self.error(
+                codes::PENDING_FEATURE,
+                p.span,
+                "declared variance is not verified yet",
+                format!(
+                    "`{keyword} {}` parses, but the checker treats every parameter as invariant",
+                    p.name.name
+                ),
+                Some("remove the `in`/`out`, or accept that it is not enforced yet".into()),
+            );
+        }
     }
 
     /// Resolves every `extends`, rejecting a base that is not a class and any
@@ -677,6 +1473,19 @@ impl<'a> Checker<'a> {
             let Some(id) = self.class_id(&decl.name.name) else {
                 continue;
             };
+
+            if decl.kind != ClassKind::Class {
+                let article = if decl.kind == ClassKind::Abstract { "an" } else { "a" };
+                let kind = decl.kind.as_str();
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    base.span,
+                    format!("{article} {kind} cannot extend anything"),
+                    format!("{kind} has no identity for inheritance to build on"),
+                    Some("remove `extends`".into()),
+                );
+                continue;
+            }
 
             let resolved = self.resolved_name(&base.name, base.span);
             let Some(base_id) = self.class_id(&resolved) else {
@@ -793,6 +1602,37 @@ impl<'a> Checker<'a> {
         let Some(id) = self.class_id(&decl.name.name) else {
             return;
         };
+        self.enter_type_params(&decl.type_params);
+
+        // The grammar and the type rules for a record, value class or
+        // abstract class exist from here on (construction or conformance,
+        // equality, immutability).
+        match decl.kind {
+            ClassKind::Class => {}
+            ClassKind::Abstract => {
+                // Nothing to lower on its own — no `construct`, no state, no
+                // layout — but a value typed through it would need dynamic
+                // dispatch through its adopter the way a contract's does,
+                // and that path does not exist for it yet.
+                self.not_lowered(
+                    decl.name.span,
+                    "an abstract class",
+                    "implement its requirements directly on the concrete class for now, without naming the abstract class as a type",
+                );
+            }
+            // A record or value class lowers to an inline value (roadmap
+            // task 11.5) — but only a non-generic one: combining that with
+            // per-instantiation specialization (11.1) is a separate concern
+            // this pass does not build.
+            ClassKind::Record | ClassKind::ValueClass if !decl.type_params.is_empty() => {
+                self.not_lowered(
+                    decl.name.span,
+                    &format!("a generic {}", decl.kind.as_str()),
+                    "model it as an ordinary `class` for now, with a `construct` that sets every field",
+                );
+            }
+            ClassKind::Record | ClassKind::ValueClass => {}
+        }
 
         // Inherited members come first, which is what makes a subclass's
         // layout start with its base's (D2).
@@ -835,14 +1675,54 @@ impl<'a> Checker<'a> {
                 );
             }
 
+            // A record or value class is a value: every field is immutable,
+            // the same way `class`'s own `public mut` default does not apply
+            // to it. Writing `mut` explicitly says so, which is worth its own
+            // diagnostic rather than a silently ignored modifier.
+            let mutability = if matches!(decl.kind, ClassKind::Class | ClassKind::Abstract) {
+                // A required attribute has whatever mutability its declared
+                // implementer gives it — an abstract class states that a
+                // field must exist, not that it is a value.
+                field.mutability
+            } else {
+                if field.mutability == Mutability::Mutable && field.explicit_modifiers {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        format!("a {} field is always immutable", decl.kind.as_str()),
+                        "it has no identity to protect by forbidding reassignment instead",
+                        Some("remove `mut`".into()),
+                    );
+                }
+                Mutability::Immutable
+            };
+
             fields.push(FieldInfo {
                 name: field.name.name.clone(),
                 ty,
                 visibility: field.visibility,
-                mutability: field.mutability,
+                mutability,
                 span: field.name.span,
                 owner: id,
             });
+        }
+
+        if decl.kind != ClassKind::Class && !decl.constructors.is_empty() {
+            let article = if decl.kind == ClassKind::Abstract { "an" } else { "a" };
+            let cause = if decl.kind == ClassKind::Abstract {
+                "it is never instantiated: a concrete class adopts its requirements with `implements`"
+            } else {
+                "its construction is always the implicit named constructor over its fields"
+            };
+            for constructor in &decl.constructors {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    constructor.span,
+                    format!("{article} {} has no `construct`", decl.kind.as_str()),
+                    cause,
+                    Some("remove `construct`".into()),
+                );
+            }
         }
 
         let constructors = decl
@@ -868,6 +1748,21 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            // The grammar only rejects a body on a method written `abstract`;
+            // one written without it inside `abstract class` still has to be
+            // caught, since every member there is a signature.
+            if decl.kind == ClassKind::Abstract && method.body.is_some() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    method.name.span,
+                    format!("`{}` has a body inside an abstract class", method.name.name),
+                    "an abstract class declares signatures only, with no body of its own",
+                    Some(format!("write `abstract fn {}(...): ...;`", method.name.name)),
+                );
+                continue;
+            }
+
+            self.enter_type_params(&method.type_params);
             let resolved = MethodInfo {
                 name: method.name.name.clone(),
                 params: method
@@ -883,6 +1778,7 @@ impl<'a> Checker<'a> {
                 overridden: false,
                 from_contract: None,
             };
+            self.leave_type_params();
 
             match methods.iter().position(|m| m.name == method.name.name) {
                 Some(position) if methods[position].owner != id => {
@@ -922,8 +1818,13 @@ impl<'a> Checker<'a> {
                 None => {
                     // `override` on something that overrides nothing is the
                     // mirror mistake, and just as worth catching: it usually
-                    // means a typo in the name.
-                    if method.is_override {
+                    // means a typo in the name. Not when the class `implements`
+                    // something, though: it may be satisfying an abstract
+                    // class's requirement, which is checked for real once
+                    // every class has registered its own methods
+                    // (`Self::require_abstract_conformance`) — this pass runs
+                    // too early to know, in either declaration order.
+                    if method.is_override && decl.implements.is_empty() {
                         self.error(
                             codes::MISSING_OVERRIDE,
                             method.name.span,
@@ -949,6 +1850,7 @@ impl<'a> Checker<'a> {
                 self.mark_overridden(base_id, &method.name.name);
             }
         }
+        self.leave_type_params();
     }
 
     /// Whether a value of one type may stand where another is expected
@@ -972,6 +1874,23 @@ impl<'a> Checker<'a> {
         match expected.base {
             // A class satisfies a contract by saying so and supplying it.
             Base::Contract(target) => self.classes[current as usize].contracts.contains(&target),
+            // A class satisfies a generic contract instantiation
+            // (`Iterable<Int32>`, task 6.9) the same way, but has to match
+            // the specific arguments too: implementing `Iterable<Int32>`
+            // does not make a class assignable to `Iterable<String>`.
+            Base::ContractInstance(target) => self.classes[current as usize]
+                .contract_instances
+                .iter()
+                .any(|&id| self.contract_instances[id as usize] == self.contract_instances[target as usize]),
+            // A class satisfies an `abstract class` the same way it
+            // satisfies a contract: by naming it in `implements`. Its own
+            // `extends` chain never does, since an abstract class has no
+            // state or layout to extend.
+            Base::Class(target) if self.classes[target as usize].kind == ClassKind::Abstract => {
+                self.classes[current as usize]
+                    .abstract_bases
+                    .contains(&target)
+            }
             Base::Class(target) => {
                 let mut current = current;
                 while let Some(base) = self.classes[current as usize].base {
@@ -984,6 +1903,53 @@ impl<'a> Checker<'a> {
             }
             _ => false,
         }
+    }
+
+    /// Whether a bare variant of a generic enum fits where one of its
+    /// instantiations is expected, such as `Iteration.Done` where
+    /// `Iteration<Int32>` is declared.
+    ///
+    /// An approximation: there is no generic-enum-construction syntax that
+    /// infers `T` (task 6.9 does not build one), so a variant of `Iteration`
+    /// always types as the bare `Base::Enum`, never as the instantiation its
+    /// context implies. Accepting it here — rather than making every such
+    /// return a spurious `TYPE_MISMATCH` — is sound exactly because nothing
+    /// downstream reads the argument yet: constructing one is `NOT_LOWERED`
+    /// at its own declaration (`Self::resolve_enum_reference`) before this
+    /// check would ever matter to a running program.
+    fn bare_enum_matches_instance(&self, actual: Type, expected: Type) -> bool {
+        if actual.nullable && !expected.nullable {
+            return false;
+        }
+        let Base::Enum(actual_id) = actual.base else {
+            return false;
+        };
+        let Base::EnumInstance(target) = expected.base else {
+            return false;
+        };
+        self.enum_instances[target as usize].enum_id == actual_id
+    }
+
+    /// Whether a value fits where a union is expected: it matches, or is a
+    /// subclass of, at least one alternative.
+    ///
+    /// `Type::accepts` alone cannot answer this: a union's member list lives
+    /// in the checker's table, not in the two bytes a bare `Type` carries.
+    fn accepts_into_union(&self, expected: Type, actual: Type) -> bool {
+        let Base::Union(id) = expected.base else {
+            return false;
+        };
+        if actual.is_unknown() {
+            return true;
+        }
+        if actual.nullable && !expected.nullable {
+            return false;
+        }
+        let actual = actual.without_null();
+        self.unions[id as usize].iter().any(|&member| {
+            let member = Type::of(member);
+            member.accepts(actual) || self.is_subclass_of(actual, member)
+        })
     }
 
     /// Marks a method as redefined, all the way up the chain.
@@ -1045,6 +2011,7 @@ impl<'a> Checker<'a> {
             return;
         };
         let class_type = Type::of(Base::Class(id as u32));
+        self.enter_type_params(&decl.type_params);
 
         for constructor in &decl.constructors {
             self.in_constructor = true;
@@ -1057,6 +2024,7 @@ impl<'a> Checker<'a> {
 
         for method in &decl.methods {
             let Some(body) = &method.body else { continue };
+            self.enter_type_params(&method.type_params);
             let returns = self.resolve_type(&method.return_type);
             let name = method.name.name.clone();
             let span = body.span;
@@ -1073,7 +2041,9 @@ impl<'a> Checker<'a> {
                     );
                 }
             });
+            self.leave_type_params();
         }
+        self.leave_type_params();
     }
 
     /// Runs a member body with `this` and the parameters in scope.
@@ -1187,7 +2157,50 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Registers every `type` alias's target, unresolved.
+    ///
+    /// Resolution happens lazily, inside [`Self::resolve_type`]: an alias may
+    /// name a class declared later in the file, the same forward-reference
+    /// every other type name already tolerates.
+    fn declare_type_aliases(&mut self, program: &Program) {
+        for decl in &program.type_aliases {
+            if self.type_aliases.contains_key(&decl.name.name) {
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    decl.name.span,
+                    format!("`{}` is already defined", decl.name.name),
+                    "a previous `type` alias exists with this name",
+                    Some("rename one of the two".into()),
+                );
+                continue;
+            }
+            self.type_aliases
+                .insert(decl.name.name.clone(), decl.target.clone());
+
+            // Resolution is real (`Self::resolve_type_alias`), but lowering
+            // independently re-resolves a written type name from the AST in
+            // some paths and does not know aliases exist yet, so a lowered
+            // program could still crash on one.
+            self.not_lowered(
+                decl.span,
+                "a `type` alias",
+                "write the aliased type directly for now",
+            );
+        }
+    }
+
     fn declare_enum(&mut self, decl: &EnumDecl) {
+        if decl.name.name == "Iteration" {
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                "`Iteration` is an enum of the language",
+                "application code cannot reopen a native enum or replace what it means",
+                Some("pick a different name".into()),
+            );
+            return;
+        }
+
         if let Some(previous) = self.enums.iter().find(|e| e.name == decl.name.name) {
             let where_ = self.declared_at(previous.span, decl.name.span);
             self.error(
@@ -1200,19 +2213,59 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let mut variants: Vec<String> = Vec::new();
+        let type_params = self.enter_type_params(&decl.type_params);
+        let mut variants: Vec<EnumVariantInfo> = Vec::new();
         for variant in &decl.variants {
-            if variants.contains(&variant.name) {
+            if variants.iter().any(|v| v.name == variant.name.name) {
                 self.error(
                     codes::DUPLICATE_DECLARATION,
                     variant.span,
-                    format!("variant `{}` is repeated", variant.name),
+                    format!("variant `{}` is repeated", variant.name.name),
                     format!("`{}` already declares it", decl.name.name),
                     None,
                 );
                 continue;
             }
-            variants.push(variant.name.clone());
+
+            let mut seen_fields: Vec<String> = Vec::new();
+            let mut associated = Vec::new();
+            for field in &variant.associated {
+                if seen_fields.contains(&field.name.name) {
+                    self.error(
+                        codes::DUPLICATE_DECLARATION,
+                        field.span,
+                        format!("associated field `{}` is repeated", field.name.name),
+                        format!("`{}` already declares it", variant.name.name),
+                        None,
+                    );
+                    continue;
+                }
+                seen_fields.push(field.name.name.clone());
+                associated.push(AssociatedFieldInfo {
+                    name: field.name.name.clone(),
+                    ty: self.resolve_type(&field.ty),
+                });
+            }
+
+            if let Some(mapping) = &variant.mapping {
+                let ty = self.check_expr(mapping);
+                if !ty.is_unknown() && ty != Type::STRING && ty != Type::INT32 {
+                    let name = self.name(ty);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        mapping.span(),
+                        format!("`{name}` cannot map a variant"),
+                        "a mapping is a string or a numeric value, per `ZIRK_LANGUAGE_SPEC.md` section 7",
+                        Some("write a string or an integer literal".into()),
+                    );
+                }
+            }
+
+            variants.push(EnumVariantInfo {
+                name: variant.name.name.clone(),
+                associated,
+                span: variant.span,
+            });
         }
 
         // An enum with no variants names a type nothing can ever be. The
@@ -1228,15 +2281,19 @@ impl<'a> Checker<'a> {
             );
         }
 
+        self.leave_type_params();
+
         self.enums.push(EnumType {
             name: decl.name.name.clone(),
             variants,
+            type_params,
             shared: decl.shared,
             span: decl.name.span,
         });
     }
 
     fn declare_function(&mut self, f: &FnDecl) {
+        let type_params = self.enter_type_params(&f.type_params);
         let params = f
             .params
             .iter()
@@ -1247,9 +2304,11 @@ impl<'a> Checker<'a> {
             name: f.name.name.clone(),
             params,
             returns: self.resolve_type(&f.return_type),
+            type_params,
             shared: f.shared,
             span: f.name.span,
         };
+        self.leave_type_params();
 
         if let Some(previous) = self.functions.get(&signature.name).cloned() {
             let where_ = self.declared_at(previous.span, f.name.span);
@@ -1324,28 +2383,230 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Brings a class's, function's or method's own `<T from A & B>` into
+    /// scope, interning each as an opaque [`Base::Param`] so the declaration
+    /// can use it as a type immediately.
+    ///
+    /// Idempotent per `TypeParam`, keyed by its span: the same declaration is
+    /// resolved once to register it and again to check its body, and both
+    /// calls must agree on `T`'s id or a field's declared type would never
+    /// equal the type of the value assigned to it in its own constructor.
+    ///
+    /// Verifying `from` at the use site and inside the body (roadmap tasks
+    /// 7.2 and 7.4) is not implemented yet: `constraints` is only recorded.
+    fn enter_type_params(&mut self, params: &[TypeParam]) -> Vec<u32> {
+        let mut frame = HashMap::new();
+        let mut newly_created = Vec::new();
+        let mut ids = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let id = match self.type_param_ids.get(&p.span) {
+                Some(&id) => id,
+                None => {
+                    let id = self.type_params.len() as u32;
+                    self.type_params.push(TypeParamInfo {
+                        name: p.name.name.clone(),
+                        constraints: Vec::new(),
+                        span: p.span,
+                    });
+                    self.type_param_ids.insert(p.span, id);
+                    newly_created.push((i, id));
+                    id
+                }
+            };
+            frame.insert(p.name.name.clone(), id);
+            ids.push(id);
+        }
+        self.type_param_scope.push(frame);
+
+        // A non-empty `newly_created` means this is the first time this
+        // exact declaration is entered (the declaring pass, ahead of the
+        // later checking pass that reuses these same ids), which is the one
+        // place to report it once: the grammar and the type rules for a
+        // generic body exist from here on, but lowering does not yet.
+        if !newly_created.is_empty() {
+            self.not_lowered(
+                params[0].span,
+                "a generic type parameter",
+                "declare it without `<...>` for now, or instantiate it manually per concrete type",
+            );
+        }
+
+        if !newly_created.is_empty() {
+            let declared: Vec<TypeParam> = newly_created.iter().map(|&(i, _)| params[i].clone()).collect();
+            self.report_declared_variance(&declared);
+        }
+
+        // Constraints are resolved only the first time a `TypeParam` is seen;
+        // a later re-entry reuses what was already resolved for its id.
+        for (i, id) in newly_created {
+            let constraints: Vec<Type> = params[i]
+                .constraints
+                .iter()
+                .map(|c| self.resolve_type(c))
+                .collect();
+            self.type_params[id as usize].constraints = constraints;
+        }
+
+        ids
+    }
+
+    fn leave_type_params(&mut self) {
+        self.type_param_scope.pop();
+    }
+
+    fn lookup_type_param(&self, name: &str) -> Option<u32> {
+        self.type_param_scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).copied())
+    }
+
+    /// A type reference, admitting `A | B | ...` — see [`Self::resolve_union`]
+    /// — before resolving one alternative on its own.
     fn resolve_type(&mut self, reference: &TypeRef) -> Type {
-        let base = if let Some(ty) = Type::from_name(&reference.name) {
+        if !reference.union_with.is_empty() {
+            return self.resolve_union(reference);
+        }
+        self.resolve_type_atom(reference)
+    }
+
+    /// `String | Int32`: resolves each alternative, folds a bare `Null` one
+    /// into the ordinary nullable bit instead of storing it (`T | Null` is
+    /// `T?`), normalizes what remains — order-independent, deduplicated,
+    /// subsumed alternatives collapsed into their supertype
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 4) — and interns it.
+    ///
+    /// Member access before narrowing (task 8.7's other half) is not
+    /// implemented: a union type exists and type-checks, but nothing can be
+    /// read from a value of one yet.
+    fn resolve_union(&mut self, reference: &TypeRef) -> Type {
+        let atoms: Vec<&TypeRef> = std::iter::once(reference)
+            .chain(reference.union_with.iter())
+            .collect();
+
+        let mut nullable = false;
+        let mut bases: Vec<Base> = Vec::new();
+        for atom in atoms {
+            if atom.name == "Null" && atom.arguments.is_empty() && !atom.nullable {
+                nullable = true;
+                continue;
+            }
+            let resolved = self.resolve_type_atom(atom);
+            if resolved.nullable {
+                nullable = true;
+            }
+            if resolved.is_unknown() {
+                continue;
+            }
+            if !bases.contains(&resolved.base) {
+                bases.push(resolved.base);
+            }
+        }
+
+        // A class alternative that is a subclass of another in the same
+        // union contributes nothing a value of the supertype does not
+        // already cover.
+        let snapshot = bases.clone();
+        bases.retain(|&candidate| {
+            !snapshot.iter().any(|&other| {
+                other != candidate
+                    && self.is_subclass_of(Type::of(candidate), Type::of(other))
+            })
+        });
+
+        Self::sort_bases(&mut bases);
+
+        let base = match bases.len() {
+            0 => Base::Null,
+            1 => bases[0],
+            _ => {
+                let before = self.unions.len();
+                let id = self.intern_union(bases);
+                // Reported once, the first time this exact normalized union
+                // is interned: the grammar and this normalization are real,
+                // but nothing lowers a union yet (roadmap task 11.x), and
+                // nothing reads a member of one before narrowing either
+                // (`Self::member_type`'s union branch says so directly).
+                if id as usize == before {
+                    self.not_lowered(
+                        reference.span,
+                        "a union type",
+                        "narrow it into a single type before using it, or avoid `|` for now",
+                    );
+                }
+                Base::Union(id)
+            }
+        };
+        Type { base, nullable }
+    }
+
+    /// A stable, arbitrary order for [`Base`] values, so two unions with the
+    /// same members intern to the same id regardless of how each was
+    /// written — `A | B` and `B | A` are one type.
+    fn sort_bases(bases: &mut [Base]) {
+        fn key(base: &Base) -> (u8, u32) {
+            match *base {
+                Base::Void => (0, 0),
+                Base::Int32 => (1, 0),
+                Base::Boolean => (2, 0),
+                Base::String => (3, 0),
+                Base::Null => (4, 0),
+                Base::Range => (5, 0),
+                Base::Unknown => (6, 0),
+                Base::Enum(id) => (7, id),
+                Base::Function(id) => (8, id),
+                Base::Contract(id) => (9, id),
+                Base::Class(id) => (10, id),
+                Base::Param(id) => (11, id),
+                Base::Instance(id) => (12, id),
+                Base::ContractInstance(id) => (13, id),
+                Base::EnumInstance(id) => (14, id),
+                Base::Union(id) => (15, id),
+            }
+        }
+        bases.sort_by_key(key);
+    }
+
+    /// Interns a normalized union, returning the id its [`Base::Union`]
+    /// carries.
+    fn intern_union(&mut self, bases: Vec<Base>) -> u32 {
+        if let Some(index) = self.unions.iter().position(|u| *u == bases) {
+            return index as u32;
+        }
+        self.unions.push(bases);
+        (self.unions.len() - 1) as u32
+    }
+
+    /// One alternative of a type reference on its own — never a union; see
+    /// [`Self::resolve_type`] for that.
+    fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
+        let base = if let Some(id) = self.lookup_type_param(&reference.name) {
+            Some(Type::of(Base::Param(id)))
+        } else if reference.arguments.is_empty() && let Some(ty) = Type::from_name(&reference.name)
+        {
             Some(ty)
         } else {
             let resolved = self.resolved_name(&reference.name, reference.span);
             let named = Ident::new(reference.name.clone(), reference.span);
 
-            if let Some(index) = self.enums.iter().position(|e| e.name == resolved) {
+            if self.type_aliases.contains_key(&resolved) {
+                self.reject_type_arguments(reference);
+                Some(self.resolve_type_alias(&resolved, reference.span))
+            } else if let Some(index) = self.enums.iter().position(|e| e.name == resolved) {
                 let declared = self.enums[index].span;
                 let shared = self.enums[index].shared;
                 self.require_visible(declared, shared, &named, "enum");
-                Some(Type::of(Base::Enum(index as u32)))
+                Some(self.resolve_enum_reference(index as u32, reference))
             } else if let Some(index) = self.classes.iter().position(|c| c.name == resolved) {
                 let declared = self.classes[index].span;
                 let shared = self.classes[index].shared;
                 self.require_visible(declared, shared, &named, "class");
-                Some(Type::of(Base::Class(index as u32)))
+                Some(self.resolve_class_reference(index as u32, reference))
             } else if let Some(index) = self.contracts.iter().position(|c| c.name == resolved) {
                 let declared = self.contracts[index].span;
                 let shared = self.contracts[index].shared;
                 self.require_visible(declared, shared, &named, "contract");
-                Some(Type::of(Base::Contract(index as u32)))
+                Some(self.resolve_contract_reference(index as u32, reference))
             } else {
                 None
             }
@@ -1400,6 +2661,368 @@ impl<'a> Checker<'a> {
         Type::UNKNOWN
     }
 
+    /// Resolves a `type` alias by resolving what it names, catching a cycle
+    /// (`type A = B; type B = A;`) rather than recursing forever.
+    fn resolve_type_alias(&mut self, name: &str, at: Span) -> Type {
+        if self.resolving_aliases.contains(&name.to_string()) {
+            let chain = self.resolving_aliases.join(" -> ");
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                at,
+                format!("`{name}` is defined in terms of itself"),
+                format!("the chain closes on itself: {chain} -> {name}"),
+                Some("a `type` alias cannot name itself, directly or indirectly".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let target = self.type_aliases[name].clone();
+        self.resolving_aliases.push(name.to_string());
+        let ty = self.resolve_type(&target);
+        self.resolving_aliases.pop();
+        ty
+    }
+
+    /// Reports `<...>` on a type reference that names a declaration with no
+    /// type parameters of its own — a `type` alias, or an enum or contract
+    /// declared without `<T>`.
+    fn reject_type_arguments(&mut self, reference: &TypeRef) {
+        if reference.arguments.is_empty() {
+            return;
+        }
+        self.error(
+            codes::PENDING_FEATURE,
+            reference.span,
+            "`<...>` is only valid on a generic declaration",
+            format!("`{}` was not declared with type parameters of its own", reference.name),
+            Some("remove the `<...>`, or add `<T>` to its declaration".into()),
+        );
+        for arg in &reference.arguments {
+            self.resolve_type(arg);
+        }
+    }
+
+    /// `Box` alone, or `Box<Int32>` with its arguments checked against
+    /// `Box`'s own type parameters (roadmap task 7.3): the right arity, and
+    /// each argument satisfying what its parameter's `from` constraints
+    /// promise.
+    fn resolve_class_reference(&mut self, class: u32, reference: &TypeRef) -> Type {
+        if reference.arguments.is_empty() {
+            return Type::of(Base::Class(class));
+        }
+
+        let expected = self.classes[class as usize].type_params.clone();
+        if reference.arguments.len() != expected.len() {
+            let name = self.classes[class as usize].name.clone();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!(
+                    "`{name}` takes {} type argument{}, not {}",
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" },
+                    reference.arguments.len()
+                ),
+                format!("`{name}` is declared with {} of its own", expected.len()),
+                None,
+            );
+            for arg in &reference.arguments {
+                self.resolve_type(arg);
+            }
+            return Type::of(Base::Class(class));
+        }
+
+        let args: Vec<Type> = reference
+            .arguments
+            .iter()
+            .map(|a| self.resolve_type(a))
+            .collect();
+
+        for (&param_id, &arg) in expected.iter().zip(&args) {
+            let constraints = self.type_params[param_id as usize].constraints.clone();
+            for constraint in &constraints {
+                if self.satisfies_constraint(arg, *constraint) {
+                    continue;
+                }
+                let param_name = self.type_params[param_id as usize].name.clone();
+                let arg_name = self.name(arg);
+                let constraint_name = self.name(*constraint);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    reference.span,
+                    format!("`{arg_name}` does not satisfy `{param_name}`"),
+                    format!(
+                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
+                    ),
+                    None,
+                );
+            }
+        }
+
+        Type::of(Base::Instance(
+            self.intern_instance(GenericInstance { class, args }),
+        ))
+    }
+
+    /// Whether a type argument satisfies one of its parameter's `from`
+    /// constraints: it either is the constraint, or (for a class) extends or
+    /// implements it.
+    fn satisfies_constraint(&self, arg: Type, constraint: Type) -> bool {
+        arg == constraint || self.is_subclass_of(arg, constraint)
+    }
+
+    /// Interns a generic instantiation, returning the id its
+    /// `Base::Instance` carries. `Box<Int32>` written twice, even in
+    /// different files, resolves to the same id.
+    fn intern_instance(&mut self, instance: GenericInstance) -> u32 {
+        if let Some(index) = self.generic_instances.iter().position(|i| *i == instance) {
+            return index as u32;
+        }
+        self.generic_instances.push(instance);
+        (self.generic_instances.len() - 1) as u32
+    }
+
+    /// Interns a generic contract instantiation, returning the id its
+    /// `Base::ContractInstance` carries. `Iterator<Int32>` written twice
+    /// resolves to the same id, the same as [`Self::intern_instance`] for a
+    /// class.
+    fn intern_contract_instance(&mut self, instance: GenericContractInstance) -> u32 {
+        if let Some(index) = self.contract_instances.iter().position(|i| *i == instance) {
+            return index as u32;
+        }
+        self.contract_instances.push(instance);
+        (self.contract_instances.len() - 1) as u32
+    }
+
+    /// Interns a generic enum instantiation, returning the id its
+    /// `Base::EnumInstance` carries.
+    fn intern_enum_instance(&mut self, instance: GenericEnumInstance) -> u32 {
+        if let Some(index) = self.enum_instances.iter().position(|i| *i == instance) {
+            return index as u32;
+        }
+        self.enum_instances.push(instance);
+        (self.enum_instances.len() - 1) as u32
+    }
+
+    /// `Iterator` alone, or `Iterator<Int32>` with its arguments checked
+    /// against `Iterator`'s own type parameters — the contract equivalent of
+    /// [`Self::resolve_class_reference`] (task 6.9). A concrete instantiation
+    /// is `NOT_LOWERED`: nothing downstream dispatches through it yet
+    /// (roadmap task 10.7), and no generic enum it may return lowers either
+    /// (11.3).
+    fn resolve_contract_reference(&mut self, contract: u32, reference: &TypeRef) -> Type {
+        let expected = self.contracts[contract as usize].type_params.clone();
+        if expected.is_empty() {
+            self.reject_type_arguments(reference);
+            return Type::of(Base::Contract(contract));
+        }
+
+        if reference.arguments.len() != expected.len() {
+            let name = self.contracts[contract as usize].name.clone();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!(
+                    "`{name}` takes {} type argument{}, not {}",
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" },
+                    reference.arguments.len()
+                ),
+                format!("`{name}` is declared with {} of its own", expected.len()),
+                None,
+            );
+            for arg in &reference.arguments {
+                self.resolve_type(arg);
+            }
+            return Type::of(Base::Contract(contract));
+        }
+
+        let args: Vec<Type> = reference
+            .arguments
+            .iter()
+            .map(|a| self.resolve_type(a))
+            .collect();
+
+        for (&param_id, &arg) in expected.iter().zip(&args) {
+            let constraints = self.type_params[param_id as usize].constraints.clone();
+            for constraint in &constraints {
+                if self.satisfies_constraint(arg, *constraint) {
+                    continue;
+                }
+                let param_name = self.type_params[param_id as usize].name.clone();
+                let arg_name = self.name(arg);
+                let constraint_name = self.name(*constraint);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    reference.span,
+                    format!("`{arg_name}` does not satisfy `{param_name}`"),
+                    format!(
+                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
+                    ),
+                    None,
+                );
+            }
+        }
+
+        // `Iterator<T>`, written as `iterator()`'s return type, is the one
+        // generic contract instantiation that lowers (roadmap task 13.5):
+        // dispatch through a contract's table never depended on its type
+        // arguments to begin with, so nothing more is needed to name it.
+        if self.native_iteration.is_none_or(|n| contract != n.iterator) {
+            self.not_lowered(
+                reference.span,
+                "a generic contract instantiation",
+                "name the contract without `<...>` for now, or model the concrete case as its own type",
+            );
+        }
+
+        Type::of(Base::ContractInstance(
+            self.intern_contract_instance(GenericContractInstance { contract, args }),
+        ))
+    }
+
+    /// `Iteration` alone, or `Iteration<Int32>` with its arguments checked —
+    /// the enum equivalent of [`Self::resolve_class_reference`]. Blocked by
+    /// `NOT_LOWERED` the same way a class instantiation is (task 7.1): there
+    /// is no monomorphization, and an algebraic variant with associated data
+    /// does not lower yet regardless (8.1).
+    fn resolve_enum_reference(&mut self, enum_id: u32, reference: &TypeRef) -> Type {
+        let expected = self.enums[enum_id as usize].type_params.clone();
+        if expected.is_empty() {
+            self.reject_type_arguments(reference);
+            return Type::of(Base::Enum(enum_id));
+        }
+
+        if reference.arguments.len() != expected.len() {
+            let name = self.enums[enum_id as usize].name.clone();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!(
+                    "`{name}` takes {} type argument{}, not {}",
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" },
+                    reference.arguments.len()
+                ),
+                format!("`{name}` is declared with {} of its own", expected.len()),
+                None,
+            );
+            for arg in &reference.arguments {
+                self.resolve_type(arg);
+            }
+            return Type::of(Base::Enum(enum_id));
+        }
+
+        let args: Vec<Type> = reference
+            .arguments
+            .iter()
+            .map(|a| self.resolve_type(a))
+            .collect();
+
+        for (&param_id, &arg) in expected.iter().zip(&args) {
+            let constraints = self.type_params[param_id as usize].constraints.clone();
+            for constraint in &constraints {
+                if self.satisfies_constraint(arg, *constraint) {
+                    continue;
+                }
+                let param_name = self.type_params[param_id as usize].name.clone();
+                let arg_name = self.name(arg);
+                let constraint_name = self.name(*constraint);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    reference.span,
+                    format!("`{arg_name}` does not satisfy `{param_name}`"),
+                    format!(
+                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
+                    ),
+                    None,
+                );
+            }
+        }
+
+        // `Iteration<T>`, written as `next()`'s return type, is the one
+        // generic enum instantiation that lowers (roadmap task 13.5): a
+        // dedicated specialization pass builds one concrete `EnumLayout` per
+        // instantiation the program actually names, the same way a generic
+        // class's does (11.1).
+        if self.native_iteration.is_none_or(|n| enum_id != n.iteration) {
+            self.not_lowered(
+                reference.span,
+                "a generic enum instantiation",
+                "name the enum without `<...>` for now, or model the concrete case as its own type",
+            );
+        }
+
+        Type::of(Base::EnumInstance(
+            self.intern_enum_instance(GenericEnumInstance { enum_id, args }),
+        ))
+    }
+
+    /// Replaces a contract's own type parameters with the concrete arguments
+    /// of one instantiation (task 6.9) — what lets a class's signature for
+    /// `Iterator<Int32>` compare equal to `Iterator<T>` with `T = Int32`
+    /// substituted, instead of two structurally different types.
+    ///
+    /// Recurses into a nested generic instantiation's own arguments, since a
+    /// contract method may return another parameterized type built from the
+    /// same `T` (`Iterable<T>`'s `iterator(): Iterator<T>`).
+    fn substitute_type(&mut self, ty: Type, subst: &[(u32, Type)]) -> Type {
+        if let Base::Param(id) = ty.base
+            && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
+        {
+            return if ty.nullable {
+                replacement.as_nullable()
+            } else {
+                replacement.without_null()
+            };
+        }
+
+        let base = match ty.base {
+            Base::ContractInstance(inst_id) => {
+                let instance = self.contract_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute_type(a, subst))
+                    .collect();
+                Base::ContractInstance(self.intern_contract_instance(GenericContractInstance {
+                    contract: instance.contract,
+                    args,
+                }))
+            }
+            Base::EnumInstance(inst_id) => {
+                let instance = self.enum_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute_type(a, subst))
+                    .collect();
+                Base::EnumInstance(self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: instance.enum_id,
+                    args,
+                }))
+            }
+            Base::Instance(inst_id) => {
+                let instance = self.generic_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute_type(a, subst))
+                    .collect();
+                Base::Instance(self.intern_instance(GenericInstance {
+                    class: instance.class,
+                    args,
+                }))
+            }
+            other => other,
+        };
+
+        Type {
+            base,
+            nullable: ty.nullable,
+        }
+    }
+
     /// Interns a function type, returning the id its `Base::Function` carries.
     fn intern_fn_type(&mut self, fn_type: FnType) -> u32 {
         if let Some(index) = self.fn_types.iter().position(|f| *f == fn_type) {
@@ -1412,6 +3035,7 @@ impl<'a> Checker<'a> {
     // --- Functions --------------------------------------------------------
 
     fn check_function(&mut self, f: &FnDecl) {
+        self.enter_type_params(&f.type_params);
         let signature = self.functions.get(&f.name.name).cloned();
         self.current_return = signature
             .as_ref()
@@ -1455,6 +3079,7 @@ impl<'a> Checker<'a> {
                 Some("add a `return` at the end of the function".into()),
             );
         }
+        self.leave_type_params();
     }
 
     /// Checks a block and reports whether every path through it returns.
@@ -1568,6 +3193,10 @@ impl<'a> Checker<'a> {
             );
         }
 
+        if let Some(init) = &stmt.init {
+            self.check_strict_alias(init, ty, stmt.mutability, &stmt.name.name, stmt.name.span);
+        }
+
         self.scopes.declare(Binding {
             name: stmt.name.name.clone(),
             ty,
@@ -1575,6 +3204,86 @@ impl<'a> Checker<'a> {
             span: stmt.name.span,
             initialized: stmt.init.is_some(),
         });
+    }
+
+    /// The `mut`/`inmut`/`inmut::strict` matrix (D11), applied to objects and
+    /// contracts: only naming another variable outright shares its reference,
+    /// so that is the only shape this looks at. A strict reference must not
+    /// gain a mutable alias, and it must not be acquired from one that is
+    /// still reachable through its own `mut` binding.
+    fn check_strict_alias(
+        &mut self,
+        init: &Expr,
+        ty: Type,
+        target_mutability: Mutability,
+        target_name: &str,
+        span: Span,
+    ) {
+        let Expr::Path(source) = init else { return };
+        if !self.is_reference_type(ty) {
+            return;
+        }
+        let Some(resolved) = self.scopes.resolve(&source.name) else {
+            return;
+        };
+
+        match (resolved.binding.mutability, target_mutability) {
+            (Mutability::Strict, Mutability::Mutable) => {
+                self.error(
+                    codes::STRICT_ALIAS_VIOLATION,
+                    span,
+                    format!(
+                        "`{target_name}` would be a mutable alias of `{}`",
+                        source.name
+                    ),
+                    format!(
+                        "`{}` is `inmut::strict`, and a strict reference cannot produce a mutable alias",
+                        source.name
+                    ),
+                    Some(format!("declare `{target_name}` with `inmut` or `inmut::strict`")),
+                );
+            }
+            (Mutability::Mutable, Mutability::Strict) => {
+                self.error(
+                    codes::STRICT_ALIAS_VIOLATION,
+                    span,
+                    format!(
+                        "`{target_name}` cannot be `inmut::strict`: `{}` is still a mutable alias",
+                        source.name
+                    ),
+                    format!(
+                        "`{}` was declared `mut`, so it can still mutate the same reachable graph",
+                        source.name
+                    ),
+                    Some(format!(
+                        "clone `{}` first, once `Clone` is available, or drop the `mut` binding before this point",
+                        source.name
+                    )),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether `ty` has reference semantics, so the strict-alias matrix
+    /// applies to it. Records and value classes are inline (task 11.5), so
+    /// they carry no aliasing to police.
+    fn is_reference_type(&self, ty: Type) -> bool {
+        match ty.base {
+            Base::Class(id) => self.classes[id as usize].kind == ClassKind::Class,
+            // A generic class's specialized instance is reached through its
+            // address exactly the way an ordinary class's is (roadmap task
+            // 11.1) — the strict-aliasing matrix (D11, task 5.15) applies
+            // the same way; a record or value class's own `Base::Instance`
+            // never reaches this arm to begin with, since one is inline and
+            // never `is_reference_type` regardless of `T` (roadmap 11.5).
+            Base::Instance(id) => {
+                self.classes[self.generic_instances[id as usize].class as usize].kind
+                    == ClassKind::Class
+            }
+            Base::Contract(_) | Base::ContractInstance(_) => true,
+            _ => false,
+        }
     }
 
     fn check_assign(&mut self, stmt: &AssignStmt) {
@@ -1605,7 +3314,7 @@ impl<'a> Checker<'a> {
     /// the rest of reference mutability.
     fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
         let object = self.check_expr(&field.object);
-        let ty = self.member_type(object, &field.name, field.object.span());
+        let ty = self.member_type(object, &field.name, field.object.span(), false);
 
         // An `inmut` field is set exactly once, by the constructor: that is
         // where its value comes from. Rejecting it there would leave no way to
@@ -1664,12 +3373,17 @@ impl<'a> Checker<'a> {
             return None;
         }
 
-        if resolved.binding.mutability == Mutability::Immutable {
+        if resolved.binding.mutability != Mutability::Mutable {
+            let qualifier = if resolved.binding.mutability == Mutability::Strict {
+                "inmut::strict"
+            } else {
+                "inmut"
+            };
             self.error(
                 codes::ASSIGN_TO_IMMUTABLE,
                 target.span,
                 format!("cannot reassign `{}`", target.name),
-                format!("it was declared with `inmut` on line {declared_line}"),
+                format!("it was declared with `{qualifier}` on line {declared_line}"),
                 Some(format!(
                     "declare it with `mut {}` if it has to change",
                     target.name
@@ -1779,15 +3493,20 @@ impl<'a> Checker<'a> {
 
     /// What `for ... in` binds for each element.
     ///
-    /// The set is closed: there is no user-extensible iteration protocol until
-    /// traits arrive in Phase 3. Decision D3.
+    /// `for ... in` requires `Iterable<T>` (D8, task 6.9): the closed set
+    /// Phase 2 iterated is gone, replaced by a real conformance check, which
+    /// is what makes a user's own type indistinguishable from a range or
+    /// `String` here. A range still resolves natively rather than through a
+    /// written `implements Iterable<Int32>` it does not have — nothing
+    /// changes for it, and Phase 2's corpus keeps compiling unmodified.
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
         match iterable.base {
             Base::Range => Type::INT32,
             // A `String` iterates by grapheme and binds a `Char`, which does
             // not exist yet. Binding a one-grapheme `String` instead would be
             // inventing a rule the norm does not have, so the whole form is
-            // deferred to the phase that brings the type.
+            // deferred to the phase that brings the type — `String` cannot
+            // implement `Iterable<Char>` before `Char` itself exists.
             Base::String => {
                 self.error(
                     codes::PENDING_FEATURE,
@@ -1802,18 +3521,65 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
             Base::Unknown => Type::UNKNOWN,
+            Base::Class(id) => {
+                let Some(element) = self.iterable_element_type(id) else {
+                    let name = self.name(iterable);
+                    self.error(
+                        codes::NOT_ITERABLE,
+                        span,
+                        format!("`{name}` cannot be iterated"),
+                        "`for ... in` requires `Iterable<T>`, which this type does not implement",
+                        Some(format!(
+                            "add `implements Iterable<T>` to `{name}` and supply `iterator()`"
+                        )),
+                    );
+                    return Type::UNKNOWN;
+                };
+
+                // Reaching an element calls through the class's contract
+                // table (task 10.7) and matches against `Iteration<T>`'s
+                // associated data (11.3/11.4) — both lower on their own by
+                // now (roadmap task 13.5), but the specific `Iteration<T>`
+                // this loop's element type needs is not derivable from the
+                // AST the way most other types are (nothing writes `T`
+                // here), so it is interned and recorded the same way a
+                // generic construction's instantiation is
+                // (`CheckedProgram::generic_constructions`).
+                let iteration = self
+                    .native_iteration
+                    .expect("registered unconditionally before any program declaration")
+                    .iteration;
+                let instance = self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: iteration,
+                    args: vec![element],
+                });
+                self.for_in_iteration.insert(span, instance);
+                element
+            }
             _ => {
                 let name = self.name(iterable);
                 self.error(
                     codes::NOT_ITERABLE,
                     span,
                     format!("`{name}` cannot be iterated"),
-                    "this phase iterates ranges and strings only",
-                    Some("iteration over your own types arrives with the traits of Phase 3".into()),
+                    "`for ... in` requires `Iterable<T>`, which this type does not implement",
+                    None,
                 );
                 Type::UNKNOWN
             }
         }
+    }
+
+    /// The `T` a class's `Iterable<T>` implementation binds, if it has one.
+    fn iterable_element_type(&self, class: u32) -> Option<Type> {
+        let iterable = self.native_iteration?.iterable;
+        self.classes[class as usize]
+            .contract_instances
+            .iter()
+            .find_map(|&id| {
+                let instance = &self.contract_instances[id as usize];
+                (instance.contract == iterable).then(|| instance.args[0])
+            })
     }
 
     fn check_jump(&mut self, stmt: &JumpStmt, word: &str) {
@@ -1845,7 +3611,10 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if !self.current_return.accepts(actual) {
+        if !self.current_return.accepts(actual)
+            && !self.is_subclass_of(actual, self.current_return)
+            && !self.bare_enum_matches_instance(actual, self.current_return)
+        {
             let expected = self.name(self.current_return);
             let found = self.name(actual);
             self.error(
@@ -1886,7 +3655,16 @@ impl<'a> Checker<'a> {
             }
             Expr::If(e) => self.check_if_expr(e),
             Expr::This(e) => match self.this_type {
-                Some(ty) => ty,
+                Some(ty) => {
+                    // `this` used inside a lambda is a capture exactly like
+                    // any other name from the enclosing scope — it just does
+                    // not go through `check_path`/`Scopes::resolve`, since it
+                    // is not an ordinary binding.
+                    if !self.capture_stack.is_empty() {
+                        self.record_this_capture(ty);
+                    }
+                    ty
+                }
                 None => {
                     self.error(
                         codes::UNDECLARED_NAME,
@@ -1919,7 +3697,122 @@ impl<'a> Checker<'a> {
                 self.require_printable(ty, e.arg.span());
                 Type::VOID
             }
+            Expr::Cast(e) => self.check_cast(e),
         }
+    }
+
+    /// `expr as Type` or `<Type>expr` (`ZIRK_LANGUAGE_SPEC.md` section 11).
+    ///
+    /// Admits a cast between types that could plausibly share a value at
+    /// runtime — the same type, a class and its base or a contract it may
+    /// implement, or a union and one of its members — and rejects one
+    /// between types that never could, such as `String` and `Int32`, at
+    /// compile time rather than waiting for a check that could never pass.
+    ///
+    /// Not lowered yet: nothing runs the checked failure a cast that turns
+    /// out wrong needs at runtime (roadmap task 11.6).
+    fn check_cast(&mut self, expr: &CastExpr) -> Type {
+        let actual = self.check_expr(&expr.expr);
+        let target = self.resolve_type(&expr.target);
+
+        if actual.is_unknown() || target.is_unknown() {
+            return target;
+        }
+
+        if !self.casts_are_related(actual, target) {
+            let a = self.name(actual);
+            let t = self.name(target);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("`{a}` cannot be cast to `{t}`"),
+                "neither is a class related to the other, a contract either may implement, or a union containing the other",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        if !self.cast_is_directly_lowerable(actual, target) {
+            self.not_lowered(
+                expr.span,
+                "this cast",
+                "convert the value some other way for now, e.g. through a constructor",
+            );
+        }
+        target
+    }
+
+    /// Whether a related cast (`Self::casts_are_related` already confirmed
+    /// it is one) has a runtime check this pass builds (roadmap task 11.6).
+    ///
+    /// Two shapes: the trivial identity cast (same base, any kind — no check
+    /// needed, the value already is the target), and a class or contract
+    /// value checked against a class's descriptor. Left out: a union member
+    /// (unions do not lower at all yet, task 8.7/11.x) and a generic
+    /// parameter's constraint (the concrete type behind `T` is not known
+    /// here the way an instantiation's substitution is). Nullable either
+    /// side is left out too — the check would also have to decide what a
+    /// null value means for it, which is a second question this does not
+    /// answer yet.
+    fn cast_is_directly_lowerable(&self, actual: Type, target: Type) -> bool {
+        if actual.nullable || target.nullable {
+            return false;
+        }
+        if actual.base == target.base {
+            return true;
+        }
+        matches!(actual.base, Base::Class(_) | Base::Contract(_)) && matches!(target.base, Base::Class(_))
+    }
+
+    /// Whether a cast between two types could ever succeed at runtime.
+    fn casts_are_related(&self, actual: Type, target: Type) -> bool {
+        let actual_bare = actual.without_null();
+        let target_bare = target.without_null();
+
+        if actual_bare.base == target_bare.base {
+            return true;
+        }
+        if self.is_subclass_of(actual_bare, target_bare)
+            || self.is_subclass_of(target_bare, actual_bare)
+        {
+            return true;
+        }
+        // A contract may be implemented by the other side's class, checked
+        // either way: up through it, or down from it to a concrete type.
+        if matches!(actual_bare.base, Base::Contract(_)) && matches!(target_bare.base, Base::Class(_))
+        {
+            return true;
+        }
+        if let Base::Union(id) = actual_bare.base {
+            return self.unions[id as usize]
+                .iter()
+                .any(|&member| Type::of(member).base == target_bare.base);
+        }
+        if let Base::Union(id) = target_bare.base {
+            return self.unions[id as usize]
+                .iter()
+                .any(|&member| Type::of(member).base == actual_bare.base);
+        }
+        // A generic parameter is related to whatever its own `from`
+        // constraints promise: casting to one of them is a widening, not a
+        // leap of faith, and the reverse (something related to a
+        // constraint, cast down to `T`) is checked the same way any other
+        // up- or downcast between classes already is above.
+        if let Base::Param(id) = actual_bare.base {
+            return self.type_params[id as usize].constraints.iter().any(|&c| {
+                c.base == target_bare.base
+                    || self.is_subclass_of(target_bare, c)
+                    || self.is_subclass_of(c, target_bare)
+            });
+        }
+        if let Base::Param(id) = target_bare.base {
+            return self.type_params[id as usize].constraints.iter().any(|&c| {
+                c.base == actual_bare.base
+                    || self.is_subclass_of(actual_bare, c)
+                    || self.is_subclass_of(c, actual_bare)
+            });
+        }
+        false
     }
 
     /// Integer literals are `Int32`, the only integer type in the subset.
@@ -1994,6 +3887,21 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// Records `this` as a capture, the same way [`Self::record_capture`]
+    /// does for an ordinary name.
+    fn record_this_capture(&mut self, ty: Type) {
+        let Some(captures) = self.capture_stack.last_mut() else {
+            return;
+        };
+        if captures.iter().any(|c| c.name == "this") {
+            return;
+        }
+        captures.push(Capture {
+            name: "this".to_string(),
+            ty,
+        });
+    }
+
     fn check_unary(&mut self, expr: &UnaryExpr) -> Type {
         let operand = self.check_expr(&expr.operand);
 
@@ -2042,9 +3950,12 @@ impl<'a> Checker<'a> {
             // nothing else: no contract, no structure, no content.
             Is => {
                 self.expect_same(left, right, expr);
-                if !matches!(left.base, Base::Class(_) | Base::Contract(_) | Base::String)
-                    && !left.is_unknown()
-                {
+                let has_identity = match left.base {
+                    Base::Class(id) => self.classes[id as usize].kind == ClassKind::Class,
+                    Base::Contract(_) | Base::String => true,
+                    _ => false,
+                };
+                if !has_identity && !left.is_unknown() {
                     let name = self.name(left);
                     self.error(
                         codes::TYPE_MISMATCH,
@@ -2093,6 +4004,31 @@ impl<'a> Checker<'a> {
         if let Base::Class(id) = left.base
             && self.classes[id as usize].method("_equals").is_some()
         {
+            return;
+        }
+
+        // A record or value class always has one: equality is derived from
+        // every field, per `ZIRK_LANGUAGE_SPEC.md` section 7, not opted into
+        // with a reserved method the way a plain class's is. Lowering it —
+        // a field-by-field comparison, recursing into a nested record —
+        // does not exist yet for anything beyond a scalar or nested-value
+        // field (roadmap task 11.5 built the value representation itself,
+        // not the comparison over it), so it is gated the same way any
+        // other checked-but-not-compilable construct is.
+        if let Base::Class(id) = left.base
+            && matches!(
+                self.classes[id as usize].kind,
+                ClassKind::Record | ClassKind::ValueClass
+            )
+        {
+            self.not_lowered(
+                expr.span,
+                "structural equality on a record or value class",
+                "compare its fields individually for now",
+            );
+            return;
+        }
+        if let Base::Class(id) = left.base && self.classes[id as usize].kind != ClassKind::Class {
             return;
         }
 
@@ -2437,18 +4373,20 @@ impl<'a> Checker<'a> {
         let mut has_wildcard = false;
 
         for arm in &expr.arms {
-            self.check_pattern(&arm.pattern, scrutinee, &mut covered, &mut has_wildcard);
+            let mut bindings = Vec::new();
+            self.check_pattern(
+                &arm.pattern,
+                scrutinee,
+                &mut covered,
+                &mut has_wildcard,
+                &mut bindings,
+            );
 
             self.scopes.push();
-            // A binding pattern names the scrutinee inside its arm.
-            if let Pattern::Binding(ident) = &arm.pattern {
-                self.scopes.declare(Binding {
-                    name: ident.name.clone(),
-                    ty: scrutinee,
-                    mutability: Mutability::Immutable,
-                    span: ident.span,
-                    initialized: true,
-                });
+            // A binding pattern, bare or inside a variant's `(...)`, names
+            // its part of the scrutinee inside the arm.
+            for binding in bindings {
+                self.scopes.declare(binding);
             }
 
             let ty = match &arm.body {
@@ -2493,15 +4431,33 @@ impl<'a> Checker<'a> {
         result
     }
 
+    /// Checks one pattern against the type it is matched against, collecting
+    /// the names it binds.
+    ///
+    /// `bindings` accumulates rather than being returned so a variant
+    /// pattern's own bindings (`Loading(progress)`) land in the same list as
+    /// a bare one (`other`) — `check_match` declares all of them together,
+    /// once, in the arm's own scope.
     fn check_pattern(
         &mut self,
         pattern: &Pattern,
         scrutinee: Type,
         covered: &mut Vec<String>,
         has_wildcard: &mut bool,
+        bindings: &mut Vec<Binding>,
     ) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::Binding(_) => *has_wildcard = true,
+            Pattern::Wildcard(_) => *has_wildcard = true,
+            Pattern::Binding(ident) => {
+                *has_wildcard = true;
+                bindings.push(Binding {
+                    name: ident.name.clone(),
+                    ty: scrutinee,
+                    mutability: Mutability::Immutable,
+                    span: ident.span,
+                    initialized: true,
+                });
+            }
             Pattern::Int(lit) => {
                 let ty = self.check_int_literal(lit);
                 self.expect_pattern_type(scrutinee, ty, lit.span);
@@ -2528,7 +4484,7 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            Pattern::Variant(v) => self.check_variant_pattern(v, scrutinee, covered),
+            Pattern::Variant(v) => self.check_variant_pattern(v, scrutinee, covered, bindings),
         }
     }
 
@@ -2537,6 +4493,7 @@ impl<'a> Checker<'a> {
         pattern: &VariantPattern,
         scrutinee: Type,
         covered: &mut Vec<String>,
+        bindings: &mut Vec<Binding>,
     ) {
         let resolved = self.resolved_name(&pattern.enum_name.name, pattern.enum_name.span);
         let Some(index) = self.enums.iter().position(|e| e.name == resolved) else {
@@ -2551,20 +4508,88 @@ impl<'a> Checker<'a> {
         };
 
         let enum_type = &self.enums[index];
-        if !enum_type.variants.contains(&pattern.variant.name) {
+        let Some(variant) = enum_type.variant(&pattern.variant.name) else {
             let enum_name = enum_type.name.clone();
-            let known = enum_type.variants.join(", ");
+            let known: Vec<&str> = enum_type.variants.iter().map(|v| v.name.as_str()).collect();
             self.error(
                 codes::UNKNOWN_VARIANT,
                 pattern.variant.span,
                 format!("`{enum_name}` has no variant `{}`", pattern.variant.name),
-                format!("its variants are: {known}"),
+                format!("its variants are: {}", known.join(", ")),
                 None,
             );
             return;
-        }
+        };
+        let associated = variant.associated.clone();
 
         self.expect_pattern_type(scrutinee, Type::of(Base::Enum(index as u32)), pattern.span);
+
+        // A variant with data must be destructured to name it; one without
+        // takes no `(...)`, the same rule construction follows.
+        if associated.is_empty() && !pattern.bindings.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                pattern.span,
+                format!("`{}` carries no associated data", pattern.variant.name),
+                "nothing to destructure, so it takes no `(...)`",
+                None,
+            );
+        } else if !associated.is_empty() && pattern.bindings.is_empty() {
+            let fields: Vec<&str> = associated.iter().map(|f| f.name.as_str()).collect();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                pattern.span,
+                format!("`{}` carries associated data", pattern.variant.name),
+                format!("its fields are: {}", fields.join(", ")),
+                Some(format!(
+                    "destructure it: `{}({})`",
+                    pattern.variant.name,
+                    fields.join(", ")
+                )),
+            );
+        } else if associated.len() != pattern.bindings.len() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                pattern.span,
+                format!(
+                    "`{}` carries {} associated value{}, not {}",
+                    pattern.variant.name,
+                    associated.len(),
+                    if associated.len() == 1 { "" } else { "s" },
+                    pattern.bindings.len()
+                ),
+                "a variant pattern destructures every field, in order",
+                None,
+            );
+        } else {
+            for (sub_pattern, field) in pattern.bindings.iter().zip(&associated) {
+                // A literal sub-pattern's own contribution to exhaustiveness
+                // and to the outer wildcard flag is not the outer match's:
+                // `Loading(0.5)` does not make the arm cover every `Loading`.
+                let mut discarded_covered = Vec::new();
+                let mut discarded_wildcard = false;
+                self.check_pattern(
+                    sub_pattern,
+                    field.ty,
+                    &mut discarded_covered,
+                    &mut discarded_wildcard,
+                    bindings,
+                );
+
+                // Lowering destructures a variant's own fields (roadmap task
+                // 11.4) by binding each one, not by testing it further: a
+                // literal or a nested variant sub-pattern would need the
+                // combined-condition compilation a plain binding does not,
+                // which this pass does not build yet.
+                if !matches!(sub_pattern, Pattern::Binding(_) | Pattern::Wildcard(_)) {
+                    self.not_lowered(
+                        sub_pattern.span(),
+                        "a literal or nested pattern destructuring a variant's field",
+                        "bind it to a name and test it in the arm's body instead",
+                    );
+                }
+            }
+        }
 
         if !covered.contains(&pattern.variant.name) {
             covered.push(pattern.variant.name.clone());
@@ -2629,8 +4654,8 @@ impl<'a> Checker<'a> {
             let missing: Vec<String> = enum_type
                 .variants
                 .iter()
-                .filter(|v| !covered.contains(v))
-                .cloned()
+                .map(|v| v.name.clone())
+                .filter(|name| !covered.contains(name))
                 .collect();
 
             if missing.is_empty() {
@@ -2680,12 +4705,9 @@ impl<'a> Checker<'a> {
     /// have the same shape — so the decision lands here, where it is known
     /// whether the base names a type or a value.
     fn check_field(&mut self, expr: &FieldExpr) -> Type {
-        if expr.safe {
-            self.not_checked(expr.span, "`?.`", "safe access needs a type with members");
-            return Type::UNKNOWN;
-        }
-
-        // A base that names a declared enum is a variant access.
+        // A base that names a declared enum is a variant access. `?.` makes
+        // no sense on it — a type name is never absent — so `safe` is not
+        // consulted here.
         if let Expr::Path(base) = &*expr.object {
             let resolved = self.resolved_name(&base.name, base.span);
             if self.enums.iter().any(|e| e.name == resolved) {
@@ -2701,18 +4723,64 @@ impl<'a> Checker<'a> {
         }
 
         let object = self.check_expr(&expr.object);
-        self.member_type(object, &expr.name, expr.object.span())
+        self.member_type(object, &expr.name, expr.object.span(), expr.safe)
     }
 
     /// The type of a member read from a value, reporting why it cannot be.
-    fn member_type(&mut self, object: Type, member: &Ident, object_span: Span) -> Type {
+    ///
+    /// `safe` is `?.`: reading through an absent receiver answers `null`
+    /// instead of rejecting the access, so the member's type comes back
+    /// nullable even when the member itself is not (D7). It only changes
+    /// what happens when `object` is nullable — the rest is the same lookup
+    /// plain `.` would do, over the narrowed non-null type.
+    fn member_type(&mut self, object: Type, member: &Ident, object_span: Span, safe: bool) -> Type {
         if object.is_unknown() {
             return Type::UNKNOWN;
         }
 
         if object.nullable {
-            self.reject_absent_receiver(object, object_span);
+            if !safe {
+                self.reject_absent_receiver(object, object_span);
+                return Type::UNKNOWN;
+            }
+            let ty = self.member_type(object.without_null(), member, object_span, false);
+            return if ty.is_unknown() {
+                ty
+            } else {
+                ty.as_nullable()
+            };
+        }
+
+        if let Base::Param(id) = object.base {
+            return self.param_field_type(id, member);
+        }
+
+        if let Base::Union(_) = object.base {
+            let name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{name}` has no member `{}`", member.name),
+                "a union exposes only what every alternative has in common, and only after narrowing it",
+                Some("narrow it first, e.g. with `match`".into()),
+            );
             return Type::UNKNOWN;
+        }
+
+        if let Base::Instance(inst_id) = object.base {
+            let instance = self.generic_instances[inst_id as usize].clone();
+            let subst: Vec<(u32, Type)> = self.classes[instance.class as usize]
+                .type_params
+                .clone()
+                .into_iter()
+                .zip(instance.args)
+                .collect();
+            let ty = self.member_type(Type::of(Base::Class(instance.class)), member, object_span, false);
+            return if ty.is_unknown() {
+                ty
+            } else {
+                self.substitute_type(ty, &subst)
+            };
         }
 
         let Base::Class(id) = object.base else {
@@ -2759,6 +4827,102 @@ impl<'a> Checker<'a> {
         }
 
         ty
+    }
+
+    /// A field read through a generic type parameter, resolved against
+    /// whichever of its `from` constraints is a class (task 7.4).
+    ///
+    /// A contract has no fields, so only a class constraint can answer this;
+    /// method calls go through [`Self::check_param_call`] instead, which also
+    /// looks at contract constraints.
+    fn param_field_type(&mut self, id: u32, member: &Ident) -> Type {
+        let constraints = self.type_params[id as usize].constraints.clone();
+        for constraint in &constraints {
+            if let Base::Class(cid) = constraint.base
+                && let Some(field) = self.classes[cid as usize].field(&member.name).cloned()
+            {
+                if !self.can_access(field.visibility, field.owner) {
+                    self.report_inaccessible(
+                        &member.name,
+                        member.span,
+                        field.visibility,
+                        field.owner,
+                        field.span,
+                    );
+                }
+                return field.ty;
+            }
+        }
+
+        let param_name = self.type_params[id as usize].name.clone();
+        self.error(
+            codes::UNKNOWN_MEMBER,
+            member.span,
+            format!("`{param_name}` has no member `{}`", member.name),
+            self.constraint_help(&constraints),
+            Some("only what a `from` constraint promises is available".into()),
+        );
+        Type::UNKNOWN
+    }
+
+    /// A method called through a generic type parameter, resolved against its
+    /// `from` constraints — a class or a contract, either may supply it
+    /// (task 7.4).
+    fn check_param_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
+        let constraints = self.type_params[id as usize].constraints.clone();
+        for constraint in &constraints {
+            let found = match constraint.base {
+                Base::Contract(cid) => self.contracts[cid as usize].method(&field.name.name).map(
+                    |m| Signature {
+                        name: m.name.clone(),
+                        params: m.params.clone(),
+                        returns: m.returns,
+                        shared: true,
+                        span: m.span,
+                        type_params: Vec::new(),
+                    },
+                ),
+                Base::Class(cid) => {
+                    self.classes[cid as usize]
+                        .method(&field.name.name)
+                        .map(|m| Signature {
+                            name: m.name.clone(),
+                            params: m.params.clone(),
+                            returns: m.returns,
+                            shared: true,
+                            span: m.span,
+                            type_params: Vec::new(),
+                        })
+                }
+                _ => None,
+            };
+            if let Some(signature) = found {
+                return self.check_direct_call(expr, &signature);
+            }
+        }
+
+        let param_name = self.type_params[id as usize].name.clone();
+        self.error(
+            codes::UNKNOWN_MEMBER,
+            field.name.span,
+            format!("`{param_name}` has no method `{}`", field.name.name),
+            self.constraint_help(&constraints),
+            Some("only what a `from` constraint promises is available".into()),
+        );
+        for arg in &expr.args {
+            self.check_expr(&arg.value);
+        }
+        Type::UNKNOWN
+    }
+
+    /// The `= help:` line naming what a type parameter's constraints are, for
+    /// a member that none of them turned out to promise.
+    fn constraint_help(&self, constraints: &[Type]) -> String {
+        if constraints.is_empty() {
+            return "it has no `from` constraint, so it promises nothing".to_string();
+        }
+        let names: Vec<String> = constraints.iter().map(|c| self.name(*c)).collect();
+        format!("its constraints are: {}", names.join(" & "))
     }
 
     /// Reports reaching a member through a value that may be absent.
@@ -2873,20 +5037,119 @@ impl<'a> Checker<'a> {
         self.require_visible(declared, shared, &expr.enum_name, "enum");
 
         let enum_type = &self.enums[index];
-        if !enum_type.variants.contains(&expr.variant.name) {
+        let Some(variant) = enum_type.variant(&expr.variant.name) else {
             let enum_name = enum_type.name.clone();
-            let known = enum_type.variants.join(", ");
+            let known: Vec<&str> = enum_type.variants.iter().map(|v| v.name.as_str()).collect();
             self.error(
                 codes::UNKNOWN_VARIANT,
                 expr.variant.span,
                 format!("`{enum_name}` has no variant `{}`", expr.variant.name),
-                format!("its variants are: {known}"),
+                format!("its variants are: {}", known.join(", ")),
                 None,
             );
             return Type::UNKNOWN;
+        };
+
+        if !variant.associated.is_empty() {
+            let fields: Vec<&str> = variant.associated.iter().map(|f| f.name.as_str()).collect();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{}` carries associated data", expr.variant.name),
+                format!("its fields are: {}", fields.join(", ")),
+                Some(format!(
+                    "construct it: `{}.{}({})`",
+                    expr.enum_name.name,
+                    expr.variant.name,
+                    fields.join(", ")
+                )),
+            );
         }
 
         Type::of(Base::Enum(index as u32))
+    }
+
+    /// `LoadState.Loading(0.5)`: an algebraic variant constructed with its
+    /// associated data (roadmap task 8.2).
+    ///
+    /// Dispatched the same way a class constructor is: a synthetic
+    /// [`Signature`] built from the variant's fields, checked through
+    /// [`Self::check_direct_call`] so arity, names and types follow the same
+    /// rules a call already does.
+    fn check_variant_construction(&mut self, expr: &CallExpr, field: &FieldExpr, enum_id: u32) -> Type {
+        let variant_name = field.name.name.clone();
+        let Some(variant) = self.enums[enum_id as usize].variant(&variant_name).cloned() else {
+            let enum_name = self.enums[enum_id as usize].name.clone();
+            let known: Vec<String> = self.enums[enum_id as usize]
+                .variants
+                .iter()
+                .map(|v| v.name.clone())
+                .collect();
+            self.error(
+                codes::UNKNOWN_VARIANT,
+                field.name.span,
+                format!("`{enum_name}` has no variant `{variant_name}`"),
+                format!("its variants are: {}", known.join(", ")),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        if variant.associated.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{variant_name}` carries no associated data"),
+                "nothing to construct with, so it takes no arguments",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::of(Base::Enum(enum_id));
+        }
+
+        let params: Vec<ParamInfo> = variant
+            .associated
+            .iter()
+            .map(|f| ParamInfo {
+                name: f.name.clone(),
+                ty: f.ty,
+                optional: false,
+                has_default: false,
+                variadic: false,
+            })
+            .collect();
+        let type_params = self.enums[enum_id as usize].type_params.clone();
+        let signature = Signature {
+            name: variant_name,
+            params,
+            returns: Type::of(Base::Enum(enum_id)),
+            shared: true,
+            span: field.span,
+            type_params: type_params.clone(),
+        };
+        let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
+
+        // A generic enum's own `T` is inferred from the associated data
+        // supplied here, the same way a generic class's construction infers
+        // it from its constructor's arguments (roadmap task 13.5, mirrors
+        // 11.1) — `Iteration<T>` is the only enum a program can reach this
+        // with today (any other generic enum's own declaration is gated at
+        // `Self::enter_type_params`), but nothing here assumes that.
+        if type_params.is_empty() {
+            return Type::of(Base::Enum(enum_id));
+        }
+        let args: Vec<Type> = type_params
+            .iter()
+            .map(|id| substitution.get(id).copied().unwrap_or(Type::UNKNOWN))
+            .collect();
+        let instance = self.intern_enum_instance(GenericEnumInstance { enum_id, args });
+        self.variant_constructions.insert(expr.span, instance);
+        Type::of(Base::EnumInstance(instance))
     }
 
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {
@@ -3001,6 +5264,7 @@ impl<'a> Checker<'a> {
             returns: method.returns,
             shared: true,
             span: method.span,
+            type_params: Vec::new(),
         };
         self.check_direct_call(expr, &signature)
     }
@@ -3058,6 +5322,7 @@ impl<'a> Checker<'a> {
             returns: Type::VOID,
             shared: true,
             span,
+            type_params: Vec::new(),
         };
         self.check_direct_call(expr, &signature);
         Type::VOID
@@ -3072,7 +5337,7 @@ impl<'a> Checker<'a> {
             }
             return Type::UNKNOWN;
         };
-        self.check_method_call(expr, field, base)
+        self.check_method_call(expr, field, base, &[])
     }
 
     /// The base of the class whose body is being checked, reporting when there
@@ -3107,14 +5372,53 @@ impl<'a> Checker<'a> {
         base
     }
 
+    /// Dispatches a method call to whichever of `Base::Class`,
+    /// `Base::Contract` or `Base::Param` the (already narrowed to non-null)
+    /// receiver is.
+    ///
+    /// Factored out of `check_call` so `?.` can run it on the narrowed
+    /// receiver and wrap the result nullable, instead of duplicating the
+    /// three-way dispatch for both the plain and the safe case.
+    fn check_method_call_on(&mut self, object: Type, expr: &CallExpr, field: &FieldExpr) -> Type {
+        if let Base::Class(id) = object.base {
+            return self.check_method_call(expr, field, id, &[]);
+        }
+        if let Base::Contract(id) = object.base {
+            return self.check_contract_call(expr, field, id);
+        }
+        if let Base::Param(id) = object.base {
+            return self.check_param_call(expr, field, id);
+        }
+        if let Base::Instance(inst_id) = object.base {
+            let instance = self.generic_instances[inst_id as usize].clone();
+            let subst: Vec<(u32, Type)> = self.classes[instance.class as usize]
+                .type_params
+                .clone()
+                .into_iter()
+                .zip(instance.args)
+                .collect();
+            return self.check_method_call(expr, field, instance.class, &subst);
+        }
+        unreachable!("caller already matched object.base against these three")
+    }
+
     /// `object.method(...)`.
     ///
     /// The receiver is checked once, by the caller, so a method call does not
-    /// evaluate it twice.
-    fn check_method_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
+    /// evaluate it twice. `subst` replaces a generic class's own type
+    /// parameters with a specific instantiation's arguments (task 6.9's
+    /// pattern extended to classes) — empty for an ordinary, non-generic
+    /// receiver.
+    fn check_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        id: u32,
+        subst: &[(u32, Type)],
+    ) -> Type {
         let class = &self.classes[id as usize];
         let class_name = class.name.clone();
-        let Some(method) = class.method(&field.name.name) else {
+        let Some(method) = class.method(&field.name.name).cloned() else {
             // Naming a field where a method is called is its own mistake, and
             // saying "not callable" would send the reader looking for a typo.
             if class.field(&field.name.name).is_some() {
@@ -3146,12 +5450,30 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         };
 
+        let params = if subst.is_empty() {
+            method.params.clone()
+        } else {
+            method
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    ty: self.substitute_type(p.ty, subst),
+                    ..p.clone()
+                })
+                .collect()
+        };
+        let returns = if subst.is_empty() {
+            method.returns
+        } else {
+            self.substitute_type(method.returns, subst)
+        };
         let signature = Signature {
             name: method.name.clone(),
-            params: method.params.clone(),
-            returns: method.returns,
+            params,
+            returns,
             shared: true,
             span: method.span,
+            type_params: Vec::new(),
         };
         let visibility = method.visibility;
         let declared = method.span;
@@ -3187,9 +5509,15 @@ impl<'a> Checker<'a> {
         let class_name = class.name.clone();
         let shared = class.shared;
         let span = class.span;
+        let kind = class.kind;
         let constructors = class.constructors.clone();
+        let type_params = class.type_params.clone();
 
-        self.require_visible(span, shared, callee, "class");
+        self.require_visible(span, shared, callee, kind.as_str());
+
+        if kind != ClassKind::Class {
+            return self.check_record_construction(expr, id);
+        }
 
         if constructors.is_empty() {
             self.error(
@@ -3237,6 +5565,68 @@ impl<'a> Checker<'a> {
             returns: Type::of(Base::Class(id)),
             shared,
             span,
+            type_params: type_params.clone(),
+        };
+        let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
+
+        // A generic class's constructor call is typed as its own instantiation
+        // (`Box<Int32>`, not the bare `Box` an ordinary call's return would
+        // be) — `check_direct_call_with_subst` only substitutes a bare `T`
+        // return, which a constructor's `Base::Class(id)` never is.
+        if type_params.is_empty() {
+            return Type::of(Base::Class(id));
+        }
+        let args: Vec<Type> = type_params
+            .iter()
+            .map(|pid| substitution.get(pid).copied().unwrap_or(Type::UNKNOWN))
+            .collect();
+        let instance = self.intern_instance(GenericInstance { class: id, args });
+        self.generic_constructions.insert(expr.span, instance);
+        Type::of(Base::Instance(instance))
+    }
+
+    /// `Point(x: 1, y: 2)`: the implicit constructor of a record or value
+    /// class, over every field, named-only, an omitted field taking its
+    /// type's default (`ZIRK_LANGUAGE_SPEC.md` section 7).
+    ///
+    /// Dispatched from [`Self::check_construction`] instead of matching
+    /// arity against `class.constructors`: a record or value class never has
+    /// one, its whole field list is the signature.
+    fn check_record_construction(&mut self, expr: &CallExpr, id: u32) -> Type {
+        let class = self.classes[id as usize].clone();
+        let class_name = class.name.clone();
+        let kind = class.kind;
+
+        for arg in &expr.args {
+            if arg.name.is_none() {
+                self.error(
+                    codes::UNKNOWN_ARGUMENT_NAME,
+                    arg.span,
+                    format!("`{class_name}` takes only named arguments"),
+                    format!("a {} is constructed by naming its fields", kind.as_str()),
+                    Some(format!("write `{class_name}(field: value, ...)`")),
+                );
+            }
+        }
+
+        let params: Vec<ParamInfo> = class
+            .fields
+            .iter()
+            .map(|f| ParamInfo {
+                name: f.name.clone(),
+                ty: f.ty,
+                optional: f.ty.has_default(),
+                has_default: false,
+                variadic: false,
+            })
+            .collect();
+        let signature = Signature {
+            name: class_name,
+            params,
+            returns: Type::of(Base::Class(id)),
+            shared: class.shared,
+            span: class.span,
+            type_params: Vec::new(),
         };
         self.check_direct_call(expr, &signature)
     }
@@ -3252,6 +5642,21 @@ impl<'a> Checker<'a> {
             return self.check_super_method(expr, field);
         }
 
+        // `LoadState.Loading(0.5)` constructs an algebraic variant. Decided
+        // here, ahead of the method-call branch below, for the same reason
+        // `check_field` decides `LoadState.Loading` alone is a variant and
+        // not a member access: the base names a type, not a value with a
+        // field called `Loading` to evaluate.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+        {
+            let resolved = self.resolved_name(&base.name, base.span);
+            if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
+                self.variant_accesses.insert(field.span);
+                return self.check_variant_construction(expr, field, enum_id as u32);
+            }
+        }
+
         // `u.greeting()` calls a method. It is decided here and not by the
         // parser for the same reason `u.name` is: the shape does not say
         // whether the base is a value with members.
@@ -3261,20 +5666,49 @@ impl<'a> Checker<'a> {
             let object = self.check_expr(&field.object);
 
             // Calling through a value that may be absent is the same mistake
-            // as reading through one, and gets the same answer.
-            if object.nullable && matches!(object.base, Base::Class(_) | Base::Contract(_)) {
-                self.reject_absent_receiver(object, field.object.span());
-                for arg in &expr.args {
-                    self.check_expr(&arg.value);
+            // as reading through one, unless it is spelled `?.`: then it is
+            // the same answer reading through one gets too — the method's
+            // return type, made nullable (D7).
+            if object.nullable
+                && matches!(
+                    object.base,
+                    Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+                )
+            {
+                if !field.safe {
+                    self.reject_absent_receiver(object, field.object.span());
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
                 }
-                return Type::UNKNOWN;
+                // A method call through `?.` lowers for a class, a specific
+                // generic instantiation, or a contract receiver — the two
+                // blocks `lower_safe_field` already builds for a field, with
+                // the call itself inside the present one (roadmap task
+                // 10.8). Through a generic parameter's constraint there is
+                // no concrete method body to call yet, so that combination
+                // stays gated.
+                if !matches!(object.base, Base::Class(_) | Base::Contract(_) | Base::Instance(_)) {
+                    self.not_lowered(
+                        field.object.span(),
+                        "`?.` calling a method through a generic parameter",
+                        "narrow the receiver first, e.g. with `?? <fallback>` or a null check, for now",
+                    );
+                }
+                let ty = self.check_method_call_on(object.without_null(), expr, field);
+                return if ty.is_unknown() {
+                    ty
+                } else {
+                    ty.as_nullable()
+                };
             }
 
-            if let Base::Class(id) = object.base {
-                return self.check_method_call(expr, field, id);
-            }
-            if let Base::Contract(id) = object.base {
-                return self.check_contract_call(expr, field, id);
+            if matches!(
+                object.base,
+                Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+            ) {
+                return self.check_method_call_on(object, expr, field);
             }
             if object.is_unknown() {
                 for arg in &expr.args {
@@ -3385,18 +5819,32 @@ impl<'a> Checker<'a> {
 
     /// A call to a declared function, where names and defaults apply.
     fn check_direct_call(&mut self, expr: &CallExpr, signature: &Signature) -> Type {
+        self.check_direct_call_with_subst(expr, signature).0
+    }
+
+    /// [`Self::check_direct_call`], also returning the type-parameter
+    /// substitution it inferred — what [`Self::check_construction`] needs to
+    /// build the constructed instance's own type (`Box<Int32>`, not the bare
+    /// `Box` an ordinary call's return type would be).
+    fn check_direct_call_with_subst(
+        &mut self,
+        expr: &CallExpr,
+        signature: &Signature,
+    ) -> (Type, HashMap<u32, Type>) {
         let name = signature.name.clone();
         let slots = self.match_arguments(expr, signature);
+        let substitution = self.infer_type_params(expr.span, &name, signature, &slots);
 
         for (index, slot) in slots.iter().enumerate() {
             let Some(param) = signature.params.get(index) else {
                 continue;
             };
+            let param_ty = self.substitute(param.ty, &substitution);
 
             match slot {
                 ArgSlot::Given { ty, span } => {
                     self.expect_assignable(
-                        param.ty,
+                        param_ty,
                         *ty,
                         *span,
                         &format!("argument `{}`", param.name),
@@ -3405,7 +5853,7 @@ impl<'a> Checker<'a> {
                 ArgSlot::Variadic(items) => {
                     for (ty, span) in items {
                         self.expect_assignable(
-                            param.ty,
+                            param_ty,
                             *ty,
                             *span,
                             &format!("a value of `...{}`", param.name),
@@ -3427,7 +5875,133 @@ impl<'a> Checker<'a> {
             }
         }
 
-        signature.returns
+        (self.substitute(signature.returns, &substitution), substitution)
+    }
+
+    /// Infers each of a callable's own type parameters from the concrete
+    /// arguments given to it (roadmap task 7.6).
+    ///
+    /// Only from arguments: the receiver, the expected result and the
+    /// surrounding callable context that `zirk-generics`' spec also lists are
+    /// not consulted yet. A parameter that no argument determines is left
+    /// unsolved and reported rather than guessed — "SHALL fail rather than
+    /// choose an arbitrary solution".
+    fn infer_type_params(
+        &mut self,
+        call_span: Span,
+        name: &str,
+        signature: &Signature,
+        slots: &[ArgSlot],
+    ) -> HashMap<u32, Type> {
+        if signature.type_params.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut substitution: HashMap<u32, Type> = HashMap::new();
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(param) = signature.params.get(index) else {
+                continue;
+            };
+            let Base::Param(id) = param.ty.base else {
+                continue;
+            };
+            let actual = match slot {
+                ArgSlot::Given { ty, .. } => Some(*ty),
+                ArgSlot::Variadic(items) => items.first().map(|&(ty, _)| ty),
+                ArgSlot::Default | ArgSlot::Absent | ArgSlot::Missing => None,
+            };
+            let Some(actual) = actual else { continue };
+            if actual.is_unknown() {
+                continue;
+            }
+
+            // A closure cannot be annotated as a parameter, return or field
+            // type (D9), and inferring a generic parameter from one would be
+            // exactly that under another name.
+            if matches!(actual.base, Base::Function(_)) {
+                let param_name = self.type_params[id as usize].name.clone();
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    call_span,
+                    format!("`{name}` cannot infer `{param_name}` from a closure"),
+                    "a closure may not be annotated as a parameter, return or field type, and a generic argument is no exception (decision D9)",
+                    None,
+                );
+                continue;
+            }
+
+            match substitution.get(&id) {
+                Some(&solved) if solved != actual => {
+                    let a = self.name(solved);
+                    let b = self.name(actual);
+                    let param_name = self.type_params[id as usize].name.clone();
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        call_span,
+                        format!("`{name}` cannot infer `{param_name}`"),
+                        format!(
+                            "it would have to be both `{a}` and `{b}` at once, one per argument"
+                        ),
+                        None,
+                    );
+                }
+                _ => {
+                    substitution.insert(id, actual);
+                }
+            }
+        }
+
+        for &id in &signature.type_params {
+            let Some(&solved) = substitution.get(&id) else {
+                let param_name = self.type_params[id as usize].name.clone();
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    call_span,
+                    format!("`{name}` cannot infer `{param_name}`"),
+                    "no argument determines it, and neither the expected result nor an explicit type argument are consulted yet",
+                    None,
+                );
+                continue;
+            };
+
+            let constraints = self.type_params[id as usize].constraints.clone();
+            for constraint in &constraints {
+                if self.satisfies_constraint(solved, *constraint) {
+                    continue;
+                }
+                let param_name = self.type_params[id as usize].name.clone();
+                let solved_name = self.name(solved);
+                let constraint_name = self.name(*constraint);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    call_span,
+                    format!("`{solved_name}` does not satisfy `{param_name}`"),
+                    format!(
+                        "`{param_name}` requires `{constraint_name}`, which `{solved_name}` does not provide"
+                    ),
+                    None,
+                );
+            }
+        }
+
+        substitution
+    }
+
+    /// Replaces a callable's own type parameter with what it was inferred
+    /// to be. Anything else — including another declaration's `T` — passes
+    /// through unchanged.
+    fn substitute(&self, ty: Type, substitution: &HashMap<u32, Type>) -> Type {
+        let Base::Param(id) = ty.base else {
+            return ty;
+        };
+        let Some(&solved) = substitution.get(&id) else {
+            return ty;
+        };
+        if ty.nullable {
+            solved.as_nullable()
+        } else {
+            solved
+        }
     }
 
     /// Assigns each argument of a call to the parameter it fills.
@@ -3522,7 +6096,11 @@ impl<'a> Checker<'a> {
 
     /// Checks that a value may be stored where a type is expected.
     fn expect_assignable(&mut self, expected: Type, actual: Type, span: Span, context: &str) {
-        if expected.accepts(actual) || self.is_subclass_of(actual, expected) {
+        if expected.accepts(actual)
+            || self.is_subclass_of(actual, expected)
+            || self.accepts_into_union(expected, actual)
+            || self.bare_enum_matches_instance(actual, expected)
+        {
             return;
         }
 

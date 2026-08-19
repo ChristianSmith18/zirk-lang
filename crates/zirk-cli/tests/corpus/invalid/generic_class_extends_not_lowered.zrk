@@ -1,0 +1,13 @@
+// A generic class's specialization pass (task 11.1) does not build a
+// specialized copy's own dispatch table yet, so `extends` on a generic
+// class stays gated.
+class Base { construct() { } }
+
+class Box<T> extends Base {
+    value: T;
+    construct(value: T) { super(); this.value = value; }
+}
+
+fn main(): Void {
+    mut b = Box(5);
+}
