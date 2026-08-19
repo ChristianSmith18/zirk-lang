@@ -1,0 +1,5 @@
+// A `Char` literal must be exactly one Unicode grapheme (roadmap Phase 3b,
+// task 6.1) — `'ab'` holds two.
+fn main(): Void {
+    mut a: Char = 'ab';
+}

@@ -174,6 +174,10 @@ pub enum Base {
     /// `Float16`…`Float128` (roadmap Phase 3b) — `Float` aliases `Float64`,
     /// `Type::FLOAT64` is `Float(FloatWidth::F64)`.
     Float(FloatWidth),
+    /// Exactly one Unicode grapheme (roadmap Phase 3b) — represented exactly
+    /// like `String` at runtime (ADR-014), but a distinct static type: no
+    /// mutation methods, and no identity (`is` is rejected, unlike `String`).
+    Char,
     Boolean,
     String,
     /// The type of the `null` literal, assignable to any nullable type.
@@ -427,6 +431,7 @@ impl Type {
             "Float16" => Type::of(Base::Float(FloatWidth::F16)),
             "Float32" => Type::of(Base::Float(FloatWidth::F32)),
             "Float128" => Type::of(Base::Float(FloatWidth::F128)),
+            "Char" => Type::of(Base::Char),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
             _ => return None,
@@ -444,6 +449,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Void => "Void".to_string(),
         Base::Int(width) => width.name().to_string(),
         Base::Float(width) => width.name().to_string(),
+        Base::Char => "Char".to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
         Base::Null => "Null".to_string(),
@@ -720,13 +726,12 @@ pub struct PendingType {
 pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 3 brings user-defined types and the roots they hang from.
     const PHASE_3: &[&str] = &["Object", "Never"];
-    // Phase 3b brings the rest of the scalars. The remaining integer widths
-    // and the binary floating family are implemented (`Type::from_name`,
-    // checked ahead of this list) — what is still pending is `Char`. `UInt`
-    // stays here too: the spec never names it as an alias the way
-    // `Int`/`Integer` name `Int32`, so it resolves to nothing even once
-    // every explicit width does.
-    const PHASE_3B: &[&str] = &["UInt", "Char"];
+    // Phase 3b brings the rest of the scalars. The integer widths, the
+    // binary floating family and `Char` are all implemented (`Type::from_name`,
+    // checked ahead of this list) — `UInt` stays here on its own: the spec
+    // never names it as an alias the way `Int`/`Integer` name `Int32`, so it
+    // resolves to nothing even once every explicit width does.
+    const PHASE_3B: &[&str] = &["UInt"];
     // Phase 4 brings errors and resources.
     const PHASE_4: &[&str] = &["Result", "Pointer", "Resource"];
     // Phase 5 brings concurrency.
@@ -781,8 +786,13 @@ mod tests {
 
     #[test]
     fn a_type_outside_the_subset_does_not_resolve() {
-        assert_eq!(Type::from_name("Char"), None);
         assert_eq!(Type::from_name("Whatever"), None);
+    }
+
+    #[test]
+    fn valid_char_resolves() {
+        assert_eq!(Type::from_name("Char"), Some(Type::of(Base::Char)));
+        assert!(pending_type("Char").is_none());
     }
 
     #[test]
@@ -827,19 +837,10 @@ mod tests {
 
     #[test]
     fn types_from_later_phases_declare_their_phase() {
-        assert_eq!(pending_type("Char").map(|t| t.phase), Some(Phase::THREE_B));
+        assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Result").map(|t| t.phase), Some(Phase::FOUR));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
-    }
-
-    #[test]
-    fn the_char_type_is_pending_not_unknown() {
-        assert_eq!(
-            pending_type("Char").map(|t| t.phase),
-            Some(Phase::THREE_B),
-            "`Char` should announce its phase"
-        );
     }
 
     #[test]

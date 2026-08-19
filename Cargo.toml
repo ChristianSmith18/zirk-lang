@@ -19,6 +19,11 @@ zirk-lexer = { path = "crates/zirk-lexer" }
 zirk-parser = { path = "crates/zirk-parser" }
 zirk-sema = { path = "crates/zirk-sema" }
 
+# Segmentación de graphemes extendidos (UAX #29), para `Char` (roadmap Fase
+# 3b): decidir si un literal `'...'` contiene exactamente un grapheme es
+# semántica, no léxico (ver el comentario de `character()` en zirk-lexer).
+unicode-segmentation = "1"
+
 # inkwell no se declara acá: su conjunto de features depende del target y se
 # define en crates/zirk-codegen-llvm/Cargo.toml. Ver el issue #2.
 

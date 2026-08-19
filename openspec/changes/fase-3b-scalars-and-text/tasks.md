@@ -35,10 +35,10 @@
 
 ## 6. Tipos — `Char`
 
-- [ ] 6.1 Registrar `Char` como tipo del chequeador
-- [ ] 6.2 Resolver la pregunta abierta de representación (design.md) antes de fijar cómo se tipa un literal o el elemento de iterar un `String`
-- [ ] 6.3 `for ... in` sobre `String` produce `Char`, retirando la deuda anotada desde la Fase 2
-- [ ] 6.4 Tests: un caso válido y uno inválido por cada regla nueva, incluido un grapheme extendido de más de un code point
+- [x] 6.1 Registrar `Char` como tipo del chequeador — `Base::Char` en `zirk-sema/types.rs`, `IrType::Char` propio en `zirk-ir` (no reutiliza `IrType::String` directamente — ver 6.2/ADR-014). El literal `'...'` ya estaba completamente modelado en el léxico desde antes de esta fase (`TokenKind::Char(String)`, guardando el contenido crudo entre comillas sin decidir si es exactamente un grapheme — eso es semántica, no léxico, por diseño explícito del propio léxico); solo estaba gateado en el parser. Nuevo `ast::Expr::Char(CharLit)`. El chequeador valida con segmentación Unicode real (crate `unicode-segmentation`, UAX #29) que el contenido sea exactamente un grapheme extendido — ni cero ni dos o más —, código nuevo `E0432`/`INVALID_CHAR_LITERAL`; verificado con un grapheme cluster extendido real (`'👨‍👩‍👧‍👦'`, una secuencia de emoji unida por ZWJ, varios code points) aceptado, y `'ab'`/`''` rechazados. `Char` no tiene identidad (`is` se rechaza, a diferencia de `String`) ni valor por defecto (`docs/handbook/11-reference/03-built-in-types.md`: "invalid without an explicit value") — ninguno de los dos necesitó código nuevo, ambos ya excluían `Char` simplemente por no estar en sus listas
+- [x] 6.2 Resolver la pregunta abierta de representación (design.md) antes de fijar cómo se tipa un literal o el elemento de iterar un `String` — resuelta como [ADR-014](../../../docs/decisions/ADR-014-representacion-de-char.md): `Char` comparte la representación opaca de `String` (ADR-005) a nivel de runtime/LLVM — mismo puntero opaco, mismo constructor `zirk_str_from_utf8`, misma comparación `zirk_str_eq` —, pero es un `IrType::Char` estático distinto (nueva instrucción `InstKind::ConstChar`, paralela a `ConstString` en vez de reutilizarla, para que el verificador siga distinguiendo un valor de otro por la instrucción que lo produjo). Se descartó la opción de un buffer inline con escape (duplica la máquina que `String` ya tiene, por una ganancia no medida) y la de restringir `Char` a un solo code point (contradice la sección 3 del spec tal como está escrita, sin justificación real para reabrirla)
+- [ ] 6.3 `for ... in` sobre `String` produce `Char`, retirando la deuda anotada desde la Fase 2 — deliberadamente fuera de esta pasada: requiere una máquina de iteración real (segmentación de graphemes en tiempo de ejecución dentro de `zirk-runtime`, más el protocolo de iterador que hoy solo `Iterable<T>` sobre una clase del usuario tiene) que es una pieza propia, no una extensión menor de 6.1/6.2. El mensaje de `element_type`'s `Base::String` arm se actualizó para reflejar que `Char` ya existe — pasó de "no implementado, llega en la Fase 3b" (`PENDING_FEATURE`) a "la gramática y las reglas de tipo existen, la bajada no" (`NOT_LOWERED`), el mismo patrón que cualquier otro construido-pero-no-compilable de este checker
+- [x] 6.4 Tests: un caso válido y uno inválido por cada regla nueva, incluido un grapheme extendido de más de un code point — `char_literals.zrk`/`.out` (igualdad entre `Char` iguales y distintos, un code point fuera de ASCII, un grapheme cluster extendido real), `invalid/char_literal_multiple_graphemes.zrk` (`'ab'`, rechazado en tiempo de compilación); en `zirk-sema/tests/typing.rs`: literal de un solo code point, literal de un grapheme extendido, literal de más de un grapheme rechazado, literal vacío rechazado, igualdad válida, `is` rechazado por falta de identidad, más el test de `for ... in` sobre `String` actualizado de "pendiente por fase" a "no bajado todavía"
 
 ## 7. Tipos — conversión contextual profunda
 
@@ -61,13 +61,13 @@
 ## 9. Runtime
 
 - [x] 9.1 Soporte de fallo controlado para la comprobación de `NaN`/dominio inválido de `Float` (mismo patrón que overflow de entero, `zirk-runtime/src/failure.rs`) — `zirk_rt_float_nan` en `zirk-runtime/src/failure.rs`, declarado `noreturn` en `zirk-codegen-llvm/src/runtime.rs` junto al resto de manejadores de fallo
-- [ ] 9.2 Lo que `Char` necesite del runtime, una vez resuelta la pregunta abierta de representación (6.2)
+- [x] 9.2 Lo que `Char` necesite del runtime, una vez resuelta la pregunta abierta de representación (6.2) — nada nuevo: ADR-014 decidió que `Char` reutiliza `zirk_str_from_utf8`/`zirk_str_eq` tal cual, sin símbolo propio
 
 ## 10. IR
 
 - [x] 10.1 Tipo entero de la IR parametrizado por ancho y señal, no una variante por ancho (design.md D1) — `IrType::Int(IntWidth)`, `IntWidth` propio de `zirk-ir` (independiente del de `zirk-sema`, ver D1)
 - [x] 10.2 Tipo `Float` de la IR, parametrizado por ancho — `IrType::Float(FloatWidth)`, mismo patrón: `FloatWidth` propio de `zirk-ir`, independiente del de `zirk-sema`; `Nullable::Float(FloatWidth)` para `Float?`
-- [ ] 10.3 Tipo `Char` de la IR, según la representación decidida en 6.2
+- [x] 10.3 Tipo `Char` de la IR, según la representación decidida en 6.2 — `IrType::Char`, `Nullable::Char`; `needs_allocation` verdadero para `Char` igual que para `String` (misma representación, mismo costo, ADR-014)
 - [x] 10.4 Bajar la comprobación de overflow por ancho/señal, reutilizando el patrón de `Int32` — hecho para enteros (integrado con la migración de anchos); `Float` no tiene un overflow propio que comprobar (desbordar a infinito es un resultado válido, D2), así que no aplica un equivalente aquí — lo que sí se comprueba es `NaN` (10.5)
 - [x] 10.5 Bajar la comprobación de `NaN`/dominio inválido de `Float` — la comprobación vive en el backend (`check_not_nan`, tarea 11.3), no como una instrucción propia de la IR: no hay una operación IEEE 754 distinta que la IR necesite nombrar, el chequeo es "el resultado de esta `Binary` es `NaN`", que es un hecho del *valor*, no de la forma de la instrucción — la misma razón por la que el overflow de enteros tampoco es una `InstKind` propia
 - [ ] 10.6 Bajar la conversión contextual: operandos convertidos antes de la operación en la IR resultante
@@ -81,7 +81,7 @@
 - [x] 11.2 Emitir cada ancho `Float` sobre el `FloatType` de LLVM correspondiente — `llvm_type_in`/`float_type` mapean `FloatWidth::{F16,F32,F64,F128}` a `context.{f16,f32,f64,f128}_type()`; un literal se construye una sola vez desde su texto crudo vía `const_float_from_string` (parser de LLVM, no un `f64` de Rust de por medio)
 - [x] 11.3 Emitir la comprobación de `NaN`/dominio inválido explícitamente alrededor de la operación nativa — `emit_float_binary` ejecuta `fadd`/`fsub`/`fmul`/`fdiv`/`frem` y llama a `check_not_nan` (`fcmp uno` contra sí mismo, luego `trap_if` hacia `zirk_rt_float_nan`) inmediatamente después de cada una — nunca antes, ya que un resultado infinito por desbordamiento es válido y no debe abortar (D2)
 - [ ] 11.4 Emitir el despacho a `to_string()` con el mismo mecanismo que cualquier otra llamada a método (directo, tabla propia o de contrato, ADR-013)
-- [ ] 11.5 Lo que `Char` necesite del backend, según 6.2/9.2
+- [x] 11.5 Lo que `Char` necesite del backend, según 6.2/9.2 — `IrType::Char` baja al mismo puntero opaco que `IrType::String` en `llvm_type_in`; `InstKind::ConstChar` emite la misma llamada a `zirk_str_from_utf8` que `ConstString` (ADR-014)
 - [x] 11.6 Tests: el módulo LLVM generado verifica para cada construcción nueva — verificado con programas reales compilados y corridos (`float_family.zrk` y pruebas manuales adicionales para cada ancho, conversión, aritmética mixta, `NaN` en tiempo de ejecución con código de salida 70); no hay tests de emisión LLVM dedicados más allá de los que ya existían para la familia entera
 
 ## 12. Verificación de punta a punta
@@ -95,6 +95,6 @@
 ## 13. Cierre
 
 - [ ] 13.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
-- [ ] 13.2 Registrar en un ADR la representación de `Char`, dada su complejidad real (design.md)
+- [x] 13.2 Registrar en un ADR la representación de `Char`, dada su complejidad real (design.md) — [ADR-014](../../../docs/decisions/ADR-014-representacion-de-char.md)
 - [ ] 13.3 Resolver o registrar como pendientes las preguntas abiertas del design
 - [ ] 13.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha

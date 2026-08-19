@@ -14,8 +14,9 @@ use crate::types::{
     IntWidth, MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
 };
 use std::collections::HashMap;
+use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
-use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceMap, Span};
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
@@ -2636,20 +2637,21 @@ impl<'a> Checker<'a> {
                 Base::Int(width) => (1, width as u32),
                 // Same idea, one group over for the float family.
                 Base::Float(width) => (2, width as u32),
-                Base::Boolean => (3, 0),
-                Base::String => (4, 0),
-                Base::Null => (5, 0),
-                Base::Range => (6, 0),
-                Base::Unknown => (7, 0),
-                Base::Enum(id) => (8, id),
-                Base::Function(id) => (9, id),
-                Base::Contract(id) => (10, id),
-                Base::Class(id) => (11, id),
-                Base::Param(id) => (12, id),
-                Base::Instance(id) => (13, id),
-                Base::ContractInstance(id) => (14, id),
-                Base::EnumInstance(id) => (15, id),
-                Base::Union(id) => (16, id),
+                Base::Char => (3, 0),
+                Base::Boolean => (4, 0),
+                Base::String => (5, 0),
+                Base::Null => (6, 0),
+                Base::Range => (7, 0),
+                Base::Unknown => (8, 0),
+                Base::Enum(id) => (9, id),
+                Base::Function(id) => (10, id),
+                Base::Contract(id) => (11, id),
+                Base::Class(id) => (12, id),
+                Base::Param(id) => (13, id),
+                Base::Instance(id) => (14, id),
+                Base::ContractInstance(id) => (15, id),
+                Base::EnumInstance(id) => (16, id),
+                Base::Union(id) => (17, id),
             }
         }
         bases.sort_by_key(key);
@@ -3594,21 +3596,18 @@ impl<'a> Checker<'a> {
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
         match iterable.base {
             Base::Range => Type::INT32,
-            // A `String` iterates by grapheme and binds a `Char`, which does
-            // not exist yet. Binding a one-grapheme `String` instead would be
-            // inventing a rule the norm does not have, so the whole form is
-            // deferred to the phase that brings the type — `String` cannot
-            // implement `Iterable<Char>` before `Char` itself exists.
+            // A `String` iterates by grapheme and binds a `Char` — `Char`
+            // itself exists now (roadmap Phase 3b, task 6.1), but the
+            // lowering that walks a `String`'s graphemes at runtime does not
+            // yet (task 6.3, still open debt from Phase 2): unlike the wait
+            // for `Char` to exist at all, this is the grammar/type-rule-
+            // exists-but-does-not-compile shape `not_lowered` names, not a
+            // missing type.
             Base::String => {
-                self.error(
-                    codes::PENDING_FEATURE,
+                self.not_lowered(
                     span,
-                    "iterating a `String` is not implemented yet",
-                    format!(
-                        "it binds a `Char`, one Unicode grapheme, which arrives in Phase {}",
-                        Phase::THREE_B
-                    ),
-                    Some("iterate a range, as in `for i in 0..n`".into()),
+                    "iterating a `String`",
+                    "iterate a range, as in `for i in 0..n`",
                 );
                 Type::UNKNOWN
             }
@@ -3725,6 +3724,7 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Int(lit) => self.check_int_literal(lit),
             Expr::Float(lit) => self.check_float_literal(lit),
+            Expr::Char(lit) => self.check_char_literal(lit),
             Expr::Str(_) => Type::STRING,
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
@@ -4041,6 +4041,32 @@ impl<'a> Checker<'a> {
         }
 
         Type::of(Base::Float(width))
+    }
+
+    /// A `Char` literal must be exactly one Unicode grapheme
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 3) — deciding that needs Unicode
+    /// segmentation (UAX #29), which the lexer deliberately does not have
+    /// (`zirk_lexer::character()`'s own doc comment); this is the one place
+    /// that segments, since a `Char` value can only be built from a literal
+    /// today (there is no `for ... in` over `String` yet, task 6.3).
+    fn check_char_literal(&mut self, lit: &CharLit) -> Type {
+        let graphemes = lit.value.graphemes(true).count();
+        if graphemes != 1 {
+            let found = if graphemes == 0 {
+                "it is empty".to_string()
+            } else {
+                format!("it holds {graphemes} graphemes")
+            };
+            self.error(
+                codes::INVALID_CHAR_LITERAL,
+                lit.span,
+                "a character literal must be exactly one Unicode grapheme",
+                found,
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        Type::of(Base::Char)
     }
 
     fn check_path(&mut self, ident: &Ident) -> Type {

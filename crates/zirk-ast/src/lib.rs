@@ -639,6 +639,8 @@ pub enum Expr {
     Int(IntLit),
     /// A fractional or scientific literal (roadmap Phase 3b).
     Float(FloatLit),
+    /// A character literal (roadmap Phase 3b).
+    Char(CharLit),
     Str(StrLit),
     Bool(BoolLit),
     /// `null`, the sole value of the `Null` half of `T?`.
@@ -713,6 +715,7 @@ impl Expr {
         match self {
             Expr::Int(e) => e.span,
             Expr::Float(e) => e.span,
+            Expr::Char(e) => e.span,
             Expr::Str(e) => e.span,
             Expr::Bool(e) => e.span,
             Expr::Null(e) => e.span,
@@ -984,6 +987,18 @@ pub struct FloatLit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrLit {
     /// Contents with escapes already resolved.
+    pub value: String,
+    pub span: Span,
+}
+
+/// A character literal (roadmap Phase 3b): exactly one Unicode grapheme.
+///
+/// Whether the content is exactly one grapheme is not decided by the lexer
+/// (`zirk_lexer::character()`'s own doc comment) — that is `zirk-sema`'s
+/// `check_char_literal`, which needs Unicode segmentation the lexer does not
+/// have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharLit {
     pub value: String,
     pub span: Span,
 }

@@ -650,6 +650,7 @@ fn ir_type(
         Base::Float(width) => IrType::Float(ir_float_width(width)),
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
+        Base::Char => IrType::Char,
         // A traditional enum — none of its variants carry data — is exactly
         // its discriminant. One with at least one algebraic variant gets a
         // representation of its own (roadmap task 11.3).
@@ -1351,7 +1352,11 @@ impl<'a> FunctionLowering<'a> {
             }
             // Absence is exactly what a nullable type defaults to.
             IrType::Nullable(base) => self.emit(InstKind::NullValue(base), ty, span),
+            // `Char` has no default (`docs/handbook/11-reference/03-built-in-types.md`:
+            // "invalid without an explicit value") — unlike `String`'s `""`,
+            // there is no empty grapheme to fall back to.
             IrType::Void
+            | IrType::Char
             | IrType::Closure(_)
             | IrType::Object(_)
             | IrType::Contract(_)
@@ -1937,6 +1942,10 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Str(lit) => {
                 let id = self.module.intern_string(&lit.value);
                 self.emit(InstKind::ConstString(id), IrType::String, span)
+            }
+            ast::Expr::Char(lit) => {
+                let id = self.module.intern_string(&lit.value);
+                self.emit(InstKind::ConstChar(id), IrType::Char, span)
             }
 
             ast::Expr::Path(ident) => {
@@ -3880,6 +3889,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Float(lit) => IrType::Float(float_literal_width(lit)),
             ast::Expr::Bool(_) => IrType::Boolean,
             ast::Expr::Str(_) => IrType::String,
+            ast::Expr::Char(_) => IrType::Char,
             ast::Expr::Path(ident) => self.slot_type(self.lookup_slot(&ident.name)),
             // `Neg`/`BitNot` preserve the operand's own width (any integer
             // width for both, plus any `Float` width for `Neg` — roadmap

@@ -103,4 +103,7 @@ pub mod codes {
     /// otherwise capture (D10): there is no ordinary shadowing, only
     /// `this.name` disambiguating a field from a colliding parameter.
     pub const ORDINARY_SHADOWING: Code = Code::new("E0431");
+    /// A `Char` literal whose content is not exactly one Unicode grapheme
+    /// (roadmap Phase 3b) — `ZIRK_LANGUAGE_SPEC.md` section 3.
+    pub const INVALID_CHAR_LITERAL: Code = Code::new("E0432");
 }
