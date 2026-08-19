@@ -868,6 +868,15 @@ impl<'a> FunctionLowering<'a> {
         id
     }
 
+    /// An `Int64` constant. `ConstInt` always declares `Int32` (a literal
+    /// always types `Int32` — `ast::Expr::Int`'s own lowering does the
+    /// same), so a wider constant goes through `IntCast` from one, exactly
+    /// the same as any other `Int32` value reaching a wider destination.
+    fn const_i64(&mut self, value: i32, span: Span) -> Operand {
+        let narrow = self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span);
+        self.emit(InstKind::IntCast(narrow), IrType::Int(IntWidth::I64), span)
+    }
+
     fn lookup_slot(&self, name: &str) -> SlotId {
         self.scopes
             .iter()
@@ -1656,10 +1665,17 @@ impl<'a> FunctionLowering<'a> {
     /// exactly a counter, so it is built directly instead of inventing a
     /// protocol the language does not define yet. Decision D3.
     fn lower_for_in(&mut self, stmt: &ast::ForInStmt) {
-        let ast::Expr::Range(range) = &stmt.iterable else {
-            return self.lower_for_in_iterable(stmt);
-        };
+        if let ast::Expr::Range(range) = &stmt.iterable {
+            return self.lower_for_in_range(stmt, range);
+        }
+        if self.type_of(&stmt.iterable, stmt.iterable.span()) == IrType::String {
+            return self.lower_for_in_string(stmt);
+        }
+        self.lower_for_in_iterable(stmt);
+    }
 
+    /// Lowers `for i in a..b { ... }`.
+    fn lower_for_in_range(&mut self, stmt: &ast::ForInStmt, range: &ast::RangeExpr) {
         self.scopes.push(HashMap::new());
 
         let start = self.lower_expr(&range.start);
@@ -1738,6 +1754,116 @@ impl<'a> FunctionLowering<'a> {
             stmt.span,
         );
         self.emit_effect(InstKind::Store(binding, next), stmt.span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    /// Lowers `for c in someString { ... }` (roadmap Phase 3b, task 6.3),
+    /// binding each Unicode extended grapheme as a `Char`, in order.
+    ///
+    /// The same block shape `lower_for_in_range` already uses, with a byte
+    /// offset in place of the range's own counter: `GraphemeLenAt` at the
+    /// head answers "is there a next grapheme, and how many bytes is it"
+    /// (`-1` means done), `GraphemeSlice` in the body builds the `Char`
+    /// from the length the head already found (held across the branch the
+    /// same way any other value that must survive one is,
+    /// `lower_and_hold`), and the step advances the offset by that same
+    /// length — never by one, since a byte offset and a grapheme count are
+    /// not the same number.
+    fn lower_for_in_string(&mut self, stmt: &ast::ForInStmt) {
+        self.scopes.push(HashMap::new());
+
+        let string = self.lower_expr(&stmt.iterable);
+        let string_slot = self.declare_slot("<string>", IrType::String, stmt.iterable.span());
+        self.emit_effect(InstKind::Store(string_slot, string), stmt.span);
+
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let offset_slot = self.declare_slot("<offset>", i64_ty, stmt.span);
+        let zero = self.const_i64(0, stmt.span);
+        self.emit_effect(InstKind::Store(offset_slot, zero), stmt.span);
+
+        let binding = self.declare_slot(&stmt.binding.name, IrType::Char, stmt.binding.span);
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let string_value = self.emit(InstKind::Load(string_slot), IrType::String, stmt.span);
+        let offset = self.emit(InstKind::Load(offset_slot), i64_ty, stmt.span);
+        let length = self.emit(
+            InstKind::GraphemeLenAt {
+                string: string_value,
+                offset,
+            },
+            i64_ty,
+            stmt.span,
+        );
+        let minus_one = self.const_i64(-1, stmt.span);
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::NotEq,
+                left: length,
+                right: minus_one,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+
+        // `length` and `offset` both survive into `body_block`: the header
+        // computed them, but values do not cross blocks (ADR-007), so each
+        // goes through a slot exactly like `string`/`offset` already do.
+        let length_slot = self.declare_slot("<grapheme len>", i64_ty, stmt.span);
+        self.emit_effect(InstKind::Store(length_slot, length), stmt.span);
+
+        self.terminate(Terminator::Branch {
+            condition: keep_going,
+            then_block: body_block,
+            else_block: continue_block,
+        });
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: step_block,
+        });
+
+        self.current = body_block;
+        let string_value = self.emit(InstKind::Load(string_slot), IrType::String, stmt.span);
+        let offset = self.emit(InstKind::Load(offset_slot), i64_ty, stmt.span);
+        let length = self.emit(InstKind::Load(length_slot), i64_ty, stmt.span);
+        let grapheme = self.emit(
+            InstKind::GraphemeSlice {
+                string: string_value,
+                offset,
+                len: length,
+            },
+            IrType::Char,
+            stmt.span,
+        );
+        self.emit_effect(InstKind::Store(binding, grapheme), stmt.span);
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(step_block));
+
+        self.loops.pop();
+
+        self.current = step_block;
+        let offset = self.emit(InstKind::Load(offset_slot), i64_ty, stmt.span);
+        let length = self.emit(InstKind::Load(length_slot), i64_ty, stmt.span);
+        let next_offset = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: offset,
+                right: length,
+            },
+            i64_ty,
+            stmt.span,
+        );
+        self.emit_effect(InstKind::Store(offset_slot, next_offset), stmt.span);
         self.terminate(Terminator::Jump(header));
 
         self.current = continue_block;
@@ -2119,6 +2245,9 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_contract_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_native_to_string_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
@@ -2899,6 +3028,25 @@ impl<'a> FunctionLowering<'a> {
     /// Direct because no method is redefinable yet: without inheritance every
     /// call has exactly one target, and paying an indirection for a generality
     /// the program cannot use would be paying for nothing (D3).
+    /// Lowers `myInt.to_string()` — the explicit spelling of the same
+    /// conversion `println`/interpolation reach implicitly (roadmap Phase
+    /// 3b, task 8's own follow-up) — for a native scalar only. A class,
+    /// record or value class's own `to_string()` method already goes
+    /// through the ordinary method-call path (`lower_method_call`, tried
+    /// right after this one), which is why this returns `None` for
+    /// `Object`/`Value`/`Contract` receivers rather than handling them too.
+    fn lower_native_to_string_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        if !self.is_native_to_string_call(call) {
+            return None;
+        }
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("checked by is_native_to_string_call")
+        };
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let receiver = self.lower_expr(&field.object);
+        Some(self.lower_to_string(receiver, receiver_ty, span))
+    }
+
     fn lower_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
         let ast::Expr::Field(field) = &*call.callee else {
             return None;
@@ -3844,6 +3992,27 @@ impl<'a> FunctionLowering<'a> {
             };
         }
 
+        // A value reached through a contract that declares `to_string()`:
+        // which body runs is not statically known — the whole point of a
+        // contract — so it goes through the object's own dispatch table for
+        // it, exactly like any other contract method call
+        // (`lower_contract_call`).
+        if let IrType::Contract(id) = ty
+            && let Some(method) = self.checked.contracts[id as usize].method("to_string")
+        {
+            let index = method.index as u32;
+            return self.emit(
+                InstKind::CallContract {
+                    object: operand,
+                    contract: id,
+                    index,
+                    args: Vec::new(),
+                },
+                IrType::String,
+                span,
+            );
+        }
+
         self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
@@ -4008,14 +4177,35 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Whether a call goes through a closure value rather than a name.
+    /// Whether `call` is `myScalar.to_string()` — the explicit spelling of
+    /// the conversion `println`/interpolation reach implicitly (roadmap
+    /// Phase 3b, task 8's own follow-up). Excludes `Object`/`Value`/
+    /// `Contract` receivers, which already resolve through the ordinary
+    /// method-call path (a class/record's own declared `to_string()`).
+    fn is_native_to_string_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        field.name.name == "to_string"
+            && !self.checked.variant_accesses.contains(&field.span)
+            && !matches!(
+                self.type_of(&field.object, field.object.span()),
+                IrType::Object(_) | IrType::Value(_) | IrType::Contract(_)
+            )
+    }
+
     fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
         // A method or `super` call is not a closure call, and asking for the
         // type of its callee would ask for the type of a method — which is not
-        // a value.
+        // a value. Neither is `myScalar.to_string()` — asking for the type of
+        // its own callee (`field_type_of`) would try to resolve `to_string`
+        // as a *field*, which panics for anything that is not an
+        // `Object`/`Value` (a native scalar has no fields at all).
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
             || self.safe_method_call_info(call).is_some()
             || self.variant_construction(call).is_some()
+            || self.is_native_to_string_call(call)
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
             return false;
@@ -4127,6 +4317,9 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if let Some((enum_id, _)) = self.variant_construction(e) {
                     return self.ir_type(Type::of(Base::Enum(enum_id)));
+                }
+                if self.is_native_to_string_call(e) {
+                    return IrType::String;
                 }
                 match self.construction_class_id(e) {
                     Some(id) => self.ir_type(Type::of(Base::Class(id))),

@@ -1,0 +1,45 @@
+// `for ... in` over a `String` produces `Char`, one Unicode extended
+// grapheme at a time (roadmap Phase 3b, task 6.3 — the debt Phase 2 first
+// noted). A byte offset threads the walk, so a multi-byte code point and an
+// extended grapheme cluster (several code points joined, like a ZWJ emoji
+// sequence) each count as exactly one iteration.
+fn main(): Void {
+    mut count: Int32 = 0;
+    for c in "hola" {
+        count = count + 1;
+    }
+    stdout.println(count);
+
+    // Multi-byte code points (each 'ñ'/'ú' is more than one UTF-8 byte).
+    mut accented: Int32 = 0;
+    for c in "ñandú" {
+        accented = accented + 1;
+    }
+    stdout.println(accented);
+
+    // An empty string iterates zero times.
+    mut empty: Int32 = 0;
+    for c in "" {
+        empty = empty + 1;
+    }
+    stdout.println(empty);
+
+    // `break` stops the walk early, same as any other loop.
+    mut stopped: Int32 = 0;
+    for c in "abcdef" {
+        if c == 'c' {
+            break;
+        }
+        stopped = stopped + 1;
+    }
+    stdout.println(stopped);
+
+    // An extended grapheme cluster (a family emoji joined by ZWJ, several
+    // code points) counts as exactly one iteration, sitting between two
+    // ordinary single-code-point graphemes.
+    mut total: Int32 = 0;
+    for c in "a👨‍👩‍👧‍👦b" {
+        total = total + 1;
+    }
+    stdout.println(total);
+}

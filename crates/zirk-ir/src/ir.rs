@@ -544,6 +544,24 @@ pub enum InstKind {
     /// so the verifier can keep telling a `Char` value apart from a `String`
     /// one by the instruction that produced it, not only by `inst.ty`.
     ConstChar(StringId),
+    /// Byte length of the grapheme at `offset` within `string`, or `-1` past
+    /// the end (roadmap Phase 3b, task 6.3: `for ... in` over `String`
+    /// produces `Char`). `offset` is threaded as an ordinary `Int64`
+    /// loop-private value — the same shape a range loop already threads its
+    /// own counter with — so this needs no instruction that mutates
+    /// anything; it only ever answers a question.
+    GraphemeLenAt {
+        string: Operand,
+        offset: Operand,
+    },
+    /// Builds a `Char` from the grapheme at byte range `[offset, offset +
+    /// len)` — the `len` a prior `GraphemeLenAt` at the same `offset`
+    /// already confirmed is exactly one grapheme.
+    GraphemeSlice {
+        string: Operand,
+        offset: Operand,
+        len: Operand,
+    },
 
     /// Reads a slot.
     Load(SlotId),

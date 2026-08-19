@@ -684,8 +684,15 @@ fn valid_printing_of_the_new_scalars() {
 }
 
 #[test]
-fn invalid_printing_of_float16() {
-    let output = rejected_body("mut a: Float16 = 1.5f16;\nstdout.println(a);");
+fn valid_printing_of_float16() {
+    // Prints by widening to Float32 first — always exact, since every f16
+    // value is representable in f32 without loss.
+    accepted_body("mut a: Float16 = 1.5f16;\nstdout.println(a);");
+}
+
+#[test]
+fn invalid_printing_of_float128() {
+    let output = rejected_body("mut a: Float128 = 1.5f128;\nstdout.println(a);");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
     assert!(output.contains("cannot be printed"));
 }
@@ -703,6 +710,32 @@ fn valid_interpolation_of_a_class_with_to_string() {
     accepted(
         "class Point { x: Int32; construct(x: Int32) { this.x = x; } fn to_string(): String { return \"{this.x}\"; } }
          fn main(): Void { mut p = Point(1); mut s = \"p: {p}\"; }",
+    );
+}
+
+#[test]
+fn valid_explicit_to_string_on_a_native_scalar() {
+    accepted_body("mut a: Int32 = 1;\nmut s: String = a.to_string();");
+}
+
+#[test]
+fn valid_explicit_to_string_on_a_string_is_identity() {
+    accepted_body("mut s: String = \"already\".to_string();");
+}
+
+#[test]
+fn invalid_explicit_to_string_with_arguments() {
+    let output = rejected_body("mut a: Int32 = 1;\nmut s: String = a.to_string(2);");
+    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
+}
+
+#[test]
+fn valid_to_string_through_a_contract_reference() {
+    accepted(
+        "interface Printable { fn to_string(): String; }
+         class Widget implements Printable { construct() { } fn to_string(): String { return \"w\"; } }
+         fn describe(p: Printable): Void { stdout.println(p); }
+         fn main(): Void { mut w = Widget(); describe(w); }",
     );
 }
 
@@ -857,13 +890,10 @@ fn valid_conditional_without_braces() {
 }
 
 #[test]
-fn invalid_string_iteration_is_not_lowered_yet() {
-    // `Char` exists now (roadmap Phase 3b, task 6.1), but the runtime
-    // lowering that walks a `String`'s graphemes does not (task 6.3, debt
-    // tracked since Phase 2) — a checked-but-not-compilable construct, not a
-    // missing type.
-    let output = rejected_body("mut text = \"hola\";\nfor c in text { }");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+fn valid_string_iteration_binds_a_char() {
+    // `for ... in` over a `String` produces `Char` (roadmap Phase 3b, task
+    // 6.3, retiring the debt tracked since Phase 2).
+    accepted_body("mut text = \"hola\";\nfor c in text { mut x: Char = c; }");
 }
 
 // --- `Iterable<T>` / `Iterator<T>` (D8, task 6.9/6.10) -----------------------

@@ -331,6 +331,62 @@ pub unsafe extern "C" fn zirk_str_is_ascii(handle: *const c_void) -> bool {
     unsafe { borrow(handle) }.is_none_or(|string| string.is_ascii)
 }
 
+/// The byte length of the Unicode extended grapheme starting at `offset`, or
+/// `-1` when `offset` is at or past the end (roadmap Phase 3b, task 6.3:
+/// `for ... in` over `String`).
+///
+/// `for ... in` threads `offset` itself as an ordinary loop-private `Int64`,
+/// the same shape `0..n` already loops with — this only ever answers "is
+/// there a next grapheme, and how many bytes is it", never mutates anything,
+/// so lowering needed no instruction beyond an ordinary runtime call.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime, and `offset` must be a byte offset
+/// this same function or `0` already produced for it — never an arbitrary
+/// value, which could split a multi-byte code point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_grapheme_len_at(handle: *const c_void, offset: i64) -> i64 {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let Some(string) = (unsafe { borrow(handle) }) else {
+        return -1;
+    };
+    let text = unsafe { string.as_str() };
+    let start = offset as usize;
+    if start >= text.len() {
+        return -1;
+    }
+    match text[start..].graphemes(true).next() {
+        Some(grapheme) => grapheme.len() as i64,
+        None => -1,
+    }
+}
+
+/// Builds a `Char` from the grapheme at byte range `[offset, offset + len)`
+/// — the same opaque construction `zirk_str_from_utf8` uses, since `Char`
+/// shares `String`'s representation bit for bit (ADR-014).
+///
+/// # Safety
+///
+/// `handle` must come from this runtime; `offset` and `len` must be a byte
+/// range `zirk_str_grapheme_len_at` already confirmed is exactly one
+/// grapheme of this string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_grapheme_slice(
+    handle: *const c_void,
+    offset: i64,
+    len: i64,
+) -> *mut c_void {
+    let Some(string) = (unsafe { borrow(handle) }) else {
+        return std::ptr::null_mut();
+    };
+    let text = unsafe { string.as_str() };
+    let start = offset as usize;
+    let end = start + len as usize;
+    owned_handle(text[start..end].to_string())
+}
+
 /// Hash of a string's contents.
 ///
 /// Derived from the same canonical form `zirk_str_eq` compares, so two strings
