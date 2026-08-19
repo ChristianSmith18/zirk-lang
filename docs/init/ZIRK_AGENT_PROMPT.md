@@ -230,14 +230,62 @@ Phase 2 corpus program that tested the opposite — the merged
 field is never affected — it is always read as `this.name`, never a bare
 name, so there is nothing for a local to shadow.
 
-## Next phase: Zirk 0.3b — complete scalars, conversions and text
+## Phase 3b — complete
 
-Phase 3b of `docs/init/ZIRK_ROADMAP.md`: the remaining integer widths
-(`Int8`/`Int16`/`Int64`/`Int128`, the `UInt*` family), the binary floating
-family (`Float16`/`Float32`/`Float64`/`Float128`, `Float` aliasing `Float64`),
-`Char` as one Unicode grapheme, deep contextual conversion, bitwise/shift
-operators, and string interpolation (needs the `to_string()` contract Phase 3
-defines). They arrive together because they depend on each other.
+**Zirk's scalars, conversions and text are complete.** The ten integer widths
+(`Int8`…`Int128`, `UInt8`…`UInt128`), the binary floating family
+(`Float16`/`Float32`/`Float64`/`Float128`, `Float` aliasing `Float64`), `Char`
+as one Unicode extended grapheme cluster, bitwise/shift operators, deep
+contextual conversion (`Float(3 / 4)`, `String("x=" + 42)`), and a real
+`to_string()` contract that `print`/`println` and string interpolation
+(`"{expr}"`) both route through, all compile to a native binary and run.
+
+Decisions taken during the phase live in `docs/decisions/` as ADR-014, and in
+the `design.md` of `fase-3b-scalars-and-text` as D1 to D3; its `tasks.md`
+carries the resolution of every open question section by section.
+
+### What this phase deliberately left pending
+
+- **`for ... in` over `String`** still does not compile (`Char` exists, but
+  the runtime grapheme-segmentation machinery and the iterator protocol it
+  would need do not) — reported with `NOT_LOWERED`, the debt Phase 2 first
+  noted and this phase narrowed without retiring.
+- **Integer literal width inference from a simple assignment context**
+  (`mut x: Int8 = 5;` without `as`) is not implemented — a literal always
+  types `Int32` unless an explicit `as` or a deep contextual conversion
+  supplies the width. There is no literal suffix syntax for it either (only
+  `Float` has one, e.g. `1.5f32`); this was a deliberate scope decision
+  during the phase's own literal-suffix task, not an oversight.
+- **`Float128` arithmetic is unverified on Windows**: LLVM lowers `fp128`
+  operations to soft-float library calls (`__addtf3` and similar) the MSVC
+  toolchain this project's CI links against does not provide the way
+  `glibc`/`libSystem` do on Linux/macOS — it crashed the Windows runner
+  (an access violation, not a failing assertion) rather than just failing a
+  test, so `Float128` is excluded from the cross-platform corpus.
+- **`Float16`/`Float128` have no `to_string()`**: neither is a stable Rust
+  primitive in this toolchain (`f16`/`f128` are behind an unstable feature),
+  so there is no `Display` to format through without a hand-rolled decimal
+  conversion this phase did not build. Printing or interpolating either width
+  is rejected at compile time with a clear diagnostic, not silently wrong.
+- **An enum cannot implement `to_string()`**, or any method at all — enums
+  have no method table yet (`EnumType` has no `methods` field, unlike
+  `ClassType`). Pre-existing debt from Phase 3, not new here.
+- **`to_string()` through a contract reference** (rather than a concrete
+  class/record) does not dispatch — only the direct and virtual-table forms
+  of the call were built, mirroring an ordinary method call.
+- **Explicit `value.to_string()` on a native scalar** (outside of
+  `println`/interpolation, which reach it implicitly) is not callable: member
+  lookup only resolves against a class's own method table today.
+
+## Next phase: Zirk 0.4 — errors and memory
+
+Phase 4 of `docs/init/ZIRK_ROADMAP.md`: `Result<T, E>` with exhaustive
+`match`, `try`/`catch`/`finally`, `fatalError`, the full memory strategy
+decided in Phase 0 (safe/weak/dependent references, deep clone graph
+semantics, automatic bounded native pinning), `unsafe {}`/`Pointer<T>`/native
+slices, transactional write journals with explicit irreversible `commit`,
+`Resource<E>`/`match with`, and `inmut::strict`'s alias-analysis-backed deep
+immutability.
 
 ## Expected working style
 

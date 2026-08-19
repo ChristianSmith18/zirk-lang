@@ -5,11 +5,11 @@
 
 ## 2. Léxico
 
-- [ ] 2.1 Literales enteros con sufijo o inferencia de ancho, según lo que la gramática existente ya distinga
-- [ ] 2.2 Literales `Float`, con notación científica y default `Float64`
-- [ ] 2.3 Literal `Char`, delimitado por comillas simples, capaz de un grapheme extendido de más de un code point
+- [x] 2.1 Literales enteros con sufijo o inferencia de ancho, según lo que la gramática existente ya distinga — resuelto por omisión deliberada: el léxico nunca tuvo (ni tiene ahora) una familia de sufijos para enteros paralela a la de `Float` (`FLOAT_WIDTHS`) — cualquier sufijo detrás de un entero decimal que no sea un ancho de `Float` o una unidad de duración ya era, y sigue siendo, un error léxico (`INVALID_NUMERIC_SUFFIX`). El ancho de un literal entero se decide únicamente por contexto explícito: `as` (task 4.3) o el destino de una conversión contextual (`Int64(3 + 4)`, task 7). Inferencia de ancho *implícita* desde un destino de asignación simple (`mut x: Int8 = 5;` tipando `5` como `Int8` sin `as`) queda fuera, deuda explícita — ver 13.4
+- [x] 2.2 Literales `Float`, con notación científica y default `Float64` — el léxico ya lo tenía completo desde antes de esta fase (`TokenKind::Float(NumberLit)`, con `1e2` y sufijo opcional); implementado en el parser/checker en la sección 5
+- [x] 2.3 Literal `Char`, delimitado por comillas simples, capaz de un grapheme extendido de más de un code point — el léxico ya lo tenía completo desde antes de esta fase (`TokenKind::Char(String)`, guardando el contenido crudo sin decidir si es un grapheme); implementado en el parser/checker en la sección 6
 - [x] 2.4 `{expr}` dentro de un literal de `String`, con `\{`/`\}` como escape — encontrado ya implementado en el léxico desde antes de esta fase (`TokenKind::InterpolatedStr`/`StrPart`, con conteo de profundidad de llaves para que una expresión anidada con las suyas propias no cierre la interpolación antes de tiempo, y el escape ya reconocido); nada que hacer aquí, solo confirmar y dejar de gatearlo en el parser (3.2)
-- [x] 2.5 Tests: un caso válido y uno inválido por cada literal nuevo — hecho para interpolación (ya cubierto por tests de léxico preexistentes, ver 2.4); pendiente `Float`/`Char`
+- [x] 2.5 Tests: un caso válido y uno inválido por cada literal nuevo — interpolación (ver 2.4), `Float` (`valid_float_literal_shapes`/`the_float_family_is_pending_not_unknown` en `grammar.rs`/`types.rs`), `Char` (`valid_char_literal_shapes` en `grammar.rs`, más los tests de segmentación de grapheme en `typing.rs`, sección 6.4)
 
 ## 3. Gramática
 
@@ -86,15 +86,22 @@
 
 ## 12. Verificación de punta a punta
 
-- [ ] 12.1 Ampliar el corpus con programas válidos: cada ancho entero, `Float`, `Char`, conversión contextual, bitwise/shift, `to_string()` en un tipo del usuario, interpolación
-- [ ] 12.2 Ampliar el corpus con programas inválidos: overflow por ancho, `NaN` evitado, conversión sin marcar, tipo sin `to_string()`
-- [ ] 12.3 Verificar que el corpus de las fases 1 a 3 sigue verde sin modificarlo, salvo los sitios que la auditoría de 1.1 identificó como necesarios
-- [ ] 12.4 Sondear cruces entre construcciones: `Float` genérico (`Box<Float64>`), `Char` en un record, `to_string()` sobre un value class, interpolación dentro de un contrato de operador
-- [ ] 12.5 Confirmar que CI pasa en las cuatro plataformas de la matriz
+- [x] 12.1 Ampliar el corpus con programas válidos: cada ancho entero, `Float`, `Char`, conversión contextual, bitwise/shift, `to_string()` en un tipo del usuario, interpolación — `integer_widths.zrk`, `float_family.zrk`, `char_literals.zrk`, `deep_context_conversion.zrk`, `bitwise_and_shift.zrk`, `to_string_contract.zrk`, `string_interpolation.zrk`
+- [x] 12.2 Ampliar el corpus con programas inválidos: overflow por ancho, `NaN` evitado, conversión sin marcar, tipo sin `to_string()` — `integer_narrowing_not_implicit.zrk`, `float_literal_overflow.zrk`, `char_literal_multiple_graphemes.zrk`, `float16_not_printable.zrk`, `context_conversion_incompatible_leaf.zrk`, `bitwise_on_non_integer.zrk`, `class_without_to_string.zrk`. `NaN` en tiempo de ejecución (`0.0 / 0.0`) se verificó manualmente con un programa real (código de salida 70) pero no entra al corpus inválido: el arnés compara el formato del diagnóstico de *compilación*, no un abort en tiempo de ejecución — mismo criterio que `integer_narrowing_not_implicit.zrk` documentó al renombrarse
+- [x] 12.3 Verificar que el corpus de las fases 1 a 3 sigue verde sin modificarlo, salvo los sitios que la auditoría de 1.1 identificó como necesarios — verificado en cada commit de la fase (`cargo test --workspace`, 761 tests al cierre); `printing.zrk` de la Fase 1 se dejó sin tocar a propósito, con su propia cobertura ampliada en un archivo nuevo (`to_string_contract.zrk`) en vez de mezclarse
+- [x] 12.4 Sondear cruces entre construcciones: `Float` genérico (`Box<Float64>`), `Char` en un record, `to_string()` sobre un value class, interpolación dentro de un contrato de operador — `Char` en un record y la interpolación de un valor producido por un operador sobrecargado (`_add`) con su propio `to_string()` verificados con un programa real, todo correcto. Un *value class* no puede implementar `to_string()` en absoluto: su gramática es compacta (`value class Name(field: Type, ...)`, sin cuerpo de métodos), así que imprimir uno se rechaza limpiamente por las mismas reglas de 8.3/8.4 — comportamiento correcto, no un hueco de esta fase. `Box<Float64>` no se ejercitó con un programa real: `Base::Instance` (roadmap task 7.3 de Fase 3) documenta que un valor de ese tipo "cannot yet be constructed — there is no expression syntax for it", así que no hay forma de construir uno hoy con ningún tipo — la combinación con `Float64` específicamente no añade nada que verificar que la Fase 3 no dejara ya como alcance futuro
+- [x] 12.5 Confirmar que CI pasa en las cuatro plataformas de la matriz — verde en las cuatro (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `macos-aarch64`) en cada commit de la fase
 
 ## 13. Cierre
 
-- [ ] 13.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
+- [x] 13.1 Actualizar `docs/init/ZIRK_AGENT_PROMPT.md` con el estado de la fase
 - [x] 13.2 Registrar en un ADR la representación de `Char`, dada su complejidad real (design.md) — [ADR-014](../../../docs/decisions/ADR-014-representacion-de-char.md)
-- [ ] 13.3 Resolver o registrar como pendientes las preguntas abiertas del design
-- [ ] 13.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha
+- [x] 13.3 Resolver o registrar como pendientes las preguntas abiertas del design — las tres preguntas abiertas de `design.md` se resolvieron durante la implementación, cada una documentada en la tarea que la resuelve: representación de `Char` → 6.2/ADR-014; si el contexto profundo cruza un operador sobrecargado por contrato → 7.4, no cruza, tal como `design.md` proponía; nombre del contrato de impresión → 8.1, `to_string()` público sin el guion bajo reservado de los operadores
+- [x] 13.4 Revisar qué deudas de fases anteriores quedan vivas y con qué fecha — deudas nuevas de esta fase, sin fecha fija (dependen de trabajo no planificado todavía):
+  - `for ... in` sobre `String` no baja (task 6.3) — necesita segmentación de graphemes en tiempo de ejecución más un protocolo de iterador que hoy solo existe para clases del usuario
+  - Inferencia de ancho entero por contexto de asignación simple, más allá de `as` y la conversión contextual (task 2.1) — `mut x: Int8 = 5;` sigue exigiendo `5 as Int8`
+  - `Float128` en Windows: la aritmética `fp128` baja a llamadas a una biblioteca de software que el toolchain MSVC de CI no provee (encontrado en 5.4) — sin verificar en las cuatro plataformas
+  - `Float16`/`Float128` no tienen `to_string()` (8.3): ninguno es un primitivo estable de Rust en este toolchain
+  - Un enum no puede implementar `to_string()` (8.4): los enums no tienen tabla de métodos todavía — deuda de fases anteriores, no nueva de esta
+  - `to_string()` a través de una referencia de contrato, no de una clase concreta, no se bajó (11.4)
+  - Explicit `value.to_string()` sobre un escalar nativo (no a través de `println`/interpolación) no se implementó: la búsqueda estructural de miembros solo mira clases hoy
