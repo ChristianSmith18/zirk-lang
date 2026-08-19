@@ -89,10 +89,11 @@ fn valid_the_four_types_of_the_subset() {
 
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
-    // `Int64`/`Float64` and the rest of the integer/float families resolve
-    // now (roadmap Phase 3b, tasks 4.1/5.1) — `Char` is still genuinely
-    // pending.
-    let output = rejected_body("mut x: Char = 1;");
+    // `Int64`/`Float64`/`Char` and the rest of the scalars in this phase's
+    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1) — `UInt` is
+    // still genuinely pending: the spec never names it as an alias the way
+    // `Int`/`Integer` name `Int32`.
+    let output = rejected_body("mut x: UInt = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
     assert!(output.contains("Phase 3b"), "{output}");
 }
@@ -210,6 +211,40 @@ fn valid_unary_negation_on_float() {
 #[test]
 fn invalid_bitwise_not_on_float() {
     let output = rejected_body("mut a: Float64 = 1.5;\nmut b = ~a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_char_literal_of_a_single_code_point() {
+    accepted_body("mut a: Char = 'a';");
+}
+
+#[test]
+fn valid_char_literal_of_an_extended_grapheme_cluster() {
+    // A family emoji joined by ZWJ: several code points, one grapheme.
+    accepted_body("mut a: Char = '👨‍👩‍👧‍👦';");
+}
+
+#[test]
+fn invalid_char_literal_of_more_than_one_grapheme() {
+    let output = rejected_body("mut a: Char = 'ab';");
+    assert!(output.contains(codes::INVALID_CHAR_LITERAL.as_str()));
+}
+
+#[test]
+fn invalid_char_literal_that_is_empty() {
+    let output = rejected_body("mut a: Char = '';");
+    assert!(output.contains(codes::INVALID_CHAR_LITERAL.as_str()));
+}
+
+#[test]
+fn valid_char_equality() {
+    accepted_body("mut a: Char = 'a';\nmut b: Char = 'a';\nmut c = a == b;");
+}
+
+#[test]
+fn invalid_char_identity_comparison() {
+    let output = rejected_body("mut a: Char = 'a';\nmut b: Char = 'a';\nmut c = a is b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
@@ -750,13 +785,13 @@ fn valid_conditional_without_braces() {
 }
 
 #[test]
-fn invalid_string_iteration_defers_to_the_phase_of_char() {
-    // It binds a `Char` — one grapheme — and binding a one-grapheme `String`
-    // instead would invent a rule the norm does not have.
+fn invalid_string_iteration_is_not_lowered_yet() {
+    // `Char` exists now (roadmap Phase 3b, task 6.1), but the runtime
+    // lowering that walks a `String`'s graphemes does not (task 6.3, debt
+    // tracked since Phase 2) — a checked-but-not-compilable construct, not a
+    // missing type.
     let output = rejected_body("mut text = \"hola\";\nfor c in text { }");
-    assert!(output.contains(codes::PENDING_FEATURE.as_str()), "{output}");
-    assert!(output.contains("Char"), "{output}");
-    assert!(output.contains("Phase 3b"), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 // --- `Iterable<T>` / `Iterator<T>` (D8, task 6.9/6.10) -----------------------

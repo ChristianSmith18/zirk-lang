@@ -123,6 +123,10 @@ pub enum IrType {
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
     String,
+    /// Exactly one Unicode grapheme (roadmap Phase 3b) — the same opaque
+    /// runtime handle as `String` (ADR-014), but a distinct static type: no
+    /// mutation methods, and no identity (`is` is rejected, unlike `String`).
+    Char,
     /// A closure, identified by its layout in the module.
     ///
     /// Each lambda has its own type rather than sharing one per signature: a
@@ -180,6 +184,7 @@ pub enum Nullable {
     Float(FloatWidth),
     Boolean,
     String,
+    Char,
     /// A reference that may be absent, by layout id.
     ///
     /// It carries the flag like every other nullable rather than reusing the
@@ -198,6 +203,7 @@ impl Nullable {
             Nullable::Float(width) => IrType::Float(width),
             Nullable::Boolean => IrType::Boolean,
             Nullable::String => IrType::String,
+            Nullable::Char => IrType::Char,
             Nullable::Object(id) => IrType::Object(id),
             Nullable::Contract(id) => IrType::Contract(id),
             Nullable::Value(id) => IrType::Value(id),
@@ -212,6 +218,7 @@ impl Nullable {
             IrType::Float(width) => Nullable::Float(width),
             IrType::Boolean => Nullable::Boolean,
             IrType::String => Nullable::String,
+            IrType::Char => Nullable::Char,
             IrType::Object(id) => Nullable::Object(id),
             IrType::Contract(id) => Nullable::Contract(id),
             IrType::Value(id) => Nullable::Value(id),
@@ -229,6 +236,7 @@ impl IrType {
             IrType::Float(width) => width.as_str(),
             IrType::Boolean => "Boolean",
             IrType::String => "String",
+            IrType::Char => "Char",
             IrType::Closure(_) => "closure",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
@@ -243,6 +251,7 @@ impl IrType {
                 Nullable::Float(_) => "Float?",
                 Nullable::Boolean => "Boolean?",
                 Nullable::String => "String?",
+                Nullable::Char => "Char?",
                 Nullable::Object(_) => "object?",
                 Nullable::Contract(_) => "contract?",
                 Nullable::Value(_) => "value?",
@@ -266,7 +275,8 @@ impl IrType {
     /// needs storage, never **how** it is obtained or released. No instruction
     /// names malloc, reference counting or garbage collection.
     pub const fn needs_allocation(self) -> bool {
-        matches!(self, IrType::String)
+        // `Char` shares `String`'s opaque runtime representation (ADR-014).
+        matches!(self, IrType::String | IrType::Char)
     }
 }
 
@@ -528,6 +538,12 @@ pub enum InstKind {
     /// Materializes a string literal. This is the only allocating operation of
     /// the subset, and it is expressed without naming a memory strategy.
     ConstString(StringId),
+    /// Materializes a character literal (roadmap Phase 3b) — a separate
+    /// instruction from `ConstString`, even though both build from the same
+    /// module string table through the same runtime constructor (ADR-014),
+    /// so the verifier can keep telling a `Char` value apart from a `String`
+    /// one by the instruction that produced it, not only by `inst.ty`.
+    ConstChar(StringId),
 
     /// Reads a slot.
     Load(SlotId),

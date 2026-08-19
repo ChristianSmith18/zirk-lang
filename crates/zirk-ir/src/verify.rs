@@ -156,6 +156,14 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::ConstChar(id) => {
+            expect(inst.ty, IrType::Char, position, "ConstChar", report);
+            if module.strings.get(id.0 as usize).is_none() {
+                report(format!(
+                    "{position}: string {id:?} is not in the module table"
+                ));
+            }
+        }
 
         InstKind::Alloc(id) => match module.objects.get(*id as usize) {
             None => report(format!(
@@ -840,7 +848,10 @@ fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrT
 /// Operands an instruction reads.
 fn operands_of(kind: &InstKind) -> Vec<Operand> {
     match kind {
-        InstKind::ConstInt(_) | InstKind::ConstBool(_) | InstKind::ConstString(_) => Vec::new(),
+        InstKind::ConstInt(_)
+        | InstKind::ConstBool(_)
+        | InstKind::ConstString(_)
+        | InstKind::ConstChar(_) => Vec::new(),
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),

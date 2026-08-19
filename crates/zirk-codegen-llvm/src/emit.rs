@@ -224,6 +224,8 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Boolean => context.bool_type().into(),
         // `String` is an opaque pointer. Its layout belongs to the runtime.
         ir::IrType::String => context.ptr_type(AddressSpace::default()).into(),
+        // `Char` shares `String`'s opaque runtime representation (ADR-014).
+        ir::IrType::Char => context.ptr_type(AddressSpace::default()).into(),
         // An object is reached through its address: identity *is* the address,
         // so the value carried around is a pointer. The struct behind it is
         // only needed where a field is addressed.
@@ -1057,6 +1059,30 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         "str",
                     )
                     .expect("call to the string constructor");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the constructor returns a value"),
+                )
+            }
+
+            // A `Char` literal builds through the exact same runtime
+            // constructor as a `String` one (ADR-014): the checker already
+            // proved the text is one grapheme, so there is nothing left for
+            // the runtime to validate at this call.
+            ir::InstKind::ConstChar(id) => {
+                let pointer = self.strings[id.0 as usize];
+                let length = self.module.strings[id.0 as usize].len();
+                let length = self.context.i64_type().const_int(length as u64, false);
+
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_from_utf8,
+                        &[pointer.into(), length.into()],
+                        "char",
+                    )
+                    .expect("call to the character constructor");
                 Some(
                     call.try_as_basic_value()
                         .basic()

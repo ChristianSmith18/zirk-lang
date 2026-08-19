@@ -82,6 +82,7 @@ fn shape(e: &Expr) -> String {
             None => f.text.clone(),
         },
         Expr::Str(s) => format!("{:?}", s.value),
+        Expr::Char(c) => format!("'{}'", c.value),
         Expr::Bool(b) => b.value.to_string(),
         Expr::Path(i) => i.name.clone(),
         Expr::Unary(u) => format!("({}{})", u.op.as_str(), shape(&u.operand)),
@@ -1345,11 +1346,6 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
 fn invalid_literals_from_other_phases_name_themselves_and_their_phase() {
     for (source_text, what, phase) in [
         (
-            "fn main(): Void { mut x = 'a'; }",
-            "character literal",
-            "Phase 3b",
-        ),
-        (
             "fn main(): Void { mut x = 250ms; }",
             "duration literal",
             "Phase 7",
@@ -1380,7 +1376,7 @@ fn invalid_literals_from_other_phases_name_themselves_and_their_phase() {
 fn invalid_literal_from_another_phase_reports_once() {
     // Abandoning the statement whole is what keeps a second "expected an
     // expression" — matching no mistake the user made — from following it.
-    let output = errors("fn main(): Void { mut x = 'a'; }");
+    let output = errors("fn main(): Void { mut x = 250ms; }");
     assert!(
         !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
         "a recognized literal must not also be an unexpected token:\n{output}"
@@ -1392,6 +1388,12 @@ fn valid_float_literal_shapes() {
     assert_eq!(shape(&expression("1.5")), "1.5");
     assert_eq!(shape(&expression("6.02e23")), "6.02e23");
     assert_eq!(shape(&expression("1.5f32")), "1.5f32");
+}
+
+#[test]
+fn valid_char_literal_shapes() {
+    assert_eq!(shape(&expression("'a'")), "'a'");
+    assert_eq!(shape(&expression("'é'")), "'é'");
 }
 
 #[test]

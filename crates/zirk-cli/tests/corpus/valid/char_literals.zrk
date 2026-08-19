@@ -1,0 +1,21 @@
+// `Char` (roadmap Phase 3b, task 6): exactly one Unicode grapheme, even an
+// extended cluster of several code points (ADR-014: same opaque runtime
+// representation as `String`, but a distinct static type with no identity).
+fn main(): Void {
+    mut a: Char = 'a';
+    mut b: Char = 'a';
+    mut c: Char = 'b';
+    stdout.println(a == b);
+    stdout.println(a == c);
+    stdout.println(a != c);
+
+    // A code point outside ASCII, still exactly one grapheme.
+    mut accented: Char = 'é';
+    stdout.println(accented == accented);
+
+    // An extended grapheme cluster: a family emoji joined by ZWJ, several
+    // code points, one user-perceived character.
+    mut family: Char = '👨‍👩‍👧‍👦';
+    stdout.println(family == family);
+    stdout.println(family == a);
+}

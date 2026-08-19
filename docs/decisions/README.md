@@ -19,6 +19,7 @@ Los ADRs son la **fuente durable** de las decisiones. Los `design.md` de cada ch
 | [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) | Identidad, igualdad y normalización de `String` | aceptada |
 | [ADR-012](./ADR-012-layout-de-objetos.md) | Layout de objetos: cabecera separada, records/value classes inline sin ella | aceptada |
 | [ADR-013](./ADR-013-forma-del-despacho.md) | Forma del despacho: directo por defecto, tabla propia o de contrato solo si hace falta | aceptada |
+| [ADR-014](./ADR-014-representacion-de-char.md) | `Char` comparte la representación opaca de `String` | aceptada |
 
 ## Estado de los pendientes de Fase 0
 
