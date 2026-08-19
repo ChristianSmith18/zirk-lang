@@ -79,7 +79,10 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             // bodies are never lowered (skipped in the loop below), so a
             // symbol in its table would name a function that does not exist.
             if !class.type_params.is_empty()
-                || matches!(class.kind, ast::ClassKind::Record | ast::ClassKind::ValueClass)
+                || matches!(
+                    class.kind,
+                    ast::ClassKind::Record | ast::ClassKind::ValueClass
+                )
             {
                 return ObjectLayout {
                     name: class.name.clone(),
@@ -154,7 +157,10 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .iter()
         .map(|class| {
             if !class.type_params.is_empty()
-                || !matches!(class.kind, ast::ClassKind::Record | ast::ClassKind::ValueClass)
+                || !matches!(
+                    class.kind,
+                    ast::ClassKind::Record | ast::ClassKind::ValueClass
+                )
             {
                 return ValueLayout {
                     name: class.name.clone(),
@@ -306,8 +312,13 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         };
         for method in &contract.methods {
             let Some(body) = &method.body else { continue };
-            let lowering =
-                FunctionLowering::new(&mut module, checked, &declarations, instance_base, enum_instance_base);
+            let lowering = FunctionLowering::new(
+                &mut module,
+                checked,
+                &declarations,
+                instance_base,
+                enum_instance_base,
+            );
             let (lowered, lifted) =
                 lowering.run_contract_default(contract, method, body, id as u32);
             module.functions.push(lowered);
@@ -316,8 +327,13 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     for function in &program.functions {
-        let lowering =
-                FunctionLowering::new(&mut module, checked, &declarations, instance_base, enum_instance_base);
+        let lowering = FunctionLowering::new(
+            &mut module,
+            checked,
+            &declarations,
+            instance_base,
+            enum_instance_base,
+        );
         let (lowered, lifted) = lowering.run(function);
         module.functions.push(lowered);
         // Lambdas become module functions of their own: the closure value only
@@ -341,8 +357,13 @@ fn lower_class_body<'a>(
     enum_instance_base: u32,
 ) {
     for (index, constructor) in class.constructors.iter().enumerate() {
-        let lowering =
-            FunctionLowering::new(module, checked, declarations, instance_base, enum_instance_base);
+        let lowering = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        );
         let (lowered, lifted) = lowering.run_constructor(class, constructor, id, index);
         module.functions.push(lowered);
         module.functions.extend(lifted);
@@ -352,8 +373,13 @@ fn lower_class_body<'a>(
     // parameter is the receiver.
     for (index, method) in class.methods.iter().enumerate() {
         let Some(body) = &method.body else { continue };
-        let lowering =
-            FunctionLowering::new(module, checked, declarations, instance_base, enum_instance_base);
+        let lowering = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        );
         let (lowered, lifted) = lowering.run_method(class, method, body, id, index);
         module.functions.push(lowered);
         module.functions.extend(lifted);
@@ -572,7 +598,12 @@ fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
 /// `enum_instance_base` is the same idea for `specialize_enum`'s copies —
 /// one per `checked.enum_instances` entry, so `Base::EnumInstance(id)` is
 /// always at `enum_instance_base + id` (roadmap task 13.5).
-fn ir_type(ty: Type, instance_base: u32, enum_instance_base: u32, checked: &CheckedProgram) -> IrType {
+fn ir_type(
+    ty: Type,
+    instance_base: u32,
+    enum_instance_base: u32,
+    checked: &CheckedProgram,
+) -> IrType {
     let base = match ty.base {
         Base::Void => IrType::Void,
         Base::Int32 => IrType::Int32,
@@ -601,7 +632,9 @@ fn ir_type(ty: Type, instance_base: u32, enum_instance_base: u32, checked: &Chec
         // naming a generic contract instantiation resolves to exactly the
         // same `IrType::Contract` an unparameterized reference would
         // (roadmap task 13.5, `Iterator<T>`).
-        Base::ContractInstance(id) => IrType::Contract(checked.contract_instances[id as usize].contract),
+        Base::ContractInstance(id) => {
+            IrType::Contract(checked.contract_instances[id as usize].contract)
+        }
         // The specialized copy this instantiation lowered to — see
         // `instance_base` above.
         Base::Instance(id) => IrType::Object(instance_base + id),
@@ -628,7 +661,12 @@ fn ir_type(ty: Type, instance_base: u32, enum_instance_base: u32, checked: &Chec
         // unconditionally reported with `NOT_LOWERED` at its own declaration
         // (`Self::generic_class_is_directly_specializable` in the checker),
         // so its body never reaches here either.
-        Base::Unknown | Base::Null | Base::Function(_) | Base::Range | Base::Param(_) | Base::Union(_) => {
+        Base::Unknown
+        | Base::Null
+        | Base::Function(_)
+        | Base::Range
+        | Base::Param(_)
+        | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -702,7 +740,12 @@ impl<'a> FunctionLowering<'a> {
 
     /// [`ir_type`], with this lowering's own `instance_base`/`enum_instance_base` applied.
     fn ir_type(&self, ty: Type) -> IrType {
-        ir_type(ty, self.instance_base, self.enum_instance_base, self.checked)
+        ir_type(
+            ty,
+            self.instance_base,
+            self.enum_instance_base,
+            self.checked,
+        )
     }
 
     // --- Construction helpers ---------------------------------------------
@@ -856,7 +899,12 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every instantiation it type-checked");
             return Type::of(Base::Instance(instance as u32));
         }
-        if let Some(id) = self.checked.contracts.iter().position(|c| c.name == declared) {
+        if let Some(id) = self
+            .checked
+            .contracts
+            .iter()
+            .position(|c| c.name == declared)
+        {
             return Type::of(Base::Contract(id as u32));
         }
         unreachable!("a verified program only names known types")
@@ -2181,14 +2229,13 @@ impl<'a> FunctionLowering<'a> {
         types: &[IrType],
         returns: IrType,
     ) -> Function {
-        let mut inner =
-            FunctionLowering::new(
-                self.module,
-                self.checked,
-                self.declarations,
-                self.instance_base,
-                self.enum_instance_base,
-            );
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
         inner.return_type = returns;
 
         let entry = inner.new_block();
@@ -2337,14 +2384,16 @@ impl<'a> FunctionLowering<'a> {
                     .get(enum_id as usize)
                     .and_then(|e| e.discriminant(&v.variant.name))
                     .expect("the checker resolved this variant");
-                let indices = self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                let indices =
+                    self.module.enums[enum_id as usize].variants[variant as usize].clone();
                 let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     let ast::Pattern::Binding(ident) = sub_pattern else {
                         continue;
                     };
                     let field_ty = self.module.enums[enum_id as usize].fields[index as usize].ty;
-                    let value = self.emit(InstKind::LoadField { object, index }, field_ty, ident.span);
+                    let value =
+                        self.emit(InstKind::LoadField { object, index }, field_ty, ident.span);
                     let slot = self.declare_slot(&ident.name, field_ty, ident.span);
                     self.emit_effect(InstKind::Store(slot, value), ident.span);
                 }
@@ -2460,10 +2509,12 @@ impl<'a> FunctionLowering<'a> {
                 else {
                     return;
                 };
-                let indices = self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                let indices =
+                    self.module.enums[enum_id as usize].variants[variant as usize].clone();
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     if let ast::Pattern::Binding(ident) = sub_pattern {
-                        let field_ty = self.module.enums[enum_id as usize].fields[index as usize].ty;
+                        let field_ty =
+                            self.module.enums[enum_id as usize].fields[index as usize].ty;
                         self.declare_slot(&ident.name, field_ty, ident.span);
                     }
                 }
@@ -2836,7 +2887,11 @@ impl<'a> FunctionLowering<'a> {
             })
             .collect();
 
-        self.emit(InstKind::BuildValue { class: id, fields }, IrType::Value(id), span)
+        self.emit(
+            InstKind::BuildValue { class: id, fields },
+            IrType::Value(id),
+            span,
+        )
     }
 
     /// The enum and discriminant a call constructs, if it names a variant
@@ -2889,7 +2944,8 @@ impl<'a> FunctionLowering<'a> {
         variant: u32,
         span: Span,
     ) -> Operand {
-        let associated = &self.checked.enums[enum_id as usize].variants[variant as usize].associated;
+        let associated =
+            &self.checked.enums[enum_id as usize].variants[variant as usize].associated;
         let field_names: Vec<String> = associated.iter().map(|f| f.name.clone()).collect();
         let field_types: Vec<IrType> = associated.iter().map(|f| self.ir_type(f.ty)).collect();
 
@@ -2939,7 +2995,9 @@ impl<'a> FunctionLowering<'a> {
         }
 
         let IrType::Object(target_class) = target_ty else {
-            unreachable!("the checker only lowers a cast whose target is a class, once identity is ruled out")
+            unreachable!(
+                "the checker only lowers a cast whose target is a class, once identity is ruled out"
+            )
         };
         self.emit(
             InstKind::CheckedCast {
@@ -3056,7 +3114,14 @@ impl<'a> FunctionLowering<'a> {
         self.current = present_block;
         let held = self.emit(InstKind::Load(holder), object_ty, span);
         let unwrapped = self.emit(InstKind::Unwrap(held), object_ty.unwrapped(), span);
-        let value = self.emit(InstKind::LoadField { object: unwrapped, index }, field_ty, span);
+        let value = self.emit(
+            InstKind::LoadField {
+                object: unwrapped,
+                index,
+            },
+            field_ty,
+            span,
+        );
         let value = if matches!(field_ty, IrType::Nullable(_)) {
             value
         } else {
@@ -3188,7 +3253,14 @@ impl<'a> FunctionLowering<'a> {
                 None => {
                     let mut all = vec![unwrapped];
                     all.extend(args);
-                    self.emit(InstKind::Call { callee: name, args: all }, returns, span)
+                    self.emit(
+                        InstKind::Call {
+                            callee: name,
+                            args: all,
+                        },
+                        returns,
+                        span,
+                    )
                 }
             },
             SafeDispatch::Contract { contract, index } => self.emit(

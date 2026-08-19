@@ -215,7 +215,10 @@ fn valid_strict_variable() {
 #[test]
 fn invalid_inmut_double_colon_without_strict() {
     let output = errors("fn main(): Void { inmut::frozen s = 0; }");
-    assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()), "{output}");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -946,7 +949,9 @@ fn invalid_union_type_missing_an_alternative() {
 #[test]
 fn valid_generic_argument_does_not_admit_a_union() {
     // Out of scope for now: a union inside `<...>` is not parsed as one.
-    let p = program("class Box<T> { value: T; }\nclass Holder { b: Box<String>; }\nfn main(): Void { }");
+    let p = program(
+        "class Box<T> { value: T; }\nclass Holder { b: Box<String>; }\nfn main(): Void { }",
+    );
     assert!(p.classes[1].fields[0].ty.arguments[0].union_with.is_empty());
 }
 
@@ -1094,9 +1099,7 @@ fn valid_match_as_an_expression() {
 
 #[test]
 fn valid_variant_pattern_destructures_associated_data() {
-    let e = expression(
-        "match s { Shape.Circle(radius) => radius, Shape.Point => 0, _ => 0 }",
-    );
+    let e = expression("match s { Shape.Circle(radius) => radius, Shape.Point => 0, _ => 0 }");
     let Expr::Match(m) = &e else {
         panic!("expected a match, got {e:?}");
     };
@@ -1552,9 +1555,7 @@ fn valid_implements_with_type_arguments() {
 
 #[test]
 fn valid_type_parameter_with_combined_constraints() {
-    let p = program(
-        "class Box<T from Clone & Serializable> { value: T; }\nfn main(): Void { }",
-    );
+    let p = program("class Box<T from Clone & Serializable> { value: T; }\nfn main(): Void { }");
     let constraints = &p.classes[0].type_params[0].constraints;
 
     assert_eq!(constraints.len(), 2);

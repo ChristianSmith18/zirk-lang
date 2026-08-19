@@ -228,7 +228,10 @@ fn invalid_reassignment_of_a_strict_variable() {
          inmut::strict s = User(\"ana\");
          s = User(\"beto\");",
     );
-    assert!(output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()), "{output}");
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -241,7 +244,10 @@ fn invalid_mutable_alias_of_a_strict_object_reference() {
              mut alias = s;
          }",
     );
-    assert!(output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -255,7 +261,10 @@ fn invalid_strict_reference_acquired_from_an_accessible_mutable_alias() {
              inmut::strict s = m;
          }",
     );
-    assert!(output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -611,19 +620,28 @@ fn invalid_iterating_a_type_that_does_not_implement_iterable() {
 #[test]
 fn invalid_reopening_the_native_iterable_contract() {
     let output = rejected("interface Iterable { fn foo(): Int32; }\nfn main(): Void { }");
-    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
 fn invalid_reopening_the_native_iterator_contract() {
     let output = rejected("trait Iterator { fn foo(): Int32; }\nfn main(): Void { }");
-    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
 fn invalid_reopening_the_native_iteration_enum() {
     let output = rejected("enum Iteration { A, B }\nfn main(): Void { }");
-    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -656,7 +674,10 @@ fn invalid_a_class_missing_iterator_still_reports_the_missing_method() {
          }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::MISSING_IMPLEMENTATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -1345,7 +1366,10 @@ fn invalid_two_traits_offer_conflicting_defaults() {
          class Both implements Loud, Quiet { construct() { } }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
     assert!(output.contains("greet"), "{output}");
 }
 
@@ -1818,7 +1842,10 @@ fn invalid_generic_type_argument_count() {
          class Holder { value: Pair<Int32>; }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()), "{output}");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -1962,7 +1989,10 @@ fn invalid_record_field_without_a_default_is_required() {
          record Car { engine: Engine; }
          fn main(): Void { mut c = Car(); }",
     );
-    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()), "{output}");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -2254,7 +2284,11 @@ fn valid_union_duplicates_collapse() {
     let program = parse(source, &tokens, &mut sink);
     let checked = check(&sources, &program, &mut sink);
 
-    assert_eq!(checked.unions[0].len(), 2, "a repeated alternative is one member");
+    assert_eq!(
+        checked.unions[0].len(),
+        2,
+        "a repeated alternative is one member"
+    );
 }
 
 #[test]
@@ -2458,7 +2492,9 @@ fn invalid_safe_method_call_through_generic_param_is_not_lowered() {
 
 #[test]
 fn valid_closure_stored_in_an_inferred_local_and_called() {
-    accepted("fn main(): Void { mut add = (a: Int32, b: Int32): Int32 => a + b; stdout.println(add(1, 2)); }");
+    accepted(
+        "fn main(): Void { mut add = (a: Int32, b: Int32): Int32 => a + b; stdout.println(add(1, 2)); }",
+    );
 }
 
 #[test]
@@ -2523,8 +2559,14 @@ fn valid_class_adopts_an_abstract_class() {
          }}
          fn main(): Void {{ }}"
     ));
-    assert!(!output.contains(codes::MISSING_IMPLEMENTATION.as_str()), "{output}");
-    assert!(!output.contains(codes::MISSING_OVERRIDE.as_str()), "{output}");
+    assert!(
+        !output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+    assert!(
+        !output.contains(codes::MISSING_OVERRIDE.as_str()),
+        "{output}"
+    );
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
@@ -2571,7 +2613,10 @@ fn invalid_abstract_class_method_without_override() {
          }}
          fn main(): Void {{ }}"
     ));
-    assert!(output.contains(codes::MISSING_OVERRIDE.as_str()), "{output}");
+    assert!(
+        output.contains(codes::MISSING_OVERRIDE.as_str()),
+        "{output}"
+    );
 }
 
 #[test]

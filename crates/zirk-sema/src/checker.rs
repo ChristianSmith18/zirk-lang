@@ -9,9 +9,9 @@
 use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
-    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType,
-    EnumVariantInfo, FieldInfo, FnType, GenericContractInstance, GenericEnumInstance,
-    GenericInstance, MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
+    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
+    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, MethodInfo,
+    Type, TypeNames, TypeParamInfo, describe, pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
@@ -707,28 +707,32 @@ impl<'a> Checker<'a> {
             contract: iterator,
             args: vec![Type::of(Base::Param(iterable_t))],
         });
-        self.contracts[iterable as usize].methods.push(ContractMethod {
-            name: "iterator".into(),
-            params: Vec::new(),
-            returns: Type::of(Base::ContractInstance(returns_iterator)),
-            span: at,
-            has_default: false,
-            index: 0,
-        });
+        self.contracts[iterable as usize]
+            .methods
+            .push(ContractMethod {
+                name: "iterator".into(),
+                params: Vec::new(),
+                returns: Type::of(Base::ContractInstance(returns_iterator)),
+                span: at,
+                has_default: false,
+                index: 0,
+            });
 
         // `next(): Iteration<T>`
         let returns_iteration = self.intern_enum_instance(GenericEnumInstance {
             enum_id: iteration,
             args: vec![Type::of(Base::Param(iterator_t))],
         });
-        self.contracts[iterator as usize].methods.push(ContractMethod {
-            name: "next".into(),
-            params: Vec::new(),
-            returns: Type::of(Base::EnumInstance(returns_iteration)),
-            span: at,
-            has_default: false,
-            index: 0,
-        });
+        self.contracts[iterator as usize]
+            .methods
+            .push(ContractMethod {
+                name: "next".into(),
+                params: Vec::new(),
+                returns: Type::of(Base::EnumInstance(returns_iteration)),
+                span: at,
+                has_default: false,
+                index: 0,
+            });
 
         self.native_iteration = Some(NativeIteration {
             iterable,
@@ -905,7 +909,10 @@ impl<'a> Checker<'a> {
                 self.error(
                     codes::UNKNOWN_TYPE,
                     named.span,
-                    format!("`{}` is not a declared contract or abstract class", named.name),
+                    format!(
+                        "`{}` is not a declared contract or abstract class",
+                        named.name
+                    ),
                     "`implements` names an interface, a trait or an abstract class",
                     None,
                 );
@@ -1039,7 +1046,10 @@ impl<'a> Checker<'a> {
                 self.error(
                     codes::TYPE_MISMATCH,
                     supplied.span,
-                    format!("`{}` does not match what `{abstract_name}` requires", field.name),
+                    format!(
+                        "`{}` does not match what `{abstract_name}` requires",
+                        field.name
+                    ),
                     format!("`{abstract_name}` declares it `{expected}`, not `{actual}`"),
                     None,
                 );
@@ -1072,7 +1082,10 @@ impl<'a> Checker<'a> {
                 self.error(
                     codes::TYPE_MISMATCH,
                     supplied.span,
-                    format!("`{}` does not match what `{abstract_name}` requires", method.name),
+                    format!(
+                        "`{}` does not match what `{abstract_name}` requires",
+                        method.name
+                    ),
                     format!("the one declared on line {line} has a different signature"),
                     Some(
                         "keep the parameters and the return type the abstract class declared"
@@ -1094,7 +1107,10 @@ impl<'a> Checker<'a> {
                 self.error(
                     codes::MISSING_OVERRIDE,
                     supplied.span,
-                    format!("`{}` implements an abstract class's requirement", method.name),
+                    format!(
+                        "`{}` implements an abstract class's requirement",
+                        method.name
+                    ),
                     format!("`{abstract_name}` requires it, the same as an inherited method"),
                     Some(format!("write `override fn {}(...): ...`", method.name)),
                 );
@@ -1104,7 +1120,11 @@ impl<'a> Checker<'a> {
 
     /// Replaces a contract method's own type parameters with the concrete
     /// arguments of one `implements` instantiation.
-    fn substitute_contract_method(&mut self, method: &ContractMethod, subst: &[(u32, Type)]) -> ContractMethod {
+    fn substitute_contract_method(
+        &mut self,
+        method: &ContractMethod,
+        subst: &[(u32, Type)],
+    ) -> ContractMethod {
         ContractMethod {
             name: method.name.clone(),
             params: method
@@ -1180,7 +1200,9 @@ impl<'a> Checker<'a> {
                     format!(
                         "`{contract_name}` and `{previous_name}` each supply their own `{name}`"
                     ),
-                    Some(format!("add `fn {name}(...): ...` to `{class_name}` to choose one")),
+                    Some(format!(
+                        "add `fn {name}(...): ...` to `{class_name}` to choose one"
+                    )),
                 );
                 continue;
             }
@@ -1390,8 +1412,7 @@ impl<'a> Checker<'a> {
         // a specialized copy's own dispatch tables (its method table for
         // `extends`, a contract table for `implements`) are a separate
         // concern this pass does not build.
-        if class.base.is_some() || !class.contracts.is_empty() || !class.abstract_bases.is_empty()
-        {
+        if class.base.is_some() || !class.contracts.is_empty() || !class.abstract_bases.is_empty() {
             return false;
         }
 
@@ -1475,7 +1496,11 @@ impl<'a> Checker<'a> {
             };
 
             if decl.kind != ClassKind::Class {
-                let article = if decl.kind == ClassKind::Abstract { "an" } else { "a" };
+                let article = if decl.kind == ClassKind::Abstract {
+                    "an"
+                } else {
+                    "a"
+                };
                 let kind = decl.kind.as_str();
                 self.error(
                     codes::TYPE_MISMATCH,
@@ -1708,7 +1733,11 @@ impl<'a> Checker<'a> {
         }
 
         if decl.kind != ClassKind::Class && !decl.constructors.is_empty() {
-            let article = if decl.kind == ClassKind::Abstract { "an" } else { "a" };
+            let article = if decl.kind == ClassKind::Abstract {
+                "an"
+            } else {
+                "a"
+            };
             let cause = if decl.kind == ClassKind::Abstract {
                 "it is never instantiated: a concrete class adopts its requirements with `implements`"
             } else {
@@ -1757,7 +1786,10 @@ impl<'a> Checker<'a> {
                     method.name.span,
                     format!("`{}` has a body inside an abstract class", method.name.name),
                     "an abstract class declares signatures only, with no body of its own",
-                    Some(format!("write `abstract fn {}(...): ...;`", method.name.name)),
+                    Some(format!(
+                        "write `abstract fn {}(...): ...;`",
+                        method.name.name
+                    )),
                 );
                 continue;
             }
@@ -1881,7 +1913,9 @@ impl<'a> Checker<'a> {
             Base::ContractInstance(target) => self.classes[current as usize]
                 .contract_instances
                 .iter()
-                .any(|&id| self.contract_instances[id as usize] == self.contract_instances[target as usize]),
+                .any(|&id| {
+                    self.contract_instances[id as usize] == self.contract_instances[target as usize]
+                }),
             // A class satisfies an `abstract class` the same way it
             // satisfies a contract: by naming it in `implements`. Its own
             // `extends` chain never does, since an abstract class has no
@@ -2432,7 +2466,10 @@ impl<'a> Checker<'a> {
         }
 
         if !newly_created.is_empty() {
-            let declared: Vec<TypeParam> = newly_created.iter().map(|&(i, _)| params[i].clone()).collect();
+            let declared: Vec<TypeParam> = newly_created
+                .iter()
+                .map(|&(i, _)| params[i].clone())
+                .collect();
             self.report_declared_variance(&declared);
         }
 
@@ -2509,8 +2546,7 @@ impl<'a> Checker<'a> {
         let snapshot = bases.clone();
         bases.retain(|&candidate| {
             !snapshot.iter().any(|&other| {
-                other != candidate
-                    && self.is_subclass_of(Type::of(candidate), Type::of(other))
+                other != candidate && self.is_subclass_of(Type::of(candidate), Type::of(other))
             })
         });
 
@@ -2582,7 +2618,8 @@ impl<'a> Checker<'a> {
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
             Some(Type::of(Base::Param(id)))
-        } else if reference.arguments.is_empty() && let Some(ty) = Type::from_name(&reference.name)
+        } else if reference.arguments.is_empty()
+            && let Some(ty) = Type::from_name(&reference.name)
         {
             Some(ty)
         } else {
@@ -2694,7 +2731,10 @@ impl<'a> Checker<'a> {
             codes::PENDING_FEATURE,
             reference.span,
             "`<...>` is only valid on a generic declaration",
-            format!("`{}` was not declared with type parameters of its own", reference.name),
+            format!(
+                "`{}` was not declared with type parameters of its own",
+                reference.name
+            ),
             Some("remove the `<...>`, or add `<T>` to its declaration".into()),
         );
         for arg in &reference.arguments {
@@ -2876,9 +2916,9 @@ impl<'a> Checker<'a> {
             );
         }
 
-        Type::of(Base::ContractInstance(
-            self.intern_contract_instance(GenericContractInstance { contract, args }),
-        ))
+        Type::of(Base::ContractInstance(self.intern_contract_instance(
+            GenericContractInstance { contract, args },
+        )))
     }
 
     /// `Iteration` alone, or `Iteration<Int32>` with its arguments checked —
@@ -3761,7 +3801,8 @@ impl<'a> Checker<'a> {
         if actual.base == target.base {
             return true;
         }
-        matches!(actual.base, Base::Class(_) | Base::Contract(_)) && matches!(target.base, Base::Class(_))
+        matches!(actual.base, Base::Class(_) | Base::Contract(_))
+            && matches!(target.base, Base::Class(_))
     }
 
     /// Whether a cast between two types could ever succeed at runtime.
@@ -3779,7 +3820,8 @@ impl<'a> Checker<'a> {
         }
         // A contract may be implemented by the other side's class, checked
         // either way: up through it, or down from it to a concrete type.
-        if matches!(actual_bare.base, Base::Contract(_)) && matches!(target_bare.base, Base::Class(_))
+        if matches!(actual_bare.base, Base::Contract(_))
+            && matches!(target_bare.base, Base::Class(_))
         {
             return true;
         }
@@ -4028,7 +4070,9 @@ impl<'a> Checker<'a> {
             );
             return;
         }
-        if let Base::Class(id) = left.base && self.classes[id as usize].kind != ClassKind::Class {
+        if let Base::Class(id) = left.base
+            && self.classes[id as usize].kind != ClassKind::Class
+        {
             return;
         }
 
@@ -4775,7 +4819,12 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .zip(instance.args)
                 .collect();
-            let ty = self.member_type(Type::of(Base::Class(instance.class)), member, object_span, false);
+            let ty = self.member_type(
+                Type::of(Base::Class(instance.class)),
+                member,
+                object_span,
+                false,
+            );
             return if ty.is_unknown() {
                 ty
             } else {
@@ -4872,18 +4921,8 @@ impl<'a> Checker<'a> {
         let constraints = self.type_params[id as usize].constraints.clone();
         for constraint in &constraints {
             let found = match constraint.base {
-                Base::Contract(cid) => self.contracts[cid as usize].method(&field.name.name).map(
-                    |m| Signature {
-                        name: m.name.clone(),
-                        params: m.params.clone(),
-                        returns: m.returns,
-                        shared: true,
-                        span: m.span,
-                        type_params: Vec::new(),
-                    },
-                ),
-                Base::Class(cid) => {
-                    self.classes[cid as usize]
+                Base::Contract(cid) => {
+                    self.contracts[cid as usize]
                         .method(&field.name.name)
                         .map(|m| Signature {
                             name: m.name.clone(),
@@ -4894,6 +4933,16 @@ impl<'a> Checker<'a> {
                             type_params: Vec::new(),
                         })
                 }
+                Base::Class(cid) => self.classes[cid as usize]
+                    .method(&field.name.name)
+                    .map(|m| Signature {
+                        name: m.name.clone(),
+                        params: m.params.clone(),
+                        returns: m.returns,
+                        shared: true,
+                        span: m.span,
+                        type_params: Vec::new(),
+                    }),
                 _ => None,
             };
             if let Some(signature) = found {
@@ -5076,7 +5125,12 @@ impl<'a> Checker<'a> {
     /// [`Signature`] built from the variant's fields, checked through
     /// [`Self::check_direct_call`] so arity, names and types follow the same
     /// rules a call already does.
-    fn check_variant_construction(&mut self, expr: &CallExpr, field: &FieldExpr, enum_id: u32) -> Type {
+    fn check_variant_construction(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        enum_id: u32,
+    ) -> Type {
         let variant_name = field.name.name.clone();
         let Some(variant) = self.enums[enum_id as usize].variant(&variant_name).cloned() else {
             let enum_name = self.enums[enum_id as usize].name.clone();
@@ -5689,7 +5743,10 @@ impl<'a> Checker<'a> {
                 // 10.8). Through a generic parameter's constraint there is
                 // no concrete method body to call yet, so that combination
                 // stays gated.
-                if !matches!(object.base, Base::Class(_) | Base::Contract(_) | Base::Instance(_)) {
+                if !matches!(
+                    object.base,
+                    Base::Class(_) | Base::Contract(_) | Base::Instance(_)
+                ) {
                     self.not_lowered(
                         field.object.span(),
                         "`?.` calling a method through a generic parameter",
@@ -5875,7 +5932,10 @@ impl<'a> Checker<'a> {
             }
         }
 
-        (self.substitute(signature.returns, &substitution), substitution)
+        (
+            self.substitute(signature.returns, &substitution),
+            substitution,
+        )
     }
 
     /// Infers each of a callable's own type parameters from the concrete
