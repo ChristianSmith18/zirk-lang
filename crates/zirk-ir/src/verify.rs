@@ -140,7 +140,13 @@ fn verify_instruction(
     let type_of = |operand: &Operand| values.get(&operand.0).map(|(_, ty)| *ty);
 
     match &inst.kind {
-        InstKind::ConstInt(_) => expect(inst.ty, IrType::Int32, position, "ConstInt", report),
+        InstKind::ConstInt(_) => expect(
+            inst.ty,
+            IrType::Int(IntWidth::I32),
+            position,
+            "ConstInt",
+            report,
+        ),
         InstKind::ConstBool(_) => expect(inst.ty, IrType::Boolean, position, "ConstBool", report),
         InstKind::ConstString(id) => {
             expect(inst.ty, IrType::String, position, "ConstString", report);
@@ -196,6 +202,23 @@ fn verify_instruction(
             if !matches!(inst.ty, IrType::Object(_) | IrType::Contract(_)) {
                 report(format!(
                     "{position}: Retype declares {}, which is neither an object nor a contract",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::IntCast(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Int(_))
+            {
+                report(format!(
+                    "{position}: IntCast converts {}, which is not an integer",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Int(_)) {
+                report(format!(
+                    "{position}: IntCast declares {}, which is not an integer",
                     inst.ty.as_str()
                 ));
             }
@@ -287,7 +310,13 @@ fn verify_instruction(
         },
 
         InstKind::Discriminant(operand) => {
-            expect(inst.ty, IrType::Int32, position, "Discriminant", report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "Discriminant",
+                report,
+            );
             if let Some(ty) = type_of(operand)
                 && !matches!(ty, IrType::Enum(_))
             {
@@ -323,7 +352,7 @@ fn verify_instruction(
                 ));
             }
             if let Some(ty) = type_of(count)
-                && ty != IrType::Int32
+                && ty != IrType::Int(IntWidth::I32)
             {
                 report(format!(
                     "{position}: repeats by {}, which is not a count",
@@ -431,7 +460,7 @@ fn verify_instruction(
 
         InstKind::Unary { op, operand } => {
             let expected = match op {
-                UnaryOp::Neg | UnaryOp::BitNot => IrType::Int32,
+                UnaryOp::Neg | UnaryOp::BitNot => IrType::Int(IntWidth::I32),
                 UnaryOp::Not => IrType::Boolean,
             };
             if let Some(value) = type_of(operand)
@@ -450,7 +479,12 @@ fn verify_instruction(
             let (Some(left_ty), Some(right_ty)) = (type_of(left), type_of(right)) else {
                 return;
             };
-            if left_ty != right_ty {
+            // A shift's amount is its own, independent integer width — the
+            // checker never requires it to match the shifted value's
+            // (roadmap Phase 3b, task 4.4); every other operator still
+            // requires both sides to agree.
+            let shares_type = matches!(op, BinaryOp::Shl | BinaryOp::Shr) || left_ty == right_ty;
+            if !shares_type {
                 report(format!(
                     "{position}: {op:?} between {} and {}",
                     left_ty.as_str(),
@@ -751,6 +785,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Discriminant(operand) => vec![*operand],
         InstKind::CheckedCast { object, .. } => vec![*object],
         InstKind::Retype(operand) => vec![*operand],
+        InstKind::IntCast(operand) => vec![*operand],
         InstKind::Concat { left, right } => vec![*left, *right],
         InstKind::Repeat { string, count } => vec![*string, *count],
         InstKind::CallContract { object, args, .. } => {

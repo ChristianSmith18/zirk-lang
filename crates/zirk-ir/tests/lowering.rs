@@ -76,7 +76,10 @@ fn parameters_become_slots() {
 
     assert_eq!(f.params.len(), 2);
     assert_eq!(f.slot(f.params[0]).map(|s| s.name.as_str()), Some("a"));
-    assert_eq!(f.slot(f.params[1]).map(|s| s.ty), Some(IrType::Int32));
+    assert_eq!(
+        f.slot(f.params[1]).map(|s| s.ty),
+        Some(IrType::Int(IntWidth::I32))
+    );
 }
 
 #[test]
@@ -219,7 +222,7 @@ fn unary_operators_lower_with_their_type() {
         .collect();
 
     assert_eq!(unaries.len(), 2);
-    assert!(unaries.iter().any(|i| i.ty == IrType::Int32));
+    assert!(unaries.iter().any(|i| i.ty == IrType::Int(IntWidth::I32)));
     assert!(unaries.iter().any(|i| i.ty == IrType::Boolean));
 }
 
@@ -609,7 +612,7 @@ fn a_class_becomes_an_object_layout() {
     assert_eq!(layout.name, "User");
     assert_eq!(layout.fields.len(), 2);
     assert_eq!(layout.fields[0].name, "id");
-    assert_eq!(layout.fields[0].ty, IrType::Int32);
+    assert_eq!(layout.fields[0].ty, IrType::Int(IntWidth::I32));
     assert_eq!(layout.fields[1].ty, IrType::String);
 }
 
@@ -730,7 +733,7 @@ fn a_method_becomes_a_function_over_its_receiver() {
         method.slot(method.params[0]).map(|s| s.name.as_str()),
         Some("this")
     );
-    assert_eq!(method.return_type, IrType::Int32);
+    assert_eq!(method.return_type, IrType::Int(IntWidth::I32));
 }
 
 #[test]
@@ -938,7 +941,7 @@ fn a_generic_instantiation_gets_its_own_specialized_layout() {
         .iter()
         .find(|o| o.name.starts_with("Box$"))
         .expect("a specialized copy exists");
-    assert_eq!(specialized.fields[0].ty, IrType::Int32);
+    assert_eq!(specialized.fields[0].ty, IrType::Int(IntWidth::I32));
 }
 
 #[test]

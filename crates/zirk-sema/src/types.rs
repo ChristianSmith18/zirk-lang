@@ -24,11 +24,98 @@ pub struct Type {
     pub nullable: bool,
 }
 
+/// Every integer type the language has (roadmap Phase 3b): five signed
+/// widths, five unsigned, with `Int32` the one Phase 1 already had.
+///
+/// A width plus a signedness, not ten separate `Base` variants: LLVM already
+/// models any integer width natively (`IntType`), so the only real cost of
+/// generalizing is deciding, at each site that used to assume `Int32`,
+/// whether it now means "any integer" or specifically needs 32 bits — a
+/// decision, not a rename. See `openspec/changes/fase-3b-scalars-and-text/design.md`
+/// D1 and its audit for the accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IntWidth {
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+}
+
+impl IntWidth {
+    pub const fn bits(self) -> u32 {
+        use IntWidth::*;
+        match self {
+            I8 | U8 => 8,
+            I16 | U16 => 16,
+            I32 | U32 => 32,
+            I64 | U64 => 64,
+            I128 | U128 => 128,
+        }
+    }
+
+    pub const fn signed(self) -> bool {
+        matches!(
+            self,
+            IntWidth::I8 | IntWidth::I16 | IntWidth::I32 | IntWidth::I64 | IntWidth::I128
+        )
+    }
+
+    pub const fn name(self) -> &'static str {
+        use IntWidth::*;
+        match self {
+            I8 => "Int8",
+            I16 => "Int16",
+            I32 => "Int32",
+            I64 => "Int64",
+            I128 => "Int128",
+            U8 => "UInt8",
+            U16 => "UInt16",
+            U32 => "UInt32",
+            U64 => "UInt64",
+            U128 => "UInt128",
+        }
+    }
+
+    /// The range of values a literal of this width may write, as `i128`.
+    ///
+    /// `UInt128`'s true upper bound (`u128::MAX`) does not fit in `i128` —
+    /// but neither does any integer literal `zirk-lexer` can produce in the
+    /// first place (`TokenKind::Integer(i128)`, capped since Phase 1 with
+    /// its own `INTEGER_TOO_LARGE` diagnostic). So `i128::MAX` is not an
+    /// approximation of `UInt128`'s range here: it is the literal's own
+    /// ceiling, which `UInt128` inherits along with every other width. A
+    /// `UInt128` *value* can still exceed it — through arithmetic, not
+    /// through a literal — the same way it always could for `Int32`.
+    pub const fn literal_range(self) -> (i128, i128) {
+        use IntWidth::*;
+        match self {
+            I8 => (i8::MIN as i128, i8::MAX as i128),
+            I16 => (i16::MIN as i128, i16::MAX as i128),
+            I32 => (i32::MIN as i128, i32::MAX as i128),
+            I64 => (i64::MIN as i128, i64::MAX as i128),
+            I128 => (i128::MIN, i128::MAX),
+            U8 => (0, u8::MAX as i128),
+            U16 => (0, u16::MAX as i128),
+            U32 => (0, u32::MAX as i128),
+            U64 => (0, u64::MAX as i128),
+            U128 => (0, i128::MAX),
+        }
+    }
+}
+
 /// The part of a type that is not its nullability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Base {
     Void,
-    Int32,
+    /// `Int8`…`UInt128` (roadmap Phase 3b) — `Int`/`Integer` alias `Int32`,
+    /// `Type::INT32` is `Int(IntWidth::I32)`.
+    Int(IntWidth),
     Boolean,
     String,
     /// The type of the `null` literal, assignable to any nullable type.
@@ -103,7 +190,7 @@ pub enum Base {
 
 impl Type {
     pub const VOID: Type = Type::of(Base::Void);
-    pub const INT32: Type = Type::of(Base::Int32);
+    pub const INT32: Type = Type::of(Base::Int(IntWidth::I32));
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
     pub const NULL: Type = Type::of(Base::Null);
@@ -163,7 +250,21 @@ impl Type {
         }
 
         if self.base != other.base {
-            return false;
+            // Safe widening is the one exception that is not equality
+            // (roadmap Phase 3b, task 4.3): a narrower integer fits a wider
+            // one of the *same* signedness without an explicit conversion —
+            // nothing is lost. Crossing signedness, or narrowing, is not
+            // "unambiguous" the way `ZIRK_LANGUAGE_SPEC.md` section 3
+            // requires for an implicit conversion, so neither goes through
+            // here; both need `as` instead.
+            return match (self.base, other.base) {
+                (Base::Int(dst), Base::Int(src)) => {
+                    dst.signed() == src.signed()
+                        && dst.bits() >= src.bits()
+                        && (self.nullable || !other.nullable)
+                }
+                _ => false,
+            };
         }
 
         // `T` fits `T?`; `T?` does not fit `T`.
@@ -219,13 +320,13 @@ impl Type {
         if self.nullable {
             return true;
         }
-        matches!(self.base, Base::Int32 | Base::Boolean | Base::String)
+        matches!(self.base, Base::Int(_) | Base::Boolean | Base::String)
     }
 
     /// Range of values representable by the type, for integer literals.
     pub const fn integer_range(self) -> Option<(i128, i128)> {
         match self.base {
-            Base::Int32 => Some((i32::MIN as i128, i32::MAX as i128)),
+            Base::Int(width) => Some(width.literal_range()),
             _ => None,
         }
     }
@@ -241,9 +342,19 @@ impl Type {
     /// after resolution nothing distinguishes them — which is what being an
     /// alias means. `UInt` is not here because `UInt32` is not implemented.
     pub fn from_name(name: &str) -> Option<Self> {
+        use IntWidth::*;
         Some(match name {
             "Void" => Type::VOID,
             "Int32" | "Int" | "Integer" => Type::INT32,
+            "Int8" => Type::of(Base::Int(I8)),
+            "Int16" => Type::of(Base::Int(I16)),
+            "Int64" => Type::of(Base::Int(I64)),
+            "Int128" => Type::of(Base::Int(I128)),
+            "UInt8" => Type::of(Base::Int(U8)),
+            "UInt16" => Type::of(Base::Int(U16)),
+            "UInt32" => Type::of(Base::Int(U32)),
+            "UInt64" => Type::of(Base::Int(U64)),
+            "UInt128" => Type::of(Base::Int(U128)),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
             _ => return None,
@@ -259,7 +370,7 @@ impl Type {
 pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
     let base = match ty.base {
         Base::Void => "Void".to_string(),
-        Base::Int32 => "Int32".to_string(),
+        Base::Int(width) => width.name().to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
         Base::Null => "Null".to_string(),
@@ -536,10 +647,13 @@ pub struct PendingType {
 pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 3 brings user-defined types and the roots they hang from.
     const PHASE_3: &[&str] = &["Object", "Never"];
-    // Phase 3b brings the rest of the scalars: the remaining integer widths,
-    // the binary floating family and `Char`.
+    // Phase 3b brings the rest of the scalars. The remaining integer widths
+    // are implemented (`Type::from_name`, checked ahead of this list) — what
+    // is still pending is the binary floating family and `Char`. `UInt`
+    // stays here too: the spec never names it as an alias the way
+    // `Int`/`Integer` name `Int32`, so it resolves to nothing even once
+    // every explicit width does.
     const PHASE_3B: &[&str] = &[
-        "Int8", "Int16", "Int64", "Int128", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
         "UInt", "Float16", "Float32", "Float64", "Float128", "Float", "Char",
     ];
     // Phase 4 brings errors and resources.
@@ -596,8 +710,22 @@ mod tests {
 
     #[test]
     fn a_type_outside_the_subset_does_not_resolve() {
-        assert_eq!(Type::from_name("Int64"), None);
+        assert_eq!(Type::from_name("Float64"), None);
         assert_eq!(Type::from_name("Whatever"), None);
+    }
+
+    #[test]
+    fn valid_every_integer_width_resolves() {
+        for name in [
+            "Int8", "Int16", "Int32", "Int64", "Int128", "UInt8", "UInt16", "UInt32", "UInt64",
+            "UInt128",
+        ] {
+            assert!(Type::from_name(name).is_some(), "`{name}` should resolve");
+            assert!(
+                pending_type(name).is_none(),
+                "`{name}` should not be pending"
+            );
+        }
     }
 
     #[test]
@@ -616,7 +744,10 @@ mod tests {
 
     #[test]
     fn types_from_later_phases_declare_their_phase() {
-        assert_eq!(pending_type("Int64").map(|t| t.phase), Some(Phase::THREE_B));
+        assert_eq!(
+            pending_type("Float64").map(|t| t.phase),
+            Some(Phase::THREE_B)
+        );
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Result").map(|t| t.phase), Some(Phase::FOUR));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));

@@ -30,8 +30,8 @@ mod verify;
 
 pub use ir::{
     BinaryOp, Block, BlockId, ClosureLayout, ContractTable, EnumLayout, Function, InstKind,
-    Instruction, IrType, Module, Nullable, ObjectField, ObjectLayout, Operand, Slot, SlotId,
-    StringId, Terminator, UnaryOp, ValueId, ValueLayout,
+    Instruction, IntWidth, IrType, Module, Nullable, ObjectField, ObjectLayout, Operand, Slot,
+    SlotId, StringId, Terminator, UnaryOp, ValueId, ValueLayout,
 };
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use verify::{IrError, verify};

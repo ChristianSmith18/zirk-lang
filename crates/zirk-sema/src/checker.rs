@@ -10,8 +10,8 @@ use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
-    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, MethodInfo,
-    Type, TypeNames, TypeParamInfo, describe, pending_type,
+    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, IntWidth,
+    MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
@@ -564,7 +564,7 @@ impl<'a> Checker<'a> {
         }
 
         let reason = match ty.base {
-            Base::Int32 | Base::Boolean | Base::String if !ty.nullable => return,
+            Base::Int(IntWidth::I32) | Base::Boolean | Base::String if !ty.nullable => return,
             _ if ty.nullable => "a value that may be absent has no text form",
             Base::Enum(_) => "an enum has no text for its variants yet",
             Base::Function(_) => "a closure is code, not data",
@@ -2631,7 +2631,9 @@ impl<'a> Checker<'a> {
         fn key(base: &Base) -> (u8, u32) {
             match *base {
                 Base::Void => (0, 0),
-                Base::Int32 => (1, 0),
+                // Ten widths share one key group, ordered among themselves by
+                // `IntWidth`'s own declaration order (its `Ord` derive).
+                Base::Int(width) => (1, width as u32),
                 Base::Boolean => (2, 0),
                 Base::String => (3, 0),
                 Base::Null => (4, 0),
@@ -3852,20 +3854,34 @@ impl<'a> Checker<'a> {
     /// Whether a related cast (`Self::casts_are_related` already confirmed
     /// it is one) has a runtime check this pass builds (roadmap task 11.6).
     ///
-    /// Two shapes: the trivial identity cast (same base, any kind — no check
-    /// needed, the value already is the target), and a class or contract
-    /// value checked against a class's descriptor. Left out: a union member
-    /// (unions do not lower at all yet, task 8.7/11.x) and a generic
-    /// parameter's constraint (the concrete type behind `T` is not known
-    /// here the way an instantiation's substitution is). Nullable either
-    /// side is left out too — the check would also have to decide what a
-    /// null value means for it, which is a second question this does not
-    /// answer yet.
+    /// Three shapes: the trivial identity cast (same base, any kind — no
+    /// check needed, the value already is the target), a class or contract
+    /// value checked against a class's descriptor, and any integer width to
+    /// any other (roadmap Phase 3b, task 4.3 — truncate/sign-extend/
+    /// zero-extend, unchecked, exactly like Rust's own `as`; there is no
+    /// `Result`-returning safe conversion yet to make it checked, since
+    /// `Result` itself is Phase 4). Left out: a union member (unions do not
+    /// lower at all yet, task 8.7/11.x) and a generic parameter's
+    /// constraint (the concrete type behind `T` is not known here the way
+    /// an instantiation's substitution is). Nullable either side is left
+    /// out too — the check would also have to decide what a null value
+    /// means for it, which is a second question this does not answer yet.
     fn cast_is_directly_lowerable(&self, actual: Type, target: Type) -> bool {
         if actual.nullable || target.nullable {
             return false;
         }
         if actual.base == target.base {
+            return true;
+        }
+        // Any integer width to any other lowers unchecked — truncating or
+        // sign/zero-extending, exactly like Rust's own `as` between
+        // integers (roadmap Phase 3b, task 4.3). Same-signedness widening
+        // is additionally *implicit* (`Type::accepts`'s own safe case);
+        // `as` here is what makes narrowing and sign-crossing possible at
+        // all, since there is no `Result`-returning safe conversion yet
+        // (`ZIRK_LANGUAGE_SPEC.md` section 11 names one, but it needs
+        // `Result`, which is Phase 4) — `as` is the only path there is.
+        if let (Base::Int(_), Base::Int(_)) = (target.base, actual.base) {
             return true;
         }
         matches!(actual.base, Base::Class(_) | Base::Contract(_))
@@ -3878,6 +3894,15 @@ impl<'a> Checker<'a> {
         let target_bare = target.without_null();
 
         if actual_bare.base == target_bare.base {
+            return true;
+        }
+        // Any integer width may be cast to any other: narrowing and
+        // sign-crossing conversions (roadmap Phase 3b, task 4.3) are exactly
+        // the "explicit" half of the widening/narrowing rule, still gated
+        // with `NOT_LOWERED` below until the checked runtime conversion
+        // itself is built — `casts_are_related` only answers "could this
+        // ever succeed", not "does it lower yet".
+        if matches!(actual_bare.base, Base::Int(_)) && matches!(target_bare.base, Base::Int(_)) {
             return true;
         }
         if self.is_subclass_of(actual_bare, target_bare)
@@ -4016,25 +4041,33 @@ impl<'a> Checker<'a> {
 
         match expr.op {
             UnaryOp::Neg => {
-                if !Type::INT32.accepts(operand) {
+                // Only a signed width: negating an unsigned value has no
+                // representable result in its own type (roadmap Phase 3b).
+                let ok = !operand.nullable && matches!(operand.base, Base::Int(w) if w.signed());
+                if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
                     self.error(
                         codes::TYPE_MISMATCH,
                         expr.span,
-                        "the `-` operator requires a number",
+                        "the `-` operator requires a signed number",
                         format!("it was applied to a value of type {found}"),
                         None,
                     );
                     return Type::UNKNOWN;
                 }
-                Type::INT32
+                if operand.is_unknown() {
+                    Type::UNKNOWN
+                } else {
+                    operand
+                }
             }
             UnaryOp::Not => {
                 self.expect_boolean(operand, expr.span, "the operand of `!`");
                 Type::BOOLEAN
             }
             UnaryOp::BitNot => {
-                if !Type::INT32.accepts(operand) {
+                let ok = !operand.nullable && matches!(operand.base, Base::Int(_));
+                if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
                     self.error(
                         codes::TYPE_MISMATCH,
@@ -4045,7 +4078,11 @@ impl<'a> Checker<'a> {
                     );
                     return Type::UNKNOWN;
                 }
-                Type::INT32
+                if operand.is_unknown() {
+                    Type::UNKNOWN
+                } else {
+                    operand
+                }
             }
         }
     }
@@ -4103,19 +4140,66 @@ impl<'a> Checker<'a> {
             Lt | LtEq | Gt | GtEq => {
                 self.expect_numeric(left, expr.left.span(), expr.op);
                 self.expect_numeric(right, expr.right.span(), expr.op);
+                // Each side is some integer width on its own; comparing two
+                // different ones needs an explicit conversion first, the
+                // same rule arithmetic already has (roadmap Phase 3b, task
+                // 4.3) — `expect_numeric` alone cannot see the other side.
+                if !left.is_unknown()
+                    && !right.is_unknown()
+                    && matches!(left.base, Base::Int(_))
+                    && matches!(right.base, Base::Int(_))
+                    && left.base != right.base
+                {
+                    let l = self.name(left);
+                    let r = self.name(right);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.op_span,
+                        format!("cannot compare {l} with {r}"),
+                        "comparison requires both sides to be the same integer type",
+                        None,
+                    );
+                }
                 Type::BOOLEAN
             }
 
             Add | Sub | Mul | Div | Rem => self.check_arithmetic(left, right, expr),
 
-            // Bitwise and shift, native `Int32` only for now — the rest of
-            // the integer widths (roadmap Phase 3b) is a separate, larger
-            // migration (`Base::Int32` generalizes structurally, not just by
-            // rename) that has not landed yet.
-            BitAnd | BitOr | BitXor | Shl | Shr => {
+            // `&`/`|`/`^` need the same width on both sides, the same rule
+            // arithmetic has; a shift's amount does not — `1i8 << 2i32` asks
+            // "shift this Int8 by 2 places", and the amount's own width
+            // carries no meaning beyond that. Roadmap Phase 3b, task 4.4.
+            BitAnd | BitOr | BitXor => {
                 self.expect_numeric(left, expr.left.span(), expr.op);
                 self.expect_numeric(right, expr.right.span(), expr.op);
-                Type::INT32
+                if left.is_unknown() || right.is_unknown() {
+                    return Type::UNKNOWN;
+                }
+                if left.base != right.base {
+                    let l = self.name(left);
+                    let r = self.name(right);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.op_span,
+                        format!(
+                            "`{}` requires both sides to be the same integer type",
+                            expr.op.as_str()
+                        ),
+                        format!("found {l} and {r}"),
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                left
+            }
+            Shl | Shr => {
+                self.expect_numeric(left, expr.left.span(), expr.op);
+                self.expect_numeric(right, expr.right.span(), expr.op);
+                if left.is_unknown() {
+                    Type::UNKNOWN
+                } else {
+                    left
+                }
             }
         }
     }
@@ -6310,7 +6394,10 @@ impl<'a> Checker<'a> {
     }
 
     fn expect_numeric(&mut self, actual: Type, span: Span, op: BinaryOp) {
-        if Type::INT32.accepts(actual) {
+        if actual.is_unknown() {
+            return;
+        }
+        if !actual.nullable && matches!(actual.base, Base::Int(_)) {
             return;
         }
 
@@ -6324,6 +6411,12 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// Unlike [`Self::expect_numeric`], deliberately `Int32` only: a
+    /// range's element type is hardcoded to `Int32` (`Self::element_type`'s
+    /// `Base::Range` arm), so accepting another width here without also
+    /// generalizing that would let `for i in a..b` bind `i` to a type its
+    /// own endpoints were not written as (roadmap Phase 3b — a range over
+    /// another width is future work, not a rename of this check).
     fn expect_numeric_value(&mut self, actual: Type, span: Span, context: &str) {
         if Type::INT32.accepts(actual) {
             return;
@@ -6502,12 +6595,22 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
     }
 
     match (left.base, right.base, op) {
-        (Base::Int32, Base::Int32, Add | Sub | Mul | Div | Rem) => Some(Type::INT32),
+        // Both operands must already be the same width and signedness —
+        // mixed-width arithmetic needs an explicit conversion first (roadmap
+        // Phase 3b, task 4.3), the same rule that already applied when
+        // `Int32` was the only width there was to mismatch.
+        (Base::Int(l), Base::Int(r), Add | Sub | Mul | Div | Rem) if l == r => {
+            Some(Type::of(Base::Int(l)))
+        }
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, in either order: `"ja" * 3` and
-        // `3 * "ja"` are the same request written two ways.
-        (Base::String, Base::Int32, Mul) | (Base::Int32, Base::String, Mul) => Some(Type::STRING),
+        // `3 * "ja"` are the same request written two ways. `Int32`
+        // specifically: the runtime's own `zirk_str_repeat` takes its count
+        // as `Int32`, and nothing converts a wider or narrower count for it
+        // yet.
+        (Base::String, Base::Int(IntWidth::I32), Mul)
+        | (Base::Int(IntWidth::I32), Base::String, Mul) => Some(Type::STRING),
         _ => None,
     }
 }

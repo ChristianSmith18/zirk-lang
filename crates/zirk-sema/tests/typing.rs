@@ -89,7 +89,9 @@ fn valid_the_four_types_of_the_subset() {
 
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
-    let output = rejected_body("mut x: Int64 = 1;");
+    // `Int64` and the rest of the integer family resolve now (roadmap
+    // Phase 3b, task 4.1) — `Float64` is still genuinely pending.
+    let output = rejected_body("mut x: Float64 = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
     assert!(output.contains("Phase 3b"), "{output}");
 }
@@ -98,6 +100,60 @@ fn invalid_type_from_a_later_phase_states_its_phase() {
 fn valid_short_aliases_of_the_default_integer() {
     // `Int` and `Integer` name `Int32`, which has existed since Phase 1.
     accepted_body("mut a: Int = 1;\nmut b: Integer = 2;\nmut c: Int32 = a + b;");
+}
+
+// --- Integer widths (roadmap Phase 3b) ---------------------------------------
+
+#[test]
+fn valid_safe_widening_between_integer_widths() {
+    // Same signedness, no narrower destination — implicit (`Type::accepts`).
+    accepted_body("mut a: Int32 = 1;\nmut b: Int64 = a;\nmut c: Int128 = b;");
+}
+
+#[test]
+fn invalid_narrowing_is_not_implicit() {
+    let output = rejected_body("mut a: Int32 = 1;\nmut b: Int8 = a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("no implicit conversion"));
+}
+
+#[test]
+fn invalid_widening_across_signedness_is_not_implicit() {
+    let output = rejected_body("mut a: Int32 = 1;\nmut b: UInt64 = a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_explicit_narrowing_with_as() {
+    accepted_body("mut a: Int32 = 300;\nmut b = a as Int8;");
+}
+
+#[test]
+fn valid_explicit_sign_crossing_with_as() {
+    accepted_body("mut a: Int32 = -1;\nmut b = a as UInt32;");
+}
+
+#[test]
+fn invalid_arithmetic_between_different_integer_widths() {
+    let output = rejected_body("mut a: Int64 = 1;\nmut b: Int32 = 2;\nmut c = a + b;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_negation_of_an_unsigned_width() {
+    let output = rejected_body("mut a: UInt32 = 1 as UInt32;\nmut b = -a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("signed"));
+}
+
+#[test]
+fn valid_bitwise_not_on_an_unsigned_width() {
+    accepted_body("mut a: UInt32 = 1 as UInt32;\nmut b = ~a;");
+}
+
+#[test]
+fn valid_shift_amount_may_be_a_different_width() {
+    accepted_body("mut a: UInt32 = 1 as UInt32;\nmut b = a << 2;");
 }
 
 #[test]
