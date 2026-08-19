@@ -1090,6 +1090,50 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 )
             }
 
+            // Byte length of the grapheme at `offset`, or `-1` past the end
+            // (roadmap Phase 3b, task 6.3: `for ... in` over `String`).
+            ir::InstKind::GraphemeLenAt { string, offset } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_grapheme_len_at,
+                        &[self.operand(*string).into(), self.operand(*offset).into()],
+                        "grapheme_len",
+                    )
+                    .expect("call to the grapheme length lookup");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the lookup returns a value"),
+                )
+            }
+
+            // Builds a `Char` from a byte range already known to be one
+            // grapheme.
+            ir::InstKind::GraphemeSlice {
+                string,
+                offset,
+                len,
+            } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_grapheme_slice,
+                        &[
+                            self.operand(*string).into(),
+                            self.operand(*offset).into(),
+                            self.operand(*len).into(),
+                        ],
+                        "grapheme",
+                    )
+                    .expect("call to the grapheme slice constructor");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the constructor returns a value"),
+                )
+            }
+
             ir::InstKind::Load(slot) => {
                 let ty = llvm_type_in(
                     self.context,
@@ -1160,7 +1204,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 if self.value_types[&operand.0] == ir::IrType::Char {
                     Some(self.operand(*operand))
                 } else {
-                    let value = self.operand(*operand);
+                    let mut value = self.operand(*operand);
                     let converter = match self.value_types[&operand.0] {
                         ir::IrType::Boolean => self.runtime.str_from_bool,
                         ir::IrType::Int(width) => {
@@ -1178,16 +1222,41 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                                 U128 => self.runtime.str_from_u128,
                             }
                         }
+                        // `Float16` has no stable Rust primitive to format
+                        // through, but widening it to `Float32` first is
+                        // always exact (`Type::accepts`'s float-widening
+                        // rule) — every `f16` value is representable in
+                        // `f32` without loss, so `f32`'s own `Display`
+                        // prints the same value `f16` held, not an
+                        // approximation of it.
+                        ir::IrType::Float(ir::FloatWidth::F16) => {
+                            value = self
+                                .builder
+                                .build_float_ext(
+                                    value.into_float_value(),
+                                    self.context.f32_type(),
+                                    "to_string.f16_ext",
+                                )
+                                .expect("widen Float16 for printing")
+                                .into();
+                            self.runtime.str_from_f32
+                        }
                         ir::IrType::Float(width) => match width {
                             ir::FloatWidth::F32 => self.runtime.str_from_f32,
                             ir::FloatWidth::F64 => self.runtime.str_from_f64,
-                            // The checker's `is_printable` never accepts
-                            // `Float16`/`Float128` (no stable Rust primitive
-                            // to format either through, roadmap Phase 3b
-                            // task 8.3's own documented gap), so a verified
-                            // program never reaches this arm with one.
+                            // `F16` is caught by the dedicated arm above —
+                            // never reaches here, but the match still needs
+                            // it to stay exhaustive. `Float128` has no
+                            // equivalent safe widening: an `f64` cannot
+                            // represent every `f128` value exactly the way
+                            // `f32` can every `f16`, so there is no honest
+                            // conversion to fall back to. The checker's
+                            // `is_printable` never accepts it (roadmap Phase
+                            // 3b task 8.3's own documented gap), so a
+                            // verified program never reaches this arm with
+                            // one.
                             ir::FloatWidth::F16 | ir::FloatWidth::F128 => {
-                                unreachable!("ToString over Float16/Float128")
+                                unreachable!("ToString over Float128")
                             }
                         },
                         // A `String` needs no conversion; the lowering does

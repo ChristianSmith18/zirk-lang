@@ -1,0 +1,48 @@
+// Follow-up work closing debt `fase-3b-scalars-and-text` documented as
+// deliberately pending: explicit `value.to_string()` on a native scalar
+// (outside of `println`/interpolation, which already reached it implicitly),
+// `to_string()` dispatched through a contract reference rather than a
+// concrete class, and `Float16` printing (fixed by widening to `Float32`
+// first, always exact).
+interface Printable {
+    fn to_string(): String;
+}
+
+class Widget implements Printable {
+    label: String;
+    construct(label: String) {
+        this.label = label;
+    }
+    fn to_string(): String {
+        return "Widget({this.label})";
+    }
+}
+
+fn describe(p: Printable): Void {
+    stdout.println(p);
+    stdout.println("via interpolation: {p}");
+}
+
+fn main(): Void {
+    mut a: Int32 = 42;
+    stdout.println(a.to_string());
+
+    mut b: Float64 = 3.14;
+    stdout.println(b.to_string());
+
+    mut c: Char = 'z';
+    stdout.println(c.to_string());
+
+    mut d: Boolean = true;
+    stdout.println(d.to_string());
+
+    mut e: String = "already".to_string();
+    stdout.println(e);
+
+    mut f: Float16 = 1.5f16;
+    stdout.println(f);
+    stdout.println(f.to_string());
+
+    mut w = Widget("gizmo");
+    describe(w);
+}

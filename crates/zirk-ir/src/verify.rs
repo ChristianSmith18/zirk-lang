@@ -165,6 +165,58 @@ fn verify_instruction(
             }
         }
 
+        InstKind::GraphemeLenAt { string, offset } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I64),
+                position,
+                "GraphemeLenAt",
+                report,
+            );
+            if let Some(ty) = type_of(string)
+                && ty != IrType::String
+            {
+                report(format!(
+                    "{position}: GraphemeLenAt reads {}, which is not a String",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(offset)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: GraphemeLenAt's offset is {}, expected Int64",
+                    ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::GraphemeSlice {
+            string,
+            offset,
+            len,
+        } => {
+            expect(inst.ty, IrType::Char, position, "GraphemeSlice", report);
+            if let Some(ty) = type_of(string)
+                && ty != IrType::String
+            {
+                report(format!(
+                    "{position}: GraphemeSlice reads {}, which is not a String",
+                    ty.as_str()
+                ));
+            }
+            for (name, operand) in [("offset", offset), ("len", len)] {
+                if let Some(ty) = type_of(operand)
+                    && ty != IrType::Int(IntWidth::I64)
+                {
+                    report(format!(
+                        "{position}: GraphemeSlice's {name} is {}, expected Int64",
+                        ty.as_str()
+                    ));
+                }
+            }
+        }
+
         InstKind::Alloc(id) => match module.objects.get(*id as usize) {
             None => report(format!(
                 "{position}: allocates object layout {id}, which is not in the module table"
@@ -865,6 +917,12 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::FloatCast(operand)
         | InstKind::IntToFloat(operand)
         | InstKind::FloatToInt(operand) => vec![*operand],
+        InstKind::GraphemeLenAt { string, offset } => vec![*string, *offset],
+        InstKind::GraphemeSlice {
+            string,
+            offset,
+            len,
+        } => vec![*string, *offset, *len],
         InstKind::Concat { left, right } => vec![*left, *right],
         InstKind::Repeat { string, count } => vec![*string, *count],
         InstKind::CallContract { object, args, .. } => {

@@ -568,8 +568,20 @@ impl<'a> Checker<'a> {
     fn is_printable(&self, ty: Type) -> bool {
         match ty.base {
             Base::Int(_) | Base::Boolean | Base::String | Base::Char => true,
-            Base::Float(w) => matches!(w, FloatWidth::F32 | FloatWidth::F64),
+            // `Float16` prints by widening to `Float32` first — always
+            // exact, since every `f16` value is representable in `f32`
+            // without loss (`Type::accepts`'s float-widening rule). No such
+            // safe fallback exists for `Float128`.
+            Base::Float(w) => matches!(w, FloatWidth::F16 | FloatWidth::F32 | FloatWidth::F64),
             Base::Class(id) => self.classes[id as usize]
+                .method("to_string")
+                .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
+            // A value reached through a contract that itself declares
+            // `to_string()` — every implementer supplies one (either its own
+            // or the contract's default body), so the dispatch table always
+            // has a real method to call through (roadmap Phase 3b task 8's
+            // follow-up).
+            Base::Contract(id) => self.contracts[id as usize]
                 .method("to_string")
                 .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
             _ => false,
@@ -591,7 +603,7 @@ impl<'a> Checker<'a> {
             Base::Function(_) => "a closure is code, not data",
             Base::Void => "`Void` is the absence of a value",
             Base::Float(_) => {
-                "Float16/Float128 have no stable conversion to text yet (roadmap Phase 3b, task 8.3)"
+                "Float128 has no stable conversion to text yet (roadmap Phase 3b, task 8.3)"
             }
             _ => "the runtime has no text form for it",
         };
@@ -3619,21 +3631,12 @@ impl<'a> Checker<'a> {
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
         match iterable.base {
             Base::Range => Type::INT32,
-            // A `String` iterates by grapheme and binds a `Char` — `Char`
-            // itself exists now (roadmap Phase 3b, task 6.1), but the
-            // lowering that walks a `String`'s graphemes at runtime does not
-            // yet (task 6.3, still open debt from Phase 2): unlike the wait
-            // for `Char` to exist at all, this is the grammar/type-rule-
-            // exists-but-does-not-compile shape `not_lowered` names, not a
-            // missing type.
-            Base::String => {
-                self.not_lowered(
-                    span,
-                    "iterating a `String`",
-                    "iterate a range, as in `for i in 0..n`",
-                );
-                Type::UNKNOWN
-            }
+            // A `String` iterates by grapheme, binding a `Char` — the debt
+            // Phase 2 first noted and Phase 3b's task 6.3 retires: `zirk-ir`
+            // lowers this as a byte-offset walk over the string's own
+            // graphemes (`lower_for_in_string`), the same shape a range loop
+            // already threads its own counter with.
+            Base::String => Type::of(Base::Char),
             Base::Unknown => Type::UNKNOWN,
             Base::Class(id) => {
                 let Some(element) = self.iterable_element_type(id) else {
@@ -6021,6 +6024,38 @@ impl<'a> Checker<'a> {
             && !self.variant_accesses.contains(&field.span)
         {
             let object = self.check_expr(&field.object);
+
+            // `myInt.to_string()`: the explicit spelling of the same
+            // conversion `println`/interpolation reach implicitly (roadmap
+            // Phase 3b, task 8's own follow-up). A native scalar has no
+            // method table to resolve a call against — `Base::Class`/
+            // `Base::Contract`/etc. already go through `check_method_call_on`
+            // below, which finds a real declared method — so this is
+            // recognized by name here instead, restricted to exactly the
+            // scalars `is_printable` already accepts.
+            if field.name.name == "to_string"
+                && !field.safe
+                && !object.nullable
+                && !matches!(
+                    object.base,
+                    Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+                )
+                && self.is_printable(object)
+            {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`to_string` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                }
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::STRING;
+            }
 
             // Calling through a value that may be absent is the same mistake
             // as reading through one, unless it is spelled `?.`: then it is

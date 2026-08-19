@@ -48,6 +48,11 @@ pub mod symbols {
     pub const STR_FROM_F64: &str = "zirk_str_from_f64";
     /// Converts a `Boolean` into a `String`.
     pub const STR_FROM_BOOL: &str = "zirk_str_from_bool";
+    /// Byte length of the grapheme at a given offset, or `-1` past the end
+    /// (roadmap Phase 3b, task 6.3: `for ... in` over `String`).
+    pub const STR_GRAPHEME_LEN_AT: &str = "zirk_str_grapheme_len_at";
+    /// Builds a `Char` from a byte range already known to be one grapheme.
+    pub const STR_GRAPHEME_SLICE: &str = "zirk_str_grapheme_slice";
     /// Structural equality of two strings.
     pub const STR_EQ: &str = "zirk_str_eq";
     /// Writes a `String` to standard output with a line break.
@@ -104,6 +109,8 @@ pub struct Runtime<'ctx> {
     pub str_from_f32: FunctionValue<'ctx>,
     pub str_from_f64: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
+    pub str_grapheme_len_at: FunctionValue<'ctx>,
+    pub str_grapheme_slice: FunctionValue<'ctx>,
     pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
     pub overflow: FunctionValue<'ctx>,
@@ -201,6 +208,17 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let str_from_bool = module.add_function(
         symbols::STR_FROM_BOOL,
         ptr.fn_type(&[context.bool_type().into()], false),
+        external,
+    );
+
+    let str_grapheme_len_at = module.add_function(
+        symbols::STR_GRAPHEME_LEN_AT,
+        i64.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let str_grapheme_slice = module.add_function(
+        symbols::STR_GRAPHEME_SLICE,
+        ptr.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
         external,
     );
 
@@ -309,6 +327,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_from_f32,
         str_from_f64,
         str_from_bool,
+        str_grapheme_len_at,
+        str_grapheme_slice,
         str_eq,
         io_println,
         overflow,

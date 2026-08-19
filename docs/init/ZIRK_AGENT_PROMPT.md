@@ -244,12 +244,32 @@ Decisions taken during the phase live in `docs/decisions/` as ADR-014, and in
 the `design.md` of `fase-3b-scalars-and-text` as D1 to D3; its `tasks.md`
 carries the resolution of every open question section by section.
 
-### What this phase deliberately left pending
+### Follow-up: the remaining loose ends were closed
 
-- **`for ... in` over `String`** still does not compile (`Char` exists, but
-  the runtime grapheme-segmentation machinery and the iterator protocol it
-  would need do not) — reported with `NOT_LOWERED`, the debt Phase 2 first
-  noted and this phase narrowed without retiring.
+A second pass retired five of the seven gaps first left open at the end of
+the phase:
+
+- **`for ... in` over `String`** now compiles — it walks the string's own
+  graphemes with a byte offset, the runtime answering "is there a next
+  grapheme, and how many bytes is it" (`zirk_str_grapheme_len_at`) and
+  building the `Char` from that range (`zirk_str_grapheme_slice`); the loop
+  itself threads the offset the same way a range loop already threads its
+  own counter, needing no new IR instruction that mutates anything.
+- **`Float16` now has `to_string()`**: it prints by widening to `Float32`
+  first, through the same `fpext` a `Float16 → Float32` `as` already uses —
+  always exact, since every `f16` value is representable in `f32` without
+  loss, so `f32`'s own `Display` prints the same value `f16` held, not an
+  approximation of it.
+- **`to_string()` through a contract reference** now dispatches — a value
+  reached through a contract that declares `to_string()` calls through the
+  object's own dispatch table for it, the exact shape any other contract
+  method call already had (`CallContract`).
+- **Explicit `value.to_string()` on a native scalar** is now callable
+  (`myInt.to_string()`, `"already".to_string()`), the explicit spelling of
+  the same conversion `println`/interpolation already reached implicitly.
+
+### What is still pending
+
 - **Integer literal width inference from a simple assignment context**
   (`mut x: Int8 = 5;` without `as`) is not implemented — a literal always
   types `Int32` unless an explicit `as` or a deep contextual conversion
@@ -262,20 +282,16 @@ carries the resolution of every open question section by section.
   `glibc`/`libSystem` do on Linux/macOS — it crashed the Windows runner
   (an access violation, not a failing assertion) rather than just failing a
   test, so `Float128` is excluded from the cross-platform corpus.
-- **`Float16`/`Float128` have no `to_string()`**: neither is a stable Rust
-  primitive in this toolchain (`f16`/`f128` are behind an unstable feature),
-  so there is no `Display` to format through without a hand-rolled decimal
-  conversion this phase did not build. Printing or interpolating either width
-  is rejected at compile time with a clear diagnostic, not silently wrong.
+- **`Float128` still has no `to_string()`**: unlike `Float16`, there is no
+  lossless narrower width to widen through instead — an `f64` cannot
+  represent every `f128` value exactly the way `f32` can every `f16` — and
+  it is not a stable Rust primitive in this toolchain either way. Printing or
+  interpolating one is rejected at compile time with a clear diagnostic, not
+  silently wrong.
 - **An enum cannot implement `to_string()`**, or any method at all — enums
   have no method table yet (`EnumType` has no `methods` field, unlike
-  `ClassType`). Pre-existing debt from Phase 3, not new here.
-- **`to_string()` through a contract reference** (rather than a concrete
-  class/record) does not dispatch — only the direct and virtual-table forms
-  of the call were built, mirroring an ordinary method call.
-- **Explicit `value.to_string()` on a native scalar** (outside of
-  `println`/interpolation, which reach it implicitly) is not callable: member
-  lookup only resolves against a class's own method table today.
+  `ClassType`). Pre-existing debt from Phase 3, not new here, and larger than
+  a `to_string()`-specific fix — it needs enum methods to exist at all.
 
 ## Next phase: Zirk 0.4 — errors and memory
 

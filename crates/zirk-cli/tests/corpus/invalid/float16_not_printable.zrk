@@ -1,7 +1,0 @@
-// `Float16` has no stable Rust primitive to format through yet (roadmap
-// Phase 3b, task 8.3's own documented gap) — printing one is rejected at
-// compile time, the same as any other type with no text form.
-fn main(): Void {
-    mut a: Float16 = 1.5f16;
-    stdout.println(a);
-}
