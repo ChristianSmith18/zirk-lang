@@ -1,7 +1,7 @@
 ## 1. Auditoría previa (bloquea todo lo demás)
 
-- [ ] 1.1 Listar cada sitio en `zirk-sema`/`zirk-ir`/`zirk-codegen-llvm` que compara contra `Base::Int32`/`IrType::Int32` directamente, y clasificar cada uno: generaliza a "cualquier entero" sin más, o asume 32 bits por una razón real que necesita una decisión explícita (por ejemplo, el ancho de un discriminante de enum)
-- [ ] 1.2 Con esa lista, confirmar o recortar el alcance de esta fase antes de escribir ningún ancho nuevo (design.md, riesgo de alcance)
+- [x] 1.1 Listar cada sitio en `zirk-sema`/`zirk-ir`/`zirk-codegen-llvm` que compara contra `Base::Int32`/`IrType::Int32` directamente, y clasificar cada uno: generaliza a "cualquier entero" sin más, o asume 32 bits por una razón real que necesita una decisión explícita (por ejemplo, el ancho de un discriminante de enum) — resultado completo en `design.md`, addendum de D1: ~70 sitios en total, concentrados en `zirk-sema/checker.rs` (decisión real: tabla de aritmética nativa, impresión, default, orden de interning) y `zirk-ir/lower.rs` (mayormente mecánico); el backend LLVM es casi gratis, un solo sitio
+- [x] 1.2 Con esa lista, confirmar o recortar el alcance de esta fase antes de escribir ningún ancho nuevo (design.md, riesgo de alcance) — decidido: una sola migración atómica con los diez anchos desde el principio, no una generalización seguida de anchos agregados después; la exhaustividad de `match` en Rust garantiza que ningún sitio quede a medias
 
 ## 2. Léxico
 
