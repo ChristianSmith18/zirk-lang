@@ -169,16 +169,68 @@ Two more, which produce no diagnostic because they are not user-visible:
 - **The IR is not versioned.** `ZIRK_COMPILER_SPEC.md` section 4 requires it for
   `.zpkg`; it is Phase 8 work, noted here so it is not discovered late.
 
-## Next phase: Zirk 0.3 — objects and the type system
+## Phase 3 — complete
 
-Phase 3 of `docs/init/ZIRK_ROADMAP.md`: `class`, `construct`, visibility,
-single inheritance, interfaces, traits, generics with `from`, records, value
-classes, algebraic enums, unions and casts.
+**Zirk is object-oriented.** `class`, `construct`, visibility
+(`public`/`private`/`protected`), single inheritance with `super`/`override`,
+interfaces and traits (with reusable default bodies), generics with `from`
+constraints (specialized per instantiation, not erased), records and value
+classes (inline, no allocation), algebraic enums with associated data, and
+checked casts (`as`) all compile to a native binary and run.
 
-The enum of this phase is meant to be **extended** by Phase 3 with associated
-data, not replaced (design D1). The same goes for `for ... in`, which becomes a
-real trait once traits exist (design D3), and for closures, which will be able
-to escape once function types have syntax (design D10).
+The three debts Phase 2 deferred to this phase are retired: `?.` (both a field
+and a method through it), `+` on `String`, and `for ... in` over a type's own
+`Iterable<T>` — ranges and `String` now implement it like any other type would,
+so Phase 2's corpus keeps compiling unchanged.
+
+Decisions taken during the phase live in `docs/decisions/` as ADR-012 and
+ADR-013, and in the `design.md` of `fase-3-objects-and-type-system` as D1 to
+D11.
+
+### What this phase deliberately left pending
+
+Reported with **E0423** the same way Phase 2's pending work was, so nothing
+reaches a backend that cannot compile it:
+
+- **Function types have no syntax yet** (design D9): a closure infers its type
+  locally and can be called, but cannot be annotated as a parameter, return or
+  field type, and cannot escape the function that created it. The semantics
+  beyond that limit are already decided (D9) for whichever future phase
+  implements the syntax.
+- **A generic contract or enum instantiation** works end to end only for the
+  language's own `Iterable<T>`/`Iterator<T>`/`Iteration<T>` (needed by
+  `for ... in`); a user's own generic contract or enum stays gated the same
+  way it was before this phase.
+- **`abstract class`** type-checks completely — a concrete class adopts its
+  requirements with `implements` and `override fn`, and conformance is
+  verified — but a value typed *through* the abstract class would need
+  dynamic dispatch through whichever concrete class adopted it, and that path
+  does not exist yet.
+- **A record or value class implementing a contract** is checked for real
+  conformance, and its own methods dispatch statically when called directly on
+  the concrete type — but it has no descriptor to carry the contract's own
+  table, so reaching one through the contract type is not compilable yet.
+- **Structural equality on a record or value class** (`==`/`!=`) type-checks
+  without a reserved method — the language derives it from every field — but
+  lowering the comparison itself does not exist yet.
+- **`unsafe {}` and reinterpreting casts** stay out of scope, same as
+  Phase 2's `?.`: they need machinery later phases own.
+
+One more, carried over unchanged from Phase 2 because nothing in this phase
+touched it: **ordinary shadowing vs. `this.name` disambiguating a captured
+name colliding with a lambda parameter** has a real, unresolved contradiction
+between `design.md`'s D10 and the corpus program `capture_by_value.zrk`,
+which already documents and tests the opposite rule. It needs a team decision
+before either side is touched again (`tasks.md` task 5.14).
+
+## Next phase: Zirk 0.3b — complete scalars, conversions and text
+
+Phase 3b of `docs/init/ZIRK_ROADMAP.md`: the remaining integer widths
+(`Int8`/`Int16`/`Int64`/`Int128`, the `UInt*` family), the binary floating
+family (`Float16`/`Float32`/`Float64`/`Float128`, `Float` aliasing `Float64`),
+`Char` as one Unicode grapheme, deep contextual conversion, bitwise/shift
+operators, and string interpolation (needs the `to_string()` contract Phase 3
+defines). They arrive together because they depend on each other.
 
 ## Expected working style
 

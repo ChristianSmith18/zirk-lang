@@ -2083,6 +2083,37 @@ fn invalid_generic_record_is_not_lowered_yet() {
 }
 
 #[test]
+fn valid_record_method_called_directly() {
+    // A record's own method dispatches statically (design.md's open
+    // question on virtual methods) — nothing gates a plain call the way
+    // implementing a contract does below.
+    accepted(
+        "record Point {
+             x: Int32;
+             fn double(): Int32 { return this.x * 2; }
+         }
+         fn main(): Void { mut p = Point(x: 3); stdout.println(p.double()); }",
+    );
+}
+
+#[test]
+fn invalid_record_implements_a_contract_is_not_lowered_yet() {
+    // Conformance is checked (a missing or mismatched `describe` would
+    // still be caught), but a record has no descriptor to carry the
+    // contract's own table, so reaching one through the contract type is
+    // not compilable yet — only the type declaration itself is gated.
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         record Point implements Describable {
+             x: Int32;
+             fn describe(): String { return \"point\"; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
 fn valid_value_class_construction() {
     accepted("value class UserId(value: Int32);\nfn main(): Void { mut u = UserId(value: 5); }");
 }

@@ -828,6 +828,26 @@ impl<'a> Checker<'a> {
                 continue;
             };
 
+            // A record or value class has no descriptor to carry a contract's
+            // table (roadmap task 11.5, design.md's open question on virtual
+            // methods): its own methods dispatch statically and lower today
+            // (`Self::method_of` accepts `IrType::Value` the same way it does
+            // `IrType::Object`), but reaching one through the contract it
+            // implements — the only reason dynamic dispatch would matter for
+            // a type with no identity — needs a vtable no value carries.
+            // Conformance is still checked below, the same way it is for an
+            // abstract class's requirements: what is missing is only the
+            // path from a contract-typed reference back to the value.
+            if matches!(decl.kind, ClassKind::Record | ClassKind::ValueClass)
+                && !decl.implements.is_empty()
+            {
+                self.not_lowered(
+                    decl.name.span,
+                    &format!("a {} that implements a contract", decl.kind.as_str()),
+                    "call its methods directly on the concrete type for now, without naming the contract as its type",
+                );
+            }
+
             // A class satisfies what its base satisfies: that is what makes a
             // subclass usable wherever the base was.
             let mut satisfied: Vec<u32> = self.classes[id as usize]

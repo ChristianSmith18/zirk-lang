@@ -1,0 +1,17 @@
+// A record's own method dispatches statically (design.md's open question on
+// virtual methods, confirmed at closeout: no descriptor exists to carry a
+// table, so nothing here is ever virtual) — a real, preexisting gap found
+// while closing the phase: no corpus program had ever called a method
+// directly on a record or value class, and doing so crashed. (A `value
+// class`'s own compact grammar has no body, so it cannot declare a method
+// at all — a record is the shape that can.)
+record Point {
+    x: Int32;
+    y: Int32;
+    fn lengthSquared(): Int32 { return this.x * this.x + this.y * this.y; }
+}
+
+fn main(): Void {
+    mut p = Point(x: 3, y: 4);
+    stdout.println(p.lengthSquared());
+}
