@@ -2111,6 +2111,10 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let Some(target) = self.context_conversion_target(e) {
+                    let target_ty = self.ir_type(target);
+                    return self.lower_context_tree(target_ty, &e.args[0].value);
+                }
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
                 }
@@ -2968,6 +2972,124 @@ impl<'a> FunctionLowering<'a> {
 
     /// The layout id a construction call builds.
     ///
+    /// The target type of a deep contextual conversion call, if this is one
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 3, roadmap Phase 3b task 7):
+    /// `Float(3 / 4)`, `String("x=" + 42)`. A native scalar name can never
+    /// collide with a declared class (type names are reserved), so this is
+    /// checked ahead of `construction_class_id` — but a local binding could
+    /// still shadow the name (nothing stops `mut Float = 5;`), which is why
+    /// this checks the scopes the same way `is_closure_call` does before
+    /// trusting the name.
+    fn context_conversion_target(&self, call: &ast::CallExpr) -> Option<Type> {
+        let ast::Expr::Path(callee) = &*call.callee else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(&callee.name))
+        {
+            return None;
+        }
+        let target = Type::from_name(&callee.name)?;
+        matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String).then_some(target)
+    }
+
+    /// Lowers the operand tree of a deep contextual conversion (task 7),
+    /// converting at each leaf rather than the whole result after — mirrors
+    /// `zirk-sema/checker.rs`'s `check_context_tree`, which already proved
+    /// this tree is well-formed for `target`.
+    ///
+    /// Two operands of a compatible operator are held across each other the
+    /// same way any other binary operand is (`lower_and_hold`): a later one
+    /// that opens blocks would otherwise strand the earlier value across a
+    /// block boundary the IR forbids (ADR-007).
+    fn lower_context_tree(&mut self, target: IrType, expr: &ast::Expr) -> Operand {
+        let span = expr.span();
+        let numeric = matches!(target, IrType::Int(_) | IrType::Float(_));
+        let is_string = target == IrType::String;
+
+        let compatible_op = |op: ast::BinaryOp| {
+            (numeric
+                && matches!(
+                    op,
+                    ast::BinaryOp::Add
+                        | ast::BinaryOp::Sub
+                        | ast::BinaryOp::Mul
+                        | ast::BinaryOp::Div
+                        | ast::BinaryOp::Rem
+                ))
+                || (is_string && op == ast::BinaryOp::Add)
+        };
+
+        match expr {
+            ast::Expr::Binary(b) if compatible_op(b.op) => {
+                let held = self.lower_context_hold(target, &b.left, opens_blocks(&b.right));
+                let right = self.lower_context_tree(target, &b.right);
+                let left = self.reload(held, b.left.span());
+
+                if is_string {
+                    self.emit(InstKind::Concat { left, right }, IrType::String, span)
+                } else {
+                    let op = binary_op(b.op);
+                    self.emit(InstKind::Binary { op, left, right }, target, span)
+                }
+            }
+            ast::Expr::Unary(u) if numeric && u.op == ast::UnaryOp::Neg => {
+                let operand = self.lower_context_tree(target, &u.operand);
+                self.emit(
+                    InstKind::Unary {
+                        op: UnaryOp::Neg,
+                        operand,
+                    },
+                    target,
+                    span,
+                )
+            }
+            _ => self.lower_context_leaf(target, expr, span),
+        }
+    }
+
+    /// [`Self::lower_and_hold`], for a value produced by `lower_context_tree`
+    /// rather than `lower_expr`.
+    fn lower_context_hold(&mut self, target: IrType, expr: &ast::Expr, will_branch: bool) -> Held {
+        let value = self.lower_context_tree(target, expr);
+        if !will_branch {
+            return Held::Value(value);
+        }
+        let slot = self.declare_slot("<context>", target, expr.span());
+        self.emit_effect(InstKind::Store(slot, value), expr.span());
+        Held::Spilled(slot, target)
+    }
+
+    /// A leaf of a contextual conversion tree: lowered with its own type,
+    /// then converted into `target` — a numeric leaf reaches any other
+    /// numeric target unchecked (the same as `as`), and any printable value
+    /// reaches `String` through `to_string()` (`Self::lower_to_string`).
+    fn lower_context_leaf(&mut self, target: IrType, expr: &ast::Expr, span: Span) -> Operand {
+        let operand = self.lower_expr(expr);
+        let actual = self.type_of_operand(operand);
+
+        if actual == target {
+            return operand;
+        }
+        match (actual, target) {
+            (IrType::Int(_), IrType::Int(_)) => self.emit(InstKind::IntCast(operand), target, span),
+            (IrType::Float(_), IrType::Float(_)) => {
+                self.emit(InstKind::FloatCast(operand), target, span)
+            }
+            (IrType::Int(_), IrType::Float(_)) => {
+                self.emit(InstKind::IntToFloat(operand), target, span)
+            }
+            (IrType::Float(_), IrType::Int(_)) => {
+                self.emit(InstKind::FloatToInt(operand), target, span)
+            }
+            (_, IrType::String) => self.lower_to_string(operand, actual, span),
+            _ => unreachable!("the checker validated this conversion"),
+        }
+    }
+
     /// A generic class's own bare name (`Box`) cannot tell `Box<Int32>` from
     /// `Box<String>` apart the way `class_id` resolves an ordinary class —
     /// the checker records which instantiation each call site inferred
@@ -3984,6 +4106,9 @@ impl<'a> FunctionLowering<'a> {
                 self.module.closures[id as usize].returns
             }
             ast::Expr::Call(e) if matches!(&*e.callee, ast::Expr::Super(_)) => IrType::Void,
+            ast::Expr::Call(e) if self.context_conversion_target(e).is_some() => {
+                self.ir_type(self.context_conversion_target(e).expect("checked above"))
+            }
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {
                     return self.ir_type(method.returns);

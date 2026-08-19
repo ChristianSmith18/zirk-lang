@@ -1,0 +1,5 @@
+// A leaf that cannot convert into the context's target is rejected at
+// compile time (roadmap Phase 3b, task 7): `Boolean` has no numeric form.
+fn main(): Void {
+    mut a: Float64 = Float64(true + 4);
+}
