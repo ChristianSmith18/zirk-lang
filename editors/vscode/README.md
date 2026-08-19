@@ -34,28 +34,17 @@ To test the extension locally in VS Code, Cursor, Windsurf, or any other VS Code
    ```
 3. Install the generated `.vsix` file in your editor via the command palette (`Developer: Install Extension from VSIX...`).
 
-## Sobre el formateo
+## About Formatting
 
-La extensión trae un formateador propio, básico, que solo alinea la
-indentación siguiendo llaves y corchetes. Existe porque hoy **no hay
-`zirk format`**: ese comando llega en la Fase 9 del roadmap.
+The extension includes a basic, built-in formatter that only aligns indentation by following curly braces and square brackets. It exists because **there is no `zirk format` yet**: that command is scheduled for Phase 9 of the roadmap.
 
-Conviene saber en qué se diferencia del que vendrá:
+It is important to know how it differs from the upcoming official formatter:
 
-- `ZIRK_COMPILER_SPEC.md` sección 10 define el formateador oficial como
-  **canónico, idempotente y sin configuración que fragmente el estilo**. El de
-  esta extensión respeta `tabSize` e `insertSpaces` del editor, que es
-  exactamente el tipo de configuración que el spec descarta.
-- No conoce cadenas ni comentarios: una línea que termine en `{` dentro de un
-  comentario desplaza la indentación de lo que sigue.
+- `ZIRK_COMPILER_SPEC.md` section 10 defines the official formatter as **canonical, idempotent, and configuration-free to prevent style fragmentation**. The formatter in this extension respects the editor's `tabSize` and `insertSpaces`, which is exactly the type of configuration the spec discards.
+- It is not aware of strings or comments: a line ending in `{` inside a comment will shift the indentation of subsequent lines.
 
-Cuando exista `zirk format`, la extensión debe delegar en él y este formateador
-se retira. Hasta entonces es una comodidad provisional, no la definición del
-estilo de Zirk.
+When `zirk format` is implemented, this extension must delegate formatting to it, and this temporary formatter will be retired. Until then, it is a provisional convenience, not the official style definition of Zirk.
 
-## Palabras clave
+## Keywords
 
-El resaltador cubre el **lenguaje completo** que definen las specs, no solo el
-subset que el compilador implementa hoy. Es deliberado: el editor muestra el
-lenguaje tal como está especificado, y es el compilador el que dice qué
-construcción todavía no está disponible y en qué fase llega.
+The highlighter covers the **entire language** defined by the specifications, not just the subset currently implemented by the compiler. This is deliberate: the editor displays the language as specified, and it is the compiler's responsibility to report which constructs are not yet available and in which phase they will arrive.
