@@ -343,9 +343,15 @@ fn declare_function<'ctx>(
         .params
         .iter()
         .map(|slot| {
-            llvm_type_in(context, function.slots[slot.0 as usize].ty, closures, values, enums)
-                .expect("a parameter cannot be Void")
-                .into()
+            llvm_type_in(
+                context,
+                function.slots[slot.0 as usize].ty,
+                closures,
+                values,
+                enums,
+            )
+            .expect("a parameter cannot be Void")
+            .into()
         })
         .collect();
 
@@ -432,8 +438,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // unnecessary (design D2).
         self.builder.position_at_end(self.blocks[&function.entry]);
         for (index, slot) in function.slots.iter().enumerate() {
-            let ty = llvm_type_in(self.context, slot.ty, &self.module.closures, &self.module.values, &self.module.enums)
-                .expect("a slot cannot be Void");
+            let ty = llvm_type_in(
+                self.context,
+                slot.ty,
+                &self.module.closures,
+                &self.module.values,
+                &self.module.enums,
+            )
+            .expect("a slot cannot be Void");
             let pointer = self
                 .builder
                 .build_alloca(ty, &slot.name)
@@ -475,7 +487,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     fn field_pointer(&self, object: ir::Operand, index: u32) -> PointerValue<'ctx> {
         let id = self.object_layout_of(object);
         let layout = &self.module.objects[id as usize];
-        let struct_type = object_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
+        let struct_type = object_struct(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
 
         self.builder
             .build_struct_gep(
@@ -707,7 +725,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::Alloc(id) => {
                 let layout = &self.module.objects[*id as usize];
-                let struct_type = object_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
+                let struct_type = object_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
 
                 // The size and alignment come from LLVM's own data layout, so
                 // the runtime is told what the target actually needs rather
@@ -783,8 +807,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::BuildValue { class, fields } => {
                 let layout = &self.module.values[*class as usize];
-                let struct_type =
-                    value_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
+                let struct_type = value_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
                 let mut built = struct_type.get_undef();
                 for (index, field) in fields.iter().enumerate() {
                     built = self
@@ -819,7 +848,9 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .builder
                     .build_insert_value(
                         built,
-                        self.context.i32_type().const_int(u64::from(*variant), false),
+                        self.context
+                            .i32_type()
+                            .const_int(u64::from(*variant), false),
                         0,
                         "discriminant",
                     )
@@ -882,8 +913,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Load(slot) => {
-                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures, &self.module.values, &self.module.enums)
-                    .expect("a load cannot be Void");
+                let ty = llvm_type_in(
+                    self.context,
+                    instruction.ty,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("a load cannot be Void");
                 Some(
                     self.builder
                         .build_load(ty, self.slots[slot], "load")
@@ -955,9 +992,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // still carries a payload slot, left undefined: nothing reads it
             // without checking the flag first, and the verifier enforces that.
             ir::InstKind::NullValue(base) => {
-                let ty = llvm_type_in(self.context, ir::IrType::Nullable(*base), &self.module.closures, &self.module.values, &self.module.enums)
-                    .expect("a nullable type has a representation")
-                    .into_struct_type();
+                let ty = llvm_type_in(
+                    self.context,
+                    ir::IrType::Nullable(*base),
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("a nullable type has a representation")
+                .into_struct_type();
                 Some(ty.get_undef().into()).map(|value: BasicValueEnum| {
                     self.builder
                         .build_insert_value(
@@ -972,9 +1015,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Wrap { base, value } => {
-                let ty = llvm_type_in(self.context, ir::IrType::Nullable(*base), &self.module.closures, &self.module.values, &self.module.enums)
-                    .expect("a nullable type has a representation")
-                    .into_struct_type();
+                let ty = llvm_type_in(
+                    self.context,
+                    ir::IrType::Nullable(*base),
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("a nullable type has a representation")
+                .into_struct_type();
                 let with_flag = self
                     .builder
                     .build_insert_value(

@@ -1094,9 +1094,7 @@ fn destructuring_a_variant_reads_its_flattened_fields() {
     let kinds = instructions(area);
 
     assert!(
-        kinds
-            .iter()
-            .any(|k| matches!(k, InstKind::Discriminant(_))),
+        kinds.iter().any(|k| matches!(k, InstKind::Discriminant(_))),
         "a variant pattern tests the discriminant, not the whole payload"
     );
     assert!(
@@ -1152,7 +1150,9 @@ fn an_ordinary_upcast_retypes_without_a_runtime_check() {
     // `mut a: Animal = Dog();` — an explicit widening annotation, not `as` —
     // needs no check at all: the checker already proved it, so only the
     // declared type changes.
-    let module = compile(&format!("{ANIMALS}\nfn main(): Void {{ mut a: Animal = Dog(); }}"));
+    let module = compile(&format!(
+        "{ANIMALS}\nfn main(): Void {{ mut a: Animal = Dog(); }}"
+    ));
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
 
@@ -1160,5 +1160,9 @@ fn an_ordinary_upcast_retypes_without_a_runtime_check() {
         kinds.iter().any(|k| matches!(k, InstKind::Retype(_))),
         "widening to a base is proven safe, not merely asserted"
     );
-    assert!(!kinds.iter().any(|k| matches!(k, InstKind::CheckedCast { .. })));
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedCast { .. }))
+    );
 }

@@ -206,7 +206,13 @@ fn verify_instruction(
                 "{position}: builds value layout {class}, which is not in the module table"
             )),
             Some(layout) => {
-                expect(inst.ty, IrType::Value(*class), position, "BuildValue", report);
+                expect(
+                    inst.ty,
+                    IrType::Value(*class),
+                    position,
+                    "BuildValue",
+                    report,
+                );
                 if fields.len() != layout.fields.len() {
                     report(format!(
                         "{position}: builds {} with {} field{}, not {}",
@@ -245,7 +251,13 @@ fn verify_instruction(
                     layout.name
                 )),
                 Some(indices) => {
-                    expect(inst.ty, IrType::Enum(*enum_id), position, "BuildEnum", report);
+                    expect(
+                        inst.ty,
+                        IrType::Enum(*enum_id),
+                        position,
+                        "BuildEnum",
+                        report,
+                    );
                     if fields.len() != indices.len() {
                         report(format!(
                             "{position}: builds variant {variant} of {} with {} field{}, not {}",
