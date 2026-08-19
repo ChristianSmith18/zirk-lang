@@ -889,3 +889,276 @@ fn a_method_nobody_redefines_is_called_directly() {
             .any(|k| matches!(k, InstKind::Call { callee, .. } if callee.contains("only_here"))),
     );
 }
+
+// --- Contratos (task 10.7) ---------------------------------------------------
+
+#[test]
+fn a_call_through_a_contract_goes_through_its_table() {
+    let module = compile(
+        "interface Describable { fn describe(): String; }
+         class User implements Describable {
+             construct() { }
+             fn describe(): String { return \"user\"; }
+         }
+         fn announce(d: Describable): String { return d.describe(); }
+         fn main(): Void { mut u = User(); mut s = announce(u); }",
+    );
+    let announce = module.function("announce").expect("announce exists");
+
+    assert!(
+        instructions(announce)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallContract { .. })),
+        "which body answers is not statically known through a contract"
+    );
+}
+
+// --- Genéricos (roadmap task 11.1/11.2) --------------------------------------
+
+const BOX: &str = "class Box<T> {
+    value: T;
+    construct(value: T) { this.value = value; }
+    fn get(): T { return this.value; }
+}";
+
+#[test]
+fn a_generic_instantiation_gets_its_own_specialized_layout() {
+    let module = compile(&format!(
+        "{BOX}\nfn main(): Void {{ mut b: Box<Int32> = Box(5); }}"
+    ));
+
+    // The template itself (`Box`, still naming `T`) is never addressed —
+    // only a specialized copy, named after it plus the instantiation index.
+    assert!(module.objects.iter().any(|o| o.name == "Box"));
+    let specialized = module
+        .objects
+        .iter()
+        .find(|o| o.name.starts_with("Box$"))
+        .expect("a specialized copy exists");
+    assert_eq!(specialized.fields[0].ty, IrType::Int32);
+}
+
+#[test]
+fn repeating_the_same_instantiation_reuses_one_layout() {
+    let module = compile(&format!(
+        "{BOX}\nfn main(): Void {{
+             mut a: Box<Int32> = Box(1);
+             mut b: Box<Int32> = Box(2);
+             mut c: Box<Int32> = Box(3);
+         }}"
+    ));
+
+    let specialized: Vec<_> = module
+        .objects
+        .iter()
+        .filter(|o| o.name.starts_with("Box$"))
+        .collect();
+    assert_eq!(
+        specialized.len(),
+        1,
+        "three uses of the same combination are one specialization, not three"
+    );
+}
+
+#[test]
+fn two_different_instantiations_get_two_layouts() {
+    let module = compile(&format!(
+        "{BOX}\nfn main(): Void {{
+             mut a: Box<Int32> = Box(1);
+             mut b: Box<String> = Box(\"x\");
+         }}"
+    ));
+
+    let specialized: Vec<_> = module
+        .objects
+        .iter()
+        .filter(|o| o.name.starts_with("Box$"))
+        .collect();
+    assert_eq!(specialized.len(), 2);
+    assert_ne!(specialized[0].fields[0].ty, specialized[1].fields[0].ty);
+}
+
+// --- Records y value classes (roadmap task 11.5) -----------------------------
+
+#[test]
+fn a_record_becomes_a_value_layout_not_an_object() {
+    let module = compile(
+        "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
+    );
+
+    assert_eq!(module.values[0].name, "Point");
+    assert_eq!(module.values[0].fields.len(), 2);
+    // Its `ObjectLayout` counterpart is the empty placeholder nothing reads.
+    assert!(module.objects[0].fields.is_empty());
+}
+
+#[test]
+fn constructing_a_record_builds_a_value_with_no_allocation() {
+    let module = compile(
+        "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::BuildValue { class: 0, fields } if fields.len() == 2)),
+        "a record is packaged, not allocated"
+    );
+    assert!(
+        !kinds.iter().any(|k| matches!(k, InstKind::Alloc(_))),
+        "nothing here needs storage the runtime provides"
+    );
+}
+
+#[test]
+fn a_record_field_reads_by_position_like_an_objects() {
+    let module = compile(
+        "record Point { x: Int32; y: Int32; }
+         fn main(): Void { mut p = Point(x: 1, y: 2); stdout.println(p.y); }",
+    );
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::LoadField { index: 1, .. })),
+        "field access does not need its own instruction kind"
+    );
+}
+
+// --- Enums algebraicos (roadmap task 11.3/11.4) ------------------------------
+
+const SHAPE: &str = "enum Shape {
+    Circle(radius: Int32),
+    Rect(width: Int32, height: Int32),
+    Point
+}";
+
+#[test]
+fn an_algebraic_enum_becomes_an_enum_layout_with_a_flattened_payload() {
+    let module = compile(&format!("{SHAPE}\nfn main(): Void {{ }}"));
+    // Index 0 is the language's own `Iteration<T>` (task 6.9), always
+    // registered first — `Shape` is found by name instead.
+    let layout = module.enums.iter().find(|e| e.name == "Shape").unwrap();
+
+    assert_eq!(layout.name, "Shape");
+    // `radius`, then `width`, `height`: every variant's own fields,
+    // concatenated in declaration order, `Point` contributing none.
+    assert_eq!(layout.fields.len(), 3);
+    assert_eq!(layout.variants.len(), 3);
+    assert_eq!(layout.variants[0], vec![0]);
+    assert_eq!(layout.variants[1], vec![1, 2]);
+    assert!(layout.variants[2].is_empty());
+}
+
+#[test]
+fn a_traditional_enum_stays_a_bare_int32() {
+    // No variant carries data, so nothing changes from before this task.
+    let module = compile("enum Direction { North, South }\nfn main(): Void { }");
+    let layout = module.enums.iter().find(|e| e.name == "Direction").unwrap();
+    assert!(layout.fields.is_empty());
+}
+
+#[test]
+fn constructing_a_variant_builds_an_enum_with_no_allocation() {
+    let module = compile(&format!(
+        "{SHAPE}\nfn main(): Void {{ mut s = Shape.Circle(radius: 2); }}"
+    ));
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(
+            k,
+            InstKind::BuildEnum { variant: 0, fields, .. } if fields.len() == 1
+        )),
+        "`Circle` is discriminant 0 with its own one field"
+    );
+    assert!(!kinds.iter().any(|k| matches!(k, InstKind::Alloc(_))));
+}
+
+#[test]
+fn destructuring_a_variant_reads_its_flattened_fields() {
+    let module = compile(&format!(
+        "{SHAPE}\nfn area(s: Shape): Int32 {{
+             return match s {{
+                 Shape.Circle(radius) => radius * radius * 3,
+                 Shape.Rect(width, height) => width * height,
+                 Shape.Point => 0,
+             }};
+         }}\nfn main(): Void {{ }}"
+    ));
+    let area = module.function("area").expect("area exists");
+    let kinds = instructions(area);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::Discriminant(_))),
+        "a variant pattern tests the discriminant, not the whole payload"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::LoadField { index: 1, .. })),
+        "`height`, `Rect`'s second field, sits at the flattened index 1"
+    );
+}
+
+// --- Casts comprobados (roadmap task 11.6) -----------------------------------
+
+const ANIMALS: &str = "class Animal { construct() { } }
+class Dog extends Animal { construct() { super(); } }";
+
+#[test]
+fn an_identity_cast_emits_no_check() {
+    let module = compile(&format!(
+        "{ANIMALS}\nfn main(): Void {{ mut d = Dog(); mut e = d as Dog; }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        !instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedCast { .. })),
+        "the value already is the target, so there is nothing to confirm"
+    );
+}
+
+#[test]
+fn a_class_to_class_cast_checks_the_target_descriptor() {
+    let module = compile(&format!(
+        "{ANIMALS}\nfn main(): Void {{ mut a: Animal = Dog(); mut d = a as Dog; }}"
+    ));
+    let main = module.function("main").expect("main exists");
+    let dog_id = module
+        .objects
+        .iter()
+        .position(|o| o.name == "Dog")
+        .expect("Dog has a layout") as u32;
+
+    assert!(
+        instructions(main).iter().any(
+            |k| matches!(k, InstKind::CheckedCast { target_class, .. } if *target_class == dog_id)
+        ),
+        "a downcast is checked against the target's own layout"
+    );
+}
+
+#[test]
+fn an_ordinary_upcast_retypes_without_a_runtime_check() {
+    // `mut a: Animal = Dog();` — an explicit widening annotation, not `as` —
+    // needs no check at all: the checker already proved it, so only the
+    // declared type changes.
+    let module = compile(&format!("{ANIMALS}\nfn main(): Void {{ mut a: Animal = Dog(); }}"));
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::Retype(_))),
+        "widening to a base is proven safe, not merely asserted"
+    );
+    assert!(!kinds.iter().any(|k| matches!(k, InstKind::CheckedCast { .. })));
+}

@@ -24,8 +24,9 @@ mod types;
 pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
-    Base, ClassType, ContractMethod, ContractType, EnumType, FieldInfo, FnType, MethodInfo,
-    PendingType, Type, pending_type,
+    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
+    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, MethodInfo,
+    PendingType, Type, TypeParamInfo, pending_type,
 };
 
 /// Diagnostic codes of the checker.
@@ -95,4 +96,7 @@ pub mod codes {
     /// compiled, while this one is not implemented at all and names the phase
     /// that brings it.
     pub const PENDING_FEATURE: Code = Code::new("E0424");
+    /// An `inmut::strict` reference used where it would gain or come from a
+    /// mutable alias of the same reachable graph (D11).
+    pub const STRICT_ALIAS_VIOLATION: Code = Code::new("E0430");
 }

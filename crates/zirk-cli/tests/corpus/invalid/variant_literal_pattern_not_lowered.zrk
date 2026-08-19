@@ -1,0 +1,12 @@
+// A binding or a wildcard destructures a variant's field for real (roadmap
+// task 11.4); a literal sub-pattern would need combined-condition
+// compilation this pass does not build.
+enum Shape { Circle(radius: Int32) }
+
+fn main(): Void {
+    mut s = Shape.Circle(radius: 3);
+    match s {
+        Shape.Circle(3) => { }
+        _ => { }
+    }
+}

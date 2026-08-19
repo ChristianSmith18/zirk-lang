@@ -1,3 +1,6 @@
-record Point { }
+// A generic record combines two things that do not lower together yet
+// (roadmap task 11.5): per-instantiation specialization is scoped to
+// ordinary classes only.
+record Box<T> { value: T; }
 
 fn main(): Void { }

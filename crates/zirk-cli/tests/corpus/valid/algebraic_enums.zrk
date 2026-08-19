@@ -1,0 +1,40 @@
+// Algebraic enums lower to a discriminant plus a flattened payload
+// (roadmap task 11.3), and destructuring reads straight out of it
+// (task 11.4): construction, matching with bindings, and a wildcard
+// discarding a field all work end to end.
+enum Shape {
+    Circle(radius: Int32),
+    Rect(width: Int32, height: Int32),
+    Point
+}
+
+fn area(s: Shape): Int32 {
+    return match s {
+        Shape.Circle(radius) => radius * radius * 3,
+        Shape.Rect(width, height) => width * height,
+        Shape.Point => 0
+    };
+}
+
+fn describe(s: Shape): String {
+    return match s {
+        Shape.Circle(_) => "circle",
+        Shape.Rect(width, _) => "rect",
+        _ => "other"
+    };
+}
+
+fn main(): Void {
+    // Named arguments may reorder, the same as an ordinary call.
+    mut circle = Shape.Circle(radius: 2);
+    mut rect = Shape.Rect(height: 4, width: 3);
+    mut point = Shape.Point;
+
+    stdout.println(area(circle));
+    stdout.println(area(rect));
+    stdout.println(area(point));
+
+    stdout.println(describe(circle));
+    stdout.println(describe(rect));
+    stdout.println(describe(point));
+}

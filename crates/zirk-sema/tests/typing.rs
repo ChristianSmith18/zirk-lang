@@ -211,6 +211,96 @@ fn invalid_reassignment_of_an_immutable_variable() {
     assert!(output.contains("= help:"));
 }
 
+// --- `mut`/`inmut`/`inmut::strict` matrix on object references (D11) --------
+
+#[test]
+fn valid_strict_reference_to_a_fresh_object() {
+    accepted(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void { inmut::strict s = User(\"ana\"); }",
+    );
+}
+
+#[test]
+fn invalid_reassignment_of_a_strict_variable() {
+    let output = rejected_body(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         inmut::strict s = User(\"ana\");
+         s = User(\"beto\");",
+    );
+    assert!(output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_mutable_alias_of_a_strict_object_reference() {
+    // A strict reference cannot produce a mutable alias of its object (D11).
+    let output = rejected(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void {
+             inmut::strict s = User(\"ana\");
+             mut alias = s;
+         }",
+    );
+    assert!(output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_strict_reference_acquired_from_an_accessible_mutable_alias() {
+    // A strict reference cannot be acquired while a `mut` alias of the same
+    // object is still reachable (D11).
+    let output = rejected(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void {
+             mut m = User(\"ana\");
+             inmut::strict s = m;
+         }",
+    );
+    assert!(output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()), "{output}");
+}
+
+#[test]
+fn valid_inmut_alias_of_a_mutable_object_reference() {
+    // Only `mut` targets and `inmut::strict` sources trigger the matrix;
+    // ordinary `inmut` sharing a mutable object's reference is unrestricted.
+    accepted(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void {
+             mut m = User(\"ana\");
+             inmut alias = m;
+         }",
+    );
+}
+
+#[test]
+fn valid_strict_alias_of_a_strict_object_reference() {
+    accepted(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void {
+             inmut::strict s = User(\"ana\");
+             inmut::strict alias = s;
+         }",
+    );
+}
+
+#[test]
+fn valid_strict_matrix_does_not_apply_to_value_classes() {
+    // Value classes are inline, not reference-backed (task 11.5), so the
+    // aliasing half of D11 has nothing to police for them. `value class` is
+    // itself still gated by `NOT_LOWERED` (task 11.5 lowers it), so this
+    // checks that gate is the only error, not the strict-alias one.
+    let output = rejected(
+        "value class Point(x: Int32, y: Int32);
+         fn main(): Void {
+             mut m = Point(1, 2);
+             inmut::strict s = m;
+         }",
+    );
+    assert!(
+        !output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
 // --- Inference --------------------------------------------------------------
 
 #[test]
@@ -494,6 +584,113 @@ fn invalid_string_iteration_defers_to_the_phase_of_char() {
     assert!(output.contains(codes::PENDING_FEATURE.as_str()), "{output}");
     assert!(output.contains("Char"), "{output}");
     assert!(output.contains("Phase 3b"), "{output}");
+}
+
+// --- `Iterable<T>` / `Iterator<T>` (D8, task 6.9/6.10) -----------------------
+
+#[test]
+fn valid_range_iteration_is_unaffected_by_iterable() {
+    // A range keeps resolving natively — it does not write
+    // `implements Iterable<Int32>`, and none of this is expected to gate it.
+    accepted_body("mut sum = 0;\nfor i in 0..5 { sum = sum + i; }");
+}
+
+#[test]
+fn invalid_iterating_a_type_that_does_not_implement_iterable() {
+    let output = rejected(
+        "class Foo { construct() { } }
+         fn main(): Void {
+             mut f = Foo();
+             for x in f { }
+         }",
+    );
+    assert!(output.contains(codes::NOT_ITERABLE.as_str()), "{output}");
+    assert!(output.contains("Iterable"), "{output}");
+}
+
+#[test]
+fn invalid_reopening_the_native_iterable_contract() {
+    let output = rejected("interface Iterable { fn foo(): Int32; }\nfn main(): Void { }");
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_reopening_the_native_iterator_contract() {
+    let output = rejected("trait Iterator { fn foo(): Int32; }\nfn main(): Void { }");
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_reopening_the_native_iteration_enum() {
+    let output = rejected("enum Iteration { A, B }\nfn main(): Void { }");
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+}
+
+#[test]
+fn valid_a_class_implementing_iterable_lowers() {
+    // `implements Iterable<Int32>`/`Iterator<Int32>` are checked for real
+    // conformance (`iterator()`/`next()` required with the right signature)
+    // and now lower too (roadmap task 13.5): dispatch through a contract's
+    // table (10.7) plus a concrete `Iteration<Int32>` (11.3, specialized the
+    // way a generic class's own fields are, 11.1).
+    accepted(
+        "class Counter implements Iterable<Int32> {
+             construct() { }
+             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+         }
+         class CounterIterator implements Iterator<Int32> {
+             construct() { }
+             fn next(): Iteration<Int32> { return Iteration.Done; }
+         }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_a_class_missing_iterator_still_reports_the_missing_method() {
+    // Conformance is real: leaving out `iterator()` is caught the same way
+    // missing any other contract method is.
+    let output = rejected(
+        "class Counter implements Iterable<Int32> {
+             construct() { }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::MISSING_IMPLEMENTATION.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_a_class_implementing_iterable_with_the_wrong_element_type() {
+    let output = rejected(
+        "class WrongIterator implements Iterator<String> {
+             construct() { }
+             fn next(): Iteration<String> { return Iteration.Done; }
+         }
+         class Counter implements Iterable<Int32> {
+             construct() { }
+             fn iterator(): Iterator<Int32> { return WrongIterator(); }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_for_in_over_a_users_iterable_lowers() {
+    accepted(
+        "class Counter implements Iterable<Int32> {
+             construct() { }
+             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+         }
+         class CounterIterator implements Iterator<Int32> {
+             construct() { }
+             fn next(): Iteration<Int32> { return Iteration.Done; }
+         }
+         fn main(): Void {
+             mut c = Counter();
+             for x in c { }
+         }",
+    );
 }
 
 // --- Clases ------------------------------------------------------------------
@@ -1140,6 +1337,34 @@ fn valid_a_trait_default_body_is_adopted() {
 }
 
 #[test]
+fn invalid_two_traits_offer_conflicting_defaults() {
+    // Neither trait's default should silently win by declaration order (D4).
+    let output = rejected(
+        "trait Loud { fn greet(): String { return \"HELLO\"; } }
+         trait Quiet { fn greet(): String { return \"hello\"; } }
+         class Both implements Loud, Quiet { construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()), "{output}");
+    assert!(output.contains("greet"), "{output}");
+}
+
+#[test]
+fn valid_class_own_method_resolves_two_traits_offering_the_same_name() {
+    // Writing the method itself is how the class picks, so it is not a
+    // conflict: both traits require the same signature and get it.
+    accepted(
+        "trait Loud { fn greet(): String { return \"HELLO\"; } }
+         trait Quiet { fn greet(): String { return \"hello\"; } }
+         class Both implements Loud, Quiet {
+             construct() { }
+             fn greet(): String { return \"hi\"; }
+         }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
 fn invalid_class_missing_what_a_contract_requires() {
     let output = rejected(
         "interface Describable { fn describe(): String; }
@@ -1380,4 +1605,1010 @@ fn valid_a_nullable_contract_is_a_type() {
          class R implements D { construct() { } fn describe(): String { return \"r\"; } }
          fn main(): Void { mut d: D? = R(); mut e: D? = null; }",
     );
+}
+
+// --- Genéricos ---------------------------------------------------------------
+
+#[test]
+fn valid_generic_class_body_type_checks_against_its_own_type_parameter() {
+    // `T` resolves the same way everywhere the class names it, so assigning a
+    // `T` to a `T` field and returning a `T` from a method that declares `T`
+    // both type-check. A class this simple — every use of `T` direct, no
+    // `extends`/`implements` — also fully lowers now (roadmap task 11.1), so
+    // this is accepted outright rather than merely free of these two codes.
+    accepted(
+        "class Box<T> {
+             value: T;
+             construct(value: T) { this.value = value; }
+             fn get(): T { return this.value; }
+         }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_generic_function_is_not_lowered_yet() {
+    // Task 11.1 specializes a generic *class*; a generic function's own type
+    // parameter is a separate mechanism (`enter_type_params`, shared with
+    // methods) that this pass does not build a specialization for.
+    let output = rejected("fn identity<T>(value: T): T { return value; }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_class_with_extends_is_not_lowered_yet() {
+    // Task 11.1's specialization pass does not build a specialized copy's
+    // own dispatch table, so a generic class that `extends` stays gated.
+    let output = rejected(
+        "class Base { }
+         class Box<T> extends Base { value: T; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_class_with_nested_type_argument_is_not_lowered_yet() {
+    // `T` nested inside another generic type (here, itself) rather than
+    // named directly is the one shape task 11.1's substitution does not
+    // recurse into (`Self::type_references_any_param`).
+    let output = rejected(
+        "class Box<T> {
+             value: T;
+             next: Box<T>?;
+             construct(value: T) { this.value = value; this.next = null; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_returning_a_concrete_type_where_the_type_parameter_is_declared() {
+    // `T` is opaque: nothing proves it is `Int32`, so a literal does not fit.
+    let output = rejected(
+        "class Box<T> {
+             fn wrong(): T { return 5; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_type_parameter_is_out_of_scope_outside_its_declaration() {
+    let output = rejected(
+        "class Box<T> { value: T; }
+         class Other { value: T; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_declared_variance_is_not_verified_yet() {
+    // The grammar accepts `in`/`out` (`ZIRK_LANGUAGE_SPEC.md` section 7), but
+    // task 7.5 of the generics slice asks for a diagnostic of its own rather
+    // than silently treating it as invariant.
+    for source in [
+        "class Box<out T> { value: T; }\nfn main(): Void { }",
+        "class Sink<in T> { fn take(value: T): Void { } }\nfn main(): Void { }",
+    ] {
+        let output = rejected(source);
+        assert!(output.contains(codes::PENDING_FEATURE.as_str()), "{output}");
+        assert!(output.contains("variance"), "{output}");
+    }
+}
+
+#[test]
+fn valid_method_call_through_a_type_parameters_contract_constraint() {
+    // `value.greet()` resolves through `Greeter`, the one constraint `T`
+    // declares — task 7.4 of the generics slice.
+    let output = rejected(
+        "interface Greeter { fn greet(): String; }
+         fn show<T from Greeter>(value: T): String { return value.greet(); }
+         fn main(): Void { }",
+    );
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_field_access_through_a_type_parameters_class_constraint() {
+    let output = rejected(
+        "class Named { name: String; construct(name: String) { this.name = name; } }
+         fn show<T from Named>(value: T): String { return value.name; }
+         fn main(): Void { }",
+    );
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_method_the_constraint_does_not_promise() {
+    let output = rejected(
+        "interface Greeter { fn greet(): String; }
+         fn show<T from Greeter>(value: T): Void { mut r = value.somethingElse(); }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains("Greeter"), "{output}");
+}
+
+#[test]
+fn invalid_member_access_on_an_unconstrained_type_parameter() {
+    let output = rejected(
+        "fn show<T>(value: T): Void { mut r = value.anything(); }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains("no `from` constraint"), "{output}");
+}
+
+#[test]
+fn valid_call_infers_the_type_parameter_from_its_argument() {
+    // `identity(5)` infers `T = Int32` (roadmap task 7.6), so it type-checks
+    // as `Int32` with no argument-type or inference error — the class-level
+    // `NOT_LOWERED` from 7.1 is the only thing keeping this from compiling.
+    let output = rejected(
+        "fn identity<T>(value: T): T { return value; }
+         fn main(): Void { mut r: Int32 = identity(5); }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_call_cannot_infer_a_type_parameter_used_only_in_the_return_type() {
+    // Inference only looks at arguments today: nothing here determines `T`.
+    let output = rejected(
+        "fn make<T>(): T { return 5; }
+         fn main(): Void { mut r = make(); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("cannot infer"), "{output}");
+}
+
+#[test]
+fn invalid_call_infers_conflicting_types_for_the_same_parameter() {
+    let output = rejected(
+        "fn pair<T>(a: T, b: T): Void { }
+         fn main(): Void { pair(5, \"x\"); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("cannot infer"), "{output}");
+}
+
+#[test]
+fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
+    let output = rejected(
+        "interface Serializable { fn serialize(): String; }
+         fn store<T from Serializable>(value: T): Void { }
+         fn main(): Void { store(5); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("Serializable"), "{output}");
+}
+
+#[test]
+fn valid_call_infers_a_type_that_satisfies_the_constraint() {
+    let output = rejected(
+        "interface Serializable { fn serialize(): String; }
+         class Doc implements Serializable { construct() { } fn serialize(): String { return \"\"; } }
+         fn store<T from Serializable>(value: T): Void { }
+         fn main(): Void { store(Doc()); }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_generic_type_arguments_resolve_and_check_arity() {
+    // `Box<Int32>` itself resolves (roadmap task 7.3), and `Box<T>` is
+    // simple enough to fully specialize (11.1), so this compiles clean.
+    accepted(
+        "class Box<T> { value: T; }
+         class Holder { value: Box<Int32>; }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_generic_type_argument_count() {
+    let output = rejected(
+        "class Pair<A, B> { a: A; b: B; }
+         class Holder { value: Pair<Int32>; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_type_argument_missing_its_constraint() {
+    let output = rejected(
+        "interface Serializable { fn serialize(): String; }
+         class Box<T from Serializable> { value: T; }
+         class Holder { value: Box<Int32>; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("Serializable"), "{output}");
+}
+
+#[test]
+fn valid_generic_type_argument_satisfying_its_class_constraint() {
+    accepted(
+        "class Animal { }
+         class Dog extends Animal { }
+         class Cage<T from Animal> { value: T; }
+         class Holder { value: Cage<Dog>; }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn valid_two_instantiations_of_the_same_class_are_the_same_type() {
+    // Interned like a function type: `Box<Int32>` written twice is one id.
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Box<T> { value: T; }
+         class Holder { a: Box<Int32>; b: Box<Int32>; }
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert_eq!(
+        checked.generic_instances.len(),
+        1,
+        "`Box<Int32>` written twice should intern to one instantiation"
+    );
+}
+
+// --- Enums algebraicos y mapping ----------------------------------------------
+
+#[test]
+fn valid_traditional_enum_is_unaffected() {
+    accepted("enum Direction { North, South, East, West }\nfn main(): Void { }");
+}
+
+#[test]
+fn valid_enum_variant_with_a_string_or_numeric_mapping() {
+    accepted("enum Status { Ok -> 200, NotFound -> 404 }\nfn main(): Void { }");
+    accepted("enum Role { Admin -> \"admin\", Guest -> \"guest\" }\nfn main(): Void { }");
+}
+
+#[test]
+fn invalid_enum_variant_mapping_to_an_incompatible_type() {
+    let output = rejected("enum Status { Ok -> true }\nfn main(): Void { }");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_algebraic_variant_constructs_and_destructures() {
+    // Associated data fully lowers now — discriminant plus a flattened
+    // payload (roadmap task 11.3/11.4) — so this compiles clean.
+    accepted(
+        "enum Shape { Circle(radius: Int32), Point }
+         fn area(s: Shape): Int32 {
+             return match s {
+                 Shape.Circle(radius) => radius,
+                 Shape.Point => 0,
+             };
+         }
+         fn main(): Void { mut s = Shape.Circle(radius: 3); stdout.println(area(s)); }",
+    );
+}
+
+#[test]
+fn valid_algebraic_variant_matches_named_arguments() {
+    accepted(
+        "enum Shape { Rectangle(w: Int32, h: Int32) }
+         fn main(): Void { mut s = Shape.Rectangle(h: 2, w: 4); }",
+    );
+}
+
+#[test]
+fn invalid_generic_enum_with_data_is_not_lowered_yet() {
+    // A non-generic algebraic enum fully lowers (task 11.3); combining that
+    // with per-instantiation specialization (11.1) is out of scope.
+    let output = rejected(
+        "enum Box<T> { Full(value: T), Empty }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_literal_pattern_destructuring_a_variant_is_not_lowered_yet() {
+    // A binding or a wildcard destructures a variant's field for real
+    // (task 11.4); a literal sub-pattern would need combined-condition
+    // compilation this pass does not build.
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32) }
+         fn main(): Void {
+             mut s = Shape.Circle(radius: 3);
+             match s { Shape.Circle(3) => { } _ => { } }
+         }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+// --- Records y value classes --------------------------------------------------
+
+#[test]
+fn valid_record_construction_and_field_access() {
+    // A non-generic record fully lowers now (roadmap task 11.5).
+    accepted(
+        "record Point { x: Int32; y: Int32; }
+         fn main(): Void { mut p = Point(x: 1, y: 2); stdout.println(p.x); }",
+    );
+}
+
+#[test]
+fn valid_record_omitted_field_takes_its_type_default() {
+    accepted(
+        "record Settings { count: Int32; flag: Boolean; }
+         fn main(): Void { mut s = Settings(); }",
+    );
+}
+
+#[test]
+fn invalid_record_field_without_a_default_is_required() {
+    let output = rejected(
+        "class Engine { }
+         record Car { engine: Engine; }
+         fn main(): Void { mut c = Car(); }",
+    );
+    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_record_construction_with_positional_arguments() {
+    let output = rejected(
+        "record Point { x: Int32; y: Int32; }
+         fn main(): Void { mut p = Point(1, 2); }",
+    );
+    assert!(
+        output.contains(codes::UNKNOWN_ARGUMENT_NAME.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_record_extends_a_class() {
+    let output = rejected(
+        "class Base { }
+         record Point extends Base { x: Int32; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_record_declares_a_custom_construct() {
+    let output = rejected(
+        "record Point {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_record_field_explicitly_marked_mut() {
+    let output = rejected(
+        "record Point { mut x: Int32; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_mutating_a_record_field_from_a_method() {
+    let output = rejected(
+        "record Point {
+             x: Int32;
+             fn reset(): Void { this.x = 0; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_record_equality_is_derived_without_a_reserved_method() {
+    let output = rejected(
+        "record Point { x: Int32; y: Int32; }
+         fn main(): Void { mut a = Point(x: 1, y: 2); mut b = Point(x: 1, y: 2); stdout.println(a == b); }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_identity_comparison_on_a_record() {
+    let output = rejected(
+        "record Point { x: Int32; }
+         fn main(): Void { mut a = Point(x: 1); mut b = Point(x: 1); stdout.println(a is b); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("no identity"), "{output}");
+}
+
+#[test]
+fn invalid_generic_record_is_not_lowered_yet() {
+    // A non-generic record/value class fully lowers (task 11.5); combining
+    // that with per-instantiation specialization (11.1) is out of scope.
+    // `value class` sugar has no syntax for `<T>` at all, so only a
+    // `record` can even be written generic.
+    let output = rejected("record Box<T> { value: T; }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn valid_value_class_construction() {
+    accepted("value class UserId(value: Int32);\nfn main(): Void { mut u = UserId(value: 5); }");
+}
+
+#[test]
+fn invalid_constructing_a_variant_with_the_wrong_argument_type() {
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32) }
+         fn main(): Void { mut s = Shape.Circle(radius: \"x\"); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_constructing_a_variant_with_the_wrong_argument_count() {
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32) }
+         fn main(): Void { mut s = Shape.Circle(1, 2); }",
+    );
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_constructing_a_bare_variant_that_carries_data() {
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32) }
+         fn main(): Void { mut s = Shape.Circle; }",
+    );
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_constructing_with_data_a_variant_that_carries_none() {
+    let output = rejected(
+        "enum Shape { Point }
+         fn main(): Void { mut s = Shape.Point(1); }",
+    );
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_pattern_omits_the_destructuring_a_variant_needs() {
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32) }
+         fn area(s: Shape): Int32 {
+             match s { Shape.Circle => 0 }
+         }
+         fn main(): Void { mut s = Shape.Circle(radius: 1); stdout.println(area(s)); }",
+    );
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_over_an_algebraic_enum_is_not_exhaustive() {
+    let output = rejected(
+        "enum Shape { Circle(radius: Int32), Point }
+         fn area(s: Shape): Int32 {
+             match s { Shape.Circle(radius) => radius }
+         }
+         fn main(): Void { mut s = Shape.Point; stdout.println(area(s)); }",
+    );
+    assert!(
+        output.contains(codes::NON_EXHAUSTIVE_MATCH.as_str()),
+        "{output}"
+    );
+}
+
+// --- Alias de tipo -------------------------------------------------------------
+
+#[test]
+fn valid_type_alias_is_transparent_with_its_target() {
+    let output = rejected("type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; }");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_type_alias_to_a_declared_class() {
+    let output = rejected(
+        "class User { construct() { } }
+         type Account = User;
+         fn main(): Void { mut a: Account = User(); }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_type_alias_is_not_lowered_yet() {
+    let output = rejected("type UserId = Int32;\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_type_alias_mismatched_target() {
+    let output = rejected("type UserId = Int32;\nfn main(): Void { mut id: UserId = \"x\"; }");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_duplicate_type_alias() {
+    let output = rejected(
+        "type A = Int32;
+         type A = String;
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_type_alias_cycle() {
+    let output = rejected(
+        "type A = B;
+         type B = A;
+         fn main(): Void { mut x: A = 1; }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("itself"), "{output}");
+}
+
+#[test]
+fn valid_type_alias_chain() {
+    let output = rejected(
+        "type A = Int32;
+         type B = A;
+         fn main(): Void { mut x: B = 5; }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+// --- Uniones ---------------------------------------------------------------
+
+#[test]
+fn valid_union_type_accepts_either_alternative() {
+    let output = rejected(
+        "fn f(x: String | Int32): Void { }
+         fn main(): Void { f(\"a\"); f(1); }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_union_type_rejects_a_third_type() {
+    let output = rejected(
+        "fn f(x: String | Int32): Void { }
+         fn main(): Void { f(true); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_union_order_is_irrelevant() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder { a: String | Int32; b: Int32 | String; }
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert_eq!(
+        checked.unions.len(),
+        1,
+        "`String | Int32` and `Int32 | String` should intern to one union"
+    );
+}
+
+#[test]
+fn valid_union_duplicates_collapse() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder { a: String | String | Int32; }
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert_eq!(checked.unions[0].len(), 2, "a repeated alternative is one member");
+}
+
+#[test]
+fn valid_union_with_null_is_a_plain_nullable_type() {
+    // `String | Null` degrades to a plain nullable `String`, not a `Union`.
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder { a: String | Null; }
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert_eq!(checked.unions.len(), 0);
+}
+
+#[test]
+fn valid_union_subsumes_a_subclass_alternative() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Animal { }
+         class Dog extends Animal { }
+         class Holder { a: Animal | Dog; }
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    // `Dog` is subsumed by `Animal`, so nothing needed a `Union` at all.
+    assert_eq!(checked.unions.len(), 0);
+}
+
+#[test]
+fn invalid_member_access_on_an_unnarrowed_union() {
+    let output = rejected(
+        "class A { fn hello(): Void { } }
+         class B { }
+         fn f(x: A | B): Void { x.hello(); }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains("narrow"), "{output}");
+}
+
+#[test]
+fn invalid_union_type_is_not_lowered_yet() {
+    let output = rejected("fn f(x: String | Int32): Void { }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+// --- Casts -----------------------------------------------------------------
+
+#[test]
+fn valid_cast_between_a_class_and_its_base() {
+    // A class-to-class cast is checked at runtime now (roadmap task 11.6),
+    // so this compiles clean rather than merely avoiding `TYPE_MISMATCH`.
+    accepted(
+        "class Animal { }
+         class Dog extends Animal { construct() { } }
+         fn main(): Void { mut d = Dog(); mut a = d as Animal; mut b = <Dog>a; }",
+    );
+}
+
+#[test]
+fn valid_cast_between_a_class_and_a_contract() {
+    let output = rejected(
+        "interface Shape { fn area(): Int32; }
+         class Circle implements Shape { construct() { } fn area(): Int32 { return 1; } }
+         fn main(): Void { mut c = Circle(); mut s = c as Shape; mut back = <Circle>s; }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_cast_from_a_union_member() {
+    let output = rejected(
+        "fn f(x: String | Int32): Void { mut s = x as String; }
+         fn main(): Void { }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_identity_cast() {
+    accepted("fn main(): Void { mut x = 1 as Int32; }");
+}
+
+#[test]
+fn invalid_cast_between_unrelated_types() {
+    let output = rejected("fn main(): Void { mut x = \"a\" as Int32; }");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_cast_between_unrelated_classes() {
+    let output = rejected(
+        "class A { construct() { } }
+         class B { construct() { } }
+         fn main(): Void { mut a = A(); mut b = a as B; }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_nullable_cast_is_not_lowered_yet() {
+    // A class-to-class cast lowers now (task 11.6), but only once nullability
+    // is out of the way: deciding what a null value means for the check is a
+    // separate question this pass does not answer yet.
+    let output = rejected(
+        "class Animal { }
+         class Dog extends Animal { construct() { } }
+         fn main(): Void { mut a: Animal? = Dog(); mut d = a as Dog?; }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn valid_cast_from_a_type_parameter_to_its_own_constraint() {
+    // `T from Serializable` may always be widened to `Serializable`: that is
+    // exactly what the constraint promises, not a leap of faith.
+    let output = rejected(
+        "interface Serializable { fn serialize(): String; }
+         fn show<T from Serializable>(x: T): Void { mut y = x as Serializable; }
+         fn main(): Void { }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_cast_from_a_type_parameter_to_an_unrelated_type() {
+    let output = rejected(
+        "interface Serializable { fn serialize(): String; }
+         fn show<T from Serializable>(x: T): Void { mut y = x as String; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+// --- `?.` --------------------------------------------------------------------
+
+#[test]
+fn valid_safe_field_access_types_as_nullable() {
+    // The type rules are real (D7): the member's own type is `String`, but
+    // reading it through `?.` makes the result `String?`. Field access through
+    // `?.` is fully lowered (task 10.8), so this is accepted outright.
+    accepted(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void { mut u: User? = null; mut n: String? = u?.name; }",
+    );
+}
+
+#[test]
+fn valid_safe_method_call_types_as_nullable() {
+    accepted(
+        "class User { fn greet(): String { return \"hi\"; } construct() { } }
+         fn main(): Void { mut u: User? = null; mut g: String? = u?.greet(); }",
+    );
+}
+
+#[test]
+fn invalid_plain_access_through_a_nullable_receiver_still_rejected() {
+    // `?.` is what makes this legal; plain `.` still is not.
+    let output = rejected(
+        "class User { name: String; construct(name: String) { this.name = name; } }
+         fn main(): Void { mut u: User? = null; mut n = u.name; }",
+    );
+    assert!(output.contains("may be absent"), "{output}");
+}
+
+#[test]
+fn valid_safe_method_call_lowers() {
+    // Both halves of task 10.8 lower now: a field through `?.` and a method
+    // call through it, dispatched under the same absent/present split.
+    accepted(
+        "class User { fn greet(): String { return \"hi\"; } construct() { } }
+         fn main(): Void { mut u: User? = null; mut g = u?.greet(); }",
+    );
+}
+
+#[test]
+fn invalid_safe_method_call_through_generic_param_is_not_lowered() {
+    // Through a generic parameter's constraint there is no concrete method
+    // body to call yet, so that combination stays gated.
+    let output = rejected(
+        "trait Greeter { fn greet(): String; }
+         class Wrap<T from Greeter> { value: T?; construct(value: T?) { this.value = value; } fn hello(): String? { return this.value?.greet(); } }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+// --- Closures no anotables ni escapables (D9) ---------------------------------
+
+#[test]
+fn valid_closure_stored_in_an_inferred_local_and_called() {
+    accepted("fn main(): Void { mut add = (a: Int32, b: Int32): Int32 => a + b; stdout.println(add(1, 2)); }");
+}
+
+#[test]
+fn invalid_closure_returned_from_a_function() {
+    // There is no way to declare `Fn(...) => R` as a return type (4.8), so a
+    // closure can never match a function's declared return type (D9).
+    let output = rejected(
+        "class NotAClosure { }
+         fn make(): NotAClosure { return (): Void => { }; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_inference_from_a_closure_argument() {
+    // The same escape, under a generic parameter instead of a named type.
+    let output = rejected(
+        "fn store<T>(value: T): Void { }
+         fn main(): Void { store((): Void => { }); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("closure"), "{output}");
+}
+
+#[test]
+fn valid_generic_class_construction_and_member_access() {
+    // A generic class's construction, annotation and member access all type
+    // through a real instantiation (`Base::Instance`), not the bare class:
+    // `check_construction` used to build the constructor's `Signature` with
+    // no type parameters at all, so `Box(5)` never inferred `T` and this
+    // failed with `TYPE_MISMATCH`. `Box<T>` is also simple enough to fully
+    // specialize (roadmap task 11.1), so the whole program compiles clean.
+    accepted(
+        "class Box<T> {
+             value: T;
+             construct(value: T) { this.value = value; }
+             fn get(): T { return this.value; }
+         }
+         fn main(): Void {
+             mut b: Box<Int32> = Box(5);
+             stdout.println(b.get());
+         }",
+    );
+}
+
+// --- Abstract classes ----------------------------------------------------------
+
+const SHAPE: &str = "abstract class Shape {
+    name: String;
+    abstract fn area(): Int32;
+}";
+
+#[test]
+fn valid_class_adopts_an_abstract_class() {
+    let output = rejected(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): Int32 {{ return 3; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(!output.contains(codes::MISSING_IMPLEMENTATION.as_str()), "{output}");
+    assert!(!output.contains(codes::MISSING_OVERRIDE.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_abstract_class_missing_attribute() {
+    let output = rejected(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             construct() {{ }}
+             override fn area(): Int32 {{ return 3; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_abstract_class_missing_method() {
+    let output = rejected(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_abstract_class_method_without_override() {
+    let output = rejected(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             fn area(): Int32 {{ return 3; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(output.contains(codes::MISSING_OVERRIDE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_abstract_class_method_with_mismatched_signature() {
+    let output = rejected(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): String {{ return \"x\"; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_abstract_class_extends_a_class() {
+    let output = rejected(
+        "class Base { }
+         abstract class Shape extends Base { }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_abstract_class_declares_a_construct() {
+    let output = rejected(
+        "abstract class Shape { construct() { } }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_abstract_class_is_not_lowered_yet() {
+    let output = rejected(&format!("{SHAPE}\nfn main(): Void {{ }}"));
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }

@@ -42,6 +42,13 @@ struct Parser<'a> {
     pos: usize,
     /// How many expressions and blocks enclose the one being parsed.
     depth: u32,
+    /// What is left of a `>>`, `>>=` or `>=` token after [`Self::eat_gt`] has
+    /// taken its first `>` to close one level of `Box<Box<T>>`.
+    ///
+    /// The lexer emits those as one token (`token.rs` explains why), so
+    /// closing nested generics means handing back the rest without moving
+    /// `pos`, which still points at the original token until this is spent.
+    pending_gt: Option<TokenKind>,
 }
 
 impl<'a> Parser<'a> {
@@ -52,6 +59,7 @@ impl<'a> Parser<'a> {
             sink,
             pos: 0,
             depth: 0,
+            pending_gt: None,
         }
     }
 
@@ -122,6 +130,44 @@ impl<'a> Parser<'a> {
 
     fn check_keyword(&self, k: Keyword) -> bool {
         self.peek() == &TokenKind::Keyword(k)
+    }
+
+    /// Splits a `>`-starting token into its first `>` and what remains.
+    fn split_gt(kind: &TokenKind) -> Option<(TokenKind, Option<TokenKind>)> {
+        match kind {
+            TokenKind::Gt => Some((TokenKind::Gt, None)),
+            TokenKind::Shr => Some((TokenKind::Gt, Some(TokenKind::Gt))),
+            TokenKind::ShrEq => Some((TokenKind::Gt, Some(TokenKind::GtEq))),
+            TokenKind::GtEq => Some((TokenKind::Gt, Some(TokenKind::Assign))),
+            _ => None,
+        }
+    }
+
+    /// Whether the next `>` a generic parameter or argument list needs is
+    /// available, possibly as the head of a `>>`, `>>=` or `>=` token.
+    fn check_gt(&self) -> bool {
+        match &self.pending_gt {
+            Some(kind) => Self::split_gt(kind).is_some(),
+            None => Self::split_gt(self.peek()).is_some(),
+        }
+    }
+
+    /// Consumes one `>`, splitting `>>`, `>>=` or `>=` when that is what is
+    /// there. See [`Self::pending_gt`].
+    fn eat_gt(&mut self) -> bool {
+        let source = match self.pending_gt.take() {
+            Some(kind) => kind,
+            None => self.peek().clone(),
+        };
+        let Some((_, rest)) = Self::split_gt(&source) else {
+            self.pending_gt = Some(source);
+            return false;
+        };
+        match rest {
+            Some(rest) => self.pending_gt = Some(rest),
+            None => self.pos += 1,
+        }
+        true
     }
 
     // --- Diagnostics ------------------------------------------------------
@@ -323,6 +369,7 @@ impl<'a> Parser<'a> {
         let mut classes = Vec::new();
         let mut contracts = Vec::new();
         let mut functions = Vec::new();
+        let mut type_aliases = Vec::new();
 
         while !self.at_eof() {
             if self.check_keyword(Keyword::Import) {
@@ -361,8 +408,49 @@ impl<'a> Parser<'a> {
             }
 
             if self.check_keyword(Keyword::Class) {
-                if let Some(c) = self.parse_class(shared_at.is_some()) {
+                if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Class) {
                     classes.push(c);
+                }
+                continue;
+            }
+
+            // `abstract class`: a requirement set, adopted with `implements`
+            // rather than extended. Only meaningful directly in front of
+            // `class` — elsewhere `abstract` still names a later phase.
+            if self.check_keyword(Keyword::Abstract)
+                && self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                    == Some(&TokenKind::Keyword(Keyword::Class))
+            {
+                self.pos += 1; // `abstract`
+                if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Abstract) {
+                    classes.push(c);
+                }
+                continue;
+            }
+
+            if self.check_keyword(Keyword::Record) {
+                if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Record) {
+                    classes.push(c);
+                }
+                continue;
+            }
+
+            // `value` is contextual: only a `class` right after it makes this
+            // a value class instead of an identifier starting an expression,
+            // which cannot appear at the top level anyway.
+            if matches!(self.peek(), TokenKind::Identifier(name) if name == "value")
+                && self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                    == Some(&TokenKind::Keyword(Keyword::Class))
+            {
+                if let Some(c) = self.parse_value_class(shared_at.is_some()) {
+                    classes.push(c);
+                }
+                continue;
+            }
+
+            if self.check_keyword(Keyword::Type) {
+                if let Some(a) = self.parse_type_alias(shared_at.is_some()) {
+                    type_aliases.push(a);
                 }
                 continue;
             }
@@ -412,6 +500,7 @@ impl<'a> Parser<'a> {
             classes,
             contracts,
             functions,
+            type_aliases,
             span: start.to(end),
         }
     }
@@ -530,11 +619,23 @@ impl<'a> Parser<'a> {
     ///
     /// The three kinds of member are told apart by what starts them: the
     /// `construct` keyword, a `fn`, or anything else — which is a field.
-    fn parse_class(&mut self, shared: bool) -> Option<ClassDecl> {
+    fn parse_class(&mut self, shared: bool, kind: ClassKind) -> Option<ClassDecl> {
         let start = self.peek_span();
-        self.eat_keyword(Keyword::Class);
+        let keyword = match kind {
+            // `abstract` is consumed by the caller, ahead of `class` itself.
+            ClassKind::Class | ClassKind::Abstract => Keyword::Class,
+            ClassKind::Record => Keyword::Record,
+            ClassKind::ValueClass => unreachable!("a value class has its own compact grammar"),
+        };
+        self.eat_keyword(keyword);
 
-        let name = self.expect_identifier("after `class`")?;
+        let context = if kind == ClassKind::Record {
+            "after `record`"
+        } else {
+            "after `class`"
+        };
+        let name = self.expect_identifier(context)?;
+        let type_params = self.parse_type_params();
 
         // A class extends at most one class. Several bases would need a rule
         // for which one a repeated member comes from, and the spec has none.
@@ -561,7 +662,7 @@ impl<'a> Parser<'a> {
         let mut implements = Vec::new();
         if self.eat_keyword(Keyword::Implements) {
             loop {
-                let Some(contract) = self.expect_identifier("after `implements`") else {
+                let Some(contract) = self.parse_type_atom() else {
                     break;
                 };
                 implements.push(contract);
@@ -578,7 +679,7 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
 
         while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
-            let Some(member) = self.parse_class_member() else {
+            let Some(member) = self.parse_class_member(kind == ClassKind::Abstract) else {
                 self.synchronize_member();
                 continue;
             };
@@ -594,11 +695,67 @@ impl<'a> Parser<'a> {
 
         Some(ClassDecl {
             name,
+            kind,
+            type_params,
             implements,
             extends,
             fields,
             constructors,
             methods,
+            shared,
+            span: start.to(end),
+        })
+    }
+
+    /// `value class Name(field: Type, field: Type, ...);`
+    ///
+    /// A record's semantics compressed into one declaration: the parenthesized
+    /// list becomes `fields`, exactly as if each had been written
+    /// `field: Type;` in a `record` body. `value` is contextual — recognized
+    /// only in front of `class`, the same way `strict` is only meaningful
+    /// after `inmut::`.
+    fn parse_value_class(&mut self, shared: bool) -> Option<ClassDecl> {
+        let start = self.peek_span();
+        self.pos += 1; // `value`
+        self.eat_keyword(Keyword::Class);
+
+        let name = self.expect_identifier("after `value class`")?;
+        self.expect(&TokenKind::LParen, "after the value class name");
+
+        let mut fields = Vec::new();
+        if !matches!(self.peek(), TokenKind::RParen) {
+            loop {
+                let field_start = self.peek_span();
+                let field_name = self.expect_identifier("as a field name")?;
+                self.expect(&TokenKind::Colon, "after the field name");
+                let ty = self.parse_type()?;
+                let field_end = ty.span;
+                fields.push(FieldDecl {
+                    name: field_name,
+                    ty,
+                    visibility: Visibility::Public,
+                    mutability: Mutability::Immutable,
+                    explicit_modifiers: false,
+                    span: field_start.to(field_end),
+                });
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen, "to close the value class's fields");
+        let end = self.peek_span();
+        self.expect(&TokenKind::Semicolon, "after a value class declaration");
+
+        Some(ClassDecl {
+            name,
+            kind: ClassKind::ValueClass,
+            type_params: Vec::new(),
+            implements: Vec::new(),
+            extends: None,
+            fields,
+            constructors: Vec::new(),
+            methods: Vec::new(),
             shared,
             span: start.to(end),
         })
@@ -615,6 +772,7 @@ impl<'a> Parser<'a> {
         };
 
         let name = self.expect_identifier(&format!("after `{}`", kind.as_str()))?;
+        let type_params = self.parse_type_params();
         self.expect(&TokenKind::LBrace, "after the contract name");
 
         let mut methods = Vec::new();
@@ -653,6 +811,7 @@ impl<'a> Parser<'a> {
         Some(ContractDecl {
             name,
             kind,
+            type_params,
             methods,
             shared,
             span: start.to(end),
@@ -669,6 +828,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Fn);
 
         let name = self.expect_identifier("after `fn`")?;
+        let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
@@ -698,6 +858,7 @@ impl<'a> Parser<'a> {
 
         Some(MethodDecl {
             name,
+            type_params,
             is_override: false,
             params,
             return_type,
@@ -709,18 +870,32 @@ impl<'a> Parser<'a> {
     }
 
     /// One member of a class body.
-    fn parse_class_member(&mut self) -> Option<ClassMember> {
+    fn parse_class_member(&mut self, allow_abstract: bool) -> Option<ClassMember> {
         let start = self.peek_span();
 
         // The modifiers come first and apply to whatever follows.
         let visibility = self.parse_visibility();
 
-        // `abstract class` is a requirement set adopted with `implements`, not
-        // something this slice supports yet.
-        if self.check_keyword(Keyword::Abstract) && self.report_if_from_another_phase() {
+        // Only meaningful inside an `abstract class`: every member there is
+        // a signature, never a body, so the keyword itself does not carry
+        // that on its own — it is written for each member all the same.
+        let is_abstract = if allow_abstract {
+            self.eat_keyword(Keyword::Abstract)
+        } else if self.check_keyword(Keyword::Abstract) {
+            let span = self.peek_span();
+            self.error(
+                codes::ABSTRACT_OUTSIDE_ABSTRACT_CLASS,
+                span,
+                "`abstract` is only valid inside an `abstract class`",
+                "an ordinary class cannot declare abstract members",
+                Some("mark the class itself `abstract class` to declare abstract methods".into()),
+            );
+            self.pos += 1;
+            self.synchronize();
             return None;
-        }
-        let is_abstract = false;
+        } else {
+            false
+        };
         let is_override = self.eat_keyword(Keyword::Override);
 
         if self.check_keyword(Keyword::Construct) {
@@ -816,6 +991,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Fn);
 
         let name = self.expect_identifier("after `fn`")?;
+        let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
@@ -844,6 +1020,7 @@ impl<'a> Parser<'a> {
 
         Some(MethodDecl {
             name,
+            type_params,
             is_override,
             params,
             return_type,
@@ -888,28 +1065,14 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Enum);
 
         let name = self.expect_identifier("after `enum`")?;
+        let type_params = self.parse_type_params();
         self.expect(&TokenKind::LBrace, "after the enum name");
 
         let mut variants = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
-            let Some(variant) = self.expect_identifier("as an enum variant") else {
+            let Some(variant) = self.parse_enum_variant() else {
                 break;
             };
-
-            // Associated data is what Phase 3 adds on top of this.
-            if matches!(self.peek(), TokenKind::LParen) {
-                let span = self.peek_span();
-                self.error(
-                    codes::NOT_IMPLEMENTED,
-                    span,
-                    "enum variants with associated data are not implemented yet",
-                    "this phase covers enums as a closed set of names",
-                    Some("algebraic enums arrive in Phase 3".into()),
-                );
-                self.synchronize();
-                return None;
-            }
-
             variants.push(variant);
 
             if !self.eat(&TokenKind::Comma) {
@@ -922,7 +1085,82 @@ impl<'a> Parser<'a> {
 
         Some(EnumDecl {
             name,
+            type_params,
             variants,
+            shared,
+            span: start.to(end),
+        })
+    }
+
+    /// One `enum` variant: a bare name, `Name(Type, ...)` with associated
+    /// data, or `Name -> value` with an explicit mapping. Never more than one
+    /// of those at once.
+    fn parse_enum_variant(&mut self) -> Option<EnumVariant> {
+        let start = self.peek_span();
+        let name = self.expect_identifier("as an enum variant")?;
+
+        if self.eat(&TokenKind::LParen) {
+            let mut associated = Vec::new();
+            if !matches!(self.peek(), TokenKind::RParen) {
+                loop {
+                    let field_start = self.peek_span();
+                    let field_name = self.expect_identifier("as an associated field's name")?;
+                    self.expect(&TokenKind::Colon, "after the associated field's name");
+                    let ty = self.parse_type()?;
+                    let field_end = ty.span;
+                    associated.push(AssociatedField {
+                        name: field_name,
+                        ty,
+                        span: field_start.to(field_end),
+                    });
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            let end = self.peek_span();
+            self.expect(&TokenKind::RParen, "to close the variant's associated data");
+            return Some(EnumVariant {
+                name,
+                associated,
+                mapping: None,
+                span: start.to(end),
+            });
+        }
+
+        if self.eat(&TokenKind::Arrow) {
+            let mapping = self.parse_expr()?;
+            let end = mapping.span();
+            return Some(EnumVariant {
+                name,
+                associated: Vec::new(),
+                mapping: Some(mapping),
+                span: start.to(end),
+            });
+        }
+
+        Some(EnumVariant {
+            span: name.span,
+            name,
+            associated: Vec::new(),
+            mapping: None,
+        })
+    }
+
+    /// `type UserLookup = Result<User, LookupError>;`
+    fn parse_type_alias(&mut self, shared: bool) -> Option<TypeAliasDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Type);
+
+        let name = self.expect_identifier("after `type`")?;
+        self.expect(&TokenKind::Assign, "after the alias name");
+        let target = self.parse_type()?;
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(TypeAliasDecl {
+            name,
+            target,
             shared,
             span: start.to(end),
         })
@@ -933,6 +1171,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Fn);
 
         let name = self.expect_identifier("after `fn`")?;
+        let type_params = self.parse_type_params();
 
         self.expect(&TokenKind::LParen, "after the function name");
         let params = self.parse_params();
@@ -945,6 +1184,7 @@ impl<'a> Parser<'a> {
 
         Some(FnDecl {
             name,
+            type_params,
             params,
             return_type,
             body,
@@ -1039,19 +1279,65 @@ impl<'a> Parser<'a> {
         params
     }
 
+    /// A type, admitting `A | B | ...` (`ZIRK_LANGUAGE_SPEC.md` section 4).
+    ///
+    /// One alternative is [`Self::parse_type_atom`]; this only adds the `|`
+    /// loop around it, so a caller that never wants a union in its position
+    /// (a generic argument, a `from` constraint) calls the atom directly
+    /// instead.
     fn parse_type(&mut self) -> Option<TypeRef> {
+        let start = self.peek_span();
+        let first = self.parse_type_atom()?;
+        if !matches!(self.peek(), TokenKind::Pipe) {
+            return Some(first);
+        }
+
+        let mut union_with = Vec::new();
+        while self.eat(&TokenKind::Pipe) {
+            union_with.push(self.parse_type_atom()?);
+        }
+        let end = union_with.last().map(|t| t.span).unwrap_or(first.span);
+
+        let mut ty = first;
+        ty.union_with = union_with;
+        ty.span = start.to(end);
+        Some(ty)
+    }
+
+    /// One alternative of a type: a name, its `<...>` arguments if generic,
+    /// and a trailing `?`. Never a union on its own — see [`Self::parse_type`].
+    fn parse_type_atom(&mut self) -> Option<TypeRef> {
         let span = self.peek_span();
         if let TokenKind::Identifier(name) = self.peek().clone() {
             self.pos += 1;
+
+            // `Fn(P...) => R` / `Function(P...) => R`: recognized so the
+            // diagnostic can name the construct instead of reporting whatever
+            // token `(` happens to confuse next (decision D9 of the design —
+            // this phase's parser and checker reject the annotation on
+            // purpose, closure values elsewhere are unaffected).
+            if (name == "Fn" || name == "Function") && matches!(self.peek(), TokenKind::LParen) {
+                return self.reject_function_type(name, span);
+            }
+
+            let arguments = if matches!(self.peek(), TokenKind::Lt) {
+                self.parse_type_args()?
+            } else {
+                Vec::new()
+            };
 
             // `T?` is `T | Null`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
             if matches!(self.peek(), TokenKind::Question) {
                 let end = self.peek_span();
                 self.pos += 1;
-                return Some(TypeRef::nullable(name, span.to(end)));
+                let mut ty = TypeRef::nullable(name, span.to(end));
+                ty.arguments = arguments;
+                return Some(ty);
             }
 
-            return Some(TypeRef::new(name, span));
+            let mut ty = TypeRef::new(name, span);
+            ty.arguments = arguments;
+            return Some(ty);
         }
 
         let found = self.peek().description();
@@ -1063,6 +1349,139 @@ impl<'a> Parser<'a> {
             Some("the available types are Void, Int32, Boolean and String".into()),
         );
         None
+    }
+
+    /// `Fn(P...) => R` or `Function(P...) => R` in type position, rejected on
+    /// purpose per decision D9 — consumes the whole shape for recovery, then
+    /// reports it by name rather than leaving `(` to confuse whatever parses
+    /// next.
+    fn reject_function_type(&mut self, name: String, start: Span) -> Option<TypeRef> {
+        self.pos += 1; // `(`
+        let mut depth = 1u32;
+        while depth > 0 && !self.at_eof() {
+            match self.peek() {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                _ => {}
+            }
+            self.pos += 1;
+        }
+
+        let mut end = self.peek_span();
+        if self.eat(&TokenKind::FatArrow)
+            && let Some(returns) = self.parse_type_atom()
+        {
+            end = returns.span;
+        }
+
+        self.error(
+            codes::NOT_IMPLEMENTED,
+            start.to(end),
+            format!("`{name}(...)` is not implemented yet"),
+            "function types exist in the language, but this phase's parser and checker reject the annotation on purpose (decision D9)",
+            Some(
+                "let a closure's type be inferred instead of annotating it: assign it to a local without a type annotation"
+                    .into(),
+            ),
+        );
+        None
+    }
+
+    /// `<Int32, String>` in `Map<Int32, String>`, the `<` already consumed by
+    /// the caller having peeked it.
+    fn parse_type_args(&mut self) -> Option<Vec<TypeRef>> {
+        self.pos += 1; // `<`
+
+        let mut arguments = Vec::new();
+        if !self.check_gt() {
+            loop {
+                // A union as a type argument is out of scope for now: it
+                // would need `check_gt`-style splitting for the `|` inside
+                // `Box<A | B>` too, which nothing exercises yet.
+                arguments.push(self.parse_type_atom()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
+        if !self.eat_gt() {
+            let span = self.peek_span();
+            let found = self.peek().description();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "expected `>` to close the type arguments",
+                format!("found {found}"),
+                None,
+            );
+            return None;
+        }
+
+        Some(arguments)
+    }
+
+    /// `<T from A & B, U>` on a class, function or method, absent when the
+    /// declaration is not generic.
+    fn parse_type_params(&mut self) -> Vec<TypeParam> {
+        if !matches!(self.peek(), TokenKind::Lt) {
+            return Vec::new();
+        }
+        self.pos += 1; // `<`
+
+        let mut params = Vec::new();
+        loop {
+            let start = self.peek_span();
+            let variance = if self.eat_keyword(Keyword::In) {
+                Variance::In
+            } else if self.eat_keyword(Keyword::Out) {
+                Variance::Out
+            } else {
+                Variance::Invariant
+            };
+            let Some(name) = self.expect_identifier("as a type parameter") else {
+                break;
+            };
+
+            let mut constraints = Vec::new();
+            if self.eat_keyword(Keyword::From) {
+                loop {
+                    let Some(constraint) = self.parse_type_atom() else {
+                        break;
+                    };
+                    constraints.push(constraint);
+                    if !self.eat(&TokenKind::Amp) {
+                        break;
+                    }
+                }
+            }
+
+            let end = constraints.last().map(|c| c.span).unwrap_or(name.span);
+            params.push(TypeParam {
+                name,
+                variance,
+                constraints,
+                span: start.to(end),
+            });
+
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        if !self.eat_gt() {
+            let span = self.peek_span();
+            let found = self.peek().description();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "expected `>` to close the type parameters",
+                format!("found {found}"),
+                None,
+            );
+        }
+
+        params
     }
 
     // --- Statements -------------------------------------------------------
@@ -1328,22 +1747,31 @@ impl<'a> Parser<'a> {
             Mutability::Mutable
         } else {
             self.eat_keyword(Keyword::Inmut);
-            Mutability::Immutable
+            // `strict` is contextual, recognized by position right after
+            // `inmut::`, the same way `value` is only special right before
+            // `class`.
+            if self.eat(&TokenKind::ColonColon) {
+                let is_strict =
+                    matches!(self.peek(), TokenKind::Identifier(name) if name == "strict");
+                if is_strict {
+                    self.pos += 1;
+                    Mutability::Strict
+                } else {
+                    let span = self.peek_span();
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "expected `strict` after `inmut::`",
+                        "`inmut::strict` is the only qualified form of `inmut`",
+                        None,
+                    );
+                    self.synchronize();
+                    return None;
+                }
+            } else {
+                Mutability::Immutable
+            }
         };
-
-        // `inmut::strict` belongs to a later phase.
-        if matches!(self.peek(), TokenKind::ColonColon) {
-            let span = self.peek_span();
-            self.error(
-                codes::NOT_IMPLEMENTED,
-                span,
-                "`inmut::strict` is not implemented yet",
-                "deep immutability arrives in a later phase",
-                Some("use `inmut` for now".into()),
-            );
-            self.synchronize();
-            return None;
-        }
 
         let name = self.expect_identifier("after `mut` or `inmut`")?;
 
@@ -1817,10 +2245,27 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), TokenKind::Dot) {
                     self.pos += 1;
                     let variant = self.expect_identifier("after the enum name")?;
+
+                    let mut end = variant.span;
+                    let mut bindings = Vec::new();
+                    if self.eat(&TokenKind::LParen) {
+                        if !matches!(self.peek(), TokenKind::RParen) {
+                            loop {
+                                bindings.push(self.parse_pattern()?);
+                                if !self.eat(&TokenKind::Comma) {
+                                    break;
+                                }
+                            }
+                        }
+                        end = self.peek_span();
+                        self.expect(&TokenKind::RParen, "to close the variant's bindings");
+                    }
+
                     return Some(Pattern::Variant(VariantPattern {
-                        span: span.to(variant.span),
+                        span: span.to(end),
                         enum_name: Ident::new(name, span),
                         variant,
+                        bindings,
                     }));
                 }
 
@@ -2057,6 +2502,17 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Expr::Super(SuperExpr { span }))
             }
+            // `<Type>expr`, the prefix spelling of a cast. Unambiguous: `<`
+            // never starts a primary expression otherwise — comparison needs
+            // a left operand, which nothing precedes here.
+            //
+            // Kept out of this match arm's own body on purpose: `parse_primary`
+            // runs once per level of a deeply nested expression (parentheses
+            // recurse through it), and in a debug build every arm's locals
+            // count against that one shared frame — this one's locals ran the
+            // 128-deep nesting guard test out of a 2 MB stack before it could
+            // even report the diagnostic.
+            TokenKind::Lt => self.parse_prefix_cast(span),
             TokenKind::LParen => {
                 self.pos += 1;
                 let expr = self.parse_expr()?;
@@ -2093,6 +2549,34 @@ impl<'a> Parser<'a> {
                 None
             }
         }
+    }
+
+    /// `<Type>expr`, the prefix spelling of a cast, once `parse_primary` has
+    /// already consumed nothing but seen the leading `<`.
+    fn parse_prefix_cast(&mut self, span: Span) -> Option<Expr> {
+        self.pos += 1; // `<`
+        let target = self.parse_type_atom()?;
+        if !self.eat_gt() {
+            let found = self.peek().description();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_span(),
+                "expected `>` to close the cast's type",
+                format!("found {found}"),
+                None,
+            );
+            return None;
+        }
+        // Only the primary that follows, not its own member chain: `<T>(x).field`
+        // casts `(x)` and then reads `.field` off the cast — the outer
+        // `parse_member_chain` applies that once this returns, the same way
+        // it would to any other primary.
+        let operand = self.parse_primary()?;
+        Some(Expr::Cast(CastExpr {
+            span: span.to(operand.span()),
+            expr: Box::new(operand),
+            target,
+        }))
     }
 
     /// What may follow an identifier: a call, `stdout.println`, or nothing.
@@ -2173,6 +2657,15 @@ impl<'a> Parser<'a> {
                         span: object.span().to(end),
                         callee: Box::new(object),
                         args,
+                    });
+                }
+                TokenKind::Keyword(Keyword::As) => {
+                    self.pos += 1;
+                    let target = self.parse_type_atom()?;
+                    object = Expr::Cast(CastExpr {
+                        span: object.span().to(target.span),
+                        expr: Box::new(object),
+                        target,
                     });
                 }
                 _ => return Some(object),

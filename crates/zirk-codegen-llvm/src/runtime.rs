@@ -47,6 +47,12 @@ pub mod symbols {
     pub const CONTRACT_TABLE: &str = "zirk_rt_contract_table";
     /// Reports a descriptor missing a contract it was said to satisfy.
     pub const MISSING_CONTRACT: &str = "zirk_rt_missing_contract";
+    /// Confirms a checked cast against a descriptor's ancestor list,
+    /// terminating if it is not one of them.
+    pub const CHECK_CAST: &str = "zirk_rt_check_cast";
+    /// Reports a checked cast whose runtime type does not match and
+    /// terminates.
+    pub const INVALID_CAST: &str = "zirk_rt_invalid_cast";
 }
 
 /// The runtime functions available to generated code.
@@ -64,6 +70,7 @@ pub struct Runtime<'ctx> {
     pub contract_table: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
     pub str_repeat: FunctionValue<'ctx>,
+    pub check_cast: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -155,12 +162,21 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
+    let check_cast = module.add_function(
+        symbols::CHECK_CAST,
+        void.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let invalid_cast =
+        module.add_function(symbols::INVALID_CAST, void.fn_type(&[], false), external);
+
     for handler in [
         overflow,
         division_by_zero,
         allocation_failed,
         missing_contract,
         invalid_repeat,
+        invalid_cast,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -183,5 +199,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         contract_table,
         str_concat,
         str_repeat,
+        check_cast,
     }
 }

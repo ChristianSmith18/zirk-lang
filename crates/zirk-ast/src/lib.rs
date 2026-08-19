@@ -40,6 +40,21 @@ pub struct Program {
     pub classes: Vec<ClassDecl>,
     pub contracts: Vec<ContractDecl>,
     pub functions: Vec<FnDecl>,
+    pub type_aliases: Vec<TypeAliasDecl>,
+    pub span: Span,
+}
+
+/// `type UserLookup = Result<User, LookupError>;`
+///
+/// Transparent: the alias and its target are the same static type
+/// (`ZIRK_LANGUAGE_SPEC.md` section 7), so it carries no representation of its
+/// own — resolving a reference to it resolves `target` instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAliasDecl {
+    pub name: Ident,
+    pub target: TypeRef,
+    /// Marked `share`, so other files of the crate may import it.
+    pub shared: bool,
     pub span: Span,
 }
 
@@ -100,38 +115,107 @@ pub struct UseDecl {
     pub span: Span,
 }
 
-/// `enum Direction { North, South }`
-///
-/// Without associated data: that is the extension Phase 3 adds, per decision
-/// D1 of the design.
+/// `enum Direction { North, South }`, or `enum Shape { Circle(Int32), Point }`
+/// with associated data (`ZIRK_LANGUAGE_SPEC.md` section 7).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
     pub name: Ident,
-    pub variants: Vec<Ident>,
+    pub type_params: Vec<TypeParam>,
+    pub variants: Vec<EnumVariant>,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
     pub span: Span,
 }
 
-/// `class User { ... }`
+/// One variant of an `enum`.
+///
+/// A traditional variant is a bare name, optionally mapped to a string or
+/// numeric value with `-> value`; its default value is the name itself. An
+/// algebraic variant instead carries zero or more associated types in
+/// `(...)`, and is unpacked only by `match`. A variant is one shape or the
+/// other, never both: `associated` and `mapping` are not simultaneously
+/// non-empty/`Some`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: Ident,
+    /// `(name: Type, name: Type, ...)`, empty for a traditional variant.
+    pub associated: Vec<AssociatedField>,
+    /// `-> value`, only ever on a variant with no associated data.
+    pub mapping: Option<Expr>,
+    pub span: Span,
+}
+
+/// One named, typed value an algebraic variant carries, as in `progress:
+/// Float64` inside `Loading(progress: Float64)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedField {
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub span: Span,
+}
+
+/// `class User { ... }`, `record Point { ... }` or `value class UserId(...)`.
+///
+/// One AST shape for the three: they share fields, methods and construction
+/// machinery, and differ only in which rules the checker applies to a given
+/// [`ClassKind`] — a record or value class rejects `extends`, a custom
+/// `construct`, and mutation, and a value class is written as a single
+/// compact declaration instead of a body (`Self::to_record_style` folds that
+/// into the same shape the parser gives a `record`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,
+    pub kind: ClassKind,
+    pub type_params: Vec<TypeParam>,
     /// The contracts this class says it satisfies.
-    pub implements: Vec<Ident>,
+    pub implements: Vec<TypeRef>,
     /// The class this one extends, if any.
     ///
     /// At most one: `ZIRK_LANGUAGE_SPEC.md` section 7 admits a single base
-    /// class, and several contracts.
+    /// class, and several contracts. Always `None` for a record or value
+    /// class, which the grammar accepts and the checker rejects — the same
+    /// treatment as any other rule tied to `kind`.
     pub extends: Option<Ident>,
     pub fields: Vec<FieldDecl>,
     /// Every `construct` the class declares. More than one is allowed when
     /// their effective signatures differ (`ZIRK_LANGUAGE_SPEC.md` section 7).
+    /// Always empty for a record or value class: construction is always the
+    /// implicit named constructor over `fields`.
     pub constructors: Vec<ConstructDecl>,
     pub methods: Vec<MethodDecl>,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
     pub span: Span,
+}
+
+/// What kind of nominal type a [`ClassDecl`] declares, per
+/// `ZIRK_LANGUAGE_SPEC.md` section 7's three-way split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassKind {
+    /// Identity, state, inheritance, a custom `construct`.
+    Class,
+    /// A nominal value: named-only construction, structural equality, no
+    /// identity, no inheritance, no mutation.
+    Record,
+    /// A record's semantics compressed into one declaration:
+    /// `value class Name(field: Type, ...);`.
+    ValueClass,
+    /// `abstract class Name { ... }`: a nominal set of required attributes
+    /// and `abstract fn` signatures, with no constructor, method body,
+    /// allocated state or layout contribution of its own. A concrete class
+    /// adopts it with `implements`, the same as an interface or a trait.
+    Abstract,
+}
+
+impl ClassKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ClassKind::Class => "class",
+            ClassKind::Record => "record",
+            ClassKind::Abstract => "abstract class",
+            ClassKind::ValueClass => "value class",
+        }
+    }
 }
 
 /// `interface Serializable { ... }` or `trait Printable { ... }`
@@ -146,6 +230,7 @@ pub struct ClassDecl {
 pub struct ContractDecl {
     pub name: Ident,
     pub kind: ContractKind,
+    pub type_params: Vec<TypeParam>,
     pub methods: Vec<MethodDecl>,
     /// Marked `share`, so other files of the crate may name it.
     pub shared: bool,
@@ -198,6 +283,7 @@ pub struct ConstructDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDecl {
     pub name: Ident,
+    pub type_params: Vec<TypeParam>,
     /// Written `override fn`, which replacing an inherited method requires
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7).
     pub is_override: bool,
@@ -232,6 +318,7 @@ impl Visibility {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: Ident,
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     /// Return type. Mandatory in this phase.
     pub return_type: TypeRef,
@@ -278,8 +365,15 @@ impl Ident {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRef {
     pub name: String,
+    /// Type arguments, as in `Box<Int32>`.
+    pub arguments: Vec<TypeRef>,
     /// Written `T?`, which per `ZIRK_LANGUAGE_SPEC.md` section 4 is `T | Null`.
     pub nullable: bool,
+    /// The rest of a union's alternatives, as in `String | Int32`: this
+    /// `TypeRef` is the first (`name`, `arguments`, `nullable` describe it
+    /// alone), and each further `A |` adds one entry here. Empty for an
+    /// ordinary, non-union type.
+    pub union_with: Vec<TypeRef>,
     pub span: Span,
 }
 
@@ -287,7 +381,9 @@ impl TypeRef {
     pub fn new(name: impl Into<String>, span: Span) -> Self {
         Self {
             name: name.into(),
+            arguments: Vec::new(),
             nullable: false,
+            union_with: Vec::new(),
             span,
         }
     }
@@ -295,10 +391,38 @@ impl TypeRef {
     pub fn nullable(name: impl Into<String>, span: Span) -> Self {
         Self {
             name: name.into(),
+            arguments: Vec::new(),
             nullable: true,
+            union_with: Vec::new(),
             span,
         }
     }
+}
+
+/// A declared type parameter, as in `<T from Serializable>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeParam {
+    pub name: Ident,
+    /// Written `in T` or `out T`. Invariant when neither is written.
+    pub variance: Variance,
+    /// Constraints written with `from`, combined with `&`.
+    ///
+    /// Several because `from A & B` requires all of them at once, which is
+    /// what lets a body use everything each one promises.
+    pub constraints: Vec<TypeRef>,
+    pub span: Span,
+}
+
+/// Declared variance of a generic parameter, `ZIRK_LANGUAGE_SPEC.md` section 7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variance {
+    /// Neither `in` nor `out`: the default, and the only option a mutable
+    /// attribute may use.
+    Invariant,
+    /// `in T`, restricted to contravariant input positions.
+    In,
+    /// `out T`, restricted to covariant output positions.
+    Out,
 }
 
 /// A block of statements with its own scope.
@@ -309,15 +433,16 @@ pub struct Block {
 }
 
 /// Mutability of a variable declaration.
-///
-/// `inmut::strict` belongs to a later phase: only the two subset forms exist
-/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mutability {
     /// `mut`: allows reassignment.
     Mutable,
     /// `inmut`: freezes the reference.
     Immutable,
+    /// `inmut::strict`: freezes the reachable graph, not just the binding
+    /// (D11) — no mutable aliases can be produced from it, and it cannot be
+    /// acquired from a mutable alias that is still accessible.
+    Strict,
 }
 
 /// A statement.
@@ -566,6 +691,17 @@ pub enum Expr {
     /// modules nor a standard library exist. Deliberate debt, documented in
     /// decision D4 of the design, retired in Phase 7.
     Println(PrintlnExpr),
+    /// `expr as Type` or `<Type>expr`, the postfix and prefix spellings of
+    /// the same checkable cast (`ZIRK_LANGUAGE_SPEC.md` section 11).
+    Cast(CastExpr),
+}
+
+/// `expr as Type` or `<Type>expr`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CastExpr {
+    pub expr: Box<Expr>,
+    pub target: TypeRef,
+    pub span: Span,
 }
 
 impl Expr {
@@ -590,6 +726,7 @@ impl Expr {
             Expr::Lambda(e) => e.span,
             Expr::Variant(e) => e.span,
             Expr::Println(e) => e.span,
+            Expr::Cast(e) => e.span,
         }
     }
 }
@@ -767,11 +904,15 @@ pub struct VariantExpr {
     pub span: Span,
 }
 
-/// `Direction.North` in pattern position.
+/// `Direction.North` in pattern position, or `Shape.Circle(radius)`
+/// destructuring an algebraic variant's associated data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantPattern {
     pub enum_name: Ident,
     pub variant: Ident,
+    /// One pattern per associated field, in declaration order. Empty for a
+    /// traditional variant or a bare algebraic variant with no data.
+    pub bindings: Vec<Pattern>,
     pub span: Span,
 }
 

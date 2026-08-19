@@ -88,6 +88,10 @@ pub enum Keyword {
     Dec,
     Gen,
     Default,
+    /// `out T` on a generic parameter, restricting it to covariant output
+    /// positions. `in` is shared with `for ... in`, so only `out` needs a
+    /// keyword of its own.
+    Out,
 }
 
 impl Keyword {
@@ -151,6 +155,7 @@ impl Keyword {
             "gen" => Gen,
             "null" => Null,
             "default" => Default,
+            "out" => Out,
             _ => return None,
         })
     }
@@ -212,6 +217,7 @@ impl Keyword {
             Gen => "gen",
             Null => "null",
             Default => "default",
+            Out => "out",
         }
     }
 
@@ -226,9 +232,6 @@ impl Keyword {
     pub const fn phase(self) -> Option<Phase> {
         use Keyword::*;
         Some(match self {
-            // `class`, `construct`, `this` and the visibility modifiers are
-            // implemented; the rest of the phase's vocabulary is not yet.
-            Record | Type | Implements | Abstract | From | As | Interface | Trait => Phase::THREE,
             // `default` labels the catch-all arm of a `try`, so it arrives with
             // error handling and not with the decorators it used to be filed
             // under.
@@ -566,16 +569,33 @@ mod tests {
 
     #[test]
     fn implemented_keywords_declare_no_phase() {
-        // `class`, `construct` and `this` landed with the objects of Phase 3.
-        for k in [Keyword::Class, Keyword::Construct, Keyword::This] {
+        // Phase 3's full vocabulary: objects, records, value classes, type
+        // aliases, contracts and casts.
+        for k in [
+            Keyword::Class,
+            Keyword::Construct,
+            Keyword::This,
+            Keyword::Record,
+            Keyword::Type,
+            Keyword::Public,
+            Keyword::Private,
+            Keyword::Protected,
+            Keyword::Abstract,
+            Keyword::Implements,
+            Keyword::Extends,
+            Keyword::From,
+            Keyword::As,
+            Keyword::Is,
+            Keyword::Interface,
+            Keyword::Trait,
+        ] {
             assert!(k.in_subset(), "`{}` is implemented", k.as_str());
         }
     }
 
     #[test]
     fn later_phase_keywords_declare_their_phase() {
-        assert!(!Keyword::Record.in_subset());
-        assert_eq!(Keyword::Record.phase(), Some(Phase::THREE));
+        assert!(!Keyword::Task.in_subset());
         assert_eq!(Keyword::Task.phase(), Some(Phase::FIVE));
     }
 

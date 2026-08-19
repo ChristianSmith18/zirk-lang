@@ -1,0 +1,10 @@
+// A class-to-class cast lowers now (roadmap task 11.6), but only once
+// nullability is out of the way: deciding what a null value means for the
+// runtime check is a separate question this pass does not answer yet.
+class Animal { }
+class Dog extends Animal { construct() { } }
+
+fn main(): Void {
+    mut a: Animal? = Dog();
+    mut d = a as Dog?;
+}

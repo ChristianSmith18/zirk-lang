@@ -45,6 +45,25 @@ pub enum IrType {
     /// which class is behind it is what a contract exists not to say, and the
     /// object already carries its own descriptor to answer that at the call.
     Contract(u32),
+    /// A record or value class, identified by its layout in the module.
+    ///
+    /// A value and not a reference: neither has identity (`is` is rejected
+    /// for both, task 8.5/8.6), so nothing observes whether two equal ones
+    /// share storage. Represented inline wherever it is used — a slot, a
+    /// parameter, a field of a containing object — with no allocation and no
+    /// descriptor header (`ZIRK_RUNTIME_SPEC.md` §9, ADR-003; roadmap task
+    /// 11.5). `Base::Class` still carries both a `Value` and an ordinary
+    /// `Object`'s id — `ClassType.kind` says which is which; the id spaces
+    /// are the same table, so nothing here needs its own.
+    Value(u32),
+    /// An algebraic enum — one with at least one variant carrying associated
+    /// data — identified by its layout in the module.
+    ///
+    /// A value, the same as a record: discriminant plus payload, inline
+    /// wherever it is used, no allocation (roadmap task 11.3). A *traditional*
+    /// enum, none of whose variants carry data, stays `Int32` exactly as
+    /// before — this variant exists only once a payload does.
+    Enum(u32),
     /// `T?`: a value that may be absent.
     ///
     /// Represented uniformly as a present flag next to the value, rather than
@@ -71,6 +90,8 @@ pub enum Nullable {
     /// pointers is one more rule, and one shape needs none.
     Object(u32),
     Contract(u32),
+    Value(u32),
+    Enum(u32),
 }
 
 impl Nullable {
@@ -81,6 +102,8 @@ impl Nullable {
             Nullable::String => IrType::String,
             Nullable::Object(id) => IrType::Object(id),
             Nullable::Contract(id) => IrType::Contract(id),
+            Nullable::Value(id) => IrType::Value(id),
+            Nullable::Enum(id) => IrType::Enum(id),
         }
     }
 
@@ -92,6 +115,8 @@ impl Nullable {
             IrType::String => Nullable::String,
             IrType::Object(id) => Nullable::Object(id),
             IrType::Contract(id) => Nullable::Contract(id),
+            IrType::Value(id) => Nullable::Value(id),
+            IrType::Enum(id) => Nullable::Enum(id),
             _ => return None,
         })
     }
@@ -107,12 +132,16 @@ impl IrType {
             IrType::Closure(_) => "closure",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
+            IrType::Value(_) => "value",
+            IrType::Enum(_) => "enum",
             IrType::Nullable(n) => match n {
                 Nullable::Int32 => "Int32?",
                 Nullable::Boolean => "Boolean?",
                 Nullable::String => "String?",
                 Nullable::Object(_) => "object?",
                 Nullable::Contract(_) => "contract?",
+                Nullable::Value(_) => "value?",
+                Nullable::Enum(_) => "enum?",
             },
         }
     }
@@ -163,6 +192,17 @@ pub struct Module {
     pub closures: Vec<ClosureLayout>,
     /// Object layouts, indexed by the id [`IrType::Object`] carries.
     pub objects: Vec<ObjectLayout>,
+    /// Record and value class layouts, indexed by the id [`IrType::Value`]
+    /// carries — its own table because they share no shape with
+    /// [`ObjectLayout`]: no header, no dispatch table, no allocation
+    /// (roadmap task 11.5).
+    pub values: Vec<ValueLayout>,
+    /// Algebraic enum layouts, indexed by the id [`IrType::Enum`] carries —
+    /// `checked.enums`' own id space, indexed the same way `objects` is
+    /// indexed by `checked.classes` (roadmap task 11.3). A traditional enum,
+    /// none of whose variants carry data, has no entry here: it stays
+    /// `Int32` and is never addressed through this table.
+    pub enums: Vec<EnumLayout>,
 }
 
 /// What one object holds in memory.
@@ -197,6 +237,12 @@ pub struct ObjectLayout {
     /// method's index from moving as the hierarchy grows, and what makes an
     /// indirect call one load and one jump. Decision D3.
     pub methods: Vec<String>,
+    /// This class's own id, plus every base's, transitively — what a
+    /// checked cast (`InstKind::CheckedCast`) searches to confirm a runtime
+    /// type is the target or one of its ancestors (roadmap task 11.6).
+    /// `checked.classes`' own id space, the same one `IrType::Object`
+    /// carries.
+    pub ancestors: Vec<u32>,
 }
 
 impl ObjectLayout {
@@ -224,6 +270,40 @@ pub struct ContractTable {
 pub struct ObjectField {
     pub name: String,
     pub ty: IrType,
+}
+
+/// What one record or value class holds — its fields, in declaration order,
+/// and nothing else: no header, no dispatch table (roadmap task 11.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValueLayout {
+    pub name: String,
+    pub fields: Vec<ObjectField>,
+}
+
+impl ValueLayout {
+    pub fn field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f.name == name)
+    }
+}
+
+/// What one algebraic enum holds: a discriminant plus a flattened payload —
+/// every variant's associated fields, concatenated in variant-declaration
+/// order, each with its own dedicated slot (roadmap task 11.3).
+///
+/// Not a byte-level union: a variant's fields never share storage with
+/// another's. Simpler and correct — reading a field always reads what was
+/// written there, never another variant's differently-typed data
+/// reinterpreted — at the cost of a layout sized for every variant's fields
+/// at once rather than only the largest one. The set of variants in this
+/// phase is small, so the trade is not tight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumLayout {
+    pub name: String,
+    pub fields: Vec<ObjectField>,
+    /// Per variant, by discriminant index: the indices into `fields` it
+    /// owns, in its own declared order. A traditional variant (no data) or
+    /// one with none owns an empty slice.
+    pub variants: Vec<Vec<u32>>,
 }
 
 /// What one closure value holds and what its lifted function expects.
@@ -355,6 +435,42 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
+    /// Builds a record or value class value from its fields, in declaration
+    /// order — no allocation, no header (roadmap task 11.5): a value class's
+    /// construction is packaging, not obtaining storage, so it has no
+    /// `Alloc` counterpart.
+    BuildValue {
+        class: u32,
+        fields: Vec<Operand>,
+    },
+    /// Builds an algebraic enum value: the discriminant of `variant`, plus
+    /// its own associated fields in declared order — everywhere else in the
+    /// flattened payload is left undefined, the same way a record's omitted
+    /// field never is but nothing here ever reads (roadmap task 11.3).
+    BuildEnum {
+        enum_id: u32,
+        variant: u32,
+        fields: Vec<Operand>,
+    },
+    /// Reads the discriminant of an algebraic enum value (roadmap task
+    /// 11.3) — a traditional enum's own `Int32` value already is one, so
+    /// only `IrType::Enum` needs this.
+    Discriminant(Operand),
+    /// `value as Target`: confirms at runtime that `value`'s actual class is
+    /// `target_class` or one of its ancestors, terminating the process if
+    /// not (roadmap task 11.6) — see [`ObjectLayout::ancestors`]. Produces
+    /// the same pointer unchanged; only its declared type differs from
+    /// `value`'s.
+    CheckedCast {
+        object: Operand,
+        target_class: u32,
+    },
+    /// Reinterprets an object or contract reference as a different, wider
+    /// static type the checker already proved it fits — a subclass accepted
+    /// where its base is expected, or a class accepted where a contract it
+    /// implements is. No runtime work: an object's address does not change
+    /// shape, only which methods a static type promises change with it.
+    Retype(Operand),
     /// `String + String`.
     Concat {
         left: Operand,

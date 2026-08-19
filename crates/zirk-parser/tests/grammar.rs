@@ -123,6 +123,7 @@ fn shape(e: &Expr) -> String {
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
         Expr::Println(p) => format!("println({})", shape(&p.arg)),
+        Expr::Cast(c) => format!("({} as {})", shape(&c.expr), c.target.name),
     }
 }
 
@@ -202,6 +203,22 @@ fn valid_immutable_variable() {
 }
 
 #[test]
+fn valid_strict_variable() {
+    let Stmt::Let(l) = statements("inmut::strict s = 0;").remove(0) else {
+        panic!("expected a declaration");
+    };
+
+    assert_eq!(l.mutability, Mutability::Strict);
+    assert_eq!(l.name.name, "s");
+}
+
+#[test]
+fn invalid_inmut_double_colon_without_strict() {
+    let output = errors("fn main(): Void { inmut::frozen s = 0; }");
+    assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()), "{output}");
+}
+
+#[test]
 fn invalid_declaration_without_type_or_initializer() {
     let output = errors("fn main(): Void { mut count; }");
     assert!(output.contains(codes::UNTYPED_DECLARATION.as_str()));
@@ -209,9 +226,11 @@ fn invalid_declaration_without_type_or_initializer() {
 }
 
 #[test]
-fn invalid_inmut_strict_is_not_implemented() {
-    let output = errors("fn main(): Void { inmut::strict X: Int32 = 1; }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()));
+fn valid_inmut_strict_is_implemented() {
+    let Stmt::Let(l) = statements("inmut::strict X: Int32 = 1;").remove(0) else {
+        panic!("expected a declaration");
+    };
+    assert_eq!(l.mutability, Mutability::Strict);
 }
 
 // --- Precedence and associativity --------------------------------------------
@@ -408,7 +427,6 @@ fn invalid_other_stdout_method() {
 #[test]
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
-        ("record Point { }", "record", "Phase 3"),
         ("fn main(): Void { try { } }", "try", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
@@ -463,7 +481,7 @@ fn invalid_constructs_from_other_phases_say_which() {
 
 #[test]
 fn invalid_constructs_from_other_phases_are_not_unexpected_tokens() {
-    let output = errors("record Point { }");
+    let output = errors("fn main(): Void { try { } }");
     assert!(
         !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
         "a known construct must not be reported as an unexpected token:\n{output}"
@@ -551,10 +569,44 @@ fn invalid_match_needs_at_least_one_arm() {
 }
 
 #[test]
-fn invalid_enum_with_associated_data_states_its_phase() {
-    let output = errors("enum Shape { Circle(Int32) }\nfn main(): Void { }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("Phase 3"), "{output}");
+fn valid_enum_variant_with_associated_data() {
+    let p = program(
+        "enum Shape { Circle(radius: Int32), Rectangle(w: Int32, h: Int32), Point }
+         fn main(): Void { }",
+    );
+    let variants = &p.enums[0].variants;
+
+    assert_eq!(variants[0].name.name, "Circle");
+    assert_eq!(variants[0].associated.len(), 1);
+    assert_eq!(variants[0].associated[0].name.name, "radius");
+    assert_eq!(variants[0].associated[0].ty.name, "Int32");
+
+    assert_eq!(variants[1].name.name, "Rectangle");
+    assert_eq!(variants[1].associated.len(), 2);
+    assert_eq!(variants[1].associated[0].name.name, "w");
+    assert_eq!(variants[1].associated[1].name.name, "h");
+
+    assert_eq!(variants[2].name.name, "Point");
+    assert!(variants[2].associated.is_empty());
+}
+
+#[test]
+fn valid_enum_variant_with_an_explicit_mapping() {
+    let p = program("enum Status { Ok -> 200, NotFound -> 404 }\nfn main(): Void { }");
+    let variants = &p.enums[0].variants;
+
+    assert_eq!(variants[0].name.name, "Ok");
+    assert!(variants[0].associated.is_empty());
+    assert!(variants[0].mapping.is_some());
+}
+
+#[test]
+fn invalid_unclosed_enum_variant_associated_data() {
+    let output = errors("enum Shape { Circle(radius: Int32 }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -762,6 +814,253 @@ fn valid_parenthesized_expression_is_not_a_lambda() {
     assert_eq!(shape(&expression("(1 + 2) * 3")), "((1 + 2) * 3)");
 }
 
+// --- Type aliases --------------------------------------------------------------
+
+#[test]
+fn valid_type_alias_declaration() {
+    let p = program("type UserId = Int32;\nfn main(): Void { }");
+    let a = &p.type_aliases[0];
+
+    assert_eq!(a.name.name, "UserId");
+    assert_eq!(a.target.name, "Int32");
+}
+
+#[test]
+fn invalid_type_alias_without_a_target() {
+    let output = errors("type UserId = ;\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+// --- Casts -------------------------------------------------------------------
+
+#[test]
+fn valid_postfix_cast() {
+    assert_eq!(shape(&expression("value as String")), "(value as String)");
+}
+
+#[test]
+fn valid_prefix_cast() {
+    let e = expression("<String>value");
+    let Expr::Cast(c) = &e else {
+        panic!("expected a cast, got {e:?}");
+    };
+    assert_eq!(c.target.name, "String");
+    assert!(matches!(*c.expr, Expr::Path(_)));
+}
+
+#[test]
+fn valid_prefix_cast_chains_a_field_access_after_it() {
+    // `<T>(x).field` casts `(x)`, then reads `.field` off the cast — not the
+    // other way around.
+    let e = expression("<CustomObject>(obj).field");
+    let Expr::Field(f) = &e else {
+        panic!("expected a field access, got {e:?}");
+    };
+    assert!(matches!(*f.object, Expr::Cast(_)));
+}
+
+#[test]
+fn valid_postfix_cast_binds_tighter_than_a_following_call() {
+    let e = expression("value as String");
+    assert_eq!(shape(&e), "(value as String)");
+}
+
+#[test]
+fn invalid_prefix_cast_missing_its_closing_angle_bracket() {
+    let output = errors("fn main(): Void { mut x = <String value; }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_postfix_cast_without_a_target_type() {
+    let output = errors("fn main(): Void { mut x = value as ; }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+// --- Function types (rejected on purpose, D9) --------------------------------
+
+#[test]
+fn invalid_function_type_annotation_states_its_reason() {
+    for source in [
+        "fn apply(f: Fn(Int32) => Int32): Void { }\nfn main(): Void { }",
+        "fn apply(f: Function(Int32) => Int32): Void { }\nfn main(): Void { }",
+    ] {
+        let output = errors(source);
+        assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+        assert!(output.contains("not implemented"), "{output}");
+    }
+}
+
+#[test]
+fn invalid_function_type_is_not_an_unexpected_token() {
+    let output = errors("fn apply(f: Fn(Int32) => Int32): Void { }\nfn main(): Void { }");
+    assert!(
+        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "a known construct must not be reported as an unexpected token:\n{output}"
+    );
+}
+
+// --- Union types -----------------------------------------------------------
+
+#[test]
+fn valid_union_type_on_a_parameter() {
+    let p = program("fn f(x: String | Int32): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+
+    assert_eq!(ty.name, "String");
+    assert_eq!(ty.union_with.len(), 1);
+    assert_eq!(ty.union_with[0].name, "Int32");
+}
+
+#[test]
+fn valid_union_type_with_several_alternatives() {
+    let p = program("fn f(x: A | B | C): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+    assert_eq!(ty.union_with.len(), 2);
+}
+
+#[test]
+fn valid_union_type_on_a_field() {
+    let p = program("class Box { value: String | Int32; }\nfn main(): Void { }");
+    assert_eq!(p.classes[0].fields[0].ty.union_with.len(), 1);
+}
+
+#[test]
+fn invalid_union_type_missing_an_alternative() {
+    let output = errors("fn f(x: String | ): Void { }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_generic_argument_does_not_admit_a_union() {
+    // Out of scope for now: a union inside `<...>` is not parsed as one.
+    let p = program("class Box<T> { value: T; }\nclass Holder { b: Box<String>; }\nfn main(): Void { }");
+    assert!(p.classes[1].fields[0].ty.arguments[0].union_with.is_empty());
+}
+
+// --- Abstract classes ----------------------------------------------------------
+
+#[test]
+fn valid_abstract_class_declaration() {
+    let p = program(
+        "abstract class Shape { name: String; abstract fn area(): Int32; }
+         fn main(): Void { }",
+    );
+    let a = &p.classes[0];
+
+    assert_eq!(a.kind, ClassKind::Abstract);
+    assert_eq!(a.fields.len(), 1);
+    assert_eq!(a.methods.len(), 1);
+    assert!(a.methods[0].is_abstract);
+    assert!(a.methods[0].body.is_none());
+    assert!(a.constructors.is_empty());
+}
+
+#[test]
+fn invalid_abstract_method_outside_an_abstract_class_still_states_its_phase() {
+    // An ordinary class does not gain `abstract fn` just because the parser
+    // now accepts it inside `abstract class`.
+    let output = errors("class Shape { abstract fn area(): Int32; }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::ABSTRACT_OUTSIDE_ABSTRACT_CLASS.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("abstract"), "{output}");
+}
+
+#[test]
+fn invalid_abstract_method_with_a_body() {
+    let output = errors(
+        "abstract class Shape { abstract fn area(): Int32 { return 1; } }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+// --- Records and value classes -----------------------------------------------
+
+#[test]
+fn valid_record_declaration() {
+    let p = program("record Point { x: Float64; y: Float64; }\nfn main(): Void { }");
+    let r = &p.classes[0];
+
+    assert_eq!(r.kind, ClassKind::Record);
+    assert_eq!(r.name.name, "Point");
+    assert_eq!(r.fields.len(), 2);
+    assert!(r.constructors.is_empty());
+}
+
+#[test]
+fn valid_record_with_a_method() {
+    let p = program(
+        "record Point { x: Float64; y: Float64; fn length(): Float64 { return this.x; } }
+         fn main(): Void { }",
+    );
+    assert_eq!(p.classes[0].methods.len(), 1);
+}
+
+#[test]
+fn invalid_record_without_a_name() {
+    let output = errors("record { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_value_class_declaration() {
+    let p = program("value class UserId(value: Int32);\nfn main(): Void { }");
+    let v = &p.classes[0];
+
+    assert_eq!(v.kind, ClassKind::ValueClass);
+    assert_eq!(v.name.name, "UserId");
+    assert_eq!(v.fields.len(), 1);
+    assert_eq!(v.fields[0].name.name, "value");
+    assert_eq!(v.fields[0].ty.name, "Int32");
+    assert!(v.constructors.is_empty());
+}
+
+#[test]
+fn valid_value_class_with_several_fields() {
+    let p = program("value class Point(x: Float64, y: Float64);\nfn main(): Void { }");
+    assert_eq!(p.classes[0].fields.len(), 2);
+}
+
+#[test]
+fn valid_value_does_not_stop_being_an_ordinary_identifier() {
+    // `value` is contextual: only `value class` is special.
+    let stmts = statements("mut value = 1;");
+    let Stmt::Let(l) = &stmts[0] else {
+        panic!("expected a declaration");
+    };
+    assert_eq!(l.name.name, "value");
+}
+
+#[test]
+fn invalid_unclosed_value_class() {
+    let output = errors("value class UserId(value: Int32\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
 // --- Enums and match -------------------------------------------------------
 
 #[test]
@@ -771,7 +1070,9 @@ fn valid_enum_declaration() {
 
     assert_eq!(e.name.name, "Direction");
     assert_eq!(e.variants.len(), 4);
-    assert_eq!(e.variants[0].name, "North");
+    assert_eq!(e.variants[0].name.name, "North");
+    assert!(e.variants[0].associated.is_empty());
+    assert!(e.variants[0].mapping.is_none());
     assert!(!e.shared);
 }
 
@@ -789,6 +1090,27 @@ fn valid_match_as_an_expression() {
     assert_eq!(m.arms.len(), 2);
     assert!(matches!(m.arms[0].pattern, Pattern::Variant(_)));
     assert!(matches!(m.arms[1].pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn valid_variant_pattern_destructures_associated_data() {
+    let e = expression(
+        "match s { Shape.Circle(radius) => radius, Shape.Point => 0, _ => 0 }",
+    );
+    let Expr::Match(m) = &e else {
+        panic!("expected a match, got {e:?}");
+    };
+    let Pattern::Variant(v) = &m.arms[0].pattern else {
+        panic!("expected a variant pattern, got {:?}", m.arms[0].pattern);
+    };
+    assert_eq!(v.variant.name, "Circle");
+    assert_eq!(v.bindings.len(), 1);
+    assert!(matches!(v.bindings[0], Pattern::Binding(_)));
+
+    let Pattern::Variant(bare) = &m.arms[1].pattern else {
+        panic!("expected a variant pattern, got {:?}", m.arms[1].pattern);
+    };
+    assert!(bare.bindings.is_empty());
 }
 
 #[test]
@@ -1184,10 +1506,135 @@ fn invalid_field_without_a_type() {
     );
 }
 
+// --- Genéricos -----------------------------------------------------------
+
 #[test]
-fn invalid_abstract_states_it_is_not_available_yet() {
-    // It constrains inheritance, which this slice of the phase does not have.
-    let output = errors("class Shape { abstract fn area(): Int32; }\nfn main(): Void { }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("abstract"), "{output}");
+fn valid_class_type_parameter() {
+    let p = program("class Box<T> { value: T; }\nfn main(): Void { }");
+    let class = &p.classes[0];
+
+    assert_eq!(class.type_params.len(), 1);
+    assert_eq!(class.type_params[0].name.name, "T");
+    assert!(class.type_params[0].constraints.is_empty());
+}
+
+#[test]
+fn valid_contract_type_parameter() {
+    let p = program("interface Box<out T> { fn value(): T; }\nfn main(): Void { }");
+    let contract = &p.contracts[0];
+
+    assert_eq!(contract.type_params.len(), 1);
+    assert_eq!(contract.type_params[0].name.name, "T");
+    assert_eq!(contract.type_params[0].variance, Variance::Out);
+}
+
+#[test]
+fn valid_enum_type_parameter() {
+    let p = program("enum Box<T> { Full(value: T), Empty }\nfn main(): Void { }");
+    let e = &p.enums[0];
+
+    assert_eq!(e.type_params.len(), 1);
+    assert_eq!(e.type_params[0].name.name, "T");
+}
+
+#[test]
+fn valid_implements_with_type_arguments() {
+    let p = program(
+        "class Counter implements Iterable<Int32> { construct() { } }\nfn main(): Void { }",
+    );
+    let implements = &p.classes[0].implements;
+
+    assert_eq!(implements.len(), 1);
+    assert_eq!(implements[0].name, "Iterable");
+    assert_eq!(implements[0].arguments.len(), 1);
+    assert_eq!(implements[0].arguments[0].name, "Int32");
+}
+
+#[test]
+fn valid_type_parameter_with_combined_constraints() {
+    let p = program(
+        "class Box<T from Clone & Serializable> { value: T; }\nfn main(): Void { }",
+    );
+    let constraints = &p.classes[0].type_params[0].constraints;
+
+    assert_eq!(constraints.len(), 2);
+    assert_eq!(constraints[0].name, "Clone");
+    assert_eq!(constraints[1].name, "Serializable");
+}
+
+#[test]
+fn valid_generic_function_and_method() {
+    let p = program(
+        "fn identity<T>(value: T): T { return value; }
+         class Box<T> { value: T; fn get<U>(other: U): U { return other; } }
+         fn main(): Void { }",
+    );
+
+    assert_eq!(p.functions[0].type_params[0].name.name, "T");
+    assert_eq!(p.classes[0].methods[0].type_params[0].name.name, "U");
+}
+
+#[test]
+fn valid_type_arguments_on_a_type_reference() {
+    let p = program("class Box<T> { value: Array<T>; }\nfn main(): Void { }");
+    let ty = &p.classes[0].fields[0].ty;
+
+    assert_eq!(ty.name, "Array");
+    assert_eq!(ty.arguments.len(), 1);
+    assert_eq!(ty.arguments[0].name, "T");
+}
+
+#[test]
+fn valid_nested_type_arguments_split_the_shift_right_token() {
+    // The lexer emits `>>` as one token (`token.rs` explains why), so this
+    // exercises the parser splitting it back into two `>` to close both
+    // levels of nesting.
+    let p = program("class Nested { value: Box<Box<Int32>>; }\nfn main(): Void { }");
+    let ty = &p.classes[0].fields[0].ty;
+
+    assert_eq!(ty.name, "Box");
+    assert_eq!(ty.arguments[0].name, "Box");
+    assert_eq!(ty.arguments[0].arguments[0].name, "Int32");
+}
+
+#[test]
+fn valid_nullable_generic_type() {
+    let p = program("class Holder { value: Box<Int32>?; }\nfn main(): Void { }");
+    let ty = &p.classes[0].fields[0].ty;
+
+    assert!(ty.nullable);
+    assert_eq!(ty.arguments[0].name, "Int32");
+}
+
+#[test]
+fn invalid_unclosed_type_parameter_list() {
+    let output = errors("class Box<T { value: T; }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_unclosed_type_argument_list() {
+    let output = errors("class Box { value: Array<Int32; }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_declared_variance_on_a_type_parameter() {
+    let p = program("class Box<out T> { value: T; }\nfn main(): Void { }");
+    assert_eq!(p.classes[0].type_params[0].variance, Variance::Out);
+
+    let p = program("class Sink<in T> { value: T; }\nfn main(): Void { }");
+    assert_eq!(p.classes[0].type_params[0].variance, Variance::In);
+}
+
+#[test]
+fn valid_type_parameter_without_variance_is_invariant() {
+    let p = program("class Box<T> { value: T; }\nfn main(): Void { }");
+    assert_eq!(p.classes[0].type_params[0].variance, Variance::Invariant);
 }

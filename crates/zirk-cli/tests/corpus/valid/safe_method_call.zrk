@@ -1,0 +1,29 @@
+// `?.` (safe navigation) on a method call is lowered end to end (task 10.8):
+// a present receiver runs the call, an absent one short-circuits to null,
+// dispatch works both through a class and through a contract, and a method
+// that already returns a nullable type isn't double-wrapped.
+interface Speaker {
+    fn speak(): String;
+}
+
+class User implements Speaker {
+    name: String;
+    construct(name: String) { this.name = name; }
+    fn speak(): String { return "hi, " + this.name; }
+    fn nickname(): String? { return null; }
+}
+
+fn main(): Void {
+    mut present: User? = User("ana");
+    mut absent: User? = null;
+    stdout.println(present?.speak() ?? "silence");
+    stdout.println(absent?.speak() ?? "silence");
+
+    mut presentSpeaker: Speaker? = User("leo");
+    mut absentSpeaker: Speaker? = null;
+    stdout.println(presentSpeaker?.speak() ?? "silence");
+    stdout.println(absentSpeaker?.speak() ?? "silence");
+
+    mut u: User? = User("kai");
+    stdout.println(u?.nickname() ?? "no nickname");
+}

@@ -1,0 +1,6 @@
+// `+` on two strings concatenates, closing the debt the previous phase left
+// open (task 13.4): `String` implements the concatenation contract (6.8).
+fn main(): Void {
+    inmut greeting = "hello" + " " + "world";
+    stdout.println(greeting);
+}

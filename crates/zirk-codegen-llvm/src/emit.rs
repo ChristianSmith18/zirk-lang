@@ -42,19 +42,21 @@ fn closure_signature<'ctx>(
     context: &'ctx Context,
     layout: &ir::ClosureLayout,
     closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
 ) -> inkwell::types::FunctionType<'ctx> {
     let params: Vec<BasicMetadataTypeEnum> = layout
         .captures
         .iter()
         .chain(&layout.params)
         .map(|ty| {
-            llvm_type_in(context, *ty, closures)
+            llvm_type_in(context, *ty, closures, values, enums)
                 .expect("a capture or parameter cannot be Void")
                 .into()
         })
         .collect();
 
-    match llvm_type_in(context, layout.returns, closures) {
+    match llvm_type_in(context, layout.returns, closures, values, enums) {
         Some(ty) => ty.fn_type(&params, false),
         None => context.void_type().fn_type(&params, false),
     }
@@ -71,7 +73,14 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
     // reference a function defined further down the file.
     let mut functions = HashMap::new();
     for function in &module.functions {
-        let declared = declare_function(context, &llvm, function, &module.closures);
+        let declared = declare_function(
+            context,
+            &llvm,
+            function,
+            &module.closures,
+            &module.values,
+            &module.enums,
+        );
         functions.insert(function.name.clone(), declared);
     }
 
@@ -122,14 +131,21 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
 
             let methods = table_of(&layout.methods, &format!("zk.vtable.{}", layout.name));
 
-            // The descriptor is the method table, how many contracts follow,
-            // and one (id, table) pair each. The runtime searches those pairs;
-            // the shape is fixed between the two and nothing else reads it.
+            // The descriptor is the method table, how many ancestor ids
+            // follow (itself included) and each one — what a checked cast
+            // searches (roadmap task 11.6) — then how many contracts follow
+            // and one (id, table) pair each. The runtime searches both
+            // lists linearly; the shape is fixed between the two and
+            // nothing else reads it.
             let word = context.i64_type();
             let mut fields: Vec<BasicValueEnum> = vec![
                 methods.into(),
-                word.const_int(layout.contracts.len() as u64, false).into(),
+                word.const_int(layout.ancestors.len() as u64, false).into(),
             ];
+            for &ancestor in &layout.ancestors {
+                fields.push(word.const_int(u64::from(ancestor), false).into());
+            }
+            fields.push(word.const_int(layout.contracts.len() as u64, false).into());
             for table in &layout.contracts {
                 let symbol = format!("zk.itable.{}.{}", layout.name, table.contract);
                 fields.push(word.const_int(u64::from(table.contract), false).into());
@@ -174,15 +190,14 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
     llvm
 }
 
-fn llvm_type<'ctx>(context: &'ctx Context, ty: ir::IrType) -> Option<BasicTypeEnum<'ctx>> {
-    llvm_type_in(context, ty, &[])
-}
-
-/// The LLVM type of an IR type, resolving closure layouts against the module.
+/// The LLVM type of an IR type, resolving closure and value layouts against
+/// the module.
 fn llvm_type_in<'ctx>(
     context: &'ctx Context,
     ty: ir::IrType,
     closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
 ) -> Option<BasicTypeEnum<'ctx>> {
     Some(match ty {
         ir::IrType::Void => return None,
@@ -199,10 +214,28 @@ fn llvm_type_in<'ctx>(
         // Reached through the contract, but still just the object's address:
         // the descriptor it already carries answers which body to run.
         ir::IrType::Contract(_) => context.ptr_type(AddressSpace::default()).into(),
+        // A record or value class carries no identity, so it is the struct
+        // itself, not a pointer to one — passed, returned and stored inline,
+        // with no allocation (roadmap task 11.5).
+        ir::IrType::Value(id) => {
+            let layout = values
+                .get(id as usize)
+                .expect("a verified module declares every value layout");
+            value_struct(context, layout, closures, values, enums).into()
+        }
+        // An algebraic enum is discriminant plus payload, inline the same
+        // way a record is — no allocation, no identity (roadmap task 11.3).
+        ir::IrType::Enum(id) => {
+            let layout = enums
+                .get(id as usize)
+                .expect("a verified module declares every enum layout");
+            enum_struct(context, layout, closures, values, enums).into()
+        }
         // A present flag next to the value. The flag comes first so the struct
         // has the same shape whatever the payload is.
         ir::IrType::Nullable(base) => {
-            let inner = llvm_type(context, base.inner()).expect("a nullable payload is not Void");
+            let inner = llvm_type_in(context, base.inner(), closures, values, enums)
+                .expect("a nullable payload is not Void");
             context
                 .struct_type(&[context.bool_type().into(), inner], false)
                 .into()
@@ -217,13 +250,58 @@ fn llvm_type_in<'ctx>(
                 vec![context.ptr_type(AddressSpace::default()).into()];
             for capture in &layout.captures {
                 fields.push(
-                    llvm_type_in(context, *capture, closures).expect("a capture is not Void"),
+                    llvm_type_in(context, *capture, closures, values, enums)
+                        .expect("a capture is not Void"),
                 );
             }
             context.struct_type(&fields, false).into()
         }
     })
 }
+
+/// The struct a record or value class occupies — its fields, in declaration
+/// order, with no header and no indirection (roadmap task 11.5).
+fn value_struct<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::ValueLayout,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> inkwell::types::StructType<'ctx> {
+    let fields: Vec<BasicTypeEnum> = layout
+        .fields
+        .iter()
+        .map(|field| {
+            llvm_type_in(context, field.ty, closures, values, enums)
+                .expect("a value field is not Void")
+        })
+        .collect();
+    context.struct_type(&fields, false)
+}
+
+/// The struct an algebraic enum occupies: its discriminant, then every
+/// variant's associated fields flattened and concatenated — see
+/// [`ir::EnumLayout`] for why this is not a byte-level union (roadmap task
+/// 11.3).
+fn enum_struct<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::EnumLayout,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> inkwell::types::StructType<'ctx> {
+    let mut fields: Vec<BasicTypeEnum> = vec![context.i32_type().into()];
+    for field in &layout.fields {
+        fields.push(
+            llvm_type_in(context, field.ty, closures, values, enums)
+                .expect("an enum field is not Void"),
+        );
+    }
+    context.struct_type(&fields, false)
+}
+
+/// Where a field sits inside an enum's struct, discriminant included.
+const ENUM_HEADER_FIELDS: u32 = 1;
 
 /// The struct an object of this layout occupies.
 ///
@@ -237,11 +315,15 @@ fn object_struct<'ctx>(
     context: &'ctx Context,
     layout: &ir::ObjectLayout,
     closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
 ) -> inkwell::types::StructType<'ctx> {
     let mut fields: Vec<BasicTypeEnum> = vec![context.ptr_type(AddressSpace::default()).into()];
     for field in &layout.fields {
-        fields
-            .push(llvm_type_in(context, field.ty, closures).expect("an object field is not Void"));
+        fields.push(
+            llvm_type_in(context, field.ty, closures, values, enums)
+                .expect("an object field is not Void"),
+        );
     }
     context.struct_type(&fields, false)
 }
@@ -254,18 +336,20 @@ fn declare_function<'ctx>(
     llvm: &LlvmModule<'ctx>,
     function: &ir::Function,
     closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
 ) -> FunctionValue<'ctx> {
     let params: Vec<BasicMetadataTypeEnum> = function
         .params
         .iter()
         .map(|slot| {
-            llvm_type_in(context, function.slots[slot.0 as usize].ty, closures)
+            llvm_type_in(context, function.slots[slot.0 as usize].ty, closures, values, enums)
                 .expect("a parameter cannot be Void")
                 .into()
         })
         .collect();
 
-    let signature = match llvm_type_in(context, function.return_type, closures) {
+    let signature = match llvm_type_in(context, function.return_type, closures, values, enums) {
         Some(ty) => ty.fn_type(&params, false),
         None => context.void_type().fn_type(&params, false),
     };
@@ -348,7 +432,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // unnecessary (design D2).
         self.builder.position_at_end(self.blocks[&function.entry]);
         for (index, slot) in function.slots.iter().enumerate() {
-            let ty = llvm_type_in(self.context, slot.ty, &self.module.closures)
+            let ty = llvm_type_in(self.context, slot.ty, &self.module.closures, &self.module.values, &self.module.enums)
                 .expect("a slot cannot be Void");
             let pointer = self
                 .builder
@@ -391,7 +475,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     fn field_pointer(&self, object: ir::Operand, index: u32) -> PointerValue<'ctx> {
         let id = self.object_layout_of(object);
         let layout = &self.module.objects[id as usize];
-        let struct_type = object_struct(self.context, layout, &self.module.closures);
+        let struct_type = object_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
 
         self.builder
             .build_struct_gep(
@@ -532,6 +616,43 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 call.try_as_basic_value().basic()
             }
 
+            ir::InstKind::CheckedCast {
+                object,
+                target_class,
+            } => {
+                // The runtime terminates the process if the check fails
+                // (roadmap task 11.6) — there is no branch to build here,
+                // the same shape `CallContract`'s own descriptor lookup
+                // aborts through when a contract turns out to be missing.
+                // A successful check changes nothing about the pointer
+                // itself: only its declared type differs from here on.
+                let receiver = self.operand(*object).into_pointer_value();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let descriptor = self
+                    .builder
+                    .build_load(ptr, receiver, "descriptor")
+                    .expect("load the descriptor")
+                    .into_pointer_value();
+                let target = self
+                    .context
+                    .i64_type()
+                    .const_int(u64::from(*target_class), false);
+                self.builder
+                    .build_call(
+                        self.runtime.check_cast,
+                        &[descriptor.into(), target.into()],
+                        "check_cast",
+                    )
+                    .expect("confirm the checked cast");
+                Some(receiver.into())
+            }
+
+            // A proven-safe widening (a subclass where its base is
+            // expected, or a class where a contract it implements is): the
+            // pointer itself is unchanged, only its declared type differs
+            // from here on.
+            ir::InstKind::Retype(operand) => Some(self.operand(*operand)),
+
             ir::InstKind::CallVirtual {
                 object,
                 index,
@@ -586,7 +707,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::Alloc(id) => {
                 let layout = &self.module.objects[*id as usize];
-                let struct_type = object_struct(self.context, layout, &self.module.closures);
+                let struct_type = object_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
 
                 // The size and alignment come from LLVM's own data layout, so
                 // the runtime is told what the target actually needs rather
@@ -614,15 +735,117 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::LoadField { object, index } => {
-                let pointer = self.field_pointer(*object, *index);
-                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures)
-                    .expect("a field is not Void");
-                Some(
-                    self.builder
-                        .build_load(ty, pointer, "field")
-                        .expect("load a field"),
-                )
+                // A record, value class or enum payload field comes straight
+                // out of the value with `extractvalue`: there is no pointer
+                // to GEP into (roadmap tasks 11.3/11.5). An enum's field
+                // sits past its discriminant, the same way an object's sits
+                // past its descriptor. Everything else keeps reading through
+                // the object's address the way it always has.
+                match self.value_types[&object.0] {
+                    ir::IrType::Value(_) => {
+                        let struct_value = self.operand(*object).into_struct_value();
+                        Some(
+                            self.builder
+                                .build_extract_value(struct_value, *index, "field")
+                                .expect("a verified module reads a field the layout has"),
+                        )
+                    }
+                    ir::IrType::Enum(_) => {
+                        let struct_value = self.operand(*object).into_struct_value();
+                        Some(
+                            self.builder
+                                .build_extract_value(
+                                    struct_value,
+                                    index + ENUM_HEADER_FIELDS,
+                                    "field",
+                                )
+                                .expect("a verified module reads a field the layout has"),
+                        )
+                    }
+                    _ => {
+                        let pointer = self.field_pointer(*object, *index);
+                        let ty = llvm_type_in(
+                            self.context,
+                            instruction.ty,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        )
+                        .expect("a field is not Void");
+                        Some(
+                            self.builder
+                                .build_load(ty, pointer, "field")
+                                .expect("load a field"),
+                        )
+                    }
+                }
             }
+
+            ir::InstKind::BuildValue { class, fields } => {
+                let layout = &self.module.values[*class as usize];
+                let struct_type =
+                    value_struct(self.context, layout, &self.module.closures, &self.module.values, &self.module.enums);
+                let mut built = struct_type.get_undef();
+                for (index, field) in fields.iter().enumerate() {
+                    built = self
+                        .builder
+                        .build_insert_value(
+                            built,
+                            self.operand(*field),
+                            index as u32,
+                            "value_field",
+                        )
+                        .expect("insert a value's field")
+                        .into_struct_value();
+                }
+                Some(built.into())
+            }
+
+            ir::InstKind::BuildEnum {
+                enum_id,
+                variant,
+                fields,
+            } => {
+                let layout = &self.module.enums[*enum_id as usize];
+                let struct_type = enum_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let mut built = struct_type.get_undef();
+                built = self
+                    .builder
+                    .build_insert_value(
+                        built,
+                        self.context.i32_type().const_int(u64::from(*variant), false),
+                        0,
+                        "discriminant",
+                    )
+                    .expect("insert the discriminant")
+                    .into_struct_value();
+                let indices = &layout.variants[*variant as usize];
+                for (&index, field) in indices.iter().zip(fields) {
+                    built = self
+                        .builder
+                        .build_insert_value(
+                            built,
+                            self.operand(*field),
+                            index + ENUM_HEADER_FIELDS,
+                            "enum_field",
+                        )
+                        .expect("insert an enum's field")
+                        .into_struct_value();
+                }
+                Some(built.into())
+            }
+
+            ir::InstKind::Discriminant(operand) => Some(
+                self.builder
+                    .build_extract_value(self.operand(*operand).into_struct_value(), 0, "tag")
+                    .expect("a verified module reads the discriminant of an enum"),
+            ),
 
             ir::InstKind::StoreField {
                 object,
@@ -659,7 +882,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Load(slot) => {
-                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures)
+                let ty = llvm_type_in(self.context, instruction.ty, &self.module.closures, &self.module.values, &self.module.enums)
                     .expect("a load cannot be Void");
                 Some(
                     self.builder
@@ -732,7 +955,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // still carries a payload slot, left undefined: nothing reads it
             // without checking the flag first, and the verifier enforces that.
             ir::InstKind::NullValue(base) => {
-                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                let ty = llvm_type_in(self.context, ir::IrType::Nullable(*base), &self.module.closures, &self.module.values, &self.module.enums)
                     .expect("a nullable type has a representation")
                     .into_struct_type();
                 Some(ty.get_undef().into()).map(|value: BasicValueEnum| {
@@ -749,7 +972,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Wrap { base, value } => {
-                let ty = llvm_type(self.context, ir::IrType::Nullable(*base))
+                let ty = llvm_type_in(self.context, ir::IrType::Nullable(*base), &self.module.closures, &self.module.values, &self.module.enums)
                     .expect("a nullable type has a representation")
                     .into_struct_type();
                 let with_flag = self
@@ -799,6 +1022,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.context,
                     ir::IrType::Closure(*id),
                     &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
                 )
                 .expect("a closure has a representation")
                 .into_struct_type();
@@ -857,7 +1082,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     arguments.push(self.operand(*arg).into());
                 }
 
-                let signature = closure_signature(self.context, &layout, &self.module.closures);
+                let signature = closure_signature(
+                    self.context,
+                    &layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
                 let call = self
                     .builder
                     .build_indirect_call(signature, pointer, &arguments, "closure")

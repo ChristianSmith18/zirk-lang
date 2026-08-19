@@ -134,6 +134,12 @@ pub struct Signature {
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
     pub span: Span,
+    /// Its own `<T>`, empty when the callable is not generic.
+    ///
+    /// Only a plain function carries these today: a method's or a
+    /// constructor's own type parameter is not tracked here yet, so a call to
+    /// one is never inferred (roadmap task 7.6 covers functions only so far).
+    pub type_params: Vec<u32>,
 }
 
 impl Signature {
