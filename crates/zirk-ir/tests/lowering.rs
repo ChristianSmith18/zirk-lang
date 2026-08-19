@@ -139,8 +139,11 @@ fn reading_a_variable_loads_from_its_slot() {
 }
 
 #[test]
-fn shadowing_produces_two_different_slots() {
-    let f = main_body("mut x: Int32 = 1;\n{ mut x: String = \"a\"; }");
+fn sibling_blocks_reusing_a_name_produce_two_different_slots() {
+    // There is no ordinary shadowing (D10): these two declarations are legal
+    // only because the first goes out of scope — the block that owns it
+    // closes — before the second one exists, so neither ever hides the other.
+    let f = main_body("{ mut x: Int32 = 1; }\n{ mut x: String = \"a\"; }");
 
     let named_x: Vec<_> = f.slots.iter().filter(|s| s.name == "x").collect();
     assert_eq!(named_x.len(), 2, "each declaration owns its slot");

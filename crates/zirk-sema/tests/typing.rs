@@ -351,8 +351,20 @@ fn invalid_variable_outside_its_scope() {
 }
 
 #[test]
-fn valid_inner_block_shadows_the_outer_name() {
-    accepted_body("mut x: Int32 = 1;\n{ mut x: String = \"a\"; mut y: String = x; }");
+fn invalid_inner_block_shadows_the_outer_name() {
+    // There is no ordinary shadowing (D10).
+    let output = rejected_body("mut x: Int32 = 1;\n{ mut x: String = \"a\"; mut y: String = x; }");
+    assert!(
+        output.contains(codes::ORDINARY_SHADOWING.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_sibling_blocks_reuse_a_name() {
+    // The first `x` goes out of scope before the second one exists, so
+    // neither ever hides the other — this is not shadowing.
+    accepted_body("{ mut x: Int32 = 1; }\n{ mut x: String = \"a\"; }");
 }
 
 // --- Use before initialization ----------------------------------------------
@@ -2559,6 +2571,35 @@ fn valid_lambda_parameter_matches_a_field_name() {
              fn scale(factor: Int32): Int32 { return factor * this.factor; }
          }
          fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_for_in_binding_shadows_an_outer_variable() {
+    let output = rejected(
+        "fn main(): Void {
+             inmut i = 5;
+             for i in 0..3 { stdout.println(i); }
+         }",
+    );
+    assert!(
+        output.contains(codes::ORDINARY_SHADOWING.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_binding_shadows_an_outer_variable() {
+    let output = rejected(
+        "fn main(): Void {
+             inmut n = 5;
+             mut x: Int32? = 1;
+             match x { n => { stdout.println(n); } null => { } }
+         }",
+    );
+    assert!(
+        output.contains(codes::ORDINARY_SHADOWING.as_str()),
+        "{output}"
     );
 }
 
