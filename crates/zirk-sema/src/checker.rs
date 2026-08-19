@@ -504,6 +504,32 @@ impl<'a> Checker<'a> {
         format!("on line {line} of `{file}`")
     }
 
+    /// Declares a local, rejecting it first if it would hide one still
+    /// visible (D10): there is no ordinary shadowing, in a nested block, a
+    /// redeclaration in the same one, a parameter, a `for ... in` binding or
+    /// a `match` pattern's own — every local goes through here. A field
+    /// never triggers this: it is always read as `this.name`, never a bare
+    /// name `Scopes` holds, so there is nothing for a local to shadow.
+    fn declare_local(&mut self, binding: Binding) {
+        if let Some(resolution) = self.scopes.resolve(&binding.name) {
+            let where_ = self.declared_at(resolution.binding.span, binding.span);
+            self.error(
+                codes::ORDINARY_SHADOWING,
+                binding.span,
+                format!(
+                    "`{}` shadows a variable from an enclosing scope",
+                    binding.name
+                ),
+                format!(
+                    "a variable named `{}` is already declared {where_}",
+                    binding.name
+                ),
+                Some("rename this declaration, or read the outer value before it is hidden".into()),
+            );
+        }
+        self.scopes.declare(binding);
+    }
+
     /// The declaration a name refers to, following the file's import aliases.
     ///
     /// `import { Role -> DomainRole }` binds `DomainRole` in the importing
@@ -2114,7 +2140,7 @@ impl<'a> Checker<'a> {
         self.this_type = Some(class_type);
 
         self.scopes.push_function();
-        self.scopes.declare(Binding {
+        self.declare_local(Binding {
             name: "this".to_string(),
             ty: class_type,
             mutability: Mutability::Immutable,
@@ -2123,7 +2149,7 @@ impl<'a> Checker<'a> {
         });
         for param in params {
             let info = self.resolve_param(param);
-            self.scopes.declare(Binding {
+            self.declare_local(Binding {
                 name: info.name,
                 ty: info.ty,
                 mutability: Mutability::Immutable,
@@ -3115,7 +3141,7 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
 
-            self.scopes.declare(Binding {
+            self.declare_local(Binding {
                 name: info.name.clone(),
                 ty: info.ty,
                 mutability: Mutability::Immutable,
@@ -3257,7 +3283,7 @@ impl<'a> Checker<'a> {
             self.check_strict_alias(init, ty, stmt.mutability, &stmt.name.name, stmt.name.span);
         }
 
-        self.scopes.declare(Binding {
+        self.declare_local(Binding {
             name: stmt.name.name.clone(),
             ty,
             mutability: stmt.mutability,
@@ -3535,7 +3561,7 @@ impl<'a> Checker<'a> {
         let element = self.element_type(iterable, stmt.iterable.span());
 
         self.scopes.push();
-        self.scopes.declare(Binding {
+        self.declare_local(Binding {
             name: stmt.binding.name.clone(),
             ty: element,
             // The loop variable is rebound each iteration, not assigned.
@@ -4450,7 +4476,7 @@ impl<'a> Checker<'a> {
             // A binding pattern, bare or inside a variant's `(...)`, names
             // its part of the scrutinee inside the arm.
             for binding in bindings {
-                self.scopes.declare(binding);
+                self.declare_local(binding);
             }
 
             let ty = match &arm.body {
@@ -5240,26 +5266,11 @@ impl<'a> Checker<'a> {
 
         self.scopes.push_function();
         for (param, info) in expr.params.iter().zip(&params) {
-            // There is no ordinary shadowing (D10): a parameter that would
-            // otherwise capture an enclosing variable of the same name is
-            // rejected outright, rather than silently hiding it for the rest
-            // of the lambda's body. A field never triggers this — `this.name`
-            // is how one is read, so it is never a bare name `Scopes` holds.
-            if let Some(resolution) = self.scopes.resolve(&info.name) {
-                let where_ = self.declared_at(resolution.binding.span, param.name.span);
-                self.error(
-                    codes::ORDINARY_SHADOWING,
-                    param.name.span,
-                    format!("`{}` shadows a variable from an enclosing scope", info.name),
-                    format!("a variable named `{}` is already declared {where_}", info.name),
-                    Some("rename the parameter, or read the outer value before the lambda captures it".into()),
-                );
-            }
             if let Some(default) = &param.default {
                 let actual = self.check_expr(default);
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
-            self.scopes.declare(Binding {
+            self.declare_local(Binding {
                 name: info.name.clone(),
                 ty: info.ty,
                 mutability: Mutability::Immutable,

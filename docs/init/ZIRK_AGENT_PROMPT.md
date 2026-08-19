@@ -217,15 +217,18 @@ reaches a backend that cannot compile it:
   Phase 2's `?.`: they need machinery later phases own.
 
 A note on something this phase resolved rather than left pending: **there is
-no ordinary shadowing.** A lambda parameter that shares a name with a
-variable it would otherwise capture is rejected (`codes::ORDINARY_SHADOWING`,
-D10) — `ZIRK_SPEC_FINAL.md` section 6 is the normative source ("Ordinary
-local shadowing is rejected; an explicit lambda capture collision uses
-`this.name`"), which settles what had been, until closeout, an open
-contradiction between `design.md`'s D10 and an older Phase 2 corpus program
-that tested the opposite. A field is never affected — it is always read as
-`this.name`, never a bare name, so there is nothing for a parameter to
-shadow.
+no ordinary shadowing.** Any local declaration — `let`/`mut`, a function or
+method parameter, a `for ... in` binding, a `match` pattern's own — that
+shares a name with one still visible, in the same block, a nested one, or
+across a lambda's own capture boundary, is rejected
+(`codes::ORDINARY_SHADOWING`, D10). `ZIRK_SPEC_FINAL.md` section 6 is the
+normative source ("Ordinary local shadowing is rejected; an explicit lambda
+capture collision uses `this.name`"), which settles what had been, until
+closeout, an open contradiction between `design.md`'s D10 and an older
+Phase 2 corpus program that tested the opposite — the merged
+`zirk-type-system` spec had already stated the general rule beforehand. A
+field is never affected — it is always read as `this.name`, never a bare
+name, so there is nothing for a local to shadow.
 
 ## Next phase: Zirk 0.3b — complete scalars, conversions and text
 
