@@ -781,6 +781,44 @@ fn invalid_context_conversion_wrong_argument_count() {
     assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
 }
 
+// --- `Never` and `fatalError` (roadmap Phase 4a) ----------------------------
+
+#[test]
+fn valid_never_is_assignable_anywhere() {
+    accepted_body("mut a: Int32 = fatalError(\"x\");");
+    accepted_body("mut a: String = fatalError(\"x\");");
+    accepted_body("mut a: Boolean = fatalError(\"x\");");
+}
+
+#[test]
+fn valid_never_unifies_at_a_ternary_join() {
+    accepted_body("mut c: Boolean = true;\nmut a: Int32 = c ? 5 : fatalError(\"x\");");
+    accepted_body("mut c: Boolean = true;\nmut a: Int32 = c ? fatalError(\"x\") : 5;");
+}
+
+#[test]
+fn valid_never_unifies_at_an_if_expression_join() {
+    accepted_body("mut c: Boolean = true;\nmut a: Int32 = if c { 5 } else { fatalError(\"x\") };");
+}
+
+#[test]
+fn valid_fatal_error_as_a_bare_statement() {
+    accepted_body("fatalError(\"x\");");
+}
+
+#[test]
+fn invalid_fatal_error_wrong_argument_type() {
+    let output = rejected_body("fatalError(5);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_empty_enum_states_to_use_never() {
+    let output = rejected("enum Impossible { }\nfn main(): Void { }");
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()));
+    assert!(output.contains("Never"));
+}
+
 // --- Error recovery ---------------------------------------------------------
 
 #[test]

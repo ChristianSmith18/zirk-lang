@@ -646,6 +646,7 @@ fn ir_type(
 ) -> IrType {
     let base = match ty.base {
         Base::Void => IrType::Void,
+        Base::Never => IrType::Never,
         Base::Int(width) => IrType::Int(ir_int_width(width)),
         Base::Float(width) => IrType::Float(ir_float_width(width)),
         Base::Boolean => IrType::Boolean,
@@ -1035,6 +1036,43 @@ impl<'a> FunctionLowering<'a> {
     /// the IR performs implicitly: this is where the widening becomes an
     /// instruction.
     fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
+        // A diverging source (`fatalError(...)`, roadmap Phase 4a) never
+        // actually produces a value of `expected` — the checker's
+        // `Type::accepts`/`Type::unify` already let `Never` fit anywhere, so
+        // lowering has to make good on that. The expression is still
+        // lowered for its own diverging effect (ending in
+        // `Terminator::Unreachable`); whatever the caller does with the
+        // returned operand afterward runs in code that can never execute,
+        // so a type-correct placeholder is enough there — reusing
+        // `default_value` is what keeps this from needing its own
+        // special-case machinery for every scalar. `default_value` has
+        // nothing for `Object`/`Contract`/`Value`/`Enum`/`Char`/`Closure`
+        // (no zero-arg constructor to call safely), so a diverging
+        // initializer of one of those types is a narrower, documented gap
+        // rather than something this silently gets wrong: the `Never`-typed
+        // operand itself is returned, which the verifier then reports as a
+        // type mismatch instead of miscompiling.
+        // `Never` can only originate from a `fatalError(...)` call and
+        // propagate through an `if`/ternary join (roadmap Phase 4a covers
+        // those two; `match` is left out on purpose — asking `type_of` a
+        // `Match` here runs into assumptions about its own arms' scope that
+        // do not hold this early, unrelated to `Never` itself, so a
+        // diverging `match` arm is a known, narrower gap than the other
+        // two). Restricted to these expression kinds so this also never
+        // calls `type_of` on a `Lambda`/`Null`/`Range`, which it cannot
+        // answer for directly (its own doc comment: "the type of this
+        // expression comes from the value it produced").
+        if matches!(
+            expr,
+            ast::Expr::Call(_) | ast::Expr::If(_) | ast::Expr::Ternary(_)
+        ) && self.type_of(expr, expr.span()) == IrType::Never
+        {
+            let diverged = self.lower_expr(expr);
+            return self
+                .default_value(expected, expr.span())
+                .unwrap_or(diverged);
+        }
+
         // A bare variant access with no associated data (`Iteration.Done`)
         // resolves here against the destination's own enum id, rather than
         // through `lower_expr`'s ordinary path (below): the checker types
@@ -1365,6 +1403,7 @@ impl<'a> FunctionLowering<'a> {
             // "invalid without an explicit value") — unlike `String`'s `""`,
             // there is no empty grapheme to fall back to.
             IrType::Void
+            | IrType::Never
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Object(_)
@@ -2241,6 +2280,9 @@ impl<'a> FunctionLowering<'a> {
                     let target_ty = self.ir_type(target);
                     return self.lower_context_tree(target_ty, &e.args[0].value);
                 }
+                if self.is_fatal_error_call(e) {
+                    return self.lower_fatal_error_call(e, span);
+                }
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
                 }
@@ -2841,7 +2883,20 @@ impl<'a> FunctionLowering<'a> {
     /// locals as slots and no SSA of our own (ADR-007), that is the whole of
     /// it: LLVM promotes the slot to a register and inserts the phi node.
     fn lower_if_expr(&mut self, stmt: &ast::IfStmt, span: Span) -> Operand {
-        let ty = self.block_value_type(&stmt.then_branch);
+        // Same idea as `lower_ternary`: `Never` (a branch ending in
+        // `fatalError(...)`) contributes nothing at the join (roadmap Phase
+        // 4a).
+        let then_ty = self.block_value_type(&stmt.then_branch);
+        let else_ty = match &stmt.else_branch {
+            Some(ast::ElseBranch::Block(b)) => self.block_value_type(b),
+            Some(ast::ElseBranch::If(nested)) => self.block_value_type(&nested.then_branch),
+            None => unreachable!("a verified `if` expression always has an `else`"),
+        };
+        let ty = if then_ty == IrType::Never {
+            else_ty
+        } else {
+            then_ty
+        };
         let result = self.declare_slot("<if>", ty, span);
 
         let condition = self.lower_expr(&stmt.condition);
@@ -2856,18 +2911,32 @@ impl<'a> FunctionLowering<'a> {
         });
 
         self.current = then_block;
-        let value = self.lower_block_value(&stmt.then_branch);
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
+        if then_ty == IrType::Never {
+            let _ = self.lower_block_value(&stmt.then_branch);
+            self.terminate(Terminator::Unreachable);
+        } else {
+            let value = self.lower_block_value(&stmt.then_branch);
+            self.emit_effect(InstKind::Store(result, value), span);
+            self.terminate(Terminator::Jump(continue_block));
+        }
 
         self.current = else_block;
-        let value = match &stmt.else_branch {
-            Some(ast::ElseBranch::Block(b)) => self.lower_block_value(b),
-            Some(ast::ElseBranch::If(nested)) => self.lower_if_expr(nested, span),
-            None => unreachable!("a verified `if` expression always has an `else`"),
-        };
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
+        if else_ty == IrType::Never {
+            let _ = match &stmt.else_branch {
+                Some(ast::ElseBranch::Block(b)) => self.lower_block_value(b),
+                Some(ast::ElseBranch::If(nested)) => self.lower_if_expr(nested, span),
+                None => unreachable!("a verified `if` expression always has an `else`"),
+            };
+            self.terminate(Terminator::Unreachable);
+        } else {
+            let value = match &stmt.else_branch {
+                Some(ast::ElseBranch::Block(b)) => self.lower_block_value(b),
+                Some(ast::ElseBranch::If(nested)) => self.lower_if_expr(nested, span),
+                None => unreachable!("a verified `if` expression always has an `else`"),
+            };
+            self.emit_effect(InstKind::Store(result, value), span);
+            self.terminate(Terminator::Jump(continue_block));
+        }
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), ty, span)
@@ -3142,6 +3211,39 @@ impl<'a> FunctionLowering<'a> {
         }
         let target = Type::from_name(&callee.name)?;
         matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String).then_some(target)
+    }
+
+    /// Whether `call` is `fatalError(...)` (roadmap Phase 4a) — checked the
+    /// same way `context_conversion_target` protects `Float`/`String`: a
+    /// local binding could shadow the name (`mut fatalError = 5;`), so the
+    /// name alone is not enough.
+    fn is_fatal_error_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Path(callee) = &*call.callee else {
+            return false;
+        };
+        callee.name == "fatalError"
+            && !self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(&callee.name))
+    }
+
+    /// Lowers `fatalError(message)`: reports `message` and terminates the
+    /// process, never returning normally (`InstKind::FatalError`'s own doc
+    /// comment). The current block ends in `Terminator::Unreachable`
+    /// immediately after — nothing following it in source can ever run —
+    /// and a fresh block picks up from there purely so this function can
+    /// still return an `Operand` the way every other expression lowering
+    /// does; nothing that matters ever reads it (a diverging `if`/ternary
+    /// branch skips the `Store` entirely instead, see `lower_if_expr`).
+    fn lower_fatal_error_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let message = self.lower_expr_as(&call.args[0].value, IrType::String);
+        let result = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        let unreachable = self.new_block();
+        self.current = unreachable;
+        result
     }
 
     /// Lowers the operand tree of a deep contextual conversion (task 7),
@@ -3807,7 +3909,17 @@ impl<'a> FunctionLowering<'a> {
     /// because it means the same thing. What it does not share is the branches
     /// being blocks: here they are expressions, so there is nothing to scope.
     fn lower_ternary(&mut self, expr: &ast::TernaryExpr, span: Span) -> Operand {
-        let ty = self.type_of(&expr.when_true, expr.when_true.span());
+        // `Never` contributes nothing at the join (`Type::unify`'s own
+        // treatment of it, roadmap Phase 4a) — `cond ? 5 : fatalError(...)`
+        // is `Int32`, not `Never`, so the result's own type comes from
+        // whichever branch is not the diverging one.
+        let true_ty = self.type_of(&expr.when_true, expr.when_true.span());
+        let false_ty = self.type_of(&expr.when_false, expr.when_false.span());
+        let ty = if true_ty == IrType::Never {
+            false_ty
+        } else {
+            true_ty
+        };
         let result = self.declare_slot("<ternary>", ty, span);
 
         let condition = self.lower_expr(&expr.condition);
@@ -3822,16 +3934,30 @@ impl<'a> FunctionLowering<'a> {
         });
 
         // Only the selected branch runs: the operand of the other one is never
-        // evaluated, which is what makes a ternary usable as a guard.
+        // evaluated, which is what makes a ternary usable as a guard. A
+        // branch whose own type is `Never` diverges instead of producing a
+        // value — `fatalError`'s own lowering already ends its block in
+        // `Terminator::Unreachable`, so there is nothing to store and no
+        // join to reach from here.
         self.current = then_block;
-        let value = self.lower_expr(&expr.when_true);
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
+        if true_ty == IrType::Never {
+            let _ = self.lower_expr(&expr.when_true);
+            self.terminate(Terminator::Unreachable);
+        } else {
+            let value = self.lower_expr(&expr.when_true);
+            self.emit_effect(InstKind::Store(result, value), span);
+            self.terminate(Terminator::Jump(continue_block));
+        }
 
         self.current = else_block;
-        let value = self.lower_expr(&expr.when_false);
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
+        if false_ty == IrType::Never {
+            let _ = self.lower_expr(&expr.when_false);
+            self.terminate(Terminator::Unreachable);
+        } else {
+            let value = self.lower_expr(&expr.when_false);
+            self.emit_effect(InstKind::Store(result, value), span);
+            self.terminate(Terminator::Jump(continue_block));
+        }
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), ty, span)
@@ -4299,6 +4425,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) if self.context_conversion_target(e).is_some() => {
                 self.ir_type(self.context_conversion_target(e).expect("checked above"))
             }
+            ast::Expr::Call(e) if self.is_fatal_error_call(e) => IrType::Never,
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {
                     return self.ir_type(method.returns);
@@ -4326,10 +4453,32 @@ impl<'a> FunctionLowering<'a> {
                     None => self.signature_return(&self.callee_name(e)),
                 }
             }
-            ast::Expr::If(e) => self.block_value_type(&e.then_branch),
+            // `Never` contributes nothing at the join (roadmap Phase 4a) —
+            // see `lower_if_expr`/`lower_ternary`'s own matching logic.
+            ast::Expr::If(e) => {
+                let then_ty = self.block_value_type(&e.then_branch);
+                if then_ty != IrType::Never {
+                    then_ty
+                } else {
+                    match &e.else_branch {
+                        Some(ast::ElseBranch::Block(b)) => self.block_value_type(b),
+                        Some(ast::ElseBranch::If(nested)) => {
+                            self.block_value_type(&nested.then_branch)
+                        }
+                        None => unreachable!("a verified `if` expression always has an `else`"),
+                    }
+                }
+            }
             ast::Expr::Field(e) => self.field_type_of(e),
             ast::Expr::This(_) | ast::Expr::Super(_) => self.slot_type(self.lookup_slot("this")),
-            ast::Expr::Ternary(e) => self.type_of(&e.when_true, e.when_true.span()),
+            ast::Expr::Ternary(e) => {
+                let true_ty = self.type_of(&e.when_true, e.when_true.span());
+                if true_ty != IrType::Never {
+                    true_ty
+                } else {
+                    self.type_of(&e.when_false, e.when_false.span())
+                }
+            }
             // Both forms yield the type of the operand they update.
             ast::Expr::Increment(e) => self.slot_type(self.lookup_slot(e.target.name())),
             ast::Expr::Match(e) => self.arm_value_type(e),

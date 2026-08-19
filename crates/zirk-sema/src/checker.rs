@@ -223,6 +223,24 @@ struct Checker<'a> {
     aliases: HashMap<Span, String>,
     /// Return type of the function or lambda being checked.
     current_return: Type,
+    /// The type the expression about to be checked is expected to produce,
+    /// if the immediate surrounding context already knows one (roadmap
+    /// Phase 4a — a `let` with an explicit annotation, a `return` against
+    /// the function's declared type) — consulted only as a fallback by a
+    /// generic construct's own type-parameter inference
+    /// (`Self::infer_type_params`'s own doc comment names this exact gap:
+    /// "the expected result... not consulted yet"), when the arguments
+    /// alone leave a parameter unsolved (`Result.Ok(v)` cannot determine
+    /// `E` from `v` alone).
+    ///
+    /// Single-shot by construction: `check_expr` takes (clears) it the
+    /// instant it starts, so it is never implicitly inherited by a nested
+    /// expression `check_expr` recurses into — only the exact expression
+    /// a caller set it in front of ever sees it. This is what keeps
+    /// `mut r: Result<Int32,String> = wrap(Result<Boolean,String>.Ok(true));`
+    /// from leaking the outer `Result<Int32,String>` into the inner
+    /// construction's own inference.
+    expected_type: Option<Type>,
     /// The class whose body is being checked, if any. It is what `this` names.
     this_type: Option<Type>,
     /// Whether the body being checked is a constructor, which is the one place
@@ -315,6 +333,7 @@ impl<'a> Checker<'a> {
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
+            expected_type: None,
             this_type: None,
             in_constructor: false,
             loop_depth: 0,
@@ -377,6 +396,7 @@ impl<'a> Checker<'a> {
 
     fn run(mut self, program: &Program) -> CheckedProgram {
         self.register_native_iteration_contracts();
+        self.register_native_functions();
         self.record_imports(program);
         self.declare_type_aliases(program);
 
@@ -803,6 +823,34 @@ impl<'a> Checker<'a> {
             iterator,
             iteration,
         });
+    }
+
+    /// Registers `fatalError(message: String): Never` as if it were an
+    /// ordinary declared function (roadmap Phase 4a, `ZIRK_LANGUAGE_SPEC.md`
+    /// section 9) — reuses every bit of ordinary call checking
+    /// (`Self::check_direct_call`) for free, the same way this checker
+    /// already treats `Int8`/`String`/etc. as pre-resolved rather than
+    /// parsed. Its lowering is a compiler intrinsic (`zirk-ir/lower.rs`'s
+    /// `lower_fatal_error_call`), not a call to a Zirk-level body — there is
+    /// none — which is unrelated to how it type-checks.
+    fn register_native_functions(&mut self) {
+        self.functions.insert(
+            "fatalError".to_string(),
+            Signature {
+                name: "fatalError".to_string(),
+                params: vec![ParamInfo {
+                    name: "message".to_string(),
+                    ty: Type::STRING,
+                    optional: false,
+                    has_default: false,
+                    variadic: false,
+                }],
+                returns: Type::of(Base::Never),
+                shared: true,
+                span: Span::empty(0),
+                type_params: Vec::new(),
+            },
+        );
     }
 
     /// Registers a contract with its method signatures.
@@ -2387,15 +2435,15 @@ impl<'a> Checker<'a> {
         }
 
         // An enum with no variants names a type nothing can ever be. The
-        // language spells that `Never`, which arrives in Phase 3; here it is a
-        // typo, and accepting it would give the concept a second spelling.
+        // language already spells that `Never`; here it is a typo, and
+        // accepting it would give the concept a second spelling.
         if variants.is_empty() {
             self.error(
                 codes::DUPLICATE_DECLARATION,
                 decl.name.span,
                 format!("enum `{}` has no variants", decl.name.name),
                 "a type with no values can never be constructed",
-                Some("add at least one variant".into()),
+                Some("write `Never` instead of an empty enum".into()),
             );
         }
 
@@ -2678,15 +2726,23 @@ impl<'a> Checker<'a> {
                 Base::Null => (6, 0),
                 Base::Range => (7, 0),
                 Base::Unknown => (8, 0),
-                Base::Enum(id) => (9, id),
-                Base::Function(id) => (10, id),
-                Base::Contract(id) => (11, id),
-                Base::Class(id) => (12, id),
-                Base::Param(id) => (13, id),
-                Base::Instance(id) => (14, id),
-                Base::ContractInstance(id) => (15, id),
-                Base::EnumInstance(id) => (16, id),
-                Base::Union(id) => (17, id),
+                // A union is meant to drop `Never` entirely, not just sort
+                // it (`ZIRK_LANGUAGE_SPEC.md` section 7: "removes
+                // duplicates, `Never`, and alternatives subsumed by a
+                // supertype") — union normalization does not implement that
+                // rule yet, so this key exists only so the match stays
+                // exhaustive, not because a `Never` alternative surviving
+                // into a union is expected.
+                Base::Never => (9, 0),
+                Base::Enum(id) => (10, id),
+                Base::Function(id) => (11, id),
+                Base::Contract(id) => (12, id),
+                Base::Class(id) => (13, id),
+                Base::Param(id) => (14, id),
+                Base::Instance(id) => (15, id),
+                Base::ContractInstance(id) => (16, id),
+                Base::EnumInstance(id) => (17, id),
+                Base::Union(id) => (18, id),
             }
         }
         bases.sort_by_key(key);
@@ -3280,7 +3336,14 @@ impl<'a> Checker<'a> {
 
     fn check_let(&mut self, stmt: &LetStmt) {
         let annotated = stmt.ty.as_ref().map(|t| self.resolve_type(t));
-        let initializer = stmt.init.as_ref().map(|e| self.check_expr(e));
+        // An explicit annotation is the expected type of the initializer —
+        // what lets `mut r: Result<Int32,String> = Result.Ok(5);` infer `E`
+        // from context instead of only from `Ok`'s own argument (roadmap
+        // Phase 4a, `expected_type`'s own doc comment).
+        let initializer = stmt.init.as_ref().map(|e| {
+            self.expected_type = annotated;
+            self.check_expr(e)
+        });
 
         let ty = match (annotated, initializer) {
             (Some(declared), Some(actual)) => {
@@ -3712,8 +3775,15 @@ impl<'a> Checker<'a> {
     }
 
     fn check_return(&mut self, stmt: &ReturnStmt) {
+        // The function's own declared return type is the expected type of
+        // the returned expression (roadmap Phase 4a, `expected_type`'s own
+        // doc comment) — the same idea `check_let` applies for an explicit
+        // annotation.
         let actual = match &stmt.value {
-            Some(expr) => self.check_expr(expr),
+            Some(expr) => {
+                self.expected_type = Some(self.current_return);
+                self.check_expr(expr)
+            }
             None => Type::VOID,
         };
 
@@ -3747,6 +3817,12 @@ impl<'a> Checker<'a> {
     // --- Expressions ------------------------------------------------------
 
     fn check_expr(&mut self, expr: &Expr) -> Type {
+        // Single-shot: whatever the immediate caller set, this expression —
+        // and only this one — sees it. A nested `check_expr` this dispatch
+        // recurses into (an operand, an argument, …) starts fresh at `None`
+        // unless something explicitly sets it again first. See
+        // `expected_type`'s own doc comment for why that matters.
+        let expected = self.expected_type.take();
         match expr {
             Expr::Int(lit) => self.check_int_literal(lit),
             Expr::Float(lit) => self.check_float_literal(lit),
@@ -3757,7 +3833,7 @@ impl<'a> Checker<'a> {
             Expr::Path(ident) => self.check_path(ident),
             Expr::Unary(e) => self.check_unary(e),
             Expr::Binary(e) => self.check_binary(e),
-            Expr::Call(e) => self.check_call(e),
+            Expr::Call(e) => self.check_call(e, expected),
             // A range is not a value: there is no `Range` type to hold one
             // until Phase 3 brings collections. It only means something as the
             // iterable of a `for ... in`, which checks it directly.
@@ -5436,6 +5512,7 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         field: &FieldExpr,
         enum_id: u32,
+        expected: Option<Type>,
     ) -> Type {
         let variant_name = field.name.name.clone();
         let Some(variant) = self.enums[enum_id as usize].variant(&variant_name).cloned() else {
@@ -5492,7 +5569,26 @@ impl<'a> Checker<'a> {
             span: field.span,
             type_params: type_params.clone(),
         };
-        let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
+        // `Result.Ok(v)` cannot determine `E` from `v` alone — no argument
+        // ever will, since `E` names the *other* variant's payload. Seeding
+        // from the expected type (`Self::expected_type`'s own doc comment)
+        // is what makes a two-parameter generic enum constructible at all,
+        // not just a convenience: `Iteration<T>`'s own single parameter is
+        // always determined by `Item(value)`'s argument, so this gap never
+        // mattered until a second, cross-variant parameter did (roadmap
+        // Phase 4a).
+        let seed: HashMap<u32, Type> = match expected {
+            Some(Type {
+                base: Base::EnumInstance(inst),
+                ..
+            }) if self.enum_instances[inst as usize].enum_id == enum_id => type_params
+                .iter()
+                .copied()
+                .zip(self.enum_instances[inst as usize].args.iter().copied())
+                .collect(),
+            _ => HashMap::new(),
+        };
+        let (_, substitution) = self.check_direct_call_with_subst_seeded(expr, &signature, seed);
 
         // A generic enum's own `T` is inferred from the associated data
         // supplied here, the same way a generic class's construction infers
@@ -5991,7 +6087,7 @@ impl<'a> Checker<'a> {
         self.check_direct_call(expr, &signature)
     }
 
-    fn check_call(&mut self, expr: &CallExpr) -> Type {
+    fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
         }
@@ -6013,7 +6109,7 @@ impl<'a> Checker<'a> {
             let resolved = self.resolved_name(&base.name, base.span);
             if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
                 self.variant_accesses.insert(field.span);
-                return self.check_variant_construction(expr, field, enum_id as u32);
+                return self.check_variant_construction(expr, field, enum_id as u32, expected);
             }
         }
 
@@ -6338,9 +6434,26 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         signature: &Signature,
     ) -> (Type, HashMap<u32, Type>) {
+        self.check_direct_call_with_subst_seeded(expr, signature, HashMap::new())
+    }
+
+    /// [`Self::check_direct_call_with_subst`], pre-populating the inferred
+    /// substitution with `seed` before arguments are considered — what lets
+    /// [`Self::check_variant_construction`] resolve a type parameter no
+    /// argument determines (`Result.Ok(v)`'s own `E`) from the surrounding
+    /// expected type instead. An argument that disagrees with the seed is
+    /// still a real error: seeding happens before the argument loop, so the
+    /// existing "cannot infer, would have to be both X and Y" conflict check
+    /// runs unchanged.
+    fn check_direct_call_with_subst_seeded(
+        &mut self,
+        expr: &CallExpr,
+        signature: &Signature,
+        seed: HashMap<u32, Type>,
+    ) -> (Type, HashMap<u32, Type>) {
         let name = signature.name.clone();
         let slots = self.match_arguments(expr, signature);
-        let substitution = self.infer_type_params(expr.span, &name, signature, &slots);
+        let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed);
 
         for (index, slot) in slots.iter().enumerate() {
             let Some(param) = signature.params.get(index) else {
@@ -6389,25 +6502,27 @@ impl<'a> Checker<'a> {
     }
 
     /// Infers each of a callable's own type parameters from the concrete
-    /// arguments given to it (roadmap task 7.6).
+    /// arguments given to it (roadmap task 7.6), pre-populated with `seed`
+    /// (roadmap Phase 4a — see [`Self::check_direct_call_with_subst_seeded`]).
     ///
-    /// Only from arguments: the receiver, the expected result and the
-    /// surrounding callable context that `zirk-generics`' spec also lists are
-    /// not consulted yet. A parameter that no argument determines is left
-    /// unsolved and reported rather than guessed — "SHALL fail rather than
-    /// choose an arbitrary solution".
+    /// Beyond `seed`, only from arguments: the receiver and the surrounding
+    /// callable context that `zirk-generics`' spec also lists are still not
+    /// consulted. A parameter neither an argument nor the seed determines is
+    /// left unsolved and reported rather than guessed — "SHALL fail rather
+    /// than choose an arbitrary solution".
     fn infer_type_params(
         &mut self,
         call_span: Span,
         name: &str,
         signature: &Signature,
         slots: &[ArgSlot],
+        seed: HashMap<u32, Type>,
     ) -> HashMap<u32, Type> {
         if signature.type_params.is_empty() {
             return HashMap::new();
         }
 
-        let mut substitution: HashMap<u32, Type> = HashMap::new();
+        let mut substitution: HashMap<u32, Type> = seed;
         for (index, slot) in slots.iter().enumerate() {
             let Some(param) = signature.params.get(index) else {
                 continue;
@@ -6468,7 +6583,7 @@ impl<'a> Checker<'a> {
                     codes::TYPE_MISMATCH,
                     call_span,
                     format!("`{name}` cannot infer `{param_name}`"),
-                    "no argument determines it, and neither the expected result nor an explicit type argument are consulted yet",
+                    "no argument or expected type determines it, and an explicit type argument is not consulted yet",
                     None,
                 );
                 continue;

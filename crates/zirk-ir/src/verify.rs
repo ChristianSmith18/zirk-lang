@@ -165,6 +165,18 @@ fn verify_instruction(
             }
         }
 
+        InstKind::FatalError(message) => {
+            expect(inst.ty, IrType::Never, position, "FatalError", report);
+            if let Some(ty) = type_of(message)
+                && ty != IrType::String
+            {
+                report(format!(
+                    "{position}: FatalError's message is {}, expected String",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::GraphemeLenAt { string, offset } => {
             expect(
                 inst.ty,
@@ -904,6 +916,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::ConstBool(_)
         | InstKind::ConstString(_)
         | InstKind::ConstChar(_) => Vec::new(),
+        InstKind::FatalError(message) => vec![*message],
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),

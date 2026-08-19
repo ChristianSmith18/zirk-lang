@@ -201,6 +201,9 @@ fn llvm_type_in<'ctx>(
 ) -> Option<BasicTypeEnum<'ctx>> {
     Some(match ty {
         ir::IrType::Void => return None,
+        // No value of `Never` exists (roadmap Phase 4a): nothing needs an
+        // LLVM representation for it, same as `Void`.
+        ir::IrType::Never => return None,
         // LLVM already has a native type for any integer width (roadmap
         // Phase 3b) — signedness is not part of an `IntType` at all in
         // LLVM, only of the operation performed on it (`sdiv` vs `udiv`,
@@ -1132,6 +1135,23 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .basic()
                         .expect("the constructor returns a value"),
                 )
+            }
+
+            // `fatalError(message)` (roadmap Phase 4a): reports `message`
+            // and terminates. No value: the caller's own `Terminator::Unreachable`
+            // right after this (`lower_fatal_error_call`'s own doc comment)
+            // is what actually stops codegen from emitting anything that
+            // would run afterward, the same way `Println` produces nothing
+            // either.
+            ir::InstKind::FatalError(message) => {
+                self.builder
+                    .build_call(
+                        self.runtime.fatal_error,
+                        &[self.operand(*message).into()],
+                        "",
+                    )
+                    .expect("call to the fatal error handler");
+                None
             }
 
             ir::InstKind::Load(slot) => {
