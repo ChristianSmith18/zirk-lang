@@ -510,6 +510,31 @@ fn valid_the_reference_program_of_the_roadmap() {
     accepted("fn main(): Void {\n    stdout.println(\"Hola desde Zirk\");\n}");
 }
 
+// --- String interpolation (roadmap Phase 3b) ---------------------------------
+
+#[test]
+fn valid_string_interpolation_of_printable_types() {
+    accepted_body(
+        "mut name = \"ana\"; mut age = 1;
+         mut s = \"Hola, {name}, edad {age}\";",
+    );
+}
+
+#[test]
+fn valid_string_interpolation_yields_string() {
+    accepted_body("mut s: String = \"x {1}\";");
+}
+
+#[test]
+fn invalid_string_interpolation_of_a_type_without_a_text_form() {
+    let output = rejected(
+        "class User { construct() { } }
+         fn main(): Void { mut u = User(); mut s = \"u: {u}\"; }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("cannot be printed"));
+}
+
 // --- Error recovery ---------------------------------------------------------
 
 #[test]

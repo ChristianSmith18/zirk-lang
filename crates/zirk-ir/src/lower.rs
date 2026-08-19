@@ -2018,6 +2018,8 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Cast(e) => self.lower_cast(e, span),
 
+            ast::Expr::Interpolated(e) => self.lower_interpolated(e, span),
+
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
             ast::Expr::Null(_) | ast::Expr::Range(_) => {
@@ -3518,6 +3520,75 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
+    /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each
+    /// `{expr}` the same way `println`'s own argument is (roadmap Phase 3b).
+    ///
+    /// A part after an `{expr}` that opens blocks (an `if`, `match` or
+    /// ternary inside the interpolation) would otherwise strand every piece
+    /// already computed — values do not cross blocks (ADR-007) — so each
+    /// piece is held in a slot when a later one branches, the same pattern
+    /// [`Self::lower_held_args`] uses for a call's own arguments.
+    fn lower_interpolated(&mut self, expr: &ast::InterpolatedStrExpr, span: Span) -> Operand {
+        fn opens(part: &ast::InterpolatedPart) -> bool {
+            matches!(part, ast::InterpolatedPart::Expr(e) if opens_blocks(e))
+        }
+
+        let mut held: Vec<Held> = Vec::with_capacity(expr.parts.len());
+        for (position, part) in expr.parts.iter().enumerate() {
+            let branches_later = expr.parts[position + 1..].iter().any(opens);
+
+            let value = match part {
+                ast::InterpolatedPart::Literal(text) => {
+                    let id = self.module.intern_string(text);
+                    self.emit(InstKind::ConstString(id), IrType::String, span)
+                }
+                ast::InterpolatedPart::Expr(inner) => {
+                    let operand = self.lower_expr(inner);
+                    let ty = self.type_of(inner, inner.span());
+                    if ty == IrType::String {
+                        operand
+                    } else {
+                        self.emit(InstKind::ToString(operand), IrType::String, span)
+                    }
+                }
+            };
+
+            held.push(if branches_later {
+                let slot = self.declare_slot("<interp>", IrType::String, span);
+                self.emit_effect(InstKind::Store(slot, value), span);
+                Held::Spilled(slot, IrType::String)
+            } else {
+                Held::Value(value)
+            });
+        }
+
+        let mut pieces = Vec::with_capacity(held.len());
+        for h in held {
+            pieces.push(self.reload(h, span));
+        }
+
+        let mut iter = pieces.into_iter();
+        // An interpolation always has at least one `StrPart` — the lexer
+        // never produces an empty one, a plain `""` lexes as `TokenKind::Str`
+        // instead — but an empty fallback keeps this total rather than
+        // leaning on that invariant holding forever.
+        let Some(mut acc) = iter.next() else {
+            let id = self.module.intern_string("");
+            return self.emit(InstKind::ConstString(id), IrType::String, span);
+        };
+        for piece in iter {
+            acc = self.emit(
+                InstKind::Concat {
+                    left: acc,
+                    right: piece,
+                },
+                IrType::String,
+                span,
+            );
+        }
+        acc
+    }
+
     /// Lowers the arguments of a call into the parameters they fill.
     ///
     /// Named arguments are placed by name and omitted ones take their default,
@@ -3734,6 +3805,7 @@ impl<'a> FunctionLowering<'a> {
                 unreachable!("the type of this expression comes from the value it produced")
             }
             ast::Expr::Cast(e) => self.ir_type_from_ref(&e.target),
+            ast::Expr::Interpolated(_) => IrType::String,
         }
     }
 
@@ -3840,6 +3912,10 @@ fn opens_blocks(expr: &ast::Expr) -> bool {
         ast::Expr::Unary(e) => opens_blocks(&e.operand),
         ast::Expr::Call(e) => e.args.iter().any(|a| opens_blocks(&a.value)),
         ast::Expr::Println(e) => opens_blocks(&e.arg),
+        ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
+            ast::InterpolatedPart::Expr(inner) => opens_blocks(inner),
+            ast::InterpolatedPart::Literal(_) => false,
+        }),
         _ => false,
     }
 }

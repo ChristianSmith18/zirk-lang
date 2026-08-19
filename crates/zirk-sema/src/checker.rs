@@ -554,8 +554,10 @@ impl<'a> Checker<'a> {
     /// Reports printing a value the runtime cannot turn into text.
     ///
     /// `ZIRK_STDLIB_SPEC.md` section 3 routes every printable value through
-    /// `to_string()`, and until traits exist that is not something a type can
-    /// provide: the runtime knows exactly `Int32`, `Boolean` and `String`.
+    /// `to_string()`. That contract itself is roadmap Phase 3b's own task 8,
+    /// not yet built — until it lands, the runtime knows exactly `Int32`,
+    /// `Boolean` and `String`, the same three both `println` and
+    /// interpolation (`"{expr}"`) accept today.
     fn require_printable(&mut self, ty: Type, span: Span) {
         if ty.is_unknown() {
             return;
@@ -574,7 +576,7 @@ impl<'a> Checker<'a> {
         let help = if ty.nullable {
             "use `?? <fallback>` to provide a value to print"
         } else {
-            "`to_string()` becomes a trait in Phase 3; print an `Int32`, `Boolean` or `String` for now"
+            "`to_string()` becomes a trait in Phase 3b; print an `Int32`, `Boolean` or `String` for now"
         };
 
         self.error(
@@ -3784,7 +3786,26 @@ impl<'a> Checker<'a> {
                 Type::VOID
             }
             Expr::Cast(e) => self.check_cast(e),
+            Expr::Interpolated(e) => self.check_interpolated(e),
         }
+    }
+
+    /// `"text {expr} text"` (roadmap Phase 3b).
+    ///
+    /// Each `{expr}` needs exactly what `println`'s own argument does — a
+    /// text form to convert to — so it is checked through the same gate
+    /// (`require_printable`) rather than a rule of its own. Once `to_string()`
+    /// exists as a real contract (task 8 of the phase), both gain a proper
+    /// user-extensible text form together; today both mean "one of the
+    /// runtime's own three printable types".
+    fn check_interpolated(&mut self, expr: &InterpolatedStrExpr) -> Type {
+        for part in &expr.parts {
+            if let InterpolatedPart::Expr(inner) = part {
+                let ty = self.check_expr(inner);
+                self.require_printable(ty, inner.span());
+            }
+        }
+        Type::STRING
     }
 
     /// `expr as Type` or `<Type>expr` (`ZIRK_LANGUAGE_SPEC.md` section 11).

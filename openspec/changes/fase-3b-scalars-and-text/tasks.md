@@ -8,14 +8,14 @@
 - [ ] 2.1 Literales enteros con sufijo o inferencia de ancho, según lo que la gramática existente ya distinga
 - [ ] 2.2 Literales `Float`, con notación científica y default `Float64`
 - [ ] 2.3 Literal `Char`, delimitado por comillas simples, capaz de un grapheme extendido de más de un code point
-- [ ] 2.4 `{expr}` dentro de un literal de `String`, con `\{`/`\}` como escape
-- [ ] 2.5 Tests: un caso válido y uno inválido por cada literal nuevo
+- [x] 2.4 `{expr}` dentro de un literal de `String`, con `\{`/`\}` como escape — encontrado ya implementado en el léxico desde antes de esta fase (`TokenKind::InterpolatedStr`/`StrPart`, con conteo de profundidad de llaves para que una expresión anidada con las suyas propias no cierre la interpolación antes de tiempo, y el escape ya reconocido); nada que hacer aquí, solo confirmar y dejar de gatearlo en el parser (3.2)
+- [x] 2.5 Tests: un caso válido y uno inválido por cada literal nuevo — hecho para interpolación (ya cubierto por tests de léxico preexistentes, ver 2.4); pendiente `Float`/`Char`
 
 ## 3. Gramática
 
 - [x] 3.1 Operadores bitwise y de shift (`&`, `|`, `^`, `~`, `<<`, `>>`), en los niveles de precedencia que el spec fija, distintos de `&&`/`||` — precedencia propia decidida durante la implementación (el roadmap no fija números exactos): bitwise entre comparación y aditiva, shift más apretado que los otros tres, mismo orden relativo que C/Rust/Swift (`Or=1, And=2, Eq/Is=3, Compare=4, Coalesce=5, BitOr=6, BitXor=7, BitAnd=8, Shl/Shr=9, Add/Sub=10, Mul/Div/Rem=11`). El léxico ya tenía cada token (`Amp`, `Pipe`, `Caret`, `Tilde`, `Shl`, `Shr` y sus formas `=`) modelado desde antes de esta fase, con su propio gate `Phase::THREE_B` en `TokenKind::phase()` — retirado para esta familia (no para `**`, que sigue esperando a `Float`)
-- [ ] 3.2 AST para una expresión interpolada: texto literal más una lista de sub-expresiones, preservando el orden de aparición
-- [ ] 3.3 Tests: un caso válido y uno inválido por cada regla nueva — hecho para bitwise/shift (`crates/zirk-cli/tests/corpus/valid/bitwise_and_shift.zrk`, `invalid/bitwise_on_non_integer.zrk`, más `typing.rs`); pendiente la interpolación
+- [x] 3.2 AST para una expresión interpolada: texto literal más una lista de sub-expresiones, preservando el orden de aparición — `Expr::Interpolated(InterpolatedStrExpr)` nuevo, con `parts: Vec<InterpolatedPart>` (`Literal(String)` | `Expr(Expr)`). El parser retira su propio gate (`pending_literal`) y re-lexa cada `{expr}` por separado — el léxico guarda el texto crudo en vez de tokenizarlo inline precisamente para esto (`StrPart::Expr`'s own doc comment) — desplazando cada span resultante por el offset donde la interpolación empieza, así un diagnóstico dentro de `{expr}` señala el lugar real del archivo en vez de la posición 0 de un texto que nadie escribió como archivo propio
+- [x] 3.3 Tests: un caso válido y uno inválido por cada regla nueva — hecho para bitwise/shift (`crates/zirk-cli/tests/corpus/valid/bitwise_and_shift.zrk`, `invalid/bitwise_on_non_integer.zrk`, más `typing.rs`) y para interpolación (`valid/string_interpolation.zrk`, `invalid/interpolation_of_non_printable.zrk`, más forma del árbol en `grammar.rs` y tipos en `typing.rs`)
 
 ## 4. Tipos — anchos enteros
 
@@ -54,7 +54,7 @@
 - [ ] 8.3 Implementación nativa de `to_string()` para cada escalar (los diez enteros, `Float`, `Boolean`, `Char`, `String`)
 - [ ] 8.4 Un tipo del usuario (clase, record, enum) puede implementar `to_string()`
 - [ ] 8.5 `print`/`println` rutean por `to_string()`; retirar `require_printable` y su lista cerrada
-- [ ] 8.6 Desazucarar `"{expr}"` a texto literal concatenado con `expr.to_string()`
+- [ ] 8.6 Desazucarar `"{expr}"` a texto literal concatenado con `expr.to_string()` — la forma de la bajada ya existe (`lower_interpolated`, cadena de `InstKind::Concat`, cada pieza pasada por `InstKind::ToString` cuando no es ya `String`) y quedó verificada con programas reales, incluida una expresión interpolada que abre bloques (`if`) — un caso donde los valores ya computados debían pasar por slot para no cruzar bloques (ADR-007), igual que `lower_held_args` ya hace para los argumentos de una llamada. Lo que falta es que esa conversión sea `to_string()` de verdad: hoy reutiliza el mismo `require_printable`/`ToString` fijo que `println` (Int32/Boolean/String únicamente) porque el contrato real todavía no existe (8.1-8.5) — cuando aterrice, este mismo desazúcar pasa a despachar por él en vez de por la lista cerrada, sin cambiar la forma de la cadena de `Concat`
 - [ ] 8.7 Tests: un caso válido y uno inválido por cada regla nueva
 
 ## 9. Runtime

@@ -1,0 +1,11 @@
+// An interpolated expression needs the same text form `println` needs — a
+// class without a text form cannot be interpolated, until `to_string()`
+// exists as a real contract (roadmap Phase 3b, task 8).
+class User {
+    construct() { }
+}
+
+fn main(): Void {
+    mut u = User();
+    stdout.println("User: {u}");
+}
