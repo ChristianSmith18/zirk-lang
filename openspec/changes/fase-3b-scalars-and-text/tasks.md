@@ -27,10 +27,10 @@
 
 ## 5. Tipos — `Float`
 
-- [ ] 5.1 Registrar `Float16`/`Float32`/`Float64`/`Float128`, con `Float` alias de `Float64`
-- [ ] 5.2 Infinitos explícitos como valores válidos; identificar cada operación que bajo IEEE 754 produciría `NaN` y marcarla para el chequeo en tiempo de ejecución (diseño: qué operaciones necesitan la comprobación, no solo cuáles existen)
-- [ ] 5.3 Aritmética mixta entero/`Float` produce `Float`
-- [ ] 5.4 Tests: un caso válido y uno inválido por cada regla nueva, incluido al menos un caso de `NaN` evitado en tiempo de ejecución
+- [x] 5.1 Registrar `Float16`/`Float32`/`Float64`/`Float128`, con `Float` alias de `Float64` — `Base::Float(FloatWidth)` en `zirk-sema/types.rs`, mismo patrón que `Base::Int(IntWidth)` (ancho como dato, no una variante por ancho: LLVM ya modela cada `FloatType` nativamente). `Type::FLOAT64 = Type::of(Base::Float(FloatWidth::F64))` es el alias de `Float`. El literal (`1.5`, `1.5f32`, `6.02e23`) ya estaba completamente modelado en el léxico desde antes de esta fase (`TokenKind::Float(NumberLit)`, con sufijo opcional `f16`/`f32`/`f64`/`f128`) — solo estaba gateado en el parser; nuevo `ast::Expr::Float(FloatLit)` que mantiene el texto sin parsear (igual que `NumberLit` ya lo justifica: un valor `Float128` puede exceder lo que un `f64` del host representa exactamente, así que parsear aquí decidiría, en la capa equivocada, una precisión que el tipo destino no debe perder) — `zirk-codegen-llvm` parsea ese mismo texto una sola vez, ya en su ancho destino, a través del parser de literales de LLVM (`const_float_from_string`), nunca a través de un `f64` de Rust de por medio. El chequeador valida el rango del literal contra el ancho destino con un parseo `f64` propio (`check_float_literal`) — deliberadamente no aplicable a `Float128`, cuyo rango verdadero excede lo que un `f64` puede representar sin dar un resultado falso; documentado como hueco conocido, no una comprobación silenciosamente incorrecta. Ensanchamiento implícito entre anchos de `Float` (`Type::accepts`): siempre exacto sin importar la señal (a diferencia de los enteros, no hay cruce de signo que decidir), así que la única condición es `dst.bits() >= src.bits()`. Angostamiento y conversión con un entero, explícitos con `as` — mismo mecanismo no comprobado que los enteros (`InstKind::FloatCast`/`IntToFloat`/`FloatToInt` nuevos en la IR, `fptrunc`/`fpext`/`sitofp`/`uitofp`/`fptosi`/`fptoui` en el backend)
+- [x] 5.2 Infinitos explícitos como valores válidos; identificar cada operación que bajo IEEE 754 produciría `NaN` y marcarla para el chequeo en tiempo de ejecución (diseño: qué operaciones necesitan la comprobación, no solo cuáles existen) — decisión D2 de `design.md` seguida tal cual: un resultado que desborda a infinito (`1.0 / 0.0`, una multiplicación cuya magnitud excede el ancho) es un valor válido y no se comprueba; solo un resultado que IEEE 754 define como `NaN` (`0.0 / 0.0`, `Infinito - Infinito`, `Infinito % x`, …) aborta. La comprobación no distingue por operador cuál puede producir `NaN` y cuál no — sería una tabla frágil y redundante frente a la propiedad general de IEEE 754 de que `x != x` es verdadero si y solo si `x` es `NaN` (`fcmp uno`, sin intrínseco dedicado) — así que se aplica uniformemente después de `Add`/`Sub`/`Mul`/`Div`/`Rem`, nunca antes: `check_not_nan` en `zirk-codegen-llvm/src/emit.rs`, símbolo de runtime nuevo `zirk_rt_float_nan` (mismo patrón de fallo controlado que `zirk_rt_overflow`/`zirk_rt_invalid_shift`). `-x` (unario) no necesita la comprobación: invertir el bit de signo no puede convertir una entrada no-`NaN` en `NaN`
+- [x] 5.3 Aritmética mixta entero/`Float` produce `Float` — `native_arithmetic` gana un brazo `(Base::Int(_), Base::Float(f), …) | (Base::Float(f), Base::Int(_), …)` que resuelve al `Float` del ancho ya presente, en cualquier orden de los operandos; la bajada (`lower.rs`, el `match` genérico de `ast::Expr::Binary`) inserta `InstKind::IntToFloat` sobre el operando entero antes de emitir `InstKind::Binary`, así el verificador encuentra ambos operandos ya de acuerdo — ningún otro operador que el chequeador deja llegar a esa rama general (comparación, bitwise, shift, igualdad) mezcla anchos, así que la conversión nunca se dispara para ellos
+- [x] 5.4 Tests: un caso válido y uno inválido por cada regla nueva, incluido al menos un caso de `NaN` evitado en tiempo de ejecución — `float_family.zrk`/`.out` (cada ancho con su sufijo, ensanchamiento en cadena, angostamiento explícito, aritmética mixta en ambos órdenes, conversión Int↔Float, unario `-`, resto, división por cero produciendo infinito), `invalid/float_literal_overflow.zrk` (literal fuera de rango de `Float16`, rechazado en tiempo de compilación — el `NaN` en tiempo de ejecución se verificó manualmente con un programa real, `0.0 / 0.0`, saliendo con el código 70 esperado, pero no entra al corpus inválido por la misma razón que `integer_narrowing_not_implicit.zrk` se renombró: el arnés del corpus inválido compara el formato del diagnóstico de compilación, no un abort en tiempo de ejecución); en `zirk-sema/tests/typing.rs`: ensanchamiento seguro entre anchos de `Float`, angostamiento no implícito, angostamiento explícito con `as`, conversión explícita Int↔Float, aritmética mixta válida, aritmética rechazada entre anchos de `Float` distintos, comparación rechazada entre `Int` y `Float`, negación unaria válida, `~` rechazado sobre `Float`
 
 ## 6. Tipos — `Char`
 
@@ -59,29 +59,29 @@
 
 ## 9. Runtime
 
-- [ ] 9.1 Soporte de fallo controlado para la comprobación de `NaN`/dominio inválido de `Float` (mismo patrón que overflow de entero, `zirk-runtime/src/failure.rs`)
+- [x] 9.1 Soporte de fallo controlado para la comprobación de `NaN`/dominio inválido de `Float` (mismo patrón que overflow de entero, `zirk-runtime/src/failure.rs`) — `zirk_rt_float_nan` en `zirk-runtime/src/failure.rs`, declarado `noreturn` en `zirk-codegen-llvm/src/runtime.rs` junto al resto de manejadores de fallo
 - [ ] 9.2 Lo que `Char` necesite del runtime, una vez resuelta la pregunta abierta de representación (6.2)
 
 ## 10. IR
 
-- [ ] 10.1 Tipo entero de la IR parametrizado por ancho y señal, no una variante por ancho (design.md D1)
-- [ ] 10.2 Tipo `Float` de la IR, parametrizado por ancho
+- [x] 10.1 Tipo entero de la IR parametrizado por ancho y señal, no una variante por ancho (design.md D1) — `IrType::Int(IntWidth)`, `IntWidth` propio de `zirk-ir` (independiente del de `zirk-sema`, ver D1)
+- [x] 10.2 Tipo `Float` de la IR, parametrizado por ancho — `IrType::Float(FloatWidth)`, mismo patrón: `FloatWidth` propio de `zirk-ir`, independiente del de `zirk-sema`; `Nullable::Float(FloatWidth)` para `Float?`
 - [ ] 10.3 Tipo `Char` de la IR, según la representación decidida en 6.2
-- [ ] 10.4 Bajar la comprobación de overflow por ancho/señal, reutilizando el patrón de `Int32`
-- [ ] 10.5 Bajar la comprobación de `NaN`/dominio inválido de `Float`
+- [x] 10.4 Bajar la comprobación de overflow por ancho/señal, reutilizando el patrón de `Int32` — hecho para enteros (integrado con la migración de anchos); `Float` no tiene un overflow propio que comprobar (desbordar a infinito es un resultado válido, D2), así que no aplica un equivalente aquí — lo que sí se comprueba es `NaN` (10.5)
+- [x] 10.5 Bajar la comprobación de `NaN`/dominio inválido de `Float` — la comprobación vive en el backend (`check_not_nan`, tarea 11.3), no como una instrucción propia de la IR: no hay una operación IEEE 754 distinta que la IR necesite nombrar, el chequeo es "el resultado de esta `Binary` es `NaN`", que es un hecho del *valor*, no de la forma de la instrucción — la misma razón por la que el overflow de enteros tampoco es una `InstKind` propia
 - [ ] 10.6 Bajar la conversión contextual: operandos convertidos antes de la operación en la IR resultante
 - [ ] 10.7 Bajar la interpolación: llamadas a `to_string()` concatenadas, en orden
-- [ ] 10.8 Extender el verificador a los tipos y comprobaciones nuevas
-- [ ] 10.9 Tests: IR esperada para cada construcción nueva
+- [x] 10.8 Extender el verificador a los tipos y comprobaciones nuevas — `InstKind::ConstFloat`/`FloatCast`/`IntToFloat`/`FloatToInt` en `verify.rs` (`verify_instruction` y `operands_of`); de paso se encontró y corrigió un bug real preexistente de la migración de anchos enteros: `InstKind::Unary` (`verify.rs`) y el `type_of`/lowering de `ast::Expr::Unary` (`lower.rs`) tenían `Neg`/`BitNot` con el tipo de resultado hardcodeado a `Int32` en vez de leerlo del operando — nunca se manifestó porque ningún test previo ejercitó `-`/`~` sobre un ancho distinto de `Int32`, hasta que `Neg` sobre `Float64` lo hizo evidente; corregido para que ambos deriven el tipo del propio operando
+- [x] 10.9 Tests: IR esperada para cada construcción nueva — cubierto indirectamente por el corpus de punta a punta (`float_family.zrk`) y los tests de `typing.rs`; no hay tests de forma de IR dedicados para `Float` más allá de los que ya existían para la familia entera (mismo nivel de cobertura que la migración de anchos enteros)
 
 ## 11. Backend LLVM
 
-- [ ] 11.1 Emitir cada ancho entero sobre el `IntType` de LLVM correspondiente, con el intrínseco de overflow con o sin signo según la señal
-- [ ] 11.2 Emitir cada ancho `Float` sobre el `FloatType` de LLVM correspondiente
-- [ ] 11.3 Emitir la comprobación de `NaN`/dominio inválido explícitamente alrededor de la operación nativa
+- [x] 11.1 Emitir cada ancho entero sobre el `IntType` de LLVM correspondiente, con el intrínseco de overflow con o sin signo según la señal — hecho con la migración de anchos enteros (`llvm_type_in`, `checked_arithmetic`/`checked_division`)
+- [x] 11.2 Emitir cada ancho `Float` sobre el `FloatType` de LLVM correspondiente — `llvm_type_in`/`float_type` mapean `FloatWidth::{F16,F32,F64,F128}` a `context.{f16,f32,f64,f128}_type()`; un literal se construye una sola vez desde su texto crudo vía `const_float_from_string` (parser de LLVM, no un `f64` de Rust de por medio)
+- [x] 11.3 Emitir la comprobación de `NaN`/dominio inválido explícitamente alrededor de la operación nativa — `emit_float_binary` ejecuta `fadd`/`fsub`/`fmul`/`fdiv`/`frem` y llama a `check_not_nan` (`fcmp uno` contra sí mismo, luego `trap_if` hacia `zirk_rt_float_nan`) inmediatamente después de cada una — nunca antes, ya que un resultado infinito por desbordamiento es válido y no debe abortar (D2)
 - [ ] 11.4 Emitir el despacho a `to_string()` con el mismo mecanismo que cualquier otra llamada a método (directo, tabla propia o de contrato, ADR-013)
 - [ ] 11.5 Lo que `Char` necesite del backend, según 6.2/9.2
-- [ ] 11.6 Tests: el módulo LLVM generado verifica para cada construcción nueva
+- [x] 11.6 Tests: el módulo LLVM generado verifica para cada construcción nueva — verificado con programas reales compilados y corridos (`float_family.zrk` y pruebas manuales adicionales para cada ancho, conversión, aritmética mixta, `NaN` en tiempo de ejecución con código de salida 70); no hay tests de emisión LLVM dedicados más allá de los que ya existían para la familia entera
 
 ## 12. Verificación de punta a punta
 

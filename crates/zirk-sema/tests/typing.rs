@@ -89,9 +89,10 @@ fn valid_the_four_types_of_the_subset() {
 
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
-    // `Int64` and the rest of the integer family resolve now (roadmap
-    // Phase 3b, task 4.1) — `Float64` is still genuinely pending.
-    let output = rejected_body("mut x: Float64 = 1;");
+    // `Int64`/`Float64` and the rest of the integer/float families resolve
+    // now (roadmap Phase 3b, tasks 4.1/5.1) — `Char` is still genuinely
+    // pending.
+    let output = rejected_body("mut x: Char = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
     assert!(output.contains("Phase 3b"), "{output}");
 }
@@ -157,10 +158,59 @@ fn valid_shift_amount_may_be_a_different_width() {
 }
 
 #[test]
-fn invalid_float_type_states_its_phase_instead_of_being_unknown() {
-    let output = rejected_body("mut x: Float64 = 1;");
-    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
-    assert!(output.contains("Phase 3b"), "{output}");
+fn valid_float_family_resolves() {
+    accepted_body(
+        "mut a: Float64 = 1.5;\nmut b: Float32 = 1.5f32;\nmut c: Float16 = 1.5f16;\nmut d: Float128 = 1.5f128;\nreturn;",
+    );
+}
+
+#[test]
+fn valid_safe_widening_between_float_widths() {
+    accepted_body("mut a: Float16 = 1.5f16;\nmut b: Float32 = a;\nmut c: Float64 = b;");
+}
+
+#[test]
+fn invalid_float_narrowing_is_not_implicit() {
+    let output = rejected_body("mut a: Float64 = 1.5;\nmut b: Float16 = a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_explicit_float_narrowing_with_as() {
+    accepted_body("mut a: Float64 = 1.5;\nmut b: Float16 = a as Float16;");
+}
+
+#[test]
+fn valid_explicit_conversion_between_int_and_float() {
+    accepted_body("mut a: Int32 = 5;\nmut b: Float64 = a as Float64;\nmut c: Int32 = b as Int32;");
+}
+
+#[test]
+fn valid_mixed_integer_and_float_arithmetic_produces_float() {
+    accepted_body("mut a: Int32 = 2;\nmut b: Float64 = 1.5;\nmut c: Float64 = a + b;");
+}
+
+#[test]
+fn invalid_arithmetic_between_different_float_widths() {
+    let output = rejected_body("mut a: Float32 = 1.5f32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_comparison_between_integer_and_float() {
+    let output = rejected_body("mut a: Int32 = 1;\nmut b: Float64 = 1.0;\nmut c = a < b;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_unary_negation_on_float() {
+    accepted_body("mut a: Float64 = 1.5;\nmut b = -a;");
+}
+
+#[test]
+fn invalid_bitwise_not_on_float() {
+    let output = rejected_body("mut a: Float64 = 1.5;\nmut b = ~a;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]

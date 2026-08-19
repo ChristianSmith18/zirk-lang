@@ -109,6 +109,61 @@ impl IntWidth {
     }
 }
 
+/// Every binary floating-point type the language has (roadmap Phase 3b):
+/// `Float16`/`Float32`/`Float64`/`Float128`, with `Float` an alias of
+/// `Float64` (`Type::FLOAT64`). Widening between widths is always exact —
+/// unlike integers, a wider IEEE 754 format can represent every value the
+/// narrower one can — so [`Type::accepts`] only needs `dst.bits() >=
+/// src.bits()`, no signedness to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FloatWidth {
+    F16,
+    F32,
+    F64,
+    F128,
+}
+
+impl FloatWidth {
+    pub const fn bits(self) -> u32 {
+        use FloatWidth::*;
+        match self {
+            F16 => 16,
+            F32 => 32,
+            F64 => 64,
+            F128 => 128,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        use FloatWidth::*;
+        match self {
+            F16 => "Float16",
+            F32 => "Float32",
+            F64 => "Float64",
+            F128 => "Float128",
+        }
+    }
+
+    /// The finite magnitude a literal of this width may name without
+    /// overflowing to infinity, as an `f64` upper bound.
+    ///
+    /// `Float128`'s true range vastly exceeds `f64::MAX`, but there is no
+    /// `f64`-based way to detect a `Float128` literal that overflows *its*
+    /// range without parsing decimal text at `f128` precision, which no
+    /// dependency here does. So `Float128` reports no bound at all — its
+    /// literal range check is a known, documented gap (see `check_float_literal`)
+    /// rather than a false one built on a wrong number.
+    pub const fn literal_bound(self) -> Option<f64> {
+        use FloatWidth::*;
+        match self {
+            F16 => Some(65504.0),
+            F32 => Some(f32::MAX as f64),
+            F64 => Some(f64::MAX),
+            F128 => None,
+        }
+    }
+}
+
 /// The part of a type that is not its nullability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Base {
@@ -116,6 +171,9 @@ pub enum Base {
     /// `Int8`…`UInt128` (roadmap Phase 3b) — `Int`/`Integer` alias `Int32`,
     /// `Type::INT32` is `Int(IntWidth::I32)`.
     Int(IntWidth),
+    /// `Float16`…`Float128` (roadmap Phase 3b) — `Float` aliases `Float64`,
+    /// `Type::FLOAT64` is `Float(FloatWidth::F64)`.
+    Float(FloatWidth),
     Boolean,
     String,
     /// The type of the `null` literal, assignable to any nullable type.
@@ -191,6 +249,7 @@ pub enum Base {
 impl Type {
     pub const VOID: Type = Type::of(Base::Void);
     pub const INT32: Type = Type::of(Base::Int(IntWidth::I32));
+    pub const FLOAT64: Type = Type::of(Base::Float(FloatWidth::F64));
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
     pub const NULL: Type = Type::of(Base::Null);
@@ -263,6 +322,12 @@ impl Type {
                         && dst.bits() >= src.bits()
                         && (self.nullable || !other.nullable)
                 }
+                // Unlike integers, widening between float formats loses
+                // nothing regardless of signedness — there is none — so the
+                // only condition is the destination being at least as wide.
+                (Base::Float(dst), Base::Float(src)) => {
+                    dst.bits() >= src.bits() && (self.nullable || !other.nullable)
+                }
                 _ => false,
             };
         }
@@ -320,7 +385,10 @@ impl Type {
         if self.nullable {
             return true;
         }
-        matches!(self.base, Base::Int(_) | Base::Boolean | Base::String)
+        matches!(
+            self.base,
+            Base::Int(_) | Base::Float(_) | Base::Boolean | Base::String
+        )
     }
 
     /// Range of values representable by the type, for integer literals.
@@ -355,6 +423,10 @@ impl Type {
             "UInt32" => Type::of(Base::Int(U32)),
             "UInt64" => Type::of(Base::Int(U64)),
             "UInt128" => Type::of(Base::Int(U128)),
+            "Float64" | "Float" => Type::FLOAT64,
+            "Float16" => Type::of(Base::Float(FloatWidth::F16)),
+            "Float32" => Type::of(Base::Float(FloatWidth::F32)),
+            "Float128" => Type::of(Base::Float(FloatWidth::F128)),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
             _ => return None,
@@ -371,6 +443,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
     let base = match ty.base {
         Base::Void => "Void".to_string(),
         Base::Int(width) => width.name().to_string(),
+        Base::Float(width) => width.name().to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
         Base::Null => "Null".to_string(),
@@ -648,14 +721,12 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 3 brings user-defined types and the roots they hang from.
     const PHASE_3: &[&str] = &["Object", "Never"];
     // Phase 3b brings the rest of the scalars. The remaining integer widths
-    // are implemented (`Type::from_name`, checked ahead of this list) — what
-    // is still pending is the binary floating family and `Char`. `UInt`
+    // and the binary floating family are implemented (`Type::from_name`,
+    // checked ahead of this list) — what is still pending is `Char`. `UInt`
     // stays here too: the spec never names it as an alias the way
     // `Int`/`Integer` name `Int32`, so it resolves to nothing even once
     // every explicit width does.
-    const PHASE_3B: &[&str] = &[
-        "UInt", "Float16", "Float32", "Float64", "Float128", "Float", "Char",
-    ];
+    const PHASE_3B: &[&str] = &["UInt", "Char"];
     // Phase 4 brings errors and resources.
     const PHASE_4: &[&str] = &["Result", "Pointer", "Resource"];
     // Phase 5 brings concurrency.
@@ -710,7 +781,7 @@ mod tests {
 
     #[test]
     fn a_type_outside_the_subset_does_not_resolve() {
-        assert_eq!(Type::from_name("Float64"), None);
+        assert_eq!(Type::from_name("Char"), None);
         assert_eq!(Type::from_name("Whatever"), None);
     }
 
@@ -729,6 +800,18 @@ mod tests {
     }
 
     #[test]
+    fn valid_every_float_width_resolves() {
+        for name in ["Float", "Float16", "Float32", "Float64", "Float128"] {
+            assert!(Type::from_name(name).is_some(), "`{name}` should resolve");
+            assert!(
+                pending_type(name).is_none(),
+                "`{name}` should not be pending"
+            );
+        }
+        assert_eq!(Type::from_name("Float"), Some(Type::FLOAT64));
+    }
+
+    #[test]
     fn the_short_aliases_of_the_default_integer_resolve() {
         // An alias *is* its target: after resolution nothing distinguishes it.
         assert_eq!(Type::from_name("Int"), Some(Type::INT32));
@@ -744,24 +827,19 @@ mod tests {
 
     #[test]
     fn types_from_later_phases_declare_their_phase() {
-        assert_eq!(
-            pending_type("Float64").map(|t| t.phase),
-            Some(Phase::THREE_B)
-        );
+        assert_eq!(pending_type("Char").map(|t| t.phase), Some(Phase::THREE_B));
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Result").map(|t| t.phase), Some(Phase::FOUR));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
     }
 
     #[test]
-    fn the_float_family_is_pending_not_unknown() {
-        for name in ["Float", "Float16", "Float32", "Float64", "Float128"] {
-            assert_eq!(
-                pending_type(name).map(|t| t.phase),
-                Some(Phase::THREE_B),
-                "`{name}` should announce its phase"
-            );
-        }
+    fn the_char_type_is_pending_not_unknown() {
+        assert_eq!(
+            pending_type("Char").map(|t| t.phase),
+            Some(Phase::THREE_B),
+            "`Char` should announce its phase"
+        );
     }
 
     #[test]

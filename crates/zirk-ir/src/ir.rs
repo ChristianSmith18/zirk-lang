@@ -69,6 +69,39 @@ impl IntWidth {
     }
 }
 
+/// Every float width the IR represents (roadmap Phase 3b) — its own type,
+/// independent of `zirk_sema::FloatWidth`, for the same reason [`IntWidth`]
+/// above is independent of `zirk_sema::IntWidth`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatWidth {
+    F16,
+    F32,
+    F64,
+    F128,
+}
+
+impl FloatWidth {
+    pub const fn bits(self) -> u32 {
+        use FloatWidth::*;
+        match self {
+            F16 => 16,
+            F32 => 32,
+            F64 => 64,
+            F128 => 128,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        use FloatWidth::*;
+        match self {
+            F16 => "Float16",
+            F32 => "Float32",
+            F64 => "Float64",
+            F128 => "Float128",
+        }
+    }
+}
+
 /// A type of the IR.
 ///
 /// Deliberately independent of `zirk_sema::Type`: the IR is the boundary that
@@ -82,6 +115,10 @@ pub enum IrType {
     /// natively, so nothing downstream needs a different *shape* per width,
     /// only the right one substituted in.
     Int(IntWidth),
+    /// `Float16`…`Float128` (roadmap Phase 3b) — same reasoning as `Int`
+    /// above, minus the signedness: LLVM's `FloatType` is already
+    /// parameterized by width alone.
+    Float(FloatWidth),
     Boolean,
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
@@ -140,6 +177,7 @@ pub enum IrType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nullable {
     Int(IntWidth),
+    Float(FloatWidth),
     Boolean,
     String,
     /// A reference that may be absent, by layout id.
@@ -157,6 +195,7 @@ impl Nullable {
     pub const fn inner(self) -> IrType {
         match self {
             Nullable::Int(width) => IrType::Int(width),
+            Nullable::Float(width) => IrType::Float(width),
             Nullable::Boolean => IrType::Boolean,
             Nullable::String => IrType::String,
             Nullable::Object(id) => IrType::Object(id),
@@ -170,6 +209,7 @@ impl Nullable {
     pub const fn of(ty: IrType) -> Option<Self> {
         Some(match ty {
             IrType::Int(width) => Nullable::Int(width),
+            IrType::Float(width) => Nullable::Float(width),
             IrType::Boolean => Nullable::Boolean,
             IrType::String => Nullable::String,
             IrType::Object(id) => Nullable::Object(id),
@@ -186,6 +226,7 @@ impl IrType {
         match self {
             IrType::Void => "Void",
             IrType::Int(width) => width.as_str(),
+            IrType::Float(width) => width.as_str(),
             IrType::Boolean => "Boolean",
             IrType::String => "String",
             IrType::Closure(_) => "closure",
@@ -199,6 +240,7 @@ impl IrType {
                 // one spelling regardless of which width — a diagnostic
                 // that needs the exact width reads `inner()` instead.
                 Nullable::Int(_) => "Int?",
+                Nullable::Float(_) => "Float?",
                 Nullable::Boolean => "Boolean?",
                 Nullable::String => "String?",
                 Nullable::Object(_) => "object?",
@@ -542,6 +584,36 @@ pub enum InstKind {
     /// operand's own signedness from its recorded type to choose sign- vs
     /// zero-extension when widening; truncation needs no such choice.
     IntCast(Operand),
+    /// A fractional or scientific literal (roadmap Phase 3b). The text is
+    /// carried verbatim rather than parsed to `f64` here, for the same
+    /// reason `zirk_ast::FloatLit` keeps it as text: `Float128` may exceed
+    /// what an `f64` represents exactly, and codegen parses this same text
+    /// once, at its own destination width, through LLVM's own literal
+    /// parser — never through a Rust float in between.
+    ConstFloat(FloatWidth, String),
+    /// `value as <a different Float width>` (roadmap Phase 3b, task 4.3/5):
+    /// truncates (`fptrunc`) or extends (`fpext`) to the destination width,
+    /// unchecked — narrowing may lose precision or overflow to an infinity,
+    /// the explicit half of the widening/narrowing rule the same way
+    /// [`InstKind::IntCast`] is for integers.
+    FloatCast(Operand),
+    /// An integer operand implicitly widened to a `Float` width before a
+    /// mixed-type arithmetic operator (`ZIRK_LANGUAGE_SPEC.md` section 3:
+    /// "mixed integer and Float arithmetic produces Float"), or an explicit
+    /// `as` from an integer to a `Float` — `sitofp`/`uitofp`, chosen by the
+    /// source operand's own recorded signedness. Always exact: a `Float`
+    /// width wide enough to hold every value of the specific integer width
+    /// involved is not guaranteed by this instruction alone, so — like every
+    /// other conversion in this family — precision loss is possible and
+    /// accepted, not prevented.
+    IntToFloat(Operand),
+    /// `value as <an integer width>` from a `Float` operand — `fptosi`/
+    /// `fptoui`, chosen by the *destination*'s signedness. Unchecked: a
+    /// `Float` value outside the destination's representable range is
+    /// undefined at the LLVM level exactly like Rust's own lossy `as`
+    /// between float and integer, and is accepted on the same footing as
+    /// every other explicit conversion in this family (roadmap Phase 3b).
+    FloatToInt(Operand),
     /// `String + String`.
     Concat {
         left: Operand,

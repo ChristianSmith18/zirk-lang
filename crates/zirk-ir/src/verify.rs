@@ -224,6 +224,65 @@ fn verify_instruction(
             }
         }
 
+        InstKind::ConstFloat(width, _) => expect(
+            inst.ty,
+            IrType::Float(*width),
+            position,
+            "ConstFloat",
+            report,
+        ),
+
+        InstKind::FloatCast(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Float(_))
+            {
+                report(format!(
+                    "{position}: FloatCast converts {}, which is not a Float",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Float(_)) {
+                report(format!(
+                    "{position}: FloatCast declares {}, which is not a Float",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::IntToFloat(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Int(_))
+            {
+                report(format!(
+                    "{position}: IntToFloat converts {}, which is not an integer",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Float(_)) {
+                report(format!(
+                    "{position}: IntToFloat declares {}, which is not a Float",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::FloatToInt(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Float(_))
+            {
+                report(format!(
+                    "{position}: FloatToInt converts {}, which is not a Float",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Int(_)) {
+                report(format!(
+                    "{position}: FloatToInt declares {}, which is not an integer",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
         InstKind::BuildValue { class, fields } => match module.values.get(*class as usize) {
             None => report(format!(
                 "{position}: builds value layout {class}, which is not in the module table"
@@ -459,20 +518,25 @@ fn verify_instruction(
         }
 
         InstKind::Unary { op, operand } => {
-            let expected = match op {
-                UnaryOp::Neg | UnaryOp::BitNot => IrType::Int(IntWidth::I32),
-                UnaryOp::Not => IrType::Boolean,
-            };
-            if let Some(value) = type_of(operand)
-                && value != expected
-            {
-                report(format!(
-                    "{position}: {op:?} applied to {}, expected {}",
-                    value.as_str(),
-                    expected.as_str()
-                ));
+            // Every unary operator preserves its operand's own type — `Neg`
+            // and `BitNot` at whatever integer width it is (`Neg` also over
+            // any `Float` width, roadmap Phase 3b), `Not` over `Boolean` —
+            // so there is one shape to check, not a fixed `Int32` the way
+            // this read before the integer-widths migration generalized
+            // everything else: an operand at another width or `Float` never
+            // exercised this path in a test, so the omission went unnoticed
+            // until a `Float` unary `Neg` did.
+            if let Some(value) = type_of(operand) {
+                let ok = match op {
+                    UnaryOp::Neg => matches!(value, IrType::Int(_) | IrType::Float(_)),
+                    UnaryOp::BitNot => matches!(value, IrType::Int(_)),
+                    UnaryOp::Not => value == IrType::Boolean,
+                };
+                if !ok {
+                    report(format!("{position}: {op:?} applied to {}", value.as_str()));
+                }
+                expect(inst.ty, value, position, "Unary", report);
             }
-            expect(inst.ty, expected, position, "Unary", report);
         }
 
         InstKind::Binary { op, left, right } => {
@@ -786,6 +850,10 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::CheckedCast { object, .. } => vec![*object],
         InstKind::Retype(operand) => vec![*operand],
         InstKind::IntCast(operand) => vec![*operand],
+        InstKind::ConstFloat(_, _) => Vec::new(),
+        InstKind::FloatCast(operand)
+        | InstKind::IntToFloat(operand)
+        | InstKind::FloatToInt(operand) => vec![*operand],
         InstKind::Concat { left, right } => vec![*left, *right],
         InstKind::Repeat { string, count } => vec![*string, *count],
         InstKind::CallContract { object, args, .. } => {

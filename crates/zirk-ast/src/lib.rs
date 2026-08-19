@@ -637,6 +637,8 @@ pub struct ExprStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(IntLit),
+    /// A fractional or scientific literal (roadmap Phase 3b).
+    Float(FloatLit),
     Str(StrLit),
     Bool(BoolLit),
     /// `null`, the sole value of the `Null` half of `T?`.
@@ -710,6 +712,7 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Int(e) => e.span,
+            Expr::Float(e) => e.span,
             Expr::Str(e) => e.span,
             Expr::Bool(e) => e.span,
             Expr::Null(e) => e.span,
@@ -956,6 +959,25 @@ pub struct IntLit {
     /// overflow of the destination type can be detected in `zirk-sema` instead
     /// of being lost while parsing.
     pub value: i128,
+    pub span: Span,
+}
+
+/// A fractional or scientific literal (roadmap Phase 3b).
+///
+/// The text is kept as written rather than parsed to `f64` here, for the
+/// same reason `zirk_lexer::NumberLit` does: the checker chooses the width,
+/// and a `Float128` value may exceed what a host `f64` represents exactly —
+/// parsing here would decide, in the wrong layer, a precision the target
+/// type may not lose. `zirk-codegen-llvm` parses this same text once, at
+/// its own destination width, through LLVM's own literal parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatLit {
+    /// Digits, decimal point and exponent as written, without `_` or a width
+    /// suffix.
+    pub text: String,
+    /// The explicit suffix, such as the `f32` of `1.5f32`, if the literal
+    /// wrote one.
+    pub width: Option<String>,
     pub span: Span,
 }
 
