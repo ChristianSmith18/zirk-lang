@@ -20,8 +20,32 @@ pub mod symbols {
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";
     /// Builds a `String` from UTF-8 bytes and a length.
     pub const STR_FROM_UTF8: &str = "zirk_str_from_utf8";
+    /// Converts an `Int8` into a `String`.
+    pub const STR_FROM_I8: &str = "zirk_str_from_i8";
+    /// Converts an `Int16` into a `String`.
+    pub const STR_FROM_I16: &str = "zirk_str_from_i16";
     /// Converts an `Int32` into a `String`.
     pub const STR_FROM_I32: &str = "zirk_str_from_i32";
+    /// Converts an `Int64` into a `String`.
+    pub const STR_FROM_I64: &str = "zirk_str_from_i64";
+    /// Converts an `Int128` into a `String`, taken by pointer (no stable
+    /// cross-target ABI for a by-value 128-bit integer).
+    pub const STR_FROM_I128: &str = "zirk_str_from_i128";
+    /// Converts a `UInt8` into a `String`.
+    pub const STR_FROM_U8: &str = "zirk_str_from_u8";
+    /// Converts a `UInt16` into a `String`.
+    pub const STR_FROM_U16: &str = "zirk_str_from_u16";
+    /// Converts a `UInt32` into a `String`.
+    pub const STR_FROM_U32: &str = "zirk_str_from_u32";
+    /// Converts a `UInt64` into a `String`.
+    pub const STR_FROM_U64: &str = "zirk_str_from_u64";
+    /// Converts a `UInt128` into a `String`, taken by pointer — see
+    /// `STR_FROM_I128`.
+    pub const STR_FROM_U128: &str = "zirk_str_from_u128";
+    /// Converts a `Float32` into a `String`.
+    pub const STR_FROM_F32: &str = "zirk_str_from_f32";
+    /// Converts a `Float64` into a `String`.
+    pub const STR_FROM_F64: &str = "zirk_str_from_f64";
     /// Converts a `Boolean` into a `String`.
     pub const STR_FROM_BOOL: &str = "zirk_str_from_bool";
     /// Structural equality of two strings.
@@ -67,7 +91,18 @@ pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
+    pub str_from_i8: FunctionValue<'ctx>,
+    pub str_from_i16: FunctionValue<'ctx>,
     pub str_from_i32: FunctionValue<'ctx>,
+    pub str_from_i64: FunctionValue<'ctx>,
+    pub str_from_i128: FunctionValue<'ctx>,
+    pub str_from_u8: FunctionValue<'ctx>,
+    pub str_from_u16: FunctionValue<'ctx>,
+    pub str_from_u32: FunctionValue<'ctx>,
+    pub str_from_u64: FunctionValue<'ctx>,
+    pub str_from_u128: FunctionValue<'ctx>,
+    pub str_from_f32: FunctionValue<'ctx>,
+    pub str_from_f64: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
     pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
@@ -99,9 +134,67 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
+    let str_from_i8 = module.add_function(
+        symbols::STR_FROM_I8,
+        ptr.fn_type(&[context.i8_type().into()], false),
+        external,
+    );
+    let str_from_i16 = module.add_function(
+        symbols::STR_FROM_I16,
+        ptr.fn_type(&[context.i16_type().into()], false),
+        external,
+    );
     let str_from_i32 = module.add_function(
         symbols::STR_FROM_I32,
         ptr.fn_type(&[context.i32_type().into()], false),
+        external,
+    );
+    let str_from_i64 = module.add_function(
+        symbols::STR_FROM_I64,
+        ptr.fn_type(&[context.i64_type().into()], false),
+        external,
+    );
+    // Taken by pointer: no stable cross-target ABI for a by-value 128-bit
+    // integer (`zirk-runtime/src/string.rs`'s own doc comment on the
+    // handler explains why).
+    let str_from_i128 = module.add_function(
+        symbols::STR_FROM_I128,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let str_from_u8 = module.add_function(
+        symbols::STR_FROM_U8,
+        ptr.fn_type(&[context.i8_type().into()], false),
+        external,
+    );
+    let str_from_u16 = module.add_function(
+        symbols::STR_FROM_U16,
+        ptr.fn_type(&[context.i16_type().into()], false),
+        external,
+    );
+    let str_from_u32 = module.add_function(
+        symbols::STR_FROM_U32,
+        ptr.fn_type(&[context.i32_type().into()], false),
+        external,
+    );
+    let str_from_u64 = module.add_function(
+        symbols::STR_FROM_U64,
+        ptr.fn_type(&[context.i64_type().into()], false),
+        external,
+    );
+    let str_from_u128 = module.add_function(
+        symbols::STR_FROM_U128,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let str_from_f32 = module.add_function(
+        symbols::STR_FROM_F32,
+        ptr.fn_type(&[context.f32_type().into()], false),
+        external,
+    );
+    let str_from_f64 = module.add_function(
+        symbols::STR_FROM_F64,
+        ptr.fn_type(&[context.f64_type().into()], false),
         external,
     );
 
@@ -203,7 +296,18 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         init,
         shutdown,
         str_from_utf8,
+        str_from_i8,
+        str_from_i16,
         str_from_i32,
+        str_from_i64,
+        str_from_i128,
+        str_from_u8,
+        str_from_u16,
+        str_from_u32,
+        str_from_u64,
+        str_from_u128,
+        str_from_f32,
+        str_from_f64,
         str_from_bool,
         str_eq,
         io_println,

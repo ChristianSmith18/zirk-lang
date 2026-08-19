@@ -552,24 +552,47 @@ impl<'a> Checker<'a> {
         original
     }
 
-    /// Reports printing a value the runtime cannot turn into text.
+    /// Whether a value of this type can be turned into text through
+    /// `to_string()` (`ZIRK_STDLIB_SPEC.md` section 3, roadmap Phase 3b task
+    /// 8).
     ///
-    /// `ZIRK_STDLIB_SPEC.md` section 3 routes every printable value through
-    /// `to_string()`. That contract itself is roadmap Phase 3b's own task 8,
-    /// not yet built — until it lands, the runtime knows exactly `Int32`,
-    /// `Boolean` and `String`, the same three both `println` and
-    /// interpolation (`"{expr}"`) accept today.
+    /// Every native scalar except `Float16`/`Float128` implicitly satisfies
+    /// it — those two have no stable Rust primitive the runtime can format
+    /// through yet (`zirk-runtime/src/string.rs`'s own doc comment on the
+    /// gap), consistent with `Float128` arithmetic's own tracked portability
+    /// gap on Windows. A class, record or value class satisfies it the same
+    /// way it supplies any other operator (decision D6): by declaring the
+    /// method itself, `fn to_string(): String`, checked structurally rather
+    /// than through a registered contract — the same shape `native_arithmetic`'s
+    /// reserved-method dispatch (`_add`, `_subtract`, …) already uses.
+    fn is_printable(&self, ty: Type) -> bool {
+        match ty.base {
+            Base::Int(_) | Base::Boolean | Base::String | Base::Char => true,
+            Base::Float(w) => matches!(w, FloatWidth::F32 | FloatWidth::F64),
+            Base::Class(id) => self.classes[id as usize]
+                .method("to_string")
+                .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
+            _ => false,
+        }
+    }
+
+    /// Reports printing a value the runtime cannot turn into text.
     fn require_printable(&mut self, ty: Type, span: Span) {
         if ty.is_unknown() {
             return;
         }
+        if !ty.nullable && self.is_printable(ty) {
+            return;
+        }
 
         let reason = match ty.base {
-            Base::Int(IntWidth::I32) | Base::Boolean | Base::String if !ty.nullable => return,
             _ if ty.nullable => "a value that may be absent has no text form",
             Base::Enum(_) => "an enum has no text for its variants yet",
             Base::Function(_) => "a closure is code, not data",
             Base::Void => "`Void` is the absence of a value",
+            Base::Float(_) => {
+                "Float16/Float128 have no stable conversion to text yet (roadmap Phase 3b, task 8.3)"
+            }
             _ => "the runtime has no text form for it",
         };
 
@@ -577,7 +600,7 @@ impl<'a> Checker<'a> {
         let help = if ty.nullable {
             "use `?? <fallback>` to provide a value to print"
         } else {
-            "`to_string()` becomes a trait in Phase 3b; print an `Int32`, `Boolean` or `String` for now"
+            "implement `fn to_string(): String` for a class, record or value class"
         };
 
         self.error(

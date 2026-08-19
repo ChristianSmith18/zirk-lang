@@ -41,8 +41,10 @@ pub use failure::{zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_o
 pub use io::zirk_io_println;
 pub use memory::zirk_rt_alloc;
 pub use string::{
-    zirk_str_concat, zirk_str_eq, zirk_str_from_bool, zirk_str_from_i32, zirk_str_from_utf8,
-    zirk_str_hash, zirk_str_is_ascii, zirk_str_repeat,
+    zirk_str_concat, zirk_str_eq, zirk_str_from_bool, zirk_str_from_f32, zirk_str_from_f64,
+    zirk_str_from_i8, zirk_str_from_i16, zirk_str_from_i32, zirk_str_from_i64, zirk_str_from_i128,
+    zirk_str_from_u8, zirk_str_from_u16, zirk_str_from_u32, zirk_str_from_u64, zirk_str_from_u128,
+    zirk_str_from_utf8, zirk_str_hash, zirk_str_is_ascii, zirk_str_repeat,
 };
 
 /// Initializes the runtime before running `main`.
