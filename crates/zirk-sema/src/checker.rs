@@ -4012,6 +4012,20 @@ impl<'a> Checker<'a> {
                 self.expect_boolean(operand, expr.span, "the operand of `!`");
                 Type::BOOLEAN
             }
+            UnaryOp::BitNot => {
+                if !Type::INT32.accepts(operand) {
+                    let found = self.name(operand);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        "the `~` operator requires a number",
+                        format!("it was applied to a value of type {found}"),
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                Type::INT32
+            }
         }
     }
 
@@ -4072,6 +4086,16 @@ impl<'a> Checker<'a> {
             }
 
             Add | Sub | Mul | Div | Rem => self.check_arithmetic(left, right, expr),
+
+            // Bitwise and shift, native `Int32` only for now — the rest of
+            // the integer widths (roadmap Phase 3b) is a separate, larger
+            // migration (`Base::Int32` generalizes structurally, not just by
+            // rename) that has not landed yet.
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                self.expect_numeric(left, expr.left.span(), expr.op);
+                self.expect_numeric(right, expr.right.span(), expr.op);
+                Type::INT32
+            }
         }
     }
 

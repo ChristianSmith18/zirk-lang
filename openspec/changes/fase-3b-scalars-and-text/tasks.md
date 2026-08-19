@@ -13,17 +13,17 @@
 
 ## 3. Gramática
 
-- [ ] 3.1 Operadores bitwise y de shift (`&`, `|`, `^`, `~`, `<<`, `>>`), en los niveles de precedencia que el spec fija, distintos de `&&`/`||`
+- [x] 3.1 Operadores bitwise y de shift (`&`, `|`, `^`, `~`, `<<`, `>>`), en los niveles de precedencia que el spec fija, distintos de `&&`/`||` — precedencia propia decidida durante la implementación (el roadmap no fija números exactos): bitwise entre comparación y aditiva, shift más apretado que los otros tres, mismo orden relativo que C/Rust/Swift (`Or=1, And=2, Eq/Is=3, Compare=4, Coalesce=5, BitOr=6, BitXor=7, BitAnd=8, Shl/Shr=9, Add/Sub=10, Mul/Div/Rem=11`). El léxico ya tenía cada token (`Amp`, `Pipe`, `Caret`, `Tilde`, `Shl`, `Shr` y sus formas `=`) modelado desde antes de esta fase, con su propio gate `Phase::THREE_B` en `TokenKind::phase()` — retirado para esta familia (no para `**`, que sigue esperando a `Float`)
 - [ ] 3.2 AST para una expresión interpolada: texto literal más una lista de sub-expresiones, preservando el orden de aparición
-- [ ] 3.3 Tests: un caso válido y uno inválido por cada regla nueva
+- [ ] 3.3 Tests: un caso válido y uno inválido por cada regla nueva — hecho para bitwise/shift (`crates/zirk-cli/tests/corpus/valid/bitwise_and_shift.zrk`, `invalid/bitwise_on_non_integer.zrk`, más `typing.rs`); pendiente la interpolación
 
 ## 4. Tipos — anchos enteros
 
 - [ ] 4.1 Registrar `Int8`/`Int16`/`Int64`/`Int128` y la familia `UInt8`…`UInt128` como tipos del chequeador
 - [ ] 4.2 Aritmética comprobada por ancho y señal, reutilizando el mecanismo de `Int32` de la Fase 1 (ver 1.1)
 - [ ] 4.3 Ensanchamiento implícito sin ambigüedad; angostamiento, cambio de señal y cualquier conversión con pérdida, siempre explícitos
-- [ ] 4.4 Operadores bitwise/shift sobre enteros, con la misma regla de conversión entre anchos que la aritmética ordinaria
-- [ ] 4.5 Tests: un caso válido y uno inválido por cada regla nueva
+- [x] 4.4 Operadores bitwise/shift sobre enteros — hecho para `Int32` (el único ancho que existe todavía; el resto de anchos es 4.1/1.2, migración aparte). `BinaryOp`/`UnaryOp` de `zirk-ast` y de la IR ganan `BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr`/`BitNot`; el checker exige números en ambos operandos (`expect_numeric`, mismo mensaje que la comparación) y tipa `Int32`. Un shift por una cantidad negativa o `>= 32` es indefinido a nivel de LLVM, así que se comprueba antes de la instrucción nativa (`checked_shift`, mismo patrón que `checked_division`) y aborta con `zirk_rt_invalid_shift` — símbolo de runtime nuevo, siguiendo la granularidad ya establecida (uno por categoría de fallo, no uno genérico). `&=`/`|=`/`^=`/`<<=`/`>>=` se desazucaran igual que `+=` ya lo hacía. Verificado con un programa real compilado y corrido, incluido el camino de fallo (shift por `-1`, exit code 70)
+- [ ] 4.5 Tests: un caso válido y uno inválido por cada regla nueva — hecho para bitwise/shift (ver 3.3); pendiente ensanchamiento/angostamiento/cambio de señal, que necesitan 4.1
 
 ## 5. Tipos — `Float`
 

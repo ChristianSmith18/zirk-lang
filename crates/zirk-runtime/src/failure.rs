@@ -46,6 +46,17 @@ pub extern "C" fn zirk_rt_invalid_repeat() -> ! {
     fatal("a string can only be repeated a non-negative number of times")
 }
 
+/// Reports a shift by a negative amount, or by at least the operand's own
+/// bit width, and terminates (roadmap task 3b: bitwise and shift operators).
+///
+/// Neither has a defined result: LLVM's shift instructions are themselves
+/// undefined behaviour past the operand's width, so this is checked before
+/// the shift ever reaches the native instruction, not after.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_invalid_shift() -> ! {
+    fatal("a shift amount must be non-negative and less than the operand's bit width")
+}
+
 /// Reports that an object does not carry a contract it was said to satisfy.
 ///
 /// Unreachable in a well-formed program: the checker proved conformance and

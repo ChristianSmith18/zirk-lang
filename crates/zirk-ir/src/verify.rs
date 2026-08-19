@@ -431,7 +431,7 @@ fn verify_instruction(
 
         InstKind::Unary { op, operand } => {
             let expected = match op {
-                UnaryOp::Neg => IrType::Int32,
+                UnaryOp::Neg | UnaryOp::BitNot => IrType::Int32,
                 UnaryOp::Not => IrType::Boolean,
             };
             if let Some(value) = type_of(operand)

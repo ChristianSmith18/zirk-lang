@@ -2395,6 +2395,7 @@ impl<'a> Parser<'a> {
         let op = match self.peek() {
             TokenKind::Minus => Some(UnaryOp::Neg),
             TokenKind::Not => Some(UnaryOp::Not),
+            TokenKind::Tilde => Some(UnaryOp::BitNot),
             _ => None,
         };
 
@@ -2734,6 +2735,11 @@ fn compound_op(kind: &TokenKind) -> Option<BinaryOp> {
         TokenKind::StarEq => BinaryOp::Mul,
         TokenKind::SlashEq => BinaryOp::Div,
         TokenKind::PercentEq => BinaryOp::Rem,
+        TokenKind::AmpEq => BinaryOp::BitAnd,
+        TokenKind::PipeEq => BinaryOp::BitOr,
+        TokenKind::CaretEq => BinaryOp::BitXor,
+        TokenKind::ShlEq => BinaryOp::Shl,
+        TokenKind::ShrEq => BinaryOp::Shr,
         _ => return None,
     })
 }
@@ -2789,11 +2795,20 @@ fn precedence(kind: &TokenKind) -> Option<(BinaryOp, u8)> {
         // may be an expression. C# places it below `||` and that ordering is a
         // known source of surprise.
         T::QuestionQuestion => (Coalesce, 5),
-        T::Plus => (Add, 6),
-        T::Minus => (Sub, 6),
-        T::Star => (Mul, 7),
-        T::Slash => (Div, 7),
-        T::Percent => (Rem, 7),
+        // Bitwise between comparison and additive, shift tighter than the
+        // other three — the same relative order C, Rust and Swift share, so
+        // `a & b == c` reads as `a & (b == c)` the way it does everywhere
+        // else, not as `(a & b) == c`.
+        T::Pipe => (BitOr, 6),
+        T::Caret => (BitXor, 7),
+        T::Amp => (BitAnd, 8),
+        T::Shl => (Shl, 9),
+        T::Shr => (Shr, 9),
+        T::Plus => (Add, 10),
+        T::Minus => (Sub, 10),
+        T::Star => (Mul, 11),
+        T::Slash => (Div, 11),
+        T::Percent => (Rem, 11),
         _ => return None,
     })
 }

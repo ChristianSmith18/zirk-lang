@@ -43,6 +43,8 @@ pub mod symbols {
     pub const STR_REPEAT: &str = "zirk_str_repeat";
     /// Reports an invalid repetition count and terminates.
     pub const INVALID_REPEAT: &str = "zirk_rt_invalid_repeat";
+    /// Reports a shift by a negative amount or by too much and terminates.
+    pub const INVALID_SHIFT: &str = "zirk_rt_invalid_shift";
     /// Finds the dispatch table a descriptor holds for a contract.
     pub const CONTRACT_TABLE: &str = "zirk_rt_contract_table";
     /// Reports a descriptor missing a contract it was said to satisfy.
@@ -71,6 +73,7 @@ pub struct Runtime<'ctx> {
     pub str_concat: FunctionValue<'ctx>,
     pub str_repeat: FunctionValue<'ctx>,
     pub check_cast: FunctionValue<'ctx>,
+    pub invalid_shift: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -150,6 +153,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let invalid_repeat =
         module.add_function(symbols::INVALID_REPEAT, void.fn_type(&[], false), external);
+    let invalid_shift =
+        module.add_function(symbols::INVALID_SHIFT, void.fn_type(&[], false), external);
 
     let contract_table = module.add_function(
         symbols::CONTRACT_TABLE,
@@ -177,6 +182,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         missing_contract,
         invalid_repeat,
         invalid_cast,
+        invalid_shift,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -200,5 +206,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_concat,
         str_repeat,
         check_cast,
+        invalid_shift,
     }
 }

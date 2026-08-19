@@ -966,6 +966,8 @@ pub enum UnaryOp {
     Neg,
     /// `!x`
     Not,
+    /// `~x`
+    BitNot,
 }
 
 impl UnaryOp {
@@ -973,6 +975,7 @@ impl UnaryOp {
         match self {
             UnaryOp::Neg => "-",
             UnaryOp::Not => "!",
+            UnaryOp::BitNot => "~",
         }
     }
 }
@@ -1010,6 +1013,16 @@ pub enum BinaryOp {
     Is,
     /// `??`, which yields the left operand unless it is null.
     Coalesce,
+    /// `&`
+    BitAnd,
+    /// `|`
+    BitOr,
+    /// `^`
+    BitXor,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
 }
 
 impl BinaryOp {
@@ -1031,6 +1044,11 @@ impl BinaryOp {
             And => "&&",
             Or => "||",
             Coalesce => "??",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Shl => "<<",
+            Shr => ">>",
         }
     }
 

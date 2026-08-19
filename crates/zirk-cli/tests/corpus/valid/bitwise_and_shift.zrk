@@ -1,0 +1,20 @@
+// Bitwise and shift operators (roadmap Phase 3b, task 3.1/4.4), over `Int32`
+// for now: `&`, `|`, `^`, `~`, `<<`, `>>`, and their compound forms.
+fn main(): Void {
+    mut a = 6;
+    mut b = 3;
+    stdout.println(a & b);
+    stdout.println(a | b);
+    stdout.println(a ^ b);
+    stdout.println(~a);
+    stdout.println(a << 2);
+    stdout.println(a >> 1);
+
+    mut c = 1;
+    c &= 3;
+    stdout.println(c);
+
+    mut d = 1;
+    d <<= 4;
+    stdout.println(d);
+}
