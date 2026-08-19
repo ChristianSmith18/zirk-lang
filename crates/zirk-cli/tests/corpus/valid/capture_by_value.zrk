@@ -8,9 +8,12 @@ fn main(): Void {
     stdout.println(F());
     stdout.println(n);
 
-    // Shadowing resolves the same way it does outside a closure.
-    inmut OUTER = 5;
-    inmut G = (OUTER: Int32): Int32 => OUTER * 2;
+    // A parameter that does not collide with anything captured works the
+    // same as any other lambda: there is nothing special about being next to
+    // a capture, only about sharing its name (D10, `ordinary_shadowing.zrk`
+    // in the invalid corpus covers that case).
+    inmut outer = 5;
+    inmut G = (factor: Int32): Int32 => outer * factor;
     stdout.println(G(3));
-    stdout.println(OUTER);
+    stdout.println(outer);
 }

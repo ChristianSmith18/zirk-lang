@@ -1,0 +1,17 @@
+// A lambda parameter may share a name with a field: a field is never a bare
+// name `Scopes` resolves — `this.name` is how one is always read — so there
+// is nothing to shadow (D10). Only a genuine capture collision is rejected
+// (`ordinary_shadowing.zrk` in the invalid corpus).
+class Multiplier {
+    factor: Int32;
+    construct(factor: Int32) { this.factor = factor; }
+    fn scaleAll(a: Int32, b: Int32): Int32 {
+        inmut apply = (factor: Int32): Int32 => factor * this.factor;
+        return apply(a) + apply(b);
+    }
+}
+
+fn main(): Void {
+    mut m = Multiplier(10);
+    stdout.println(m.scaleAll(2, 3));
+}

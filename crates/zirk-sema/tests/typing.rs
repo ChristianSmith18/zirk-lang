@@ -2519,6 +2519,49 @@ fn invalid_safe_method_call_through_generic_param_is_not_lowered() {
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
+// --- Sin shadowing ordinario (D10) --------------------------------------------
+
+#[test]
+fn invalid_lambda_parameter_shadows_a_captured_variable() {
+    let output = rejected(
+        "fn main(): Void {
+             inmut outer = 5;
+             inmut g = (outer: Int32): Int32 => outer * 2;
+             stdout.println(g(3));
+         }",
+    );
+    assert!(
+        output.contains(codes::ORDINARY_SHADOWING.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_lambda_parameter_with_a_distinct_name_still_captures() {
+    accepted(
+        "fn main(): Void {
+             inmut outer = 5;
+             inmut g = (factor: Int32): Int32 => outer * factor;
+             stdout.println(g(3));
+         }",
+    );
+}
+
+#[test]
+fn valid_lambda_parameter_matches_a_field_name() {
+    // A field is never a bare name `Scopes` resolves — `this.name` is how
+    // one is always read — so there is nothing for a same-named parameter
+    // to shadow.
+    accepted(
+        "class Multiplier {
+             factor: Int32;
+             construct(factor: Int32) { this.factor = factor; }
+             fn scale(factor: Int32): Int32 { return factor * this.factor; }
+         }
+         fn main(): Void { }",
+    );
+}
+
 // --- Closures no anotables ni escapables (D9) ---------------------------------
 
 #[test]
