@@ -42,6 +42,21 @@ El costo se paga en el checker y en `lower.rs`: cada sitio que hoy compara contr
 
 **Alternativa descartada:** una variante de IR por ancho (`Int8`, `Int16`, …). Multiplica cada `match` exhaustivo por diez sin ninguna ganancia — el ancho es un dato, no una forma distinta de instrucción.
 
+**Auditoría (tarea 1.1, hecha):** conteo de sitios que nombran `Base::Int32`/`IrType::Int32` directamente, por archivo:
+
+| Archivo | Ocurrencias | Naturaleza |
+|---|---|---|
+| `zirk-sema/src/types.rs` | 4 | `Type::INT32` (constante), `has_default`, `integer_range`, `sort_bases` — lógica genuinamente por tipo, no renombrado mecánico |
+| `zirk-sema/src/checker.rs` | ~25 sitios con `match ... .base { ... }` que incluyen un brazo `Base::Int32` | Mezcla: la mayoría son "¿es esto un entero?" (generaliza sin más), pero `native_arithmetic` (la tabla de operadores nativos) y `require_printable` necesitan decidir explícitamente qué anchos participan y con qué reglas de conversión |
+| `zirk-ir/src/ir.rs` | 6 | Definiciones/helpers de tipo — mecánico |
+| `zirk-ir/src/lower.rs` | 30 | Conversión `Base`→`IrType` y contabilidad de tipos de operandos — mayormente mecánico, salvo la comprobación de overflow que necesita el ancho real |
+| `zirk-ir/src/verify.rs` | 4 | Chequeo de invariantes de la IR — mecánico |
+| `zirk-codegen-llvm/src/emit.rs` | **1** | `IrType::Int32 => context.i32_type().into()` — el backend en sí es barato: LLVM ya soporta cualquier ancho, este es el único sitio que traduce el tipo |
+
+**Conclusión de la auditoría:** el costo no está repartido parejo. El backend LLVM es casi gratis (un sitio). El costo real está en `zirk-sema/checker.rs`: `Base::Int32` no es hoy "el entero", es "el único entero que existe", así que la tabla de aritmética nativa, la impresión, el valor por defecto y el orden de interning de uniones lo asumen estructuralmente, no por descuido. Generalizar `Base::Int32` a `Base::Int { width, signed }` (o equivalente) es un cambio que el propio compilador de Rust hace imposible dejar a medias — cada `match` exhaustivo sobre `Base` que no cubra el nuevo brazo no compila — así que no hay riesgo real de un sitio olvidado, solo de subestimar cuánto trabajo de **decisión** (no de mecánica) cada sitio necesita.
+
+**Decisión de alcance (tarea 1.2):** una sola migración atómica — parametrizar `Base::Int32`/`IrType::Int32` una vez, con los diez anchos ya declarados desde el principio — en vez de generalizar primero y agregar anchos después. Agregar anchos en dos pasadas pagaría el costo de revisar cada sitio dos veces; la exhaustividad del compilador ya garantiza que ningún sitio queda a medias en una sola pasada.
+
 ### D2 — `Float` prohíbe `NaN` en el tipo, no lo descarta después
 
 Una operación que en IEEE 754 produciría `NaN` (`0.0 / 0.0`, la raíz de un negativo, etc.) se convierte en un error controlado en el punto donde ocurre, igual que el overflow de un entero ya lo es desde la Fase 1 — no se deja que el bit pattern de `NaN` se propague y se comprueba al final. Los infinitos, en cambio, son valores válidos y explícitos.
