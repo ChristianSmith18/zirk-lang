@@ -14,11 +14,11 @@ use crate::runtime;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module as LlvmModule};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue,
 };
-use inkwell::{AddressSpace, IntPredicate};
+use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
 use zirk_ir as ir;
 
@@ -211,6 +211,14 @@ fn llvm_type_in<'ctx>(
             )
             .expect("every IntWidth is a valid LLVM integer width")
             .into(),
+        // Same idea, one family over: LLVM has a native `FloatType` for each
+        // width the language has (roadmap Phase 3b).
+        ir::IrType::Float(width) => match width {
+            ir::FloatWidth::F16 => context.f16_type().into(),
+            ir::FloatWidth::F32 => context.f32_type().into(),
+            ir::FloatWidth::F64 => context.f64_type().into(),
+            ir::FloatWidth::F128 => context.f128_type().into(),
+        },
         // `Boolean` is `i1`: LLVM's natural type for a condition, and what a
         // conditional branch expects.
         ir::IrType::Boolean => context.bool_type().into(),
@@ -720,6 +728,101 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(converted.into())
             }
 
+            // A fractional or scientific literal (roadmap Phase 3b). Parsed
+            // once, here, straight from the source text through LLVM's own
+            // literal parser — never through a Rust `f64` in between, which
+            // is what lets a `Float128` literal keep precision an `f64`
+            // could not hold.
+            ir::InstKind::ConstFloat(width, text) => {
+                let float_ty = self.float_type(*width);
+                Some(unsafe { float_ty.const_float_from_string(text) }.into())
+            }
+
+            // `value as <a different Float width>` (roadmap Phase 3b) —
+            // `fptrunc`/`fpext`, unchecked. Equal width is a pure
+            // reinterpretation, needing no instruction, mirroring `IntCast`.
+            ir::InstKind::FloatCast(operand) => {
+                let value = self.operand(*operand).into_float_value();
+                let ir::IrType::Float(target_width) = instruction.ty else {
+                    unreachable!("FloatCast always declares a Float destination")
+                };
+                let target_ty = self.float_type(target_width);
+
+                let converted = match self.value_types[&operand.0] {
+                    ir::IrType::Float(source_width)
+                        if source_width.bits() == target_width.bits() =>
+                    {
+                        value
+                    }
+                    ir::IrType::Float(source_width)
+                        if source_width.bits() < target_width.bits() =>
+                    {
+                        self.builder
+                            .build_float_ext(value, target_ty, "fpext")
+                            .expect("float extension")
+                    }
+                    _ => self
+                        .builder
+                        .build_float_trunc(value, target_ty, "fptrunc")
+                        .expect("float truncation"),
+                };
+                Some(converted.into())
+            }
+
+            // An integer operand converted to `Float`, either an implicit
+            // mixed-arithmetic widening or an explicit `as` (roadmap Phase
+            // 3b) — `sitofp`/`uitofp`, chosen by the *source*'s own
+            // signedness, unchecked: precision loss for a very wide integer
+            // is possible and accepted, the same as every other conversion
+            // in this family.
+            ir::InstKind::IntToFloat(operand) => {
+                let value = self.operand(*operand).into_int_value();
+                let source_signed = self.is_signed(self.value_types[&operand.0]);
+                let ir::IrType::Float(target_width) = instruction.ty else {
+                    unreachable!("IntToFloat always declares a Float destination")
+                };
+                let target_ty = self.float_type(target_width);
+                let converted = if source_signed {
+                    self.builder
+                        .build_signed_int_to_float(value, target_ty, "sitofp")
+                        .expect("signed int to float")
+                } else {
+                    self.builder
+                        .build_unsigned_int_to_float(value, target_ty, "uitofp")
+                        .expect("unsigned int to float")
+                };
+                Some(converted.into())
+            }
+
+            // `value as <an integer width>` from a `Float` operand (roadmap
+            // Phase 3b) — `fptosi`/`fptoui`, chosen by the *destination*'s
+            // signedness. Unchecked: a `Float` outside the destination's
+            // representable range is undefined at the LLVM level, exactly
+            // like Rust's own lossy `as` between float and integer.
+            ir::InstKind::FloatToInt(operand) => {
+                let value = self.operand(*operand).into_float_value();
+                let ir::IrType::Int(target_width) = instruction.ty else {
+                    unreachable!("FloatToInt always declares an integer destination")
+                };
+                let target_ty = self
+                    .context
+                    .custom_width_int_type(
+                        std::num::NonZeroU32::new(target_width.bits())
+                            .expect("every IntWidth is nonzero"),
+                    )
+                    .expect("every IntWidth is a valid LLVM integer width");
+                let converted = if target_width.signed() {
+                    self.builder
+                        .build_float_to_signed_int(value, target_ty, "fptosi")
+                        .expect("float to signed int")
+                } else {
+                    self.builder
+                        .build_float_to_unsigned_int(value, target_ty, "fptoui")
+                        .expect("float to unsigned int")
+                };
+                Some(converted.into())
+            }
+
             ir::InstKind::CallVirtual {
                 object,
                 index,
@@ -1225,6 +1328,16 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         matches!(ty, ir::IrType::Int(width) if width.signed())
     }
 
+    /// LLVM's native float type for a given IR width.
+    fn float_type(&self, width: ir::FloatWidth) -> FloatType<'ctx> {
+        match width {
+            ir::FloatWidth::F16 => self.context.f16_type(),
+            ir::FloatWidth::F32 => self.context.f32_type(),
+            ir::FloatWidth::F64 => self.context.f64_type(),
+            ir::FloatWidth::F128 => self.context.f128_type(),
+        }
+    }
+
     fn emit_unary(
         &mut self,
         op: ir::UnaryOp,
@@ -1232,6 +1345,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
+        // A `Float` operand only ever reaches `Neg` (`~`/`!` are integer- and
+        // Boolean-only, per the checker) — flipping the sign bit cannot turn
+        // a non-`NaN` input into `NaN`, so unlike the binary arithmetic
+        // operators below, this needs no post-check (design D2).
+        if operand.is_float_value() {
+            let value = operand.into_float_value();
+            return self
+                .builder
+                .build_float_neg(value, "fneg")
+                .expect("float negation")
+                .into();
+        }
+
         match op {
             // Negation is a subtraction from zero, so it goes through the same
             // overflow check: `-Int32.MIN` does not fit in Int32. The
@@ -1283,6 +1409,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 return self.compare(IntPredicate::EQ, l, r);
             }
             return self.compare_strings(op, left, right);
+        }
+
+        if left.is_float_value() {
+            return self.emit_float_binary(
+                op,
+                left.into_float_value(),
+                right.into_float_value(),
+                function,
+            );
         }
 
         let l = left.into_int_value();
@@ -1601,6 +1736,104 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .expect("right shift")
                 .into(),
         }
+    }
+
+    /// Arithmetic and comparison over `Float` operands (roadmap Phase 3b).
+    ///
+    /// Unlike integer arithmetic, there is no width/signedness table to pick
+    /// an intrinsic from: LLVM's `fadd`/`fsub`/`fmul`/`fdiv`/`frem` already
+    /// work over any float width uniformly. What replaces the integer path's
+    /// overflow intrinsic is [`Self::check_not_nan`] — an overflowing float
+    /// result becomes a valid infinity (design D2), only a result IEEE 754
+    /// itself defines as `NaN` is a controlled error, so the check runs after
+    /// the operation rather than guarding before it.
+    fn emit_float_binary(
+        &mut self,
+        op: ir::BinaryOp,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+        function: FunctionValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        use ir::BinaryOp::*;
+
+        match op {
+            Add => {
+                let result = self
+                    .builder
+                    .build_float_add(left, right, "fadd")
+                    .expect("addition");
+                self.check_not_nan(result, function);
+                result.into()
+            }
+            Sub => {
+                let result = self
+                    .builder
+                    .build_float_sub(left, right, "fsub")
+                    .expect("subtraction");
+                self.check_not_nan(result, function);
+                result.into()
+            }
+            Mul => {
+                let result = self
+                    .builder
+                    .build_float_mul(left, right, "fmul")
+                    .expect("multiplication");
+                self.check_not_nan(result, function);
+                result.into()
+            }
+            Div => {
+                let result = self
+                    .builder
+                    .build_float_div(left, right, "fdiv")
+                    .expect("division");
+                self.check_not_nan(result, function);
+                result.into()
+            }
+            Rem => {
+                let result = self
+                    .builder
+                    .build_float_rem(left, right, "frem")
+                    .expect("remainder");
+                self.check_not_nan(result, function);
+                result.into()
+            }
+            Eq => self.compare_float(FloatPredicate::OEQ, left, right),
+            NotEq => self.compare_float(FloatPredicate::ONE, left, right),
+            Lt => self.compare_float(FloatPredicate::OLT, left, right),
+            LtEq => self.compare_float(FloatPredicate::OLE, left, right),
+            Gt => self.compare_float(FloatPredicate::OGT, left, right),
+            GtEq => self.compare_float(FloatPredicate::OGE, left, right),
+            // The checker never lets a `Float` operand reach `is`, a logical
+            // operator, bitwise or shift.
+            Identical | And | Or | BitAnd | BitOr | BitXor | Shl | Shr => {
+                unreachable!("operator {op:?} over Float")
+            }
+        }
+    }
+
+    fn compare_float(
+        &self,
+        predicate: FloatPredicate,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        self.builder
+            .build_float_compare(predicate, left, right, "fcmp")
+            .expect("comparison")
+            .into()
+    }
+
+    /// Traps if a `Float` arithmetic result is `NaN` (design D2).
+    ///
+    /// `x != x` is true if and only if `x` is `NaN` — the one IEEE 754
+    /// property that needs no dedicated LLVM intrinsic, just an ordinary
+    /// unordered-vs-ordered float comparison.
+    fn check_not_nan(&mut self, value: FloatValue<'ctx>, function: FunctionValue<'ctx>) {
+        let is_nan = self
+            .builder
+            .build_float_compare(FloatPredicate::UNO, value, value, "is_nan")
+            .expect("NaN check");
+        self.trap_if(is_nan, self.runtime.float_nan, function);
     }
 
     /// Transfers control to the runtime when a condition holds.

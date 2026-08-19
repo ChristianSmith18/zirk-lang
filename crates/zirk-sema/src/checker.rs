@@ -10,8 +10,8 @@ use crate::codes;
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
-    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, IntWidth,
-    MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
+    FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
+    IntWidth, MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
 };
 use std::collections::HashMap;
 use zirk_ast::*;
@@ -2634,20 +2634,22 @@ impl<'a> Checker<'a> {
                 // Ten widths share one key group, ordered among themselves by
                 // `IntWidth`'s own declaration order (its `Ord` derive).
                 Base::Int(width) => (1, width as u32),
-                Base::Boolean => (2, 0),
-                Base::String => (3, 0),
-                Base::Null => (4, 0),
-                Base::Range => (5, 0),
-                Base::Unknown => (6, 0),
-                Base::Enum(id) => (7, id),
-                Base::Function(id) => (8, id),
-                Base::Contract(id) => (9, id),
-                Base::Class(id) => (10, id),
-                Base::Param(id) => (11, id),
-                Base::Instance(id) => (12, id),
-                Base::ContractInstance(id) => (13, id),
-                Base::EnumInstance(id) => (14, id),
-                Base::Union(id) => (15, id),
+                // Same idea, one group over for the float family.
+                Base::Float(width) => (2, width as u32),
+                Base::Boolean => (3, 0),
+                Base::String => (4, 0),
+                Base::Null => (5, 0),
+                Base::Range => (6, 0),
+                Base::Unknown => (7, 0),
+                Base::Enum(id) => (8, id),
+                Base::Function(id) => (9, id),
+                Base::Contract(id) => (10, id),
+                Base::Class(id) => (11, id),
+                Base::Param(id) => (12, id),
+                Base::Instance(id) => (13, id),
+                Base::ContractInstance(id) => (14, id),
+                Base::EnumInstance(id) => (15, id),
+                Base::Union(id) => (16, id),
             }
         }
         bases.sort_by_key(key);
@@ -3722,6 +3724,7 @@ impl<'a> Checker<'a> {
     fn check_expr(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::Int(lit) => self.check_int_literal(lit),
+            Expr::Float(lit) => self.check_float_literal(lit),
             Expr::Str(_) => Type::STRING,
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
@@ -3884,6 +3887,23 @@ impl<'a> Checker<'a> {
         if let (Base::Int(_), Base::Int(_)) = (target.base, actual.base) {
             return true;
         }
+        // `Float` to `Float`, any width, unchecked (LLVM's `fptrunc`/`fpext`,
+        // roadmap Phase 3b): narrowing may lose precision or overflow to an
+        // infinity, exactly the kind of explicit-only conversion `as` exists
+        // for. Int-to-Float and Float-to-Int are the same idea across
+        // families — `fptosi`/`fptoui`/`sitofp`/`uitofp` — and equally
+        // unchecked: a `Float` that does not fit the target integer's range,
+        // or an integer whose magnitude a narrow `Float` cannot represent
+        // exactly, is on the same footing as any other narrowing `as`.
+        if let (Base::Float(_), Base::Float(_)) = (target.base, actual.base) {
+            return true;
+        }
+        if matches!(
+            (target.base, actual.base),
+            (Base::Int(_), Base::Float(_)) | (Base::Float(_), Base::Int(_))
+        ) {
+            return true;
+        }
         matches!(actual.base, Base::Class(_) | Base::Contract(_))
             && matches!(target.base, Base::Class(_))
     }
@@ -3903,6 +3923,18 @@ impl<'a> Checker<'a> {
         // itself is built — `casts_are_related` only answers "could this
         // ever succeed", not "does it lower yet".
         if matches!(actual_bare.base, Base::Int(_)) && matches!(target_bare.base, Base::Int(_)) {
+            return true;
+        }
+        // Same idea across `Float` widths and between `Int` and `Float`
+        // (roadmap Phase 3b, task 4.3/task 5) — see `cast_is_directly_lowerable`.
+        if matches!(actual_bare.base, Base::Float(_)) && matches!(target_bare.base, Base::Float(_))
+        {
+            return true;
+        }
+        if matches!(
+            (actual_bare.base, target_bare.base),
+            (Base::Int(_), Base::Float(_)) | (Base::Float(_), Base::Int(_))
+        ) {
             return true;
         }
         if self.is_subclass_of(actual_bare, target_bare)
@@ -3968,6 +4000,47 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         Type::INT32
+    }
+
+    /// A fractional or scientific literal is `Float64` unless it names an
+    /// explicit width suffix (roadmap Phase 3b) — there is no context-directed
+    /// inference yet (task 7, deep contextual conversion covers the operator
+    /// case; a bare literal's own destination is separate and not built).
+    ///
+    /// The magnitude check parses the text as `f64` purely to catch a literal
+    /// that overflows to infinity in its destination width — it does not
+    /// decide the literal's runtime value, which `zirk-codegen-llvm` builds
+    /// straight from this same text through LLVM's own parser, at the actual
+    /// destination width. `Float128` is exempted: its true range vastly
+    /// exceeds what an `f64` parse can even represent, so there is no `f64`
+    /// bound to check it against without a false result — see
+    /// `FloatWidth::literal_bound`.
+    fn check_float_literal(&mut self, lit: &FloatLit) -> Type {
+        use FloatWidth::*;
+        let width = match lit.width.as_deref() {
+            None => F64,
+            Some("f16") => F16,
+            Some("f32") => F32,
+            Some("f64") => F64,
+            Some("f128") => F128,
+            Some(_) => F64,
+        };
+
+        let value: f64 = lit.text.parse().unwrap_or(f64::NAN);
+        if let Some(bound) = width.literal_bound()
+            && value.abs() > bound
+        {
+            self.error(
+                codes::INTEGER_OUT_OF_RANGE,
+                lit.span,
+                format!("the literal {} does not fit in {}", lit.text, width.name()),
+                format!("{} admits magnitudes up to {bound}", width.name()),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        Type::of(Base::Float(width))
     }
 
     fn check_path(&mut self, ident: &Ident) -> Type {
@@ -4041,9 +4114,13 @@ impl<'a> Checker<'a> {
 
         match expr.op {
             UnaryOp::Neg => {
-                // Only a signed width: negating an unsigned value has no
-                // representable result in its own type (roadmap Phase 3b).
-                let ok = !operand.nullable && matches!(operand.base, Base::Int(w) if w.signed());
+                // Only a signed integer width: negating an unsigned value has
+                // no representable result in its own type (roadmap Phase 3b).
+                // Every `Float` width is signed by construction (IEEE 754's
+                // sign bit), so it needs no equivalent guard.
+                let ok = !operand.nullable
+                    && (matches!(operand.base, Base::Int(w) if w.signed())
+                        || matches!(operand.base, Base::Float(_)));
                 if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
                     self.error(
@@ -4136,27 +4213,29 @@ impl<'a> Checker<'a> {
                 Type::BOOLEAN
             }
 
-            // Comparison only makes sense on numbers in this subset.
+            // Comparison only makes sense on numbers in this subset —
+            // integer or `Float` (roadmap Phase 3b), unlike bitwise/shift
+            // which stay integer-only, so this does not reuse
+            // `expect_numeric`.
             Lt | LtEq | Gt | GtEq => {
-                self.expect_numeric(left, expr.left.span(), expr.op);
-                self.expect_numeric(right, expr.right.span(), expr.op);
-                // Each side is some integer width on its own; comparing two
-                // different ones needs an explicit conversion first, the
-                // same rule arithmetic already has (roadmap Phase 3b, task
-                // 4.3) — `expect_numeric` alone cannot see the other side.
-                if !left.is_unknown()
-                    && !right.is_unknown()
-                    && matches!(left.base, Base::Int(_))
-                    && matches!(right.base, Base::Int(_))
-                    && left.base != right.base
-                {
+                self.expect_comparable(left, expr.left.span(), expr.op);
+                self.expect_comparable(right, expr.right.span(), expr.op);
+                // Each side is some width on its own; comparing two different
+                // ones — including an integer against a `Float` — needs an
+                // explicit conversion first, the same rule arithmetic has for
+                // integers (roadmap Phase 3b, task 4.3). Arithmetic's mixed
+                // int/Float rule does not extend here: which side's width the
+                // comparison would run at is not the unambiguous "produces
+                // Float" the spec states for arithmetic, so it is left
+                // explicit rather than guessed.
+                if !left.is_unknown() && !right.is_unknown() && left.base != right.base {
                     let l = self.name(left);
                     let r = self.name(right);
                     self.error(
                         codes::TYPE_MISMATCH,
                         expr.op_span,
                         format!("cannot compare {l} with {r}"),
-                        "comparison requires both sides to be the same integer type",
+                        "comparison requires both sides to be the same numeric type",
                         None,
                     );
                 }
@@ -6411,6 +6490,27 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// Like [`Self::expect_numeric`], but also accepts `Float` — used only by
+    /// comparison, which has no reason to exclude it the way bitwise/shift
+    /// do (roadmap Phase 3b).
+    fn expect_comparable(&mut self, actual: Type, span: Span, op: BinaryOp) {
+        if actual.is_unknown() {
+            return;
+        }
+        if !actual.nullable && matches!(actual.base, Base::Int(_) | Base::Float(_)) {
+            return;
+        }
+
+        let found = self.name(actual);
+        self.error(
+            codes::TYPE_MISMATCH,
+            span,
+            format!("the `{}` operator requires numbers", op.as_str()),
+            format!("a value of type {found} was found"),
+            None,
+        );
+    }
+
     /// Unlike [`Self::expect_numeric`], deliberately `Int32` only: a
     /// range's element type is hardcoded to `Int32` (`Self::element_type`'s
     /// `Base::Range` arm), so accepting another width here without also
@@ -6601,6 +6701,20 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         // `Int32` was the only width there was to mismatch.
         (Base::Int(l), Base::Int(r), Add | Sub | Mul | Div | Rem) if l == r => {
             Some(Type::of(Base::Int(l)))
+        }
+        // Same rule, one family over: both `Float` operands must already
+        // share a width.
+        (Base::Float(l), Base::Float(r), Add | Sub | Mul | Div | Rem) if l == r => {
+            Some(Type::of(Base::Float(l)))
+        }
+        // Mixed integer and `Float` arithmetic produces `Float`
+        // (`ZIRK_LANGUAGE_SPEC.md` section 3), in either operand order: the
+        // integer side is implicitly widened to the `Float` operand's own
+        // width before the operation (`zirk-ir/lower.rs`'s `lower_binary`),
+        // never the other way, so nothing here is lossy.
+        (Base::Int(_), Base::Float(f), Add | Sub | Mul | Div | Rem)
+        | (Base::Float(f), Base::Int(_), Add | Sub | Mul | Div | Rem) => {
+            Some(Type::of(Base::Float(f)))
         }
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),

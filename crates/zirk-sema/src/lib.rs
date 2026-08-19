@@ -25,8 +25,8 @@ pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
-    FieldInfo, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance, IntWidth,
-    MethodInfo, PendingType, Type, TypeParamInfo, pending_type,
+    FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
+    IntWidth, MethodInfo, PendingType, Type, TypeParamInfo, pending_type,
 };
 
 /// Diagnostic codes of the checker.

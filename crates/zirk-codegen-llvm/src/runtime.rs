@@ -55,6 +55,11 @@ pub mod symbols {
     /// Reports a checked cast whose runtime type does not match and
     /// terminates.
     pub const INVALID_CAST: &str = "zirk_rt_invalid_cast";
+    /// Reports a `Float` operation that would produce `NaN` and terminates
+    /// (roadmap Phase 3b, design decision D2: `Float` prohibits `NaN` in the
+    /// type, not after the fact — an infinite result is a valid value,
+    /// unlike `NaN`).
+    pub const FLOAT_NAN: &str = "zirk_rt_float_nan";
 }
 
 /// The runtime functions available to generated code.
@@ -74,6 +79,7 @@ pub struct Runtime<'ctx> {
     pub str_repeat: FunctionValue<'ctx>,
     pub check_cast: FunctionValue<'ctx>,
     pub invalid_shift: FunctionValue<'ctx>,
+    pub float_nan: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -174,6 +180,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let invalid_cast =
         module.add_function(symbols::INVALID_CAST, void.fn_type(&[], false), external);
+    let float_nan = module.add_function(symbols::FLOAT_NAN, void.fn_type(&[], false), external);
 
     for handler in [
         overflow,
@@ -183,6 +190,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         invalid_repeat,
         invalid_cast,
         invalid_shift,
+        float_nan,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -207,5 +215,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_repeat,
         check_cast,
         invalid_shift,
+        float_nan,
     }
 }

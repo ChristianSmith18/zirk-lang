@@ -2527,10 +2527,17 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Expr::Str(StrLit { value, span }))
             }
+            TokenKind::Float(lit) => {
+                self.pos += 1;
+                Some(Expr::Float(FloatLit {
+                    text: lit.text,
+                    width: lit.width,
+                    span,
+                }))
+            }
             // Literals the norm defines and this phase does not implement.
             // They are recognized so the diagnostic can name them and their
             // phase; without the lexeme there would be nothing to name.
-            TokenKind::Float(_) => self.pending_literal(span, "a float literal", Phase::THREE_B),
             TokenKind::Char(_) => self.pending_literal(span, "a character literal", Phase::THREE_B),
             TokenKind::InterpolatedStr(parts) => {
                 self.pos += 1;

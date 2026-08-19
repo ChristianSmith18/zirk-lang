@@ -15,7 +15,7 @@ use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, CheckedProgram, ClassType, EnumType, EnumVariantInfo, FieldInfo,
-    IntWidth as SemaIntWidth, MethodInfo, ParamInfo, Type,
+    FloatWidth as SemaFloatWidth, IntWidth as SemaIntWidth, MethodInfo, ParamInfo, Type,
 };
 
 /// Lowers a verified program into an IR module.
@@ -598,6 +598,28 @@ const fn ir_int_width(width: SemaIntWidth) -> IntWidth {
     }
 }
 
+/// A float literal's width, from its optional suffix — mirrors the checker's
+/// own `check_float_literal`, since lowering re-derives a literal's type from
+/// the tree rather than re-checking it.
+fn float_literal_width(lit: &ast::FloatLit) -> FloatWidth {
+    match lit.width.as_deref() {
+        Some("f16") => FloatWidth::F16,
+        Some("f32") => FloatWidth::F32,
+        Some("f128") => FloatWidth::F128,
+        _ => FloatWidth::F64,
+    }
+}
+
+/// Same idea as [`ir_int_width`], for the float family.
+const fn ir_float_width(width: SemaFloatWidth) -> FloatWidth {
+    match width {
+        SemaFloatWidth::F16 => FloatWidth::F16,
+        SemaFloatWidth::F32 => FloatWidth::F32,
+        SemaFloatWidth::F64 => FloatWidth::F64,
+        SemaFloatWidth::F128 => FloatWidth::F128,
+    }
+}
+
 fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
     checked.enums[id as usize]
         .variants
@@ -625,6 +647,7 @@ fn ir_type(
     let base = match ty.base {
         Base::Void => IrType::Void,
         Base::Int(width) => IrType::Int(ir_int_width(width)),
+        Base::Float(width) => IrType::Float(ir_float_width(width)),
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
         // A traditional enum — none of its variants carry data — is exactly
@@ -1062,6 +1085,8 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::Retype(value), base.inner(), expr.span())
             } else if matches!(actual, IrType::Int(_)) && matches!(base, Nullable::Int(_)) {
                 self.emit(InstKind::IntCast(value), base.inner(), expr.span())
+            } else if matches!(actual, IrType::Float(_)) && matches!(base, Nullable::Float(_)) {
+                self.emit(InstKind::FloatCast(value), base.inner(), expr.span())
             } else {
                 value
             };
@@ -1092,6 +1117,11 @@ impl<'a> FunctionLowering<'a> {
         // an integer's representation does change size.
         if matches!(expected, IrType::Int(_)) {
             return self.emit(InstKind::IntCast(value), expected, expr.span());
+        }
+        // Same idea, one family over: `Float` widening is always exact
+        // (`Type::accepts`'s float arm), but the bits still need extending.
+        if matches!(expected, IrType::Float(_)) {
+            return self.emit(InstKind::FloatCast(value), expected, expr.span());
         }
 
         value
@@ -1311,6 +1341,9 @@ impl<'a> FunctionLowering<'a> {
             // serves every width — only `ty` (already the right one) says
             // which.
             IrType::Int(_) => self.emit(InstKind::ConstInt(0), ty, span),
+            IrType::Float(width) => {
+                self.emit(InstKind::ConstFloat(width, "0".to_string()), ty, span)
+            }
             IrType::Boolean => self.emit(InstKind::ConstBool(false), ty, span),
             IrType::String => {
                 let id = self.module.intern_string("");
@@ -1890,6 +1923,14 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I32),
                 span,
             ),
+            ast::Expr::Float(lit) => {
+                let width = float_literal_width(lit);
+                self.emit(
+                    InstKind::ConstFloat(width, lit.text.clone()),
+                    IrType::Float(width),
+                    span,
+                )
+            }
             ast::Expr::Bool(lit) => {
                 self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
             }
@@ -1907,9 +1948,20 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Unary(e) => {
                 let operand = self.lower_expr(&e.operand);
                 let (op, ty) = match e.op {
-                    ast::UnaryOp::Neg => (UnaryOp::Neg, IrType::Int(IntWidth::I32)),
+                    // `Neg`/`BitNot` preserve the operand's own width — any
+                    // integer width for both, plus any `Float` width for
+                    // `Neg` (roadmap Phase 3b) — so the result type is read
+                    // from the value just lowered, not assumed to be
+                    // `Int32`.
+                    ast::UnaryOp::Neg | ast::UnaryOp::BitNot => {
+                        let op = if e.op == ast::UnaryOp::Neg {
+                            UnaryOp::Neg
+                        } else {
+                            UnaryOp::BitNot
+                        };
+                        (op, self.type_of_operand(operand))
+                    }
                     ast::UnaryOp::Not => (UnaryOp::Not, IrType::Boolean),
-                    ast::UnaryOp::BitNot => (UnaryOp::BitNot, IrType::Int(IntWidth::I32)),
                 };
                 self.emit(InstKind::Unary { op, operand }, ty, span)
             }
@@ -1996,7 +2048,37 @@ impl<'a> FunctionLowering<'a> {
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
                 let op = binary_op(e.op);
-                let operand_type = self.type_of(&e.left, e.left.span());
+
+                let left_ty = self.type_of(&e.left, e.left.span());
+                let right_ty = self.type_of(&e.right, e.right.span());
+
+                // Mixed integer/`Float` arithmetic implicitly widens the
+                // integer operand to the `Float` operand's own width before
+                // the operation (`ZIRK_LANGUAGE_SPEC.md` section 3) — the
+                // checker already accepted this specific combination
+                // (`native_arithmetic`'s mixed arm), so lowering only has to
+                // insert the conversion the verifier's `Binary` check then
+                // finds both operands already agreeing on. Every other
+                // operator the checker allows through here (comparison,
+                // bitwise, shift, equality) already requires the same type
+                // on both sides, so this never fires for them.
+                let (left, right, operand_type) = match (left_ty, right_ty) {
+                    (IrType::Int(_), IrType::Float(w)) => {
+                        let left =
+                            self.emit(InstKind::IntToFloat(left), IrType::Float(w), e.left.span());
+                        (left, right, IrType::Float(w))
+                    }
+                    (IrType::Float(w), IrType::Int(_)) => {
+                        let right = self.emit(
+                            InstKind::IntToFloat(right),
+                            IrType::Float(w),
+                            e.right.span(),
+                        );
+                        (left, right, IrType::Float(w))
+                    }
+                    _ => (left, right, left_ty),
+                };
+
                 self.emit(
                     InstKind::Binary { op, left, right },
                     op.result_type(operand_type),
@@ -3078,6 +3160,15 @@ impl<'a> FunctionLowering<'a> {
         if let (IrType::Int(_), IrType::Int(_)) = (actual_ty, target_ty) {
             return self.emit(InstKind::IntCast(value), target_ty, span);
         }
+        if let (IrType::Float(_), IrType::Float(_)) = (actual_ty, target_ty) {
+            return self.emit(InstKind::FloatCast(value), target_ty, span);
+        }
+        if let (IrType::Int(_), IrType::Float(_)) = (actual_ty, target_ty) {
+            return self.emit(InstKind::IntToFloat(value), target_ty, span);
+        }
+        if let (IrType::Float(_), IrType::Int(_)) = (actual_ty, target_ty) {
+            return self.emit(InstKind::FloatToInt(value), target_ty, span);
+        }
 
         let IrType::Object(target_class) = target_ty else {
             unreachable!(
@@ -3786,13 +3877,17 @@ impl<'a> FunctionLowering<'a> {
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
         match expr {
             ast::Expr::Int(_) => IrType::Int(IntWidth::I32),
+            ast::Expr::Float(lit) => IrType::Float(float_literal_width(lit)),
             ast::Expr::Bool(_) => IrType::Boolean,
             ast::Expr::Str(_) => IrType::String,
             ast::Expr::Path(ident) => self.slot_type(self.lookup_slot(&ident.name)),
+            // `Neg`/`BitNot` preserve the operand's own width (any integer
+            // width for both, plus any `Float` width for `Neg` — roadmap
+            // Phase 3b); only `Not` has a type of its own regardless of the
+            // operand.
             ast::Expr::Unary(e) => match e.op {
-                ast::UnaryOp::Neg => IrType::Int(IntWidth::I32),
+                ast::UnaryOp::Neg | ast::UnaryOp::BitNot => self.type_of(&e.operand, e.span),
                 ast::UnaryOp::Not => IrType::Boolean,
-                ast::UnaryOp::BitNot => IrType::Int(IntWidth::I32),
             },
             // `??` yields its operands' shared type, not a boolean or an
             // arithmetic result: it is the one binary operator that is not an

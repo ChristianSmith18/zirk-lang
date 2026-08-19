@@ -88,3 +88,16 @@ pub extern "C" fn zirk_rt_allocation_failed() -> ! {
 pub extern "C" fn zirk_rt_invalid_cast() -> ! {
     fatal("invalid cast: the value's runtime type is not the target type")
 }
+
+/// Reports a `Float` operation that would produce `NaN` and terminates
+/// (roadmap Phase 3b, design decision D2).
+///
+/// `ZIRK_LANGUAGE_SPEC.md` section 3: `Float` has no valid `NaN`. An infinite
+/// result is a valid, explicit value and is never checked here — only a
+/// result IEEE 754 defines as `NaN` (`0.0 / 0.0`, `Infinity - Infinity`, and
+/// so on) reaches this handler, checked immediately after the arithmetic
+/// operation that produced it.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_float_nan() -> ! {
+    fatal("Float operation produced an indeterminate result (NaN)")
+}
