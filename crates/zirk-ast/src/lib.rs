@@ -694,6 +694,8 @@ pub enum Expr {
     /// `expr as Type` or `<Type>expr`, the postfix and prefix spellings of
     /// the same checkable cast (`ZIRK_LANGUAGE_SPEC.md` section 11).
     Cast(CastExpr),
+    /// `"text {expr} more text"` (roadmap Phase 3b).
+    Interpolated(InterpolatedStrExpr),
 }
 
 /// `expr as Type` or `<Type>expr`.
@@ -727,8 +729,25 @@ impl Expr {
             Expr::Variant(e) => e.span,
             Expr::Println(e) => e.span,
             Expr::Cast(e) => e.span,
+            Expr::Interpolated(e) => e.span,
         }
     }
+}
+
+/// One piece of an interpolated string literal, in the order it was written.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpolatedPart {
+    /// Text between `{...}` sections, with escapes already resolved.
+    Literal(String),
+    /// One `{expr}` section.
+    Expr(Expr),
+}
+
+/// `"text {expr} more text"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterpolatedStrExpr {
+    pub parts: Vec<InterpolatedPart>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -124,6 +124,17 @@ fn shape(e: &Expr) -> String {
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
         Expr::Println(p) => format!("println({})", shape(&p.arg)),
         Expr::Cast(c) => format!("({} as {})", shape(&c.expr), c.target.name),
+        Expr::Interpolated(s) => {
+            let parts: Vec<_> = s
+                .parts
+                .iter()
+                .map(|p| match p {
+                    InterpolatedPart::Literal(text) => format!("{text:?}"),
+                    InterpolatedPart::Expr(e) => shape(e),
+                })
+                .collect();
+            format!("interp({})", parts.join(", "))
+        }
     }
 }
 
@@ -1340,11 +1351,6 @@ fn invalid_literals_from_other_phases_name_themselves_and_their_phase() {
             "Phase 3b",
         ),
         (
-            "fn main(): Void { mut x = \"a {b}\"; }",
-            "string interpolation",
-            "Phase 3b",
-        ),
-        (
             "fn main(): Void { mut x = 250ms; }",
             "duration literal",
             "Phase 7",
@@ -1385,6 +1391,32 @@ fn invalid_literal_from_another_phase_reports_once() {
 #[test]
 fn valid_ordinary_string_is_unaffected_by_interpolation() {
     assert_eq!(shape(&expression("\"hola\"")), "\"hola\"");
+}
+
+#[test]
+fn valid_string_interpolation_parses_its_parts_in_order() {
+    assert_eq!(
+        shape(&expression(r#""a {1} b {2} c""#)),
+        r#"interp("a ", 1, " b ", 2, " c")"#
+    );
+}
+
+#[test]
+fn valid_string_interpolation_escaped_brace_is_literal_text() {
+    assert_eq!(
+        shape(&expression(r#""\{not interpolated\}""#)),
+        r#""{not interpolated}""#
+    );
+}
+
+#[test]
+fn valid_string_interpolation_embeds_a_full_expression() {
+    // The braces count depth, so a nested `{...}` inside the expression —
+    // here, a lambda's own block — does not close the interpolation early.
+    assert_eq!(
+        shape(&expression(r#""{1 + 2 * 3}""#)),
+        "interp((1 + (2 * 3)))"
+    );
 }
 
 // --- Clases ------------------------------------------------------------------

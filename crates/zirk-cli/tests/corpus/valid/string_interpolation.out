@@ -1,0 +1,5 @@
+Hola, ana! Edad: 30, activo: true
+Escaped: {not interpolated}
+Nested: adult
+Math: 7
+Concatenated: a1b end

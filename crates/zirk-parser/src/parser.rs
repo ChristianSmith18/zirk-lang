@@ -8,7 +8,7 @@
 use crate::codes;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceFile, Span};
-use zirk_lexer::{Keyword, Token, TokenKind};
+use zirk_lexer::{Keyword, StrPart, Token, TokenKind, tokenize};
 
 /// Parses a sequence of tokens into a program.
 ///
@@ -2459,6 +2459,62 @@ impl<'a> Parser<'a> {
         Some(expr)
     }
 
+    /// Parses `"text {expr} text"` into its literal and expression parts
+    /// (roadmap Phase 3b).
+    ///
+    /// Each `{expr}` was kept as raw source text by the lexer rather than
+    /// tokenized inline (see `StrPart::Expr`'s own doc comment): it is
+    /// tokenized here, on its own, and every resulting span is shifted by
+    /// the offset the interpolation started at — so a diagnostic inside
+    /// `{expr}` points at its real place in the file, not at offset 0 of a
+    /// text nobody wrote as its own file.
+    fn parse_interpolated(&mut self, parts: Vec<StrPart>, span: Span) -> Option<Expr> {
+        let mut result = Vec::with_capacity(parts.len());
+
+        for part in parts {
+            match part {
+                StrPart::Literal(text) => result.push(InterpolatedPart::Literal(text)),
+                StrPart::Expr {
+                    text,
+                    span: inner_span,
+                } => {
+                    let sub_source = SourceFile::new("<interpolation>", text);
+                    let sub_tokens: Vec<Token> = tokenize(&sub_source, self.sink)
+                        .into_iter()
+                        .map(|t| Token {
+                            kind: t.kind,
+                            span: Span::in_file(
+                                inner_span.file,
+                                inner_span.start + t.span.start,
+                                inner_span.start + t.span.end,
+                            ),
+                        })
+                        .collect();
+
+                    let mut sub = Parser::new(self.source, &sub_tokens, self.sink);
+                    let expr = sub.parse_expr()?;
+                    if !sub.at_eof() {
+                        let extra = sub.peek_span();
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            extra,
+                            "unexpected token after the interpolated expression",
+                            "an interpolation holds exactly one expression",
+                            None,
+                        );
+                        return None;
+                    }
+                    result.push(InterpolatedPart::Expr(expr));
+                }
+            }
+        }
+
+        Some(Expr::Interpolated(InterpolatedStrExpr {
+            parts: result,
+            span,
+        }))
+    }
+
     fn parse_primary(&mut self) -> Option<Expr> {
         let span = self.peek_span();
 
@@ -2476,8 +2532,9 @@ impl<'a> Parser<'a> {
             // phase; without the lexeme there would be nothing to name.
             TokenKind::Float(_) => self.pending_literal(span, "a float literal", Phase::THREE_B),
             TokenKind::Char(_) => self.pending_literal(span, "a character literal", Phase::THREE_B),
-            TokenKind::InterpolatedStr(_) => {
-                self.pending_literal(span, "string interpolation", Phase::THREE_B)
+            TokenKind::InterpolatedStr(parts) => {
+                self.pos += 1;
+                self.parse_interpolated(parts, span)
             }
             TokenKind::Duration(_, _) => {
                 self.pending_literal(span, "a duration literal", Phase::SEVEN)

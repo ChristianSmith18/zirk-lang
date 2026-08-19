@@ -1,0 +1,14 @@
+// String interpolation (roadmap Phase 3b, task 3.2/8.6): `{expr}` inside a
+// string literal, desazucared to concatenation. `\{`/`\}` escape a literal
+// brace, and an interpolated expression may itself open blocks (`if`).
+fn main(): Void {
+    mut name = "ana";
+    mut age = 30;
+    mut ok = true;
+
+    stdout.println("Hola, {name}! Edad: {age}, activo: {ok}");
+    stdout.println("Escaped: \{not interpolated\}");
+    stdout.println("Nested: {if age > 18 { "adult" } else { "minor" }}");
+    stdout.println("Math: {1 + 2 * 3}");
+    stdout.println("Concatenated: " + "a{1}b" + " end");
+}
