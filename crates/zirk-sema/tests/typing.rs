@@ -706,6 +706,48 @@ fn valid_interpolation_of_a_class_with_to_string() {
     );
 }
 
+// --- Deep contextual conversion (roadmap Phase 3b, task 7) ------------------
+
+#[test]
+fn valid_context_conversion_over_arithmetic() {
+    accepted_body("mut a: Float64 = Float64(3 / 4);");
+}
+
+#[test]
+fn valid_context_conversion_over_string_concatenation() {
+    accepted_body("mut a: String = String(\"x=\" + 42);");
+}
+
+#[test]
+fn valid_context_conversion_reaches_any_numeric_target() {
+    accepted_body("mut a: Int64 = Int64(3 + 4);");
+}
+
+#[test]
+fn valid_context_conversion_over_unary_negation() {
+    accepted_body("mut a: Float64 = Float64(-3 / 4);");
+}
+
+#[test]
+fn valid_context_conversion_stops_at_a_call() {
+    accepted(
+        "fn half(n: Int32): Int32 { return n / 2; }
+         fn main(): Void { mut a: Float64 = Float64(half(3) + 0.5); }",
+    );
+}
+
+#[test]
+fn invalid_context_conversion_of_an_incompatible_leaf() {
+    let output = rejected_body("mut a: Float64 = Float64(true + 4);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_context_conversion_wrong_argument_count() {
+    let output = rejected_body("mut a: Float64 = Float64(1, 2);");
+    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
+}
+
 // --- Error recovery ---------------------------------------------------------
 
 #[test]

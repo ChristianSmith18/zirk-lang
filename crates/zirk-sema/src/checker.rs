@@ -6090,6 +6090,18 @@ impl<'a> Checker<'a> {
                 return self.check_direct_call(expr, &signature);
             }
 
+            // `Float(3 / 4)` establishes a deep contextual conversion domain
+            // over the arithmetic tree directly inside it, and `String("x=" + 42)`
+            // does the same over concatenation (roadmap Phase 3b, task 7) —
+            // decided here, ahead of class construction, since a native
+            // scalar name can never collide with one (type names are
+            // reserved).
+            if let Some(target) = Type::from_name(&callee.name)
+                && matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String)
+            {
+                return self.check_context_conversion(target, expr);
+            }
+
             // `User(1, "x")` builds an instance. There is no `new`: the type
             // name is the constructor (`LANGUAGE_SPEC` section 7).
             if let Some(id) = self.classes.iter().position(|c| c.name == declared) {
@@ -6175,6 +6187,106 @@ impl<'a> Checker<'a> {
         }
 
         fn_type.returns
+    }
+
+    /// `Target(expr)`, a deep contextual conversion (`ZIRK_LANGUAGE_SPEC.md`
+    /// section 3, roadmap Phase 3b task 7): `Float(3 / 4)` converts `3` and
+    /// `4` to `Float` *before* dividing, yielding `0.75`, not `(3 / 4) as
+    /// Float` which would divide as `Int32` first and convert the
+    /// already-truncated `0` after. `String("x=" + 42)` is the same idea
+    /// over concatenation.
+    ///
+    /// Exactly one positional argument — the syntax reads like a
+    /// constructor call, and a constructor takes what it is given, not a
+    /// list of things to convert independently.
+    fn check_context_conversion(&mut self, target: Type, expr: &CallExpr) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{}` takes exactly one argument", self.name(target)),
+                "a contextual conversion converts one expression",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return target;
+        }
+
+        self.check_context_tree(target, &expr.args[0].value);
+        target
+    }
+
+    /// Walks an operand tree deciding, at each node, whether it still
+    /// belongs to `target`'s own compatible operator family (arithmetic for
+    /// a numeric target, `+` alone for `String` — repeating a `String` with
+    /// `*` is already native and needs no context) — recursing while it
+    /// does, and treating anything else as a boundary: checked with its own
+    /// type, then required to convert into `target` at that point.
+    ///
+    /// A boundary is also where this naturally stops at a call: a function
+    /// or method call is never one of the recognized operator shapes, so it
+    /// is always a leaf here — the context never reaches into a called
+    /// function's body, without needing a special case for it (task 7.3).
+    /// The tree itself is never rewritten, only read twice (once here to
+    /// check it, again in `zirk-ir/lower.rs`'s `lower_context_tree` to
+    /// lower it) — task 7.3's "does not mutate operands" the same way.
+    fn check_context_tree(&mut self, target: Type, expr: &Expr) {
+        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_));
+        let is_string = matches!(target.base, Base::String);
+
+        let compatible_op = |op: BinaryOp| {
+            (numeric
+                && matches!(
+                    op,
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+                ))
+                || (is_string && op == BinaryOp::Add)
+        };
+
+        match expr {
+            Expr::Binary(b) if compatible_op(b.op) => {
+                self.check_context_tree(target, &b.left);
+                self.check_context_tree(target, &b.right);
+            }
+            Expr::Unary(u) if numeric && u.op == UnaryOp::Neg => {
+                self.check_context_tree(target, &u.operand);
+            }
+            _ => {
+                let actual = self.check_expr(expr);
+                self.expect_context_convertible(target, actual, expr.span());
+            }
+        }
+    }
+
+    /// Whether a leaf's own type can convert into a contextual target —
+    /// always unchecked where it applies, the same as an explicit `as`
+    /// (roadmap Phase 3b, task 4.3/7.2): a numeric leaf reaches any other
+    /// numeric target, and any printable value reaches `String` through
+    /// `to_string()` (task 8).
+    fn expect_context_convertible(&mut self, target: Type, actual: Type, span: Span) {
+        if actual.is_unknown() || target == actual {
+            return;
+        }
+        let numeric_target = matches!(target.base, Base::Int(_) | Base::Float(_));
+        let numeric_actual = matches!(actual.base, Base::Int(_) | Base::Float(_));
+        if !actual.nullable && numeric_target && numeric_actual {
+            return;
+        }
+        if !actual.nullable && matches!(target.base, Base::String) && self.is_printable(actual) {
+            return;
+        }
+
+        let target_name = self.name(target);
+        let actual_name = self.name(actual);
+        self.error(
+            codes::TYPE_MISMATCH,
+            span,
+            format!("cannot convert {actual_name} into the `{target_name}` context"),
+            format!("`{target_name}(...)` requires every leaf to reach {target_name}"),
+            None,
+        );
     }
 
     /// A call to a declared function, where names and defaults apply.
