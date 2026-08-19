@@ -463,13 +463,8 @@ impl TokenKind {
             PipeGt => Phase::SEVEN_B,
             // Exponentiation needs `Float`: `2 ** -1` is defined as the
             // mathematical result converted back, so it cannot be answered
-            // inside the integers alone.
+            // inside the integers alone. It arrives with `Float` itself.
             StarStar | StarStarEq => Phase::THREE_B,
-            // The bitwise and shift family arrives with the integer widths it
-            // is defined over.
-            Amp | AmpEq | Pipe | PipeEq | Caret | CaretEq | Tilde | Shl | ShlEq | Shr | ShrEq => {
-                Phase::THREE_B
-            }
             _ => return None,
         })
     }

@@ -469,13 +469,31 @@ fn valid_shifts_and_their_compound_forms() {
 }
 
 #[test]
-fn valid_bitwise_and_power_operators_declare_their_phase() {
+fn valid_power_operator_declares_its_phase() {
+    // `**` needs `Float` to define what a negative exponent means (`2 ** -1`
+    // is the mathematical result converted back), so it stays gated until
+    // `Float` itself lands — unlike bitwise/shift, which only ever needed
+    // `Int32`, already available.
     use TokenKind::*;
-    for kind in [StarStar, StarStarEq, Amp, Pipe, Caret, Tilde, Shl, Shr] {
+    for kind in [StarStar, StarStarEq] {
         assert_eq!(
             kind.phase(),
             Some(Phase::THREE_B),
             "`{}` should announce its phase",
+            kind.symbol()
+        );
+    }
+}
+
+#[test]
+fn valid_bitwise_and_shift_operators_no_longer_declare_a_phase() {
+    // Roadmap task 3b/4.4: bitwise and shift work over `Int32` now.
+    use TokenKind::*;
+    for kind in [Amp, Pipe, Caret, Tilde, Shl, Shr] {
+        assert_eq!(
+            kind.phase(),
+            None,
+            "`{}` should not be gated",
             kind.symbol()
         );
     }

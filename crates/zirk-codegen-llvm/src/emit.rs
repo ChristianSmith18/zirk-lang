@@ -1169,10 +1169,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let zero = self.context.i32_type().const_zero();
                 self.checked_arithmetic("ssub", zero, operand.into_int_value(), function)
             }
-            ir::UnaryOp::Not => self
+            // `not` is bitwise complement at the LLVM level regardless of
+            // whether the checker calls it logical negation or `~`: `!true`
+            // and `~5` are the same instruction on different widths.
+            ir::UnaryOp::Not | ir::UnaryOp::BitNot => self
                 .builder
                 .build_not(operand.into_int_value(), "not")
-                .expect("logical negation")
+                .expect("bitwise complement")
                 .into(),
         }
     }
@@ -1243,6 +1246,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .build_or(l, r, "or")
                 .expect("disjunction")
                 .into(),
+
+            BitAnd => self
+                .builder
+                .build_and(l, r, "bitand")
+                .expect("bitand")
+                .into(),
+            BitOr => self.builder.build_or(l, r, "bitor").expect("bitor").into(),
+            BitXor => self
+                .builder
+                .build_xor(l, r, "bitxor")
+                .expect("bitxor")
+                .into(),
+
+            // `<< `/`>>` on `Int32` only for now (roadmap Phase 3b, task
+            // 4.4) — an amount outside `0..32` is undefined at the LLVM
+            // level, so it is rejected before the native instruction runs,
+            // the same shape `checked_division` uses for its own guards.
+            Shl => self.checked_shift(op, l, r, function),
+            Shr => self.checked_shift(op, l, r, function),
         }
     }
 
@@ -1380,6 +1402,50 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .builder
                 .build_int_signed_rem(left, right, "rem")
                 .expect("remainder")
+                .into(),
+        }
+    }
+
+    /// `<<`/`>>`, checked against the one thing that makes either undefined
+    /// at the LLVM level: an amount outside `0..32` for an `Int32` operand
+    /// (roadmap Phase 3b, task 4.4/10.4 — the check itself generalizes to
+    /// any width once the rest of the integer family lands; only the
+    /// literal `32` here is specific to today's single width).
+    fn checked_shift(
+        &mut self,
+        op: ir::BinaryOp,
+        left: inkwell::values::IntValue<'ctx>,
+        right: inkwell::values::IntValue<'ctx>,
+        function: FunctionValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let zero = self.context.i32_type().const_zero();
+        let width = self.context.i32_type().const_int(32, false);
+
+        let is_negative = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, right, zero, "shift_negative")
+            .expect("shift amount comparison");
+        let is_too_wide = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, right, width, "shift_too_wide")
+            .expect("shift amount comparison");
+        let invalid = self
+            .builder
+            .build_or(is_negative, is_too_wide, "shift_invalid")
+            .expect("disjunction");
+
+        self.trap_if(invalid, self.runtime.invalid_shift, function);
+
+        match op {
+            ir::BinaryOp::Shl => self
+                .builder
+                .build_left_shift(left, right, "shl")
+                .expect("left shift")
+                .into(),
+            _ => self
+                .builder
+                .build_right_shift(left, right, true, "shr")
+                .expect("right shift")
                 .into(),
         }
     }

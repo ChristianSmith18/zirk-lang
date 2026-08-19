@@ -433,28 +433,9 @@ fn invalid_constructs_from_other_phases_say_which() {
         ("fn main(): Void { try { } }", "try", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
-        // The operators the norm defines and this phase does not implement.
+        // `**` still needs `Float` (bitwise/shift no longer belong here:
+        // they work over `Int32` now, roadmap task 3b/4.4).
         ("fn main(): Void { mut x = 2 ** 3; }", "**", "Phase 3b"),
-        (
-            "fn main(): Void { mut a = 1; mut x = a & 2; }",
-            "&",
-            "Phase 3b",
-        ),
-        (
-            "fn main(): Void { mut a = 1; mut x = a << 2; }",
-            "<<",
-            "Phase 3b",
-        ),
-        (
-            "fn main(): Void { mut a = 1; mut x = a | 2; }",
-            "|",
-            "Phase 3b",
-        ),
-        (
-            "fn main(): Void { mut a = 1; mut x = a ^ 2; }",
-            "^",
-            "Phase 3b",
-        ),
         // Generators belong to the functional style, not to the objects of
         // Phase 3 they used to be filed under.
         ("fn gen numbers(): Int32 { }", "gen", "Phase 7b"),

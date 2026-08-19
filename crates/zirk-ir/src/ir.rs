@@ -584,6 +584,7 @@ pub struct Operand(pub ValueId);
 pub enum UnaryOp {
     Neg,
     Not,
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +607,11 @@ pub enum BinaryOp {
     /// A comparison of addresses, which is why it needs no contract and no
     /// runtime call: identity *is* the address.
     Identical,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 impl BinaryOp {
@@ -613,7 +619,7 @@ impl BinaryOp {
     pub const fn result_type(self, operand: IrType) -> IrType {
         use BinaryOp::*;
         match self {
-            Add | Sub | Mul | Div | Rem => operand,
+            Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr => operand,
             Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or | Identical => IrType::Boolean,
         }
     }

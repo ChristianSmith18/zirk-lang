@@ -155,6 +155,27 @@ fn invalid_arithmetic_between_different_types() {
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
+#[test]
+fn valid_bitwise_and_shift_on_int32() {
+    // Roadmap Phase 3b, task 4.4 — over `Int32` for now.
+    accepted_body(
+        "mut a = 6; mut b = 3;
+         mut x = a & b;
+         mut y = a | b;
+         mut z = a ^ b;
+         mut w = ~a;
+         mut s = a << 2;
+         mut t = a >> 1;",
+    );
+}
+
+#[test]
+fn invalid_bitwise_on_boolean() {
+    let output = rejected_body("mut a = true; mut x = a & true;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+    assert!(output.contains("requires numbers"));
+}
+
 // --- No truthiness ----------------------------------------------------------
 
 #[test]

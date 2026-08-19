@@ -1849,6 +1849,7 @@ impl<'a> FunctionLowering<'a> {
                 let (op, ty) = match e.op {
                     ast::UnaryOp::Neg => (UnaryOp::Neg, IrType::Int32),
                     ast::UnaryOp::Not => (UnaryOp::Not, IrType::Boolean),
+                    ast::UnaryOp::BitNot => (UnaryOp::BitNot, IrType::Int32),
                 };
                 self.emit(InstKind::Unary { op, operand }, ty, span)
             }
@@ -3646,6 +3647,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Unary(e) => match e.op {
                 ast::UnaryOp::Neg => IrType::Int32,
                 ast::UnaryOp::Not => IrType::Boolean,
+                ast::UnaryOp::BitNot => IrType::Int32,
             },
             // `??` yields its operands' shared type, not a boolean or an
             // arithmetic result: it is the one binary operator that is not an
@@ -3787,6 +3789,11 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         A::And => BinaryOp::And,
         A::Or => BinaryOp::Or,
         A::Is => BinaryOp::Identical,
+        A::BitAnd => BinaryOp::BitAnd,
+        A::BitOr => BinaryOp::BitOr,
+        A::BitXor => BinaryOp::BitXor,
+        A::Shl => BinaryOp::Shl,
+        A::Shr => BinaryOp::Shr,
         // `??` is expanded by the lowering into a null check with two blocks,
         // so it never reaches the IR as an operator.
         A::Coalesce => unreachable!("`??` is lowered into branches, not an operator"),

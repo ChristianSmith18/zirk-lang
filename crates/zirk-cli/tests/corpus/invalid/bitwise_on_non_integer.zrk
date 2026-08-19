@@ -1,0 +1,5 @@
+// Bitwise operators require numbers, the same rule comparison already has.
+fn main(): Void {
+    mut a: Boolean = true;
+    mut b = a & true;
+}
