@@ -13,10 +13,17 @@ fn load(path: String): Result<Document, LoadError> { /* ... */ }
 
 Callers can see and compose the failure without hidden control transfer. Choose a specific error type that contains actionable context without exposing secrets.
 
-The initial method family is `is_ok`, `is_error`, `ok_or_null`,
-`error_or_null`, `get_or`, `get_or_else`, `map`, `map_error`, `and_then`,
-`or_else`, `unwrap`, `unwrap_error`, and `or_throw`. Wrong-variant unwrap is a
-programmer assertion and invokes `fatalError`, not a recoverable exception.
+> **Implementation status:** the current checker recognizes seven structural
+> methods — `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`,
+> `unwrap`, and `unwrap_error`. `get_or_else`, `map`, `map_error`, `and_then`,
+> `or_else`, and `or_throw` are normative but not yet implemented: each needs
+> its own method-level type parameter (`map<U>(transform: Fn(T) => U)`), and
+> `MethodInfo` has no such field today — only the containing class/contract/enum
+> can be generic. `get_or_else` additionally needs `Fn` as a writable parameter
+> type, which the language does not have yet.
+
+Wrong-variant unwrap is a programmer assertion and invokes `fatalError`, not a
+recoverable exception.
 
 ---
 

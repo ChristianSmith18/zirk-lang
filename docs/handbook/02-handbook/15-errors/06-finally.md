@@ -8,10 +8,16 @@ Cleanup failure must not silently replace the primary failure; the governing API
 
 Direct `return`, `break`, `continue`, `throw`, or `fatalError` inside `finally`
 cannot replace an active outcome. When cleanup throws during propagation, the
-original throwable stays primary and cleanup is appended to `suppressed`.
-`throw;` inside a catch preserves exact identity and trace; wrapping constructs
-a new throwable with the original as `cause`. Traces materialize lazily and do
-not capture locals or secrets by default.
+original throwable stays primary; `throw;` inside a catch preserves exact
+identity and trace, and wrapping constructs a new throwable with the original
+as `cause`.
+
+> **Implementation status:** `suppressed` (recording a cleanup failure that
+> occurs while another throwable is already propagating) is normative but not
+> implemented — `Error` has no `suppressed` member yet, since it needs
+> `List<T>`, a Phase 7 collection that does not exist. `stack_trace()` exists
+> and is callable, but every override returns an empty `StackTrace` with no
+> captured frames; real frame capture is unimplemented.
 
 ---
 

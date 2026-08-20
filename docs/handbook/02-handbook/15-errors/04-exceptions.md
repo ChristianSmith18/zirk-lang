@@ -16,9 +16,14 @@ try {
 
 An explicit `throw` must be caught or declared; public APIs write the complete
 explicit set. Built-in safety failures belong to typed `RuntimeError`
-subclasses and remain catchable without appearing in every signature. Declared
-exception sets participate in `Fn` compatibility. An exception crosses frames
-while resource and `finally` cleanup still runs.
+subclasses and remain catchable without appearing in every signature. An
+exception crosses frames while resource and `finally` cleanup still runs.
+
+> **Implementation status:** declared exception sets participating in `Fn`
+> compatibility is normative but not applicable yet — `Fn(...) => T` has no
+> writable syntax in Zirk today (function-type annotations are rejected by
+> the parser on purpose, decision D9); a closure's type is inferred locally
+> and cannot be written as a parameter, return, or field type.
 
 ---
 

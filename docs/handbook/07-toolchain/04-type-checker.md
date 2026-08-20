@@ -7,9 +7,13 @@ generates typed information for portable IR; it does not choose native layout.
 > **Implementation status:** the current checker covers the implemented scalar
 > subset, inference, nullability basics, assignments, calls/named arguments,
 > returns, definite initialization, loops, match foundations, lambdas/captures,
-> enums, classes, constructors, visibility, inheritance, and method calls. Full
-> generics/contracts, resource/effect checking, strict immutability, concurrency,
-> complete algebraic matching, and later standard types remain staged work.
+> enums, classes, constructors, visibility, inheritance, method calls, generics
+> with `from` constraints, interfaces/traits, `Result<T,E>`'s seven structural
+> methods, `throw`/`try`/`catch`/`finally` with "capture or declare" effect
+> analysis, and `Resource<E>`/`match with` closing on a single acquisition.
+> `Result`'s generic combinators (`map`, `and_then`, …), catch variant patterns,
+> grouped resource acquisition, `Fn` type annotations, strict immutability,
+> concurrency, and later standard types remain staged work.
 
 ## Inputs and output
 
