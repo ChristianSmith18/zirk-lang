@@ -240,16 +240,16 @@ impl Keyword {
     pub const fn phase(self) -> Option<Phase> {
         use Keyword::*;
         Some(match self {
-            // `match with` needs `Resource<E>`, which needs exceptions already
-            // running — still Phase 4 (roadmap Phase 4b's own "fuera de
-            // alcance"). `unsafe`/`Pointer<T>` are the memory-strategy half of
-            // Phase 4, not exceptions. `default` labels the catch-all arm of a
-            // `try`, so it arrives with error handling and not with the
-            // decorators it used to be filed under — but `catch Throwable(e)`
-            // already means "catch everything" for this phase's scope
-            // (`fase-4b-excepciones`), so `default` stays gated a little
-            // longer, until `match with` needs its own catch-all arm.
-            With | Unsafe | Default => Phase::FOUR,
+            // `match ... with` is implemented (roadmap Phase 4c: `Resource<E>`
+            // and scoped acquisition), so `With` is no longer gated here —
+            // `parse_match` consumes it directly. `unsafe`/`Pointer<T>` are
+            // the memory-strategy half of Phase 4, not exceptions or
+            // resources. `default` labels the catch-all arm of a `try`, so it
+            // arrives with error handling and not with the decorators it used
+            // to be filed under — but `catch Throwable(e)` already means
+            // "catch everything" for this phase's scope, so `default` stays
+            // gated until `match with` needs its own catch-all arm.
+            Unsafe | Default => Phase::FOUR,
             Task | Await | Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.
