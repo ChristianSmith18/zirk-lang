@@ -1,0 +1,23 @@
+// The same native failures as `native_runtime_errors_caught.zrk`, but caught
+// by `RuntimeError`/`Throwable` rather than by the concrete class
+// (`fase-4d-runtimeerror`): virtual dispatch through the compiler-known
+// exception hierarchy works for these four exactly like it already does for
+// a user's own `implements RuntimeError` class.
+fn main(): Void {
+    try {
+        mut a: Int32 = 5;
+        mut b: Int32 = 0;
+        mut c: Int32 = a / b;
+        stdout.println(c);
+    } catch RuntimeError(e) {
+        stdout.println("runtime: " + e.message());
+    }
+
+    try {
+        mut zero: Float = 0.0;
+        mut nan: Float = zero / zero;
+        stdout.println(nan);
+    } catch Throwable(e) {
+        stdout.println("throwable: " + e.message());
+    }
+}

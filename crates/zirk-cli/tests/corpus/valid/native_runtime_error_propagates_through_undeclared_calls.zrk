@@ -1,0 +1,26 @@
+// D11 (`fase-4d-runtimeerror`): a native failure inside `g()`, called by
+// `f()`, propagates through both — neither declares `throws` (a native
+// failure never appears in one, by design) and neither has a `try` of its
+// own — and is caught two call levels up, in `main()`. Before this pass,
+// only a call whose *declared* `throws` was non-empty ran the post-call
+// pending-exception check; `g()`'s own division has none, so this is exactly
+// the case that check alone could never have made sound.
+fn g(divisor: Int32): Int32 {
+    mut a: Int32 = 100;
+    return a / divisor;
+}
+
+fn f(divisor: Int32): Int32 {
+    mut r: Int32 = g(divisor);
+    return r + 1;
+}
+
+fn main(): Void {
+    try {
+        mut result: Int32 = f(0);
+        stdout.println(result);
+    } catch DivisionByZeroError(e) {
+        stdout.println("caught through two levels: " + e.message());
+    }
+    stdout.println("done");
+}

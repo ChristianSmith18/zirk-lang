@@ -3485,6 +3485,115 @@ fn invalid_return_directly_inside_finally() {
     );
 }
 
+// --- Native `RuntimeError` subclasses (`fase-4d-runtimeerror`) --------------
+
+#[test]
+fn valid_catch_native_failure_by_its_own_concrete_type() {
+    accepted_body(
+        "try {
+             mut a: Int32 = 1;
+             mut b: Int32 = 0;
+             mut c: Int32 = a / b;
+         } catch DivisionByZeroError(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
+#[test]
+fn valid_catch_native_failure_by_runtime_error_supertype() {
+    accepted_body(
+        "try {
+             mut a: Int32 = 1;
+             mut b: Int32 = 0;
+             mut c: Int32 = a / b;
+         } catch RuntimeError(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
+#[test]
+fn valid_catch_native_failure_by_throwable_supertype() {
+    accepted_body(
+        "try {
+             mut a: Int32 = 1;
+             mut b: Int32 = 0;
+             mut c: Int32 = a / b;
+         } catch Throwable(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
+#[test]
+fn valid_catch_each_of_the_four_native_failure_classes() {
+    // Every one of the four type-checks against its own catch, exactly like
+    // a user's own `implements RuntimeError` class does — `DivisionByZeroError`
+    // is covered by the tests above already, so this exercises the other
+    // three: `InvalidShiftError`, `InvalidRepeatError`, `FloatNanError`.
+    accepted_body(
+        "try {
+             mut x: Int32 = 1;
+             mut s: Int32 = 40;
+             mut y: Int32 = x << s;
+         } catch InvalidShiftError(e) {
+             stdout.println(e.message());
+         }
+         try {
+             mut a: String = \"x\";
+             mut n: Int32 = -1;
+             mut r: String = a * n;
+         } catch InvalidRepeatError(e) {
+             stdout.println(e.message());
+         }
+         try {
+             mut zero: Float = 0.0;
+             mut nan: Float = zero / zero;
+         } catch FloatNanError(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
+#[test]
+fn valid_native_failure_is_never_declared_in_a_throws_clause() {
+    // A native failure is implicit by design
+    // (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a function
+    // that divides is not required — and has no syntax — to declare
+    // `throws DivisionByZeroError`, unlike a `throw` of its own.
+    accepted(
+        "fn divide(a: Int32, b: Int32): Int32 {
+             return a / b;
+         }
+         fn main(): Void {
+             try {
+                 mut r: Int32 = divide(1, 0);
+             } catch DivisionByZeroError(e) {
+                 stdout.println(e.message());
+             }
+         }",
+    );
+}
+
+#[test]
+fn valid_native_failure_class_is_constructible_like_any_other_runtime_error() {
+    // `fase-4d-runtimeerror`'s design (D9) registers the four native failure
+    // classes as concrete, not abstract — a program may name and construct
+    // one directly, exactly as it could write its own
+    // `class Foo implements RuntimeError { construct(reason: String) { ... } }`
+    // and call `Foo("reason")`; nothing about being compiler-known makes
+    // construction special or forbidden (see `design.md`'s `## Decisions`
+    // for why no explicit rejection was added).
+    accepted_body(
+        "try {
+             throw DivisionByZeroError(\"custom\");
+         } catch DivisionByZeroError(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
 // --- `Resource<E>` / `match ... with` (roadmap Phase 4c) --------------------
 
 const OPEN_ERROR: &str = "class OpenError implements Error {

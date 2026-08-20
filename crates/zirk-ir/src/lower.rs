@@ -310,6 +310,22 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|f| (f.name.name.as_str(), f))
         .collect();
 
+    // The sixteen hand-built method bodies of the four native failure
+    // classes (`fase-4d-runtimeerror`, D8) — the same "no `program.classes`
+    // entry, build the IR directly" shape `UNREACHABLE_ABSTRACT_METHOD`
+    // above already uses, just with sixteen real (reachable) bodies instead
+    // of one unreachable one. `construct` needs no body here: a
+    // `Type("reason")` construction of one of these four is handled by
+    // `Self::lower_construction`'s own special case, the same way
+    // `StackTrace()` already skips calling a constructor symbol.
+    synthesize_native_failure_bodies(
+        &mut module,
+        checked,
+        &declarations,
+        instance_base,
+        enum_instance_base,
+    );
+
     // A constructor becomes an ordinary function whose first parameter is the
     // object being built. Emitting it once and calling it beats inlining the
     // body at every construction site, and it is the same shape a method call
@@ -400,6 +416,76 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     module
+}
+
+/// Builds the sixteen method bodies of the four native failure classes by
+/// hand (`fase-4d-runtimeerror`, design D8): `message`/`code`/`cause`/
+/// `stack_trace` for `DivisionByZeroError`, `InvalidShiftError`,
+/// `InvalidRepeatError` and `FloatNanError`. None of the four has a
+/// `program.classes` entry — `Checker::register_native_exception_hierarchy`
+/// injects them the same "table directly" way `Error`/`Throwable`/
+/// `RuntimeError`/`StackTrace` already are — so nothing in the ordinary
+/// per-class lowering loop below ever reaches them; this is their only
+/// source of a real body.
+fn synthesize_native_failure_bodies<'a>(
+    module: &mut Module,
+    checked: &'a CheckedProgram,
+    declarations: &HashMap<&'a str, &'a ast::FnDecl>,
+    instance_base: u32,
+    enum_instance_base: u32,
+) {
+    let Some(native) = checked.native_exceptions else {
+        return;
+    };
+
+    let classes = [
+        (native.division_by_zero, "E_DIVISION_BY_ZERO"),
+        (native.invalid_shift, "E_INVALID_SHIFT"),
+        (native.invalid_repeat, "E_INVALID_REPEAT"),
+        (native.float_nan, "E_FLOAT_NAN"),
+    ];
+
+    for (class_id, code) in classes {
+        let message = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .build_native_message(class_id);
+        module.functions.push(message);
+
+        let code_fn = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .build_native_code(class_id, code);
+        module.functions.push(code_fn);
+
+        let cause = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .build_native_cause(class_id, native.error);
+        module.functions.push(cause);
+
+        let stack_trace = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .build_native_stack_trace(class_id, native.stack_trace);
+        module.functions.push(stack_trace);
+    }
 }
 
 /// Lowers every constructor and method of one class declaration under `id` —
@@ -1597,6 +1683,115 @@ impl<'a> FunctionLowering<'a> {
         (lowered, lifted)
     }
 
+    /// `message(): String { return this.reason; }` (D8) — `reason` is
+    /// always field `0`, the class's only one, written by whatever built the
+    /// object (`Self::lower_construction`'s special case for a user's own
+    /// `Type("...")`, or `Self::build_native_failure` for a compiler-thrown
+    /// one).
+    fn build_native_message(mut self, class_id: u32) -> Function {
+        let span = Span::empty(0);
+        let entry = self.new_block();
+        self.current = entry;
+        let this_ty = IrType::Object(class_id);
+        let this = self.declare_slot("this", this_ty, span);
+        let object = self.emit(InstKind::Load(this), this_ty, span);
+        let value = self.emit(
+            InstKind::LoadField { object, index: 0 },
+            IrType::String,
+            span,
+        );
+        self.terminate(Terminator::Return(Some(value)));
+
+        Function {
+            name: method_symbol(&self.checked.classes[class_id as usize].name, "message"),
+            params: vec![this],
+            return_type: IrType::String,
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `code(): String { return "<fixed code>"; }` (D8) — one constant per
+    /// class (`E_DIVISION_BY_ZERO`, …), unrelated to the instance's own
+    /// `reason`.
+    fn build_native_code(mut self, class_id: u32, code: &str) -> Function {
+        let span = Span::empty(0);
+        let entry = self.new_block();
+        self.current = entry;
+        let this_ty = IrType::Object(class_id);
+        let this = self.declare_slot("this", this_ty, span);
+        let text = self.module.intern_string(code);
+        let value = self.emit(InstKind::ConstString(text), IrType::String, span);
+        self.terminate(Terminator::Return(Some(value)));
+
+        Function {
+            name: method_symbol(&self.checked.classes[class_id as usize].name, "code"),
+            params: vec![this],
+            return_type: IrType::String,
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `cause(): Error? { return null; }` (D8) — none of the four native
+    /// failures ever wraps an earlier one.
+    fn build_native_cause(mut self, class_id: u32, error_id: u32) -> Function {
+        let span = Span::empty(0);
+        let entry = self.new_block();
+        self.current = entry;
+        let this_ty = IrType::Object(class_id);
+        let this = self.declare_slot("this", this_ty, span);
+        let nullable = Nullable::Object(error_id);
+        let value = self.emit(
+            InstKind::NullValue(nullable),
+            IrType::Nullable(nullable),
+            span,
+        );
+        self.terminate(Terminator::Return(Some(value)));
+
+        Function {
+            name: method_symbol(&self.checked.classes[class_id as usize].name, "cause"),
+            params: vec![this],
+            return_type: IrType::Nullable(nullable),
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `stack_trace(): StackTrace { return StackTrace(); }` (D8) — the same
+    /// `Alloc`-with-no-constructor `Self::lower_construction` already builds
+    /// for a user-written `StackTrace()`, reused here since this body never
+    /// goes through an `ast::CallExpr` to reach that path itself.
+    fn build_native_stack_trace(mut self, class_id: u32, stack_trace_id: u32) -> Function {
+        let span = Span::empty(0);
+        let entry = self.new_block();
+        self.current = entry;
+        let this_ty = IrType::Object(class_id);
+        let this = self.declare_slot("this", this_ty, span);
+        let value = self.emit(
+            InstKind::Alloc(stack_trace_id),
+            IrType::Object(stack_trace_id),
+            span,
+        );
+        self.terminate(Terminator::Return(Some(value)));
+
+        Function {
+            name: method_symbol(&self.checked.classes[class_id as usize].name, "stack_trace"),
+            params: vec![this],
+            return_type: IrType::Object(stack_trace_id),
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span,
+        }
+    }
+
     fn lower_block(&mut self, block: &ast::Block) {
         self.scopes.push(HashMap::new());
         for stmt in &block.statements {
@@ -2221,10 +2416,28 @@ impl<'a> FunctionLowering<'a> {
     fn lower_return(&mut self, stmt: &ast::ReturnStmt) {
         let expected = self.return_type;
         let value = stmt.value.as_ref().map(|e| self.lower_expr_as(e, expected));
+        // Spilled ahead of `run_finally_through` below, the same reason
+        // `Self::lower_and_hold` spills any operand a later, block-opening
+        // expression would otherwise strand (ADR-007): a `finally` on the
+        // way out may itself open blocks — a call inside it does,
+        // unconditionally, since D11 (`fase-4d-runtimeerror`) — and `value`
+        // was computed in the block *before* that, so using it directly in
+        // this statement's own `Terminator::Return` below (built in
+        // whichever block lowering the `finally` left `self.current` at)
+        // would use a value from a block this one is no longer that same
+        // block (found via a `return call();` inside a `match ... with`
+        // arm whose own resource-close `finally` calls a `Void` method).
+        let holder = value.map(|operand| {
+            let ty = self.type_of_operand(operand);
+            let slot = self.declare_slot("<return_value>", ty, stmt.span);
+            self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+            (slot, ty)
+        });
         // A `return` leaves every enclosing `try`, not just the innermost
         // one (roadmap Phase 4b, design D3) — unlike `break`/`continue`,
         // which only exit the ones nested *inside* the loop they target.
         self.run_finally_through(0);
+        let value = holder.map(|(slot, ty)| self.emit(InstKind::Load(slot), ty, stmt.span));
         self.terminate(Terminator::Return(value));
     }
 
@@ -2363,21 +2576,21 @@ impl<'a> FunctionLowering<'a> {
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
 
-                let kind = if e.op == ast::BinaryOp::Add {
-                    InstKind::Concat { left, right }
-                } else if self.type_of(&e.left, e.left.span()) == IrType::String {
-                    InstKind::Repeat {
-                        string: left,
-                        count: right,
-                    }
+                if e.op == ast::BinaryOp::Add {
+                    self.emit(InstKind::Concat { left, right }, IrType::String, span)
                 } else {
-                    // `3 * "ja"`: the same request, written the other way.
-                    InstKind::Repeat {
-                        string: right,
-                        count: left,
-                    }
-                };
-                self.emit(kind, IrType::String, span)
+                    let (string, count) = if self.type_of(&e.left, e.left.span()) == IrType::String
+                    {
+                        (left, right)
+                    } else {
+                        // `3 * "ja"`: the same request, written the other way.
+                        (right, left)
+                    };
+                    // D10: the negative-count check that used to live inside
+                    // `zirk_rt_invalid_repeat` (`zirk-runtime/src/string.rs`)
+                    // moved here, ahead of the repetition itself.
+                    self.checked_repeat(string, count, span)
+                }
             }
 
             ast::Expr::Binary(e) => {
@@ -2454,11 +2667,7 @@ impl<'a> FunctionLowering<'a> {
                     _ => (left, right, left_ty),
                 };
 
-                self.emit(
-                    InstKind::Binary { op, left, right },
-                    op.result_type(operand_type),
-                    span,
-                )
+                self.emit_checked_binary(op, left, right, operand_type, span)
             }
 
             // Calling a closure value goes through the value, not a name.
@@ -2489,7 +2698,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if let Some(operand) = self.lower_contract_call(e, span) {
                     let ty = self.type_of_operand(operand);
-                    return self.lower_throws_check(e, operand, ty, span);
+                    return self.lower_throws_check(operand, ty, span);
                 }
                 if let Some(operand) = self.lower_native_to_string_call(e, span) {
                     return operand;
@@ -2499,7 +2708,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
                     let ty = self.type_of_operand(operand);
-                    return self.lower_throws_check(e, operand, ty, span);
+                    return self.lower_throws_check(operand, ty, span);
                 }
                 if let Some(operand) = self.lower_safe_method_call(e, span) {
                     return operand;
@@ -2521,7 +2730,7 @@ impl<'a> FunctionLowering<'a> {
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
                 let result = self.emit(InstKind::Call { callee: name, args }, returns, span);
-                self.lower_throws_check(e, result, returns, span)
+                self.lower_throws_check(result, returns, span)
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
@@ -3380,35 +3589,6 @@ impl<'a> FunctionLowering<'a> {
         self.checked.classes[id as usize].method(&field.name.name)
     }
 
-    /// The `throws` set a call's own target declares (roadmap Phase 4b),
-    /// empty when it names none — a plain function's, a method's, or a
-    /// contract method's, whichever the call resolves to. A construction, a
-    /// closure call, `to_string()`, a `Result` method and a variant
-    /// construction never throw in this pass's scope, so none of those
-    /// paths are consulted here.
-    fn call_throws(&self, call: &ast::CallExpr) -> &[Type] {
-        if let Some(method) = self.method_of(call) {
-            return &method.throws;
-        }
-        if let Some(method) = self.contract_method_of(call) {
-            return &method.throws;
-        }
-        if let ast::Expr::Path(ident) = &*call.callee
-            && !self
-                .scopes
-                .iter()
-                .rev()
-                .any(|scope| scope.contains_key(&ident.name))
-            && let Some(signature) = self
-                .checked
-                .functions
-                .get(&self.declaration_of(&ident.name, ident.span))
-        {
-            return &signature.throws;
-        }
-        &[]
-    }
-
     /// The module object id of the compiler-known `Throwable` (roadmap
     /// Phase 4b) — the static type every pending exception is taken as,
     /// since the runtime slot holding it is type-erased.
@@ -3421,6 +3601,400 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("`Throwable` is an ordinary class")
         };
         id
+    }
+
+    /// Whether `id` is one of the four native failure classes
+    /// (`fase-4d-runtimeerror`, D9) — `DivisionByZeroError`,
+    /// `InvalidShiftError`, `InvalidRepeatError` or `FloatNanError`. Used by
+    /// [`Self::lower_construction`]'s own special case for a program's
+    /// explicit `Type("reason")` of one of these, the same way
+    /// [`Self::lower_construction`] already special-cases `StackTrace`.
+    fn is_native_failure_class(&self, id: u32) -> bool {
+        self.checked.native_exceptions.is_some_and(|n| {
+            id == n.division_by_zero
+                || id == n.invalid_shift
+                || id == n.invalid_repeat
+                || id == n.float_nan
+        })
+    }
+
+    /// Builds one of the four native failure objects by hand (D8/D10): an
+    /// `Alloc` plus a `StoreField` of a fixed message into `reason` (field
+    /// `0`, the class's only one) — the same shape a program's own
+    /// `Type("reason")` takes through [`Self::lower_construction`]'s special
+    /// case, except this one never goes through an `ast::CallExpr`: a
+    /// compiler-detected failure has no source expression to lower an
+    /// argument from.
+    fn build_native_failure(&mut self, class_id: u32, message: &str, span: Span) -> Operand {
+        let object = self.emit(InstKind::Alloc(class_id), IrType::Object(class_id), span);
+        let text = self.module.intern_string(message);
+        let value = self.emit(InstKind::ConstString(text), IrType::String, span);
+        self.emit_effect(
+            InstKind::StoreField {
+                object,
+                index: 0,
+                value,
+            },
+            span,
+        );
+        object
+    }
+
+    /// Builds and throws one of the four native failures, then dispatches to
+    /// whatever active `catch` covers it — or re-propagates, having run
+    /// every `finally` on the way (D10). The same two steps
+    /// [`Self::lower_throw`] takes for an explicit `throw expr;`, just with
+    /// the exception built by [`Self::build_native_failure`] instead of
+    /// lowered from a source expression.
+    fn throw_native_failure(&mut self, class_id: u32, message: &str, span: Span) {
+        let exception = self.build_native_failure(class_id, message, span);
+        self.emit_effect(InstKind::Throw(exception), span);
+        self.lower_pending_exception_dispatch(span);
+    }
+
+    /// Division-by-zero guard (D10): before `Div`/`Rem` over integers runs,
+    /// compares the divisor to zero on a branch of its own, throwing
+    /// `DivisionByZeroError` on the failing side — `checked_division`'s own
+    /// `trap_if` (`zirk-codegen-llvm/src/emit.rs`), moved up from codegen to
+    /// here so a `try`/`catch` around the expression can intercept it. The
+    /// one overflow case a signed division can still hit (`Int32::MIN /
+    /// -1`) is untouched: `OverflowError` is explicitly out of this pass's
+    /// scope (see `proposal.md`), so `checked_division` still guards it with
+    /// `trap_if` exactly as before.
+    /// Spills an already-lowered value into a fresh slot and reads it back
+    /// immediately — a no-op in the block it runs in, but what makes the
+    /// *value* usable again once [`Self::current`] has moved to a different
+    /// block: an IR value never crosses a block boundary on its own (ADR-007
+    /// D7 of `fase-1`), so anything a guard's own branch needs on its
+    /// "nothing failed" side has to travel through a slot the same way
+    /// [`Self::lower_and_hold`]'s `Held::Spilled` already does for a
+    /// held operand, just without that helper's own conditional ("only if a
+    /// later expression opens blocks") — a guard's branch is unconditional
+    /// once it exists.
+    fn spill(&mut self, operand: Operand, ty: IrType, span: Span) -> SlotId {
+        let slot = self.declare_slot("<guard>", ty, span);
+        self.emit_effect(InstKind::Store(slot, operand), span);
+        slot
+    }
+
+    /// An integer constant at an arbitrary width (a guard's own `0` or bit
+    /// width, which may need to compare against an operand narrower or
+    /// wider than `Int32`) — the same `ConstInt` declares `Int32`, widen
+    /// with `IntCast`" shape [`Self::const_i64`] already uses, generalized
+    /// to any destination width: the verifier requires every `ConstInt`
+    /// itself to declare `Int32` (a literal always types `Int32`), so a
+    /// different destination goes through an explicit `IntCast` from one.
+    fn const_int_at(&mut self, value: i32, ty: IrType, span: Span) -> Operand {
+        let narrow = self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span);
+        if ty == IrType::Int(IntWidth::I32) {
+            narrow
+        } else {
+            self.emit(InstKind::IntCast(narrow), ty, span)
+        }
+    }
+
+    /// Division/remainder guard (D10): before `Div`/`Rem` over integers
+    /// runs, compares the divisor to zero on a branch of its own, throwing
+    /// `DivisionByZeroError` on the failing side and performing the real
+    /// division/remainder on the other — `checked_division`'s own `trap_if`
+    /// (`zirk-codegen-llvm/src/emit.rs`), moved up from codegen to here so a
+    /// `try`/`catch` around the expression can intercept it. Both operands
+    /// are spilled ahead of the branch ([`Self::spill`]) since the actual
+    /// operation is emitted on the far side of it, in a different block. The
+    /// one overflow case a signed division can still hit (`Int32::MIN /
+    /// -1`) is untouched: `OverflowError` is explicitly out of this pass's
+    /// scope (see `proposal.md`), so `checked_division` still guards it with
+    /// `trap_if` exactly as before.
+    fn checked_int_division(
+        &mut self,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        operand_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let left_slot = self.spill(left, operand_type, span);
+        let right_slot = self.spill(right, operand_type, span);
+
+        let right_reloaded = self.emit(InstKind::Load(right_slot), operand_type, span);
+        let zero = self.const_int_at(0, operand_type, span);
+        let is_zero = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: right_reloaded,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_zero,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with integer division registered the exception hierarchy");
+        self.throw_native_failure(native.division_by_zero, "division by zero", span);
+
+        self.current = cont;
+        let left = self.emit(InstKind::Load(left_slot), operand_type, span);
+        let right = self.emit(InstKind::Load(right_slot), operand_type, span);
+        let result_type = op.result_type(operand_type);
+        self.emit(InstKind::Binary { op, left, right }, result_type, span)
+    }
+
+    /// Invalid-shift guard (D10): before `Shl`/`Shr` runs, the same range
+    /// check `checked_shift` used to make at the LLVM level (negative, or at
+    /// least the shifted operand's own bit width), now as an IR `Branch`
+    /// that throws `InvalidShiftError` on the failing side and performs the
+    /// real shift on the other. Both operands are spilled ahead of the
+    /// branch ([`Self::spill`]), the same reason
+    /// [`Self::checked_int_division`] does.
+    fn checked_shift(
+        &mut self,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        operand_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let IrType::Int(width) = operand_type else {
+            unreachable!("the checker only allows Shl/Shr over an integer operand")
+        };
+        let IrType::Int(amount_width) = self.type_of_operand(right) else {
+            unreachable!("a shift amount is always an integer")
+        };
+        let amount_ty = IrType::Int(amount_width);
+
+        let left_slot = self.spill(left, operand_type, span);
+        let right_slot = self.spill(right, amount_ty, span);
+
+        let amount = self.emit(InstKind::Load(right_slot), amount_ty, span);
+        let bits = self.const_int_at(width.bits() as i32, amount_ty, span);
+
+        // An unsigned amount is never negative by construction — the same
+        // narrowing `checked_shift`'s own `right_signed` branch made at the
+        // codegen level.
+        let invalid = if amount_width.signed() {
+            let zero = self.const_int_at(0, amount_ty, span);
+            let is_negative = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Lt,
+                    left: amount,
+                    right: zero,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let is_too_wide = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::GtEq,
+                    left: amount,
+                    right: bits,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Or,
+                    left: is_negative,
+                    right: is_too_wide,
+                },
+                IrType::Boolean,
+                span,
+            )
+        } else {
+            self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::GtEq,
+                    left: amount,
+                    right: bits,
+                },
+                IrType::Boolean,
+                span,
+            )
+        };
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with a shift registered the exception hierarchy");
+        self.throw_native_failure(
+            native.invalid_shift,
+            "a shift amount must be non-negative and less than the operand's bit width",
+            span,
+        );
+
+        self.current = cont;
+        let left = self.emit(InstKind::Load(left_slot), operand_type, span);
+        let right = self.emit(InstKind::Load(right_slot), amount_ty, span);
+        self.emit(InstKind::Binary { op, left, right }, operand_type, span)
+    }
+
+    /// Invalid-repeat guard (D10): before `String * Int32` runs, checks the
+    /// count is non-negative — the one check that used to live inside the
+    /// runtime itself (`zirk_rt_invalid_repeat`'s own negative-count branch
+    /// in `zirk-runtime/src/string.rs`), now moved ahead of the call so a
+    /// `try`/`catch` can intercept it, throwing `InvalidRepeatError` on the
+    /// failing side and performing the real repetition on the other. Both
+    /// operands are spilled ahead of the branch ([`Self::spill`]), the same
+    /// reason [`Self::checked_int_division`] does. The runtime keeps its own
+    /// other check (an overflowing byte size): that guards `OverflowError`'s
+    /// own territory, out of this pass's scope.
+    fn checked_repeat(&mut self, string: Operand, count: Operand, span: Span) -> Operand {
+        let string_slot = self.spill(string, IrType::String, span);
+        let count_slot = self.spill(count, IrType::Int(IntWidth::I32), span);
+
+        let count_reloaded =
+            self.emit(InstKind::Load(count_slot), IrType::Int(IntWidth::I32), span);
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        let is_negative = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: count_reloaded,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_negative,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with a string repetition registered the exception hierarchy");
+        self.throw_native_failure(
+            native.invalid_repeat,
+            "a string can only be repeated a non-negative number of times",
+            span,
+        );
+
+        self.current = cont;
+        let string = self.emit(InstKind::Load(string_slot), IrType::String, span);
+        let count = self.emit(InstKind::Load(count_slot), IrType::Int(IntWidth::I32), span);
+        self.emit(InstKind::Repeat { string, count }, IrType::String, span)
+    }
+
+    /// `NaN` guard (D10): after a `Float` arithmetic operation runs (unlike
+    /// the other three, this checks the *result*, not an operand — a `Float`
+    /// division's own zero divisor is a valid infinity, never a check target
+    /// on its own), compares it against itself — the IEEE 754 property that
+    /// only `NaN` fails — and throws `FloatNanError` on a hit. The result is
+    /// spilled before the branch ([`Self::spill`]) and reloaded on the
+    /// non-failing side, since it is the value this guard itself returns.
+    fn guard_nan(&mut self, result: Operand, ty: IrType, span: Span) -> Operand {
+        let slot = self.spill(result, ty, span);
+        let reloaded = self.emit(InstKind::Load(slot), ty, span);
+        // `x == x` is `false` exactly when `x` is `NaN` — the IEEE 754
+        // property `check_not_nan` used to test directly through LLVM's own
+        // *unordered* `UNO` predicate. `BinaryOp::NotEq` is not its
+        // negation here: `ZIRK_LANGUAGE_SPEC.md`'s own `!=` over `Float`
+        // lowers to LLVM's *ordered* `ONE` (`emit_float_binary`'s own
+        // table), which — like `==`'s `OEQ` — is `false` whenever either
+        // operand is `NaN`, so `x != x` is `false` for a `NaN` `x` too, the
+        // opposite of what a guard needs. `!(x == x)` sidesteps the
+        // difference entirely: `Eq`'s own `OEQ` already answers "is `x`
+        // exactly itself", and negating that is exactly "is `x` `NaN`".
+        let is_equal = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: reloaded,
+                right: reloaded,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let is_nan = self.emit(
+            InstKind::Unary {
+                op: UnaryOp::Not,
+                operand: is_equal,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_nan,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with Float arithmetic registered the exception hierarchy");
+        self.throw_native_failure(
+            native.float_nan,
+            "Float operation produced an indeterminate result (NaN)",
+            span,
+        );
+
+        self.current = cont;
+        self.emit(InstKind::Load(slot), ty, span)
+    }
+
+    /// Emits a binary operation, guarded by whichever of the four native
+    /// checks D10 moved into `zirk-ir` applies to it: division/remainder and
+    /// shift are guarded before the operation runs (the operand decides the
+    /// failure, so [`Self::checked_int_division`]/[`Self::checked_shift`]
+    /// perform the operation themselves, on the far side of their own
+    /// branch), `Float` arithmetic is guarded after (the result does, so
+    /// [`Self::guard_nan`] wraps an already-emitted one). Every other
+    /// operator (comparison, bitwise, logical, `is`) has no native failure
+    /// to guard and reaches straight through to [`Self::emit`].
+    fn emit_checked_binary(
+        &mut self,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        operand_type: IrType,
+        span: Span,
+    ) -> Operand {
+        if let (BinaryOp::Div | BinaryOp::Rem, IrType::Int(_)) = (op, operand_type) {
+            return self.checked_int_division(op, left, right, operand_type, span);
+        }
+        if let (BinaryOp::Shl | BinaryOp::Shr, IrType::Int(_)) = (op, operand_type) {
+            return self.checked_shift(op, left, right, operand_type, span);
+        }
+
+        let result_type = op.result_type(operand_type);
+        let result = self.emit(InstKind::Binary { op, left, right }, result_type, span);
+
+        if matches!(operand_type, IrType::Float(_))
+            && matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+            )
+        {
+            return self.guard_nan(result, result_type, span);
+        }
+
+        result
     }
 
     /// `throw expr;` / `throw;` (roadmap Phase 4b, design D1): records the
@@ -3450,26 +4024,29 @@ impl<'a> FunctionLowering<'a> {
         self.lower_pending_exception_dispatch(stmt.span);
     }
 
-    /// After a call whose target `throws` (roadmap Phase 4b, design D1):
-    /// tests `zirk_rt_has_pending_exception()`, and on a hit dispatches to
-    /// the nearest enclosing `catch` that covers the actual (runtime-tested)
+    /// After *every* call (roadmap Phase 4b, design D1; unconditional since
+    /// `fase-4d-runtimeerror`'s own D11 — see below): tests
+    /// `zirk_rt_has_pending_exception()`, and on a hit dispatches to the
+    /// nearest enclosing `catch` that covers the actual (runtime-tested)
     /// exception type, or — having run every `finally` it passes through on
     /// the way — re-propagates by returning early from the current
     /// function. `result`/`ty` are the call's own already-lowered value and
     /// type, held across the branch through a slot (values do not cross
     /// blocks, ADR-007) and reloaded once the check confirms nothing was
     /// pending.
-    fn lower_throws_check(
-        &mut self,
-        call: &ast::CallExpr,
-        result: Operand,
-        ty: IrType,
-        span: Span,
-    ) -> Operand {
-        if self.call_throws(call).is_empty() {
-            return result;
-        }
-
+    ///
+    /// Runs after every call, not only one whose static target declares a
+    /// non-empty `throws` (D11, `fase-4d-runtimeerror`'s design doc): once a
+    /// native check inside the callee (division by zero, an invalid shift, a
+    /// negative repeat count, `Float` producing `NaN`) can itself throw a
+    /// `RuntimeError` that no `throws` clause ever names — by design,
+    /// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` §3 — a callee's
+    /// declared `throws` alone is no longer sound evidence that nothing
+    /// pending needs checking here. The cost (one
+    /// `zirk_rt_has_pending_exception` plus a branch per call site) is the
+    /// same trade-off `fase-4b-excepciones`'s own D6 already flagged and
+    /// accepted if this ever happened.
+    fn lower_throws_check(&mut self, result: Operand, ty: IrType, span: Span) -> Operand {
         let holder = (ty != IrType::Void).then(|| {
             let slot = self.declare_slot("<call_result>", ty, span);
             self.emit_effect(InstKind::Store(slot, result), span);
@@ -3491,7 +4068,18 @@ impl<'a> FunctionLowering<'a> {
         self.current = continue_block;
         match holder {
             Some(slot) => self.emit(InstKind::Load(slot), ty, span),
-            None => result,
+            // `result` (a `Void` value, carrying no information of its own)
+            // was defined in the block before this function's own branch —
+            // reusing it here directly, in `continue_block`, would cross
+            // that boundary (ADR-007) the moment a caller actually threads
+            // it onward instead of discarding it, as
+            // `Self::lower_variant_construction` does for `Result.Ok(a_void_call())`
+            // (found via `FakeFile::close`'s own `return Result.Ok(this.nothing())`).
+            // A fresh placeholder in `continue_block` is exactly as
+            // meaningless as `result` was — nothing ever reads a `Void`
+            // value — so there is nothing to actually carry across, only a
+            // valid one to produce here.
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
         }
     }
 
@@ -3507,8 +4095,24 @@ impl<'a> FunctionLowering<'a> {
         let holder = self.declare_slot("<exception>", throwable_ty, span);
         self.emit_effect(InstKind::Store(holder, taken), span);
 
+        // A snapshot, walked from innermost to outermost — and, crucially,
+        // what `self.try_stack` itself is temporarily narrowed to while each
+        // frame's own `finally` is lowered below. Without the narrowing, a
+        // call inside that `finally` (D11, `fase-4d-runtimeerror`: *every*
+        // call now runs this same dispatch after it, not only a `throws`-
+        // declared one — a `Resource<E>`'s own `close()` call, synthesized
+        // by `Self::resource_close_block`, is exactly such a call and
+        // declares no `throws` of its own) would still see this same frame
+        // — not yet actually popped from the live `self.try_stack` at this
+        // point — as active, re-enter it, and lower its `finally` again,
+        // forever: found via `resources_match_with_closes_on_thrown_exception`
+        // recursing until the generated program's own stack overflowed.
+        // Real exception semantics agree with the narrowing regardless: a
+        // `finally` runs in the context of whatever is *outer* to its own
+        // `try`, never wrapped by that `try` itself.
         let frames = self.try_stack.clone();
-        for frame in frames.iter().rev() {
+        let full_try_stack = std::mem::take(&mut self.try_stack);
+        for (index, frame) in frames.iter().enumerate().rev() {
             for catch in &frame.catches {
                 let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
                 let matches = self.emit(
@@ -3541,9 +4145,12 @@ impl<'a> FunctionLowering<'a> {
             }
             // None of this frame's own catches covers it: its `finally`
             // still runs before the search continues further out, exactly
-            // as it would on any other exit from this `try`.
+            // as it would on any other exit from this `try` — with only the
+            // frames outer to this one active for the duration (see above).
+            self.try_stack = full_try_stack[..index].to_vec();
             self.lower_finally_block(&frame.finally);
         }
+        self.try_stack = full_try_stack;
 
         // Escaped every active `try`: put the exception back as pending and
         // re-propagate from the current function, the same early-return an
@@ -3888,8 +4495,24 @@ impl<'a> FunctionLowering<'a> {
     /// `self`: a call opens blocks not only when one of its arguments does,
     /// but also when it is itself one of `Result<T,E>`'s branching methods
     /// (`ok_or_null`, `get_or`, `unwrap`, … — `Self::result_method`) —
-    /// unlike `to_string()` or an ordinary function call, those lower to a
-    /// branch of their own (roadmap Phase 4a).
+    /// unlike `to_string()` or a construction, those lower to a branch of
+    /// their own (roadmap Phase 4a).
+    ///
+    /// Every ordinary call opens blocks too, unconditionally, since
+    /// `fase-4d-runtimeerror`'s D11: [`Self::lower_throws_check`] now runs
+    /// after *every* call (not only one whose static target declares
+    /// `throws`), and it always branches on
+    /// `zirk_rt_has_pending_exception()`. Before D11 this arm only opened
+    /// blocks through a nested `Result` method or a branching operand — a
+    /// plain call was "leaf-shaped" as far as this function was concerned,
+    /// and no longer is: a `1 + length(n.next)` recursive call now moves the
+    /// insertion point exactly as much as an `if` would, so `1` (the left
+    /// operand, evaluated first) has to be held in a slot across it the same
+    /// way. Marking every call this way is a deliberate over-approximation —
+    /// a construction or a closure call never actually branches — but
+    /// telling those apart here would just re-derive the same resolution
+    /// `Self::lower_expr`'s own call arm already does, for a correctness
+    /// question this coarser answer already gets right.
     fn opens_blocks(&self, expr: &ast::Expr) -> bool {
         match expr {
             // A ternary opens blocks for the same reason an `if` does: only
@@ -3911,11 +4534,7 @@ impl<'a> FunctionLowering<'a> {
             // recursive traversal combining a call with a `?.` read of the
             // same discriminant in one arm).
             ast::Expr::Field(e) => e.safe || self.opens_blocks(&e.object),
-            ast::Expr::Call(e) => {
-                self.result_method(e).is_some()
-                    || self.opens_blocks(&e.callee)
-                    || e.args.iter().any(|a| self.opens_blocks(&a.value))
-            }
+            ast::Expr::Call(_) => true,
             ast::Expr::Println(e) => self.opens_blocks(&e.arg),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
                 ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
@@ -4300,7 +4919,7 @@ impl<'a> FunctionLowering<'a> {
                     self.emit(InstKind::Concat { left, right }, IrType::String, span)
                 } else {
                     let op = binary_op(b.op);
-                    self.emit(InstKind::Binary { op, left, right }, target, span)
+                    self.emit_checked_binary(op, left, right, target, span)
                 }
             }
             ast::Expr::Unary(u) if numeric && u.op == ast::UnaryOp::Neg => {
@@ -4389,6 +5008,28 @@ impl<'a> FunctionLowering<'a> {
             .native_exceptions
             .is_some_and(|n| n.stack_trace == id)
         {
+            return object;
+        }
+
+        // One of the four native failure classes (`fase-4d-runtimeerror`,
+        // D8/D9): concrete and nameable, so a program may write
+        // `DivisionByZeroError("custom reason")` exactly like any other
+        // `implements RuntimeError` class — nothing rejects it — but there is
+        // still no `program.classes` entry and so no real `construct`
+        // symbol to call. Its single field (`reason`, always index `0`) is
+        // written directly instead, the same shape
+        // `Self::build_native_failure` uses when the compiler itself throws
+        // one of these from a failed native check.
+        if self.is_native_failure_class(id) {
+            let value = self.lower_expr_as(&call.args[0].value, IrType::String);
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: 0,
+                    value,
+                },
+                span,
+            );
             return object;
         }
 
@@ -5118,14 +5759,14 @@ impl<'a> FunctionLowering<'a> {
                 let span = expr.span();
                 if let Some(result) = self.lower_contract_call(e, span) {
                     let ty = self.type_of_operand(result);
-                    self.lower_throws_check(e, result, ty, span);
+                    self.lower_throws_check(result, ty, span);
                 }
             }
             ast::Expr::Call(e) if self.method_of(e).is_some() => {
                 let span = expr.span();
                 if let Some(result) = self.lower_method_call(e, span) {
                     let ty = self.type_of_operand(result);
-                    self.lower_throws_check(e, result, ty, span);
+                    self.lower_throws_check(result, ty, span);
                 }
             }
             // `u?.greet();` as a bare statement still needs the absent/present
@@ -5145,7 +5786,7 @@ impl<'a> FunctionLowering<'a> {
                 let name = self.callee_name(e).to_string();
                 let args = self.lower_args(e);
                 let result = self.emit(InstKind::Call { callee: name, args }, IrType::Void, span);
-                self.lower_throws_check(e, result, IrType::Void, span);
+                self.lower_throws_check(result, IrType::Void, span);
             }
             other => {
                 self.lower_expr(other);

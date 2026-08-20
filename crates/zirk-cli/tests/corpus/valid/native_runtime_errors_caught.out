@@ -1,0 +1,5 @@
+division: division by zero
+shift: a shift amount must be non-negative and less than the operand's bit width
+repeat: a string can only be repeated a non-negative number of times
+nan: Float operation produced an indeterminate result (NaN)
+done

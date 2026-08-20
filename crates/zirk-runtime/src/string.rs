@@ -242,19 +242,19 @@ pub unsafe extern "C" fn zirk_str_concat(left: *const c_void, right: *const c_vo
 
 /// Repeats a string a non-negative number of times.
 ///
-/// `"ja" * 3 == "jajaja"`. A negative count is a controlled error rather than
-/// an empty string: asking for `-1` copies is a mistake, and quietly answering
-/// `""` would hide it (`ZIRK_LANGUAGE_SPEC.md` section 4).
+/// `"ja" * 3 == "jajaja"`. The negative-count check moved to `zirk-ir`
+/// (`fase-4d-runtimeerror`, design D10): `Lowering::guard_repeat` now throws
+/// a catchable `InvalidRepeatError` *before* this function is ever called,
+/// so `count` is always non-negative by the time it gets here — this
+/// function no longer rejects it itself. What is still checked here is a
+/// distinct invariant, out of this pass's scope (`OverflowError` territory):
+/// a byte size that would overflow what can be addressed.
 ///
 /// # Safety
 ///
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *mut c_void {
-    if count < 0 {
-        crate::failure::zirk_rt_invalid_repeat()
-    }
-
     let Some(string) = (unsafe { borrow(handle) }) else {
         return owned_handle(String::new());
     };

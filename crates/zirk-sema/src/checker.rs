@@ -121,6 +121,17 @@ pub struct NativeExceptions {
     pub throwable: u32,
     pub runtime_error: u32,
     pub stack_trace: u32,
+    /// The four compiler-known, concrete `RuntimeError` subclasses
+    /// `fase-4d-runtimeerror` registers (D9): division by zero, an
+    /// out-of-range shift, a negative string-repeat count, and a `Float`
+    /// operation producing `NaN`. Unlike `error`/`throwable`/`runtime_error`
+    /// above, these are real, instantiable classes — `zirk-ir/src/lower.rs`
+    /// both builds one of these directly whenever the matching native check
+    /// fails (D10) and synthesizes their four method bodies by hand (D8).
+    pub division_by_zero: u32,
+    pub invalid_shift: u32,
+    pub invalid_repeat: u32,
+    pub float_nan: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -1136,11 +1147,130 @@ impl<'a> Checker<'a> {
             span: at,
         });
 
+        // The four compiler-known, concrete `RuntimeError` subclasses
+        // `fase-4d-runtimeerror` adds (D9): each `implements RuntimeError`
+        // with a single `reason: String` field and the same four methods
+        // (`message`/`code`/`cause`/`stack_trace`), at the same indices
+        // `throwable_methods` above already uses — that alignment is what
+        // lets `catch RuntimeError(e)`/`catch Throwable(e)` dispatch through
+        // one of these exactly like it does through a user's own
+        // `implements RuntimeError` class (the mechanism is D4's, unchanged
+        // here). Unlike `Error`/`Throwable`/`RuntimeError`, these are
+        // `ClassKind::Class` — concrete and instantiable — since a program
+        // (or the compiler itself, from `zirk-ir/src/lower.rs`) constructs
+        // one whenever the matching native check actually fails.
+        let native_methods = |owner: u32| {
+            vec![
+                MethodInfo {
+                    name: "message".into(),
+                    params: Vec::new(),
+                    returns: Type::STRING,
+                    visibility: Visibility::Public,
+                    span: at,
+                    index: 0,
+                    owner,
+                    from_contract: None,
+                    overridden: false,
+                    throws: Vec::new(),
+                },
+                MethodInfo {
+                    name: "code".into(),
+                    params: Vec::new(),
+                    returns: Type::STRING,
+                    visibility: Visibility::Public,
+                    span: at,
+                    index: 1,
+                    owner,
+                    from_contract: None,
+                    overridden: false,
+                    throws: Vec::new(),
+                },
+                MethodInfo {
+                    name: "cause".into(),
+                    params: Vec::new(),
+                    returns: Type::of(Base::Class(error)).as_nullable(),
+                    visibility: Visibility::Public,
+                    span: at,
+                    index: 2,
+                    owner,
+                    from_contract: None,
+                    overridden: false,
+                    throws: Vec::new(),
+                },
+                MethodInfo {
+                    name: "stack_trace".into(),
+                    params: Vec::new(),
+                    returns: Type::of(Base::Class(stack_trace)),
+                    visibility: Visibility::Public,
+                    span: at,
+                    index: 3,
+                    owner,
+                    from_contract: None,
+                    overridden: false,
+                    throws: Vec::new(),
+                },
+            ]
+        };
+
+        let register_native_failure = |classes: &mut Vec<ClassType>, name: &str| -> u32 {
+            let id = classes.len() as u32;
+            classes.push(ClassType {
+                name: name.into(),
+                kind: ClassKind::Class,
+                base: None,
+                fields: vec![FieldInfo {
+                    name: "reason".into(),
+                    ty: Type::STRING,
+                    visibility: Visibility::Private,
+                    mutability: Mutability::Immutable,
+                    span: at,
+                    owner: id,
+                }],
+                // `construct(reason: String)`: one parameter, no user-visible
+                // body — `zirk-ir::lower_construction`'s own special case for
+                // these four classes builds it directly (an `Alloc` plus a
+                // `StoreField`), the same "no `program.classes` entry, no
+                // real constructor symbol" shape `StackTrace` already has,
+                // just with one argument instead of zero (D8's own note on
+                // reconciling this with the sixteen hand-built bodies).
+                constructors: vec![vec![ParamInfo {
+                    name: "reason".into(),
+                    ty: Type::STRING,
+                    optional: false,
+                    has_default: false,
+                    variadic: false,
+                }]],
+                methods: native_methods(id),
+                contracts: Vec::new(),
+                contract_instances: Vec::new(),
+                // Direct only, matching `implements_abstract_class`'s own
+                // doc comment on why a user class implementing `RuntimeError`
+                // gets `[runtime_error]` here, not the fully flattened
+                // `[error, throwable, runtime_error]` — `zirk-ir`'s own
+                // `ObjectLayout::ancestors` construction is what flattens it
+                // transitively, for every class alike.
+                abstract_bases: vec![runtime_error],
+                type_params: Vec::new(),
+                shared: true,
+                span: at,
+            });
+            id
+        };
+
+        let division_by_zero = register_native_failure(&mut self.classes, "DivisionByZeroError");
+        let invalid_shift = register_native_failure(&mut self.classes, "InvalidShiftError");
+        let invalid_repeat = register_native_failure(&mut self.classes, "InvalidRepeatError");
+        let float_nan = register_native_failure(&mut self.classes, "FloatNanError");
+
         self.native_exceptions = Some(NativeExceptions {
             error,
             throwable,
             runtime_error,
             stack_trace,
+            division_by_zero,
+            invalid_shift,
+            invalid_repeat,
+            float_nan,
         });
     }
 
