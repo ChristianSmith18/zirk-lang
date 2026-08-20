@@ -9,4 +9,4 @@ inline assembly.
 
 ---
 
-**Previous:** [← std.system](../04-standard-library/17-std-system.md) · **Next:** [ C ABI](01-c-abi.md)
+**Previous:** [← Standard Library Indexes](../04-standard-library/19-standard-library-indexes.md) · **Next:** [ C ABI](01-c-abi.md)
