@@ -1,0 +1,17 @@
+// `?.` on a receiver whose static type is already non-nullable (found in
+// manual verification after the fase-4 nullability fixes): the operator's
+// entire purpose is handling absence, so applying it where absence is
+// impossible is flagged the same way `??` on a non-nullable left side is
+// (`REDUNDANT_OPERATOR`), instead of reaching the lowering — which assumes
+// every `?.` receiver is nullable — and producing invalid IR.
+class Node {
+    mut value: Int32;
+    mut next: Node?;
+    construct(value: Int32) { this.value = value; this.next = null; }
+}
+
+fn main(): Void {
+    mut a: Node = Node(1);
+    mut b: Node = Node(2);
+    a.next = b?.next;
+}

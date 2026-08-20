@@ -1302,3 +1302,31 @@ fn recursive_call_combined_with_safe_navigation_in_one_match_arm_compiles() {
         "the recursive call itself still lowers, alongside the `?.` argument that used to strand it"
     );
 }
+
+/// `objeto?.algo()` where `algo` returns `Void` used to panic
+/// `lower_safe_method_call`: it unconditionally wrapped the method's return
+/// type in `Nullable::of`, which has no case for `Void` (documented, not
+/// fixed, in `docs/decisions/ADR-003-investigacion-fase-4.md`, section
+/// "Extensión: criterio 3..."). The checker now types the whole call as
+/// plain `Void`, and the lowering skips the result slot entirely — the same
+/// way `Self::lower_match` skips one for a `Void` arm.
+#[test]
+fn safe_call_of_a_void_returning_method_compiles() {
+    let module = compile(
+        "class Counter { mut value: Int32;
+             construct(value: Int32) { this.value = value; }
+             fn bump(): Void { this.value = this.value + 1; } }
+         fn main(): Void {
+             mut c: Counter? = Counter(1);
+             c?.bump();
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::Call { callee, .. } if callee.contains("bump"))),
+        "the call still lowers, guarded by the absent/present split, with no `Void?` slot"
+    );
+}

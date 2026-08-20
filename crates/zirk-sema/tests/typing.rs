@@ -2061,6 +2061,44 @@ fn invalid_reaching_a_member_through_a_nullable_receiver() {
 }
 
 #[test]
+fn invalid_safe_navigation_on_a_receiver_that_is_never_null() {
+    // Found in manual verification after the fase-4 nullability fixes:
+    // `?.`'s whole purpose is handling absence, so — the same judgment
+    // `check_coalesce` already makes for `??` on a non-nullable left side
+    // — applying it to a receiver that is never absent is flagged instead
+    // of silently accepted and left to reach the lowering, which assumes
+    // every `?.` receiver is nullable.
+    for body in [
+        "mut u: U = U();\nstdout.println(u?.name);",
+        "mut u: U = U();\nstdout.println(u?.describe());",
+    ] {
+        let output = rejected(&format!(
+            "class U {{ name: String; construct() {{ this.name = \"a\"; }} \
+             fn describe(): String {{ return this.name; }} }}\n\
+             fn main(): Void {{ {body} }}"
+        ));
+        assert!(
+            output.contains(codes::REDUNDANT_OPERATOR.as_str()),
+            "for `{body}`:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn valid_safe_call_on_a_method_that_returns_void() {
+    // `Void?` is rejected as a type (see the test below), so the checker
+    // types `objeto?.algo()` as plain `Void` when `algo` returns `Void` —
+    // there is nothing to widen to a nullable form of "no value" — rather
+    // than panicking the lowering trying to build one
+    // (`docs/decisions/ADR-003-investigacion-fase-4.md`, section "Extensión:
+    // criterio 3...").
+    accepted(
+        "class C { construct() { } fn bump(): Void { } }
+         fn main(): Void { mut c: C? = C(); c?.bump(); }",
+    );
+}
+
+#[test]
 fn valid_a_nullable_contract_is_a_type() {
     // It reaches lowering as an ordinary nullable, which is what the uniform
     // representation buys.
