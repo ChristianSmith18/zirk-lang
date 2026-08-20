@@ -2864,6 +2864,20 @@ impl<'a> FunctionLowering<'a> {
         let scrutinee = self.declare_slot("<scrutinee>", scrutinee_type, span);
         self.emit_effect(InstKind::Store(scrutinee, value), span);
 
+        // Mirrors the checker's own narrowing (`Checker::check_match`): a
+        // `null` arm already took the only case in which the scrutinee is
+        // absent, so every other arm's own binding is the unwrapped type,
+        // not the raw nullable slot.
+        let has_null_arm = expr
+            .arms
+            .iter()
+            .any(|arm| matches!(arm.pattern, ast::Pattern::Null(_)));
+        let narrowed_type = if has_null_arm {
+            scrutinee_type.unwrapped()
+        } else {
+            scrutinee_type
+        };
+
         // A `match` used as a statement produces nothing, and a slot has no
         // `Void` form to hold it. `arm_value_type` needs the first arm's own
         // bound names in scope before any block for its body exists — a
@@ -2874,7 +2888,12 @@ impl<'a> FunctionLowering<'a> {
         // below, where there is a body block for a load to belong to.
         self.scopes.push(HashMap::new());
         if let Some(first) = expr.arms.first() {
-            self.declare_pattern_types(&first.pattern, scrutinee_type);
+            let first_type = if matches!(first.pattern, ast::Pattern::Null(_)) {
+                scrutinee_type
+            } else {
+                narrowed_type
+            };
+            self.declare_pattern_types(&first.pattern, first_type);
         }
         let result_type = self.arm_value_type(expr);
         self.scopes.pop();
@@ -2892,7 +2911,13 @@ impl<'a> FunctionLowering<'a> {
                 self.terminate(Terminator::Jump(block));
                 block
             } else {
-                let test = self.lower_pattern_test(&arm.pattern, scrutinee, scrutinee_type, span);
+                let test = self.lower_pattern_test(
+                    &arm.pattern,
+                    scrutinee,
+                    scrutinee_type,
+                    narrowed_type,
+                    span,
+                );
 
                 let body_block = self.new_block();
                 let next_block = self.new_block();
@@ -2909,10 +2934,18 @@ impl<'a> FunctionLowering<'a> {
             self.current = body_block;
 
             self.scopes.push(HashMap::new());
-            // A binding pattern names the scrutinee inside its arm.
+            // A binding pattern names the scrutinee inside its arm — narrowed
+            // to the unwrapped type when a sibling `null` arm already took
+            // the absent case (mirrors `Checker::check_match`'s own
+            // narrowing).
             if let ast::Pattern::Binding(ident) = &arm.pattern {
-                let current = self.emit(InstKind::Load(scrutinee), scrutinee_type, ident.span);
-                let slot = self.declare_slot(&ident.name, scrutinee_type, ident.span);
+                let current = self.load_scrutinee_narrowed(
+                    scrutinee,
+                    scrutinee_type,
+                    narrowed_type,
+                    ident.span,
+                );
+                let slot = self.declare_slot(&ident.name, narrowed_type, ident.span);
                 self.emit_effect(InstKind::Store(slot, current), ident.span);
             }
             // A variant pattern destructures its own associated fields, each
@@ -2942,12 +2975,16 @@ impl<'a> FunctionLowering<'a> {
                     .get(template_id as usize)
                     .and_then(|e| e.discriminant(&v.variant.name))
                     .expect("the checker resolved this variant");
-                let IrType::Enum(module_id) = scrutinee_type else {
+                // A sibling `null` arm already narrowed a nullable scrutinee
+                // (`narrowed_type`) down to the bare enum this pattern
+                // destructures.
+                let IrType::Enum(module_id) = narrowed_type else {
                     unreachable!("a variant pattern with bindings matches an enum with a payload")
                 };
                 let indices =
                     self.module.enums[module_id as usize].variants[variant as usize].clone();
-                let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                let object =
+                    self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     let ast::Pattern::Binding(ident) = sub_pattern else {
                         continue;
@@ -3027,12 +3064,32 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    /// Loads the scrutinee, unwrapping it when `narrowed_type` says a
+    /// sibling `null` arm already ruled out absence — the same
+    /// `InstKind::Unwrap` `lower_coalesce`/`lower_safe_field` use once they
+    /// too have proven a nullable value present.
+    fn load_scrutinee_narrowed(
+        &mut self,
+        scrutinee: SlotId,
+        scrutinee_type: IrType,
+        narrowed_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let value = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+        if narrowed_type == scrutinee_type {
+            value
+        } else {
+            self.emit(InstKind::Unwrap(value), narrowed_type, span)
+        }
+    }
+
     /// The comparison one pattern stands for.
     fn lower_pattern_test(
         &mut self,
         pattern: &ast::Pattern,
         scrutinee: SlotId,
         scrutinee_type: IrType,
+        narrowed_type: IrType,
         span: Span,
     ) -> Operand {
         let expected = match pattern {
@@ -3053,7 +3110,8 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
             }
             // `null` tests absence rather than a value, so it is the one
-            // pattern that does not compare against anything.
+            // pattern that does not compare against anything — and the one
+            // test that must read the raw, still-nullable slot.
             ast::Pattern::Null(_) => {
                 let value = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
                 return self.emit(InstKind::IsNull(value), IrType::Boolean, span);
@@ -3063,11 +3121,14 @@ impl<'a> FunctionLowering<'a> {
             }
         };
 
-        let left = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+        // Every other pattern tests a value that is known present (either
+        // the scrutinee was never nullable, or a sibling `null` arm already
+        // took that case), so it compares against the unwrapped value.
+        let left = self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
         // An algebraic enum's own value is discriminant plus payload, not
         // the discriminant alone (roadmap task 11.3) — a variant pattern
         // still tests only the discriminant, so it is read out first.
-        let left = if let IrType::Enum(_) = scrutinee_type {
+        let left = if let IrType::Enum(_) = narrowed_type {
             self.emit(
                 InstKind::Discriminant(left),
                 IrType::Int(IntWidth::I32),
@@ -4614,9 +4675,27 @@ impl<'a> FunctionLowering<'a> {
                 Nullable::of(field_ty).expect("a field reachable through `?.` has a nullable form"),
             ),
         };
-        let result = self.declare_slot("<safe_field>", result_type, span);
 
         let object_ty = self.type_of(&expr.object, expr.object.span());
+        // `?.` type-checks on a non-nullable receiver too (`member_type`
+        // only special-cases the nullable case) — narrowing (`match`'s own
+        // `null` arm, `Checker::check_match`) is exactly what makes that
+        // reachable: the receiver can no longer be absent, so there is
+        // nothing to branch on, only the result to wrap.
+        if !matches!(object_ty, IrType::Nullable(_)) {
+            let object = self.lower_expr(&expr.object);
+            let value = self.emit(InstKind::LoadField { object, index }, field_ty, span);
+            return if matches!(field_ty, IrType::Nullable(_)) {
+                value
+            } else {
+                let base = Nullable::of(field_ty)
+                    .expect("a field reachable through `?.` has a nullable form");
+                self.emit(InstKind::Wrap { base, value }, result_type, span)
+            };
+        }
+
+        let result = self.declare_slot("<safe_field>", result_type, span);
+
         let receiver = self.lower_expr(&expr.object);
         let test = self.emit(InstKind::IsNull(receiver), IrType::Boolean, span);
 
@@ -4737,10 +4816,69 @@ impl<'a> FunctionLowering<'a> {
                 Nullable::of(returns).expect("a method reachable through `?.` has a nullable form"),
             ),
         };
+        let object_ty = self.type_of(&field.object, field.object.span());
+        // Same reasoning as `lower_safe_field`: narrowing can make a `?.`
+        // receiver provably present, and then there is nothing to branch
+        // on — the call is dispatched directly and only the result wrapped.
+        if !matches!(object_ty, IrType::Nullable(_)) {
+            let object = self.lower_expr(&field.object);
+            let mut args = Vec::new();
+            for (arg, ty) in call.args.iter().zip(params) {
+                args.push(self.lower_expr_as(&arg.value, ty));
+            }
+            let value = match dispatch {
+                SafeDispatch::Object {
+                    name,
+                    virtual_index,
+                } => match virtual_index {
+                    Some(index) => self.emit(
+                        InstKind::CallVirtual {
+                            object,
+                            index,
+                            args,
+                        },
+                        returns,
+                        span,
+                    ),
+                    None => {
+                        let mut all = vec![object];
+                        all.extend(args);
+                        self.emit(
+                            InstKind::Call {
+                                callee: name,
+                                args: all,
+                            },
+                            returns,
+                            span,
+                        )
+                    }
+                },
+                SafeDispatch::Contract { contract, index } => self.emit(
+                    InstKind::CallContract {
+                        object,
+                        contract,
+                        index,
+                        args,
+                    },
+                    returns,
+                    span,
+                ),
+            };
+            return Some(if matches!(returns, IrType::Nullable(_)) {
+                value
+            } else {
+                let base = Nullable::of(returns)
+                    .expect("a method reachable through `?.` has a nullable form");
+                self.emit(InstKind::Wrap { base, value }, result_type, span)
+            });
+        }
+
+        // `Void` has no nullable form (`result_type` stays `Void` for it,
+        // above) — there is nothing to store or merge, the same way
+        // `Self::lower_match` skips a slot for a `Void` arm value.
         let result = (result_type != IrType::Void)
             .then(|| self.declare_slot("<safe_call>", result_type, span));
 
-        let object_ty = self.type_of(&field.object, field.object.span());
         let receiver = self.lower_expr(&field.object);
         let test = self.emit(InstKind::IsNull(receiver), IrType::Boolean, span);
 

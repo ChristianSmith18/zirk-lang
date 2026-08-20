@@ -5582,11 +5582,26 @@ impl<'a> Checker<'a> {
         let mut has_wildcard = false;
         let mut resource_binding_found = false;
 
+        // A `null` arm already took the only case in which the scrutinee is
+        // absent, so every other arm sees a value that cannot be — the same
+        // narrowing `??` gives a coalesced expression, applied here to
+        // whatever a sibling arm's own pattern binds.
+        let has_null_arm = expr
+            .arms
+            .iter()
+            .any(|arm| matches!(arm.pattern, Pattern::Null(_)));
+
         for arm in &expr.arms {
+            let arm_scrutinee = if has_null_arm && !matches!(arm.pattern, Pattern::Null(_)) {
+                scrutinee.without_null()
+            } else {
+                scrutinee
+            };
+
             let mut bindings = Vec::new();
             self.check_pattern(
                 &arm.pattern,
-                scrutinee,
+                arm_scrutinee,
                 &mut covered,
                 &mut has_wildcard,
                 &mut bindings,
