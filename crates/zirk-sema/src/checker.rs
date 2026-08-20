@@ -95,6 +95,16 @@ pub struct CheckedProgram {
     /// equivalent for a generic enum's own `T`, the same reason
     /// `generic_constructions` exists for a generic class's.
     pub variant_constructions: std::collections::HashMap<Span, u32>,
+    /// The id of the compiler-known `Result<T,E>` enum, in `enums` (roadmap
+    /// Phase 4a) — `zirk-ir/lower.rs` needs this to recognize a `Result`
+    /// method call (`is_ok`, `unwrap`, …) structurally, by receiver type,
+    /// the same way `Checker::is_native_to_string_call` recognizes
+    /// `to_string()` on a native scalar: `Result`'s methods are not a real
+    /// method table (`ZIRK_LANGUAGE_SPEC.md` section 7 forbids enums from
+    /// having user-declarable ones at all), so there is no `MethodInfo` for
+    /// lowering to look up — only this id, to tell "a `Result` value" apart
+    /// from any other enum.
+    pub native_result: Option<u32>,
 }
 
 /// What the checker learned about one lambda.
@@ -299,6 +309,8 @@ struct Checker<'a> {
     for_in_iteration: HashMap<Span, u32>,
     /// See [`CheckedProgram::variant_constructions`].
     variant_constructions: HashMap<Span, u32>,
+    /// See [`CheckedProgram::native_result`].
+    native_result: Option<u32>,
 }
 
 /// Ids of the contracts and enum `for ... in` checks a type against, once
@@ -349,6 +361,7 @@ impl<'a> Checker<'a> {
             unions: Vec::new(),
             generic_constructions: HashMap::new(),
             native_iteration: None,
+            native_result: None,
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
         }
@@ -397,6 +410,7 @@ impl<'a> Checker<'a> {
     fn run(mut self, program: &Program) -> CheckedProgram {
         self.register_native_iteration_contracts();
         self.register_native_functions();
+        self.register_native_result_enum();
         self.record_imports(program);
         self.declare_type_aliases(program);
 
@@ -466,6 +480,7 @@ impl<'a> Checker<'a> {
             generic_constructions: self.generic_constructions,
             for_in_iteration: self.for_in_iteration,
             variant_constructions: self.variant_constructions,
+            native_result: self.native_result,
         }
     }
 
@@ -851,6 +866,64 @@ impl<'a> Checker<'a> {
                 type_params: Vec::new(),
             },
         );
+    }
+
+    /// Registers `Result<T,E>` as `enum Result<T, E> { Ok(T); Error(E); }`
+    /// (roadmap Phase 4a, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
+    /// section 2, the authorial source of truth for `Result`'s exact
+    /// shape), the same "inject the tables directly" mechanism
+    /// `register_native_iteration_contracts` already uses for `Iteration<T>`.
+    ///
+    /// Its method API (`is_ok`, `unwrap`, …) is deliberately *not* stored
+    /// here as an `EnumType.methods` table — no such field exists, and none
+    /// should: `ZIRK_LANGUAGE_SPEC.md` section 7 forbids an enum from
+    /// declaring user methods at all, and `Result` does not get a silent
+    /// exception to that rule. Its methods are recognized structurally, by
+    /// receiver type and name, the same way `to_string()` on a native
+    /// scalar already is (`Self::is_native_result_call`, below).
+    fn register_native_result_enum(&mut self) {
+        let at = Span::empty(0);
+
+        let t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            span: at,
+        });
+        let e = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "E".into(),
+            constraints: Vec::new(),
+            span: at,
+        });
+
+        let result = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "Result".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Ok".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "value".into(),
+                        ty: Type::of(Base::Param(t)),
+                    }],
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Error".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "error".into(),
+                        ty: Type::of(Base::Param(e)),
+                    }],
+                    span: at,
+                },
+            ],
+            type_params: vec![t, e],
+            shared: true,
+            span: at,
+        });
+
+        self.native_result = Some(result);
     }
 
     /// Registers a contract with its method signatures.
@@ -2356,11 +2429,11 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_enum(&mut self, decl: &EnumDecl) {
-        if decl.name.name == "Iteration" {
+        if matches!(decl.name.name.as_str(), "Iteration" | "Result") {
             self.error(
                 codes::DUPLICATE_DECLARATION,
                 decl.name.span,
-                "`Iteration` is an enum of the language",
+                format!("`{}` is an enum of the language", decl.name.name),
                 "application code cannot reopen a native enum or replace what it means",
                 Some("pick a different name".into()),
             );
@@ -3125,12 +3198,16 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // `Iteration<T>`, written as `next()`'s return type, is the one
-        // generic enum instantiation that lowers (roadmap task 13.5): a
-        // dedicated specialization pass builds one concrete `EnumLayout` per
-        // instantiation the program actually names, the same way a generic
-        // class's does (11.1).
-        if self.native_iteration.is_none_or(|n| enum_id != n.iteration) {
+        // `Iteration<T>`, written as `next()`'s return type, and `Result<T,E>`
+        // (roadmap Phase 4a) are the generic enum instantiations that lower:
+        // a dedicated specialization pass builds one concrete `EnumLayout`
+        // per instantiation the program actually names, the same way a
+        // generic class's does (roadmap task 13.5/11.1).
+        let is_native = self
+            .native_iteration
+            .is_some_and(|n| enum_id == n.iteration)
+            || self.native_result == Some(enum_id);
+        if !is_native {
             self.not_lowered(
                 reference.span,
                 "a generic enum instantiation",
@@ -3327,7 +3404,8 @@ impl<'a> Checker<'a> {
                 ..
             }) => self.check_match_statement(m),
             Stmt::Expr(s) => {
-                self.check_expr(&s.expr);
+                let ty = self.check_expr(&s.expr);
+                self.require_result_consumed(ty, s.span);
                 false
             }
             Stmt::Block(b) => self.check_block(b),
@@ -3480,6 +3558,16 @@ impl<'a> Checker<'a> {
 
     fn check_assign(&mut self, stmt: &AssignStmt) {
         let value = self.check_expr(&stmt.value);
+
+        // `_ = expr;` discards `value` deliberately — the escape hatch a
+        // mandatory-consumption type like `Result` needs
+        // (`Self::require_result_consumed`) — rather than assigning to a
+        // real binding named `_`.
+        if let AssignTarget::Name(name) = &stmt.target
+            && name.name == "_"
+        {
+            return;
+        }
 
         let AssignTarget::Name(name) = &stmt.target else {
             let AssignTarget::Field(field) = &stmt.target else {
@@ -4946,9 +5034,39 @@ impl<'a> Checker<'a> {
             );
             return;
         };
+        let type_params = enum_type.type_params.clone();
         let associated = variant.associated.clone();
 
         self.expect_pattern_type(scrutinee, Type::of(Base::Enum(index as u32)), pattern.span);
+
+        // A generic enum's variant carries its own bare `Base::Param` field
+        // types (`Result.Ok`'s `value: T`) — substituted here against the
+        // scrutinee's own concrete instantiation, the same way a generic
+        // class's field read already substitutes (`Self::member_type`'s
+        // `Base::Instance` arm), so a destructured binding gets `Int32`,
+        // not the type parameter itself (roadmap Phase 4a).
+        let substitution: HashMap<u32, Type> =
+            if let Base::EnumInstance(inst) = scrutinee.without_null().base {
+                let instance = &self.enum_instances[inst as usize];
+                if instance.enum_id == index as u32 {
+                    type_params
+                        .iter()
+                        .copied()
+                        .zip(instance.args.clone())
+                        .collect()
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
+        let associated: Vec<AssociatedFieldInfo> = associated
+            .into_iter()
+            .map(|f| AssociatedFieldInfo {
+                name: f.name,
+                ty: self.substitute(f.ty, &substitution),
+            })
+            .collect();
 
         // A variant with data must be destructured to name it; one without
         // takes no `(...)`, the same rule construction follows.
@@ -5025,7 +5143,17 @@ impl<'a> Checker<'a> {
     fn expect_pattern_type(&mut self, scrutinee: Type, pattern: Type, span: Span) {
         // The scrutinee's nullability is irrelevant here: a `null` pattern is
         // what covers that half.
-        if scrutinee.without_null().accepts(pattern) || scrutinee.is_unknown() {
+        //
+        // A variant pattern (`Result.Ok(value)`) types itself against the
+        // bare, unparameterized enum — the same reason `bare_enum_matches_instance`'s
+        // own doc comment gives for construction and `return`: nothing here
+        // reads the pattern's own type arguments, only which variant it
+        // names, so a bare `Result` pattern matching a `Result<Int32,String>`
+        // scrutinee is not a real mismatch.
+        if scrutinee.without_null().accepts(pattern)
+            || self.bare_enum_matches_instance(pattern, scrutinee)
+            || scrutinee.is_unknown()
+        {
             return;
         }
 
@@ -5073,7 +5201,16 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if let Base::Enum(id) = scrutinee.base
+        // A generic enum instantiation (`Result<Int32,String>`, roadmap
+        // Phase 4a) has the same closed variant set as the bare enum it
+        // instantiates — only the field types differ, and exhaustiveness
+        // never looks at those.
+        let enum_id = match scrutinee.base {
+            Base::Enum(id) => Some(id),
+            Base::EnumInstance(inst) => Some(self.enum_instances[inst as usize].enum_id),
+            _ => None,
+        };
+        if let Some(id) = enum_id
             && !scrutinee.nullable
             && let Some(enum_type) = self.enums.get(id as usize)
         {
@@ -6087,6 +6224,76 @@ impl<'a> Checker<'a> {
         self.check_direct_call(expr, &signature)
     }
 
+    /// Rejects a `Result<T,E>` produced by an expression statement and
+    /// never consumed (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
+    /// section 2: "ignoring it is a compile-time error"). `_ = expr;`
+    /// (`Self::check_assign`'s own `_` handling) is the explicit escape
+    /// hatch, and it is a `Stmt::Assign`, not a `Stmt::Expr` — so it never
+    /// reaches this check at all.
+    fn require_result_consumed(&mut self, ty: Type, span: Span) {
+        let Base::EnumInstance(inst) = ty.base else {
+            return;
+        };
+        if self.native_result != Some(self.enum_instances[inst as usize].enum_id) {
+            return;
+        }
+        self.error(
+            codes::DISCARDED_RESULT,
+            span,
+            "a `Result` must be handled",
+            "an operation that can fail must be matched or checked, not silently dropped",
+            Some("use `match`, one of its methods (`is_ok`, `get_or`, …), or `_ = expr;` to discard it deliberately".into()),
+        );
+    }
+
+    /// `Result<T,E>`'s seven in-scope methods (`fase-4a-errores/proposal.md`
+    /// — `get_or_else` and the four generic combinators need machinery this
+    /// phase does not build). `t`/`e` are the receiver's own resolved type
+    /// arguments. `None` when `field` does not name one of them, so the
+    /// call falls through to the ordinary unknown-method error the way any
+    /// other unrecognized field access on the receiver would.
+    ///
+    /// Building a throwaway [`Signature`] and handing it to
+    /// [`Self::check_direct_call`] reuses the same argument-matching,
+    /// naming, and arity diagnostics an ordinary function call gets, rather
+    /// than duplicating that logic by hand for eight names.
+    fn check_result_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        t: Type,
+        e: Type,
+    ) -> Option<Type> {
+        let (params, returns): (Vec<(&str, Type)>, Type) = match field.name.name.as_str() {
+            "is_ok" | "is_error" => (Vec::new(), Type::BOOLEAN),
+            "ok_or_null" => (Vec::new(), t.as_nullable()),
+            "error_or_null" => (Vec::new(), e.as_nullable()),
+            "unwrap" => (Vec::new(), t),
+            "unwrap_error" => (Vec::new(), e),
+            "get_or" => (vec![("default_value", t)], t),
+            _ => return None,
+        };
+
+        let signature = Signature {
+            name: field.name.name.clone(),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| ParamInfo {
+                    name: name.to_string(),
+                    ty,
+                    optional: false,
+                    has_default: false,
+                    variadic: false,
+                })
+                .collect(),
+            returns,
+            shared: true,
+            span: field.name.span,
+            type_params: Vec::new(),
+        };
+        Some(self.check_direct_call(expr, &signature))
+    }
+
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
@@ -6151,6 +6358,28 @@ impl<'a> Checker<'a> {
                     self.check_expr(&arg.value);
                 }
                 return Type::STRING;
+            }
+
+            // `result.is_ok()`, `.unwrap()`, … : `Result<T,E>`'s own method
+            // API (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2),
+            // recognized structurally by receiver and name, the same way
+            // `to_string()` above is — `EnumType` has no method table, and
+            // `Result` gets no exception to that rule
+            // (`register_native_result_enum`'s doc comment). The generic
+            // combinators, `or_throw`, and `get_or_else` are explicitly out
+            // of scope for this pass (`fase-4a-errores/proposal.md`: the
+            // first four need a per-method type parameter `MethodInfo` does
+            // not have, and `get_or_else` needs the closure-typed-parameter
+            // syntax decision D9 leaves to a future phase).
+            if !field.safe
+                && !object.nullable
+                && let Base::EnumInstance(inst) = object.base
+                && self.native_result == Some(self.enum_instances[inst as usize].enum_id)
+            {
+                let args = self.enum_instances[inst as usize].args.clone();
+                if let Some(ty) = self.check_result_method_call(expr, field, args[0], args[1]) {
+                    return ty;
+                }
             }
 
             // Calling through a value that may be absent is the same mistake

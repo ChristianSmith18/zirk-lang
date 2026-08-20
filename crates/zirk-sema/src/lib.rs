@@ -106,4 +106,8 @@ pub mod codes {
     /// A `Char` literal whose content is not exactly one Unicode grapheme
     /// (roadmap Phase 3b) — `ZIRK_LANGUAGE_SPEC.md` section 3.
     pub const INVALID_CHAR_LITERAL: Code = Code::new("E0432");
+    /// A `Result<T,E>` produced by a statement and never consumed (roadmap
+    /// Phase 4a) — `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2's
+    /// mandatory consumption. `_ = expr;` discards it explicitly.
+    pub const DISCARDED_RESULT: Code = Code::new("E0433");
 }

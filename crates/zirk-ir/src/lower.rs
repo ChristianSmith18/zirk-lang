@@ -932,7 +932,21 @@ impl<'a> FunctionLowering<'a> {
             return ty;
         }
         if let Some(id) = self.checked.enums.iter().position(|e| e.name == declared) {
-            return Type::of(Base::Enum(id as u32));
+            if reference.arguments.is_empty() {
+                return Type::of(Base::Enum(id as u32));
+            }
+            let args: Vec<Type> = reference
+                .arguments
+                .iter()
+                .map(|a| self.resolve_written_type(a))
+                .collect();
+            let instance = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|gi| gi.enum_id == id as u32 && gi.args == args)
+                .expect("the checker interned every instantiation it type-checked");
+            return Type::of(Base::EnumInstance(instance as u32));
         }
         if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
             if reference.arguments.is_empty() {
@@ -996,7 +1010,7 @@ impl<'a> FunctionLowering<'a> {
                 .unwrap_or(IrType::Int(IntWidth::I32));
             let branches_later = args[position + 1..]
                 .iter()
-                .any(|later| opens_blocks(&later.value));
+                .any(|later| self.opens_blocks(&later.value));
             held.push(self.lower_and_hold_as(&arg.value, ty, branches_later));
         }
 
@@ -1543,6 +1557,13 @@ impl<'a> FunctionLowering<'a> {
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
         match &stmt.target {
+            // `_ = expr;`: the value is lowered for its side effects and
+            // then dropped — there is no slot named `_` to store it in
+            // (`Checker::check_assign`'s own `_` handling never declared
+            // one), which is exactly the point (roadmap Phase 4a).
+            ast::AssignTarget::Name(name) if name.name == "_" => {
+                self.lower_expr(&stmt.value);
+            }
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
                 let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
@@ -2163,7 +2184,7 @@ impl<'a> FunctionLowering<'a> {
                     .map(|p| self.ir_type(p.ty))
                     .expect("an operator method takes one operand");
 
-                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
+                let held = self.lower_and_hold(&e.left, self.opens_blocks(&e.right));
                 let right = self.lower_expr_as(&e.right, param);
                 let left = self.reload(held, e.left.span());
 
@@ -2196,7 +2217,7 @@ impl<'a> FunctionLowering<'a> {
                     e.op,
                 ) =>
             {
-                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
+                let held = self.lower_and_hold(&e.left, self.opens_blocks(&e.right));
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
 
@@ -2218,7 +2239,7 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Binary(e) => {
-                let held = self.lower_and_hold(&e.left, opens_blocks(&e.right));
+                let held = self.lower_and_hold(&e.left, self.opens_blocks(&e.right));
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
                 let op = binary_op(e.op);
@@ -2265,7 +2286,7 @@ impl<'a> FunctionLowering<'a> {
                 let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_closure_call`")
                 };
-                let branching = e.args.iter().any(|a| opens_blocks(&a.value));
+                let branching = e.args.iter().any(|a| self.opens_blocks(&a.value));
                 let held = self.lower_and_hold(&e.callee, branching);
 
                 let expected = self.module.closures[id as usize].params.clone();
@@ -2290,6 +2311,9 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_native_to_string_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_result_method_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
@@ -2706,21 +2730,37 @@ impl<'a> FunctionLowering<'a> {
             if let ast::Pattern::Variant(v) = &arm.pattern
                 && !v.bindings.is_empty()
             {
-                let enum_id = self.enum_id_of(&v.enum_name);
+                // The discriminant's own order is identical between a
+                // generic enum's template and any of its specializations
+                // (`specialize_enum` copies variants verbatim), so the
+                // *template* id is right for it — but the module-level
+                // `EnumLayout` (field indices, concrete field types) is not:
+                // a generic template's own layout is an empty placeholder
+                // (roadmap task 13.5's specialization pass builds the real
+                // one per instantiation), so that id has to come from the
+                // scrutinee's own already-specialized `IrType::Enum`
+                // instead of re-resolving the pattern's bare written name
+                // (roadmap Phase 4a, found via `Result<T,E>`, the first
+                // generic enum a program ever matches by hand — `for ... in`
+                // over `Iteration<T>` never went through this path).
+                let template_id = self.enum_id_of(&v.enum_name);
                 let variant = self
                     .checked
                     .enums
-                    .get(enum_id as usize)
+                    .get(template_id as usize)
                     .and_then(|e| e.discriminant(&v.variant.name))
                     .expect("the checker resolved this variant");
+                let IrType::Enum(module_id) = scrutinee_type else {
+                    unreachable!("a variant pattern with bindings matches an enum with a payload")
+                };
                 let indices =
-                    self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                    self.module.enums[module_id as usize].variants[variant as usize].clone();
                 let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     let ast::Pattern::Binding(ident) = sub_pattern else {
                         continue;
                     };
-                    let field_ty = self.module.enums[enum_id as usize].fields[index as usize].ty;
+                    let field_ty = self.module.enums[module_id as usize].fields[index as usize].ty;
                     let value =
                         self.emit(InstKind::LoadField { object, index }, field_ty, ident.span);
                     let slot = self.declare_slot(&ident.name, field_ty, ident.span);
@@ -2835,21 +2875,24 @@ impl<'a> FunctionLowering<'a> {
                 self.declare_slot(&ident.name, scrutinee_type, ident.span);
             }
             ast::Pattern::Variant(v) if !v.bindings.is_empty() => {
-                let enum_id = self.enum_id_of(&v.enum_name);
+                let template_id = self.enum_id_of(&v.enum_name);
                 let Some(variant) = self
                     .checked
                     .enums
-                    .get(enum_id as usize)
+                    .get(template_id as usize)
                     .and_then(|e| e.discriminant(&v.variant.name))
                 else {
                     return;
                 };
+                let IrType::Enum(module_id) = scrutinee_type else {
+                    return;
+                };
                 let indices =
-                    self.module.enums[enum_id as usize].variants[variant as usize].clone();
+                    self.module.enums[module_id as usize].variants[variant as usize].clone();
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     if let ast::Pattern::Binding(ident) = sub_pattern {
                         let field_ty =
-                            self.module.enums[enum_id as usize].fields[index as usize].ty;
+                            self.module.enums[module_id as usize].fields[index as usize].ty;
                         self.declare_slot(&ident.name, field_ty, ident.span);
                     }
                 }
@@ -3239,11 +3282,392 @@ impl<'a> FunctionLowering<'a> {
     /// branch skips the `Store` entirely instead, see `lower_if_expr`).
     fn lower_fatal_error_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
         let message = self.lower_expr_as(&call.args[0].value, IrType::String);
+        self.lower_fatal_error(message, span)
+    }
+
+    /// The operand-level core of [`Self::lower_fatal_error_call`], reused by
+    /// `Result::unwrap`/`unwrap_error` (roadmap Phase 4a) for the message
+    /// they build themselves rather than take from a program-written
+    /// argument.
+    fn lower_fatal_error(&mut self, message: Operand, span: Span) -> Operand {
         let result = self.emit(InstKind::FatalError(message), IrType::Never, span);
         self.terminate(Terminator::Unreachable);
         let unreachable = self.new_block();
         self.current = unreachable;
         result
+    }
+
+    /// Whether lowering this expression opens blocks of its own.
+    ///
+    /// Only these constructs move the insertion point, and that is what
+    /// forces an earlier value to travel through a slot. A method, needing
+    /// `self`: a call opens blocks not only when one of its arguments does,
+    /// but also when it is itself one of `Result<T,E>`'s branching methods
+    /// (`ok_or_null`, `get_or`, `unwrap`, … — `Self::result_method`) —
+    /// unlike `to_string()` or an ordinary function call, those lower to a
+    /// branch of their own (roadmap Phase 4a).
+    fn opens_blocks(&self, expr: &ast::Expr) -> bool {
+        match expr {
+            // A ternary opens blocks for the same reason an `if` does: only
+            // one of its branches runs.
+            ast::Expr::If(_) | ast::Expr::Match(_) | ast::Expr::Ternary(_) => true,
+            ast::Expr::Binary(e) => {
+                matches!(
+                    e.op,
+                    ast::BinaryOp::Coalesce | ast::BinaryOp::And | ast::BinaryOp::Or
+                ) || self.opens_blocks(&e.left)
+                    || self.opens_blocks(&e.right)
+            }
+            ast::Expr::Unary(e) => self.opens_blocks(&e.operand),
+            ast::Expr::Call(e) => {
+                self.result_method(e).is_some()
+                    || e.args.iter().any(|a| self.opens_blocks(&a.value))
+            }
+            ast::Expr::Println(e) => self.opens_blocks(&e.arg),
+            ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
+                ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
+                ast::InterpolatedPart::Literal(_) => false,
+            }),
+            _ => false,
+        }
+    }
+
+    /// Which of `Result<T,E>`'s seven in-scope methods `call` is, if any
+    /// (`Checker::check_result_method_call`'s IR-side counterpart —
+    /// `get_or_else` and the four generic combinators are out of scope for
+    /// this pass, `fase-4a-errores/proposal.md`). Returns the method name
+    /// plus the receiver's own resolved `T`/`E`.
+    fn result_method(&self, call: &ast::CallExpr) -> Option<(&'static str, IrType, IrType)> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if field.safe {
+            return None;
+        }
+        let name = match field.name.name.as_str() {
+            "is_ok" => "is_ok",
+            "is_error" => "is_error",
+            "ok_or_null" => "ok_or_null",
+            "error_or_null" => "error_or_null",
+            "unwrap" => "unwrap",
+            "unwrap_error" => "unwrap_error",
+            "get_or" => "get_or",
+            _ => return None,
+        };
+        let IrType::Enum(module_id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+        if module_id < self.enum_instance_base {
+            return None;
+        }
+        let instance = &self.checked.enum_instances[(module_id - self.enum_instance_base) as usize];
+        if Some(instance.enum_id) != self.checked.native_result {
+            return None;
+        }
+        Some((
+            name,
+            self.ir_type(instance.args[0]),
+            self.ir_type(instance.args[1]),
+        ))
+    }
+
+    /// Lowers a call to one of `Result<T,E>`'s seven in-scope methods.
+    fn lower_result_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let (name, t, e) = self.result_method(call)?;
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("checked by `result_method`")
+        };
+
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let IrType::Enum(module_id) = receiver_ty else {
+            unreachable!("checked by `result_method`")
+        };
+        let receiver = self.lower_expr(&field.object);
+        let holder = self.declare_slot("<result>", receiver_ty, span);
+        self.emit_effect(InstKind::Store(holder, receiver), span);
+        let object = self.emit(InstKind::Load(holder), receiver_ty, span);
+        let discriminant = self.emit(
+            InstKind::Discriminant(object),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+
+        // `Ok` is declared before `Error` (`register_native_result_enum`),
+        // so its discriminant and field index are always 0 and its variant
+        // 1 — the same order `specialize_enum` preserves.
+        let ok_field = self.module.enums[module_id as usize].variants[0][0];
+        let error_field = self.module.enums[module_id as usize].variants[1][0];
+
+        Some(match name {
+            "is_ok" | "is_error" => {
+                let target = self.emit(
+                    InstKind::ConstInt(if name == "is_ok" { 0 } else { 1 }),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: discriminant,
+                        right: target,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            }
+            "ok_or_null" => {
+                self.lower_result_or_null(holder, receiver_ty, discriminant, ok_field, t, span)
+            }
+            "error_or_null" => {
+                self.lower_result_or_null(holder, receiver_ty, discriminant, error_field, e, span)
+            }
+            "unwrap" => self.lower_result_unwrap(
+                holder,
+                receiver_ty,
+                discriminant,
+                ok_field,
+                t,
+                "Error",
+                span,
+            ),
+            "unwrap_error" => self.lower_result_unwrap(
+                holder,
+                receiver_ty,
+                discriminant,
+                error_field,
+                e,
+                "Ok",
+                span,
+            ),
+            "get_or" => {
+                let default = self.lower_expr_as(&call.args[0].value, t);
+                self.lower_result_get_or(
+                    holder,
+                    receiver_ty,
+                    discriminant,
+                    ok_field,
+                    t,
+                    default,
+                    span,
+                )
+            }
+            _ => unreachable!("checked by `result_method`"),
+        })
+    }
+
+    /// `result.ok_or_null()`/`.error_or_null()`: the named field, wrapped
+    /// nullable, when the discriminant names that side; `null` otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_result_or_null(
+        &mut self,
+        holder: SlotId,
+        object_ty: IrType,
+        discriminant: Operand,
+        field: u32,
+        payload: IrType,
+        span: Span,
+    ) -> Operand {
+        let base = Nullable::of(payload)
+            .expect("`Result`'s own T/E can never be a closure type — no syntax names one (D9)");
+        let result_ty = IrType::Nullable(base);
+        let result = self.declare_slot("<result_or_null>", result_ty, span);
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        let matches = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: discriminant,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        // `field` already picks out the right side (`ok_field` when this is
+        // `ok_or_null`, `error_field` when it is `error_or_null`), so the
+        // same discriminant-vs-`Ok` test the caller derives its own branch
+        // order from is reused, and only one of `field`/`discriminant`
+        // pairs is ever actually the one this compares — see the two call
+        // sites in `lower_result_method_call`.
+        let present_block = self.new_block();
+        let absent_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: matches,
+            then_block: if field == 0 {
+                present_block
+            } else {
+                absent_block
+            },
+            else_block: if field == 0 {
+                absent_block
+            } else {
+                present_block
+            },
+        });
+
+        self.current = present_block;
+        let object = self.emit(InstKind::Load(holder), object_ty, span);
+        let value = self.emit(
+            InstKind::LoadField {
+                object,
+                index: field,
+            },
+            payload,
+            span,
+        );
+        let value = match payload {
+            IrType::Nullable(_) => value,
+            _ => self.emit(InstKind::Wrap { base, value }, result_ty, span),
+        };
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = absent_block;
+        let absent = self.emit(InstKind::NullValue(base), result_ty, span);
+        self.emit_effect(InstKind::Store(result, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), result_ty, span)
+    }
+
+    /// `result.get_or(default_value)`: the `Ok` payload, or `default_value`
+    /// when the receiver is `Error`.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_result_get_or(
+        &mut self,
+        holder: SlotId,
+        object_ty: IrType,
+        discriminant: Operand,
+        ok_field: u32,
+        t: IrType,
+        default: Operand,
+        span: Span,
+    ) -> Operand {
+        let result = self.declare_slot("<result_get_or>", t, span);
+        // `default` was computed in the block active before this branch —
+        // values do not cross blocks (ADR-007) — so it travels through a
+        // slot to reach `error_block` the same way `holder`'s own payload
+        // does.
+        let default_holder = self.declare_slot("<result_default>", t, span);
+        self.emit_effect(InstKind::Store(default_holder, default), span);
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        let is_ok = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: discriminant,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let ok_block = self.new_block();
+        let error_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_ok,
+            then_block: ok_block,
+            else_block: error_block,
+        });
+
+        self.current = ok_block;
+        let object = self.emit(InstKind::Load(holder), object_ty, span);
+        let value = self.emit(
+            InstKind::LoadField {
+                object,
+                index: ok_field,
+            },
+            t,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = error_block;
+        let default = self.emit(InstKind::Load(default_holder), t, span);
+        self.emit_effect(InstKind::Store(result, default), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), t, span)
+    }
+
+    /// `result.unwrap()`/`.unwrap_error()`: the named field when the
+    /// discriminant names that side; a `fatalError` naming the *other*
+    /// variant (`wrong_variant`) otherwise — the assertion the doc comment
+    /// of `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2 describes.
+    /// The message is a static string rather than one built from the
+    /// payload's own text form: `T`/`E` are not guaranteed `is_printable`
+    /// (a class with no `to_string()`, say), and there is no source-location
+    /// plumbing yet for any compiler-generated failure (`zirk_rt_overflow`
+    /// and its siblings have the same gap) — both are narrower than this
+    /// pass needs to close.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_result_unwrap(
+        &mut self,
+        holder: SlotId,
+        object_ty: IrType,
+        discriminant: Operand,
+        field: u32,
+        payload: IrType,
+        wrong_variant: &str,
+        span: Span,
+    ) -> Operand {
+        let result = self.declare_slot("<result_unwrap>", payload, span);
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        // `field == 0` names the `Ok` side (`unwrap`); the other
+        // (`unwrap_error`) wants the discriminant to be `Error` instead.
+        let op = if field == 0 {
+            BinaryOp::Eq
+        } else {
+            BinaryOp::NotEq
+        };
+        let matches = self.emit(
+            InstKind::Binary {
+                op,
+                left: discriminant,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let present_block = self.new_block();
+        let wrong_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: matches,
+            then_block: present_block,
+            else_block: wrong_block,
+        });
+
+        self.current = present_block;
+        let object = self.emit(InstKind::Load(holder), object_ty, span);
+        let value = self.emit(
+            InstKind::LoadField {
+                object,
+                index: field,
+            },
+            payload,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result, value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = wrong_block;
+        let text = format!(
+            "called `unwrap{}()` on a `Result.{wrong_variant}` value",
+            if field == 0 { "" } else { "_error" }
+        );
+        let id = self.module.intern_string(&text);
+        let message = self.emit(InstKind::ConstString(id), IrType::String, span);
+        // `Never`, like a diverging `if`/ternary branch (`lower_if_expr`):
+        // nothing is stored and no jump to `continue_block` is made — the
+        // dangling block `lower_fatal_error` leaves `self.current` on is
+        // simply closed off here instead.
+        let _ = self.lower_fatal_error(message, span);
+        self.terminate(Terminator::Unreachable);
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), payload, span)
     }
 
     /// Lowers the operand tree of a deep contextual conversion (task 7),
@@ -3275,7 +3699,7 @@ impl<'a> FunctionLowering<'a> {
 
         match expr {
             ast::Expr::Binary(b) if compatible_op(b.op) => {
-                let held = self.lower_context_hold(target, &b.left, opens_blocks(&b.right));
+                let held = self.lower_context_hold(target, &b.left, self.opens_blocks(&b.right));
                 let right = self.lower_context_tree(target, &b.right);
                 let left = self.reload(held, b.left.span());
 
@@ -4163,13 +4587,11 @@ impl<'a> FunctionLowering<'a> {
     /// piece is held in a slot when a later one branches, the same pattern
     /// [`Self::lower_held_args`] uses for a call's own arguments.
     fn lower_interpolated(&mut self, expr: &ast::InterpolatedStrExpr, span: Span) -> Operand {
-        fn opens(part: &ast::InterpolatedPart) -> bool {
-            matches!(part, ast::InterpolatedPart::Expr(e) if opens_blocks(e))
-        }
-
         let mut held: Vec<Held> = Vec::with_capacity(expr.parts.len());
         for (position, part) in expr.parts.iter().enumerate() {
-            let branches_later = expr.parts[position + 1..].iter().any(opens);
+            let branches_later = expr.parts[position + 1..]
+                .iter()
+                .any(|p| matches!(p, ast::InterpolatedPart::Expr(e) if self.opens_blocks(e)));
 
             let value = match part {
                 ast::InterpolatedPart::Literal(text) => {
@@ -4260,7 +4682,7 @@ impl<'a> FunctionLowering<'a> {
             // computed, so each is held until every argument is lowered.
             let branches_later = call.args[position + 1..]
                 .iter()
-                .any(|a| opens_blocks(&a.value));
+                .any(|a| self.opens_blocks(&a.value));
             slots[index] =
                 Some(self.lower_and_hold_as(&arg.value, params[index].1, branches_later));
         }
@@ -4332,6 +4754,7 @@ impl<'a> FunctionLowering<'a> {
             || self.safe_method_call_info(call).is_some()
             || self.variant_construction(call).is_some()
             || self.is_native_to_string_call(call)
+            || self.result_method(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
             return false;
@@ -4447,6 +4870,21 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if self.is_native_to_string_call(e) {
                     return IrType::String;
+                }
+                if let Some((name, t, e_ty)) = self.result_method(e) {
+                    return match name {
+                        "is_ok" | "is_error" => IrType::Boolean,
+                        "ok_or_null" => IrType::Nullable(
+                            Nullable::of(t).expect("`Result`'s T/E cannot be a closure type (D9)"),
+                        ),
+                        "error_or_null" => IrType::Nullable(
+                            Nullable::of(e_ty)
+                                .expect("`Result`'s T/E cannot be a closure type (D9)"),
+                        ),
+                        "unwrap" | "get_or" => t,
+                        "unwrap_error" => e_ty,
+                        _ => unreachable!("checked by `result_method`"),
+                    };
                 }
                 match self.construction_class_id(e) {
                     Some(id) => self.ir_type(Type::of(Base::Class(id))),
@@ -4584,33 +5022,6 @@ enum Held {
     Value(Operand),
     /// Parked in a slot, because the later expression opened blocks.
     Spilled(SlotId, IrType),
-}
-
-/// Whether lowering this expression opens blocks of its own.
-///
-/// Only these constructs move the insertion point, and that is what forces an
-/// earlier value to travel through a slot.
-fn opens_blocks(expr: &ast::Expr) -> bool {
-    match expr {
-        // A ternary opens blocks for the same reason an `if` does: only one of
-        // its branches runs.
-        ast::Expr::If(_) | ast::Expr::Match(_) | ast::Expr::Ternary(_) => true,
-        ast::Expr::Binary(e) => {
-            matches!(
-                e.op,
-                ast::BinaryOp::Coalesce | ast::BinaryOp::And | ast::BinaryOp::Or
-            ) || opens_blocks(&e.left)
-                || opens_blocks(&e.right)
-        }
-        ast::Expr::Unary(e) => opens_blocks(&e.operand),
-        ast::Expr::Call(e) => e.args.iter().any(|a| opens_blocks(&a.value)),
-        ast::Expr::Println(e) => opens_blocks(&e.arg),
-        ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
-            ast::InterpolatedPart::Expr(inner) => opens_blocks(inner),
-            ast::InterpolatedPart::Literal(_) => false,
-        }),
-        _ => false,
-    }
 }
 
 /// The name of a directly called function.
