@@ -1,7 +1,8 @@
 # zirk-temporal-types Specification
 
 ## Purpose
-TBD - created by archiving change document-complete-zirk-type-system. Update Purpose after archive.
+Defines the sealed temporal family, exact and calendar arithmetic, time zones,
+comparison domains, parsing, formatting, and temporal errors.
 ## Requirements
 
 ### Requirement: Current-time APIs separate values from clock sources

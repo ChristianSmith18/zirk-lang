@@ -51,10 +51,12 @@ sounds reasonable"**:
   pointers, transactional unsafe rollback, and irreversible commit.
 - `docs/STRUCTURED_CONCURRENCY_SEMANTICS.md` — tasks, scopes, cancellation,
   aggregation, selection, transfer, parallelism, and synchronization.
+- `docs/DECORATOR_SEMANTICS.md` — decorator declarations, targets, phases,
+  composition, erasure, and generated framework API.
 
 If two documents contradict each other: `ZIRK_SPEC_FINAL.md` defines scope and
 exclusions; the specialized document defines the semantics of its own area.
-The four consolidated semantic documents are the newest authoritative
+The five consolidated semantic documents are the newest authoritative
 checkpoints for their named areas and supersede shorter historical examples.
 
 **Explicit rule from the spec itself, and a working rule here:** every ambiguity
@@ -62,9 +64,12 @@ must produce a question or be documented — never resolved silently by inventin
 unspecified behaviour. If something is needed to move forward and the spec does
 not cover it, say so explicitly before deciding on your own.
 
-The architecture decisions in `docs/decisions/` **carry the same weight as the
-specs**. They record what was already decided and why, so it is not re-litigated
-in every session.
+Architecture decisions in `docs/decisions/` are authoritative for internal
+architecture that current normative specs leave open. They are historical
+rationale or implementation evidence—not competing language specifications—
+when a later authorial checkpoint changes a public rule. Phase designs, tasks,
+and archived OpenSpec changes never override current normative language
+semantics.
 
 ## The most important scope rule in this prompt
 
@@ -217,7 +222,7 @@ reaches a backend that cannot compile it:
   Phase 2's `?.`: they need machinery later phases own.
 
 A note on something this phase resolved rather than left pending: **there is
-no ordinary shadowing.** Any local declaration — `let`/`mut`, a function or
+no ordinary shadowing.** Any local declaration — `mut`/`inmut`, a function or
 method parameter, a `for ... in` binding, a `match` pattern's own — that
 shares a name with one still visible, in the same block, a nested one, or
 across a lambda's own capture boundary, is rejected
@@ -296,15 +301,31 @@ the phase:
   is correct on purpose, not an omission; domain behavior for an enum is an
   external function using `match`, by design.
 
-## Next phase: Zirk 0.4 — errors and memory
+## Phase 4a–4c — completed delivery slices
 
-Phase 4 of `docs/init/ZIRK_ROADMAP.md`: `Result<T, E>` with exhaustive
-`match`, `try`/`catch`/`finally`, `fatalError`, the full memory strategy
-decided in Phase 0 (safe/weak/dependent references, deep clone graph
-semantics, automatic bounded native pinning), `unsafe {}`/`Pointer<T>`/native
-slices, transactional write journals with explicit irreversible `commit`,
-`Resource<E>`/`match with`, and `inmut::strict`'s alias-analysis-backed deep
-immutability.
+Phase 4a implemented mandatory `Result<T,E>` handling and explicit discard.
+Phase 4b implemented checked explicit exceptions, typed catch dispatch,
+rethrow, and the initial throwable runtime; a follow-up slice
+(`native-runtime-errors-catcheable`, archived) made four of the five
+compiler-known implicit safety checks — division by zero, an out-of-range
+shift, a negative string-repeat count, `Float` producing `NaN` — catchable
+`RuntimeError` subclasses, leaving overflow and invalid cast as the only ones
+still aborting unconditionally. Phase 4c implemented the first single-resource
+`match with` pipeline and deterministic cleanup on ordinary control transfer.
+Their archived OpenSpec changes and tests are implementation evidence; they do
+not narrow final semantics such as grouped acquisition, surfaced close
+failures, suppressed errors, immutable throwable provenance, or complete
+stack traces.
+
+## Next phase: Zirk 0.4d — callable and binding completion
+
+The next slice enables `Fn(P...) => R` annotations throughout type positions,
+escaping compiler-managed closures, multiple same-type declarations, and
+simultaneous exact-arity assignment. After that, Phase 4e owns managed-memory
+strategy delivery, dependent references, deep graph cloning, bounded native
+views, `inmut::strict` alias analysis, `unsafe`, transactional rollback, and
+explicit irreversible `commit` effects. See `docs/init/ZIRK_ROADMAP.md` for the
+acceptance outputs and remaining Phase 4 dependencies.
 
 ## Expected working style
 

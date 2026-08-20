@@ -1,7 +1,8 @@
 # zirk-data-types Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines tuples, records, value classes, algebraic and mapped enums, unions,
+aliases, and their value semantics.
 ## Requirements
 ### Requirement: Standard text utilities preserve native text semantics
 `std.text` SHALL provide reusable `StringBuilder`, compile-checked literal
@@ -194,4 +195,3 @@ Una value class NO SHALL tener identidad observable y SHALL poder almacenarse in
 #### Scenario: Alias
 - **WHEN** se declara `type Id = Int32;`
 - **THEN** `Id` e `Int32` son intercambiables
-

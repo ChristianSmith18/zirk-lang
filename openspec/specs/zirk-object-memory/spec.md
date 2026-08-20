@@ -1,7 +1,8 @@
 # zirk-object-memory Specification
 
 ## Purpose
-TBD - created by archiving change fase-3-objects-and-type-system. Update Purpose after archive.
+Defines strategy-neutral object allocation, runtime type headers, inherited
+layout, value layouts, and object-memory ABI boundaries.
 ## Requirements
 ### Requirement: La IR aloca por una operación abstracta
 
@@ -17,21 +18,6 @@ Es la aplicación directa de `docs/decisions/ADR-003-memoria.md` y de `docs/deci
 #### Scenario: El runtime expone la alocación sin mangling
 - **WHEN** se inspeccionan los símbolos de la biblioteca estática
 - **THEN** la función de alocación aparece con su nombre `extern "C"`
-
-### Requirement: La memoria no se libera en esta fase
-
-El runtime NO SHALL liberar la memoria de los objetos que aloca.
-
-No es un descuido: liberar exige haber decidido **cuándo**, y esa es exactamente la pregunta que ADR-003 deja abierta hasta la Fase 4. Construir una liberación parcial ahora sería trabajo que hay que deshacer, con la trampa de que un recuento de referencias a medias parece funcionar hasta el primer ciclo.
-
-#### Scenario: Un programa termina sin liberar
-- **WHEN** un programa construye objetos y termina
-- **THEN** el proceso termina normalmente
-- **AND** el sistema operativo recupera la memoria
-
-#### Scenario: La deuda está declarada
-- **WHEN** se consulta la documentación del runtime
-- **THEN** indica que la estrategia de memoria llega en la Fase 4
 
 ### Requirement: Cabecera de objeto
 
@@ -60,4 +46,3 @@ Así el prefijo del layout de una subclase coincide con el de su superclase, y e
 #### Scenario: Acceso a través del tipo base
 - **WHEN** una variable del tipo base sostiene una instancia de la subclase y se lee un campo heredado
 - **THEN** se lee el valor correcto sin comprobación en tiempo de ejecución
-

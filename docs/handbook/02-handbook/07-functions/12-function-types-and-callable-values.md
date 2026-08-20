@@ -4,7 +4,7 @@ Use `Fn(P...) => R` when behavior must be stored, passed, or returned. It is the
 preferred exact alias of `Function(P...) => R`.
 
 ```zirk
-fn parse_user(source: String) => Result<User, ParseError> { ... }
+fn parse_user(source: String): Result<User, ParseError> { ... }
 
 inmut parser: Fn(String) => Result<User, ParseError> = parse_user
 inmut printer: Fn(String) => Void = stdout.println

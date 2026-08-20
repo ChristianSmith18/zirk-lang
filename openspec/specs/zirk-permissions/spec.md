@@ -1,7 +1,8 @@
 # zirk-permissions Specification
 
 ## Purpose
-TBD - created by archiving change document-errors-resources-and-permissions. Update Purpose after archive.
+Defines library requirements, application grants, build/runtime phases,
+least-authority enforcement, signed consent, and privileged standard APIs.
 ## Requirements
 ### Requirement: Libraries request and applications grant scoped authority
 Libraries SHALL declare requirements through `requires`; only applications SHALL grant authority through `permissions`. Each operation grant SHALL identify `during: build`, `runtime`, or `both`. Libraries SHALL NOT enlarge grants, and a separate public `compile_permissions` block SHALL NOT exist.

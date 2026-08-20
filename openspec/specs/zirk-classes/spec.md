@@ -1,7 +1,8 @@
 # zirk-classes Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines class attributes, construction, inheritance, virtual dispatch,
+abstract requirements, overrides, and object-oriented conformance.
 ## Requirements
 ### Requirement: Attributes, defaults, and projection behavior
 Classes SHALL expose attributes and ordinary methods, SHALL NOT expose a property declaration, and SHALL use conventional `get_`/`set_` methods when accessors are desired. Omitted attributes SHALL receive their type default. Reading a reference-valued attribute SHALL deep-clone an independent value, while a whole class variable SHALL share identity and an attribute place SHALL mutate original storage.
@@ -131,4 +132,3 @@ Una subclase SHALL poder redefinir un método de su superclase con la misma firm
 #### Scenario: Método abstracto con cuerpo
 - **WHEN** un método `abstract` declara un cuerpo
 - **THEN** se emite un diagnóstico que señala el cuerpo
-

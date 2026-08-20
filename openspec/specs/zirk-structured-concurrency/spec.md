@@ -1,7 +1,8 @@
 # zirk-structured-concurrency Specification
 
 ## Purpose
-TBD - created by archiving change document-memory-and-structured-concurrency. Update Purpose after archive.
+Defines typed structured tasks, cancellation, aggregation, fair selection,
+channels, transfer/share safety, threads, parallelism, and synchronization.
 ## Requirements
 
 ### Requirement: Task results have one consumer

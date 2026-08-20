@@ -5,7 +5,7 @@ Decorators inspect declarations and generate or wrap validated syntax during com
 ```zirk
 @Authorized(Role.Admin)
 @Cached(5.minutes)
-fn report(): Result(Report, ReportError) {
+fn report(): Result<Report, ReportError> {
     // ...
 }
 ```

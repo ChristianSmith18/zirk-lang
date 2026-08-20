@@ -234,18 +234,20 @@ Environment
 Env // exact preferred alias
 
 Env.get(name): Result<String,EnvironmentError>
-Env.get_or_null(name): String?
-Env.get_or(name, fallback): String
+Env.get_or_null(name): Result<String?,EnvironmentError>
+Env.get_or(name, fallback): Result<String,EnvironmentError>
 Env.require(name): Result<String,EnvironmentError>
 Env.get_secret(name): Result<SecretString,SecretError>
-Env.contains(name): Boolean
+Env.contains(name): Result<Boolean,EnvironmentError>
 Env.list_names(): Result<List<String>,EnvironmentError>
 ```
 
-`Env.list_names` requires broad environment-read authority. Environment writes
-are excluded initially. A dynamic target outside the effective grant returns
-the privileged operation's typed `PermissionDeniedError`; deployed programs
-never prompt or modify their own manifest.
+Every environment operation returns `Result` so absence or a fallback cannot
+hide permission, encoding, or platform failure. `Env.list_names` requires broad
+environment-read authority. Environment writes are excluded initially. A
+dynamic target outside the effective grant returns the privileged operation's
+typed `PermissionDeniedError`; deployed programs never prompt or modify their
+own manifest.
 
 ## 7. Consent is not source text
 

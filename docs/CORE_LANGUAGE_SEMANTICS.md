@@ -44,6 +44,16 @@ documented view can share a subregion. `inmut` prevents rebinding but can allow
 referent mutation; `inmut::strict` freezes the complete reachable graph and
 forbids a weaker alias. `clone()` makes a deep independent copy.
 
+Comma-grouped declarations apply one explicit type and permission to every
+name. Without explicit initializers, each name receives the type default;
+otherwise initializer and destination counts must match exactly. In a
+simultaneous assignment, all right-hand expressions evaluate once from left to
+right before any write, then their values are assigned positionally. Duplicate
+destinations, arity mismatch, incompatible values, rebinding `inmut` or
+`inmut::strict`, and mutation through a strict referent are compile-time errors.
+This gives `left, right = right, left` swap semantics without constructing a
+tuple or exposing a partially updated state.
+
 ## 2. Functions and callable values
 
 The native callable type is `Function(P...) => R`; `Fn(P...) => R` is its exact
@@ -101,7 +111,7 @@ checked cast; `as?` returns a nullable cast result.
 ## 4. Generics
 
 ```zirk
-fn max<T from Comparable<T> & Clone>(left: T, right: T) => T
+fn max<T from Comparable<T> & Clone>(left: T, right: T): T
 class Cache<K from Hashable & Equatable, out V> { ... }
 ```
 
@@ -169,8 +179,8 @@ an operation exists.
 
 ```zirk
 enum Iteration<T> { Item(T), Done }
-interface Iterable<out T> { fn iterator() => Iterator<T> }
-interface Iterator<out T> { fn next() => Iteration<T> }
+interface Iterable<out T> { fn iterator(): Iterator<T> }
+interface Iterator<out T> { fn next(): Iteration<T> }
 ```
 
 Ordinary loops yield independent projected values. Structural mutation

@@ -1,7 +1,8 @@
 # zirk-pattern-matching Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines exhaustive guard-free matching, supported pattern families, binding
+copy semantics, reachability, and match-expression typing.
 ## Requirements
 ### Requirement: Exhaustive guard-free matching
 Every statement or expression match over a closed domain SHALL be exhaustive. Patterns SHALL NOT contain guards. Expression branch results SHALL unify with Never compatible with every result; statement match SHALL produce Void.
@@ -27,4 +28,3 @@ Every attribute, tuple element, or enum payload bound by a pattern SHALL be an i
 #### Scenario: Enum destructuring outside match
 - **WHEN** `inmut Ready(document) = state` is declared
 - **THEN** compilation fails and recommends exhaustive match
-

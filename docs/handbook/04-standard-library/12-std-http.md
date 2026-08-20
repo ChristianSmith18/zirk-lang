@@ -63,7 +63,7 @@ match await HTTP.query(
     json: filter,
     timeout: 10s,
 ) {
-    Value(response) => stdout.println(response.status);
+    Ok(response) => stdout.println(response.status);
     Error(error) => stderr.println(error);
 }
 ```
@@ -82,7 +82,7 @@ and fragment and resolves relative references according to the URI standard.
 
 ```zirk
 match URL.parse("https://api.example.com/users?page=2") {
-    Value(url) => {
+    Ok(url) => {
         mut next = url.with_query("page", "3");
         stdout.println(next.origin);
     }
@@ -105,10 +105,10 @@ request with secure defaults:
 mut url = URL("https://api.example.com/profile");
 
 match await HTTP.get(url:, timeout: 10s) {
-    Value(response) => {
+    Ok(response) => {
         using response {
             match await response.json<Profile>() {
-                Value(profile) => stdout.println(profile.name);
+                Ok(profile) => stdout.println(profile.name);
                 Error(error) => stderr.println(error);
             }
         }
@@ -275,8 +275,8 @@ Missing values use `Option`; malformed typed values use `Result`:
 mut search = request.query.get("search");
 
 match request.query.parse<Int>("page") {
-    Value(Some(page)) => stdout.println(page);
-    Value(None) => stdout.println("default page");
+    Ok(Some(page)) => stdout.println(page);
+    Ok(None) => stdout.println("default page");
     Error(error) => stderr.println(error);
 }
 ```
@@ -320,7 +320,7 @@ change which structurally equivalent route wins.
 A handler has the conceptual form:
 
 ```zirk
-fn get_user(request: HTTPRequest) => Result<HTTPResponse, HTTPError> {
+fn get_user(request: HTTPRequest): Result<HTTPResponse, HTTPError> {
     // ...
 }
 ```
@@ -356,7 +356,7 @@ server.use(logging);
 server.use(authentication);
 
 @Use(logging, authentication)
-fn get_user(request: HTTPRequest) => Result<HTTPResponse, HTTPError> {
+fn get_user(request: HTTPRequest): Result<HTTPResponse, HTTPError> {
     // ...
 }
 ```
@@ -422,7 +422,7 @@ connection into a message-oriented full-duplex resource:
 
 ```zirk
 match WebSocket.upgrade(request) {
-    Value(socket) => {
+    Ok(socket) => {
         using socket {
             match await socket.receive() {
                 Value(message) => await socket.send(message);

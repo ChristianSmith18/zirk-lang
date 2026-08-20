@@ -1,7 +1,8 @@
 # zirk-contracts Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines interfaces, traits, abstract requirement classes, capability contracts,
+conformance, conflict resolution, and dynamic contract dispatch.
 ## Requirements
 ### Requirement: Interface, trait, and abstract requirements
 Interfaces SHALL contain behavior signatures only. Traits SHALL contain behavior requirements and reusable method bodies but no attributes or constructors. Abstract classes SHALL contain nominal attribute and abstract-method requirements but no bodies. All three SHALL be adopted through `implements`; a declaration SHALL satisfy every compatible requirement explicitly.
@@ -108,4 +109,3 @@ Una declaración que dice implementar un contrato SHALL implementarlo por comple
 #### Scenario: Implementación parcial
 - **WHEN** una clase implementa dos de los tres métodos de un contrato
 - **THEN** se emite un diagnóstico por cada método faltante
-

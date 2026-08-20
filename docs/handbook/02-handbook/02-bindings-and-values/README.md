@@ -13,8 +13,9 @@ This unit also covers inference, defaults, initialization, destructuring, shadow
 5. [Default Values](./05-default-values.md)
 6. [Definite Initialization](./06-definite-initialization.md)
 7. [Destructuring](./07-destructuring.md)
-8. [Shadowing](./08-shadowing.md)
-9. [Value and Reference Semantics](./09-value-and-reference-semantics.md)
+8. [Multiple Bindings and Simultaneous Assignment](./07a-multiple-bindings-and-assignment.md)
+9. [Shadowing](./08-shadowing.md)
+10. [Value and Reference Semantics](./09-value-and-reference-semantics.md)
 
 ---
 

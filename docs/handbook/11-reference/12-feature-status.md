@@ -18,21 +18,30 @@ clone, transactional unsafe rollback, irreversible commit, typed structured
 tasks, aggregation, fair selection, transfer/share derivation, and safe-code
 data-race freedom are also final definitions even where delivery is pending.
 
-| Area | Language definition | Implementation tracking |
-|---|---|---|
-| scalar and special types | defined | compiler roadmap and phases |
-| shared references and strict aliases | defined | Phase 3 and later validation |
-| user-defined types and contracts | defined | Phase 3 |
-| callables and escaping closures | defined | later than Phase 3 |
-| collections and generics | defined | phased compiler work |
-| tuples, records, enums, unions and match | defined | phased compiler work |
-| temporal family | defined | later standard-library/runtime phase |
-| Result and exception model | defined | later compiler/runtime phase |
-| deterministic resources | defined | later compiler/runtime phase |
-| permissions and secure approval | defined | later compiler/package tooling phase |
-| memory, native views and transactional unsafe | defined | Phase 4 compiler/runtime work |
-| tasks, channels, select and cancellation | defined | Phase 5 compiler/runtime work |
-| parallelism, threads, synchronization and atomics | defined | Phase 5 staged work |
+| Area | Definition | Current delivery evidence | Remaining material work |
+|---|---|---|---|
+| frontend and diagnostics | defined | Phases 0–3b; stable codes and recovery exist | lossless/incremental syntax and complete public diagnostic catalog |
+| scalar and text families | defined | Phase 3b complete for its scope | `Float128` Windows verification and formatting |
+| classes, contracts and value types | defined | Phase 3 scoped implementation | generic contract/enum lowering, abstract/value-type contract dispatch, derived equality |
+| callable types and escaping closures | defined | local inferred closures only | Phase 4d annotations, escape storage, callable compatibility end to end |
+| multiple declarations and simultaneous assignment | defined | not implemented | Phase 4d grammar through backend and diagnostics |
+| collections and generics | defined | native iteration subset exists | complete stdlib collections and general generic contract/enum delivery |
+| temporal family | defined | syntax/type design only | runtime and `std.time` delivery in Phase 7 |
+| `Result<T,E>` | defined | Phase 4a scoped implementation | generic combinators that depend on callable completion |
+| explicit exceptions | defined | Phase 4b scoped implementation, plus 4 of 5 implicit native safety checks catchable | overflow and invalid-cast as catchable errors, suppressed failures, complete traces and immutability |
+| deterministic resources | defined | Phase 4c single-acquisition implementation | grouped acquisition, close-error composition, cancellation, transfer and lifetimes |
+| permissions and secure approval | defined | specification and handbook | Phase 6 manifest, signed approval store, incremental requester audit |
+| memory, native views and transactional unsafe | defined | object allocation is intentionally transitional | Phase 4e strategy delivery, dependent references, strict aliases, rollback/commit |
+| tasks, channels, select and cancellation | defined | specification and handbook | Phase 5 staged runtime/compiler delivery |
+| parallelism, threads, synchronization and atomics | defined | specification and handbook | Phase 5 staged delivery after structured tasks |
+| standard library | defined at API-contract level | handbook Block One documented | Phase 7 implementation and final example audit |
+| decorators | defined | normative semantics and OpenSpec complete | Phase 10 compiler/tooling implementation |
+| packaging and developer tooling | defined at architecture level | bootstrap CLI/editor pieces exist | Phases 8–9 and remaining deep documentation |
+
+The table describes the repository state audited on **20 August 2026**. The
+archived phase change and its tests are the evidence for a completed delivery
+slice. A later implementation change must update this table when it changes a
+row; documentation design alone must not promote delivery status.
 
 Explicit Zirk 1.x exclusions include browser/WebAssembly, public runtime directives, standalone `worker`, `async fn`, public event loop, textual inline assembly, general `comptime`, general `defer`, multiple class inheritance, traditional function overloading, `Result` propagation `?`, and public ownership/RC semantics.
 
@@ -43,9 +52,10 @@ generators, comma-grouped patterns, tuple/record destructuring, `Fn` callable
 values, and bound methods. Compiler support may trail this target; consult milestone diagnostics
 rather than treating absence in the current parser as a language exclusion.
 
-Remaining implementation artifacts include the complete machine-readable
-grammar and stable diagnostic-code assignments. They do not leave the language
-semantics in this checkpoint open.
+Remaining artifacts include a complete generated machine grammar and exhaustive
+public diagnostic catalog. Stable diagnostic-code policy and many assigned
+codes already exist; missing catalog coverage does not make accepted language
+semantics open.
 
 ---
 

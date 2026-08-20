@@ -17,7 +17,9 @@ The handbook has complete navigation and a mature semantic core, but many standa
 
 ### New Capabilities
 
-None.
+- `zirk-standard-library`: Establish one OpenSpec owner for standard-library
+  module coverage, shared API conventions, failure variants, permissions,
+  cancellation, limits, and handbook synchronization.
 
 ### Modified Capabilities
 

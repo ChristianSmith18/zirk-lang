@@ -1,7 +1,8 @@
 # zirk-scalars Specification
 
 ## Purpose
-TBD - created by archiving change fase-3b-scalars-and-text. Update Purpose after archive.
+Defines integer and floating families, Boolean and grapheme Char semantics,
+checked arithmetic, contextual conversion, and scalar formatting contracts.
 ## Requirements
 ### Requirement: Familia completa de anchos enteros
 
@@ -98,4 +99,3 @@ El chequeador SHALL aceptar `&`, `|`, `^`, `~`, `<<`, `>>` sobre operandos enter
 #### Scenario: Shift por una cantidad negativa
 - **WHEN** el operando derecho de `<<` o `>>` es negativo en tiempo de ejecución
 - **THEN** el programa termina con un error controlado
-

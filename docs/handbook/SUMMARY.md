@@ -36,6 +36,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Default Values](./02-handbook/02-bindings-and-values/05-default-values.md)
     - [Definite Initialization](./02-handbook/02-bindings-and-values/06-definite-initialization.md)
     - [Destructuring](./02-handbook/02-bindings-and-values/07-destructuring.md)
+    - [Multiple Bindings and Simultaneous Assignment](./02-handbook/02-bindings-and-values/07a-multiple-bindings-and-assignment.md)
     - [Shadowing](./02-handbook/02-bindings-and-values/08-shadowing.md)
     - [Value and Reference Semantics](./02-handbook/02-bindings-and-values/09-value-and-reference-semantics.md)
   - [Everyday Types](./02-handbook/03-everyday-types/README.md)

@@ -46,6 +46,9 @@ ADR-006.
 
 ## Phase 1 — Zirk 0.1: minimal end-to-end pipeline
 
+**Status: complete.** The archived `fase-1-pipeline-minimo` change and CI
+closeout provide the implementation evidence.
+
 **Goal:** `zirk run` over a `.zrk` containing
 `fn main(): Void { stdout.println("..."); }` really compiles through LLVM and
 runs as a native binary.
@@ -66,10 +69,14 @@ everything that follows extends this backbone rather than building a new one.
 
 ## Phase 2 — Core language surface
 
+**Status: complete for its scoped delivery.** Closures are callable locally,
+but annotated callable types and escaping closures are explicitly owned by
+Phase 4d rather than silently treated as complete here.
+
 - Complete control flow: `for`, `for ... in`, `while`, `loop`, `break`,
   `continue`, `if` as an expression.
-- Complete functions: optional, named and variadic parameters, default values,
-  closures/lambdas.
+- Complete the phase-local function surface: optional, named and variadic
+  parameters, default values, and locally callable closures/lambdas.
 - `match` with basic exhaustiveness (over simple enums).
 - Nullability: `T?`, `?.`, `??`.
 - Modules within a single crate: basic `share`/`import`, without `init.zrk` yet.
@@ -80,6 +87,11 @@ still without classes or concurrency.
 ---
 
 ## Phase 3 — Objects and the type system
+
+**Status: complete for its scoped delivery.** The archived
+`fase-3-objects-and-type-system` change records remaining pipeline limitations
+for generic contracts, abstract dispatch, value-type contract dispatch, and
+derived structural equality.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
@@ -93,6 +105,9 @@ generics.
 ---
 
 ## Phase 3b — Complete scalars, conversions and text
+
+**Status: complete for its scoped delivery.** Platform and formatting limits
+for `Float128` remain tracked as implementation limitations.
 
 Phase 1 implemented one integer width, one Boolean and an opaque `String`.
 Everything else the type system promises about scalars was never assigned a
@@ -119,26 +134,70 @@ implementing each one twice.
 
 ---
 
-## Phase 4 — Errors and memory
+## Phase 4 — Failure, callable completion, and memory
 
-- `Result<T, E>` with exhaustive `match`.
-- `try`/`catch`/`finally`, `fatalError`.
-- Full implementation of the memory strategy decided in Phase 0.
-- safe/weak/dependent references, deep clone graph semantics and automatic
-  bounded native pinning;
-- `unsafe {}`, `Pointer<T>`, native slices, and memory-safety guarantees
-  enforced by the compiler;
-- transactional write journals and rollback for managed/validated ranges,
-  followed by explicit irreversible `commit` effects;
-- `Resource<E>` and `match with`.
-- `inmut::strict`: deep immutability with alias analysis. It lands here and not
-  with the other two mutability forms because it is not a local read-only flag —
-  it must prove that no accessible mutable alias of the reachable state exists,
-  which is the same analysis the memory strategy needs.
+Phase 4 is split so completed slices are not confused with final semantics that
+still need delivery.
 
-**Output:** complete error handling and the central promise of the spec — safe
-code with no use-after-free, no uncontrolled null deref and no UB — verifiable
-with tests.
+### Phase 4a — Expected errors
+
+**Status: complete for its scoped delivery.** Implements `Result<T,E>`,
+exhaustive handling, mandatory consumption, and explicit `_ = expression`
+discard.
+
+### Phase 4b — Exceptions
+
+**Status: complete for its scoped delivery.** Implements explicit
+`throws`/`try`/`catch`/`finally`, typed catch dispatch, rethrow, `fatalError`,
+and initial throwable runtime support. A follow-up slice
+(`native-runtime-errors-catcheable`, archived) made four of the five
+compiler-known implicit safety checks — division by zero, an out-of-range
+shift, a negative string-repeat count, and `Float` producing `NaN` — catchable
+`RuntimeError` subclasses instead of unconditional aborts. Suppressed
+failures, fully materialized traces, deep thrown-object immutability, and the
+remaining two implicit native safety errors (arithmetic overflow, invalid
+cast) remain final requirements, not completed claims.
+
+### Phase 4c — Deterministic resources
+
+**Status: complete for its scoped delivery.** Implements one-resource
+`match with` and cleanup across ordinary control flow and explicit exception
+propagation. Grouped acquisition, surfaced/combined close failures,
+cancellation integration, transfer, and dependent-resource analysis remain
+pending final behavior.
+
+### Phase 4d — Callable and binding completion
+
+- Parse and type `Function(P...) => R` and preferred alias `Fn(P...) => R` in
+  parameters, returns, attributes, generic arguments, and local annotations.
+- Permit closures to escape through compiler-managed capture environments with
+  the finalized snapshot/share/lift/clone rules.
+- Implement same-type multiple declarations with independent defaults.
+- Implement exact-arity simultaneous assignment: evaluate all sources before
+  writes, reject duplicate or immutable destinations, and preserve projection
+  copy/place semantics.
+
+**Output:** higher-order APIs and escaping closures work end to end; `left,
+right = right, left` and `mut a, b: String;` compile with targeted invalid
+cases and backend tests.
+
+### Phase 4e — Managed memory and unsafe boundaries
+
+- Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
+  public ownership syntax.
+- Implement safe/weak/dependent references, deep clone graph semantics and
+  automatic bounded native pinning.
+- Implement `inmut::strict` with reachable-alias analysis.
+- Implement `unsafe {}`, `Pointer<T>`, native slices, and compiler-enforced
+  memory-safety boundaries.
+- Implement transactional write journals and rollback for managed/validated
+  ranges, followed by explicit irreversible `commit` effects.
+- Finish resource transfer/dependency and throwable cleanup interactions that
+  require the complete memory model.
+
+**Output:** complete failure and memory behavior, with no use-after-free,
+uncontrolled null dereference, silent cleanup loss, or undefined behavior in
+safe code, verified end to end.
 
 ---
 

@@ -1,7 +1,8 @@
 # zirk-callables Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines structural callable types, escaping closure environments, method
+values, generators, and pipeline adaptation.
 ## Requirements
 ### Requirement: Writable structural callable types
 The language SHALL recognize `Function(P...) => R` as the native callable type and `Fn(P...) => R` as its preferred exact alias. Named functions, contextually typed lambdas, bound/unbound methods, and explicit callable-contract values SHALL adapt when parameter labels/options/variadics, parameter types, result, mutability, safety, and permissions are compatible; parameters SHALL be contravariant and results covariant.
@@ -31,4 +32,3 @@ Naming a function SHALL produce its callable without address syntax. Bound metho
 #### Scenario: Pipeline first argument
 - **WHEN** `users |> paginate(page: 2)` is evaluated
 - **THEN** it is checked as `paginate(users, page: 2)`
-

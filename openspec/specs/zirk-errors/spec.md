@@ -1,7 +1,8 @@
 # zirk-errors Specification
 
 ## Purpose
-TBD - created by archiving change document-errors-resources-and-permissions. Update Purpose after archive.
+Defines mandatory expected-failure handling, checked and implicit exceptions,
+throwable provenance, and the extensible throwable hierarchy.
 ## Requirements
 ### Requirement: Expected failure uses mandatory Result handling
 The language SHALL define `Result<T,E>` as `Ok(T)` or `Error(E)`, SHALL reject a discarded `Result`, and SHALL permit intentional discard only through explicit `_ = expression`. `Result` SHALL provide the accepted inspection, nullable extraction, fallback, mapping, chaining, unwrap, and exception-conversion API. Using the wrong `unwrap` variant SHALL invoke `fatalError`.
@@ -15,15 +16,45 @@ The language SHALL define `Result<T,E>` as `Ok(T)` or `Error(E)`, SHALL reject a
 - **THEN** compilation fails and suggests handling it or writing `_ = expression`
 
 ### Requirement: Explicit and implicit exceptions remain distinct
+
 The language SHALL require every explicit `throw` to be caught or declared in `throws`, SHALL include declared exception sets in callable compatibility, and SHALL allow typed implicit `RuntimeError` failures to be caught without requiring them in a signature. No implicit conversion SHALL occur between `Result.Error` and an exception.
 
+This pass (`native-runtime-errors-catcheable`) makes the implicit-`RuntimeError` half of this requirement real for four of the compiler-known safety checks: division by zero, an out-of-range shift amount, a negative string-repeat count, and a `Float` operation producing `NaN`. Each now throws a concrete, catchable `RuntimeError` subclass (`DivisionByZeroError`, `InvalidShiftError`, `InvalidRepeatError`, `FloatNanError`) instead of aborting the process unconditionally. A fifth compiler-known check, arithmetic overflow, and invalid-cast failures are unchanged — they still abort via `fatalError` regardless of any enclosing `try`/`catch`, pending a follow-up pass (documented in `design.md`).
+
 #### Scenario: Explicit exception escapes undeclared
+
 - **WHEN** a function throws a custom `DatabaseUnavailable` without catching or declaring it
 - **THEN** compilation fails and identifies the missing `throws DatabaseUnavailable`
 
 #### Scenario: Division failure is caught without declaration
+
 - **WHEN** a function performs integer division without a `throws` clause and a caller catches `DivisionByZeroError`
-- **THEN** the catch is valid because the implicit runtime exception is compiler-known but signature-optional
+- **THEN** the catch runs — the division does not abort the process, and `error.message()` describes the division by zero
+
+#### Scenario: Invalid shift is caught without declaration
+
+- **WHEN** a shift amount is negative or at least the operand's bit width, and a caller catches `InvalidShiftError` or `RuntimeError`
+- **THEN** the catch runs instead of the process aborting
+
+#### Scenario: Invalid repeat count is caught without declaration
+
+- **WHEN** a `String` is repeated a negative number of times, and a caller catches `InvalidRepeatError`
+- **THEN** the catch runs instead of the process aborting
+
+#### Scenario: `NaN`-producing `Float` operation is caught without declaration
+
+- **WHEN** a `Float` arithmetic expression would produce `NaN`, and a caller catches `FloatNanError` or `Throwable`
+- **THEN** the catch runs instead of the process aborting
+
+#### Scenario: Uncaught native failure still aborts
+
+- **WHEN** one of the four native failures above is never caught by any enclosing `try` and propagates out of `main`
+- **THEN** the process still exits with a nonzero status, unchanged from before this pass
+
+#### Scenario: Overflow and invalid cast are unchanged
+
+- **WHEN** an arithmetic operation overflows, or a cast targets a runtime type the value does not have
+- **THEN** the process aborts unconditionally, exactly as before this pass — neither is a catchable exception yet
 
 ### Requirement: Patterned exception handling preserves provenance
 The language SHALL support pattern-shaped `catch Type(binding)`, subtype/variant patterns without guards, exhaustive handling of declared exceptions, `finally` on every exit, exact `throw;` rethrow, causes, suppressed failures, and lazy structured stack traces. It SHALL reject a control transfer written directly inside `finally` when it could replace the active outcome.
@@ -40,15 +71,8 @@ The language SHALL support pattern-shaped `catch Type(binding)`, subtype/variant
 
 The language SHALL define nominal `Error`, `Throwable`, and `RuntimeError` requirements with `message`/`code`/`cause`/`stack` behavior. Custom throwable classes SHALL implement `Throwable`; `Result` error payloads SHALL NOT be required to implement `Error`.
 
-This pass (`fase-4b-excepciones`) narrows three things the fuller requirement above still describes as the target: `suppressed(): List<Error>` is not part of `Error`'s method set yet — `List<T>` is a Phase 7 collection that does not exist yet, and nothing in this pass populates a suppressed list regardless. `stack_trace(): StackTrace` is real and callable, but `StackTrace` carries no frames — a concrete exception class's own override is free to build one any way it likes, commonly `return StackTrace();`, an empty stub. Deep immutability of a thrown instance is not enforced by the checker; a thrown object behaves like any other object reference for now.
-
 #### Scenario: Custom exception
 
 - **WHEN** a class implements every `Throwable` requirement and is thrown from a declared function
 - **THEN** it can be caught by its type, `Throwable`, or a compatible requirement ancestor
-
-#### Scenario: Stack trace is an empty stub
-
-- **WHEN** a thrown exception's `stack_trace()` is called
-- **THEN** it returns a `StackTrace` value with no frames, not a diagnostic error
 

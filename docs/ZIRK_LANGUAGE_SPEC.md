@@ -51,6 +51,30 @@ logical value; a reference-valued projection therefore performs a deep clone
 and requires `Clone`. A projection used as a place, as in
 `users[index].name = "Grace"`, retains direct access to original storage.
 
+Comma-grouped binding syntax supports declarations and simultaneous assignment.
+A declaration such as `mut first, second: String;` creates two independent
+bindings of the same declared type and initializes each with that type's
+default. Initializers must have exactly the same arity as the declared names:
+
+```zirk
+mut left, right: Int32 = 3, 4;
+```
+
+Simultaneous assignment also requires exact arity:
+
+```zirk
+left, right = right, left;
+```
+
+Every right-hand expression is evaluated exactly once, from left to right,
+before any destination is written. Each produced value is then checked against
+its corresponding destination and committed from left to right. A destination
+may appear only once. Rebinding an `inmut` or `inmut::strict` binding is a
+compile-time error. A projected place may be updated through a reference only
+when its referent permissions allow it; `inmut::strict` therefore rejects every
+such internal write. The syntax is assignment, not tuple construction or
+destructuring, and a count mismatch is always a compile-time error.
+
 There are block, function, file and module scopes. A file symbol does not leave
 it unless published with `share`.
 
