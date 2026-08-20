@@ -18,7 +18,7 @@ secret values remain redacted.
 import { Env } from std.environment;
 
 match Env.get("APP_MODE") {
-    Value(mode) => stdout.println(mode);
+    Ok(mode) => stdout.println(mode);
     Error(error) => stderr.println(error);
 }
 ```
@@ -44,7 +44,7 @@ failure.
 
 ```zirk
 match Env.get_or("LOG_LEVEL", "info") {
-    Value(level) => configure_logging(level);
+    Ok(level) => configure_logging(level);
     Error(error) => report_configuration_error(error);
 }
 ```
@@ -105,7 +105,7 @@ repository edit alone cannot authorize a new environment name.
 
 ```zirk
 match Env.get_secret("DATABASE_PASSWORD") {
-    Value(password) => connect_database(password:);
+    Ok(password) => connect_database(password:);
     Error(error) => report_secret_error(error);
 }
 ```

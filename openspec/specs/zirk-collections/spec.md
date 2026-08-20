@@ -1,7 +1,8 @@
 # zirk-collections Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines native collection types, copying and mutation rules, slicing,
+iteration validity, complexity, and collection capabilities.
 ## Requirements
 
 ### Requirement: Standard collection families are deterministic and ergonomic

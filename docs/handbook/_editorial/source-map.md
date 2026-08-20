@@ -15,10 +15,10 @@ The handbook synthesizes repository documents with different roles and ages. Thi
 
 When final documents remain ambiguous, the handbook records the ambiguity or defers the claim. It does not invent a silent resolution.
 
-The language author's numbered annotations dated 2026-08-15 supersede the
-older specification snapshot used to create this worktree. Their decisions are
-documented here first and synchronized into current normative specs only after
-the documentation is transplanted onto the latest `develop` revision.
+The language author's numbered annotations dated 2026-08-15 and the semantic
+checkpoints accepted through 2026-08-20 supersede older snapshots, phase-local
+limits, and historical examples. Current normative specs and handbook owners
+must be synchronized in the same change whenever those decisions evolve.
 
 ## Coverage map
 
@@ -42,17 +42,22 @@ Historical material about WebAssembly/browser integration, public runtime direct
 
 ## Publication audit
 
-The complete handbook was initially audited on 2026-08-13 and received its
-authorial correction audit on 2026-08-15:
+The handbook received its initial structural audit on 2026-08-13 and its
+authorial correction audit on 2026-08-15. Those results describe the 334-file
+snapshot that existed then; they are historical evidence, not certification of
+the expanded current handbook:
 
-- **Inventory coverage:** all 334 Markdown documents named by the approved handbook tree are present. The comparison reports zero missing and zero unexpected published chapters.
+- **Inventory coverage at that revision:** all 334 Markdown documents named by the then-approved handbook tree were present.
 - **Navigation:** every published document appears exactly once in `SUMMARY.md` and carries adjacent previous/next navigation appropriate to its position.
 - **Links:** all local Markdown targets resolve. External links remain intentionally limited to source or ecosystem references that need an authoritative destination.
-- **Examples:** fenced examples were reviewed in context as valid, invalid, illustrative, manifest, shell, or output samples. Intentionally invalid examples are introduced as invalid and followed by the expected rule or diagnostic behavior.
-- **Semantic claims:** terminology and examples were checked against the authority order above. Searches for historically proposed features confirmed that they appear only as explicit exclusions, comparisons, CLI names, or invalid examples.
+- **Examples at that revision:** fenced examples were reviewed in context as valid, invalid, illustrative, manifest, shell, or output samples.
+- **Semantic claims at that revision:** terminology and examples were checked against the authority order that existed at the time.
 - **Implementation gaps:** the handbook distinguishes the normative Zirk 1.x language from current implementation availability. Known limitations and non-promises are collected in [Current Limitations](../13-appendices/07-current-limitations.md) and [Feature Status](../11-reference/12-feature-status.md).
 
-The current compiler is not yet a complete executable oracle for every normative example. Consequently, this audit verifies examples against the final specifications and their grammar rather than claiming that every example can already be compiled by the repository implementation.
+The expanded handbook requires a new global audit after the active deep-
+documentation change finishes. The current compiler is not yet a complete
+executable oracle for every normative example, so that audit must distinguish
+spec validation from execution on the current compiler.
 
 ## Type-system canonical owners
 

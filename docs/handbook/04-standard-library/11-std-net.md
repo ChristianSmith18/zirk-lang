@@ -55,7 +55,7 @@ provide equivalent validation styles:
 mut loopback = IPv4Address("127.0.0.1");
 
 match IPAddress.parse("fe80::1%en0") {
-    Value(address) => stdout.println(address);
+    Ok(address) => stdout.println(address);
     Error(error) => stderr.println(error);
 }
 ```
@@ -75,7 +75,7 @@ can provide trustworthy validation evidence.
 
 ```zirk
 match await DNS.resolve("example.com") {
-    Value(result) => {
+    Ok(result) => {
         for address in result.addresses {
             stdout.println(address);
         }
@@ -106,10 +106,10 @@ making one family wait for a full timeout of the other.
 mut endpoint = SocketAddress("example.com", 443);
 
 match await TCPStream.connect(endpoint, timeout: 5s) {
-    Value(stream) => {
+    Ok(stream) => {
         using stream {
             match await stream.write_all(request_bytes) {
-                Value(_) => stdout.println("request sent");
+                Ok(_) => stdout.println("request sent");
                 Error(error) => stderr.println(error);
             }
         }
@@ -141,10 +141,10 @@ socket. `accept` suspends its task and returns a stream plus its peer address.
 
 ```zirk
 match TCPListener.bind(SocketAddress(IPv4Address.any(), 8080)) {
-    Value(listener) => {
+    Ok(listener) => {
         using listener {
             match await listener.accept() {
-                Value(connection) => {
+                Ok(connection) => {
                     mut stream = connection.stream;
                     mut peer = connection.peer;
                     stdout.println("accepted", peer);
@@ -171,10 +171,10 @@ a typed size-limit error according to the selected receive policy.
 
 ```zirk
 match UDPSocket.bind(SocketAddress(IPv4Address.any(), 9000)) {
-    Value(socket) => {
+    Ok(socket) => {
         using socket {
             match await socket.receive_from(max_bytes: 64KiB) {
-                Value(datagram) => {
+                Ok(datagram) => {
                     await socket.send_to(datagram.bytes, datagram.source);
                 }
                 Error(error) => stderr.println(error);
@@ -208,7 +208,7 @@ match await TLS.connect(
     server_name: HostName("example.com"),
     configuration: configuration,
 ) {
-    Value(stream) => {
+    Ok(stream) => {
         using stream {
             stdout.println(stream.negotiated_protocol);
         }

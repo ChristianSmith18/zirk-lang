@@ -554,6 +554,28 @@ The checker SHALL classify reference expressions as whole references, projection
 - **WHEN** a generic function returns `values[0]` for unconstrained T
 - **THEN** the checker requires `T from Clone` or rejects extraction
 
+### Requirement: Multiple bindings and simultaneous assignment are atomic at the language level
+Comma-grouped declarations SHALL apply their declared type and binding
+permission to every name and SHALL require initializer arity to match when an
+initializer list is present. Missing initializers SHALL use the declared type's
+default independently for every binding. Simultaneous assignment SHALL require
+equal source and destination arity, evaluate every source exactly once from
+left to right before any destination write, type-check values positionally,
+reject duplicate destinations, and then commit writes from left to right.
+Rebinding `inmut` or `inmut::strict`, or mutating a projection through an
+`inmut::strict` referent, SHALL be rejected.
+
+#### Scenario: Swap observes original values
+- **WHEN** `left` is `3`, `right` is `4`, and source executes
+  `left, right = right, left`
+- **THEN** `left` becomes `4` and `right` becomes `3` without either source
+  observing an earlier destination write
+
+#### Scenario: Strict reference projection is a destination
+- **WHEN** a simultaneous assignment attempts to write an element through an
+  `inmut::strict` collection reference
+- **THEN** compilation rejects the write before evaluating an executable update
+
 ### Requirement: Final callable and object typing supersedes delivery limits
 The final language type system SHALL support structural `Fn` adaptation, escaping closures, compiler-managed capture environments, abstract-class implementation, explicit overrides, declared generic variance, normalized unions, constant tuple indexes, copied iteration, and exhaustive guard-free matching. Feature phasing MAY diagnose an undelivered construct but SHALL NOT describe the final construct as semantically forbidden.
 
@@ -786,4 +808,3 @@ The checker SHALL treat `Never` as assignable to any type, and as contributing n
 #### Scenario: An enum with no variants is rejected
 - **WHEN** `enum Impossible { }` is declared
 - **THEN** the checker rejects it and names `Never` as the type that already means "no value"
-

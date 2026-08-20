@@ -1,7 +1,8 @@
 # zirk-generics Specification
 
 ## Purpose
-TBD - created by archiving change document-refined-core-language-semantics. Update Purpose after archive.
+Defines generic parameters, constraints, defaults, inference, variance,
+specialization, recursion, and runtime type identity.
 ## Requirements
 ### Requirement: Generic declarations, constraints, defaults, and inference
 Generic parameters SHALL use `<T>`, combined constraints SHALL use `T from A & B`, and trailing parameters MAY declare defaults satisfying their constraints. Inference SHALL use arguments, receiver, expected result, callable context, and constraints and SHALL fail rather than choose an arbitrary solution.
@@ -95,4 +96,3 @@ Ninguno está en `ZIRK_LANGUAGE_SPEC.md`, y admitirlos fijaría semántica que e
 #### Scenario: Construcción no soportada
 - **WHEN** se escribe una anotación de varianza
 - **THEN** se emite un diagnóstico indicando que no forma parte del lenguaje
-

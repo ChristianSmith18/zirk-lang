@@ -2,6 +2,12 @@
 
 This tutorial builds validation, wrapping, and a static framework registry. Every compiler value is introduced explicitly.
 
+> **Status:** decorators are final Zirk 1.x design but remain Phase 10 compiler
+> work. The examples define the expected expansion contract.
+
+**Prerequisites:** [Decorator Semantics](../06-metaprogramming/01-decorators.md),
+pattern matching, callable types, permissions, and generated diagnostics.
+
 ## Validate an attribute
 
 ```zirk
@@ -14,7 +20,7 @@ fn dec NonEmpty() {
                 }
             }
             Augment(builder) => {
-                builder.add_validator((value): Result(Void, ValidationError) => {
+                builder.add_validator((value): Result<Void, ValidationError> => {
                     if value.length == 0 {
                         return Error(ValidationError("must not be empty"));
                     }
@@ -98,6 +104,16 @@ The resulting `RouteDescriptor` is an ordinary typed runtime value. `@Get` itsel
 ## Test the contract
 
 Test a valid expansion, every unsupported target, malformed configuration, source-order dependency, missing requirement, direct and indirect cycle, duplicate policy, generated public conflict, generic declaration, override without reapplication, source-mapped diagnostic, build permission denial, cache invalidation, and absence of retained decorator metadata.
+
+## Completion contract
+
+- **Expected success:** validation and wrappers expand deterministically, and
+  the ordinary typed route registry is available at runtime without retained
+  decorator metadata.
+- **Failure recovery:** invalid target, order, cycle, generated API, or denied
+  build effect stops expansion with original and generated source provenance.
+- **Next:** use the [Reference](../11-reference/README.md) for lookup and the
+  metaprogramming unit for each phase/API contract.
 
 ---
 

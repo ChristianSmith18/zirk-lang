@@ -118,12 +118,12 @@ is rejected.
 
 ## Results and throwables
 
-`Result` assertions preserve the enum's `Value`/`Error` model:
+`Result` assertions preserve the enum's `Ok`/`Error` model:
 
 ```zirk
-assert.is_value(result);
+assert.is_ok(result);
 assert.is_error(result);
-expect(result).to_be_value(expected);
+expect(result).to_be_ok(expected);
 expect(result).to_be_error<NotFoundError>();
 ```
 
@@ -254,13 +254,13 @@ Fixtures are explicit typed producers:
 
 ```zirk
 @fixture
-fn database() => Result<TestDatabase, FixtureError> {
+fn database(): Result<TestDatabase, FixtureError> {
     return TestDatabase.create();
 }
 
 @test
 fn creates_user(database: TestDatabase) {
-    assert.is_value(database.create_user("Ada"));
+    assert.is_ok(database.create_user("Ada"));
 }
 ```
 
@@ -310,7 +310,7 @@ E2E declarations exercise public application boundaries:
 
 ```zirk
 @e2e(name: "serves the health endpoint", tags: ["http"])
-fn serves_health_endpoint() => Task<Result<Void, TestError>> {
+fn serves_health_endpoint(): Task<Result<Void, TestError>> {
     // Start through documented public APIs and verify the observable boundary.
 }
 ```

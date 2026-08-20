@@ -69,7 +69,7 @@ Decorator expressions are evaluated top-to-bottom. The closest decorator is the 
 ```zirk
 @Authorized()
 @Cached()
-fn report() -> Report { ... }
+fn report(): Report { ... }
 ```
 
 composes as `Authorized(Cached(report))`. This matches the familiar TypeScript/Python composition model.

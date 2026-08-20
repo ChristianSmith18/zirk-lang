@@ -1,7 +1,8 @@
 # zirk-memory-safety Specification
 
 ## Purpose
-TBD - created by archiving change document-memory-and-structured-concurrency. Update Purpose after archive.
+Defines managed-memory guarantees, dependent and weak references, native views,
+pointers, unsafe rollback, irreversible commit, and safety diagnostics.
 ## Requirements
 ### Requirement: Strategy-neutral automatic memory
 Zirk SHALL reclaim unreachable managed memory including cycles without exposing GC, ownership, regions, moves, or reference counting as mandatory source semantics, and representation changes MUST preserve identity and observable lifetime.
@@ -79,4 +80,3 @@ Zirk SHALL guarantee rollback only for controlled failures detected before irrev
 #### Scenario: Development sanitizer detects invalid native access
 - **WHEN** a development build detects an invalid native access before corruption
 - **THEN** it may raise a controlled trap and roll back the still-reversible transaction
-

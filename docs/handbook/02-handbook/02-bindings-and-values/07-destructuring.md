@@ -18,4 +18,4 @@ Use direct property access when only one value is needed; destructuring is most 
 
 ---
 
-**Previous:** [← Definite Initialization](06-definite-initialization.md) · **Next:** [ Shadowing](08-shadowing.md)
+**Previous:** [← Definite Initialization](06-definite-initialization.md) · **Next:** [ Multiple Bindings and Simultaneous Assignment](07a-multiple-bindings-and-assignment.md)

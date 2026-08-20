@@ -1,7 +1,8 @@
 # Zirk — Master specification
 
-Status: initial normative design
-Date: 12 August 2026
+Status: living normative design for Zirk 1.x
+Initial publication: 12 August 2026
+Last normative checkpoint: 20 August 2026
 Source extension: `.zrk`
 CLI: `zirk`
 Manifest: `init.zrk`
@@ -169,6 +170,8 @@ This specification is split into:
   memory, references, native views, pointers, unsafe rollback, and commit.
 - [STRUCTURED_CONCURRENCY_SEMANTICS.md](./STRUCTURED_CONCURRENCY_SEMANTICS.md):
   tasks, cancellation, aggregation, select, channels, parallelism, and races.
+- [DECORATOR_SEMANTICS.md](./DECORATOR_SEMANTICS.md): decorator declarations,
+  targets, phases, composition, erasure, and generated framework API.
 
 If two documents contradict each other, this master specification defines scope
 and exclusions; the specialized document defines the semantics of its own area.
