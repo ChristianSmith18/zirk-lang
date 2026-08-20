@@ -4724,13 +4724,21 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("checked by `safe_method_call_info`")
         };
 
+        // `Void` has no nullable form (the checker types `objeto?.algo()` as
+        // plain `Void` for exactly that reason — `Self::check_call`'s `?.`
+        // branch), so there is nothing to store or merge: the call either
+        // runs or does not, and neither path leaves a value behind. `result`
+        // stays `None` for it, the same way `Self::lower_match` skips a slot
+        // for a `Void` arm value.
         let result_type = match returns {
+            IrType::Void => IrType::Void,
             IrType::Nullable(_) => returns,
             _ => IrType::Nullable(
                 Nullable::of(returns).expect("a method reachable through `?.` has a nullable form"),
             ),
         };
-        let result = self.declare_slot("<safe_call>", result_type, span);
+        let result = (result_type != IrType::Void)
+            .then(|| self.declare_slot("<safe_call>", result_type, span));
 
         let object_ty = self.type_of(&field.object, field.object.span());
         let receiver = self.lower_expr(&field.object);
@@ -4750,11 +4758,13 @@ impl<'a> FunctionLowering<'a> {
         });
 
         self.current = absent_block;
-        let IrType::Nullable(base) = result_type else {
-            unreachable!("computed above")
-        };
-        let absent = self.emit(InstKind::NullValue(base), result_type, span);
-        self.emit_effect(InstKind::Store(result, absent), span);
+        if let Some(result) = result {
+            let IrType::Nullable(base) = result_type else {
+                unreachable!("computed above")
+            };
+            let absent = self.emit(InstKind::NullValue(base), result_type, span);
+            self.emit_effect(InstKind::Store(result, absent), span);
+        }
         self.terminate(Terminator::Jump(continue_block));
 
         self.current = present_block;
@@ -4806,16 +4816,27 @@ impl<'a> FunctionLowering<'a> {
                 span,
             ),
         };
-        let value = if matches!(returns, IrType::Nullable(_)) {
-            value
-        } else {
-            self.emit(InstKind::Wrap { base, value }, result_type, span)
-        };
-        self.emit_effect(InstKind::Store(result, value), span);
+        if let Some(result) = result {
+            let IrType::Nullable(base) = result_type else {
+                unreachable!("computed above")
+            };
+            let value = if matches!(returns, IrType::Nullable(_)) {
+                value
+            } else {
+                self.emit(InstKind::Wrap { base, value }, result_type, span)
+            };
+            self.emit_effect(InstKind::Store(result, value), span);
+        }
         self.terminate(Terminator::Jump(continue_block));
 
         self.current = continue_block;
-        Some(self.emit(InstKind::Load(result), result_type, span))
+        Some(match result {
+            Some(result) => self.emit(InstKind::Load(result), result_type, span),
+            // Nothing reads the result of a `Void` safe call; a placeholder
+            // keeps the signature of `Self::lower_expr` total, the same
+            // trick `Self::lower_match` uses for a `Void` arm value.
+            None => self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span),
+        })
     }
 
     /// The type a member access produces.
@@ -5421,8 +5442,10 @@ impl<'a> FunctionLowering<'a> {
                     return self.ir_type(method.returns);
                 }
                 if let Some((returns, ..)) = self.safe_method_call_info(e) {
+                    // `Void` stays `Void` through `?.` (`Self::lower_safe_method_call`'s
+                    // doc comment) — there is no nullable form of "no value" to widen to.
                     return match returns {
-                        IrType::Nullable(_) => returns,
+                        IrType::Void | IrType::Nullable(_) => returns,
                         _ => IrType::Nullable(
                             Nullable::of(returns)
                                 .expect("a method reachable through `?.` has a nullable form"),

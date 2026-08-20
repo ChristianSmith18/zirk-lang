@@ -6032,6 +6032,10 @@ impl<'a> Checker<'a> {
             };
         }
 
+        if safe {
+            self.reject_redundant_safe(object, object_span);
+        }
+
         if let Base::Param(id) = object.base {
             return self.param_field_type(id, member);
         }
@@ -6222,6 +6226,24 @@ impl<'a> Checker<'a> {
             format!("`{name}` may be absent"),
             "reaching a member through a value that may be null is not allowed",
             Some("use `?.`, or provide a value with `??` first".into()),
+        );
+    }
+
+    /// Reports `?.` on a receiver that is never absent — the same judgment
+    /// `Self::check_coalesce` makes for `??` on a non-nullable left side: an
+    /// operator whose entire purpose is handling absence has nothing to do
+    /// when absence is not a possibility, so it is flagged rather than
+    /// silently accepted and left to widen a type (or, for a method
+    /// returning through a receiver the lowering never expects to be
+    /// non-nullable, to reach the IR broken).
+    fn reject_redundant_safe(&mut self, object: Type, at: Span) {
+        let name = self.name(object);
+        self.error(
+            codes::REDUNDANT_OPERATOR,
+            at,
+            "`?.` on a receiver that is never null",
+            format!("the receiver has type `{name}`, which always holds a value"),
+            Some("use `.` instead".into()),
         );
     }
 
@@ -7147,8 +7169,12 @@ impl<'a> Checker<'a> {
                         "narrow the receiver first, e.g. with `?? <fallback>` or a null check, for now",
                     );
                 }
+                // `Void` has no value to be absent (`Void?` is rejected as a
+                // type above, for the same reason), so a `Void`-returning
+                // method reached through `?.` stays `Void`: the call runs
+                // or does not, but there is nothing to wrap either way.
                 let ty = self.check_method_call_on(object.without_null(), expr, field);
-                return if ty.is_unknown() {
+                return if ty.is_unknown() || ty == Type::VOID {
                     ty
                 } else {
                     ty.as_nullable()
@@ -7159,6 +7185,9 @@ impl<'a> Checker<'a> {
                 object.base,
                 Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
             ) {
+                if field.safe {
+                    self.reject_redundant_safe(object, field.object.span());
+                }
                 return self.check_method_call_on(object, expr, field);
             }
             if object.is_unknown() {

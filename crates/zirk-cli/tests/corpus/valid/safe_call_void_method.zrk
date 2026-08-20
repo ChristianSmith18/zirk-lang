@@ -1,0 +1,18 @@
+// `?.` calling a `Void`-returning method (found via ADR-003's fase-4
+// investigation): the checker types the result as plain `Void`, not `Void?`
+// — there is no nullable form of "no value" to widen to — and the lowering
+// mirrors a `Void` `match` arm, running the call under the same
+// absent/present split without a slot to merge through.
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+    fn bump(): Void { this.value = this.value + 1; }
+}
+
+fn main(): Void {
+    mut present: Counter? = Counter(1);
+    mut absent: Counter? = null;
+    present?.bump();
+    absent?.bump();
+    stdout.println(present?.value ?? -1);
+}
