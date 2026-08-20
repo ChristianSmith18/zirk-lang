@@ -1283,13 +1283,17 @@ fn assigning_a_field_from_a_safe_navigation_expression_compiles() {
 /// defect as the field-assignment case above, but from a different root
 /// cause: `Self::opens_blocks` did not know `?.` opens blocks of its own, so
 /// an earlier operand held across the call was never spilled to a slot.
+/// `n` is narrowed to non-null by the `match`'s own binding arm (later
+/// narrowing work), so plain `.next` is what the checker now requires here;
+/// the block-spilling fix itself is still exercised elsewhere by `?.` on a
+/// receiver narrowing cannot prove non-null.
 #[test]
 fn recursive_call_combined_with_safe_navigation_in_one_match_arm_compiles() {
     let module = compile(&format!(
         "{NODE}\nfn length(node: Node?): Int32 {{
              return match node {{
                  null => 0,
-                 n => 1 + length(n?.next),
+                 n => 1 + length(n.next),
              }};
          }}\nfn main(): Void {{ mut a: Node = Node(1); mut r = length(a); }}"
     ));

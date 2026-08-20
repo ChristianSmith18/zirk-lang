@@ -1,4 +1,4 @@
-// A recursive function combining its own call with a `?.` read of the same
+// A recursive function combining its own call with a field read of the same
 // discriminant in one `match` arm used to produce invalid IR, the same
 // "values do not cross blocks" defect as `field_assign_from_safe_navigation`
 // but with a different root cause: `Self::opens_blocks` never recognized
@@ -6,6 +6,8 @@
 // so an earlier operand held across a call whose argument was a `?.` read
 // was never spilled to a slot. This is the ordinary shape of walking a
 // hand-rolled linked list recursively, with no iterator protocol to lean on.
+// `n` is narrowed to non-null by the `match`'s own binding arm, so `.next`
+// (not `?.next`) is what the checker requires here.
 class Node {
     value: Int32;
     mut next: Node?;
@@ -18,7 +20,7 @@ class Node {
 fn length(node: Node?): Int32 {
     return match node {
         null => 0,
-        n => 1 + length(n?.next),
+        n => 1 + length(n.next),
     };
 }
 
