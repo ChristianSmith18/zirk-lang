@@ -1,0 +1,25 @@
+// An explicit exception must be caught or declared (roadmap Phase 4b,
+// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3).
+class BoomError implements RuntimeError {
+    construct() { }
+
+    override fn message(): String {
+        return "boom";
+    }
+
+    override fn code(): String {
+        return "BOOM";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn main(): Void {
+    throw BoomError();
+}

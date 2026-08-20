@@ -18,6 +18,11 @@ use zirk_sema::{
     FloatWidth as SemaFloatWidth, IntWidth as SemaIntWidth, MethodInfo, ParamInfo, Type,
 };
 
+/// The symbol every `abstract class`'s own method-table slot names (roadmap
+/// Phase 4b) — see `lower`'s own doc comment on the dummy function it
+/// points to.
+const UNREACHABLE_ABSTRACT_METHOD: &str = "zk.unreachable_abstract_method";
+
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // Specialization comes first (roadmap task 11.1, D5): one concrete copy
@@ -97,11 +102,32 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             // searches (roadmap task 11.6). A specialized generic copy
             // never `extends` (gated at its own declaration, task 11.1), so
             // this is always just itself for one.
+            //
+            // Also every `implements`-adopted `abstract class`, transitively
+            // through its own `abstract_bases` (roadmap Phase 4b): `catch
+            // Throwable(e)` needs a *runtime* test that a concrete
+            // exception's actual class is `Throwable` or a descendant, and
+            // `abstract_bases` alone is not transitive the way `extends` is
+            // (`Checker::implements_abstract_class`'s own doc comment on
+            // exactly this — `class Foo implements RuntimeError` gives
+            // `Foo.abstract_bases` only `[runtime_error]`, not
+            // `[error, throwable, runtime_error]`). Nothing before this
+            // phase ever tested an object against an abstract-class target
+            // at runtime, so widening `ancestors` to include these is purely
+            // additive.
             let mut ancestors = vec![id];
             let mut current = class.base;
             while let Some(base_id) = current {
                 ancestors.push(base_id);
                 current = checked.classes[base_id as usize].base;
+            }
+            let mut frontier = class.abstract_bases.clone();
+            while let Some(abstract_id) = frontier.pop() {
+                if ancestors.contains(&abstract_id) {
+                    continue;
+                }
+                ancestors.push(abstract_id);
+                frontier.extend(checked.classes[abstract_id as usize].abstract_bases.clone());
             }
 
             ObjectLayout {
@@ -116,11 +142,18 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                     })
                     .collect(),
                 // Ordered by index, which is what makes the table of a
-                // subclass start with its base's.
+                // subclass start with its base's. An `abstract class`'s own
+                // entries all point at the shared dummy body instead
+                // (`UNREACHABLE_ABSTRACT_METHOD`'s own doc comment) — none
+                // of them has a real one.
                 methods: {
                     let mut table = vec![String::new(); class.methods.len()];
                     for method in &class.methods {
-                        table[method.index] = body_symbol(checked, method);
+                        table[method.index] = if class.kind == ast::ClassKind::Abstract {
+                            UNREACHABLE_ABSTRACT_METHOD.to_string()
+                        } else {
+                            body_symbol(checked, method)
+                        };
                     }
                     table
                 },
@@ -243,6 +276,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+
+    // A dummy body every `abstract class`'s own (never-invoked) method-table
+    // slot points to (roadmap Phase 4b) — the class itself is never
+    // allocated, `Checker`'s own construction check sees to that, so no real
+    // body exists for `message`/`stack_trace`/etc. to name. Dead data at
+    // runtime: dispatch through a value statically typed as an abstract
+    // class (`catch Throwable(e)`, `e.message()`) is `InstKind::CallVirtual`,
+    // which reads the pointer out of the *concrete* object's own descriptor,
+    // never this one's. But codegen still builds a descriptor for every
+    // `ObjectLayout` unconditionally, and that build needs every symbol its
+    // table names to actually exist — one shared, empty function is cheaper
+    // than teaching that pass which layouts are provably dead.
+    module.functions.push(Function {
+        name: UNREACHABLE_ABSTRACT_METHOD.to_string(),
+        params: Vec::new(),
+        return_type: IrType::Void,
+        slots: Vec::new(),
+        blocks: vec![Block {
+            id: BlockId(0),
+            instructions: Vec::new(),
+            terminator: Some(Terminator::Return(None)),
+        }],
+        entry: BlockId(0),
+        span: Span::empty(0),
+    });
 
     // Default values are written in the declaration but evaluated at the call
     // site, so the lowering needs the declarations while lowering the calls.
@@ -747,6 +805,40 @@ struct FunctionLowering<'a> {
     /// The type of each value emitted, so a destination can ask for it instead
     /// of deriving it from the tree a second time.
     value_types: HashMap<ValueId, IrType>,
+    /// The binding slot (and its type) of the `catch` directly enclosing the
+    /// statement being lowered, if any (roadmap Phase 4b) — what a bare
+    /// `throw;` rethrows.
+    current_catch: Option<(SlotId, IrType)>,
+    /// Active `try` frames, innermost last (roadmap Phase 4b, design D1) —
+    /// what a throwing call's post-call check walks to decide where a
+    /// pending exception dispatches: the nearest `catch` that covers it, or
+    /// (having run every enclosing `finally` it passes on the way) an early
+    /// return from the current function.
+    try_stack: Vec<TryFrame>,
+}
+
+/// One active `try`'s catches and `finally`, as [`FunctionLowering::try_stack`]
+/// tracks it (roadmap Phase 4b). `finally` is a clone of the AST block
+/// rather than a borrow: threading its `'a` lifetime through every
+/// statement-lowering call in the recursive descent this frame is pushed
+/// across would touch far more of this file than the clone costs.
+#[derive(Clone)]
+struct TryFrame {
+    catches: Vec<CatchFrame>,
+    finally: Option<ast::Block>,
+}
+
+/// One `catch Type(name)` arm, pre-built before its `try`'s body is lowered
+/// (roadmap Phase 4b) — its handler block and binding slot must already
+/// exist for a throwing call deep inside the body to jump into.
+#[derive(Clone)]
+struct CatchFrame {
+    /// The class `catch` named, by its module object id — [`InstKind::IsInstance`]'s
+    /// own target.
+    class: u32,
+    handler: BlockId,
+    slot: SlotId,
+    name: String,
 }
 
 /// The two blocks a loop exposes to the jumps inside it.
@@ -778,6 +870,8 @@ impl<'a> FunctionLowering<'a> {
             loops: Vec::new(),
             lifted: Vec::new(),
             value_types: HashMap::new(),
+            current_catch: None,
+            try_stack: Vec::new(),
         }
     }
 
@@ -1522,6 +1616,8 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_expr_for_effect(&s.expr);
             }
             ast::Stmt::Block(b) => self.lower_block(b),
+            ast::Stmt::Throw(s) => self.lower_throw(s),
+            ast::Stmt::Try(s) => self.lower_try(s),
         }
     }
 
@@ -2308,7 +2404,8 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_contract_call(e, span) {
-                    return operand;
+                    let ty = self.type_of_operand(operand);
+                    return self.lower_throws_check(e, operand, ty, span);
                 }
                 if let Some(operand) = self.lower_native_to_string_call(e, span) {
                     return operand;
@@ -2317,7 +2414,8 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
-                    return operand;
+                    let ty = self.type_of_operand(operand);
+                    return self.lower_throws_check(e, operand, ty, span);
                 }
                 if let Some(operand) = self.lower_safe_method_call(e, span) {
                     return operand;
@@ -2338,7 +2436,8 @@ impl<'a> FunctionLowering<'a> {
                 let name = self.callee_name(e);
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
-                self.emit(InstKind::Call { callee: name, args }, returns, span)
+                let result = self.emit(InstKind::Call { callee: name, args }, returns, span);
+                self.lower_throws_check(e, result, returns, span)
             }
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
@@ -3099,6 +3198,269 @@ impl<'a> FunctionLowering<'a> {
         self.checked.classes[id as usize].method(&field.name.name)
     }
 
+    /// The `throws` set a call's own target declares (roadmap Phase 4b),
+    /// empty when it names none — a plain function's, a method's, or a
+    /// contract method's, whichever the call resolves to. A construction, a
+    /// closure call, `to_string()`, a `Result` method and a variant
+    /// construction never throw in this pass's scope, so none of those
+    /// paths are consulted here.
+    fn call_throws(&self, call: &ast::CallExpr) -> &[Type] {
+        if let Some(method) = self.method_of(call) {
+            return &method.throws;
+        }
+        if let Some(method) = self.contract_method_of(call) {
+            return &method.throws;
+        }
+        if let ast::Expr::Path(ident) = &*call.callee
+            && !self
+                .scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains_key(&ident.name))
+            && let Some(signature) = self
+                .checked
+                .functions
+                .get(&self.declaration_of(&ident.name, ident.span))
+        {
+            return &signature.throws;
+        }
+        &[]
+    }
+
+    /// The module object id of the compiler-known `Throwable` (roadmap
+    /// Phase 4b) — the static type every pending exception is taken as,
+    /// since the runtime slot holding it is type-erased.
+    fn throwable_object_id(&self) -> u32 {
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program that can throw registered the exception hierarchy");
+        let IrType::Object(id) = self.ir_type(Type::of(Base::Class(native.throwable))) else {
+            unreachable!("`Throwable` is an ordinary class")
+        };
+        id
+    }
+
+    /// `throw expr;` / `throw;` (roadmap Phase 4b, design D1): records the
+    /// value as the pending exception and returns immediately from the
+    /// current function with a placeholder — the callee side of the same
+    /// mechanism [`Self::lower_throws_check`] is the caller side of.
+    fn lower_throw(&mut self, stmt: &ast::ThrowStmt) {
+        let exception = match &stmt.value {
+            Some(expr) => self.lower_expr(expr),
+            // A bare rethrow reads the innermost `catch`'s own binding — the
+            // checker already confirmed one is active
+            // (`Checker::check_throw`'s own `catch_type` gate).
+            None => {
+                let (slot, ty) = self
+                    .current_catch
+                    .expect("the checker confirmed a bare `throw;` is inside a `catch`");
+                self.emit(InstKind::Load(slot), ty, stmt.span)
+            }
+        };
+        self.emit_effect(InstKind::Throw(exception), stmt.span);
+        // Dispatches to a local `catch` that covers it, or — finding
+        // none — re-propagates by returning early from the current
+        // function; the same resolution a throwing call's own post-call
+        // check reaches (`Self::lower_throws_check`), since a `throw`
+        // statement is just that check with the "was something pending"
+        // test already known to be true.
+        self.lower_pending_exception_dispatch(stmt.span);
+    }
+
+    /// After a call whose target `throws` (roadmap Phase 4b, design D1):
+    /// tests `zirk_rt_has_pending_exception()`, and on a hit dispatches to
+    /// the nearest enclosing `catch` that covers the actual (runtime-tested)
+    /// exception type, or — having run every `finally` it passes through on
+    /// the way — re-propagates by returning early from the current
+    /// function. `result`/`ty` are the call's own already-lowered value and
+    /// type, held across the branch through a slot (values do not cross
+    /// blocks, ADR-007) and reloaded once the check confirms nothing was
+    /// pending.
+    fn lower_throws_check(
+        &mut self,
+        call: &ast::CallExpr,
+        result: Operand,
+        ty: IrType,
+        span: Span,
+    ) -> Operand {
+        if self.call_throws(call).is_empty() {
+            return result;
+        }
+
+        let holder = (ty != IrType::Void).then(|| {
+            let slot = self.declare_slot("<call_result>", ty, span);
+            self.emit_effect(InstKind::Store(slot, result), span);
+            slot
+        });
+
+        let has_pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
+        let handle_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: has_pending,
+            then_block: handle_block,
+            else_block: continue_block,
+        });
+
+        self.current = handle_block;
+        self.lower_pending_exception_dispatch(span);
+
+        self.current = continue_block;
+        match holder {
+            Some(slot) => self.emit(InstKind::Load(slot), ty, span),
+            None => result,
+        }
+    }
+
+    /// The handling half of [`Self::lower_throws_check`]: takes the pending
+    /// exception, tests it against each active `catch` from innermost to
+    /// outermost, jumps into the first match, and otherwise re-propagates —
+    /// running each frame's own `finally` on the way past it, the same as a
+    /// normal exit from that `try` would (design D2).
+    fn lower_pending_exception_dispatch(&mut self, span: Span) {
+        let throwable_id = self.throwable_object_id();
+        let throwable_ty = IrType::Object(throwable_id);
+        let taken = self.emit(InstKind::TakePendingException, throwable_ty, span);
+        let holder = self.declare_slot("<exception>", throwable_ty, span);
+        self.emit_effect(InstKind::Store(holder, taken), span);
+
+        let frames = self.try_stack.clone();
+        for frame in frames.iter().rev() {
+            for catch in &frame.catches {
+                let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
+                let matches = self.emit(
+                    InstKind::IsInstance {
+                        object: exception,
+                        target_class: catch.class,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let matched_block = self.new_block();
+                let next_test_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: matches,
+                    then_block: matched_block,
+                    else_block: next_test_block,
+                });
+
+                self.current = matched_block;
+                let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
+                let narrowed = self.emit(
+                    InstKind::Retype(exception),
+                    IrType::Object(catch.class),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(catch.slot, narrowed), span);
+                self.terminate(Terminator::Jump(catch.handler));
+
+                self.current = next_test_block;
+            }
+            // None of this frame's own catches covers it: its `finally`
+            // still runs before the search continues further out, exactly
+            // as it would on any other exit from this `try`.
+            self.lower_finally_block(&frame.finally);
+        }
+
+        // Escaped every active `try`: put the exception back as pending and
+        // re-propagate from the current function, the same early-return an
+        // uncaught `throw` itself takes.
+        let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(exception), span);
+        let placeholder = self
+            .default_value(self.return_type, span)
+            .unwrap_or_else(|| self.emit(InstKind::Undefined, self.return_type, span));
+        self.terminate(Terminator::Return(
+            (self.return_type != IrType::Void).then_some(placeholder),
+        ));
+    }
+
+    /// Lowers a `finally` block's statements in place, if there is one — no
+    /// termination of its own (roadmap Phase 4b): the caller decides what
+    /// follows.
+    ///
+    /// Only reached from the "falls through" and "propagates past this
+    /// `try`" exits ([`Self::lower_try`]/[`Self::lower_pending_exception_dispatch`]):
+    /// a `return`/`break`/`continue` written *inside* the `try` body itself
+    /// still jumps out through the ordinary `lower_return`/`lower_break`/
+    /// `lower_continue` paths, which do not consult `try_stack` — narrower
+    /// than design D2's full rule (every exit path runs `finally`), and
+    /// documented as such (`fase-4b-excepciones/design.md`'s own risk list).
+    fn lower_finally_block(&mut self, finally: &Option<ast::Block>) {
+        if let Some(block) = finally {
+            self.lower_block(block);
+        }
+    }
+
+    /// Lowers `try { } catch Type(name) { } ... finally { }` (roadmap Phase
+    /// 4b). Each `catch`'s handler block and binding slot are built before
+    /// the body is lowered, so a throwing call anywhere inside it — however
+    /// deeply nested — can jump straight into one
+    /// (`Self::lower_pending_exception_dispatch`).
+    fn lower_try(&mut self, stmt: &ast::TryStmt) {
+        let continue_block = self.new_block();
+
+        let catches: Vec<CatchFrame> = stmt
+            .catches
+            .iter()
+            .map(|catch| {
+                let class = self
+                    .class_id(&catch.ty.name)
+                    .expect("the checker resolved this catch type to a class");
+                let handler = self.new_block();
+                let slot = self.declare_slot(
+                    &catch.binding.name,
+                    IrType::Object(class),
+                    catch.binding.span,
+                );
+                CatchFrame {
+                    class,
+                    handler,
+                    slot,
+                    name: catch.binding.name.clone(),
+                }
+            })
+            .collect();
+
+        self.try_stack.push(TryFrame {
+            catches: catches.clone(),
+            finally: stmt.finally.clone(),
+        });
+        self.lower_block(&stmt.body);
+        self.try_stack.pop();
+        if self.block_mut(self.current).terminator.is_none() {
+            self.lower_finally_block(&stmt.finally);
+            self.terminate(Terminator::Jump(continue_block));
+        }
+
+        for frame in &catches {
+            self.current = frame.handler;
+            self.scopes.push(HashMap::new());
+            self.scopes
+                .last_mut()
+                .expect("just pushed")
+                .insert(frame.name.clone(), frame.slot);
+            let clause = stmt
+                .catches
+                .iter()
+                .find(|c| c.binding.name == frame.name)
+                .expect("built from the same list");
+            let previous_catch = self
+                .current_catch
+                .replace((frame.slot, IrType::Object(frame.class)));
+            self.lower_block(&clause.body);
+            self.current_catch = previous_catch;
+            self.scopes.pop();
+            if self.block_mut(self.current).terminator.is_none() {
+                self.lower_finally_block(&stmt.finally);
+                self.terminate(Terminator::Jump(continue_block));
+            }
+        }
+
+        self.current = continue_block;
+    }
+
     /// Lowers `value.method(...)` where the receiver is reached by contract.
     fn lower_contract_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -3783,6 +4145,21 @@ impl<'a> FunctionLowering<'a> {
     /// constructor runs on it.
     fn lower_construction(&mut self, call: &ast::CallExpr, id: u32, span: Span) -> Operand {
         let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+
+        // `StackTrace()` (roadmap Phase 4b): the compiler-injected class has
+        // no `program.classes` entry, so there is no real constructor
+        // symbol to call — nor any field to initialize (`register_native_exception_hierarchy`'s
+        // own doc comment). The allocation alone is the whole of it, the
+        // same "inject the tables directly, nothing to lower into a body"
+        // shape `Result`'s own construction needs none of, since it is an
+        // enum variant rather than a class at all.
+        if self
+            .checked
+            .native_exceptions
+            .is_some_and(|n| n.stack_trace == id)
+        {
+            return object;
+        }
 
         let index = self.constructor_index(id, call.args.len());
         let params: Vec<IrType> = self
@@ -4469,10 +4846,18 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_super_call(e, expr.span());
             }
             ast::Expr::Call(e) if self.contract_method_of(e).is_some() => {
-                self.lower_contract_call(e, expr.span());
+                let span = expr.span();
+                if let Some(result) = self.lower_contract_call(e, span) {
+                    let ty = self.type_of_operand(result);
+                    self.lower_throws_check(e, result, ty, span);
+                }
             }
             ast::Expr::Call(e) if self.method_of(e).is_some() => {
-                self.lower_method_call(e, expr.span());
+                let span = expr.span();
+                if let Some(result) = self.lower_method_call(e, span) {
+                    let ty = self.type_of_operand(result);
+                    self.lower_throws_check(e, result, ty, span);
+                }
             }
             // `u?.greet();` as a bare statement still needs the absent/present
             // split — only the value it produces goes unused.
@@ -4487,9 +4872,11 @@ impl<'a> FunctionLowering<'a> {
                     self.signature_return(&name)
                 } == IrType::Void =>
             {
+                let span = expr.span();
                 let name = self.callee_name(e).to_string();
                 let args = self.lower_args(e);
-                self.emit_effect(InstKind::Call { callee: name, args }, expr.span());
+                let result = self.emit(InstKind::Call { callee: name, args }, IrType::Void, span);
+                self.lower_throws_check(e, result, IrType::Void, span);
             }
             other => {
                 self.lower_expr(other);

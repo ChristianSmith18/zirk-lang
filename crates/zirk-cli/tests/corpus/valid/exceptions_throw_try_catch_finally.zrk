@@ -1,0 +1,73 @@
+// `throw`/`try`/`catch`/`finally` (roadmap Phase 4b,
+// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a compiler-known
+// exception hierarchy, a user's own `implements Throwable`/`RuntimeError`
+// class, catch by concrete type and by the `Throwable` supertype, `finally`
+// running on both the normal and the exceptional path, `throws` propagated
+// across a call, and a bare rethrow inside a `catch`.
+class NetworkError implements Throwable {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "NETWORK";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn risky(fail: Boolean): Int32 throws NetworkError {
+    if fail {
+        throw NetworkError("connection lost");
+    }
+    return 42;
+}
+
+fn wrapper(fail: Boolean): Int32 throws NetworkError {
+    try {
+        return risky(fail);
+    } catch NetworkError(e) {
+        stdout.println("logging: " + e.message());
+        throw;
+    }
+}
+
+fn main(): Void {
+    try {
+        mut value: Int32 = risky(false);
+        stdout.println(value);
+    } catch NetworkError(error) {
+        stdout.println(error.message());
+    } finally {
+        stdout.println("cleanup 1");
+    }
+
+    try {
+        mut value: Int32 = risky(true);
+        stdout.println(value);
+    } catch NetworkError(error) {
+        stdout.println(error.message());
+    } finally {
+        stdout.println("cleanup 2");
+    }
+
+    try {
+        wrapper(true);
+    } catch Throwable(e) {
+        stdout.println("caught by supertype: " + e.message());
+    }
+
+    stdout.println("done");
+}

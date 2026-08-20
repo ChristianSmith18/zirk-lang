@@ -51,4 +51,6 @@ pub mod codes {
     pub const NESTING_TOO_DEEP: Code = Code::new("E0311");
     /// `abstract` used on a member of a class that is not itself `abstract`.
     pub const ABSTRACT_OUTSIDE_ABSTRACT_CLASS: Code = Code::new("E0312");
+    /// A `try` with neither a `catch` nor a `finally` (roadmap Phase 4b).
+    pub const EMPTY_TRY: Code = Code::new("E0313");
 }

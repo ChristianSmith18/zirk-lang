@@ -607,7 +607,8 @@ const USER: &str = "class User {
 #[test]
 fn a_class_becomes_an_object_layout() {
     let module = with_class(USER, "");
-    let layout = &module.objects[0];
+    let id = module.object_id("User").expect("User is a class");
+    let layout = &module.objects[id as usize];
 
     assert_eq!(layout.name, "User");
     assert_eq!(layout.fields.len(), 2);
@@ -619,6 +620,7 @@ fn a_class_becomes_an_object_layout() {
 #[test]
 fn a_constructor_becomes_a_function_over_the_object() {
     let module = with_class(USER, "");
+    let id = module.object_id("User").expect("User is a class");
     let constructor = module
         .function(&zirk_ir::constructor_symbol("User", 0))
         .expect("the constructor is emitted");
@@ -633,7 +635,7 @@ fn a_constructor_becomes_a_function_over_the_object() {
     );
     assert_eq!(
         constructor.slot(constructor.params[0]).map(|s| s.ty),
-        Some(IrType::Object(0))
+        Some(IrType::Object(id))
     );
     assert_eq!(constructor.return_type, IrType::Void);
 }
@@ -641,12 +643,13 @@ fn a_constructor_becomes_a_function_over_the_object() {
 #[test]
 fn building_an_object_allocates_and_then_calls_its_constructor() {
     let module = with_class(USER, "mut u = User(1, \"x\");");
+    let id = module.object_id("User").expect("User is a class");
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
 
     let alloc = kinds
         .iter()
-        .position(|k| matches!(k, InstKind::Alloc(0)))
+        .position(|k| matches!(k, InstKind::Alloc(alloc_id) if *alloc_id == id))
         .expect("the object is allocated");
     let call = kinds
         .iter()
@@ -992,10 +995,11 @@ fn a_record_becomes_a_value_layout_not_an_object() {
         "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
     );
 
-    assert_eq!(module.values[0].name, "Point");
-    assert_eq!(module.values[0].fields.len(), 2);
+    let id = module.object_id("Point").expect("Point is a record") as usize;
+    assert_eq!(module.values[id].name, "Point");
+    assert_eq!(module.values[id].fields.len(), 2);
     // Its `ObjectLayout` counterpart is the empty placeholder nothing reads.
-    assert!(module.objects[0].fields.is_empty());
+    assert!(module.objects[id].fields.is_empty());
 }
 
 #[test]
@@ -1003,13 +1007,14 @@ fn constructing_a_record_builds_a_value_with_no_allocation() {
     let module = compile(
         "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
     );
+    let id = module.object_id("Point").expect("Point is a record");
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
 
     assert!(
         kinds
             .iter()
-            .any(|k| matches!(k, InstKind::BuildValue { class: 0, fields } if fields.len() == 2)),
+            .any(|k| matches!(k, InstKind::BuildValue { class, fields } if *class == id && fields.len() == 2)),
         "a record is packaged, not allocated"
     );
     assert!(

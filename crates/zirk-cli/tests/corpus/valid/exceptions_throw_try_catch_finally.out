@@ -1,0 +1,7 @@
+42
+cleanup 1
+connection lost
+cleanup 2
+logging: connection lost
+caught by supertype: connection lost
+done

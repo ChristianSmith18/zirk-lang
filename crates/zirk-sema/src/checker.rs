@@ -105,6 +105,22 @@ pub struct CheckedProgram {
     /// lowering to look up — only this id, to tell "a `Result` value" apart
     /// from any other enum.
     pub native_result: Option<u32>,
+    /// The compiler-known exception hierarchy's class ids (roadmap Phase
+    /// 4b): `Error`, `Throwable`, `RuntimeError`, `StackTrace`, in that
+    /// registration order — `zirk-ir/lower.rs` needs `throwable` to build
+    /// the `IsInstance` check a `catch` clause tests against, and
+    /// `stack_trace` to construct the empty stub `Throwable::stack_trace()`
+    /// returns without a real unwind-time frame capture.
+    pub native_exceptions: Option<NativeExceptions>,
+}
+
+/// See [`CheckedProgram::native_exceptions`].
+#[derive(Debug, Clone, Copy)]
+pub struct NativeExceptions {
+    pub error: u32,
+    pub throwable: u32,
+    pub runtime_error: u32,
+    pub stack_trace: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -262,6 +278,28 @@ struct Checker<'a> {
     loop_depth: u32,
     /// Captures collected for the lambda being checked, innermost last.
     capture_stack: Vec<Vec<Capture>>,
+    /// The `throws` set of the function or method being checked (roadmap
+    /// Phase 4b) — empty when it declares none. What
+    /// [`Self::check_function`]/the method equivalent verifies every
+    /// remaining entry of [`Self::pending_throws`] is covered by, once the
+    /// body has been fully checked.
+    current_throws: Vec<Type>,
+    /// Every exception type a `throw`, a rethrow, or a call to a `throws`
+    /// function/method has produced since the last point that resolved it
+    /// (roadmap Phase 4b) — reset and drained at each `try`'s own `catch`
+    /// coverage check, and at the end of the enclosing function/method's
+    /// body, where whatever remains must be covered by `current_throws`.
+    ///
+    /// A flat accumulator rather than real per-statement dataflow, the same
+    /// simplification `current_return`/`loop_depth` already make: "did
+    /// *something* in this stretch of code throw a type nothing here
+    /// catches" is answerable without tracking exactly which statement.
+    pending_throws: Vec<Type>,
+    /// The declared type of the innermost active `catch`, if the statement
+    /// being checked is (transitively) inside one — what a bare `throw;`
+    /// rethrows (roadmap Phase 4b). `None` outside any `catch`, which is
+    /// exactly when a bare rethrow is illegal.
+    catch_type: Option<Type>,
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     type_params: Vec<TypeParamInfo>,
@@ -311,6 +349,8 @@ struct Checker<'a> {
     variant_constructions: HashMap<Span, u32>,
     /// See [`CheckedProgram::native_result`].
     native_result: Option<u32>,
+    /// See [`CheckedProgram::native_exceptions`].
+    native_exceptions: Option<NativeExceptions>,
 }
 
 /// Ids of the contracts and enum `for ... in` checks a type against, once
@@ -350,6 +390,9 @@ impl<'a> Checker<'a> {
             in_constructor: false,
             loop_depth: 0,
             capture_stack: Vec::new(),
+            current_throws: Vec::new(),
+            pending_throws: Vec::new(),
+            catch_type: None,
             type_params: Vec::new(),
             type_param_scope: Vec::new(),
             type_param_ids: HashMap::new(),
@@ -362,6 +405,7 @@ impl<'a> Checker<'a> {
             generic_constructions: HashMap::new(),
             native_iteration: None,
             native_result: None,
+            native_exceptions: None,
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
         }
@@ -411,6 +455,7 @@ impl<'a> Checker<'a> {
         self.register_native_iteration_contracts();
         self.register_native_functions();
         self.register_native_result_enum();
+        self.register_native_exception_hierarchy();
         self.record_imports(program);
         self.declare_type_aliases(program);
 
@@ -481,6 +526,7 @@ impl<'a> Checker<'a> {
             for_in_iteration: self.for_in_iteration,
             variant_constructions: self.variant_constructions,
             native_result: self.native_result,
+            native_exceptions: self.native_exceptions,
         }
     }
 
@@ -815,6 +861,7 @@ impl<'a> Checker<'a> {
                 span: at,
                 has_default: false,
                 index: 0,
+                throws: Vec::new(),
             });
 
         // `next(): Iteration<T>`
@@ -831,6 +878,7 @@ impl<'a> Checker<'a> {
                 span: at,
                 has_default: false,
                 index: 0,
+                throws: Vec::new(),
             });
 
         self.native_iteration = Some(NativeIteration {
@@ -864,6 +912,7 @@ impl<'a> Checker<'a> {
                 shared: true,
                 span: Span::empty(0),
                 type_params: Vec::new(),
+                throws: Vec::new(),
             },
         );
     }
@@ -926,6 +975,158 @@ impl<'a> Checker<'a> {
         self.native_result = Some(result);
     }
 
+    /// Registers `Error`/`Throwable`/`RuntimeError`/`StackTrace` (roadmap
+    /// Phase 4b, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3),
+    /// the same "inject the tables directly" mechanism
+    /// [`Self::register_native_iteration_contracts`] and
+    /// [`Self::register_native_result_enum`] already use.
+    ///
+    /// Unlike `Result`, these are ordinary (abstract) classes — a program's
+    /// own exception type `implements Throwable` the same way it would
+    /// adopt any other `abstract class`'s requirements, so no structural
+    /// method dispatch is needed here: the existing class machinery
+    /// (`implements` against an `abstract class`, `abstract_bases`,
+    /// `require_abstract_conformance`) does the rest once these exist in
+    /// `self.classes`.
+    ///
+    /// Two narrowings from the doc's exact pseudocode: `suppressed(): List<Error>`
+    /// is dropped from `Error` — `List<T>` is a Phase 7 collection that does
+    /// not exist yet, and populating `suppressed` from a `finally` cleanup
+    /// failure is already out of scope for this pass (`fase-4b-excepciones`
+    /// proposal). `stack_trace(): StackTrace` stays exactly as declared —
+    /// abstract, so a concrete exception class must implement it — since a
+    /// compiler-supplied default body would need the same structural
+    /// dispatch machinery `Result` uses, for one method, on a receiver type
+    /// otherwise indistinguishable from an ordinary class's.
+    fn register_native_exception_hierarchy(&mut self) {
+        let at = Span::empty(0);
+
+        let stack_trace = self.classes.len() as u32;
+        self.classes.push(ClassType {
+            name: "StackTrace".into(),
+            kind: ClassKind::Class,
+            base: None,
+            fields: Vec::new(),
+            // One zero-argument constructor: `StackTrace()` builds the empty
+            // stub every `stack_trace()` override in this pass returns —
+            // there are no frames to capture yet.
+            constructors: vec![Vec::new()],
+            methods: Vec::new(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+
+        let error = self.classes.len() as u32;
+        let error_methods = vec![
+            MethodInfo {
+                name: "message".into(),
+                params: Vec::new(),
+                returns: Type::STRING,
+                visibility: Visibility::Public,
+                span: at,
+                index: 0,
+                owner: error,
+                from_contract: None,
+                overridden: true,
+                throws: Vec::new(),
+            },
+            MethodInfo {
+                name: "code".into(),
+                params: Vec::new(),
+                returns: Type::STRING,
+                visibility: Visibility::Public,
+                span: at,
+                index: 1,
+                owner: error,
+                from_contract: None,
+                overridden: true,
+                throws: Vec::new(),
+            },
+            MethodInfo {
+                name: "cause".into(),
+                params: Vec::new(),
+                returns: Type::of(Base::Class(error)).as_nullable(),
+                visibility: Visibility::Public,
+                span: at,
+                index: 2,
+                owner: error,
+                from_contract: None,
+                overridden: true,
+                throws: Vec::new(),
+            },
+        ];
+        self.classes.push(ClassType {
+            name: "Error".into(),
+            kind: ClassKind::Abstract,
+            base: None,
+            fields: Vec::new(),
+            constructors: Vec::new(),
+            methods: error_methods.clone(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+
+        let throwable = self.classes.len() as u32;
+        let mut throwable_methods = error_methods;
+        throwable_methods.push(MethodInfo {
+            name: "stack_trace".into(),
+            params: Vec::new(),
+            returns: Type::of(Base::Class(stack_trace)),
+            visibility: Visibility::Public,
+            span: at,
+            index: throwable_methods.len(),
+            owner: throwable,
+            from_contract: None,
+            overridden: true,
+            throws: Vec::new(),
+        });
+        self.classes.push(ClassType {
+            name: "Throwable".into(),
+            kind: ClassKind::Abstract,
+            base: None,
+            fields: Vec::new(),
+            constructors: Vec::new(),
+            methods: throwable_methods.clone(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: vec![error],
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+
+        let runtime_error = self.classes.len() as u32;
+        self.classes.push(ClassType {
+            name: "RuntimeError".into(),
+            kind: ClassKind::Abstract,
+            base: None,
+            fields: Vec::new(),
+            constructors: Vec::new(),
+            methods: throwable_methods,
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: vec![error, throwable],
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+
+        self.native_exceptions = Some(NativeExceptions {
+            error,
+            throwable,
+            runtime_error,
+            stack_trace,
+        });
+    }
+
     /// Registers a contract with its method signatures.
     fn declare_contract(&mut self, decl: &ContractDecl) {
         if Self::is_native_contract_name(&decl.name.name) {
@@ -966,6 +1167,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            let returns = self.resolve_type(&method.return_type);
+            let throws = self.resolve_throws_clause(&method.throws);
             methods.push(ContractMethod {
                 name: method.name.name.clone(),
                 params: method
@@ -973,10 +1176,11 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| self.resolve_param(p))
                     .collect(),
-                returns: self.resolve_type(&method.return_type),
+                returns,
                 span: method.name.span,
                 has_default: method.body.is_some(),
                 index,
+                throws,
             });
         }
 
@@ -1344,6 +1548,7 @@ impl<'a> Checker<'a> {
             span: method.span,
             has_default: method.has_default,
             index: method.index,
+            throws: method.throws.clone(),
         }
     }
 
@@ -1433,6 +1638,7 @@ impl<'a> Checker<'a> {
             owner: class,
             overridden: false,
             from_contract: Some(contract),
+            throws: method.throws.clone(),
         });
     }
 
@@ -1969,6 +2175,37 @@ impl<'a> Checker<'a> {
             .map(|b| self.classes[b as usize].methods.clone())
             .unwrap_or_default();
 
+        // Seeded here too, ahead of `check_conformance` (which resolves
+        // `implements` generally, too late for this): a class implementing
+        // one of the compiler-known `Error`/`Throwable`/`RuntimeError`
+        // (roadmap Phase 4b) needs its `message`/`code`/`cause`/
+        // `stack_trace` slots to land at the *same* indices those classes
+        // themselves use, or `overridden: true` virtual dispatch through a
+        // value statically typed as one of them (`catch Throwable(e)`,
+        // `e.message()`) calls whatever happens to sit at that index in an
+        // unrelated class instead. Scoped narrowly to these three specific
+        // ids — not a general "seed from every implemented abstract class"
+        // change, which would need its own conflict/diamond resolution this
+        // pass does not build.
+        if let Some(native) = self.native_exceptions {
+            for named in &decl.implements {
+                let resolved = self.resolved_name(&named.name, named.span);
+                let Some(id) = self
+                    .classes
+                    .iter()
+                    .position(|c| c.name == resolved)
+                    .map(|i| i as u32)
+                else {
+                    continue;
+                };
+                if (id == native.error || id == native.throwable || id == native.runtime_error)
+                    && methods.is_empty()
+                {
+                    methods = self.classes[id as usize].methods.clone();
+                }
+            }
+        }
+
         for method in &decl.methods {
             if let Some(field) = fields.iter().find(|f| f.name == method.name.name) {
                 let where_ = self.declared_at(field.span, method.name.span);
@@ -2000,6 +2237,8 @@ impl<'a> Checker<'a> {
             }
 
             self.enter_type_params(&method.type_params);
+            let returns = self.resolve_type(&method.return_type);
+            let throws = self.resolve_throws_clause(&method.throws);
             let resolved = MethodInfo {
                 name: method.name.name.clone(),
                 params: method
@@ -2007,13 +2246,14 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| self.resolve_param(p))
                     .collect(),
-                returns: self.resolve_type(&method.return_type),
+                returns,
                 visibility: method.visibility,
                 span: method.name.span,
                 index: 0,
                 owner: id,
                 overridden: false,
                 from_contract: None,
+                throws,
             };
             self.leave_type_params();
 
@@ -2144,6 +2384,105 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether `class` is `target` itself, or (transitively) adopts it
+    /// through `implements`/its own `extends` chain (roadmap Phase 4b).
+    ///
+    /// Unlike [`Self::is_subclass_of`]'s abstract-class arm — which checks
+    /// only the *direct* `abstract_bases` entry, sound for an ordinary
+    /// `expect_assignable` call because [`Self::check_conformance`] already
+    /// flattens a class's own base's `abstract_bases` into it — this walks
+    /// every entry recursively. It has to: `class Foo implements
+    /// RuntimeError` gives `Foo` only `[runtime_error]` in `abstract_bases`
+    /// (`check_conformance` pushes the named id directly, not that id's own
+    /// `abstract_bases`), so a direct-only check would miss that `Foo` is
+    /// also a `Throwable` — exactly the case `catch Throwable(e)` "catches
+    /// every recoverable throwable" depends on.
+    fn implements_abstract_class(&self, class: u32, target: u32) -> bool {
+        if class == target {
+            return true;
+        }
+        if let Some(base) = self.classes[class as usize].base
+            && self.implements_abstract_class(base, target)
+        {
+            return true;
+        }
+        self.classes[class as usize]
+            .abstract_bases
+            .iter()
+            .any(|&b| self.implements_abstract_class(b, target))
+    }
+
+    /// Whether `ty` is a value that may be thrown or caught (roadmap Phase
+    /// 4b) — a non-nullable class that is, or (transitively) implements,
+    /// the compiler-known `Throwable`. A value that may be absent is
+    /// rejected the same way a `to_string()` receiver is: there is no
+    /// meaningful "absent exception" to throw or catch.
+    fn is_throwable_type(&self, ty: Type) -> bool {
+        if ty.nullable {
+            return false;
+        }
+        let Base::Class(id) = ty.base else {
+            return false;
+        };
+        let Some(native) = self.native_exceptions else {
+            return false;
+        };
+        self.implements_abstract_class(id, native.throwable)
+    }
+
+    /// Resolves a `throws Type (| Type)*` clause into its individual
+    /// alternatives (roadmap Phase 4b), reporting each one that does not
+    /// name a `Throwable`.
+    ///
+    /// Deliberately not [`Self::resolve_type`]/[`Self::resolve_union`]: that
+    /// path interns a real union *value* type, and reports `NOT_LOWERED`
+    /// the first time a given normalized union is interned (unions are not
+    /// lowered yet, roadmap task 11.x) — exactly wrong here, where `A | B`
+    /// after `throws` names a set of alternative exception types the
+    /// program never holds a value of at once, not a union-typed value.
+    fn resolve_throws_clause(&mut self, throws: &Option<TypeRef>) -> Vec<Type> {
+        let Some(reference) = throws else {
+            return Vec::new();
+        };
+
+        let atoms = std::iter::once(reference).chain(reference.union_with.iter());
+        let mut resolved = Vec::new();
+        for atom in atoms {
+            let ty = self.resolve_type_atom(atom);
+            if ty.is_unknown() {
+                continue;
+            }
+            if !self.is_throwable_type(ty) {
+                let name = self.name(ty);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    atom.span,
+                    format!("`{name}` cannot be thrown"),
+                    "`throws` names a class that implements `Throwable`",
+                    Some("implement `Throwable`, or throw a type that already does".into()),
+                );
+                continue;
+            }
+            resolved.push(ty);
+        }
+        resolved
+    }
+
+    /// Whether a `try`'s `catch` clauses, taken together, cover `thrown`
+    /// (roadmap Phase 4b) — a later catch than the one that already
+    /// handles it is unreachable code, not a second chance.
+    fn throw_is_covered(&self, thrown: Type, catches: &[Type]) -> bool {
+        let Base::Class(thrown_id) = thrown.base else {
+            return false;
+        };
+        catches.iter().any(|&caught| {
+            let Base::Class(caught_id) = caught.base else {
+                return false;
+            };
+            self.implements_abstract_class(thrown_id, caught_id)
+        })
+    }
+
     /// Whether a bare variant of a generic enum fits where one of its
     /// instantiations is expected, such as `Iteration.Done` where
     /// `Iteration<Int32>` is declared.
@@ -2254,9 +2593,14 @@ impl<'a> Checker<'a> {
 
         for constructor in &decl.constructors {
             self.in_constructor = true;
+            let outer_pending = std::mem::take(&mut self.pending_throws);
+            self.current_throws = Vec::new();
+            let ctor_span = constructor.body.span;
             self.check_member_body(class_type, &constructor.params, Type::VOID, |checker| {
                 checker.check_block(&constructor.body);
             });
+            self.report_uncaught_throws(ctor_span, "construct");
+            self.pending_throws = outer_pending;
             self.in_constructor = false;
             self.require_fields_initialized(decl, constructor);
         }
@@ -2265,8 +2609,11 @@ impl<'a> Checker<'a> {
             let Some(body) = &method.body else { continue };
             self.enter_type_params(&method.type_params);
             let returns = self.resolve_type(&method.return_type);
+            let throws = self.resolve_throws_clause(&method.throws);
             let name = method.name.name.clone();
             let span = body.span;
+            let outer_pending = std::mem::take(&mut self.pending_throws);
+            self.current_throws = throws;
             self.check_member_body(class_type, &method.params, returns, |checker| {
                 let always_returns = checker.check_block(body);
                 if returns != Type::VOID && !returns.is_unknown() && !always_returns {
@@ -2280,6 +2627,8 @@ impl<'a> Checker<'a> {
                     );
                 }
             });
+            self.report_uncaught_throws(span, &method.name.name);
+            self.pending_throws = outer_pending;
             self.leave_type_params();
         }
         self.leave_type_params();
@@ -2539,13 +2888,16 @@ impl<'a> Checker<'a> {
             .map(|p| self.resolve_param(p))
             .collect::<Vec<_>>();
 
+        let returns = self.resolve_type(&f.return_type);
+        let throws = self.resolve_throws_clause(&f.throws);
         let signature = Signature {
             name: f.name.name.clone(),
             params,
-            returns: self.resolve_type(&f.return_type),
+            returns,
             type_params,
             shared: f.shared,
             span: f.name.span,
+            throws,
         };
         self.leave_type_params();
 
@@ -3303,6 +3655,11 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|s| s.returns)
             .unwrap_or(Type::UNKNOWN);
+        self.current_throws = signature
+            .as_ref()
+            .map(|s| s.throws.clone())
+            .unwrap_or_default();
+        let outer_pending = std::mem::take(&mut self.pending_throws);
 
         // A function body cannot see the locals of another: the barrier is what
         // makes a name from outside a capture rather than a plain read.
@@ -3341,6 +3698,8 @@ impl<'a> Checker<'a> {
                 Some("add a `return` at the end of the function".into()),
             );
         }
+        self.report_uncaught_throws(f.body.span, &f.name.name);
+        self.pending_throws = outer_pending;
         self.leave_type_params();
     }
 
@@ -3409,6 +3768,13 @@ impl<'a> Checker<'a> {
                 false
             }
             Stmt::Block(b) => self.check_block(b),
+            Stmt::Throw(s) => {
+                self.check_throw(s);
+                // A `throw` diverges the same way `return` does: nothing
+                // after it in this block runs.
+                true
+            }
+            Stmt::Try(s) => self.check_try(s),
         }
     }
 
@@ -3898,6 +4264,175 @@ impl<'a> Checker<'a> {
                 "the returned type does not match the signature",
                 format!("the function declares `{expected}` and this returns `{found}`"),
                 None,
+            );
+        }
+    }
+
+    /// `throw expr;` / `throw;` (roadmap Phase 4b).
+    ///
+    /// Either way, the thrown type is recorded into [`Self::pending_throws`]
+    /// rather than resolved against `catch`/`throws` here directly: only the
+    /// enclosing `try`/function knows what covers it, the same reason a
+    /// `return`'s value is checked against `current_return` rather than each
+    /// `return` walking up to find its own function.
+    fn check_throw(&mut self, stmt: &ThrowStmt) {
+        let thrown = match &stmt.value {
+            Some(expr) => {
+                let ty = self.check_expr(expr);
+                if !ty.is_unknown() && !self.is_throwable_type(ty) {
+                    let name = self.name(ty);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span(),
+                        format!("`{name}` cannot be thrown"),
+                        "only a class that implements `Throwable` may be thrown",
+                        None,
+                    );
+                    return;
+                }
+                ty
+            }
+            None => {
+                let Some(caught) = self.catch_type else {
+                    self.error(
+                        codes::RETHROW_OUTSIDE_CATCH,
+                        stmt.span,
+                        "`throw;` is only legal inside a `catch`",
+                        "with no value, it rethrows whatever the enclosing `catch` bound",
+                        Some("write `throw <expr>;` to throw a new value".into()),
+                    );
+                    return;
+                };
+                caught
+            }
+        };
+
+        if !thrown.is_unknown() {
+            self.pending_throws.push(thrown);
+        }
+    }
+
+    /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
+    ///
+    /// The try body's own escapees are isolated (saved and cleared from
+    /// [`Self::pending_throws`]) so this `try`'s own `catch` clauses are
+    /// judged only against what its own body produced — an outer `try`
+    /// around this one must not see a type this one already caught, and
+    /// must still see one this one's catches do not cover.
+    fn check_try(&mut self, stmt: &TryStmt) -> bool {
+        let mut catch_types: Vec<Type> = Vec::new();
+
+        let outer_pending = std::mem::take(&mut self.pending_throws);
+        let body_always_returns = self.check_block(&stmt.body);
+        let body_escapees = std::mem::replace(&mut self.pending_throws, outer_pending);
+
+        // Every path out of the `try` as a whole guarantees a return only
+        // when the body does *and* every `catch` does too — a `catch` that
+        // falls through leaves a path this analysis cannot follow further
+        // (`docs/handbook`'s own missing-return diagnostic, `MISSING_RETURN`),
+        // the same way an `if` needs both branches to.
+        let mut catches_always_return = true;
+
+        for catch in &stmt.catches {
+            let ty = self.resolve_type_atom(&catch.ty);
+            if !ty.is_unknown() && !self.is_throwable_type(ty) {
+                let name = self.name(ty);
+                self.error(
+                    codes::UNREACHABLE_CATCH,
+                    catch.ty.span,
+                    format!("`{name}` cannot be caught"),
+                    "`catch` names a class that implements `Throwable`",
+                    None,
+                );
+                continue;
+            }
+            if !ty.is_unknown() && self.throw_is_covered(ty, &catch_types) {
+                self.error(
+                    codes::UNREACHABLE_CATCH,
+                    catch.ty.span,
+                    "this `catch` can never run",
+                    "an earlier `catch` in this `try` already covers everything it would",
+                    Some("reorder it before the one that already covers it".into()),
+                );
+                continue;
+            }
+
+            self.scopes.push();
+            self.declare_local(Binding {
+                name: catch.binding.name.clone(),
+                ty,
+                mutability: Mutability::Immutable,
+                span: catch.binding.span,
+                initialized: true,
+            });
+            let previous_catch = self.catch_type.replace(ty);
+            let catch_always_returns = self.check_block(&catch.body);
+            self.catch_type = previous_catch;
+            self.scopes.pop();
+            if !catch_always_returns {
+                catches_always_return = false;
+            }
+
+            catch_types.push(ty);
+        }
+
+        // Whatever the body could throw that no catch here covers keeps
+        // propagating, exactly like an ordinary `throws` call's own type
+        // would from this point.
+        for thrown in body_escapees {
+            if !self.throw_is_covered(thrown, &catch_types) {
+                self.pending_throws.push(thrown);
+            }
+        }
+
+        if let Some(finally) = &stmt.finally {
+            self.reject_outcome_in_finally(finally);
+            self.check_block(finally);
+        }
+
+        body_always_returns && !stmt.catches.is_empty() && catches_always_return
+    }
+
+    /// Rejects a `return`/`break`/`continue`/`throw` written directly inside
+    /// a `finally` block (roadmap Phase 4b) — see
+    /// [`codes::FINALLY_REPLACES_OUTCOME`]'s own doc comment for how this
+    /// simplifies the spec's narrower "only when it would replace an active
+    /// outcome" rule.
+    fn reject_outcome_in_finally(&mut self, finally: &Block) {
+        for stmt in &finally.statements {
+            let (word, span) = match stmt {
+                Stmt::Return(s) => ("return", s.span),
+                Stmt::Break(s) => ("break", s.span),
+                Stmt::Continue(s) => ("continue", s.span),
+                Stmt::Throw(s) => ("throw", s.span),
+                _ => continue,
+            };
+            self.error(
+                codes::FINALLY_REPLACES_OUTCOME,
+                span,
+                format!("`{word}` cannot appear directly inside a `finally`"),
+                "it would silently replace whichever outcome triggered this `finally`",
+                Some("move it outside the `finally`, or restructure the cleanup".into()),
+            );
+        }
+    }
+
+    /// Reports each type in [`Self::pending_throws`] the just-checked
+    /// function/method's own `current_throws` does not cover (roadmap Phase
+    /// 4b) — "catch or declare".
+    fn report_uncaught_throws(&mut self, at: Span, name: &str) {
+        let current_throws = self.current_throws.clone();
+        for thrown in self.pending_throws.clone() {
+            if self.throw_is_covered(thrown, &current_throws) {
+                continue;
+            }
+            let type_name = self.name(thrown);
+            self.error(
+                codes::UNCAUGHT_THROW,
+                at,
+                format!("`{type_name}` escapes `{name}` uncaught"),
+                "an explicit exception must be caught or declared",
+                Some(format!("catch it in a `try`, or add `throws {type_name}`")),
             );
         }
     }
@@ -5450,6 +5985,7 @@ impl<'a> Checker<'a> {
                             shared: true,
                             span: m.span,
                             type_params: Vec::new(),
+                            throws: m.throws.clone(),
                         })
                 }
                 Base::Class(cid) => self.classes[cid as usize]
@@ -5461,6 +5997,7 @@ impl<'a> Checker<'a> {
                         shared: true,
                         span: m.span,
                         type_params: Vec::new(),
+                        throws: m.throws.clone(),
                     }),
                 _ => None,
             };
@@ -5705,6 +6242,7 @@ impl<'a> Checker<'a> {
             shared: true,
             span: field.span,
             type_params: type_params.clone(),
+            throws: Vec::new(),
         };
         // `Result.Ok(v)` cannot determine `E` from `v` alone — no argument
         // ever will, since `E` names the *other* variant's payload. Seeding
@@ -5858,6 +6396,7 @@ impl<'a> Checker<'a> {
             shared: true,
             span: method.span,
             type_params: Vec::new(),
+            throws: method.throws.clone(),
         };
         self.check_direct_call(expr, &signature)
     }
@@ -5916,6 +6455,9 @@ impl<'a> Checker<'a> {
             shared: true,
             span,
             type_params: Vec::new(),
+            // A constructor cannot declare `throws` in this pass (roadmap
+            // Phase 4b's own scope).
+            throws: Vec::new(),
         };
         self.check_direct_call(expr, &signature);
         Type::VOID
@@ -6067,6 +6609,7 @@ impl<'a> Checker<'a> {
             shared: true,
             span: method.span,
             type_params: Vec::new(),
+            throws: method.throws.clone(),
         };
         let visibility = method.visibility;
         let declared = method.span;
@@ -6159,6 +6702,9 @@ impl<'a> Checker<'a> {
             shared,
             span,
             type_params: type_params.clone(),
+            // A constructor cannot declare `throws` in this pass (roadmap
+            // Phase 4b's own scope).
+            throws: Vec::new(),
         };
         let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
 
@@ -6220,6 +6766,7 @@ impl<'a> Checker<'a> {
             shared: class.shared,
             span: class.span,
             type_params: Vec::new(),
+            throws: Vec::new(),
         };
         self.check_direct_call(expr, &signature)
     }
@@ -6290,6 +6837,7 @@ impl<'a> Checker<'a> {
             shared: true,
             span: field.name.span,
             type_params: Vec::new(),
+            throws: Vec::new(),
         };
         Some(self.check_direct_call(expr, &signature))
     }
@@ -6683,6 +7231,13 @@ impl<'a> Checker<'a> {
         let name = signature.name.clone();
         let slots = self.match_arguments(expr, signature);
         let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed);
+
+        // A call to a `throws` function/method propagates its declared
+        // types into whatever this point in the program can itself throw
+        // (roadmap Phase 4b) — the enclosing `try`'s catches or the
+        // enclosing function's own `throws` resolve it, the same way a
+        // `throw` statement's own type does.
+        self.pending_throws.extend(signature.throws.iter().copied());
 
         for (index, slot) in slots.iter().enumerate() {
             let Some(param) = signature.params.get(index) else {

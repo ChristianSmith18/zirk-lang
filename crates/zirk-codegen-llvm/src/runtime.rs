@@ -92,6 +92,22 @@ pub mod symbols {
     /// Reports a program-supplied `fatalError(message)` and terminates
     /// (roadmap Phase 4a).
     pub const FATAL_ERROR: &str = "zirk_rt_fatal_error";
+    /// Records the pending exception (roadmap Phase 4b) — `throw`'s own
+    /// lowering.
+    pub const THROW: &str = "zirk_rt_throw";
+    /// Whether an exception is pending (roadmap Phase 4b) — checked after
+    /// every call to a function that can throw.
+    pub const HAS_PENDING_EXCEPTION: &str = "zirk_rt_has_pending_exception";
+    /// Takes the pending exception, clearing the slot (roadmap Phase 4b) —
+    /// a matching `catch`'s own lowering.
+    pub const TAKE_PENDING_EXCEPTION: &str = "zirk_rt_take_pending_exception";
+    /// Tests a descriptor's ancestor list against a target class, without
+    /// terminating when it does not match (roadmap Phase 4b) — a `catch`
+    /// clause's own coverage test.
+    pub const IS_INSTANCE: &str = "zirk_rt_is_instance";
+    /// Reports an exception that escaped `main` uncaught and terminates
+    /// (roadmap Phase 4b).
+    pub const UNCAUGHT_EXCEPTION: &str = "zirk_rt_uncaught_exception";
 }
 
 /// The runtime functions available to generated code.
@@ -126,6 +142,11 @@ pub struct Runtime<'ctx> {
     pub invalid_shift: FunctionValue<'ctx>,
     pub float_nan: FunctionValue<'ctx>,
     pub fatal_error: FunctionValue<'ctx>,
+    pub throw: FunctionValue<'ctx>,
+    pub has_pending_exception: FunctionValue<'ctx>,
+    pub take_pending_exception: FunctionValue<'ctx>,
+    pub is_instance: FunctionValue<'ctx>,
+    pub uncaught_exception: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -302,6 +323,29 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
+    let throw = module.add_function(symbols::THROW, void.fn_type(&[ptr.into()], false), external);
+    let bool_ty = context.bool_type();
+    let has_pending_exception = module.add_function(
+        symbols::HAS_PENDING_EXCEPTION,
+        bool_ty.fn_type(&[], false),
+        external,
+    );
+    let take_pending_exception = module.add_function(
+        symbols::TAKE_PENDING_EXCEPTION,
+        ptr.fn_type(&[], false),
+        external,
+    );
+    let is_instance = module.add_function(
+        symbols::IS_INSTANCE,
+        bool_ty.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let uncaught_exception = module.add_function(
+        symbols::UNCAUGHT_EXCEPTION,
+        void.fn_type(&[], false),
+        external,
+    );
+
     for handler in [
         overflow,
         division_by_zero,
@@ -312,6 +356,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         invalid_shift,
         float_nan,
         fatal_error,
+        uncaught_exception,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -351,5 +396,10 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         invalid_shift,
         float_nan,
         fatal_error,
+        throw,
+        has_pending_exception,
+        take_pending_exception,
+        is_instance,
+        uncaught_exception,
     }
 }

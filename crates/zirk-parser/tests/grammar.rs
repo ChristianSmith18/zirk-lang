@@ -446,7 +446,10 @@ fn invalid_other_stdout_method() {
 #[test]
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
-        ("fn main(): Void { try { } }", "try", "Phase 4"),
+        // `try`/`catch`/`finally` are implemented (roadmap Phase 4b);
+        // `match with` still needs `Resource<E>`, which needs exceptions
+        // already running, so `with` stays gated a little longer.
+        ("fn main(): Void { match with x { } }", "with", "Phase 4"),
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
         // `**` still needs `Float` (bitwise/shift no longer belong here:

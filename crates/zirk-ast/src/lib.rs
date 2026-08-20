@@ -289,6 +289,11 @@ pub struct MethodDecl {
     pub is_override: bool,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
+    /// `throws Type (| Type)*` (roadmap Phase 4b) — reuses `TypeRef`'s own
+    /// union syntax (`union_with`) rather than a `Vec<TypeRef>` of its own,
+    /// since `A | B` after `throws` is exactly the same grammar `parse_type`
+    /// already handles for an ordinary type.
+    pub throws: Option<TypeRef>,
     /// Absent on an `abstract` method, which declares a signature and no body.
     pub body: Option<Block>,
     pub visibility: Visibility,
@@ -322,6 +327,8 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     /// Return type. Mandatory in this phase.
     pub return_type: TypeRef,
+    /// `throws Type (| Type)*` (roadmap Phase 4b) — see `MethodDecl::throws`.
+    pub throws: Option<TypeRef>,
     pub body: Block,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
@@ -469,6 +476,10 @@ pub enum Stmt {
     Expr(ExprStmt),
     /// A nested block.
     Block(Block),
+    /// `throw expr;` / `throw;` (rethrow, roadmap Phase 4b).
+    Throw(ThrowStmt),
+    /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
+    Try(TryStmt),
 }
 
 impl Stmt {
@@ -483,8 +494,48 @@ impl Stmt {
             Stmt::Return(s) => s.span,
             Stmt::Expr(s) => s.span,
             Stmt::Block(b) => b.span,
+            Stmt::Throw(s) => s.span,
+            Stmt::Try(s) => s.span,
         }
     }
+}
+
+/// `throw expr;` / `throw;` (roadmap Phase 4b).
+///
+/// `value: None` is the bare rethrow, legal only directly inside a `catch`
+/// (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3: "legal only in a
+/// catch and preserves exact identity, original throw point, cause,
+/// suppressed list, and trace").
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThrowStmt {
+    pub value: Option<Expr>,
+    pub span: Span,
+}
+
+/// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
+///
+/// At least one `catch` or a `finally` — a bare `try { }` with neither is
+/// rejected by the parser the same way an `if` with no `else` used as an
+/// expression is: syntactically total, semantically pointless.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryStmt {
+    pub body: Block,
+    pub catches: Vec<CatchClause>,
+    pub finally: Option<Block>,
+    pub span: Span,
+}
+
+/// One `catch Type(name) { }` arm of a `try`.
+///
+/// By class type only — no variant pattern (`catch NetworkError.Timeout(d)`)
+/// yet, since a user exception has no way to declare one (roadmap Phase 4b's
+/// own "fuera de alcance").
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchClause {
+    pub ty: TypeRef,
+    pub binding: Ident,
+    pub body: Block,
+    pub span: Span,
 }
 
 /// The loop forms that are not `for ... in`.
