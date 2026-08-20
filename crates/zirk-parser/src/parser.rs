@@ -2219,21 +2219,17 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Match);
 
-        // `match with` scopes a `Resource<E>`, which needs Phase 4.
-        if self.check_keyword(Keyword::With) {
-            let span = self.peek_span();
-            self.error(
-                codes::NOT_IMPLEMENTED,
-                span,
-                "`match with` is not implemented yet",
-                "scoped acquisition needs `Resource<E>`, which arrives in Phase 4",
-                Some("see docs/init/ZIRK_ROADMAP.md for the scope of each phase".into()),
-            );
-            self.synchronize();
-            return None;
-        }
-
         let scrutinee = self.parse_range()?;
+
+        // `match scrutinee with binding { ... }` (roadmap Phase 4c) scopes a
+        // `Resource<E>`: `binding` names whichever arm's pattern acquires
+        // one, closed automatically on every exit from that arm.
+        let with_binding = if self.eat_keyword(Keyword::With) {
+            Some(self.expect_identifier("after `with`")?)
+        } else {
+            None
+        };
+
         self.expect(&TokenKind::LBrace, "before the match arms");
 
         let mut arms = Vec::new();
@@ -2270,6 +2266,7 @@ impl<'a> Parser<'a> {
 
         Some(Expr::Match(MatchExpr {
             scrutinee: Box::new(scrutinee),
+            with_binding,
             arms,
             span: start.to(end),
         }))

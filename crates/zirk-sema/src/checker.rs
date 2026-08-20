@@ -351,6 +351,21 @@ struct Checker<'a> {
     native_result: Option<u32>,
     /// See [`CheckedProgram::native_exceptions`].
     native_exceptions: Option<NativeExceptions>,
+    /// Ids of the language's own `Resource<E>` interface and its `E`
+    /// parameter, minted by [`Self::register_native_resource_contract`]
+    /// (roadmap Phase 4c) — only consulted while checking `implements
+    /// Resource<...>` and a `match ... with` binding; `zirk-ir/lower.rs`
+    /// needs none of this, since it reaches `close()`/`is_closed()` by
+    /// ordinary static method dispatch on the binding's own concrete class.
+    native_resource: Option<NativeResource>,
+}
+
+/// See [`Checker::native_resource`].
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+struct NativeResource {
+    resource: u32,
+    e: u32,
 }
 
 /// Ids of the contracts and enum `for ... in` checks a type against, once
@@ -406,6 +421,7 @@ impl<'a> Checker<'a> {
             native_iteration: None,
             native_result: None,
             native_exceptions: None,
+            native_resource: None,
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
         }
@@ -456,6 +472,7 @@ impl<'a> Checker<'a> {
         self.register_native_functions();
         self.register_native_result_enum();
         self.register_native_exception_hierarchy();
+        self.register_native_resource_contract();
         self.record_imports(program);
         self.declare_type_aliases(program);
 
@@ -1127,6 +1144,86 @@ impl<'a> Checker<'a> {
         });
     }
 
+    /// Registers `interface Resource<E from Error> { fn close(): Result<Void,E>;
+    /// fn is_closed(): Boolean; }` (roadmap Phase 4c,
+    /// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4), the same
+    /// "inject the tables directly" mechanism
+    /// [`Self::register_native_iteration_contracts`] uses for `Iterable<T>`.
+    ///
+    /// Unlike `Iterable<T>`/`Iterator<T>`, `E`'s own `from Error` constraint
+    /// is expressed directly with [`TypeParamInfo::constraints`] — the same
+    /// field a user-declared interface's own `from` clause resolves into
+    /// (`Self::resolve_class_type_param_constraints`) — since `Error` (and
+    /// therefore a real constraint to check against) already exists once
+    /// [`Self::register_native_exception_hierarchy`] has run, unlike when
+    /// `Iterable<T>`'s own unconstrained `T` was registered.
+    ///
+    /// A class that `implements Resource<SomeError>` reaches `close()`/
+    /// `is_closed()` by ordinary static dispatch on its own concrete type —
+    /// `match ... with` never calls through a `Resource`-typed reference —
+    /// so unlike `Iterable`/`Iterator` this contract needs no dispatch-table
+    /// specialization to be usable; only [`Self::resolve_implements_args`]'s
+    /// own `NOT_LOWERED` gate has to name it as another exception, alongside
+    /// `Iterable`/`Iterator`.
+    fn register_native_resource_contract(&mut self) {
+        let at = Span::empty(0);
+        let native_exceptions = self
+            .native_exceptions
+            .expect("register_native_exception_hierarchy runs first");
+
+        let e = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "E".into(),
+            constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            span: at,
+        });
+        let resource = self.contracts.len() as u32;
+        self.contracts.push(ContractType {
+            name: "Resource".into(),
+            kind: ContractKind::Interface,
+            methods: Vec::new(),
+            type_params: vec![e],
+            shared: true,
+            span: at,
+        });
+
+        let result = self
+            .native_result
+            .expect("register_native_result_enum runs first");
+
+        // `close(): Result<Void,E>`
+        let close_returns = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: result,
+            args: vec![Type::VOID, Type::of(Base::Param(e))],
+        });
+        self.contracts[resource as usize]
+            .methods
+            .push(ContractMethod {
+                name: "close".into(),
+                params: Vec::new(),
+                returns: Type::of(Base::EnumInstance(close_returns)),
+                span: at,
+                has_default: false,
+                index: 0,
+                throws: Vec::new(),
+            });
+
+        // `is_closed(): Boolean`
+        self.contracts[resource as usize]
+            .methods
+            .push(ContractMethod {
+                name: "is_closed".into(),
+                params: Vec::new(),
+                returns: Type::BOOLEAN,
+                span: at,
+                has_default: false,
+                index: 1,
+                throws: Vec::new(),
+            });
+
+        self.native_resource = Some(NativeResource { resource, e });
+    }
+
     /// Registers a contract with its method signatures.
     fn declare_contract(&mut self, decl: &ContractDecl) {
         if Self::is_native_contract_name(&decl.name.name) {
@@ -1197,10 +1294,11 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `name` is one of the contracts the language itself registers
-    /// (task 6.9): `Iterable` and `Iterator`, injected directly into the
-    /// tables rather than parsed, so application code cannot reopen them.
+    /// (task 6.9, roadmap Phase 4c): `Iterable`, `Iterator` and `Resource`,
+    /// injected directly into the tables rather than parsed, so application
+    /// code cannot reopen them.
     fn is_native_contract_name(name: &str) -> bool {
-        matches!(name, "Iterable" | "Iterator")
+        matches!(name, "Iterable" | "Iterator" | "Resource")
     }
 
     fn contract_id(&self, name: &str) -> Option<u32> {
@@ -1401,10 +1499,16 @@ impl<'a> Checker<'a> {
         // generic contract instantiations that lower (roadmap task 13.5,
         // `for ... in` over a type's own iterator, which needs both halves
         // of the protocol implemented): any other stays gated, since
-        // nothing else specializes a class's own generic contract table yet.
+        // nothing else specializes a class's own generic contract table yet
+        // — except `implements Resource<E>` (roadmap Phase 4c), which needs
+        // no specialized dispatch table at all: `match ... with` reaches
+        // `close()`/`is_closed()` by ordinary static dispatch on the
+        // binding's own concrete class, never through a `Resource`-typed
+        // reference.
         if self
             .native_iteration
             .is_none_or(|n| contract != n.iterable && contract != n.iterator)
+            && self.native_resource.is_none_or(|n| contract != n.resource)
         {
             self.not_lowered(
                 reference.span,
@@ -5413,13 +5517,70 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `match ... with binding` (roadmap Phase 4c) requires a `Result<R,Err>`
+    /// scrutinee — acquisition "normally returns `Result<Resource,OpenError>`"
+    /// (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4) — so a
+    /// grouped or non-`Result` acquisition, out of scope for this pass, is
+    /// rejected here rather than silently accepted with no cleanup wired up.
+    fn check_resource_match_scrutinee(&mut self, with_binding: &Ident, scrutinee: Type) {
+        if scrutinee.is_unknown() {
+            return;
+        }
+        let is_result = matches!(scrutinee.without_null().base, Base::EnumInstance(inst)
+            if self.native_result == Some(self.enum_instances[inst as usize].enum_id));
+        if is_result && !scrutinee.nullable {
+            return;
+        }
+        let name = self.name(scrutinee);
+        self.error(
+            codes::INVALID_RESOURCE_MATCH,
+            with_binding.span,
+            format!("`match ... with` needs a `Result<R,Err>` scrutinee, not `{name}`"),
+            "acquisition normally returns `Result<Resource,OpenError>`",
+            None,
+        );
+    }
+
+    /// Whether `ty` — whatever a `match ... with binding` arm bound
+    /// `binding` to — is a value that may be closed: a non-nullable class
+    /// that `implements Resource<E>` for some `E` (roadmap Phase 4c).
+    fn check_resource_binding_type(&mut self, with_binding: &Ident, ty: Type) {
+        if ty.is_unknown() {
+            return;
+        }
+        let Some(native_resource) = self.native_resource else {
+            return;
+        };
+        let implements_resource = !ty.nullable
+            && matches!(ty.base, Base::Class(id) if self.classes[id as usize]
+                .contract_instances
+                .iter()
+                .any(|&inst| self.contract_instances[inst as usize].contract == native_resource.resource));
+        if implements_resource {
+            return;
+        }
+        let name = self.name(ty);
+        self.error(
+            codes::INVALID_RESOURCE_MATCH,
+            with_binding.span,
+            format!("`{}` does not implement `Resource<E>`, so it cannot be closed automatically", name),
+            "`match ... with` closes whatever its binding names on every exit from the arm that acquires it",
+            Some("implement `Resource<E>` (`close(): Result<Void,E>`, `is_closed(): Boolean`) on it, or drop `with`".into()),
+        );
+    }
+
     fn check_match(&mut self, expr: &MatchExpr, as_value: bool) -> Type {
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
 
+        if let Some(with_binding) = &expr.with_binding {
+            self.check_resource_match_scrutinee(with_binding, scrutinee);
+        }
+
         let mut arm_types: Vec<(Type, Span)> = Vec::new();
         let mut covered: Vec<String> = Vec::new();
         let mut has_wildcard = false;
+        let mut resource_binding_found = false;
 
         for arm in &expr.arms {
             let mut bindings = Vec::new();
@@ -5430,6 +5591,13 @@ impl<'a> Checker<'a> {
                 &mut has_wildcard,
                 &mut bindings,
             );
+
+            if let Some(with_binding) = &expr.with_binding
+                && let Some(resource) = bindings.iter().find(|b| b.name == with_binding.name)
+            {
+                resource_binding_found = true;
+                self.check_resource_binding_type(with_binding, resource.ty);
+            }
 
             self.scopes.push();
             // A binding pattern, bare or inside a variant's `(...)`, names
@@ -5449,6 +5617,21 @@ impl<'a> Checker<'a> {
             self.scopes.pop();
 
             arm_types.push((ty, arm.body.span()));
+        }
+
+        if let Some(with_binding) = &expr.with_binding
+            && !resource_binding_found
+        {
+            self.error(
+                codes::INVALID_RESOURCE_MATCH,
+                with_binding.span,
+                format!("no arm's pattern binds `{}`", with_binding.name),
+                "`match ... with` names the resource one of the arms acquires by binding it in its own pattern",
+                Some(format!(
+                    "destructure it into `{}` in the arm that acquires it, e.g. `Result.Ok({})`",
+                    with_binding.name, with_binding.name
+                )),
+            );
         }
 
         self.check_exhaustive(expr, scrutinee, &covered, has_wildcard);

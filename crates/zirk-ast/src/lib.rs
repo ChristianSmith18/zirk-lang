@@ -903,10 +903,15 @@ pub enum IncrementFix {
     Postfix,
 }
 
-/// `match scrutinee { arms }`
+/// `match scrutinee { arms }`, or `match scrutinee with binding { arms }`
+/// (roadmap Phase 4c, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section
+/// 4): the `with` form owns whichever arm's pattern binds `with_binding`'s
+/// name and closes it — calling its `Resource<E>` `close()` — on every exit
+/// from that arm, normal or not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchExpr {
     pub scrutinee: Box<Expr>,
+    pub with_binding: Option<Ident>,
     pub arms: Vec<MatchArm>,
     pub span: Span,
 }

@@ -314,9 +314,15 @@ fn enum_struct<'ctx>(
 ) -> inkwell::types::StructType<'ctx> {
     let mut fields: Vec<BasicTypeEnum> = vec![context.i32_type().into()];
     for field in &layout.fields {
+        // A `Void` field carries no value — `Result<Void,E>` is
+        // `Resource<E>::close()`'s own return type (roadmap Phase 4c) — but
+        // still occupies a genuine (zero-sized) struct slot rather than
+        // being skipped, so every other field's index into this struct
+        // keeps matching `EnumLayout.variants`'s unchanged numbering.
+        // `InstKind::BuildEnum`/`LoadField` never read or write into it.
         fields.push(
             llvm_type_in(context, field.ty, closures, values, enums)
-                .expect("an enum field is not Void"),
+                .unwrap_or_else(|| context.struct_type(&[], false).into()),
         );
     }
     context.struct_type(&fields, false)
@@ -1017,6 +1023,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(object.into())
             }
 
+            // A `Void` field (roadmap Phase 4c, `Result<Void,E>`) has no
+            // value to extract — the same reason a `Void` call's own result
+            // is never inserted into `self.values` below.
+            ir::InstKind::LoadField { .. } if instruction.ty == ir::IrType::Void => None,
+
             ir::InstKind::LoadField { object, index } => {
                 // A record, value class or enum payload field comes straight
                 // out of the value with `extractvalue`: there is no pointer
@@ -1117,6 +1128,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .into_struct_value();
                 let indices = &layout.variants[*variant as usize];
                 for (&index, field) in indices.iter().zip(fields) {
+                    // A `Void` field (roadmap Phase 4c, `Result<Void,E>`) has
+                    // no operand to insert — its slot stays `undef`, which is
+                    // sound: `LoadField`'s own `Void` guard never reads it.
+                    if layout.fields[index as usize].ty == ir::IrType::Void {
+                        continue;
+                    }
                     built = self
                         .builder
                         .build_insert_value(
