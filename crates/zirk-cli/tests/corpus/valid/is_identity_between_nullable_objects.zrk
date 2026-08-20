@@ -1,0 +1,22 @@
+// `is` between two `T?` operands used to panic LLVM codegen: a nullable
+// object lowers to the `{i1, ptr}` struct `T?` always uses, and `emit_binary`
+// only knew how to compare a bare pointer's address. Two absent references
+// are identical to each other, one absent and one present never are, and two
+// present ones compare by address exactly like the non-nullable case.
+class Node {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut a: Node? = Node(1);
+    mut sameAsA: Node? = a;
+    mut differentNode: Node? = Node(1);
+    mut absentOne: Node? = null;
+    mut absentTwo: Node? = null;
+
+    stdout.println(a is sameAsA);
+    stdout.println(a is differentNode);
+    stdout.println(a is absentOne);
+    stdout.println(absentOne is absentTwo);
+}

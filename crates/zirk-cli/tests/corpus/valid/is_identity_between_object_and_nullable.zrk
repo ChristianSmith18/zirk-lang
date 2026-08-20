@@ -1,0 +1,23 @@
+// `is` between a bare `T` and a `T?` used to reach the IR with two different
+// operand types (`Checker::check_binary`'s `Is` arm unifies them, the same
+// widening any other assignment allows, but lowering never inserted the
+// `Wrap` — `verify.rs` then rejected the mismatch as invalid IR). `is`
+// deliberately allows this unlike `==` (`ZIRK_LANGUAGE_SPEC.md` section 4):
+// identity is the one place comparing against a possibly-absent reference is
+// allowed.
+class Node {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut a: Node = Node(1);
+    mut sameAsA: Node? = a;
+    mut differentNode: Node? = Node(1);
+    mut absent: Node? = null;
+
+    stdout.println(a is sameAsA);
+    stdout.println(sameAsA is a);
+    stdout.println(a is differentNode);
+    stdout.println(a is absent);
+}

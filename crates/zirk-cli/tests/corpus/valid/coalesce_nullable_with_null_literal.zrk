@@ -1,0 +1,21 @@
+// `nullable ?? null` used to panic lowering: `type_of` has no answer for a
+// bare `Expr::Null` on purpose (it has no type of its own — everywhere else a
+// destination type supplies it first), but `lower_coalesce` and its `type_of`
+// counterpart both called it directly on the fallback to decide the
+// expression's own result type. A literal `null` fallback keeps the result
+// exactly as nullable as the left side already was.
+class Node {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut present: Node? = Node(7);
+    mut absent: Node? = null;
+
+    mut keptPresent: Node? = present ?? null;
+    mut keptAbsent: Node? = absent ?? null;
+
+    stdout.println(keptPresent?.value ?? -1);
+    stdout.println(keptAbsent?.value ?? -1);
+}

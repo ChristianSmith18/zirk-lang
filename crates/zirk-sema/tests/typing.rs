@@ -2020,6 +2020,30 @@ fn invalid_identity_on_a_value() {
 }
 
 #[test]
+fn valid_identity_between_two_nullable_receivers() {
+    // Unlike `==` (`reject_nullable_comparison`), `Is`'s own arm of
+    // `check_binary` has no such rejection: identity is the one place
+    // comparing against a possibly-absent reference is allowed
+    // (`ZIRK_LANGUAGE_SPEC.md` section 4).
+    accepted(
+        "class U { construct() { } }
+         fn main(): Void { mut a: U? = U(); mut b: U? = a; stdout.println(a is b); }",
+    );
+}
+
+#[test]
+fn valid_identity_between_a_bare_and_a_nullable_receiver() {
+    // `expect_same`'s own `unify` widens `U` to `U?` the same way an
+    // ordinary assignment would — found via a lowering bug where the
+    // checker accepted this and the IR did not agree with itself about
+    // which of the two types the comparison ran at.
+    accepted(
+        "class U { construct() { } }
+         fn main(): Void { mut a: U = U(); mut b: U? = a; stdout.println(a is b); }",
+    );
+}
+
+#[test]
 fn invalid_reaching_a_member_through_a_nullable_receiver() {
     // Calling through a value that may be absent is the same mistake as
     // reading through one.

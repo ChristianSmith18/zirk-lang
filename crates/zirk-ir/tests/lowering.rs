@@ -1177,3 +1177,128 @@ fn an_ordinary_upcast_retypes_without_a_runtime_check() {
             .any(|k| matches!(k, InstKind::CheckedCast { .. }))
     );
 }
+
+// --- Nullable objects and `?.` (found writing Fase 4's memory probes) -------
+
+const NODE: &str = "class Node { value: Int32; mut next: Node?;
+    construct(value: Int32) { this.value = value; this.next = null; } }";
+
+/// `is` between two `T?` operands used to panic LLVM codegen (`emit.rs`
+/// expected a bare pointer, not the `{i1, ptr}` struct a nullable lowers to).
+/// `compile`'s own `verify` call is what would have caught the IR-level half
+/// of this — the panic itself only ever showed up further down, in codegen.
+#[test]
+fn is_between_two_nullable_objects_compiles() {
+    let module = compile(&format!(
+        "{NODE}\nfn main(): Void {{
+             mut a: Node? = Node(1);
+             mut b: Node? = a;
+             mut r = a is b;
+         }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main).iter().any(|k| matches!(
+            k,
+            InstKind::Binary {
+                op: BinaryOp::Identical,
+                ..
+            }
+        )),
+        "`is` still lowers to `Identical`, just over operands that now agree"
+    );
+}
+
+/// `is` between a bare `T` and a `T?` used to reach the verifier with two
+/// different operand types: the checker's `expect_same` widens `T` to `T?`
+/// the same way an ordinary assignment would, but lowering never inserted
+/// the matching `Wrap`.
+#[test]
+fn is_between_object_and_nullable_object_widens_the_bare_side() {
+    let module = compile(&format!(
+        "{NODE}\nfn main(): Void {{
+             mut a: Node = Node(1);
+             mut b: Node? = Node(1);
+             mut r = a is b;
+         }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::Wrap { .. })),
+        "the bare operand is wrapped to `Node?` before `Identical` compares them"
+    );
+}
+
+/// `nullable ?? null` used to hit `type_of`'s `unreachable!` for `Expr::Null`
+/// — both in `lower_coalesce` directly and in its `type_of` counterpart,
+/// which decides the coalescence's own result type before lowering it.
+#[test]
+fn coalescing_a_nullable_with_a_null_literal_compiles() {
+    let module = compile(&format!(
+        "{NODE}\nfn main(): Void {{
+             mut a: Node? = Node(1);
+             mut b: Node? = a ?? null;
+         }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::IsNull(_))),
+        "`??` still lowers to an explicit null check even when the fallback is `null` itself"
+    );
+}
+
+/// `object.field = <expr containing `?.`>` used to produce IR where
+/// `StoreField`'s `object` operand was computed in a block that was no
+/// longer current once the `?.` on the right-hand side branched — exactly
+/// the "values do not cross blocks" defect ADR-007 exists to name.
+#[test]
+fn assigning_a_field_from_a_safe_navigation_expression_compiles() {
+    let module = compile(&format!(
+        "{NODE}\nfn main(): Void {{
+             mut a: Node = Node(1);
+             mut b: Node = Node(2);
+             mut maybeB: Node? = b;
+             a.next = maybeB?.next;
+         }}"
+    ));
+    let main = module.function("main").expect("main exists");
+
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::StoreField { .. })),
+        "the assignment still lowers to a field store, now with an operand that survives the branch"
+    );
+}
+
+/// A recursive function combining its own call with a `?.` read of the same
+/// discriminant in one `match` arm hit the same "values do not cross blocks"
+/// defect as the field-assignment case above, but from a different root
+/// cause: `Self::opens_blocks` did not know `?.` opens blocks of its own, so
+/// an earlier operand held across the call was never spilled to a slot.
+#[test]
+fn recursive_call_combined_with_safe_navigation_in_one_match_arm_compiles() {
+    let module = compile(&format!(
+        "{NODE}\nfn length(node: Node?): Int32 {{
+             return match node {{
+                 null => 0,
+                 n => 1 + length(n?.next),
+             }};
+         }}\nfn main(): Void {{ mut a: Node = Node(1); mut r = length(a); }}"
+    ));
+    let length = module.function("length").expect("length exists");
+
+    assert!(
+        instructions(length)
+            .iter()
+            .any(|k| matches!(k, InstKind::Call { callee, .. } if callee == "length")),
+        "the recursive call itself still lowers, alongside the `?.` argument that used to strand it"
+    );
+}
