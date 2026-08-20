@@ -1,0 +1,33 @@
+// A recursive function combining its own call with a `?.` read of the same
+// discriminant in one `match` arm used to produce invalid IR, the same
+// "values do not cross blocks" defect as `field_assign_from_safe_navigation`
+// but with a different root cause: `Self::opens_blocks` never recognized
+// that `?.` itself opens blocks (`lower_safe_field`'s absent/present split),
+// so an earlier operand held across a call whose argument was a `?.` read
+// was never spilled to a slot. This is the ordinary shape of walking a
+// hand-rolled linked list recursively, with no iterator protocol to lean on.
+class Node {
+    value: Int32;
+    mut next: Node?;
+    construct(value: Int32) {
+        this.value = value;
+        this.next = null;
+    }
+}
+
+fn length(node: Node?): Int32 {
+    return match node {
+        null => 0,
+        n => 1 + length(n?.next),
+    };
+}
+
+fn main(): Void {
+    mut a: Node = Node(1);
+    mut b: Node = Node(2);
+    mut c: Node = Node(3);
+    a.next = b;
+    b.next = c;
+
+    stdout.println(length(a));
+}

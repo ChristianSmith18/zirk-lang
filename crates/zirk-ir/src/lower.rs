@@ -1672,10 +1672,24 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::AssignTarget::Field(field) => {
                 // The object is evaluated before the value, which is the order
-                // it is written in.
+                // it is written in. When the value contains its own `?.` (or
+                // any other block-opening form), lowering it moves `self.current`
+                // to a fresh block — so the object computed here does not
+                // survive to the `StoreField` below unless it goes through a
+                // slot first, the same holder pattern `lower_safe_field` uses
+                // for its own receiver (values do not cross blocks, ADR-007).
                 let object = self.lower_expr(&field.object);
                 let (index, ty) = self.field_position(&field.object, &field.name.name);
+                let object_ty = self.type_of(&field.object, field.object.span());
+                let held = if self.opens_blocks(&stmt.value) {
+                    let holder = self.declare_slot("<assign_object>", object_ty, field.span);
+                    self.emit_effect(InstKind::Store(holder, object), stmt.span);
+                    Held::Spilled(holder, object_ty)
+                } else {
+                    Held::Value(object)
+                };
                 let value = self.lower_expr_as(&stmt.value, ty);
+                let object = self.reload(held, field.span);
                 self.emit_effect(
                     InstKind::StoreField {
                         object,
@@ -2384,7 +2398,15 @@ impl<'a> FunctionLowering<'a> {
                 // finds both operands already agreeing on. Every other
                 // operator the checker allows through here (comparison,
                 // bitwise, shift, equality) already requires the same type
-                // on both sides, so this never fires for them.
+                // on both sides, so this never fires for them — except `is`:
+                // unlike `==`, the checker deliberately lets `T is T?`
+                // through (`Checker::check_binary`'s `Is` arm has no
+                // `reject_nullable_comparison`, on purpose — identity is
+                // exactly the one place absence is allowed to participate,
+                // `ZIRK_LANGUAGE_SPEC.md` §4), the same way `T` widens to
+                // `T?` anywhere else it is assigned. `Wrap` here mirrors that
+                // widening so both operands reach the IR already agreeing on
+                // type (verify.rs's `Binary` check requires it).
                 let (left, right, operand_type) = match (left_ty, right_ty) {
                     (IrType::Int(_), IrType::Float(w)) => {
                         let left =
@@ -2398,6 +2420,36 @@ impl<'a> FunctionLowering<'a> {
                             e.right.span(),
                         );
                         (left, right, IrType::Float(w))
+                    }
+                    (base, IrType::Nullable(_))
+                        if op == BinaryOp::Identical && !matches!(base, IrType::Nullable(_)) =>
+                    {
+                        let nb = Nullable::of(base)
+                            .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                        let left = self.emit(
+                            InstKind::Wrap {
+                                base: nb,
+                                value: left,
+                            },
+                            right_ty,
+                            e.left.span(),
+                        );
+                        (left, right, right_ty)
+                    }
+                    (IrType::Nullable(_), base)
+                        if op == BinaryOp::Identical && !matches!(base, IrType::Nullable(_)) =>
+                    {
+                        let nb = Nullable::of(base)
+                            .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                        let right = self.emit(
+                            InstKind::Wrap {
+                                base: nb,
+                                value: right,
+                            },
+                            left_ty,
+                            e.right.span(),
+                        );
+                        (left, right, left_ty)
                     }
                     _ => (left, right, left_ty),
                 };
@@ -2573,7 +2625,16 @@ impl<'a> FunctionLowering<'a> {
     /// holds a value.
     fn lower_coalesce(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
         let left_type = self.type_of(&expr.left, expr.left.span());
-        let right_type = self.type_of(&expr.right, expr.right.span());
+        // A literal `null` fallback (`nullable ?? null`) has no type of its
+        // own — `type_of` on `Expr::Null` is `unreachable!` on purpose,
+        // because everywhere else a destination type supplies it first. Here
+        // the only sensible destination is the left side's own nullable
+        // type: the fallback keeps the result exactly as nullable as `a`
+        // already was, so this stands in for `type_of` instead of calling it.
+        let right_type = match &*expr.right {
+            ast::Expr::Null(_) => left_type,
+            _ => self.type_of(&expr.right, expr.right.span()),
+        };
         // The fallback decides: when it may itself be absent, so may the
         // result; otherwise the result always holds a value.
         let result_type = if matches!(right_type, IrType::Nullable(_)) {
@@ -3781,8 +3842,17 @@ impl<'a> FunctionLowering<'a> {
                     || self.opens_blocks(&e.right)
             }
             ast::Expr::Unary(e) => self.opens_blocks(&e.operand),
+            // `?.` itself lowers to the same absent/present/continue split as
+            // an `if` (`Self::lower_safe_field`/`lower_safe_method_call`), so
+            // it has to be recognized here too — missing this let a `?.`
+            // buried inside a call's argument or a field chain strand an
+            // earlier operand across the branch it opens (found via a
+            // recursive traversal combining a call with a `?.` read of the
+            // same discriminant in one arm).
+            ast::Expr::Field(e) => e.safe || self.opens_blocks(&e.object),
             ast::Expr::Call(e) => {
                 self.result_method(e).is_some()
+                    || self.opens_blocks(&e.callee)
                     || e.args.iter().any(|a| self.opens_blocks(&a.value))
             }
             ast::Expr::Println(e) => self.opens_blocks(&e.arg),
@@ -5290,12 +5360,19 @@ impl<'a> FunctionLowering<'a> {
             // arithmetic result: it is the one binary operator that is not an
             // operator in the IR at all.
             ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => {
-                let left = self.type_of(&e.left, e.left.span()).unwrapped();
-                let right = self.type_of(&e.right, e.right.span());
+                let left = self.type_of(&e.left, e.left.span());
+                // A literal `null` fallback has no type of its own — see
+                // `Self::lower_coalesce`'s matching special case — so the
+                // left side's own (still nullable) type stands in for it
+                // instead of calling `type_of` on `Expr::Null`.
+                let right = match &*e.right {
+                    ast::Expr::Null(_) => left,
+                    _ => self.type_of(&e.right, e.right.span()),
+                };
                 if matches!(right, IrType::Nullable(_)) {
                     right
                 } else {
-                    left
+                    left.unwrapped()
                 }
             }
             ast::Expr::Binary(e)

@@ -1,0 +1,24 @@
+// `object.field = <expr containing `?.`>` used to produce invalid IR:
+// `lower_assign`'s `Field` arm lowered the target object before the value,
+// but never held it across the value's own `?.` branch — so `StoreField`
+// referenced an operand computed in a block that was no longer current
+// (ADR-007, values do not cross blocks). Found writing a hand-rolled linked
+// list, where this is the ordinary shape of relinking a node around a
+// possibly-absent neighbor.
+class Node {
+    value: Int32;
+    mut next: Node?;
+    construct(value: Int32) { this.value = value; this.next = null; }
+}
+
+fn main(): Void {
+    mut a: Node = Node(1);
+    mut b: Node = Node(2);
+    mut c: Node = Node(3);
+    b.next = c;
+
+    mut maybeB: Node? = b;
+    a.next = maybeB?.next;
+
+    stdout.println(a.next?.value ?? -1);
+}

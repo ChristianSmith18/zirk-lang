@@ -1708,6 +1708,73 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
 
+        // `is` between two nullable references (`Node? is Node?`, or `T is T?`
+        // once `Self::lower_coalesce`'s sibling in `zirk-ir/lower.rs` has
+        // widened the narrower side) sees the `{i1, ptr}` struct a `T?`
+        // lowers to, not a bare pointer — `left.is_pointer_value()` below is
+        // false for it, and falling through to the integer/float paths
+        // panicked on the struct. Two absent references are identical to
+        // each other; an absent one is identical to nothing present; two
+        // present ones compare by address exactly like the non-nullable case.
+        if op == Identical && left.is_struct_value() {
+            let l = left.into_struct_value();
+            let r = right.into_struct_value();
+            let l_present = self
+                .builder
+                .build_extract_value(l, 0, "l_present")
+                .expect("nullable present flag")
+                .into_int_value();
+            let r_present = self
+                .builder
+                .build_extract_value(r, 0, "r_present")
+                .expect("nullable present flag")
+                .into_int_value();
+            let l_ptr = self
+                .builder
+                .build_extract_value(l, 1, "l_ptr")
+                .expect("nullable payload")
+                .into_pointer_value();
+            let r_ptr = self
+                .builder
+                .build_extract_value(r, 1, "r_ptr")
+                .expect("nullable payload")
+                .into_pointer_value();
+            let l_addr = self
+                .builder
+                .build_ptr_to_int(l_ptr, self.context.i64_type(), "lhs")
+                .expect("compare addresses");
+            let r_addr = self
+                .builder
+                .build_ptr_to_int(r_ptr, self.context.i64_type(), "rhs")
+                .expect("compare addresses");
+            let same_presence = self
+                .builder
+                .build_int_compare(IntPredicate::EQ, l_present, r_present, "same_presence")
+                .expect("compare presence");
+            let same_address = self
+                .compare(IntPredicate::EQ, l_addr, r_addr)
+                .into_int_value();
+            // When both are absent the address comparison is over whatever
+            // garbage the payload holds, so it is only consulted when `l` is
+            // actually present — `same_presence` already covers the
+            // both-absent and mixed cases on its own.
+            let identical_when_present = self
+                .builder
+                .build_or(
+                    self.builder
+                        .build_not(l_present, "l_absent")
+                        .expect("negate"),
+                    same_address,
+                    "identical_when_present",
+                )
+                .expect("combine");
+            return self
+                .builder
+                .build_and(same_presence, identical_when_present, "identical")
+                .expect("combine")
+                .into();
+        }
+
         // `ZIRK_LANGUAGE_SPEC.md` section 4: `==` compares structurally. Over a
         // `String` the operands are opaque handles, so comparing them as
         // integers would compare identity — which is what `is` means, not `==`.
