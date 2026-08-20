@@ -1,5 +1,12 @@
 # Cancellation and Cleanup
 
+> **Implementation status:** normative target only. Zirk has no task/thread
+> primitives yet (roadmap Phase 5), so there is no cancellation to observe and
+> nothing in the current compiler closes a resource scope on that path. Provable
+> abandonment, duplicate close, and illegal-escape diagnostics described below
+> depend on the escape analysis from [Resource Transfer](03-resource-transfer.md),
+> which is also unimplemented.
+
 Cancellation is cooperative and observed at safe points. Before a cancelled task finishes, its resource scopes close and the runtime waits for required cleanup.
 
 Cleanup should be bounded and cancellation-aware without abandoning invariants. A second shutdown signal or exhausted limit may force controlled termination, so cleanup cannot assume unlimited time.

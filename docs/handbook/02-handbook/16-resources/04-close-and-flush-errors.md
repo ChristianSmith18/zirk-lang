@@ -2,7 +2,13 @@
 
 Closing or flushing can fail. The resource contract defines how that failure is exposed, especially when another error is already active.
 
-A close failure never erases the primary outcome:
+> **Implementation status:** normative target only. Today, the automatic
+> `close()` call `match with` inserts on every exit path discards `close()`'s
+> own `Result` — a close failure is not combined with the body's outcome and
+> is not reported. `ResourceFailure<BodyError, CloseError>` does not exist,
+> and `suppressed` does not exist on `Error` (see [`finally`](../15-errors/06-finally.md)).
+
+A close failure never erases the primary outcome, once implemented:
 
 ```zirk
 enum ResourceFailure<BodyError, CloseError> {

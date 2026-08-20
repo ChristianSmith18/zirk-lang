@@ -10,12 +10,18 @@ inmut line = match File.open("data.txt") with file {
 ```
 
 The file closes before the expression delivers its value. Closure occurs on
-normal completion, `return`, exception, cancellation, and a `break` or
+normal completion, `return`, a propagating exception, and a `break` or
 `continue` that leaves the scope.
 
-Grouped acquisition opens left-to-right and closes right-to-left. If a later
-open fails, earlier resources close before the error branch executes. Nested
-`match with` remains equivalent and available.
+Grouped acquisition (`match a with x, b with y { ... }`, opening left-to-right
+and closing right-to-left with earlier resources closed before a later open's
+error branch runs) is normative but not implemented — one `match ... with`
+manages a single acquisition today. Nesting one `match with` inside another
+arm's body works, since each is an ordinary expression.
+
+> **Implementation status:** cancellation-triggered closure is normative but
+> not implemented — Zirk has no concurrency primitives yet (roadmap Phase 5),
+> so there is nothing to cancel a resource scope.
 
 ---
 
