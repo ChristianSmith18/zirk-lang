@@ -4677,22 +4677,11 @@ impl<'a> FunctionLowering<'a> {
         };
 
         let object_ty = self.type_of(&expr.object, expr.object.span());
-        // `?.` type-checks on a non-nullable receiver too (`member_type`
-        // only special-cases the nullable case) — narrowing (`match`'s own
-        // `null` arm, `Checker::check_match`) is exactly what makes that
-        // reachable: the receiver can no longer be absent, so there is
-        // nothing to branch on, only the result to wrap.
-        if !matches!(object_ty, IrType::Nullable(_)) {
-            let object = self.lower_expr(&expr.object);
-            let value = self.emit(InstKind::LoadField { object, index }, field_ty, span);
-            return if matches!(field_ty, IrType::Nullable(_)) {
-                value
-            } else {
-                let base = Nullable::of(field_ty)
-                    .expect("a field reachable through `?.` has a nullable form");
-                self.emit(InstKind::Wrap { base, value }, result_type, span)
-            };
-        }
+        // `Checker::reject_redundant_safe` rejects `?.` on a non-nullable
+        // receiver unconditionally (including a narrowing-derived one), so
+        // a checked program never reaches lowering with `object_ty` other
+        // than `Nullable` here.
+        debug_assert!(matches!(object_ty, IrType::Nullable(_)));
 
         let result = self.declare_slot("<safe_field>", result_type, span);
 
@@ -4817,61 +4806,12 @@ impl<'a> FunctionLowering<'a> {
             ),
         };
         let object_ty = self.type_of(&field.object, field.object.span());
-        // Same reasoning as `lower_safe_field`: narrowing can make a `?.`
-        // receiver provably present, and then there is nothing to branch
-        // on — the call is dispatched directly and only the result wrapped.
-        if !matches!(object_ty, IrType::Nullable(_)) {
-            let object = self.lower_expr(&field.object);
-            let mut args = Vec::new();
-            for (arg, ty) in call.args.iter().zip(params) {
-                args.push(self.lower_expr_as(&arg.value, ty));
-            }
-            let value = match dispatch {
-                SafeDispatch::Object {
-                    name,
-                    virtual_index,
-                } => match virtual_index {
-                    Some(index) => self.emit(
-                        InstKind::CallVirtual {
-                            object,
-                            index,
-                            args,
-                        },
-                        returns,
-                        span,
-                    ),
-                    None => {
-                        let mut all = vec![object];
-                        all.extend(args);
-                        self.emit(
-                            InstKind::Call {
-                                callee: name,
-                                args: all,
-                            },
-                            returns,
-                            span,
-                        )
-                    }
-                },
-                SafeDispatch::Contract { contract, index } => self.emit(
-                    InstKind::CallContract {
-                        object,
-                        contract,
-                        index,
-                        args,
-                    },
-                    returns,
-                    span,
-                ),
-            };
-            return Some(if matches!(returns, IrType::Nullable(_)) {
-                value
-            } else {
-                let base = Nullable::of(returns)
-                    .expect("a method reachable through `?.` has a nullable form");
-                self.emit(InstKind::Wrap { base, value }, result_type, span)
-            });
-        }
+        // `safe_method_call_info` already bails out (returning `None`, via
+        // the `?` above) unless `object_ty` is `Nullable`, and
+        // `Checker::reject_redundant_safe` rejects `?.` on a non-nullable
+        // receiver unconditionally — so a checked program never reaches
+        // this point with anything but a nullable `object_ty`.
+        debug_assert!(matches!(object_ty, IrType::Nullable(_)));
 
         // `Void` has no nullable form (`result_type` stays `Void` for it,
         // above) — there is nothing to store or merge, the same way
