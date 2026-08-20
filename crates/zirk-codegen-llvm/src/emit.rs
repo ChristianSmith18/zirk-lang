@@ -1326,17 +1326,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::Binary { op, left, right } => {
                 // The left operand's own width/signedness — the checker
-                // already required both sides to share it for every
-                // operator except a shift's own amount (roadmap Phase 3b,
-                // task 4.3/4.4), which is `right_signed` below.
+                // already required both sides to share it for every operator
+                // this function still guards; a shift amount's own
+                // (possibly different, roadmap Phase 3b task 4.3/4.4)
+                // signedness is no longer read here — `zirk-ir`'s own
+                // `Lowering::guard_shift` uses it upstream instead
+                // (`fase-4d-runtimeerror`, design D10).
                 let signed = self.is_signed(self.value_types[&left.0]);
-                let right_signed = self.is_signed(self.value_types[&right.0]);
                 Some(self.emit_binary(
                     *op,
                     self.operand(*left),
                     self.operand(*right),
                     signed,
-                    right_signed,
                     function,
                 ))
             }
@@ -1703,7 +1704,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         left: BasicValueEnum<'ctx>,
         right: BasicValueEnum<'ctx>,
         signed: bool,
-        right_signed: bool,
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
@@ -1796,12 +1796,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
 
         if left.is_float_value() {
-            return self.emit_float_binary(
-                op,
-                left.into_float_value(),
-                right.into_float_value(),
-                function,
-            );
+            return self.emit_float_binary(op, left.into_float_value(), right.into_float_value());
         }
 
         let l = left.into_int_value();
@@ -1886,12 +1881,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .expect("bitxor")
                 .into(),
 
-            // An amount outside the operand's own bit width is undefined at
-            // the LLVM level, so it is rejected before the native
-            // instruction runs, the same shape `checked_division` uses for
-            // its own guards (roadmap Phase 3b, task 4.4).
-            Shl => self.checked_shift(op, l, r, signed, right_signed, function),
-            Shr => self.checked_shift(op, l, r, signed, right_signed, function),
+            Shl => self.checked_shift(op, l, r, signed),
+            Shr => self.checked_shift(op, l, r, signed),
         }
     }
 
@@ -1981,15 +1972,22 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         result
     }
 
-    /// Division and remainder, checking the divisor and the one overflow case.
+    /// Division and remainder, checking the one remaining overflow case.
     ///
-    /// `ZIRK_LANGUAGE_SPEC.md` section 9 requires that a division by zero never
-    /// become undefined behaviour, and in LLVM `sdiv` by zero is exactly that.
+    /// The divisor is no longer checked here (`fase-4d-runtimeerror`, design
+    /// D10): `zirk-ir/src/lower.rs`'s own `Lowering::guard_division` now
+    /// compares it to zero and throws `DivisionByZeroError` *before* this
+    /// point is ever reached, as an ordinary `Branch` in the IR rather than a
+    /// codegen-level `trap_if` — a `sdiv`/`udiv` by zero here would be
+    /// undefined behaviour in LLVM (`ZIRK_LANGUAGE_SPEC.md` section 9), but
+    /// the guard upstream already guarantees `right` is nonzero whenever
+    /// this function runs.
     ///
-    /// `Int32::MIN / -1` is the other one: its result is one past the maximum,
-    /// so it overflows, and in LLVM it is undefined rather than wrapping. It is
-    /// the only pair of operands that overflows a division, which is why it is
-    /// checked here instead of through the overflow intrinsics.
+    /// `Int32::MIN / -1` is a separate case this function still guards
+    /// directly: its result is one past the maximum, so it overflows, and in
+    /// LLVM it is undefined rather than wrapping. `OverflowError` is out of
+    /// this pass's scope (`proposal.md`), so it keeps aborting via
+    /// `trap_if`/`fatalError`, unchanged.
     fn checked_division(
         &mut self,
         op: ir::BinaryOp,
@@ -1999,13 +1997,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let int_ty = left.get_type();
-        let zero = int_ty.const_zero();
-        let is_zero = self
-            .builder
-            .build_int_compare(IntPredicate::EQ, right, zero, "is_zero")
-            .expect("divisor comparison");
-
-        self.trap_if(is_zero, self.runtime.division_by_zero, function);
 
         // The one pair that overflows a division: `MIN / -1`, one past the
         // widest value the width can hold. Unsigned has no such minimum —
@@ -2065,47 +2056,22 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
     }
 
-    /// `<<`/`>>`, checked against the one thing that makes either undefined
-    /// at the LLVM level: an amount outside `0..bits` of the *shifted*
-    /// operand's own width — its amount may be a different, independent
-    /// width (roadmap Phase 3b, task 4.4), so the bound comes from `left`
-    /// and the comparison's own signedness comes from `right`.
+    /// `<<`/`>>`.
+    ///
+    /// No longer checked here (`fase-4d-runtimeerror`, design D10): an
+    /// amount outside `0..bits` of the *shifted* operand's own width — the
+    /// one thing that makes either shift undefined at the LLVM level — is
+    /// now checked upstream, in `zirk-ir/src/lower.rs`'s own
+    /// `Lowering::guard_shift`, as an ordinary IR `Branch` that throws
+    /// `InvalidShiftError` before this point is ever reached, in place of
+    /// this function's own former `trap_if`.
     fn checked_shift(
         &mut self,
         op: ir::BinaryOp,
         left: inkwell::values::IntValue<'ctx>,
         right: inkwell::values::IntValue<'ctx>,
         signed: bool,
-        right_signed: bool,
-        function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let amount_ty = right.get_type();
-        let zero = amount_ty.const_zero();
-        let width = amount_ty.const_int(u64::from(left.get_type().get_bit_width()), false);
-
-        // An unsigned amount is never negative by construction — the check
-        // is only meaningful, and only well-typed as a signed comparison,
-        // when the amount's own type is signed.
-        let invalid = if right_signed {
-            let is_negative = self
-                .builder
-                .build_int_compare(IntPredicate::SLT, right, zero, "shift_negative")
-                .expect("shift amount comparison");
-            let is_too_wide = self
-                .builder
-                .build_int_compare(IntPredicate::SGE, right, width, "shift_too_wide")
-                .expect("shift amount comparison");
-            self.builder
-                .build_or(is_negative, is_too_wide, "shift_invalid")
-                .expect("disjunction")
-        } else {
-            self.builder
-                .build_int_compare(IntPredicate::UGE, right, width, "shift_too_wide")
-                .expect("shift amount comparison")
-        };
-
-        self.trap_if(invalid, self.runtime.invalid_shift, function);
-
         match op {
             ir::BinaryOp::Shl => self
                 .builder
@@ -2126,61 +2092,48 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     ///
     /// Unlike integer arithmetic, there is no width/signedness table to pick
     /// an intrinsic from: LLVM's `fadd`/`fsub`/`fmul`/`fdiv`/`frem` already
-    /// work over any float width uniformly. What replaces the integer path's
-    /// overflow intrinsic is [`Self::check_not_nan`] — an overflowing float
-    /// result becomes a valid infinity (design D2), only a result IEEE 754
-    /// itself defines as `NaN` is a controlled error, so the check runs after
-    /// the operation rather than guarding before it.
+    /// work over any float width uniformly. An overflowing result becomes a
+    /// valid infinity (design D2) — only a result IEEE 754 itself defines as
+    /// `NaN` is a controlled error, and that is no longer checked here:
+    /// `zirk-ir/src/lower.rs`'s own `Lowering::guard_nan` now compares the
+    /// already-lowered `InstKind::Binary` result against itself and throws
+    /// `FloatNanError` after this operation runs, as an ordinary IR
+    /// `Branch` rather than this function's own former `trap_if`
+    /// (`fase-4d-runtimeerror`, design D10).
     fn emit_float_binary(
         &mut self,
         op: ir::BinaryOp,
         left: FloatValue<'ctx>,
         right: FloatValue<'ctx>,
-        function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
 
         match op {
-            Add => {
-                let result = self
-                    .builder
-                    .build_float_add(left, right, "fadd")
-                    .expect("addition");
-                self.check_not_nan(result, function);
-                result.into()
-            }
-            Sub => {
-                let result = self
-                    .builder
-                    .build_float_sub(left, right, "fsub")
-                    .expect("subtraction");
-                self.check_not_nan(result, function);
-                result.into()
-            }
-            Mul => {
-                let result = self
-                    .builder
-                    .build_float_mul(left, right, "fmul")
-                    .expect("multiplication");
-                self.check_not_nan(result, function);
-                result.into()
-            }
-            Div => {
-                let result = self
-                    .builder
-                    .build_float_div(left, right, "fdiv")
-                    .expect("division");
-                self.check_not_nan(result, function);
-                result.into()
-            }
-            Rem => {
-                let result = self
-                    .builder
-                    .build_float_rem(left, right, "frem")
-                    .expect("remainder");
-                self.check_not_nan(result, function);
-                result.into()
-            }
+            Add => self
+                .builder
+                .build_float_add(left, right, "fadd")
+                .expect("addition")
+                .into(),
+            Sub => self
+                .builder
+                .build_float_sub(left, right, "fsub")
+                .expect("subtraction")
+                .into(),
+            Mul => self
+                .builder
+                .build_float_mul(left, right, "fmul")
+                .expect("multiplication")
+                .into(),
+            Div => self
+                .builder
+                .build_float_div(left, right, "fdiv")
+                .expect("division")
+                .into(),
+            Rem => self
+                .builder
+                .build_float_rem(left, right, "frem")
+                .expect("remainder")
+                .into(),
             Eq => self.compare_float(FloatPredicate::OEQ, left, right),
             NotEq => self.compare_float(FloatPredicate::ONE, left, right),
             Lt => self.compare_float(FloatPredicate::OLT, left, right),
@@ -2205,19 +2158,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .build_float_compare(predicate, left, right, "fcmp")
             .expect("comparison")
             .into()
-    }
-
-    /// Traps if a `Float` arithmetic result is `NaN` (design D2).
-    ///
-    /// `x != x` is true if and only if `x` is `NaN` — the one IEEE 754
-    /// property that needs no dedicated LLVM intrinsic, just an ordinary
-    /// unordered-vs-ordered float comparison.
-    fn check_not_nan(&mut self, value: FloatValue<'ctx>, function: FunctionValue<'ctx>) {
-        let is_nan = self
-            .builder
-            .build_float_compare(FloatPredicate::UNO, value, value, "is_nan")
-            .expect("NaN check");
-        self.trap_if(is_nan, self.runtime.float_nan, function);
     }
 
     /// Transfers control to the runtime when a condition holds.

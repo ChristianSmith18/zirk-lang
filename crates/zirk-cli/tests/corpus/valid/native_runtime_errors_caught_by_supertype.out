@@ -1,0 +1,2 @@
+runtime: division by zero
+throwable: Float operation produced an indeterminate result (NaN)

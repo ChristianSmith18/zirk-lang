@@ -57,6 +57,31 @@ fn instructions(function: &Function) -> Vec<InstKind> {
         .collect()
 }
 
+/// The fixed `code()` strings of the four native failure classes
+/// (`fase-4d-runtimeerror`, design D8), in the order
+/// `Checker::register_native_exception_hierarchy` registers the classes and
+/// `synthesize_native_failure_bodies` lowers their bodies — every module's
+/// string table starts with these four, whether or not the program itself
+/// ever names one of the classes or triggers a native check.
+const NATIVE_FAILURE_CODES: [&str; 4] = [
+    "E_DIVISION_BY_ZERO",
+    "E_INVALID_SHIFT",
+    "E_INVALID_REPEAT",
+    "E_FLOAT_NAN",
+];
+
+const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
+
+/// The module string table a program's own literals produce, prefixed by
+/// the four always-present native failure codes above.
+fn native_failure_codes_then<const N: usize>(rest: [&str; N]) -> Vec<String> {
+    NATIVE_FAILURE_CODES
+        .iter()
+        .chain(rest.iter())
+        .map(|s| s.to_string())
+        .collect()
+}
+
 // --- Function shape ---------------------------------------------------------
 
 #[test]
@@ -112,13 +137,19 @@ fn a_boolean_literal_lowers_to_a_constant() {
 #[test]
 fn a_string_literal_goes_into_the_module_table() {
     let module = compile("fn main(): Void { mut x: String = \"hola\"; }");
-    assert_eq!(module.strings, vec!["hola".to_string()]);
+    // The four native failure classes' own `code()` bodies
+    // (`fase-4d-runtimeerror`, design D8) intern their fixed code strings
+    // unconditionally, the same way `UNREACHABLE_ABSTRACT_METHOD` is always
+    // synthesized whether or not a program ever names an `abstract class` —
+    // so every module's string table starts with those four, regardless of
+    // what the program itself writes.
+    assert_eq!(module.strings, native_failure_codes_then(["hola"]));
 }
 
 #[test]
 fn a_repeated_literal_is_interned_once() {
     let module = compile("fn main(): Void {\nmut a: String = \"x\";\nmut b: String = \"x\";\n}");
-    assert_eq!(module.strings.len(), 1);
+    assert_eq!(module.strings.len(), NATIVE_FAILURE_CODE_COUNT + 1);
 }
 
 // --- Locals as slots --------------------------------------------------------
@@ -489,7 +520,10 @@ fn the_ir_names_no_memory_strategy() {
 fn the_reference_program_of_the_roadmap_lowers() {
     let module = compile("fn main(): Void {\n    stdout.println(\"Hola desde Zirk\");\n}");
 
-    assert_eq!(module.strings, vec!["Hola desde Zirk".to_string()]);
+    assert_eq!(
+        module.strings,
+        native_failure_codes_then(["Hola desde Zirk"])
+    );
     let main = module.function("main").expect("main exists");
     assert_eq!(main.return_type, IrType::Void);
     assert!(

@@ -183,12 +183,23 @@ fn negation_goes_through_the_overflow_check() {
 
 #[test]
 fn division_checks_the_divisor() {
+    // The check itself moved to `zirk-ir` (`fase-4d-runtimeerror`, design
+    // D10): `checked_division` no longer calls `zirk_rt_division_by_zero`
+    // directly (that handler stays declared in the module only for the
+    // `noreturn` attribute it shares with the rest of that family, never
+    // called from here again) — instead, the divisor is compared to zero
+    // and, on a hit, a `DivisionByZeroError` is built and handed to
+    // `zirk_rt_throw`, the same mechanism an explicit `throw` uses.
     let ir = llvm_ir(&in_main(
         "mut a: Int32 = 10;\nmut b: Int32 = 2;\nmut c: Int32 = a / b;",
     ));
     assert!(
-        ir.contains(symbols::DIVISION_BY_ZERO),
+        ir.contains(symbols::THROW),
         "division by zero must not be undefined behaviour:\n{ir}"
+    );
+    assert!(
+        ir.contains("icmp eq i32"),
+        "the divisor is compared to zero:\n{ir}"
     );
     assert!(ir.contains("sdiv i32"));
 }
@@ -198,7 +209,7 @@ fn the_remainder_also_checks_the_divisor() {
     let ir = llvm_ir(&in_main(
         "mut a: Int32 = 10;\nmut b: Int32 = 3;\nmut c: Int32 = a % b;",
     ));
-    assert!(ir.contains(symbols::DIVISION_BY_ZERO));
+    assert!(ir.contains(symbols::THROW));
     assert!(ir.contains("srem i32"));
 }
 
@@ -359,6 +370,17 @@ fn generated_symbols_only_use_characters_every_assembler_accepts() {
     // safe set is not the same everywhere: `#` starts a comment in x86_64's
     // AT&T syntax, so a lifted lambda named `<lambda>#0` broke there and
     // nowhere else — aarch64 comments with `//`.
+    //
+    // `$` is accepted here even though it is outside that same AT&T set,
+    // because `zirk-ir/src/lower.rs`'s own `method_symbol`/`constructor_symbol`
+    // already build every class method's and constructor's own symbol with it
+    // (`Class$method`, `Class$construct$0`) — the four native failure classes
+    // `fase-4d-runtimeerror` adds (`DivisionByZeroError`, …) are the first
+    // thing to put one of those symbols in a program that declares no class
+    // of its own: their `message`/`code`/`cause`/`stack_trace` bodies are
+    // synthesized into every module unconditionally, the same "no
+    // `program.classes` entry, build it by hand" shape
+    // `zk.unreachable_abstract_method` already uses.
     let ir = llvm_ir(
         "fn main(): Void {\n\
          inmut A = 1;\n\
@@ -374,10 +396,17 @@ fn generated_symbols_only_use_characters_every_assembler_accepts() {
             .skip(1)
             .take_while(|c| *c != '(')
             .collect();
+        // LLVM's own textual printer wraps a global in `"..."` whenever its
+        // name contains a character outside its bare-identifier grammar
+        // (`$` is one, which is exactly why `Class$method` needs it) — that
+        // quoting is IR syntax, not part of the symbol the assembler
+        // ultimately sees, so it is stripped before checking what is inside.
+        let name = name.strip_prefix('"').unwrap_or(&name);
+        let name = name.strip_suffix('"').unwrap_or(name);
 
         assert!(
             name.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$'),
             "`{name}` uses a character an assembler may not accept"
         );
     }

@@ -1,0 +1,46 @@
+// Four native safety checks — division by zero, an out-of-range shift, a
+// negative string-repeat count, a `Float` operation producing `NaN` — throw
+// concrete, catchable `RuntimeError` subclasses instead of aborting the
+// process (`fase-4d-runtimeerror`): `DivisionByZeroError`, `InvalidShiftError`,
+// `InvalidRepeatError`, `FloatNanError`. None of them is declared, the way a
+// user's own `throws` would be — a native failure is implicit by design
+// (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3) — yet each is
+// caught here by its own concrete type.
+fn main(): Void {
+    try {
+        mut a: Int32 = 10;
+        mut b: Int32 = 0;
+        mut c: Int32 = a / b;
+        stdout.println(c);
+    } catch DivisionByZeroError(e) {
+        stdout.println("division: " + e.message());
+    }
+
+    try {
+        mut x: Int32 = 1;
+        mut shift: Int32 = 40;
+        mut y: Int32 = x << shift;
+        stdout.println(y);
+    } catch InvalidShiftError(e) {
+        stdout.println("shift: " + e.message());
+    }
+
+    try {
+        mut s: String = "ja";
+        mut n: Int32 = -1;
+        mut r: String = s * n;
+        stdout.println(r);
+    } catch InvalidRepeatError(e) {
+        stdout.println("repeat: " + e.message());
+    }
+
+    try {
+        mut zero: Float = 0.0;
+        mut nan: Float = zero / zero;
+        stdout.println(nan);
+    } catch FloatNanError(e) {
+        stdout.println("nan: " + e.message());
+    }
+
+    stdout.println("done");
+}
