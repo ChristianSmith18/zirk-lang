@@ -819,6 +819,83 @@ fn invalid_empty_enum_states_to_use_never() {
     assert!(output.contains("Never"));
 }
 
+// --- `Result<T,E>` (roadmap Phase 4a) ---------------------------------------
+
+#[test]
+fn valid_result_construction_and_match() {
+    accepted(
+        "fn load(fail: Boolean): Result<Int32, String> {\n\
+             if fail { return Result.Error(\"boom\"); }\n\
+             return Result.Ok(5);\n\
+         }\n\
+         fn main(): Void {\n\
+             mut r: Result<Int32, String> = load(false);\n\
+             match r {\n\
+                 Result.Ok(value) => stdout.println(value);\n\
+                 Result.Error(error) => stdout.println(error);\n\
+             }\n\
+         }",
+    );
+}
+
+#[test]
+fn valid_result_seven_in_scope_methods() {
+    accepted_body(
+        "mut r: Result<Int32, String> = Result.Ok(5);\n\
+         mut a: Boolean = r.is_ok();\n\
+         mut b: Boolean = r.is_error();\n\
+         mut c: Int32? = r.ok_or_null();\n\
+         mut d: String? = r.error_or_null();\n\
+         mut e: Int32 = r.get_or(0);\n\
+         mut f: Int32 = r.unwrap();\n\
+         mut g: String = r.unwrap_error();",
+    );
+}
+
+#[test]
+fn invalid_result_unknown_method() {
+    let output = rejected_body("mut r: Result<Int32, String> = Result.Ok(5);\nr.map_to_string();");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()));
+}
+
+#[test]
+fn invalid_result_get_or_wrong_argument_type() {
+    let output = rejected_body(
+        "mut r: Result<Int32, String> = Result.Ok(5);\nmut a: Int32 = r.get_or(\"nope\");",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_result_get_or_wrong_argument_count() {
+    let output =
+        rejected_body("mut r: Result<Int32, String> = Result.Ok(5);\nmut a: Int32 = r.get_or();");
+    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
+}
+
+#[test]
+fn invalid_result_cannot_be_reimplemented() {
+    let output = rejected("enum Result { Ok; }\nfn main(): Void { }");
+    assert!(output.contains(codes::DUPLICATE_DECLARATION.as_str()));
+}
+
+#[test]
+fn invalid_result_discarded_as_a_bare_statement() {
+    let output = rejected(
+        "fn load(): Result<Int32, String> { return Result.Ok(5); }\n\
+         fn main(): Void { load(); }",
+    );
+    assert!(output.contains(codes::DISCARDED_RESULT.as_str()));
+}
+
+#[test]
+fn valid_result_discarded_explicitly_with_underscore() {
+    accepted(
+        "fn load(): Result<Int32, String> { return Result.Ok(5); }\n\
+         fn main(): Void { _ = load(); }",
+    );
+}
+
 // --- Error recovery ---------------------------------------------------------
 
 #[test]

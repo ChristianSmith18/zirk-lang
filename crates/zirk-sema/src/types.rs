@@ -763,8 +763,11 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // never names it as an alias the way `Int`/`Integer` name `Int32`, so it
     // resolves to nothing even once every explicit width does.
     const PHASE_3B: &[&str] = &["UInt"];
-    // Phase 4 brings errors and resources.
-    const PHASE_4: &[&str] = &["Result", "Pointer", "Resource"];
+    // Phase 4 brings errors and resources. `Result<T,E>` is implemented now
+    // (roadmap Phase 4a — registered as a real enum, resolved by
+    // `resolve_type_atom`'s enum lookup ahead of this list, the same way
+    // any other declared enum is); `Pointer`/`Resource` are still pending.
+    const PHASE_4: &[&str] = &["Pointer", "Resource"];
     // Phase 5 brings concurrency.
     const PHASE_5: &[&str] = &["Task", "Channel", "Thread", "Atomic"];
     // Phase 7 brings the stdlib, and with it the collection and temporal
@@ -870,7 +873,7 @@ mod tests {
     fn types_from_later_phases_declare_their_phase() {
         assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
-        assert_eq!(pending_type("Result").map(|t| t.phase), Some(Phase::FOUR));
+        assert_eq!(pending_type("Resource").map(|t| t.phase), Some(Phase::FOUR));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
     }
 
