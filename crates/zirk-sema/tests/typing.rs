@@ -3344,3 +3344,147 @@ fn invalid_return_directly_inside_finally() {
         "{output}"
     );
 }
+
+// --- `Resource<E>` / `match ... with` (roadmap Phase 4c) --------------------
+
+const OPEN_ERROR: &str = "class OpenError implements Error {
+    inmut reason: String;
+    construct(reason: String) { this.reason = reason; }
+    override fn message(): String { return this.reason; }
+    override fn code(): String { return \"OPEN\"; }
+    override fn cause(): Error? { return null; }
+}";
+
+const FAKE_FILE: &str = "class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    mut closed: Boolean;
+    construct(name: String) { this.name = name; this.closed = false; }
+    fn nothing(): Void { return; }
+    override fn close(): Result<Void, OpenError> {
+        this.closed = true;
+        return Result.Ok(this.nothing());
+    }
+    override fn is_closed(): Boolean { return this.closed; }
+}
+
+fn open(name: String): Result<FakeFile, OpenError> {
+    return Result.Ok(FakeFile(name));
+}";
+
+#[test]
+fn valid_class_implements_resource() {
+    accepted(&format!(
+        "{OPEN_ERROR}
+         {FAKE_FILE}
+         fn main(): Void {{ }}"
+    ));
+}
+
+#[test]
+fn valid_match_with_closes_the_acquired_resource() {
+    accepted(&format!(
+        "{OPEN_ERROR}
+         {FAKE_FILE}
+         fn main(): Void {{
+             match open(\"a.txt\") with file {{
+                 Result.Ok(file) => {{
+                     stdout.println(file.name);
+                 }}
+                 Result.Error(error) => {{
+                     stdout.println(error.message());
+                 }}
+             }}
+         }}"
+    ));
+}
+
+#[test]
+fn valid_match_with_closes_on_early_return() {
+    accepted(&format!(
+        "{OPEN_ERROR}
+         {FAKE_FILE}
+         fn read(): Int32 {{
+             match open(\"a.txt\") with file {{
+                 Result.Ok(file) => {{
+                     return 1;
+                 }}
+                 Result.Error(error) => {{
+                     return -1;
+                 }}
+             }}
+             return 0;
+         }}
+         fn main(): Void {{ }}"
+    ));
+}
+
+#[test]
+fn invalid_class_does_not_implement_resource() {
+    let output = rejected(
+        "class OpenError implements Error {
+             inmut reason: String;
+             construct(reason: String) { this.reason = reason; }
+             override fn message(): String { return this.reason; }
+             override fn code(): String { return \"OPEN\"; }
+             override fn cause(): Error? { return null; }
+         }
+         class FakeFile implements Resource<OpenError> {
+             construct() { }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_with_binding_unused_by_any_arm() {
+    let output = rejected(&format!(
+        "{OPEN_ERROR}
+         {FAKE_FILE}
+         fn main(): Void {{
+             match open(\"a.txt\") with file {{
+                 Result.Ok(other) => {{ }}
+                 Result.Error(error) => {{ }}
+             }}
+         }}"
+    ));
+    assert!(
+        output.contains(codes::INVALID_RESOURCE_MATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_with_scrutinee_not_a_result() {
+    let output = rejected(
+        "fn main(): Void {
+             match 1 with file {
+                 _ => { }
+             }
+         }",
+    );
+    assert!(
+        output.contains(codes::INVALID_RESOURCE_MATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_match_with_binding_does_not_implement_resource() {
+    let output = rejected(
+        "fn describe(r: Result<Int32, String>): Void {
+             match r with file {
+                 Result.Ok(file) => { }
+                 Result.Error(error) => { }
+             }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::INVALID_RESOURCE_MATCH.as_str()),
+        "{output}"
+    );
+}

@@ -2899,6 +2899,27 @@ impl<'a> FunctionLowering<'a> {
                 }
             }
 
+            // `match ... with binding` (roadmap Phase 4c): whichever arm's
+            // own pattern binds `binding` owns the acquired `Resource<E>`
+            // and must close it on every exit — reuses the `try`/`finally`
+            // machinery (design D3, `fase-4b-excepciones/design.md`)
+            // wholesale, with no `catch` of its own, so `run_finally_through`
+            // already closes it on a `return`/`break`/`continue` written
+            // inside the arm, and `lower_pending_exception_dispatch` already
+            // closes it on a propagating exception — this only has to build
+            // the frame and run it once more on the fall-through path,
+            // exactly as `lower_try` does for a real `finally`.
+            let resource_finally = expr.with_binding.as_ref().and_then(|binding| {
+                Self::pattern_binds(&arm.pattern, &binding.name)
+                    .then(|| Self::resource_close_block(&binding.name, arm.span))
+            });
+            if let Some(finally) = &resource_finally {
+                self.try_stack.push(TryFrame {
+                    catches: Vec::new(),
+                    finally: Some(finally.clone()),
+                });
+            }
+
             let value = match &arm.body {
                 ast::ArmBody::Expr(e) => self.lower_expr(e),
                 ast::ArmBody::Block(b) if result_type == IrType::Void => {
@@ -2907,6 +2928,13 @@ impl<'a> FunctionLowering<'a> {
                 }
                 ast::ArmBody::Block(b) => self.lower_block_value(b),
             };
+
+            if resource_finally.is_some() {
+                self.try_stack.pop();
+                if self.block_mut(self.current).terminator.is_none() {
+                    self.lower_finally_block(&resource_finally);
+                }
+            }
             self.scopes.pop();
 
             if let Some(slot) = result {
@@ -3419,6 +3447,46 @@ impl<'a> FunctionLowering<'a> {
     /// `lower_continue` paths, which do not consult `try_stack` — narrower
     /// than design D2's full rule (every exit path runs `finally`), and
     /// documented as such (`fase-4b-excepciones/design.md`'s own risk list).
+    /// Whether `pattern` — bare or inside a variant's `(...)` — binds `name`
+    /// (roadmap Phase 4c), the same shape [`Self::declare_pattern_types`]
+    /// already walks for an ordinary arm.
+    fn pattern_binds(pattern: &ast::Pattern, name: &str) -> bool {
+        match pattern {
+            ast::Pattern::Binding(ident) => ident.name == name,
+            ast::Pattern::Variant(v) => v.bindings.iter().any(|p| Self::pattern_binds(p, name)),
+            _ => false,
+        }
+    }
+
+    /// Synthesizes `binding.close();` as a one-statement block (roadmap
+    /// Phase 4c) — a `Resource<E>`'s `close(): Result<Void,E>` called for
+    /// its own side effect and never for its returned `Result`, the same
+    /// simplification this pass's own scope narrowing accepts: a close
+    /// failure is not merged into `ResourceFailure<BodyError,CloseError>`
+    /// (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4), only
+    /// discarded. Lowered through the ordinary method-call path
+    /// (`Self::lower_expr_for_effect`'s `method_of` arm), which resolves
+    /// `binding` by its own slot in `self.scopes` — no checker-side table is
+    /// consulted, since none was built for this synthetic node.
+    fn resource_close_block(name: &str, span: Span) -> ast::Block {
+        let object = ast::Expr::Path(ast::Ident::new(name.to_string(), span));
+        let callee = ast::Expr::Field(ast::FieldExpr {
+            object: Box::new(object),
+            name: ast::Ident::new("close".to_string(), span),
+            safe: false,
+            span,
+        });
+        let call = ast::Expr::Call(ast::CallExpr {
+            callee: Box::new(callee),
+            args: Vec::new(),
+            span,
+        });
+        ast::Block {
+            statements: vec![ast::Stmt::Expr(ast::ExprStmt { expr: call, span })],
+            span,
+        }
+    }
+
     fn lower_finally_block(&mut self, finally: &Option<ast::Block>) {
         if let Some(block) = finally {
             self.lower_block(block);

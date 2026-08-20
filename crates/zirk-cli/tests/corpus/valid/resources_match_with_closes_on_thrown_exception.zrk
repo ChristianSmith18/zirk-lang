@@ -1,0 +1,62 @@
+// `match ... with` (roadmap Phase 4c) closes its resource on a propagating
+// exception too, not only on `return`/normal completion — the frame it
+// pushes has no `catch` of its own, so `lower_pending_exception_dispatch`
+// (roadmap Phase 4b, design D2) runs its `finally` on the way past exactly
+// as it would for a real `try`, then keeps escalating.
+class OpenError implements Error {
+    inmut reason: String;
+    construct(reason: String) { this.reason = reason; }
+    override fn message(): String { return this.reason; }
+    override fn code(): String { return "OPEN"; }
+    override fn cause(): Error? { return null; }
+}
+
+class BoomError implements RuntimeError {
+    construct() { }
+    override fn message(): String { return "boom"; }
+    override fn code(): String { return "BOOM"; }
+    override fn cause(): Error? { return null; }
+    override fn stack_trace(): StackTrace { return StackTrace(); }
+}
+
+class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    mut closed: Boolean;
+    construct(name: String) { this.name = name; this.closed = false; }
+    fn nothing(): Void { return; }
+    override fn close(): Result<Void, OpenError> {
+        this.closed = true;
+        stdout.println("closed " + this.name);
+        return Result.Ok(this.nothing());
+    }
+    override fn is_closed(): Boolean { return this.closed; }
+}
+
+fn open(name: String): Result<FakeFile, OpenError> {
+    return Result.Ok(FakeFile(name));
+}
+
+fn risky(): Int32 throws BoomError {
+    throw BoomError();
+}
+
+fn use_it(): Int32 throws BoomError {
+    match open("thrown.txt") with file {
+        Result.Ok(file) => {
+            return risky();
+        }
+        Result.Error(error) => {
+            return -1;
+        }
+    }
+    return -2;
+}
+
+fn main(): Void {
+    try {
+        use_it();
+    } catch BoomError(e) {
+        stdout.println("caught: " + e.message());
+    }
+    stdout.println("done");
+}

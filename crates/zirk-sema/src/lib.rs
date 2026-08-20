@@ -129,4 +129,10 @@ pub mod codes {
     /// A bare `throw;` outside a `catch` (roadmap Phase 4b) — legal only as
     /// a rethrow of the value the enclosing `catch` bound.
     pub const RETHROW_OUTSIDE_CATCH: Code = Code::new("E0437");
+    /// A `match ... with binding` (roadmap Phase 4c,
+    /// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4) whose
+    /// scrutinee is not a `Result<R,Err>`, or whose `binding` names no
+    /// arm's own pattern binding, or whose bound value does not implement
+    /// `Resource<E>`.
+    pub const INVALID_RESOURCE_MATCH: Code = Code::new("E0438");
 }

@@ -446,10 +446,8 @@ fn invalid_other_stdout_method() {
 #[test]
 fn invalid_constructs_from_other_phases_say_which() {
     for (source_text, text, phase) in [
-        // `try`/`catch`/`finally` are implemented (roadmap Phase 4b);
-        // `match with` still needs `Resource<E>`, which needs exceptions
-        // already running, so `with` stays gated a little longer.
-        ("fn main(): Void { match with x { } }", "with", "Phase 4"),
+        // `try`/`catch`/`finally` (roadmap Phase 4b) and `match ... with`
+        // (roadmap Phase 4c) are both implemented now.
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
         // `**` still needs `Float` (bitwise/shift no longer belong here:
@@ -1140,10 +1138,27 @@ fn valid_patterns_cover_the_forms_of_this_phase() {
 }
 
 #[test]
-fn valid_match_with_states_its_phase() {
-    let output = errors("fn main(): Void { match with r { } }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("Phase 4"), "{output}");
+fn valid_match_with_binding() {
+    let e = expression(
+        "match File.open(path) with file { Result.Ok(file) => a, Result.Error(error) => b }",
+    );
+    let Expr::Match(m) = &e else {
+        panic!("expected a match");
+    };
+    assert_eq!(
+        m.with_binding.as_ref().map(|i| i.name.as_str()),
+        Some("file")
+    );
+    assert!(matches!(m.arms[0].pattern, Pattern::Variant(_)));
+}
+
+#[test]
+fn valid_match_without_with_binding_is_still_none() {
+    let e = expression("match x { _ => a }");
+    let Expr::Match(m) = &e else {
+        panic!("expected a match");
+    };
+    assert!(m.with_binding.is_none());
 }
 
 // --- Nullability -----------------------------------------------------------
