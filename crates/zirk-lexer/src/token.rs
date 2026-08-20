@@ -61,6 +61,10 @@ pub enum Keyword {
     Try,
     Catch,
     Finally,
+    /// `throw expr;` / `throw;` (rethrow, roadmap Phase 4b).
+    Throw,
+    /// `throws Type (| Type)*` on a function signature (roadmap Phase 4b).
+    Throws,
     Class,
     Construct,
     This,
@@ -125,6 +129,8 @@ impl Keyword {
             "try" => Try,
             "catch" => Catch,
             "finally" => Finally,
+            "throw" => Throw,
+            "throws" => Throws,
             "class" => Class,
             "construct" => Construct,
             "this" => This,
@@ -187,6 +193,8 @@ impl Keyword {
             Try => "try",
             Catch => "catch",
             Finally => "finally",
+            Throw => "throw",
+            Throws => "throws",
             Class => "class",
             Construct => "construct",
             This => "this",
@@ -232,10 +240,16 @@ impl Keyword {
     pub const fn phase(self) -> Option<Phase> {
         use Keyword::*;
         Some(match self {
-            // `default` labels the catch-all arm of a `try`, so it arrives with
-            // error handling and not with the decorators it used to be filed
-            // under.
-            Try | Catch | Finally | With | Unsafe | Default => Phase::FOUR,
+            // `match with` needs `Resource<E>`, which needs exceptions already
+            // running — still Phase 4 (roadmap Phase 4b's own "fuera de
+            // alcance"). `unsafe`/`Pointer<T>` are the memory-strategy half of
+            // Phase 4, not exceptions. `default` labels the catch-all arm of a
+            // `try`, so it arrives with error handling and not with the
+            // decorators it used to be filed under — but `catch Throwable(e)`
+            // already means "catch everything" for this phase's scope
+            // (`fase-4b-excepciones`), so `default` stays gated a little
+            // longer, until `match with` needs its own catch-all arm.
+            With | Unsafe | Default => Phase::FOUR,
             Task | Await | Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.

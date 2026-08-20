@@ -177,6 +177,33 @@ fn verify_instruction(
             }
         }
 
+        InstKind::Throw(exception) => {
+            expect(inst.ty, IrType::Void, position, "Throw", report);
+            if let Some(ty) = type_of(exception)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: Throw's exception is {}, neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::HasPendingException => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "HasPendingException",
+                report,
+            );
+        }
+
+        // No shape to check: `ty` is whichever class the matching `catch`
+        // declared (roadmap Phase 4b) — see `InstKind::TakePendingException`'s
+        // own doc comment.
+        InstKind::TakePendingException => {}
+
         InstKind::GraphemeLenAt { string, offset } => {
             expect(
                 inst.ty,
@@ -229,6 +256,11 @@ fn verify_instruction(
             }
         }
 
+        // No shape to check: `ty` is whatever the caller asked for, by
+        // construction (roadmap Phase 4b's own `throw` early-return
+        // placeholder) — see `InstKind::Undefined`'s own doc comment.
+        InstKind::Undefined => {}
+
         InstKind::Alloc(id) => match module.objects.get(*id as usize) {
             None => report(format!(
                 "{position}: allocates object layout {id}, which is not in the module table"
@@ -261,6 +293,26 @@ fn verify_instruction(
                 }
             }
         },
+
+        InstKind::IsInstance {
+            object,
+            target_class,
+        } => {
+            if module.objects.get(*target_class as usize).is_none() {
+                report(format!(
+                    "{position}: tests object layout {target_class}, which is not in the module table"
+                ));
+            }
+            expect(inst.ty, IrType::Boolean, position, "IsInstance", report);
+            if let Some(ty) = type_of(object)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: tests {}, which is neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+        }
 
         InstKind::Retype(operand) => {
             if let Some(ty) = type_of(operand)
@@ -917,6 +969,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::ConstString(_)
         | InstKind::ConstChar(_) => Vec::new(),
         InstKind::FatalError(message) => vec![*message],
+        InstKind::Throw(exception) => vec![*exception],
+        InstKind::HasPendingException | InstKind::TakePendingException => vec![],
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
@@ -924,6 +978,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::BuildEnum { fields, .. } => fields.clone(),
         InstKind::Discriminant(operand) => vec![*operand],
         InstKind::CheckedCast { object, .. } => vec![*object],
+        InstKind::IsInstance { object, .. } => vec![*object],
+        InstKind::Undefined => vec![],
         InstKind::Retype(operand) => vec![*operand],
         InstKind::IntCast(operand) => vec![*operand],
         InstKind::ConstFloat(_, _) => Vec::new(),

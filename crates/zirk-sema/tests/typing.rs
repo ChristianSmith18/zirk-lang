@@ -3176,3 +3176,171 @@ fn invalid_abstract_class_is_not_lowered_yet() {
     let output = rejected(&format!("{SHAPE}\nfn main(): Void {{ }}"));
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
+
+// --- `throw`/`try`/`catch`/`finally` (roadmap Phase 4b) ----------------------
+
+const BOOM_ERROR: &str = "class BoomError implements RuntimeError {
+    construct() { }
+    override fn message(): String { return \"boom\"; }
+    override fn code(): String { return \"BOOM\"; }
+    override fn cause(): Error? { return null; }
+    override fn stack_trace(): StackTrace { return StackTrace(); }
+}";
+
+#[test]
+fn valid_throw_and_catch_by_concrete_type() {
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             try {{
+                 throw BoomError();
+             }} catch BoomError(e) {{
+                 stdout.println(e.message());
+             }}
+         }}"
+    ));
+}
+
+#[test]
+fn valid_catch_by_throwable_supertype() {
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             try {{
+                 throw BoomError();
+             }} catch Throwable(e) {{
+                 stdout.println(e.message());
+             }}
+         }}"
+    ));
+}
+
+#[test]
+fn valid_rethrow_inside_catch() {
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn wrapper(): Void throws BoomError {{
+             try {{
+                 throw BoomError();
+             }} catch BoomError(e) {{
+                 throw;
+             }}
+         }}
+         fn main(): Void {{
+             try {{
+                 wrapper();
+             }} catch Throwable(e) {{
+                 stdout.println(e.message());
+             }}
+         }}"
+    ));
+}
+
+#[test]
+fn valid_throws_declaration_covers_propagation() {
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn explode(): Void throws BoomError {{
+             throw BoomError();
+         }}
+         fn main(): Void throws BoomError {{
+             explode();
+         }}"
+    ));
+}
+
+#[test]
+fn valid_finally_always_runs() {
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             try {{
+                 throw BoomError();
+             }} catch BoomError(e) {{
+                 stdout.println(e.message());
+             }} finally {{
+                 stdout.println(\"cleanup\");
+             }}
+         }}"
+    ));
+}
+
+#[test]
+fn invalid_throw_of_non_throwable_type() {
+    let output = rejected_body("throw \"not throwable\";");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_uncaught_throw_must_be_declared() {
+    let output = rejected(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             throw BoomError();
+         }}"
+    ));
+    assert!(output.contains(codes::UNCAUGHT_THROW.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_uncovered_throw_from_a_call_must_be_declared() {
+    let output = rejected(&format!(
+        "{BOOM_ERROR}
+         fn explode(): Void throws BoomError {{
+             throw BoomError();
+         }}
+         fn main(): Void {{
+             explode();
+         }}"
+    ));
+    assert!(output.contains(codes::UNCAUGHT_THROW.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_unreachable_catch_after_a_broader_one() {
+    let output = rejected(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             try {{
+                 throw BoomError();
+             }} catch Throwable(e) {{
+                 stdout.println(e.message());
+             }} catch BoomError(e) {{
+                 stdout.println(e.message());
+             }}
+         }}"
+    ));
+    assert!(
+        output.contains(codes::UNREACHABLE_CATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_bare_rethrow_outside_catch() {
+    let output = rejected_body("throw;");
+    assert!(
+        output.contains(codes::RETHROW_OUTSIDE_CATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_return_directly_inside_finally() {
+    let output = rejected(&format!(
+        "{BOOM_ERROR}
+         fn f(): Void {{
+             try {{
+                 throw BoomError();
+             }} catch BoomError(e) {{
+             }} finally {{
+                 return;
+             }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+    assert!(
+        output.contains(codes::FINALLY_REPLACES_OUTCOME.as_str()),
+        "{output}"
+    );
+}

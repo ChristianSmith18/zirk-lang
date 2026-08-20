@@ -450,6 +450,17 @@ impl Module {
         self.functions.iter().find(|f| f.name == name)
     }
 
+    /// The layout id of a class, by name — what `objects[id]` should be
+    /// indexed by instead of a hardcoded position, since the compiler-known
+    /// classes (roadmap Phase 4b: `Error`/`Throwable`/`RuntimeError`/
+    /// `StackTrace`) are registered ahead of anything a program declares.
+    pub fn object_id(&self, name: &str) -> Option<u32> {
+        self.objects
+            .iter()
+            .position(|o| o.name == name)
+            .map(|i| i as u32)
+    }
+
     /// Records a literal, reusing it if it already exists.
     pub fn intern_string(&mut self, value: &str) -> StringId {
         if let Some(index) = self.strings.iter().position(|s| s == value) {
@@ -563,6 +574,23 @@ pub enum InstKind {
     /// `Terminator::Unreachable` immediately after, since control never
     /// returns to whatever instruction would otherwise follow.
     FatalError(Operand),
+    /// Records `Operand` as the pending exception (roadmap Phase 4b) —
+    /// `throw`'s own lowering, right before the current function's own
+    /// early `Terminator::Return` (unlike `FatalError`, this returns
+    /// normally rather than aborting the process; see
+    /// `zirk-runtime/src/exceptions.rs`'s own doc comment for the whole
+    /// propagation mechanism, design decision D1 of
+    /// `fase-4b-excepciones`).
+    Throw(Operand),
+    /// Whether an exception is pending (roadmap Phase 4b), `IrType::Boolean`
+    /// — emitted right after a call to a function/method that can throw.
+    HasPendingException,
+    /// Takes the pending exception, clearing the slot (roadmap Phase 4b) —
+    /// a matching `catch`'s own lowering, right after `IsInstance` confirms
+    /// it. Typed as whichever class the matching `catch` declared: the
+    /// pointer is type-erased at the runtime boundary, but `IsInstance`
+    /// already proved it fits.
+    TakePendingException,
     /// Byte length of the grapheme at `offset` within `string`, or `-1` past
     /// the end (roadmap Phase 3b, task 6.3: `for ... in` over `String`
     /// produces `Char`). `offset` is threaded as an ordinary `Int64`
@@ -620,6 +648,25 @@ pub enum InstKind {
     /// the same pointer unchanged; only its declared type differs from
     /// `value`'s.
     CheckedCast {
+        object: Operand,
+        target_class: u32,
+    },
+    /// A value nothing may read (roadmap Phase 4b) — the placeholder
+    /// `throw`'s own early `Terminator::Return` needs when the enclosing
+    /// function's return type has no cheap zero value
+    /// ([`Lowering::default_value`] covers Int/Float/Boolean/String/
+    /// Nullable; this covers everything else). Sound only because the
+    /// caller checks `zirk_rt_has_pending_exception()` before ever looking
+    /// at what a `throws` call returned — LLVM's own `undef`, the same
+    /// escape hatch codegen already reaches for elsewhere when a value is
+    /// built field-by-field and momentarily incomplete.
+    Undefined,
+    /// `catch Type(name)`'s own runtime test (roadmap Phase 4b): whether
+    /// `object`'s actual class is `target_class` or one of its ancestors —
+    /// [`InstKind::CheckedCast`]'s own question, but answered rather than
+    /// asserted, since a `catch` that does not match must keep running (try
+    /// the next `catch`, or re-propagate) rather than terminate the process.
+    IsInstance {
         object: Operand,
         target_class: u32,
     },

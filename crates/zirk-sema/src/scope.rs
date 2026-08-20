@@ -140,6 +140,10 @@ pub struct Signature {
     /// constructor's own type parameter is not tracked here yet, so a call to
     /// one is never inferred (roadmap task 7.6 covers functions only so far).
     pub type_params: Vec<u32>,
+    /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
+    /// Phase 4b) — each a resolved `Base::Class` that is (transitively)
+    /// `Throwable`.
+    pub throws: Vec<Type>,
 }
 
 impl Signature {

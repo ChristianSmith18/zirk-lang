@@ -416,6 +416,32 @@ fn emit_c_entrypoint<'ctx>(
     builder
         .build_call(zirk_main, &[], "")
         .expect("call to Zirk main");
+
+    // `main` itself may declare `throws` and still leave an exception
+    // pending — nothing above it in the call chain checks (roadmap Phase
+    // 4b, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3: "an
+    // uncaught `main` exception ... exits nonzero"). `zirk_rt_uncaught_exception`
+    // never returns, so the block after it is unreachable.
+    let pending = builder
+        .build_call(runtime.has_pending_exception, &[], "")
+        .expect("call to the pending-exception query")
+        .try_as_basic_value()
+        .basic()
+        .expect("has_pending_exception returns a value")
+        .into_int_value();
+    let uncaught_block = context.append_basic_block(main, "uncaught_exception");
+    let clean_block = context.append_basic_block(main, "clean_exit");
+    builder
+        .build_conditional_branch(pending, uncaught_block, clean_block)
+        .expect("branch on the pending exception");
+
+    builder.position_at_end(uncaught_block);
+    builder
+        .build_call(runtime.uncaught_exception, &[], "")
+        .expect("call to the uncaught-exception handler");
+    builder.build_unreachable().expect("never returns");
+
+    builder.position_at_end(clean_block);
     builder
         .build_call(runtime.shutdown, &[], "")
         .expect("call to the runtime shutdown");
@@ -656,6 +682,27 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 call.try_as_basic_value().basic()
             }
 
+            // `throw`'s own early-return placeholder (roadmap Phase 4b) —
+            // see `InstKind::Undefined`'s own doc comment. `Void`/`Never`
+            // produce no value at all, the same as any other instruction
+            // whose type is one of those.
+            ir::InstKind::Undefined => llvm_type_in(
+                self.context,
+                instruction.ty,
+                &self.module.closures,
+                &self.module.values,
+                &self.module.enums,
+            )
+            .map(|ty| match ty {
+                BasicTypeEnum::IntType(t) => t.get_undef().into(),
+                BasicTypeEnum::FloatType(t) => t.get_undef().into(),
+                BasicTypeEnum::PointerType(t) => t.get_undef().into(),
+                BasicTypeEnum::StructType(t) => t.get_undef().into(),
+                BasicTypeEnum::ArrayType(t) => t.get_undef().into(),
+                BasicTypeEnum::VectorType(t) => t.get_undef().into(),
+                BasicTypeEnum::ScalableVectorType(t) => t.get_undef().into(),
+            }),
+
             ir::InstKind::CheckedCast {
                 object,
                 target_class,
@@ -685,6 +732,35 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     )
                     .expect("confirm the checked cast");
                 Some(receiver.into())
+            }
+
+            // `catch Type(name)`'s own runtime test (roadmap Phase 4b): the
+            // same descriptor load `CheckedCast` does, but through
+            // `zirk_rt_is_instance`, which answers rather than terminates.
+            ir::InstKind::IsInstance {
+                object,
+                target_class,
+            } => {
+                let receiver = self.operand(*object).into_pointer_value();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let descriptor = self
+                    .builder
+                    .build_load(ptr, receiver, "descriptor")
+                    .expect("load the descriptor")
+                    .into_pointer_value();
+                let target = self
+                    .context
+                    .i64_type()
+                    .const_int(u64::from(*target_class), false);
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.is_instance,
+                        &[descriptor.into(), target.into()],
+                        "is_instance",
+                    )
+                    .expect("test the instance");
+                call.try_as_basic_value().basic()
             }
 
             // A proven-safe widening (a subclass where its base is
@@ -834,8 +910,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 args,
             } => {
                 let receiver = self.operand(*object).into_pointer_value();
-                let id = self.object_layout_of(*object);
-                let layout = &self.module.objects[id as usize];
 
                 // The descriptor lives in the header, so which body runs is
                 // decided by the object itself and not by the static type of
@@ -866,12 +940,40 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("load the method")
                     .into_pointer_value();
 
-                let signature = self.functions[&layout.methods[*index as usize]].get_type();
-                let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
-                arguments.extend(
-                    args.iter()
-                        .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
-                );
+                let basic_values: Vec<BasicValueEnum> = std::iter::once(receiver.into())
+                    .chain(args.iter().map(|a| self.operand(*a)))
+                    .collect();
+
+                // Built from the call's own known return type and each
+                // argument's own LLVM type, not from
+                // `self.functions[&layout.methods[index]]`'s declared type
+                // (roadmap Phase 4b) — that name is whichever class the
+                // *static* receiver type happens to be, which for a value
+                // statically typed as an `abstract class` (`catch
+                // Throwable(e)`, `e.message()`) is
+                // `UNREACHABLE_ABSTRACT_METHOD`'s dummy `Void`, no-argument
+                // shape, not `message`'s real `(): String`. The dynamic
+                // target loaded above already resolves to the concrete
+                // implementation regardless; only the indirect call's own
+                // ABI shape was ever at risk of disagreeing with it.
+                let param_types: Vec<BasicMetadataTypeEnum> = basic_values
+                    .iter()
+                    .map(|v| BasicMetadataTypeEnum::from(v.get_type()))
+                    .collect();
+                let arguments: Vec<BasicMetadataValueEnum> = basic_values
+                    .into_iter()
+                    .map(BasicMetadataValueEnum::from)
+                    .collect();
+                let signature = match llvm_type_in(
+                    self.context,
+                    instruction.ty,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                ) {
+                    Some(ty) => ty.fn_type(&param_types, false),
+                    None => self.context.void_type().fn_type(&param_types, false),
+                };
 
                 let call = self
                     .builder
@@ -1152,6 +1254,29 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     )
                     .expect("call to the fatal error handler");
                 None
+            }
+
+            ir::InstKind::Throw(exception) => {
+                self.builder
+                    .build_call(self.runtime.throw, &[self.operand(*exception).into()], "")
+                    .expect("record the pending exception");
+                None
+            }
+
+            ir::InstKind::HasPendingException => {
+                let call = self
+                    .builder
+                    .build_call(self.runtime.has_pending_exception, &[], "has_pending")
+                    .expect("query the pending exception");
+                call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::TakePendingException => {
+                let call = self
+                    .builder
+                    .build_call(self.runtime.take_pending_exception, &[], "take_pending")
+                    .expect("take the pending exception");
+                call.try_as_basic_value().basic()
             }
 
             ir::InstKind::Load(slot) => {

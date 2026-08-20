@@ -32,6 +32,7 @@
 //! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
 //! and Phase 5 (concurrency) hook without refactoring codegen.
 
+mod exceptions;
 mod failure;
 mod io;
 mod memory;

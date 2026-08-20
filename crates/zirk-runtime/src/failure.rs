@@ -16,7 +16,7 @@ use crate::io;
 /// what these cases are from the point of view of whoever runs the program.
 const FATAL_EXIT_CODE: i32 = 70;
 
-fn fatal(reason: &str) -> ! {
+pub(crate) fn fatal(reason: &str) -> ! {
     eprintln!("fatal error: {reason}");
     // The streams are flushed before terminating so the diagnostic is not lost
     // when output is buffered into a pipe.

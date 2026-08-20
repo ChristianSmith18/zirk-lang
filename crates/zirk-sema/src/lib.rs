@@ -110,4 +110,23 @@ pub mod codes {
     /// Phase 4a) — `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2's
     /// mandatory consumption. `_ = expr;` discards it explicitly.
     pub const DISCARDED_RESULT: Code = Code::new("E0433");
+    /// An exception a `throw`, a rethrow, or a call to a `throws` function
+    /// or method can produce, neither caught by a local `try` nor declared
+    /// in the enclosing function's own `throws` (roadmap Phase 4b) —
+    /// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3's "an
+    /// explicit exception must be caught or declared".
+    pub const UNCAUGHT_THROW: Code = Code::new("E0434");
+    /// A `throw`/`return`/`break`/`continue` written directly inside a
+    /// `finally` block (roadmap Phase 4b) — it "cannot directly ... replace
+    /// an active outcome" (section 3). A blunt, sound over-approximation of
+    /// that rule for this pass: forbidden regardless of whether an outcome
+    /// is actually active, not just when replacing one.
+    pub const FINALLY_REPLACES_OUTCOME: Code = Code::new("E0435");
+    /// A `catch` clause a name does not resolve to a class that implements
+    /// `Throwable`, or one an earlier `catch` in the same `try` already
+    /// covers, making it unreachable (roadmap Phase 4b).
+    pub const UNREACHABLE_CATCH: Code = Code::new("E0436");
+    /// A bare `throw;` outside a `catch` (roadmap Phase 4b) — legal only as
+    /// a rethrow of the value the enclosing `catch` bound.
+    pub const RETHROW_OUTSIDE_CATCH: Code = Code::new("E0437");
 }

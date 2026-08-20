@@ -833,6 +833,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
         let return_type = self.parse_return_type(&name)?;
+        let throws = self.parse_throws_clause();
 
         let has_body = matches!(self.peek(), TokenKind::LBrace);
 
@@ -862,6 +863,7 @@ impl<'a> Parser<'a> {
             is_override: false,
             params,
             return_type,
+            throws,
             body,
             visibility,
             is_abstract: false,
@@ -996,6 +998,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
         let return_type = self.parse_return_type(&name)?;
+        let throws = self.parse_throws_clause();
 
         // An `abstract` method declares a signature and stops there.
         let body = if is_abstract {
@@ -1024,6 +1027,7 @@ impl<'a> Parser<'a> {
             is_override,
             params,
             return_type,
+            throws,
             body,
             visibility,
             is_abstract,
@@ -1178,6 +1182,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
         let return_type = self.parse_return_type(&name)?;
+        let throws = self.parse_throws_clause();
 
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -1187,6 +1192,7 @@ impl<'a> Parser<'a> {
             type_params,
             params,
             return_type,
+            throws,
             body,
             shared,
             span,
@@ -1212,6 +1218,15 @@ impl<'a> Parser<'a> {
         );
         self.synchronize();
         None
+    }
+
+    /// `throws Type (| Type)*`, if present (roadmap Phase 4b) — absent for an
+    /// ordinary function/method, which declares no exception effect.
+    fn parse_throws_clause(&mut self) -> Option<TypeRef> {
+        if !self.eat_keyword(Keyword::Throws) {
+            return None;
+        }
+        self.parse_type()
     }
 
     /// Parameters, with the optional, default and variadic forms of
@@ -1560,6 +1575,12 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Return) {
             return self.parse_return();
         }
+        if self.check_keyword(Keyword::Throw) {
+            return self.parse_throw();
+        }
+        if self.check_keyword(Keyword::Try) {
+            return self.parse_try();
+        }
         if matches!(self.peek(), TokenKind::LBrace) {
             return self.parse_block().map(Stmt::Block);
         }
@@ -1898,6 +1919,87 @@ impl<'a> Parser<'a> {
 
         Some(Stmt::Return(ReturnStmt {
             value,
+            span: start.to(end),
+        }))
+    }
+
+    /// `throw expr;` / `throw;` (roadmap Phase 4b).
+    ///
+    /// Whether a bare `throw;` is legal (only directly inside a `catch`) is
+    /// not a syntactic question — the checker decides it, the same way
+    /// `break`/`continue` outside a loop parse fine and are rejected later.
+    fn parse_throw(&mut self) -> Option<Stmt> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Throw);
+
+        let value = if matches!(self.peek(), TokenKind::Semicolon | TokenKind::RBrace) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(Stmt::Throw(ThrowStmt {
+            value,
+            span: start.to(end),
+        }))
+    }
+
+    /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
+    fn parse_try(&mut self) -> Option<Stmt> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Try);
+
+        let body = self.parse_block()?;
+
+        let mut catches = Vec::new();
+        while self.check_keyword(Keyword::Catch) {
+            let catch_start = self.peek_span();
+            self.eat_keyword(Keyword::Catch);
+
+            let ty = self.parse_type_atom()?;
+            self.expect(&TokenKind::LParen, "after the caught type");
+            let binding = self.expect_identifier("naming the caught value")?;
+            self.expect(&TokenKind::RParen, "after the catch binding");
+            let catch_body = self.parse_block()?;
+            let catch_end = catch_body.span;
+
+            catches.push(CatchClause {
+                ty,
+                binding,
+                body: catch_body,
+                span: catch_start.to(catch_end),
+            });
+        }
+
+        let finally = if self.eat_keyword(Keyword::Finally) {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        let end = finally
+            .as_ref()
+            .map(|b| b.span)
+            .or_else(|| catches.last().map(|c| c.span))
+            .unwrap_or(body.span);
+
+        if catches.is_empty() && finally.is_none() {
+            self.error(
+                codes::EMPTY_TRY,
+                end,
+                "a `try` needs at least one `catch` or a `finally`",
+                "with neither, it does nothing a plain block would not",
+                Some("add a `catch Type(name) { }`, or a `finally { }`".into()),
+            );
+        }
+
+        Some(Stmt::Try(TryStmt {
+            body,
+            catches,
+            finally,
             span: start.to(end),
         }))
     }

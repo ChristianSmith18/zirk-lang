@@ -132,6 +132,33 @@ pub unsafe extern "C" fn zirk_rt_check_cast(descriptor: *const c_void, target: u
     crate::failure::zirk_rt_invalid_cast()
 }
 
+/// Tests a descriptor's ancestor list against `target`, the same list
+/// [`zirk_rt_check_cast`] searches — but returns whether it matched instead
+/// of terminating when it does not (roadmap Phase 4b: a `catch Type(name)`
+/// tests whether the pending exception's runtime type is `Type` or one of
+/// its ancestors, and must keep running either way).
+///
+/// # Safety
+///
+/// `descriptor` must be one this compiler emitted, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_is_instance(descriptor: *const c_void, target: u64) -> bool {
+    if descriptor.is_null() {
+        return false;
+    }
+
+    let words = descriptor as *const usize;
+    let count = unsafe { *words.add(1) };
+    for entry in 0..count {
+        let id = unsafe { *words.add(2 + entry) } as u64;
+        if id == target {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

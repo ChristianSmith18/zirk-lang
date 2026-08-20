@@ -669,6 +669,9 @@ pub struct MethodInfo {
     /// paying an indirection for all of them would be paying for a generality
     /// the program does not use. Decision D3.
     pub overridden: bool,
+    /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
+    /// Phase 4b) — see [`crate::scope::Signature::throws`].
+    pub throws: Vec<Type>,
 }
 
 /// A declared interface or trait.
@@ -709,6 +712,9 @@ pub struct ContractMethod {
     pub has_default: bool,
     /// Its position in the contract, which is its slot in the dispatch table.
     pub index: usize,
+    /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
+    /// Phase 4b) — see [`crate::scope::Signature::throws`].
+    pub throws: Vec<Type>,
 }
 
 /// One field of a class, as the checker sees it.
