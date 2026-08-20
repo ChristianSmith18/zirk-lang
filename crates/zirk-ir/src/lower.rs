@@ -845,6 +845,11 @@ struct CatchFrame {
 struct LoopTargets {
     break_to: BlockId,
     continue_to: BlockId,
+    /// How many `try` frames were active when this loop started (roadmap
+    /// Phase 4b) — `break`/`continue` only exits the `try`s *nested inside*
+    /// the loop, never ones enclosing it, so only `try_stack[try_depth..]`
+    /// runs its `finally` on the way out (`Self::lower_break`/`lower_continue`).
+    try_depth: usize,
 }
 
 impl<'a> FunctionLowering<'a> {
@@ -1796,6 +1801,7 @@ impl<'a> FunctionLowering<'a> {
         self.loops.push(LoopTargets {
             break_to: continue_block,
             continue_to: step_block,
+            try_depth: self.try_stack.len(),
         });
 
         self.current = body_block;
@@ -1885,6 +1891,7 @@ impl<'a> FunctionLowering<'a> {
         self.loops.push(LoopTargets {
             break_to: continue_block,
             continue_to: step_block,
+            try_depth: self.try_stack.len(),
         });
 
         self.current = body_block;
@@ -1986,6 +1993,7 @@ impl<'a> FunctionLowering<'a> {
         self.loops.push(LoopTargets {
             break_to: continue_block,
             continue_to: step_block,
+            try_depth: self.try_stack.len(),
         });
 
         self.current = body_block;
@@ -2132,6 +2140,7 @@ impl<'a> FunctionLowering<'a> {
         self.loops.push(LoopTargets {
             break_to: continue_block,
             continue_to: header,
+            try_depth: self.try_stack.len(),
         });
 
         self.current = body_block;
@@ -2168,11 +2177,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_break(&mut self, _stmt: &ast::JumpStmt) {
-        let target = self
+        let loop_target = self
             .loops
             .last()
-            .expect("a verified program only breaks inside a loop")
-            .break_to;
+            .expect("a verified program only breaks inside a loop");
+        let target = loop_target.break_to;
+        self.run_finally_through(loop_target.try_depth);
         self.terminate(Terminator::Jump(target));
 
         // Statements after a `break` are unreachable, but the block they would
@@ -2182,11 +2192,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_continue(&mut self, _stmt: &ast::JumpStmt) {
-        let target = self
+        let loop_target = self
             .loops
             .last()
-            .expect("a verified program only continues inside a loop")
-            .continue_to;
+            .expect("a verified program only continues inside a loop");
+        let target = loop_target.continue_to;
+        self.run_finally_through(loop_target.try_depth);
         self.terminate(Terminator::Jump(target));
 
         let unreachable = self.new_block();
@@ -2196,7 +2207,28 @@ impl<'a> FunctionLowering<'a> {
     fn lower_return(&mut self, stmt: &ast::ReturnStmt) {
         let expected = self.return_type;
         let value = stmt.value.as_ref().map(|e| self.lower_expr_as(e, expected));
+        // A `return` leaves every enclosing `try`, not just the innermost
+        // one (roadmap Phase 4b, design D3) — unlike `break`/`continue`,
+        // which only exit the ones nested *inside* the loop they target.
+        self.run_finally_through(0);
         self.terminate(Terminator::Return(value));
+    }
+
+    /// Runs the `finally` of every active `try` frame from `depth` onward,
+    /// innermost first — what a `return`/`break`/`continue` leaving one or
+    /// more enclosing `try`s owes each of them on the way out (roadmap
+    /// Phase 4b, design D3). A plain slice rather than popping
+    /// `try_stack`: the frames are still active for whatever this statement
+    /// does *not* leave (a `break` only exits as far as its own loop).
+    fn run_finally_through(&mut self, depth: usize) {
+        let finally_blocks: Vec<Option<ast::Block>> = self.try_stack[depth..]
+            .iter()
+            .rev()
+            .map(|frame| frame.finally.clone())
+            .collect();
+        for finally in finally_blocks {
+            self.lower_finally_block(&finally);
+        }
     }
 
     // --- Expressions ------------------------------------------------------

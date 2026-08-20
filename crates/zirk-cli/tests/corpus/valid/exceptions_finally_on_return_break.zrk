@@ -1,0 +1,54 @@
+// `finally` runs on every exit path out of its `try` (roadmap Phase 4b,
+// design D3), including a `return` or a `break`/`continue` written directly
+// inside the body — not only the normal-completion and propagating-exception
+// paths.
+class BoomError implements RuntimeError {
+    construct() { }
+
+    override fn message(): String {
+        return "boom";
+    }
+
+    override fn code(): String {
+        return "BOOM";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn f(): Int32 {
+    try {
+        return 5;
+    } catch BoomError(e) {
+        return -1;
+    } finally {
+        stdout.println("cleanup return");
+    }
+}
+
+fn g(): Void {
+    mut i: Int32 = 0;
+    while i < 3 {
+        try {
+            if i == 1 {
+                break;
+            }
+            stdout.println(i);
+        } catch BoomError(e) {
+        } finally {
+            stdout.println("cleanup loop " + i.to_string());
+        }
+        i = i + 1;
+    }
+}
+
+fn main(): Void {
+    stdout.println(f());
+    g();
+}
