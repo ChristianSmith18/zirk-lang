@@ -2671,6 +2671,84 @@ fn invalid_match_over_an_algebraic_enum_is_not_exhaustive() {
     );
 }
 
+#[test]
+fn valid_match_null_arm_narrows_the_binding_arm() {
+    accepted(
+        "class Node { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         fn main(): Void {
+             mut n: Node? = Node(1);
+             match n {
+                 null => { }
+                 binding => { stdout.println(binding.value); }
+             }
+         }",
+    );
+}
+
+#[test]
+fn valid_match_null_arm_narrows_the_variant_pattern_arm() {
+    // Exhaustiveness over a nullable enum still needs a catch-all today
+    // (a pre-existing rule this change does not touch) — the variant arm's
+    // own destructuring is what is under test here, not exhaustiveness.
+    accepted(
+        "enum Status { Ok(value: Int32), Err(message: String) }
+         fn main(): Void {
+             mut s: Status? = Status.Ok(1);
+             match s {
+                 null => { }
+                 Status.Ok(value) => { stdout.println(value); }
+                 _ => { }
+             }
+         }",
+    );
+}
+
+#[test]
+fn invalid_match_binding_still_nullable_without_a_null_arm() {
+    let output = rejected(
+        "class Node { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         fn main(): Void {
+             mut n: Node? = Node(1);
+             match n {
+                 binding => { stdout.println(binding.value); }
+             }
+         }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_match_narrowing_does_not_apply_inside_the_null_arm_itself() {
+    let output = rejected(
+        "class Node { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         fn main(): Void {
+             mut n: Node? = Node(1);
+             match n {
+                 null => { stdout.println(n.value); }
+                 binding => { stdout.println(binding.value); }
+             }
+         }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_member_access_still_rejected_on_a_non_nullable_match_binding() {
+    // Narrowing must not paper over a genuine mismatch: a `Node` scrutinee
+    // (never nullable) that is matched against a member the class does not
+    // have is still an error, `null`-arm narrowing or not.
+    let output = rejected(
+        "class Node { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         fn main(): Void {
+             mut n: Node = Node(1);
+             match n {
+                 binding => { stdout.println(binding.missing); }
+             }
+         }",
+    );
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
 // --- Alias de tipo -------------------------------------------------------------
 
 #[test]

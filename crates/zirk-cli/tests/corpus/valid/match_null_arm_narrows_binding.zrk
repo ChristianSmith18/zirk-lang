@@ -1,0 +1,40 @@
+// A `match` arm other than `null` sees a scrutinee that cannot be absent —
+// the `null` arm already took that case — so its own binding is the
+// unwrapped type, not `T?`. Before this narrowing, walking a hand-rolled
+// linked list needed `?.`/`??` at every step (see
+// `recursive_match_with_safe_navigation.zrk`) even though the `null` arm
+// already ruled out absence; this is the natural form that removes the
+// detour.
+class Node {
+    mut value: Int32;
+    mut next: Node?;
+    construct(value: Int32) {
+        this.value = value;
+        this.next = null;
+    }
+}
+
+fn sum(head: Node?): Int32 {
+    mut total: Int32 = 0;
+    mut cursor: Node? = head;
+    while true {
+        match cursor {
+            null => { break; },
+            node => {
+                total = total + node.value;
+                cursor = node.next;
+            }
+        };
+    }
+    return total;
+}
+
+fn main(): Void {
+    mut a: Node = Node(1);
+    mut b: Node = Node(2);
+    mut c: Node = Node(3);
+    a.next = b;
+    b.next = c;
+
+    stdout.println(sum(a));
+}
