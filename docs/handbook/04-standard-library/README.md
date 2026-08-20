@@ -9,4 +9,4 @@ its complete contract.
 
 ---
 
-**Previous:** [← Reproducible Builds](../03-projects/13-reproducible-builds.md) · **Next:** [ Common API Contracts](01-common-api-contracts.md)
+**Previous:** [← Permission Approval and Audit](../03-projects/14-permission-approval-and-audit.md) · **Next:** [ Common API Contracts](01-common-api-contracts.md)
