@@ -140,6 +140,16 @@ pub struct LambdaInfo {
     /// Names captured from the enclosing scope, in a stable order.
     pub captures: Vec<Capture>,
     pub fn_type: u32,
+    /// The name of this lambda's own binding, when it is a *recursive*
+    /// lambda referring to itself (`ZIRK_LANGUAGE_SPEC.md` section 6: a
+    /// lambda calling itself through its own explicitly `Fn(...) => R`
+    /// typed binding, roadmap Phase 4d) — present in `captures` too (it is
+    /// still an ordinary capture for type-checking purposes), but `zirk-ir`
+    /// reads this to lower a self-call directly rather than through a
+    /// runtime capture, since no closure value for it exists yet at the
+    /// point this literal is still being built (`Checker::check_let`'s own
+    /// pre-declaration).
+    pub recursive_binding: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +299,12 @@ struct Checker<'a> {
     loop_depth: u32,
     /// Captures collected for the lambda being checked, innermost last.
     capture_stack: Vec<Vec<Capture>>,
+    /// The name of a recursive lambda's own binding, set only around
+    /// checking the lambda literal that directly initializes it
+    /// (`Self::check_let`) — consumed (`Option::take`'d) by
+    /// `Self::check_lambda` for exactly that one lambda, so a lambda
+    /// nested inside it never mistakes itself for the recursive one too.
+    recursive_binding: Option<String>,
     /// The `throws` set of the function or method being checked (roadmap
     /// Phase 4b) — empty when it declares none. What
     /// [`Self::check_function`]/the method equivalent verifies every
@@ -416,6 +432,7 @@ impl<'a> Checker<'a> {
             in_constructor: false,
             loop_depth: 0,
             capture_stack: Vec::new(),
+            recursive_binding: None,
             current_throws: Vec::new(),
             pending_throws: Vec::new(),
             catch_type: None,
@@ -3417,9 +3434,39 @@ impl<'a> Checker<'a> {
         (self.unions.len() - 1) as u32
     }
 
+    /// `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d): resolves
+    /// each written parameter and the result, then interns the shape
+    /// *structurally* (`Self::intern_fn_type`) — the same table a named
+    /// function reference or a capture-less lambda's own type lands in
+    /// (`Self::check_path`, `Self::check_lambda`), so `Fn(Int32) => Int32`
+    /// written twice, or written once and matched by a same-shaped named
+    /// function, is one id, not two merely-equal ones (design D12).
+    ///
+    /// Labels/`?`/`...` are parsed (`zirk-parser`'s `parse_fn_type_param`)
+    /// but not carried into the interned [`FnType`]: invoking a value of
+    /// this type is always positional (`Self::check_call`'s closure-call
+    /// path already rejects named arguments for any closure), so a label
+    /// here documents intent without being load-bearing the way a declared
+    /// function's own parameter name is.
+    fn resolve_fn_type_ref(&mut self, function: &FnTypeRef, nullable: bool) -> Type {
+        let params: Vec<Type> = function
+            .params
+            .iter()
+            .map(|p| self.resolve_type(&p.ty))
+            .collect();
+        let returns = self.resolve_type(&function.returns);
+        let id = self.intern_fn_type(FnType { params, returns });
+        let ty = Type::of(Base::Function(id));
+        if nullable { ty.as_nullable() } else { ty }
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
+        if let Some(function) = &reference.function {
+            return self.resolve_fn_type_ref(function, reference.nullable);
+        }
+
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
             Some(Type::of(Base::Param(id)))
         } else if reference.arguments.is_empty()
@@ -3871,6 +3918,89 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The span of the lambda literal that owns `fn_type`, when it is a
+    /// *capturing* lambda's own id (design D14). `None` for a named
+    /// function's interned id, a capture-less lambda's interned id (both
+    /// freely interchangeable with any compatible shape, D12), or an id no
+    /// lambda ever produced.
+    fn capturing_lambda_span(&self, fn_type: u32) -> Option<Span> {
+        self.lambdas
+            .iter()
+            .find(|(_, info)| info.fn_type == fn_type && !info.captures.is_empty())
+            .map(|(span, _)| *span)
+    }
+
+    /// Whether `expr` is a lambda literal that captures something — the one
+    /// shape design D14 lets satisfy a `Fn(...) => R` position at all, and
+    /// only when written directly at that position (not through a variable
+    /// that merely holds one).
+    fn capturing_literal_at(&self, expr: &Expr) -> bool {
+        let Expr::Lambda(lambda) = expr else {
+            return false;
+        };
+        self.lambdas
+            .get(&lambda.span)
+            .is_some_and(|info| !info.captures.is_empty())
+    }
+
+    /// Whether `actual`'s callable shape may stand in for `expected`'s:
+    /// same arity, parameters contravariant, result covariant
+    /// (`zirk-callables` spec) — structural compatibility, not necessarily
+    /// the same interned id (interning only merges *identical* shapes;
+    /// D12's whole point is that a merely-*compatible* shape also
+    /// qualifies).
+    fn fn_shapes_compatible(&self, expected_id: u32, actual_id: u32) -> bool {
+        if expected_id == actual_id {
+            return true;
+        }
+        let expected = &self.fn_types[expected_id as usize];
+        let actual = &self.fn_types[actual_id as usize];
+        if expected.params.len() != actual.params.len() {
+            return false;
+        }
+        expected
+            .params
+            .iter()
+            .zip(&actual.params)
+            .all(|(e, a)| a.accepts(*e))
+            && expected.returns.accepts(actual.returns)
+    }
+
+    /// [`Self::fn_shapes_compatible`], applied to two full [`Type`]s rather
+    /// than bare ids — also checks nullability the ordinary way.
+    fn callable_assignable(&self, expected: Type, actual: Type) -> bool {
+        let Base::Function(expected_id) = expected.base else {
+            return false;
+        };
+        let Base::Function(actual_id) = actual.base else {
+            return false;
+        };
+        if actual.nullable && !expected.nullable {
+            return false;
+        }
+        self.fn_shapes_compatible(expected_id, actual_id)
+    }
+
+    /// Whether `actual` — already known to be a capturing closure literal
+    /// written directly at this position (`Self::capturing_literal_at`) —
+    /// may be adopted as the position's own static type (design D14).
+    ///
+    /// `expected` must not already be locked to a *different* capturing
+    /// literal: once `Self::check_let`/`Self::check_assign` adopt one
+    /// literal's own id here, the position's storage is sized for that
+    /// literal's `ClosureLayout` alone, so a second, textually different
+    /// literal — even of a compatible shape — cannot land here too (that
+    /// would need the captures boxed behind a uniform representation, D13).
+    fn accepts_capturing_literal(&self, expected: Type, actual: Type) -> bool {
+        let Base::Function(expected_id) = expected.base else {
+            return false;
+        };
+        if self.capturing_lambda_span(expected_id).is_some() {
+            return false;
+        }
+        self.callable_assignable(expected, actual)
+    }
+
     /// Interns a function type, returning the id its `Base::Function` carries.
     fn intern_fn_type(&mut self, fn_type: FnType) -> u32 {
         if let Some(index) = self.fn_types.iter().position(|f| *f == fn_type) {
@@ -3932,6 +4062,27 @@ impl<'a> Checker<'a> {
                 Some("add a `return` at the end of the function".into()),
             );
         }
+
+        // D14: a `return` of a capturing closure literal narrows
+        // `current_return` to that literal's own id (`Self::check_return`) —
+        // the function's *signature*, which every caller reads, must learn
+        // the same narrowed id, or a caller checked before this point would
+        // still see the generic (capture-less-shaped) written annotation
+        // and accept a value whose actual layout does not match it.
+        //
+        // This is sound for every caller checked *after* this function in
+        // `Self::run`'s declaration-order body pass; one checked *before* it
+        // (calling ahead to a function whose body has not run yet) still
+        // sees the pre-narrowed signature — a known limitation of doing this
+        // structurally, in one pass, without real interprocedural
+        // dataflow (see `design.md`'s D14 addendum).
+        if let Some(mut updated) = self.functions.get(&f.name.name).cloned()
+            && updated.returns != self.current_return
+        {
+            updated.returns = self.current_return;
+            self.functions.insert(f.name.name.clone(), updated);
+        }
+
         self.report_uncaught_throws(f.body.span, &f.name.name);
         self.pending_throws = outer_pending;
         self.leave_type_params();
@@ -4014,20 +4165,70 @@ impl<'a> Checker<'a> {
 
     fn check_let(&mut self, stmt: &LetStmt) {
         let annotated = stmt.ty.as_ref().map(|t| self.resolve_type(t));
+
+        // A recursive lambda calling itself by its own binding name needs
+        // that name in scope *while its own body is checked*
+        // (`ZIRK_LANGUAGE_SPEC.md` section 6: "recursive lambdas require an
+        // explicit binding type", roadmap Phase 4d) — impossible for an
+        // ordinary initializer (`Self::declare_local` below runs only
+        // *after* the initializer is checked, so `x` in `mut x = x + 1;`
+        // reads the outer one, not itself). Pre-declared here, and only for
+        // exactly this shape — an explicitly `Fn(...) => R`-typed local
+        // whose initializer is a lambda literal — so an ordinary `mut x: T
+        // = x;` still reads the outer `x` unchanged.
+        let self_recursive = matches!(
+            annotated,
+            Some(Type {
+                base: Base::Function(_),
+                ..
+            })
+        ) && matches!(stmt.init.as_ref(), Some(Expr::Lambda(_)));
+
+        if self_recursive {
+            self.declare_local(Binding {
+                name: stmt.name.name.clone(),
+                ty: annotated.expect("checked by `self_recursive` above"),
+                mutability: stmt.mutability,
+                span: stmt.name.span,
+                initialized: true,
+            });
+        }
+
         // An explicit annotation is the expected type of the initializer —
         // what lets `mut r: Result<Int32,String> = Result.Ok(5);` infer `E`
         // from context instead of only from `Ok`'s own argument (roadmap
         // Phase 4a, `expected_type`'s own doc comment).
+        let outer_recursive_binding = self.recursive_binding.take();
+        self.recursive_binding = self_recursive.then(|| stmt.name.name.clone());
         let initializer = stmt.init.as_ref().map(|e| {
             self.expected_type = annotated;
             self.check_expr(e)
         });
+        self.recursive_binding = outer_recursive_binding;
 
         let ty = match (annotated, initializer) {
             (Some(declared), Some(actual)) => {
                 let span = stmt.init.as_ref().map(|e| e.span()).unwrap_or(stmt.span);
-                self.expect_assignable(declared, actual, span, "the initial value");
-                declared
+
+                // D14: a capturing closure literal written directly as this
+                // local's initializer becomes the local's own static type —
+                // its exact `Base::Function` id — rather than the written
+                // annotation's: the storage this local's slot gets is sized
+                // for that one literal's `ClosureLayout`, so every later use
+                // of the local (a call, a reassignment, a read) is checked
+                // against it. `Self::expect_assignable`'s own generic
+                // callable-vs-callable path never accepts a capturing
+                // closure, so this is checked ahead of it, not through it.
+                let literal_captures = stmt
+                    .init
+                    .as_ref()
+                    .is_some_and(|e| self.capturing_literal_at(e));
+                if literal_captures && self.accepts_capturing_literal(declared, actual) {
+                    actual
+                } else {
+                    self.expect_assignable(declared, actual, span, "the initial value");
+                    declared
+                }
             }
             (Some(declared), None) => declared,
             // Inference is allowed where it is unambiguous
@@ -4067,13 +4268,22 @@ impl<'a> Checker<'a> {
             self.check_strict_alias(init, ty, stmt.mutability, &stmt.name.name, stmt.name.span);
         }
 
-        self.declare_local(Binding {
-            name: stmt.name.name.clone(),
-            ty,
-            mutability: stmt.mutability,
-            span: stmt.name.span,
-            initialized: stmt.init.is_some(),
-        });
+        if self_recursive {
+            // Already declared above (so the lambda body could call itself)
+            // — only its final type might still need updating, in case D14
+            // adopted the literal's own id; declaring it a second time
+            // would report `ORDINARY_SHADOWING` against the entry this is
+            // finishing.
+            self.scopes.retype(&stmt.name.name, ty);
+        } else {
+            self.declare_local(Binding {
+                name: stmt.name.name.clone(),
+                ty,
+                mutability: stmt.mutability,
+                span: stmt.name.span,
+                initialized: stmt.init.is_some(),
+            });
+        }
     }
 
     /// The `mut`/`inmut`/`inmut::strict` matrix (D11), applied to objects and
@@ -4182,6 +4392,19 @@ impl<'a> Checker<'a> {
             return;
         };
 
+        // Design D14 is deliberately narrower here than in `Self::check_let`:
+        // a capturing closure literal only ever adopts a position's static
+        // type through a `let`/`mut` *initializer* — never through a later
+        // plain assignment. A local's IR storage is sized once, at its own
+        // declaration (`zirk-ir`'s `lower_let`); a bare `mut f: Fn(...) =>
+        // R;` with no initializer has already committed that slot to the
+        // written annotation's own (capture-less) shape by the time any
+        // assignment reaches it, so a capturing literal landing here later
+        // would need the slot re-sized under it — unsound, not merely
+        // unimplemented. `Self::expect_assignable` below reports it with
+        // the same dedicated diagnostic a second, differently-captured
+        // literal gets, which is an accurate description either way: this
+        // position cannot hold this closure.
         self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
         self.scopes.mark_initialized(&name.name);
     }
@@ -4486,9 +4709,43 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        // D14, mirroring `Self::check_let`'s initializer: a capturing
+        // closure literal returned directly adopts its own id as the
+        // function's declared return type from here on — every later
+        // `return` (and every caller, once `Self::check_function`'s
+        // post-body fix-up updates the signature) is checked against it.
+        let literal_captures = stmt
+            .value
+            .as_ref()
+            .is_some_and(|e| self.capturing_literal_at(e));
+        if literal_captures && self.accepts_capturing_literal(self.current_return, actual) {
+            self.current_return = actual;
+            return;
+        }
+
+        // A capturing closure that either targets an already-adopted,
+        // *different* literal, or was not written directly here (reached
+        // through a variable), gets the dedicated diagnostic instead of the
+        // generic mismatch below — both need the captures boxed behind a
+        // uniform representation this pass does not build (design D13).
+        if let Base::Function(actual_id) = actual.base
+            && self.capturing_lambda_span(actual_id).is_some()
+            && self.callable_assignable(self.current_return, actual)
+        {
+            self.error(
+                codes::AMBIGUOUS_CAPTURING_CALLABLE,
+                stmt.value.as_ref().map(|e| e.span()).unwrap_or(stmt.span),
+                "this function cannot return this closure",
+                "a capturing closure only satisfies the declared return type when its own literal is returned directly, and only one such literal per function; a different one, or one reached through a variable, would need its captures boxed behind a uniform representation, which is not implemented yet",
+                Some("general callable-type polymorphism across captures is future work (design D13/D14 of fase-4d-callables)".into()),
+            );
+            return;
+        }
+
         if !self.current_return.accepts(actual)
             && !self.is_subclass_of(actual, self.current_return)
             && !self.bare_enum_matches_instance(actual, self.current_return)
+            && !self.callable_assignable(self.current_return, actual)
         {
             let expected = self.name(self.current_return);
             let found = self.name(actual);
@@ -5174,7 +5431,14 @@ impl<'a> Checker<'a> {
                 self.expect_same(left, right, expr);
                 let has_identity = match left.base {
                     Base::Class(id) => self.classes[id as usize].kind == ClassKind::Class,
-                    Base::Contract(_) | Base::String => true,
+                    // A closure's identity is its whole value — function
+                    // pointer plus captures (design D15) —
+                    // `CORE_LANGUAGE_SEMANTICS.md`'s "callable identity uses
+                    // `is`". `expect_same` above already requires both
+                    // sides to share one exact `Base::Function` id, so this
+                    // is comparing two values of the *same* callable shape,
+                    // not deciding cross-shape compatibility.
+                    Base::Contract(_) | Base::String | Base::Function(_) => true,
                     _ => false,
                 };
                 if !has_identity && !left.is_unknown() {
@@ -6645,6 +6909,13 @@ impl<'a> Checker<'a> {
         self.loop_depth = 0;
         self.capture_stack.push(Vec::new());
 
+        // `Option::take` so a lambda nested inside this one (if this is the
+        // recursive lambda `Self::check_let` just pre-declared) never
+        // mistakes *itself* for the recursive one too — only the one
+        // literal directly initializing the pre-declared binding consumes
+        // this.
+        let own_recursive_binding = self.recursive_binding.take();
+
         self.scopes.push_function();
         for (param, info) in expr.params.iter().zip(&params) {
             if let Some(default) = &param.default {
@@ -6695,19 +6966,48 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Each lambda gets a type of its own rather than sharing one per
-        // signature: its captures are part of its representation (D10), so two
-        // lambdas of the same shape are not interchangeable. Interning them
-        // together would let one be assigned over the other and leave the IR
-        // holding a value whose layout no longer matches its slot.
-        self.fn_types.push(FnType {
+        let shape = FnType {
             params: params.iter().map(|p| p.ty).collect(),
             returns,
-        });
-        let fn_type = (self.fn_types.len() - 1) as u32;
+        };
 
-        self.lambdas
-            .insert(expr.span, LambdaInfo { captures, fn_type });
+        // A lambda that captures nothing is, at the representation level,
+        // exactly as uniform as a named function (design D12: an empty
+        // `ClosureLayout`, `{function pointer}` and nothing else) — so it is
+        // interned structurally, the same table `Self::resolve_fn_type_ref`
+        // and `Self::check_path` share, letting it freely interchange with
+        // any other value of the same shape.
+        //
+        // A lambda that captures something keeps a type of its own rather
+        // than sharing one per signature: its captures are part of its
+        // representation (D10), so two lambdas of the same shape are not
+        // interchangeable in general (design D13, deferred). Interning them
+        // together would let one be assigned over the other and leave the IR
+        // holding a value whose layout no longer matches its slot. A single
+        // such literal may still satisfy a `Fn(...) => R` position written
+        // directly at that literal (design D14) — `Self::expect_assignable`
+        // recognizes that case by looking this id up in `self.lambdas`.
+        let fn_type = if captures.is_empty() {
+            self.intern_fn_type(shape)
+        } else {
+            self.fn_types.push(shape);
+            (self.fn_types.len() - 1) as u32
+        };
+
+        // Only a real, actually-captured self-reference counts — a
+        // pre-declared binding the body never ends up calling is simply an
+        // ordinary (if unused) local, not a recursive lambda.
+        let recursive_binding =
+            own_recursive_binding.filter(|name| captures.iter().any(|c| &c.name == name));
+
+        self.lambdas.insert(
+            expr.span,
+            LambdaInfo {
+                captures,
+                fn_type,
+                recursive_binding,
+            },
+        );
 
         Type::of(Base::Function(fn_type))
     }
@@ -7681,21 +7981,6 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            // A closure cannot be annotated as a parameter, return or field
-            // type (D9), and inferring a generic parameter from one would be
-            // exactly that under another name.
-            if matches!(actual.base, Base::Function(_)) {
-                let param_name = self.type_params[id as usize].name.clone();
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    call_span,
-                    format!("`{name}` cannot infer `{param_name}` from a closure"),
-                    "a closure may not be annotated as a parameter, return or field type, and a generic argument is no exception (decision D9)",
-                    None,
-                );
-                continue;
-            }
-
             match substitution.get(&id) {
                 Some(&solved) if solved != actual => {
                     let a = self.name(solved);
@@ -7870,9 +8155,40 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        // Two closures of the same shape still have different types, and
-        // saying `(Int32) => Int32` is not `(Int32) => Int32` would be useless.
+        // A named function or a capture-less lambda is already structurally
+        // uniform (design D12: an empty `ClosureLayout`, `{function
+        // pointer}` and nothing else), so any shape-compatible one of those
+        // freely interchanges with another at a `Fn(...) => R` position.
+        //
+        // A capturing closure's captures are part of its representation
+        // (D10), so two differently-captured closures are never
+        // interchangeable this way — only the exact same literal, written
+        // directly at the position, may occupy it (design D14); the callers
+        // that recognize that case (`Self::check_let`, `Self::check_return`,
+        // `Self::check_assign`) accept it themselves before ever reaching
+        // this generic check, so a capturing closure arriving here always
+        // means either a second, different one targets an
+        // already-committed position, or one reached a position D14 does
+        // not cover (a field, a parameter, an argument through a variable).
+        // Both need the captures boxed behind a uniform representation this
+        // pass does not build (design D13, deferred).
         if matches!(expected.base, Base::Function(_)) && matches!(actual.base, Base::Function(_)) {
+            if self.callable_assignable(expected, actual) {
+                let Base::Function(actual_id) = actual.base else {
+                    unreachable!("checked by the guard above")
+                };
+                if self.capturing_lambda_span(actual_id).is_none() {
+                    return;
+                }
+                self.error(
+                    codes::AMBIGUOUS_CAPTURING_CALLABLE,
+                    span,
+                    "this position cannot hold this closure",
+                    "a capturing closure only satisfies a callable type when its own literal is written directly at that position; a different closure — or one reached through a variable — would need its captures boxed behind a uniform representation, which is not implemented yet",
+                    Some("general callable-type polymorphism across captures is future work (design D13/D14 of fase-4d-callables)".into()),
+                );
+                return;
+            }
             self.error(
                 codes::TYPE_MISMATCH,
                 span,

@@ -100,6 +100,17 @@ impl<'a> Parser<'a> {
             .unwrap_or(&TokenKind::Eof)
     }
 
+    /// The token `offset` positions ahead of [`Self::peek`], without
+    /// consuming anything — needed to disambiguate `Fn(name: T, ...)`'s
+    /// optional `name:`/`name?:` label from a bare `T` (`Fn(String) =>
+    /// Void`), which the single-token [`Self::peek`] cannot tell apart.
+    fn peek_at(&self, offset: usize) -> &TokenKind {
+        self.tokens
+            .get(self.pos + offset)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
+    }
+
     fn peek_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -1326,13 +1337,10 @@ impl<'a> Parser<'a> {
         if let TokenKind::Identifier(name) = self.peek().clone() {
             self.pos += 1;
 
-            // `Fn(P...) => R` / `Function(P...) => R`: recognized so the
-            // diagnostic can name the construct instead of reporting whatever
-            // token `(` happens to confuse next (decision D9 of the design —
-            // this phase's parser and checker reject the annotation on
-            // purpose, closure values elsewhere are unaffected).
+            // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d):
+            // a real callable type in every position a type may appear.
             if (name == "Fn" || name == "Function") && matches!(self.peek(), TokenKind::LParen) {
-                return self.reject_function_type(name, span);
+                return self.parse_function_type(name, span);
             }
 
             let arguments = if matches!(self.peek(), TokenKind::Lt) {
@@ -1366,40 +1374,81 @@ impl<'a> Parser<'a> {
         None
     }
 
-    /// `Fn(P...) => R` or `Function(P...) => R` in type position, rejected on
-    /// purpose per decision D9 — consumes the whole shape for recovery, then
-    /// reports it by name rather than leaving `(` to confuse whatever parses
-    /// next.
-    fn reject_function_type(&mut self, name: String, start: Span) -> Option<TypeRef> {
+    /// `Fn(P...) => R` or `Function(P...) => R` in type position (roadmap
+    /// Phase 4d) — `name` is already consumed, `(` is next.
+    fn parse_function_type(&mut self, name: String, start: Span) -> Option<TypeRef> {
         self.pos += 1; // `(`
-        let mut depth = 1u32;
-        while depth > 0 && !self.at_eof() {
-            match self.peek() {
-                TokenKind::LParen => depth += 1,
-                TokenKind::RParen => depth -= 1,
-                _ => {}
+
+        let mut params = Vec::new();
+        if !matches!(self.peek(), TokenKind::RParen) {
+            loop {
+                let Some(param) = self.parse_fn_type_param() else {
+                    break;
+                };
+                params.push(param);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-            self.pos += 1;
         }
 
-        let mut end = self.peek_span();
-        if self.eat(&TokenKind::FatArrow)
-            && let Some(returns) = self.parse_type_atom()
-        {
-            end = returns.span;
+        if !self.expect(
+            &TokenKind::RParen,
+            "to close the callable type's parameters",
+        ) {
+            return None;
         }
 
-        self.error(
-            codes::NOT_IMPLEMENTED,
+        if !self.expect(&TokenKind::FatArrow, "after a callable type's parameters") {
+            return None;
+        }
+
+        let returns = self.parse_type()?;
+        let end = returns.span;
+
+        Some(TypeRef::function(
+            name,
+            FnTypeRef {
+                params,
+                returns: Box::new(returns),
+            },
             start.to(end),
-            format!("`{name}(...)` is not implemented yet"),
-            "function types exist in the language, but this phase's parser and checker reject the annotation on purpose (decision D9)",
-            Some(
-                "let a closure's type be inferred instead of annotating it: assign it to a local without a type annotation"
-                    .into(),
-            ),
-        );
-        None
+        ))
+    }
+
+    /// One parameter of a written `Fn(...)` type: `T`, `name: T`, `name?: T`,
+    /// or `...name: T`. A label needs two tokens of lookahead
+    /// ([`Self::peek_at`]) to tell apart from a bare type: `String` alone is
+    /// a type, `name: String` is a labeled one, and only the token after the
+    /// identifier (`:`, or `?` then `:`) says which.
+    fn parse_fn_type_param(&mut self) -> Option<FnTypeParamRef> {
+        let start = self.peek_span();
+        let variadic = self.eat(&TokenKind::DotDotDot);
+
+        let labeled = matches!(self.peek(), TokenKind::Identifier(_))
+            && (matches!(self.peek_at(1), TokenKind::Colon)
+                || (matches!(self.peek_at(1), TokenKind::Question)
+                    && matches!(self.peek_at(2), TokenKind::Colon)));
+
+        let (label, optional) = if labeled {
+            let name = self.expect_identifier("as a callable type's parameter label")?;
+            let optional = self.eat(&TokenKind::Question);
+            self.pos += 1; // `:`
+            (Some(name), optional)
+        } else {
+            (None, false)
+        };
+
+        let ty = self.parse_type()?;
+        let end = ty.span;
+
+        Some(FnTypeParamRef {
+            label,
+            optional,
+            variadic,
+            ty,
+            span: start.to(end),
+        })
     }
 
     /// `<Int32, String>` in `Map<Int32, String>`, the `<` already consumed by
