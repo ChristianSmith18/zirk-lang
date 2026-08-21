@@ -144,4 +144,16 @@ pub mod codes {
     /// [`TYPE_MISMATCH`] so the message can explain *why*, not just that the
     /// types differ.
     pub const AMBIGUOUS_CAPTURING_CALLABLE: Code = Code::new("E0439");
+    /// A recursive lambda's own binding (`ZIRK_LANGUAGE_SPEC.md` section 6,
+    /// roadmap Phase 4d) referenced inside its own body anywhere other than
+    /// as the direct callee of a call — assigned to a variable, passed as
+    /// an argument, compared with `is`, or reached from inside a nested
+    /// lambda. Lowering has no closure *value* for the binding to give at
+    /// any of those points (`zirk-ir`'s own `lower_lambda` doc comment): the
+    /// value the recursive name refers to does not exist yet at the moment
+    /// this literal is still being built, which is exactly why a direct
+    /// self-*call* is rewritten into an ordinary recursive call instead of
+    /// reading a captured value. Caught here so a program that would panic
+    /// during lowering is rejected with a diagnostic instead.
+    pub const RECURSIVE_BINDING_NOT_A_VALUE: Code = Code::new("E0440");
 }
