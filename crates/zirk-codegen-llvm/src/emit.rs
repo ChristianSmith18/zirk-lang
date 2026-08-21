@@ -1332,13 +1332,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 // signedness is no longer read here — `zirk-ir`'s own
                 // `Lowering::guard_shift` uses it upstream instead
                 // (`fase-4d-runtimeerror`, design D10).
-                let signed = self.is_signed(self.value_types[&left.0]);
+                let left_ty = self.value_types[&left.0];
+                let signed = self.is_signed(left_ty);
                 Some(self.emit_binary(
                     *op,
                     self.operand(*left),
                     self.operand(*right),
                     signed,
                     function,
+                    left_ty,
                 ))
             }
 
@@ -1549,8 +1551,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("payload"),
             ),
 
-            ir::InstKind::MakeClosure { id, captures } => {
-                let layout = &self.module.closures[*id as usize];
+            ir::InstKind::MakeClosure {
+                id,
+                captures,
+                target,
+            } => {
                 let ty = llvm_type_in(
                     self.context,
                     ir::IrType::Closure(*id),
@@ -1561,7 +1566,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .expect("a closure has a representation")
                 .into_struct_type();
 
-                let target = self.functions[layout.function.as_str()];
+                let target = self.functions[target.as_str()];
 
                 let mut value = self
                     .builder
@@ -1705,8 +1710,21 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         right: BasicValueEnum<'ctx>,
         signed: bool,
         function: FunctionValue<'ctx>,
+        left_ty: ir::IrType,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
+
+        // `is` between two closure values (roadmap Phase 4d, design D15,
+        // `CORE_LANGUAGE_SEMANTICS.md`: "callable identity uses `is`")
+        // compares the whole `{function pointer, capture...}` struct
+        // field-by-field — the function pointer by address, each capture
+        // recursively through this same dispatcher (so a captured closure,
+        // or a captured `T?`, compares the same way it would on its own).
+        // Generalizes the same struct-shaped `is` pattern `fase-4c` already
+        // built for `T?` right below.
+        if op == Identical && left.is_struct_value() && matches!(left_ty, ir::IrType::Closure(_)) {
+            return self.identical_value(left, right, left_ty).into();
+        }
 
         // `is` between two nullable references (`Node? is Node?`, or `T is T?`
         // once `Self::lower_coalesce`'s sibling in `zirk-ir/lower.rs` has
@@ -1883,6 +1901,155 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             Shl => self.checked_shift(op, l, r, signed),
             Shr => self.checked_shift(op, l, r, signed),
+        }
+    }
+
+    /// `is` over one value of any type — used both at the top of
+    /// `Self::emit_binary` and recursively over a closure's own capture
+    /// fields (design D15), which may themselves be of any type the
+    /// language admits inside a closure's environment (an `Int32`, a
+    /// `String`, another closure, a nullable reference, ...). Unlike
+    /// `Self::emit_binary`'s own `Identical` arm — reachable only where the
+    /// checker already proved the *top-level* operand has identity — a
+    /// capture field has no such guarantee from the checker (it never
+    /// separately typechecks `is` over a capture on its own), so every
+    /// shape is handled here rather than assuming one.
+    fn identical_value(
+        &mut self,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+        ty: ir::IrType,
+    ) -> inkwell::values::IntValue<'ctx> {
+        match ty {
+            ir::IrType::Closure(id) => {
+                let l = left.into_struct_value();
+                let r = right.into_struct_value();
+                let layout = self.module.closures[id as usize].clone();
+
+                let l_fn = self
+                    .builder
+                    .build_extract_value(l, 0, "l_fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+                let r_fn = self
+                    .builder
+                    .build_extract_value(r, 0, "r_fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+                let l_addr = self
+                    .builder
+                    .build_ptr_to_int(l_fn, self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r_addr = self
+                    .builder
+                    .build_ptr_to_int(r_fn, self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                let mut identical = self
+                    .compare(IntPredicate::EQ, l_addr, r_addr)
+                    .into_int_value();
+
+                for (index, capture_ty) in layout.captures.iter().enumerate() {
+                    let field = index as u32 + 1;
+                    let l_field = self
+                        .builder
+                        .build_extract_value(l, field, "l_capture")
+                        .expect("capture");
+                    let r_field = self
+                        .builder
+                        .build_extract_value(r, field, "r_capture")
+                        .expect("capture");
+                    let field_identical = self.identical_value(l_field, r_field, *capture_ty);
+                    identical = self
+                        .builder
+                        .build_and(identical, field_identical, "identical")
+                        .expect("combine");
+                }
+
+                identical
+            }
+            // `T?`: absent-vs-absent is identical, absent-vs-present is not,
+            // two present ones compare by address (`fase-4c`'s own fix for
+            // `is` over a nullable reference, generalized here to a nested
+            // position instead of only the top level).
+            ir::IrType::Nullable(_) => {
+                let l = left.into_struct_value();
+                let r = right.into_struct_value();
+                let l_present = self
+                    .builder
+                    .build_extract_value(l, 0, "l_present")
+                    .expect("nullable present flag")
+                    .into_int_value();
+                let r_present = self
+                    .builder
+                    .build_extract_value(r, 0, "r_present")
+                    .expect("nullable present flag")
+                    .into_int_value();
+                let l_ptr = self
+                    .builder
+                    .build_extract_value(l, 1, "l_ptr")
+                    .expect("nullable payload")
+                    .into_pointer_value();
+                let r_ptr = self
+                    .builder
+                    .build_extract_value(r, 1, "r_ptr")
+                    .expect("nullable payload")
+                    .into_pointer_value();
+                let l_addr = self
+                    .builder
+                    .build_ptr_to_int(l_ptr, self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r_addr = self
+                    .builder
+                    .build_ptr_to_int(r_ptr, self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                let same_presence = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, l_present, r_present, "same_presence")
+                    .expect("compare presence");
+                let same_address = self
+                    .compare(IntPredicate::EQ, l_addr, r_addr)
+                    .into_int_value();
+                let identical_when_present = self
+                    .builder
+                    .build_or(
+                        self.builder
+                            .build_not(l_present, "l_absent")
+                            .expect("negate"),
+                        same_address,
+                        "identical_when_present",
+                    )
+                    .expect("combine");
+                self.builder
+                    .build_and(same_presence, identical_when_present, "identical")
+                    .expect("combine")
+            }
+            _ if left.is_pointer_value() => {
+                let l = self
+                    .builder
+                    .build_ptr_to_int(left.into_pointer_value(), self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r = self
+                    .builder
+                    .build_ptr_to_int(right.into_pointer_value(), self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                self.compare(IntPredicate::EQ, l, r).into_int_value()
+            }
+            _ if left.is_float_value() => self
+                .builder
+                .build_float_compare(
+                    inkwell::FloatPredicate::OEQ,
+                    left.into_float_value(),
+                    right.into_float_value(),
+                    "identical",
+                )
+                .expect("compare floats"),
+            _ => self
+                .compare(
+                    IntPredicate::EQ,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                )
+                .into_int_value(),
         }
     }
 

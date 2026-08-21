@@ -756,7 +756,11 @@ fn verify_instruction(
             }
         }
 
-        InstKind::MakeClosure { id, captures } => {
+        InstKind::MakeClosure {
+            id,
+            captures,
+            target,
+        } => {
             expect(
                 inst.ty,
                 IrType::Closure(*id),
@@ -771,6 +775,13 @@ fn verify_instruction(
                 ));
                 return;
             };
+
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: MakeClosure targets `{target}`, which is not a module function"
+                ));
+                return;
+            }
 
             if captures.len() != layout.captures.len() {
                 report(format!(

@@ -138,9 +138,15 @@ pub enum IrType {
     Char,
     /// A closure, identified by its layout in the module.
     ///
-    /// Each lambda has its own type rather than sharing one per signature: a
-    /// closure cannot escape in this phase, so at every use site the type is
-    /// statically known. Decision D10.
+    /// A named function reference and a capture-less lambda share one
+    /// canonical, capture-less layout per signature — `{function pointer}`,
+    /// nothing else (roadmap Phase 4d, design D12) — so any two
+    /// same-shaped values of that kind carry the same id. A *capturing*
+    /// lambda literal keeps a layout of its own instead: its captures are
+    /// part of its representation (decision D10), and a closure escaping
+    /// its creating frame (roadmap Phase 4d) is already sound at this
+    /// representation level regardless — nothing here holds a pointer back
+    /// into the frame that built it, only the captured values themselves.
     Closure(u32),
     /// A reference to an object, identified by its layout in the module.
     ///
@@ -436,10 +442,15 @@ pub struct EnumLayout {
 /// The captures live inside the value, so the lifted function takes them as
 /// its leading parameters: nothing is allocated and nothing is dereferenced.
 /// Decision D10.
+///
+/// Carries no target function of its own (roadmap Phase 4d, design D12):
+/// many differently-targeted values (a lambda's own lifted body, or an
+/// altogether different named function) can share one id's shape here when
+/// they have the same captures — the target a given value calls is
+/// [`InstKind::MakeClosure`]'s own `target` field instead, one per value
+/// built, not one per shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosureLayout {
-    /// The module function the lambda body was lifted into.
-    pub function: String,
     pub captures: Vec<IrType>,
     pub params: Vec<IrType>,
     pub returns: IrType,
@@ -801,9 +812,20 @@ pub enum InstKind {
     Unwrap(Operand),
 
     /// Builds a closure value from its captures.
+    ///
+    /// `target` names the module function this particular value's pointer
+    /// field embeds — carried on the instruction itself, independent of
+    /// `id`, so many differently-targeted values (a lambda's own lifted
+    /// body, or a *different* named function entirely) can share one
+    /// `id`'s `ClosureLayout` shape when they have the same captures
+    /// (roadmap Phase 4d, design D12): `id` alone decides the struct's
+    /// *layout* (how many captures, of what types), never which function a
+    /// given value calls — `InstKind::CallClosure` never reads `target` at
+    /// all, only the pointer the value carries at runtime.
     MakeClosure {
         id: u32,
         captures: Vec<Operand>,
+        target: String,
     },
     /// Calls a closure value.
     ///

@@ -14,8 +14,9 @@ use std::collections::HashMap;
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
-    AssociatedFieldInfo, Base, CheckedProgram, ClassType, EnumType, EnumVariantInfo, FieldInfo,
-    FloatWidth as SemaFloatWidth, IntWidth as SemaIntWidth, MethodInfo, ParamInfo, Type,
+    AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
+    FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
+    ParamInfo, Type,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -276,6 +277,54 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+
+    // One entry per `checked.fn_types` id, pushed first and in order so
+    // `Base::Function(id)` and `IrType::Closure(id)` share the same number
+    // (`Self::ir_type`'s own `Base::Function` arm relies on this).
+    //
+    // Most ids get their real content right here: the uniform, capture-less
+    // `ClosureLayout` design D12 gives a named function reference or a
+    // capture-less lambda — `{function pointer}`, nothing else — shared by
+    // every value of that shape (`Self::lower_expr`'s `ast::Expr::Path` arm,
+    // `Self::lower_lambda`'s capture-less branch). `function` is left empty:
+    // nothing calls through a canonical layout's *own* stored target —
+    // `InstKind::MakeClosure` carries the target it embeds explicitly
+    // (`MakeClosure::target`), precisely so many differently-targeted values
+    // (`double`, `triple`, ...) can share one canonical shape instead of
+    // each needing a layout of its own.
+    //
+    // An id a *capturing* lambda literal owns (design D14) instead gets a
+    // placeholder here — its real capture types are only known once that
+    // one lambda occurrence is actually lowered in its enclosing function's
+    // own body (each capture's type comes from the *slot* it lives in
+    // there, not from anything this pre-pass can see) — `Self::lower_lambda`
+    // overwrites `module.closures[id]` in place when it reaches it.
+    let capturing_fn_types: std::collections::HashSet<u32> = checked
+        .lambdas
+        .values()
+        .filter(|info| !info.captures.is_empty())
+        .map(|info| info.fn_type)
+        .collect();
+
+    for (index, shape) in checked.fn_types.iter().enumerate() {
+        if capturing_fn_types.contains(&(index as u32)) {
+            module.closures.push(ClosureLayout {
+                captures: Vec::new(),
+                params: Vec::new(),
+                returns: IrType::Void,
+            });
+            continue;
+        }
+        module.closures.push(ClosureLayout {
+            captures: Vec::new(),
+            params: shape
+                .params
+                .iter()
+                .map(|t| ir_type(*t, instance_base, enum_instance_base, checked))
+                .collect(),
+            returns: ir_type(shape.returns, instance_base, enum_instance_base, checked),
+        });
+    }
 
     // A dummy body every `abstract class`'s own (never-invoked) method-table
     // slot points to (roadmap Phase 4b) — the class itself is never
@@ -848,12 +897,21 @@ fn ir_type(
         // unconditionally reported with `NOT_LOWERED` at its own declaration
         // (`Self::generic_class_is_directly_specializable` in the checker),
         // so its body never reaches here either.
-        Base::Unknown
-        | Base::Null
-        | Base::Function(_)
-        | Base::Range
-        | Base::Param(_)
-        | Base::Union(_) => {
+        // A `Fn(...) => R` position maps to the *canonical*, capture-less
+        // `ClosureLayout` `Self::lower` pre-populates for every checker
+        // `fn_types` entry, one-to-one by index (roadmap Phase 4d, design
+        // D12) — a named function reference or a capture-less lambda always
+        // targets it (`Self::lower_expr`'s `ast::Expr::Path` arm,
+        // `Self::lower_lambda`'s capture-less branch). A *capturing* lambda
+        // literal written directly at a `Fn(...) => R` position (design
+        // D14) instead keeps its own, separately-pushed `ClosureLayout`
+        // (`Self::lower_lambda`'s capturing branch) — its slot's IR type is
+        // read off that value directly, never through this generic
+        // conversion (see `Self::lower_lambda`'s own comment on why captures
+        // read the *slot's* type, not the checker's).
+        Base::Function(id) => IrType::Closure(id),
+
+        Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -901,6 +959,19 @@ struct FunctionLowering<'a> {
     /// (having run every enclosing `finally` it passes on the way) an early
     /// return from the current function.
     try_stack: Vec<TryFrame>,
+    /// Set only while lowering a *recursive* lambda's own lifted body
+    /// (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d): the source
+    /// name that refers to the lambda itself, this lifted function's own
+    /// symbol, the slots (already declared, this function's own leading
+    /// parameters) to forward unchanged, and the ordinary parameter types
+    /// that follow them. A call to that name inside the body becomes a
+    /// direct, ordinary recursive call to this same symbol
+    /// (`Self::lower_expr`'s own `ast::Expr::Call` arm) instead of going
+    /// through a closure value — there is no such value to call *through*
+    /// yet at the point this closure is still being built
+    /// (`Self::lower_lambda`'s own doc comment on why the self-reference is
+    /// never a real runtime capture).
+    recursive_call: Option<(String, String, Vec<SlotId>, Vec<IrType>)>,
 }
 
 /// One active `try`'s catches and `finally`, as [`FunctionLowering::try_stack`]
@@ -963,6 +1034,7 @@ impl<'a> FunctionLowering<'a> {
             value_types: HashMap::new(),
             current_catch: None,
             try_stack: Vec::new(),
+            recursive_call: None,
         }
     }
 
@@ -1064,12 +1136,44 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lookup_slot(&self, name: &str) -> SlotId {
+        self.try_lookup_slot(name)
+            .expect("a verified program only names declared variables")
+    }
+
+    fn try_lookup_slot(&self, name: &str) -> Option<SlotId> {
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(name))
             .copied()
-            .expect("a verified program only names declared variables")
+    }
+
+    /// The callable id and target symbol of a bare name that is a *named
+    /// function* used as a value, not called (`Checker::check_path`'s own
+    /// "a bare function name is a value" rule, roadmap Phase 4d) — `None`
+    /// when `name` is not one (a local shadows it, or it names nothing).
+    ///
+    /// The id is found the same way `Self::resolve_written_type` finds a
+    /// written `Fn(...) => R` annotation's id: by structural search over
+    /// `checked.fn_types`, since a named function's own callable type is
+    /// interned there exactly like a written annotation of the same shape
+    /// (`Checker::intern_fn_type`, design D12) — not pushed fresh the way a
+    /// capturing lambda's is.
+    fn named_function_value(&self, name: &str, span: Span) -> Option<(u32, String)> {
+        let declared = self.declaration_of(name, span);
+        let signature = self.checked.functions.get(&declared)?;
+        let shape = FnType {
+            params: signature.param_types(),
+            returns: signature.returns,
+        };
+        let id = self
+            .checked
+            .fn_types
+            .iter()
+            .position(|f| *f == shape)
+            .expect("the checker interned this named function's own callable type")
+            as u32;
+        Some((id, declared))
     }
 
     fn slot_type(&self, id: SlotId) -> IrType {
@@ -1112,6 +1216,35 @@ impl<'a> FunctionLowering<'a> {
     /// (roadmap task 11.1). A bare `Box` without arguments is the ordinary,
     /// unspecialized class it always was.
     fn resolve_written_type(&self, reference: &ast::TypeRef) -> Type {
+        // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d): the
+        // checker already interned every shape it type-checked
+        // (`Checker::intern_fn_type`, or a capturing lambda's own reserved
+        // id, design D14) — this looks the same shape up in
+        // `checked.fn_types` by structural equality rather than interning a
+        // second time, so it always lands on the exact id the checker used.
+        if let Some(function) = &reference.function {
+            let params: Vec<Type> = function
+                .params
+                .iter()
+                .map(|p| {
+                    let mut ty = self.resolve_written_type(&p.ty);
+                    ty.nullable = p.ty.nullable;
+                    ty
+                })
+                .collect();
+            let mut returns = self.resolve_written_type(&function.returns);
+            returns.nullable = function.returns.nullable;
+            let shape = FnType { params, returns };
+            let id = self
+                .checked
+                .fn_types
+                .iter()
+                .position(|f| *f == shape)
+                .expect("the checker interned every callable type it type-checked")
+                as u32;
+            return Type::of(Base::Function(id));
+        }
+
         let declared = self.declaration_of(&reference.name, reference.span);
         if let Some(ty) = Type::from_name(&reference.name) {
             return ty;
@@ -1377,7 +1510,22 @@ impl<'a> FunctionLowering<'a> {
     // --- Function ---------------------------------------------------------
 
     fn run(mut self, function: &ast::FnDecl) -> (Function, Vec<Function>) {
-        self.return_type = self.ir_type_from_ref(&function.return_type);
+        // Read off `checked.functions`, not re-derived from the written
+        // annotation (`Self::ir_type_from_ref`): when the declared return
+        // type is a capturing `Fn(...) => R`, the checker narrows the
+        // signature's own `returns` to the one literal's exact id once its
+        // body accepts it (`Checker::check_function`'s own post-body
+        // fix-up, design D14) — re-deriving from the written text here
+        // would instead find *a* same-shaped id (very possibly the
+        // canonical, capture-less one another position uses), not
+        // necessarily the specific one this function's body actually
+        // builds.
+        self.return_type = self
+            .checked
+            .functions
+            .get(&function.name.name)
+            .map(|s| self.ir_type(s.returns))
+            .expect("the checker records every declared function");
 
         let entry = self.new_block();
         self.current = entry;
@@ -1827,21 +1975,44 @@ impl<'a> FunctionLowering<'a> {
         // resolved it.
         let annotated = stmt.ty.as_ref().map(|a| self.ir_type_from_ref(a));
 
+        // D14: a capturing closure literal written directly as this
+        // initializer adopts its own id as the local's type
+        // (`Checker::check_let`'s own narrowing) — re-deriving the
+        // annotation's id from its written text (`annotated`, above) only
+        // finds *a* same-shaped `Fn(...) => R` id, which is ambiguous
+        // whenever this exact shape is also the canonical, capture-less one
+        // another position shares (`Self::resolve_written_type`'s own doc
+        // comment) or another capturing literal entirely. The initializer's
+        // own lowered value already carries the right id
+        // (`Self::lower_lambda` derives it straight from the checker's
+        // `LambdaInfo`, not from this annotation), so it is asked instead.
+        let literal_captures = matches!(
+            stmt.init.as_ref(),
+            Some(ast::Expr::Lambda(l))
+                if self
+                    .checked
+                    .lambdas
+                    .get(&l.span)
+                    .is_some_and(|i| !i.captures.is_empty())
+        );
+
         let value = stmt.init.as_ref().map(|e| {
             let operand = match annotated {
-                Some(expected) => self.lower_expr_as(e, expected),
-                None => self.lower_expr(e),
+                Some(expected) if !literal_captures => self.lower_expr_as(e, expected),
+                _ => self.lower_expr(e),
             };
             (operand, e.span())
         });
 
         let ty = match (annotated, value) {
-            (Some(ty), _) => ty,
-            // Without an annotation the type is the one the initializer
-            // produced. Asking the value rather than the tree is what lets a
-            // lambda be inferred: its closure type only exists once lowered.
-            (None, Some((operand, _))) => self.type_of_operand(operand),
+            (Some(ty), _) if !literal_captures => ty,
+            // Without an annotation — or with one a capturing literal just
+            // overrides — the type is the one the initializer produced.
+            // Asking the value rather than the tree is what lets a lambda be
+            // inferred: its closure type only exists once lowered.
+            (_, Some((operand, _))) => self.type_of_operand(operand),
             (None, None) => unreachable!("without a type there is always an initializer"),
+            (Some(ty), None) => ty,
         };
 
         let slot = self.declare_slot(&stmt.name.name, ty, stmt.name.span);
@@ -2490,9 +2661,28 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Path(ident) => {
-                let slot = self.lookup_slot(&ident.name);
-                let ty = self.slot_type(slot);
-                self.emit(InstKind::Load(slot), ty, span)
+                if let Some(slot) = self.try_lookup_slot(&ident.name) {
+                    let ty = self.slot_type(slot);
+                    self.emit(InstKind::Load(slot), ty, span)
+                } else {
+                    // A bare function name with no local shadowing it is a
+                    // value (`Checker::check_path`, roadmap Phase 4d,
+                    // design D12): the canonical, capture-less closure the
+                    // `Self::lower` pre-pass already reserved for this
+                    // shape, targeting this specific function.
+                    let (id, target) = self
+                        .named_function_value(&ident.name, ident.span)
+                        .expect("a verified program only names declared variables or functions");
+                    self.emit(
+                        InstKind::MakeClosure {
+                            id,
+                            captures: Vec::new(),
+                            target,
+                        },
+                        IrType::Closure(id),
+                        span,
+                    )
+                }
             }
 
             ast::Expr::Unary(e) => {
@@ -2668,6 +2858,33 @@ impl<'a> FunctionLowering<'a> {
                 };
 
                 self.emit_checked_binary(op, left, right, operand_type, span)
+            }
+
+            // A recursive lambda calling itself by its own binding name
+            // (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d): an
+            // ordinary, direct recursive call to this same lifted function,
+            // forwarding its own captures unchanged ahead of the new call's
+            // arguments — there is no closure *value* to call through here,
+            // since none exists yet at the point this closure literal is
+            // still being built (`Self::lower_lambda`'s own doc comment).
+            ast::Expr::Call(e) if self.is_recursive_self_call(e) => {
+                let (_, target, capture_slots, param_types) = self
+                    .recursive_call
+                    .clone()
+                    .expect("checked by `is_recursive_self_call`");
+                let mut args: Vec<Operand> = capture_slots
+                    .iter()
+                    .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+                    .collect();
+                args.extend(self.lower_held_args(&e.args, &param_types));
+                self.emit(
+                    InstKind::Call {
+                        callee: target,
+                        args,
+                    },
+                    self.return_type,
+                    span,
+                )
             }
 
             // Calling a closure value goes through the value, not a name.
@@ -2902,8 +3119,12 @@ impl<'a> FunctionLowering<'a> {
     ///
     /// The body becomes a function whose leading parameters are the captures,
     /// and the value pairs a pointer to it with the captured values themselves.
-    /// Nothing is allocated: a closure cannot escape in this phase, so the
-    /// value lives wherever its slot does. Decision D10.
+    /// A capturing closure's value carries every capture inline
+    /// (`MakeClosure`), so it needs nothing from the frame that created it
+    /// once built — it is already safe to escape that frame (roadmap Phase
+    /// 4d, design D12): only *naming* the escaped position (`Fn(...) => R`
+    /// in a return type, a field, a typed local) was the gap D9 left, not
+    /// this representation.
     fn lower_lambda(&mut self, expr: &ast::LambdaExpr, span: Span) -> Operand {
         let info = self
             .checked
@@ -2911,12 +3132,27 @@ impl<'a> FunctionLowering<'a> {
             .get(&expr.span)
             .expect("the checker records every lambda it accepted");
 
+        // A *recursive* lambda's own binding (`ZIRK_LANGUAGE_SPEC.md`
+        // section 6, roadmap Phase 4d) is a capture for the checker's own
+        // type-checking purposes, but it is excluded here: no value for it
+        // exists yet at the point this literal is still being *built* (its
+        // own enclosing `let`/`mut` has not finished storing anything into
+        // it — `zirk-ir`'s own `lower_let` only declares that slot *after*
+        // lowering this very initializer). A call to it inside this body is
+        // lowered as a direct recursive call to this lifted function
+        // instead (`Self::lift_lambda_body`'s own `recursive_call`
+        // parameter) — see this lambda's own lifted body, below.
+        let real_captures: Vec<&Capture> = info
+            .captures
+            .iter()
+            .filter(|c| info.recursive_binding.as_deref() != Some(c.name.as_str()))
+            .collect();
+
         // The types come from the slots the captures live in, not from the
         // checker's types. A captured closure is the reason: the checker
         // identifies a closure type by its own numbering and the IR by the
         // layout it built, and only the slot knows which layout this one is.
-        let capture_slots: Vec<SlotId> = info
-            .captures
+        let capture_slots: Vec<SlotId> = real_captures
             .iter()
             .map(|c| self.lookup_slot(&c.name))
             .collect();
@@ -2934,15 +3170,34 @@ impl<'a> FunctionLowering<'a> {
         // nowhere else, since aarch64 comments with `//`.
         //
         // A dot is valid in ELF, Mach-O and COFF symbols, and impossible in a
-        // Zirk identifier, so it cannot collide with a user's function.
-        let name = format!("lambda.{}", self.module.closures.len());
-        let id = self.module.closures.len() as u32;
-        self.module.closures.push(ClosureLayout {
-            function: name.clone(),
-            captures: capture_types.clone(),
-            params: param_types.clone(),
-            returns,
-        });
+        // Zirk identifier, so it cannot collide with a user's function. The
+        // lambda's own span (file plus source offset) is unique across the
+        // whole program, unlike `module.closures.len()` — that no longer
+        // tracks "one entry per lambda occurrence" now that a capture-less
+        // lambda shares its canonical id with every other value of the same
+        // shape (design D12).
+        let name = format!("lambda.{}.{}", expr.span.file.0, expr.span.start);
+        let id = info.fn_type;
+
+        // A capture-less lambda's id is the canonical, capture-less
+        // `ClosureLayout` `Self::lower` already pre-populated for it (D12) —
+        // shared with every other value of the same shape, so nothing here
+        // overwrites it; only the target this particular `MakeClosure`
+        // embeds is specific to this lambda. A capturing lambda's id
+        // (design D14) instead names a placeholder `Self::lower` reserved
+        // just for this one literal — filled in for real right here, the
+        // first (and, by construction, only) time it is lowered. Gated on
+        // the checker's own capture list, not `capture_types` above: a
+        // *purely* self-recursive lambda (no capture besides itself) still
+        // reserved a placeholder id (it is not capture-less at the checker
+        // level) that needs its real, non-`Void` shape filled in here too.
+        if !info.captures.is_empty() {
+            self.module.closures[id as usize] = ClosureLayout {
+                captures: capture_types.clone(),
+                params: param_types.clone(),
+                returns,
+            };
+        }
 
         // The captures are read in the enclosing function, where their slots
         // live, before the body is lifted out.
@@ -2951,19 +3206,26 @@ impl<'a> FunctionLowering<'a> {
             .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
             .collect();
 
-        let names: Vec<String> = info
-            .captures
+        let names: Vec<String> = real_captures
             .iter()
             .map(|c| c.name.clone())
             .chain(expr.params.iter().map(|p| p.name.name.clone()))
             .collect();
         let types: Vec<IrType> = capture_types.into_iter().chain(param_types).collect();
 
-        let body = self.lift_lambda_body(expr, &name, &names, &types, returns);
+        let recursive_call = info
+            .recursive_binding
+            .as_deref()
+            .map(|source| (source, real_captures.len()));
+        let body = self.lift_lambda_body(expr, &name, &names, &types, returns, recursive_call);
         self.lifted.push(body);
 
         self.emit(
-            InstKind::MakeClosure { id, captures },
+            InstKind::MakeClosure {
+                id,
+                captures,
+                target: name,
+            },
             IrType::Closure(id),
             span,
         )
@@ -2982,6 +3244,12 @@ impl<'a> FunctionLowering<'a> {
         params: &[String],
         types: &[IrType],
         returns: IrType,
+        // The source name that refers to this lambda recursively, and how
+        // many of `params`' leading entries are real captures to forward
+        // unchanged on a self-call (`Self::lower_lambda`'s own
+        // `real_captures.len()`, *after* excluding the recursive binding
+        // itself from the capture list).
+        recursive_binding: Option<(&str, usize)>,
     ) -> Function {
         let mut inner = FunctionLowering::new(
             self.module,
@@ -3001,6 +3269,20 @@ impl<'a> FunctionLowering<'a> {
             .zip(types)
             .map(|(name, ty)| inner.declare_slot(name, *ty, expr.span))
             .collect();
+
+        // Set only now that `slots` (this function's own leading
+        // parameters) exists: the forwarded prefix is the real captures,
+        // already-declared slots; the rest are this lambda's own ordinary
+        // parameter types, fixed regardless of what locals the body itself
+        // goes on to declare deeper inside it.
+        inner.recursive_call = recursive_binding.map(|(source, forwarded)| {
+            (
+                source.to_string(),
+                name.to_string(),
+                slots[..forwarded].to_vec(),
+                types[forwarded..].to_vec(),
+            )
+        });
 
         match &*expr.body {
             ast::LambdaBody::Expr(e) => {
@@ -6039,6 +6321,16 @@ impl<'a> FunctionLowering<'a> {
             )
     }
 
+    /// Whether `call` is a recursive lambda calling itself by its own
+    /// binding name (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d)
+    /// — see `Self::recursive_call`'s own doc comment.
+    fn is_recursive_self_call(&self, call: &ast::CallExpr) -> bool {
+        let Some((source, ..)) = &self.recursive_call else {
+            return false;
+        };
+        matches!(&*call.callee, ast::Expr::Path(ident) if &ident.name == source)
+    }
+
     fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
         // A method or `super` call is not a closure call, and asking for the
         // type of its callee would ask for the type of a method — which is not
@@ -6087,7 +6379,15 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Bool(_) => IrType::Boolean,
             ast::Expr::Str(_) => IrType::String,
             ast::Expr::Char(_) => IrType::Char,
-            ast::Expr::Path(ident) => self.slot_type(self.lookup_slot(&ident.name)),
+            ast::Expr::Path(ident) => match self.try_lookup_slot(&ident.name) {
+                Some(slot) => self.slot_type(slot),
+                None => {
+                    let (id, _) = self
+                        .named_function_value(&ident.name, ident.span)
+                        .expect("a verified program only names declared variables or functions");
+                    IrType::Closure(id)
+                }
+            },
             // `Neg`/`BitNot` preserve the operand's own width (any integer
             // width for both, plus any `Float` width for `Neg` — roadmap
             // Phase 3b); only `Not` has a type of its own regardless of the
@@ -6142,6 +6442,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Binary(e) => {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
+            ast::Expr::Call(e) if self.is_recursive_self_call(e) => self.return_type,
             ast::Expr::Call(e) if self.is_closure_call(e) => {
                 let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_closure_call`")
