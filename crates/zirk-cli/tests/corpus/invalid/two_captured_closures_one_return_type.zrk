@@ -1,0 +1,17 @@
+// Design D14 (roadmap Phase 4d): a Fn(...) => R return type accepts at
+// most one distinct capturing closure literal. Two `return`s, each with its
+// own capture, need the captures boxed behind a uniform representation
+// this pass does not build (design D13) — rejected with a dedicated
+// diagnostic, not a generic type mismatch.
+fn make(pick: Boolean): Fn() => Int32 {
+    mut a = 1;
+    mut b = 2;
+    if pick {
+        return (): Int32 => a;
+    }
+    return (): Int32 => b;
+}
+
+fn main(): Void {
+    stdout.println(make(true)());
+}
