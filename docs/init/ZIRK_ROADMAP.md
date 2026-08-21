@@ -168,18 +168,42 @@ pending final behavior.
 
 ### Phase 4d — Callable and binding completion
 
-- Parse and type `Function(P...) => R` and preferred alias `Fn(P...) => R` in
-  parameters, returns, attributes, generic arguments, and local annotations.
-- Permit closures to escape through compiler-managed capture environments with
-  the finalized snapshot/share/lift/clone rules.
-- Implement same-type multiple declarations with independent defaults.
-- Implement exact-arity simultaneous assignment: evaluate all sources before
-  writes, reject duplicate or immutable destinations, and preserve projection
-  copy/place semantics.
+**Status: callable-type slice complete for its scoped delivery
+(`fase-4d-callables`); multiple declarations and simultaneous assignment
+remain pending, tracked as a separate change.**
 
-**Output:** higher-order APIs and escaping closures work end to end; `left,
-right = right, left` and `mut a, b: String;` compile with targeted invalid
-cases and backend tests.
+- [x] Parse and type `Function(P...) => R` and preferred alias `Fn(P...) => R`
+  in parameters, returns, attributes, generic arguments, and local
+  annotations.
+- [x] Permit a closure to escape its creating frame through a `Fn(...) => R`
+  annotation, for the shapes this pass covers: a named function or a
+  capture-less lambda freely interchanges with any structurally compatible
+  position (design D12); a *single* capturing closure literal written
+  directly at a local's initializer or a function's own `return` escapes
+  too, including a recursive lambda with an explicit binding type (design
+  D14). `is` compares two callable values by identity (design D15).
+  **Not** covered by this slice: general callable-type polymorphism across
+  two or more differently-captured closures at one position (design D13 —
+  needs the captures heap-boxed behind a uniform, `{function pointer,
+  capture-block pointer}` representation); a captured binding written by
+  the closure, lifted into one shared mutable cell; `.clone()` on a
+  closure's environment; a capturing literal reaching a function parameter,
+  a field, or an argument passed through a variable (D14's single-literal
+  rule only covers the two positions — a local's own initializer, a
+  function's own return — where exactly one static AST occurrence can size
+  the position soundly without D13's boxing).
+- [ ] Implement same-type multiple declarations with independent defaults.
+- [ ] Implement exact-arity simultaneous assignment: evaluate all sources
+  before writes, reject duplicate or immutable destinations, and preserve
+  projection copy/place semantics.
+
+**Output:** a named function or capture-less lambda interoperates with
+`Fn(...) => R` anywhere it is written; a single capturing closure escapes its
+creating function through a typed local or a `return`, including recursive
+lambdas; `is` works between callables. `left, right = right, left` and `mut
+a, b: String;` remain unimplemented, and general callable-type polymorphism
+(any two differently-captured closures sharing one position) is deferred to a
+follow-up change.
 
 ### Phase 4e — Managed memory and unsafe boundaries
 

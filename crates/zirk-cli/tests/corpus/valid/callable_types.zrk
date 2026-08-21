@@ -1,0 +1,34 @@
+// Fn(...) => R / Function(...) => R as a real, writable type (roadmap Phase
+// 4d): a named function assigned to a typed local, a closure that captures a
+// value and escapes its creating function, a recursive lambda with an
+// explicit binding type, and `is` between two callable values.
+
+fn double(n: Int32): Int32 {
+    return n * 2;
+}
+
+fn triple(n: Int32): Int32 {
+    return n * 3;
+}
+
+fn make_adder(step: Int32): Fn(Int32) => Int32 {
+    return (n: Int32): Int32 => n + step;
+}
+
+fn main(): Void {
+    mut op: Fn(Int32) => Int32 = double;
+    stdout.println(op(21));
+
+    mut add_five = make_adder(5);
+    stdout.println(add_five(10));
+    stdout.println(add_five(20));
+
+    mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => n <= 1 ? 1 : n * fact(n - 1);
+    stdout.println(fact(5));
+
+    mut a: Fn(Int32) => Int32 = double;
+    mut b: Fn(Int32) => Int32 = double;
+    mut c: Fn(Int32) => Int32 = triple;
+    stdout.println(a is b);
+    stdout.println(a is c);
+}
