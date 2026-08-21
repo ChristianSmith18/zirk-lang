@@ -3157,26 +3157,76 @@ fn valid_closure_stored_in_an_inferred_local_and_called() {
 }
 
 #[test]
-fn invalid_closure_returned_from_a_function() {
-    // There is no way to declare `Fn(...) => R` as a return type (4.8), so a
-    // closure can never match a function's declared return type (D9).
+fn valid_closure_returned_from_a_function() {
+    // `Fn(...) => R` is a real, writable return type (roadmap Phase 4d): a
+    // capture-less closure literal — uniformly represented the same way a
+    // named function is (design D12) — satisfies it like any other
+    // structurally compatible value. `invalid_closure_returned_from_a_function`
+    // used to stand in for this with an unrelated class purely because D9
+    // made the annotation itself impossible to write at all.
+    accepted(
+        "fn make(): Fn() => Void { return (): Void => { }; }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_class_returned_where_a_closure_is_expected() {
+    // The class-vs-closure mismatch the old test actually exercised is still
+    // rejected — replacing the class with a real class value shows the
+    // mismatch is about the *types*, not about `Fn(...) => R` being
+    // unwritable.
     let output = rejected(
         "class NotAClosure { }
-         fn make(): NotAClosure { return (): Void => { }; }
+         fn make(): Fn() => Void { return NotAClosure(); }
          fn main(): Void { }",
     );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
-fn invalid_generic_inference_from_a_closure_argument() {
-    // The same escape, under a generic parameter instead of a named type.
+fn valid_generic_inference_from_a_closure_argument() {
+    // A closure argument infers a generic parameter `T` the same way any
+    // other value does (roadmap Phase 4d): the checker no longer refuses to
+    // name `Base::Function` as `T`'s solution — that refusal
+    // (`invalid_generic_inference_from_a_closure_argument`) existed only
+    // because D9 made a closure's type unwritable anywhere, generic
+    // arguments included. `store<T>` itself is still `NOT_LOWERED` (generic
+    // functions are not code-generated yet, roadmap task 7.6) — unrelated
+    // to closures, and the one diagnostic this now reports.
     let output = rejected(
         "fn store<T>(value: T): Void { }
          fn main(): Void { store((): Void => { }); }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains("closure"), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(
+        !output.contains("closure"),
+        "a closure argument should no longer be singled out:\n{output}"
+    );
+}
+
+#[test]
+fn invalid_two_differently_captured_closures_in_one_return_type() {
+    // Design D14: a `Fn(...) => R` return type only accepts a *single*
+    // capturing closure literal — two different `return`s, each with its
+    // own captures, would need the captures boxed behind a uniform
+    // representation this pass does not build (design D13). Rejected with a
+    // dedicated diagnostic, not a generic `TYPE_MISMATCH`.
+    let output = rejected(
+        "fn make(pick: Boolean): Fn() => Int32 {
+             mut a = 1;
+             mut b = 2;
+             if pick {
+                 return (): Int32 => a;
+             }
+             return (): Int32 => b;
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::AMBIGUOUS_CAPTURING_CALLABLE.as_str()),
+        "{output}"
+    );
 }
 
 #[test]

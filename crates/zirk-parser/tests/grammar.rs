@@ -889,24 +889,99 @@ fn invalid_postfix_cast_without_a_target_type() {
 
 // --- Function types (rejected on purpose, D9) --------------------------------
 
+// --- Callable types (`Fn(...) => R` / `Function(...) => R`, roadmap Phase 4d) ---
+
 #[test]
-fn invalid_function_type_annotation_states_its_reason() {
-    for source in [
-        "fn apply(f: Fn(Int32) => Int32): Void { }\nfn main(): Void { }",
-        "fn apply(f: Function(Int32) => Int32): Void { }\nfn main(): Void { }",
-    ] {
-        let output = errors(source);
-        assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-        assert!(output.contains("not implemented"), "{output}");
-    }
+fn valid_function_type_on_a_parameter() {
+    let p = program("fn apply(f: Fn(Int32) => Int32): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+    let function = ty.function.as_ref().expect("a callable type");
+    assert_eq!(ty.name, "Fn");
+    assert_eq!(function.params.len(), 1);
+    assert_eq!(function.params[0].ty.name, "Int32");
+    assert_eq!(function.returns.name, "Int32");
 }
 
 #[test]
-fn invalid_function_type_is_not_an_unexpected_token() {
-    let output = errors("fn apply(f: Fn(Int32) => Int32): Void { }\nfn main(): Void { }");
+fn valid_function_type_alias_is_also_recognized() {
+    let p = program("fn apply(f: Function(Int32) => Int32): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+    assert_eq!(ty.name, "Function");
+    assert!(ty.function.is_some());
+}
+
+#[test]
+fn valid_function_type_on_a_return_type() {
+    let p = program("fn make(): Fn(Int32) => Int32 { }\nfn main(): Void { }");
+    let ty = &p.functions[0].return_type;
+    let function = ty.function.as_ref().expect("a callable type");
+    assert_eq!(function.params.len(), 1);
+}
+
+#[test]
+fn valid_function_type_on_a_field() {
+    let p = program("class Box { handler: Fn(Int32) => Void; }\nfn main(): Void { }");
+    let ty = &p.classes[0].fields[0].ty;
+    assert!(ty.function.is_some());
+}
+
+#[test]
+fn valid_function_type_as_a_generic_argument() {
+    let p = program(
+        "class Box<T> { value: T; }\nclass Holder { b: Box<Fn(Int32) => Int32>; }\nfn main(): Void { }",
+    );
+    let argument = &p.classes[1].fields[0].ty.arguments[0];
+    assert!(argument.function.is_some());
+}
+
+#[test]
+fn valid_function_type_on_a_local_annotation() {
+    let stmts = statements("mut f: Fn(Int32) => Int32 = (n: Int32): Int32 => n;");
+    let Stmt::Let(let_stmt) = &stmts[0] else {
+        panic!("expected a let statement");
+    };
+    let ty = let_stmt.ty.as_ref().expect("an annotation");
+    assert!(ty.function.is_some());
+}
+
+#[test]
+fn valid_function_type_with_no_parameters() {
+    let p = program("fn apply(f: Fn() => Void): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+    assert!(ty.function.as_ref().unwrap().params.is_empty());
+}
+
+#[test]
+fn valid_function_type_parameter_labels_optional_and_variadic() {
+    let p = program(
+        "fn apply(f: Fn(name: String, extra?: Int32, ...values: Int32) => Void): Void { }\nfn main(): Void { }",
+    );
+    let function = p.functions[0].params[0].ty.function.as_ref().unwrap();
+    assert_eq!(function.params.len(), 3);
+    assert_eq!(function.params[0].label.as_ref().unwrap().name, "name");
+    assert!(!function.params[0].optional);
+    assert!(!function.params[0].variadic);
+    assert_eq!(function.params[1].label.as_ref().unwrap().name, "extra");
+    assert!(function.params[1].optional);
+    assert!(function.params[2].variadic);
+    assert_eq!(function.params[2].label.as_ref().unwrap().name, "values");
+}
+
+#[test]
+fn invalid_function_type_missing_the_arrow() {
+    let output = errors("fn apply(f: Fn(Int32) Int32): Void { }\nfn main(): Void { }");
     assert!(
-        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
-        "a known construct must not be reported as an unexpected token:\n{output}"
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_function_type_missing_the_result_type() {
+    let output = errors("fn apply(f: Fn(Int32) =>): Void { }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
     );
 }
 

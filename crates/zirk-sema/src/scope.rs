@@ -120,6 +120,23 @@ impl Scopes {
             }
         }
     }
+
+    /// Updates a binding's own static type in place, without declaring a
+    /// second one (`Self::declare` would report `ORDINARY_SHADOWING`
+    /// against the very entry this is meant to finish setting up).
+    ///
+    /// Exists for a self-recursive lambda's own binding (roadmap Phase 4d,
+    /// `Checker::check_let`): it is pre-declared with the written
+    /// annotation's type so the lambda body can call itself, then possibly
+    /// narrowed afterward to that one literal's own exact id (design D14).
+    pub fn retype(&mut self, name: &str, ty: Type) {
+        for level in self.levels.iter_mut().rev() {
+            if let Some(binding) = level.bindings.iter_mut().rev().find(|b| b.name == name) {
+                binding.ty = ty;
+                return;
+            }
+        }
+    }
 }
 
 /// A function signature, for checking calls.

@@ -135,4 +135,13 @@ pub mod codes {
     /// arm's own pattern binding, or whose bound value does not implement
     /// `Resource<E>`.
     pub const INVALID_RESOURCE_MATCH: Code = Code::new("E0438");
+    /// A `Fn(...) => R`-typed position (a function's declared return type, or
+    /// a local's own storage) would need to hold two *differently-captured*
+    /// closure literals at once (roadmap Phase 4d, design D14) — general
+    /// callable-type polymorphism across distinct capture sets needs the
+    /// captures heap-boxed behind a uniform representation, which this pass
+    /// does not build (design D13, deferred). Distinct from
+    /// [`TYPE_MISMATCH`] so the message can explain *why*, not just that the
+    /// types differ.
+    pub const AMBIGUOUS_CAPTURING_CALLABLE: Code = Code::new("E0439");
 }

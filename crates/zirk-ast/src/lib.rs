@@ -381,6 +381,12 @@ pub struct TypeRef {
     /// alone), and each further `A |` adds one entry here. Empty for an
     /// ordinary, non-union type.
     pub union_with: Vec<TypeRef>,
+    /// `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d), when this
+    /// reference names a callable type instead of an ordinary one. `name` is
+    /// still set (`"Fn"` or `"Function"`, whichever was written) purely for
+    /// diagnostics; every consumer that cares about the callable shape reads
+    /// this field first.
+    pub function: Option<Box<FnTypeRef>>,
     pub span: Span,
 }
 
@@ -391,6 +397,7 @@ impl TypeRef {
             arguments: Vec::new(),
             nullable: false,
             union_with: Vec::new(),
+            function: None,
             span,
         }
     }
@@ -401,9 +408,48 @@ impl TypeRef {
             arguments: Vec::new(),
             nullable: true,
             union_with: Vec::new(),
+            function: None,
             span,
         }
     }
+
+    /// `Fn(P...) => R`, written as `name` (`"Fn"` or `"Function"`).
+    pub fn function(name: impl Into<String>, function: FnTypeRef, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            arguments: Vec::new(),
+            nullable: false,
+            union_with: Vec::new(),
+            function: Some(Box::new(function)),
+            span,
+        }
+    }
+}
+
+/// The parameter list and result of a written `Fn(P...) => R` type — see
+/// [`TypeRef::function`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnTypeRef {
+    pub params: Vec<FnTypeParamRef>,
+    pub returns: Box<TypeRef>,
+}
+
+/// One parameter of a written callable type: `T`, `name: T`, `name?: T`, or
+/// `...name: T`. `label` is `None` for a bare `T`, written purely for its
+/// type — matching how invoking a value of this type always passes
+/// arguments positionally (`Checker::check_call`'s closure-call path rejects
+/// named arguments), so a label here documents intent without being
+/// semantically load-bearing the way a declared function's own parameter
+/// name is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnTypeParamRef {
+    pub label: Option<Ident>,
+    /// `name?: T`.
+    pub optional: bool,
+    /// `...name: T`.
+    pub variadic: bool,
+    pub ty: TypeRef,
+    pub span: Span,
 }
 
 /// A declared type parameter, as in `<T from Serializable>`.
