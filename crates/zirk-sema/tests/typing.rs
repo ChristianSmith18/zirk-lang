@@ -3230,6 +3230,64 @@ fn invalid_two_differently_captured_closures_in_one_return_type() {
 }
 
 #[test]
+fn invalid_recursive_lambda_binding_used_as_a_value() {
+    // A recursive lambda's own binding (`ZIRK_LANGUAGE_SPEC.md` section 6)
+    // refers to itself only through a direct call inside its own body:
+    // `zirk-ir` rewrites that one shape into an ordinary recursive call,
+    // since no closure value for it exists yet at the point the literal is
+    // still being built. Reading it into a variable — or any other use
+    // besides a direct call — has no value to give and must be rejected
+    // here, not reach a panic during lowering.
+    let output = rejected(
+        "fn main(): Void {
+             mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => {
+                 mut self_ref = fact;
+                 return n <= 1 ? 1 : n * fact(n - 1);
+             };
+             stdout.println(fact(5));
+         }",
+    );
+    assert!(
+        output.contains(codes::RECURSIVE_BINDING_NOT_A_VALUE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_recursive_lambda_calling_itself_only_directly() {
+    // The one shape a recursive lambda's own binding may appear in: the
+    // direct callee of a call, anywhere inside its own body (including
+    // nested inside a ternary/if), never through a nested lambda.
+    accepted(
+        "fn main(): Void {
+             mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => n <= 1 ? 1 : n * fact(n - 1);
+             stdout.println(fact(5));
+         }",
+    );
+}
+
+#[test]
+fn invalid_recursive_lambda_binding_used_from_a_nested_lambda() {
+    // Even in call position, a reference reached from inside a lambda
+    // nested within the recursive one is an ordinary (but unimplemented)
+    // capture-of-a-capture, not a self-call — `zirk-ir`'s rewrite only
+    // covers the recursive lambda's own immediate body.
+    let output = rejected(
+        "fn main(): Void {
+             mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => {
+                 mut helper = (): Int32 => fact(1);
+                 return n <= 1 ? 1 : n * fact(n - 1);
+             };
+             stdout.println(fact(5));
+         }",
+    );
+    assert!(
+        output.contains(codes::RECURSIVE_BINDING_NOT_A_VALUE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
 fn valid_generic_class_construction_and_member_access() {
     // A generic class's construction, annotation and member access all type
     // through a real instantiation (`Base::Instance`), not the bare class:

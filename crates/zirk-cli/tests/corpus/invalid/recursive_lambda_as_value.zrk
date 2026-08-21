@@ -1,0 +1,14 @@
+// Roadmap Phase 4d: a recursive lambda's own binding
+// (`ZIRK_LANGUAGE_SPEC.md` section 6) refers to itself only through a
+// direct call inside its own body — `zirk-ir` rewrites that one shape into
+// an ordinary recursive call, since no closure value for it exists yet at
+// the point the literal is still being built. Using the binding any other
+// way (here, reading it into a variable) has no value to give and must be
+// rejected in the checker, not reach a panic during lowering.
+fn main(): Void {
+    mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => {
+        mut self_ref = fact;
+        return n <= 1 ? 1 : n * fact(n - 1);
+    };
+    stdout.println(fact(5));
+}

@@ -6897,6 +6897,196 @@ impl<'a> Checker<'a> {
         Type::of(Base::EnumInstance(instance))
     }
 
+    /// Walks a block for `Self::check_recursive_reference`, statement by
+    /// statement.
+    fn check_recursive_reference_block(&mut self, block: &Block, name: &str, nested: bool) {
+        for stmt in &block.statements {
+            self.check_recursive_reference_stmt(stmt, name, nested);
+        }
+    }
+
+    /// Walks a statement for `Self::check_recursive_reference`.
+    fn check_recursive_reference_stmt(&mut self, stmt: &Stmt, name: &str, nested: bool) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(init) = &s.init {
+                    self.check_recursive_reference(init, name, nested);
+                }
+            }
+            Stmt::Assign(s) => {
+                if let AssignTarget::Field(f) = &s.target {
+                    self.check_recursive_reference(&f.object, name, nested);
+                }
+                self.check_recursive_reference(&s.value, name, nested);
+            }
+            Stmt::If(s) => {
+                self.check_recursive_reference(&s.condition, name, nested);
+                self.check_recursive_reference_block(&s.then_branch, name, nested);
+                match &s.else_branch {
+                    Some(ElseBranch::Block(b)) => {
+                        self.check_recursive_reference_block(b, name, nested)
+                    }
+                    Some(ElseBranch::If(inner)) => self.check_recursive_reference_stmt(
+                        &Stmt::If((**inner).clone()),
+                        name,
+                        nested,
+                    ),
+                    None => {}
+                }
+            }
+            Stmt::Loop(s) => {
+                if let Some(init) = &s.init {
+                    self.check_recursive_reference_stmt(init, name, nested);
+                }
+                if let Some(condition) = &s.condition {
+                    self.check_recursive_reference(condition, name, nested);
+                }
+                if let Some(step) = &s.step {
+                    self.check_recursive_reference_stmt(step, name, nested);
+                }
+                self.check_recursive_reference_block(&s.body, name, nested);
+            }
+            Stmt::ForIn(s) => {
+                self.check_recursive_reference(&s.iterable, name, nested);
+                self.check_recursive_reference_block(&s.body, name, nested);
+            }
+            Stmt::Break(_) | Stmt::Continue(_) => {}
+            Stmt::Return(s) => {
+                if let Some(value) = &s.value {
+                    self.check_recursive_reference(value, name, nested);
+                }
+            }
+            Stmt::Expr(s) => self.check_recursive_reference(&s.expr, name, nested),
+            Stmt::Block(b) => self.check_recursive_reference_block(b, name, nested),
+            Stmt::Throw(s) => {
+                if let Some(value) = &s.value {
+                    self.check_recursive_reference(value, name, nested);
+                }
+            }
+            Stmt::Try(s) => {
+                self.check_recursive_reference_block(&s.body, name, nested);
+                for catch in &s.catches {
+                    self.check_recursive_reference_block(&catch.body, name, nested);
+                }
+                if let Some(finally) = &s.finally {
+                    self.check_recursive_reference_block(finally, name, nested);
+                }
+            }
+        }
+    }
+
+    /// Rejects every reference to a recursive lambda's own binding (`name`)
+    /// inside its own body other than as the direct callee of a call
+    /// (`E0440`) — see `Self::check_lambda`'s own call site for why.
+    ///
+    /// `nested` is `true` once the walk has descended into another lambda
+    /// literal: `zirk-ir`'s self-call rewrite only ever covers the
+    /// recursive lambda's *own* immediate body — a reference reached from
+    /// inside a lambda nested within it is an ordinary (but unimplemented)
+    /// capture-of-a-capture, not a self-call, so it is rejected even in
+    /// call position there.
+    fn check_recursive_reference(&mut self, expr: &Expr, name: &str, nested: bool) {
+        match expr {
+            Expr::Path(ident) if ident.name == name => {
+                self.error(
+                    codes::RECURSIVE_BINDING_NOT_A_VALUE,
+                    ident.span,
+                    format!("`{name}` can only be called here, not used as a value"),
+                    "a recursive lambda refers to itself only through a direct call inside its own body (`ZIRK_LANGUAGE_SPEC.md` section 6); using its own binding any other way — assigned, passed as an argument, compared, or reached from inside a nested lambda — is not implemented yet",
+                    Some(format!("call it directly, as in `{name}(...)`")),
+                );
+            }
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Char(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Null(_)
+            | Expr::Path(_)
+            | Expr::This(_)
+            | Expr::Super(_)
+            | Expr::Variant(_) => {}
+            Expr::Unary(e) => self.check_recursive_reference(&e.operand, name, nested),
+            Expr::Binary(e) => {
+                self.check_recursive_reference(&e.left, name, nested);
+                self.check_recursive_reference(&e.right, name, nested);
+            }
+            Expr::Call(e) => {
+                match &*e.callee {
+                    // The one shape a recursive binding is actually allowed
+                    // in: called directly, and only outside a nested lambda.
+                    Expr::Path(ident) if !nested && ident.name == name => {}
+                    other => self.check_recursive_reference(other, name, nested),
+                }
+                for arg in &e.args {
+                    self.check_recursive_reference(&arg.value, name, nested);
+                }
+            }
+            Expr::Range(e) => {
+                self.check_recursive_reference(&e.start, name, nested);
+                self.check_recursive_reference(&e.end, name, nested);
+            }
+            Expr::If(e) => {
+                self.check_recursive_reference(&e.condition, name, nested);
+                self.check_recursive_reference_block(&e.then_branch, name, nested);
+                match &e.else_branch {
+                    Some(ElseBranch::Block(b)) => {
+                        self.check_recursive_reference_block(b, name, nested)
+                    }
+                    Some(ElseBranch::If(inner)) => self.check_recursive_reference_stmt(
+                        &Stmt::If((**inner).clone()),
+                        name,
+                        nested,
+                    ),
+                    None => {}
+                }
+            }
+            Expr::Ternary(e) => {
+                self.check_recursive_reference(&e.condition, name, nested);
+                self.check_recursive_reference(&e.when_true, name, nested);
+                self.check_recursive_reference(&e.when_false, name, nested);
+            }
+            Expr::Increment(e) => {
+                if let AssignTarget::Field(f) = &e.target {
+                    self.check_recursive_reference(&f.object, name, nested);
+                }
+            }
+            Expr::Field(e) => self.check_recursive_reference(&e.object, name, nested),
+            Expr::Match(e) => {
+                self.check_recursive_reference(&e.scrutinee, name, nested);
+                for arm in &e.arms {
+                    match &arm.body {
+                        ArmBody::Expr(body) => self.check_recursive_reference(body, name, nested),
+                        ArmBody::Block(b) => self.check_recursive_reference_block(b, name, nested),
+                    }
+                }
+            }
+            Expr::Lambda(l) => {
+                // Everything reachable from inside a nested lambda literal
+                // is walked with `nested = true` from here on — see this
+                // method's own doc comment.
+                for p in &l.params {
+                    if let Some(default) = &p.default {
+                        self.check_recursive_reference(default, name, true);
+                    }
+                }
+                match &*l.body {
+                    LambdaBody::Expr(body) => self.check_recursive_reference(body, name, true),
+                    LambdaBody::Block(b) => self.check_recursive_reference_block(b, name, true),
+                }
+            }
+            Expr::Println(e) => self.check_recursive_reference(&e.arg, name, nested),
+            Expr::Cast(e) => self.check_recursive_reference(&e.expr, name, nested),
+            Expr::Interpolated(e) => {
+                for part in &e.parts {
+                    if let InterpolatedPart::Expr(inner) = part {
+                        self.check_recursive_reference(inner, name, nested);
+                    }
+                }
+            }
+        }
+    }
+
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {
         let params: Vec<ParamInfo> = expr.params.iter().map(|p| self.resolve_param(p)).collect();
         let returns = self.resolve_type(&expr.return_type);
@@ -6999,6 +7189,21 @@ impl<'a> Checker<'a> {
         // ordinary (if unused) local, not a recursive lambda.
         let recursive_binding =
             own_recursive_binding.filter(|name| captures.iter().any(|c| &c.name == name));
+
+        // `zirk-ir::lower_lambda` never materializes the recursive binding
+        // as a real runtime capture (design addendum in `design.md`): a
+        // direct call to it is rewritten into an ordinary recursive call,
+        // but any other use has no closure value to give at all — the
+        // value the name refers to does not exist yet at the point this
+        // literal is still being built. Walked here, structurally, so a
+        // program using it any other way is rejected with a diagnostic
+        // instead of reaching that gap during lowering.
+        if let Some(name) = &recursive_binding {
+            match &*expr.body {
+                LambdaBody::Expr(body) => self.check_recursive_reference(body, name, false),
+                LambdaBody::Block(b) => self.check_recursive_reference_block(b, name, false),
+            }
+        }
 
         self.lambdas.insert(
             expr.span,
