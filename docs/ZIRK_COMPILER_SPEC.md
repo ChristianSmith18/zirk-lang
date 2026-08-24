@@ -213,8 +213,8 @@ Minimum commands:
 ```text
 zirk new <name>       create a new project
 zirk init             initialize Zirk in an existing directory
-zirk run              compile incrementally and run
-zirk build            produce artifacts
+zirk run [source]     compile incrementally and run
+zirk build [source]   produce artifacts
 zirk check            analyze without generating code
 zirk test             run tests
 zirk bench            run benchmarks
@@ -231,6 +231,12 @@ zirk doc              generate documentation
 
 The CLI must start fast, produce deterministic output and offer a structured
 mode (`--json`) for tooling.
+
+When `run` or `build` receives a Zirk source operand, the `.zrk` extension is
+optional. For example, `zirk run hello` and `zirk run hello.zrk` resolve the
+same source file, as do `zirk build hello` and `zirk build hello.zrk`. This
+shorthand changes command-line resolution only; the physical source file still
+uses the `.zrk` extension.
 
 ## 10. Formatter, linter and LSP
 
