@@ -19,6 +19,12 @@ zirk build --target aarch64-macos
 zirk run -- arg1 arg2
 ```
 
+`run` and `build` may also receive a Zirk source file. Its extension is
+optional at the command line: `zirk run hello` is equivalent to
+`zirk run hello.zrk`, and `zirk build hello` is equivalent to
+`zirk build hello.zrk`. The source file on disk still uses the `.zrk`
+extension.
+
 `check` stops after frontend validation and must not require LLVM, a linker, or
 the runtime archive. `build` writes artifacts without executing them. `run`
 builds incrementally and then starts the application; arguments after `--`
