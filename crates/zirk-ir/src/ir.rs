@@ -993,6 +993,45 @@ pub enum InstKind {
     /// `.is_alive` (design D4): the same null-check `.upgrade()` does,
     /// without producing a new strong reference.
     WeakIsAlive(Operand),
+
+    /// `x.clone()` on a `Clone`-derived class receiver (roadmap Phase 4e,
+    /// `fase-4e-clone`, design D2): a deep-clone-graph traversal, producing
+    /// new identity for every reachable object while preserving internal
+    /// sharing and cycles through a per-call memoization map (source
+    /// address → already-cloned copy address).
+    ///
+    /// Lowered to one call into the runtime's own generic, descriptor-driven
+    /// traversal (`zirk_rt_clone`, `crates/zirk-codegen-llvm/src/emit.rs`) —
+    /// deliberately *not* five separate IR-level ops (`CloneBegin`/
+    /// `CloneLookup`/`CloneRecord`/`CloneAlloc`/`CloneEnd`) threading a
+    /// context through per-field recursion, despite that being this
+    /// change's own design doc's literal D2 wording. Deviation, documented
+    /// here rather than only in `tasks.md` (matching `fase-4e-weak`'s own
+    /// `Base::Weak(u32)` vs `Box<Type>` precedent for correcting design
+    /// prose against a checked reality): the field-offset table a
+    /// compile-time, per-declared-field-type recursion would need to bake
+    /// in (this same crate's/codegen's `gc_reference_paths`) is keyed to
+    /// the *static* field type, but a `class` receiver may at runtime be a
+    /// more-derived subclass with a larger, different layout (ordinary
+    /// class polymorphism, already handled correctly by the collector's own
+    /// `mark_object`, which reads size/fields from the object's own runtime
+    /// header rather than from the static type at the allocation site).
+    /// Baking clone's own field walk into IR/codegen at the *declared*
+    /// type would silently miss a subclass's own extra fields or use the
+    /// wrong size — the design doc's own "Alternative considered" already
+    /// prefers "a single generic runtime entry point parameterized by the
+    /// per-class field-layout table" over a distinct compile-time-generated
+    /// function per class; this applies that same reasoning one layer
+    /// further, to the *whole* recursive walk, not merely which function
+    /// dispatches it, and is what makes the operation correct for a
+    /// polymorphic receiver rather than merely simpler. Runtime-side
+    /// correctness (memoization scoping, cycle safety, collector-safety of
+    /// a clone in progress) is unchanged from design's own D2/D3 — only
+    /// where the recursion executes (in `zirk-runtime`'s own Rust, driven
+    /// by the same field-offset table the collector's mark pass already
+    /// reads from each object's header, instead of unrolled across several
+    /// IR instructions) moved.
+    Clone(Operand),
 }
 
 /// An input to an instruction.

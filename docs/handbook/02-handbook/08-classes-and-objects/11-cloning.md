@@ -18,7 +18,8 @@ first is second;            // true
 ```
 
 An explicit clone produces an independent logical object when the class
-implements `Clone<User>`:
+implements `Clone` (derived automatically when every field is itself
+`Clone`, or written explicitly as `implements Clone`):
 
 ```zirk
 mut independent = first.clone();

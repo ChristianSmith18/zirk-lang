@@ -1911,9 +1911,27 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
 
-            // A nullable value is `{ i1 present, T value }`. The absent form
-            // still carries a payload slot, left undefined: nothing reads it
-            // without checking the flag first, and the verifier enforces that.
+            // A nullable value is `{ i1 present, T value }`. The absent form's
+            // payload slot is zeroed, not left undefined: ordinary Zirk-level
+            // code never reads it without checking the flag first (the
+            // verifier enforces that), but the collector's own `mark_object`
+            // and `Clone`'s deep-clone traversal (roadmap Phase 4e,
+            // `fase-4e-clone`) both read a nullable-*reference*-typed field's
+            // payload directly off the object's own byte layout, with no flag
+            // check at all — `gc_field_offsets`' table carries only byte
+            // offsets, not "and here is where its own present flag lives" —
+            // relying on exactly this invariant: an absent reference's
+            // payload pointer is reliably null, the same way a `Base::Class`/
+            // `Base::Contract` field that was simply never written is (every
+            // `zirk_rt_alloc` allocation is zeroed). An undefined payload
+            // (this arm's previous behavior) breaks that silently: LLVM is
+            // free to lower `undef` to any bit pattern, including a
+            // non-null-looking one, which crashes `Clone`'s own recursion the
+            // moment it treats that garbage as a pointer to dereference —
+            // found while building `fase-4e-clone`'s own end-to-end tests,
+            // not a `Clone`-specific requirement: `mark_object` has carried
+            // this exact same assumption, and therefore this exact same
+            // latent bug, since `fase-4e-colector-mark-sweep`.
             ir::InstKind::NullValue(base) => {
                 let ty = llvm_type_in(
                     self.context,
@@ -1924,7 +1942,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 )
                 .expect("a nullable type has a representation")
                 .into_struct_type();
-                Some(ty.get_undef().into()).map(|value: BasicValueEnum| {
+                Some(ty.const_zero().into()).map(|value: BasicValueEnum| {
                     self.builder
                         .build_insert_value(
                             value.into_struct_value(),
@@ -2292,6 +2310,23 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("negation")
                         .into(),
                 )
+            }
+
+            // `x.clone()` (roadmap Phase 4e, `fase-4e-clone`, design D2):
+            // one call into the runtime's own generic, descriptor-driven
+            // deep-clone traversal — see `InstKind::Clone`'s own doc
+            // comment for why the whole recursive walk lives there rather
+            // than being unrolled into several IR instructions here.
+            ir::InstKind::Clone(value) => {
+                let source = self.operand(*value);
+                let cloned = self
+                    .builder
+                    .build_call(self.runtime.clone, &[source.into()], "cloned")
+                    .expect("call zirk_rt_clone")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_clone returns a pointer");
+                Some(cloned)
             }
         };
 

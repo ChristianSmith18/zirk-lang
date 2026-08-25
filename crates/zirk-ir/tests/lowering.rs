@@ -1514,3 +1514,81 @@ fn weak_upgrade_result_and_the_handle_itself_are_both_gc_roots() {
         "the Marker?-typed local `u` (from .upgrade()) must be a gc root"
     );
 }
+
+// --- Clone (`fase-4e-clone`) -------------------------------------------------
+
+const CLONE_NODE: &str = "class Node { mut left: Node?; mut right: Node?; construct() { } }";
+
+#[test]
+fn derived_clone_lowers_to_a_single_clone_instruction() {
+    let source = format!(
+        "{CLONE_NODE}\nfn main(): Void {{
+             mut a: Node = Node();
+             mut b: Node = a.clone();
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::Clone(_))),
+        "a.clone() must lower to InstKind::Clone, found {kinds:?}"
+    );
+}
+
+/// The `Clone`-produced object is a managed-reference-typed instruction
+/// result like any other (`fase-4e-colector-mark-sweep`'s own unconditional
+/// synthetic-slot spill), so it must be a gc root with no extra work needed
+/// for `Clone` specifically — checked here rather than assumed, the same
+/// rigor `fase-4e-weak`'s own task 2.3 applied to `WeakUpgrade`'s result.
+#[test]
+fn clone_result_is_a_gc_root() {
+    let source = format!(
+        "{CLONE_NODE}\nfn main(): Void {{
+             mut a: Node = Node();
+             mut b: Node = a.clone();
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let node_id = module.object_id("Node").expect("Node is a class");
+
+    let has_clone_root = main
+        .gc_roots
+        .iter()
+        .any(|&id| matches!(main.slot(id).unwrap().ty, IrType::Object(id) if id == node_id));
+    assert!(
+        has_clone_root,
+        "b (a.clone()'s own result) must be a gc root, gc_roots={:?}",
+        main.gc_roots
+    );
+}
+
+/// A class that declares its own `clone()` method (the manual
+/// implementation escape hatch) is dispatched as an ordinary method call —
+/// no `InstKind::Clone` at all, unlike the derived case above.
+#[test]
+fn a_manually_implemented_clone_method_lowers_as_an_ordinary_method_call() {
+    let source = "class Node {
+        mut value: Int32;
+        construct(value: Int32) { this.value = value; }
+        fn clone(): Node { return Node(this.value); }
+    }
+    fn main(): Void {
+        mut a: Node = Node(1);
+        mut b: Node = a.clone();
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        !kinds.iter().any(|k| matches!(k, InstKind::Clone(_))),
+        "a manually implemented clone() must not lower through InstKind::Clone, found {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::Call { .. })),
+        "a manually implemented clone() must lower as an ordinary call, found {kinds:?}"
+    );
+}

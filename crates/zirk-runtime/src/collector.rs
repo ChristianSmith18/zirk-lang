@@ -195,6 +195,29 @@ unsafe fn get_size(object: *mut c_void) -> usize {
     unsafe { *header_word(object, SIZE_WORD) }
 }
 
+/// `object`'s own header size word — [`crate::clone`]'s own read of "how
+/// many bytes does this allocation occupy", the same word [`get_size`]
+/// reads, exposed across the module boundary since the deep-clone
+/// traversal needs it to size its own allocation identically (design D2).
+///
+/// # Safety
+///
+/// `object` must be a live, non-null allocation this collector produced.
+pub(crate) unsafe fn object_size(object: *mut c_void) -> usize {
+    unsafe { get_size(object) }
+}
+
+/// `object`'s own header descriptor word (word 0) — [`crate::clone`]'s own
+/// read of "what class is this", needed both to copy into the fresh clone
+/// and to find its [`gc_field_offsets`] table.
+///
+/// # Safety
+///
+/// `object` must be a live, non-null allocation this collector produced.
+pub(crate) unsafe fn object_descriptor(object: *mut c_void) -> *mut c_void {
+    unsafe { *(object as *mut *mut c_void) }
+}
+
 #[inline]
 unsafe fn set_size(object: *mut c_void, value: usize) {
     unsafe { *header_word(object, SIZE_WORD) = value };
@@ -221,7 +244,7 @@ fn next_ptr(next_raw: usize) -> *mut c_void {
 /// `descriptor` must be one this compiler emitted (or null, in which case
 /// an empty slice is returned — a `Value`/`Enum` field that is itself a
 /// contract-typed null has nothing to walk).
-unsafe fn gc_field_offsets<'a>(descriptor: *const c_void) -> &'a [usize] {
+pub(crate) unsafe fn gc_field_offsets<'a>(descriptor: *const c_void) -> &'a [usize] {
     if descriptor.is_null() {
         return &[];
     }
@@ -338,6 +361,16 @@ fn mark() {
             }
         }
     });
+
+    // `zirk-object-memory`'s own "Deep-clone traversal state is
+    // collector-safe for its whole duration" requirement (roadmap Phase
+    // 4e, `fase-4e-clone`, design D3): every destination object a
+    // still-in-progress `clone()` call has produced so far is not yet
+    // reachable from any ordinary shadow-stack root (only the *finished*
+    // top-level result is, once its own instruction result is spilled) —
+    // `crate::clone` tracks them itself and this is its own extra root
+    // set, walked exactly like the shadow stack above.
+    crate::clone::mark_clone_roots(mark_object);
 }
 
 fn mark_object(object: *mut c_void) {
@@ -437,6 +470,64 @@ fn sweep() {
     ALL_OBJECTS.with(|cell| cell.set(survivors));
     LIVE_BYTES.with(|cell| cell.set(live_bytes));
 }
+
+/// Test-only support for `crate::clone`'s own synthetic-object tests
+/// (`fase-4e-clone`) — thin `pub(crate)` wrappers around this module's own
+/// private test helpers below, since a sibling module's `#[cfg(test)]` code
+/// cannot reach into `mod tests`' private items directly.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::alloc::alloc_zeroed;
+
+    /// See `mod tests`' own `synthetic_object` — identical shape, exposed
+    /// across the module boundary. `extra_bytes` is in bytes, not fields.
+    pub(crate) unsafe fn synthetic_object_for_tests(
+        descriptor: *const c_void,
+        extra_bytes: usize,
+    ) -> *mut c_void {
+        let size = HEADER_BYTES + extra_bytes;
+        let align = allocation_align(std::mem::align_of::<usize>());
+        let layout = Layout::from_size_align(size, align).unwrap();
+        let object = unsafe { alloc_zeroed(layout) } as *mut c_void;
+        unsafe { *(object as *mut *mut c_void) = descriptor as *mut c_void };
+        unsafe { register(object, size) };
+        object
+    }
+
+    /// See `mod tests`' own `descriptor_with_fields`.
+    pub(crate) fn descriptor_with_fields_for_tests(field_offsets: &[usize]) -> Vec<usize> {
+        let mut words = vec![0usize, 0, 0, field_offsets.len()];
+        words.extend_from_slice(field_offsets);
+        words
+    }
+
+    /// Sets this thread's own collection threshold (bytes) — the same
+    /// mechanism `ZIRK_GC_THRESHOLD` configures for a real compiled
+    /// program, set directly here so a test can force a collection without
+    /// depending on process environment variables.
+    pub(crate) fn set_threshold_for_tests(bytes: usize) {
+        THRESHOLD.with(|c| c.set(bytes));
+    }
+
+    /// Resets every piece of this thread's own collector state to a fresh
+    /// start — everything `mod tests`' own `reset_state` resets except the
+    /// process-global WeakCell flag/guard, which `crate::clone`'s own tests
+    /// never touch (they hold no descriptor `crate::collector::mark_object`
+    /// would ever recognize as a WeakCell sentinel).
+    pub(crate) fn reset_state_for_tests() {
+        FRAMES.with(|f| f.borrow_mut().clear());
+        sweep();
+        ALL_OBJECTS.with(|c| c.set(std::ptr::null_mut()));
+        LIVE_BYTES.with(|c| c.set(0));
+        THRESHOLD.with(|c| c.set(default_threshold()));
+    }
+}
+#[cfg(test)]
+pub(crate) use test_support::{
+    descriptor_with_fields_for_tests, reset_state_for_tests, set_threshold_for_tests,
+    synthetic_object_for_tests,
+};
 
 #[cfg(test)]
 mod tests {

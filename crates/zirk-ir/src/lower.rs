@@ -3193,6 +3193,9 @@ impl<'a> FunctionLowering<'a> {
                 if self.is_weak_method_call(e) {
                     return self.lower_weak_method_call(e, span);
                 }
+                if self.is_derived_clone_call(e) {
+                    return self.lower_derived_clone_call(e, span);
+                }
                 if let Some(target) = self.context_conversion_target(e) {
                     let target_ty = self.ir_type(target);
                     return self.lower_context_tree(target_ty, &e.args[0].value);
@@ -6392,6 +6395,46 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::WeakUpgrade(weak), result_ty, span)
     }
 
+    /// Whether `e` is the compiler-derived `.clone()` (roadmap Phase 4e,
+    /// `fase-4e-clone`, design D1/D4) — a bare, no-argument `.clone()` on an
+    /// `Object`-typed receiver whose class declares no `clone` method of
+    /// its own. `Checker::check_method_call_on` already reached exactly the
+    /// same conclusion at the same gate (a manual implementation, when one
+    /// exists, is dispatched through the ordinary method-call path,
+    /// `Self::method_of`, instead) — mirrored here rather than threaded
+    /// through from the checker, the same way `Self::is_weak_method_call`
+    /// re-derives its own answer from the receiver's IR type rather than
+    /// consulting a sema-provided call-resolution table.
+    fn is_derived_clone_call(&self, e: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*e.callee else {
+            return false;
+        };
+        if field.name.name != "clone" || !e.args.is_empty() {
+            return false;
+        }
+        if self.checked.variant_accesses.contains(&field.span) {
+            return false;
+        }
+        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
+            return false;
+        };
+        self.checked.classes[id as usize].method("clone").is_none()
+    }
+
+    /// The compiler-derived `.clone()` (design D1/D2): lowers to a single
+    /// `InstKind::Clone`, typed as the receiver's own type — see that
+    /// variant's own doc comment for why the whole graph traversal lives in
+    /// the runtime rather than being unrolled into several IR instructions
+    /// here.
+    fn lower_derived_clone_call(&mut self, e: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*e.callee else {
+            unreachable!("checked by `Self::is_derived_clone_call`")
+        };
+        let ty = self.type_of(&field.object, field.object.span());
+        let value = self.lower_expr(&field.object);
+        self.emit(InstKind::Clone(value), ty, span)
+    }
+
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
         match self.type_of(object, object.span()).unwrapped() {
             IrType::Object(id) => {
@@ -6897,6 +6940,14 @@ impl<'a> FunctionLowering<'a> {
         if self.is_weak_from_call(call) || self.is_weak_method_call(call) {
             return false;
         }
+        // Neither is the compiler-derived `.clone()` (roadmap Phase 4e,
+        // `fase-4e-clone`) — same reasoning again: its own receiver is an
+        // ordinary `Object`, but `field.name.name` names no method, so
+        // `Self::method_of` below would find nothing and this call would
+        // otherwise be mistaken for a closure-typed value.
+        if self.is_derived_clone_call(call) {
+            return false;
+        }
 
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
@@ -7069,6 +7120,12 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Nullable(
                     Nullable::of(referent).expect("a Weak<T> referent has a nullable form"),
                 )
+            }
+            ast::Expr::Call(e) if self.is_derived_clone_call(e) => {
+                let ast::Expr::Field(field) = &*e.callee else {
+                    unreachable!("checked by `Self::is_derived_clone_call`")
+                };
+                self.type_of(&field.object, field.object.span())
             }
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {
