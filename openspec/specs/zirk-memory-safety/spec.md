@@ -19,11 +19,11 @@ Managed objects MUST NOT expose general-purpose finalizers whose timing is obser
 - **THEN** the program cannot depend on a destructor running at that moment
 
 ### Requirement: Weak references
-`Weak<T>` SHALL NOT keep its referent alive, SHALL require `upgrade(): Option<T>` before safe use, and SHALL expose `is_alive: Boolean` only as an observational hint subject to concurrent change.
+`Weak<T>` SHALL NOT keep its referent alive, SHALL require `upgrade(): T?` before safe use, and SHALL expose `is_alive: Boolean` only as an observational hint subject to concurrent change.
 
 #### Scenario: Weak referent was reclaimed
 - **WHEN** `upgrade()` is called after no strong reference keeps the referent alive
-- **THEN** it returns `None` rather than exposing reclaimed memory
+- **THEN** it returns `null` rather than exposing reclaimed memory
 
 ### Requirement: Checked dependent lifetimes
 Native views, pinned borrows, borrowed iterators, resource-derived handles, and internal-storage views MUST NOT escape the lifetime of their owner, and the compiler SHALL enforce this without requiring public lifetime syntax.
