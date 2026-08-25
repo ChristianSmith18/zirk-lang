@@ -18,9 +18,13 @@ Current high-impact delivery limits include:
   one-resource `match with`, but final suppressed/combined cleanup failures,
   grouped acquisition, complete stack traces, throwable immutability,
   cancellation cleanup, resource transfer, and dependent lifetimes remain.
-- Managed memory (ADR-003's strategy decision remains open), weak/dependent
-  references, and full deep-graph cloning remain Phase 4e work.
-  `inmut::strict` rejects a direct rebinding and a write through a field
+- Managed memory reclaims automatically now: `docs/decisions/ADR-003-memoria.md`
+  closed on a non-moving mark-sweep collector, real (not a placeholder),
+  reclaiming unreachable memory including cycles without exposing GC,
+  ownership, or moves as source semantics. `Weak<T>`, dependent references,
+  automatic pinning, and full deep-graph cloning remain Phase 4e work — a
+  live/dead distinction now exists for them to build against, but none are
+  implemented yet. `inmut::strict` rejects a direct rebinding and a write through a field
   projection off a strict binding; strictness declared on a field itself
   (independent of its container's own mutability) and a mutating method call
   reached through a strict reference remain open. `unsafe fn`/`unsafe {}`/

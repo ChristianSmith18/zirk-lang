@@ -411,3 +411,78 @@ fn generated_symbols_only_use_characters_every_assembler_accepts() {
         );
     }
 }
+
+// --- Collector shadow-stack frames (`fase-4e-colector-mark-sweep`, design D2) ---
+
+/// The text of one Zirk-defined function, from its `define` line up to (and
+/// including) its closing brace — LLVM's textual printer never nests braces
+/// inside a single function body, so the first `"\n}\n"` after the marker is
+/// always that function's own end.
+fn function_body<'a>(ir: &'a str, symbol: &str) -> &'a str {
+    let marker = format!("@{symbol}(");
+    let start = ir
+        .find(&marker)
+        .unwrap_or_else(|| panic!("`{symbol}` is defined:\n{ir}"));
+    let after = &ir[start..];
+    let end = after.find("\n}\n").map(|i| i + 3).unwrap_or(after.len());
+    &after[..end]
+}
+
+#[test]
+fn function_entry_pushes_exactly_one_gc_frame() {
+    let ir = llvm_ir("fn main(): Void { }");
+    let body = function_body(&ir, "zk_main");
+    assert_eq!(
+        body.matches("call void @zirk_rt_push_frame").count(),
+        1,
+        "exactly one push per function entry:\n{body}"
+    );
+}
+
+#[test]
+fn every_return_path_pops_its_own_gc_frame() {
+    let ir = llvm_ir(
+        "fn classify(n: Int32): Int32 {
+             if (n < 0) { return -1; }
+             if (n == 0) { return 0; }
+             return 1;
+         }
+         fn main(): Void { }",
+    );
+    let body = function_body(&ir, "zk_classify");
+
+    assert_eq!(
+        body.matches("call void @zirk_rt_push_frame").count(),
+        1,
+        "exactly one push per function entry, however many return statements follow:\n{body}"
+    );
+    assert_eq!(
+        body.matches("call void @zirk_rt_pop_frame").count(),
+        3,
+        "one pop per return path — three `return` statements, three pops:\n{body}"
+    );
+}
+
+#[test]
+fn a_reference_typed_local_is_pushed_as_a_gc_root() {
+    let ir = llvm_ir(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void { mut p = Point(1); }",
+    );
+    let body = function_body(&ir, "zk_main");
+
+    // Two roots, not one: `p` itself, plus design D4's own synthetic slot
+    // spilling `Point(1)`'s `Alloc` result the moment it is produced —
+    // before the constructor call that follows it, so a collection
+    // triggered by anything the constructor itself might allocate can never
+    // collect the object being constructed.
+    assert!(
+        body.contains("call void @zirk_rt_push_frame(ptr %gc_roots, i64 2)"),
+        "a function with a named reference local plus its own D4 synthetic \
+         spill must push a frame of exactly two roots:\n{body}"
+    );
+    assert!(
+        body.contains("<gc_root>"),
+        "the Alloc result must be spilled to a synthetic root slot before the constructor runs:\n{body}"
+    );
+}

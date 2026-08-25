@@ -1368,3 +1368,77 @@ fn safe_call_of_a_void_returning_method_compiles() {
         "the call still lowers, guarded by the absent/present split, with no `Void?` slot"
     );
 }
+
+// --- Collector shadow-stack roots (`fase-4e-colector-mark-sweep`, design D2/D4) --------
+
+#[test]
+fn gc_roots_names_exactly_the_reference_typed_slots() {
+    let module = with_class(USER, "mut n = 1; mut u = User(1, \"x\");");
+    let main = module.function("main").expect("main exists");
+    let user_id = module.object_id("User").expect("User is a class");
+
+    for &slot_id in &main.gc_roots {
+        let ty = main.slot(slot_id).expect("declared slot").ty;
+        assert!(
+            ty.is_managed_reference(&module),
+            "every gc_roots entry must be a managed reference, found {ty:?}"
+        );
+    }
+
+    let n_slot = main
+        .slots
+        .iter()
+        .position(|s| s.name == "n")
+        .map(|i| SlotId(i as u32))
+        .expect("`n` was declared");
+    assert!(
+        !main.gc_roots.contains(&n_slot),
+        "a scalar local must never be named as a gc root"
+    );
+
+    let has_user_root = main
+        .gc_roots
+        .iter()
+        .any(|&id| main.slot(id).unwrap().ty == IrType::Object(user_id));
+    assert!(has_user_root, "the User-typed local `u` must be a gc root");
+}
+
+#[test]
+fn multi_argument_constructor_calls_spill_each_argument_before_the_next_is_built() {
+    // Design D4's own motivating hazard: `take(User(1, "a"), User(2, "b"))`
+    // evaluates its arguments left to right — the first `Alloc`'s result
+    // must be spilled to its own synthetic slot immediately, before the
+    // second argument's own `Alloc`/constructor-call sequence runs, so a
+    // collection triggered while building the second argument cannot
+    // collect the first.
+    let source = format!(
+        "{USER}\nfn take(a: User, b: User): Void {{ }}\nfn main(): Void {{ take(User(1, \"a\"), User(2, \"b\")); }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    let alloc_positions: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| matches!(k, InstKind::Alloc(_)))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        alloc_positions.len(),
+        2,
+        "two constructor calls, two allocations"
+    );
+    assert!(
+        alloc_positions[0] < alloc_positions[1],
+        "arguments are still built left to right"
+    );
+
+    for &alloc_index in &alloc_positions {
+        assert!(
+            matches!(kinds.get(alloc_index + 1), Some(InstKind::Store(_, _))),
+            "the Alloc result at index {alloc_index} must be spilled to a slot immediately, found {:?}",
+            kinds.get(alloc_index + 1)
+        );
+    }
+}

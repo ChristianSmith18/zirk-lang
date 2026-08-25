@@ -32,12 +32,14 @@
 //! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
 //! and Phase 5 (concurrency) hook without refactoring codegen.
 
+mod collector;
 mod exceptions;
 mod failure;
 mod io;
 mod memory;
 mod string;
 
+pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error, zirk_rt_overflow,
 };

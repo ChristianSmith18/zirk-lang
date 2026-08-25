@@ -383,6 +383,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         }],
         entry: BlockId(0),
         span: Span::empty(0),
+        gc_roots: Vec::new(),
     });
 
     // Default values are written in the declaration but evaluated at the call
@@ -965,6 +966,20 @@ fn ir_type(
     IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
 }
 
+/// The static shadow-stack root descriptor for a finished function's own slot
+/// table (`fase-4e-colector-mark-sweep`, design D2): every slot — named or
+/// D4's synthetic ones, [`FunctionLowering::emit`] already spilled every
+/// managed-reference-typed instruction result to one — whose type is
+/// [`IrType::is_managed_reference`].
+fn gc_roots_of(module: &Module, slots: &[Slot]) -> Vec<SlotId> {
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.ty.is_managed_reference(module))
+        .map(|(index, _)| SlotId(index as u32))
+        .collect()
+}
+
 struct FunctionLowering<'a> {
     module: &'a mut Module,
     checked: &'a CheckedProgram,
@@ -1112,6 +1127,20 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Appends an instruction that produces a value.
+    ///
+    /// Design D4 of `fase-4e-colector-mark-sweep` (the correctness-critical
+    /// finding of that change): whenever `ty` is a collector-managed
+    /// reference (directly, or nested inside a `Value`/`Enum`/`Closure`,
+    /// [`IrType::is_managed_reference`]), the result is immediately spilled
+    /// to its own synthetic slot, unconditionally — the same
+    /// `declare_slot` + `Store` move `Self::lower_throws_check` (`fase-4b`)
+    /// already uses to keep a value valid across a block boundary its own
+    /// lowering introduces, reused here to keep it visible to the shadow
+    /// stack across anything downstream that might allocate and trigger a
+    /// collection. This runs for *every* such instruction, including a
+    /// plain `Load` of an already-named local: the value in hand right now
+    /// is what must survive, not merely the slot it happened to come from,
+    /// since that slot can be overwritten before the next collection point.
     fn emit(&mut self, kind: InstKind, ty: IrType, span: Span) -> Operand {
         let result = self.new_value();
         self.value_types.insert(result, ty);
@@ -1122,7 +1151,14 @@ impl<'a> FunctionLowering<'a> {
             ty,
             span,
         });
-        Operand(result)
+        let operand = Operand(result);
+
+        if ty.is_managed_reference(self.module) {
+            let slot = self.declare_slot("<gc_root>", ty, span);
+            self.emit_effect(InstKind::Store(slot, operand), span);
+        }
+
+        operand
     }
 
     /// Appends an instruction executed for its effect.
@@ -1621,6 +1657,7 @@ impl<'a> FunctionLowering<'a> {
         self.scopes.pop();
 
         let lifted = std::mem::take(&mut self.lifted);
+        let gc_roots = gc_roots_of(self.module, &self.slots);
         let lowered = Function {
             name: function.name.name.clone(),
             params,
@@ -1629,6 +1666,7 @@ impl<'a> FunctionLowering<'a> {
             blocks: self.blocks,
             entry,
             span: function.span,
+            gc_roots,
         };
 
         (lowered, lifted)
@@ -1685,6 +1723,7 @@ impl<'a> FunctionLowering<'a> {
             name: constructor_symbol(&self.checked.classes[id as usize].name, index),
             params,
             return_type: IrType::Void,
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1744,6 +1783,7 @@ impl<'a> FunctionLowering<'a> {
             name: contract_method_symbol(&contract.name.name, &method.name.name),
             params,
             return_type: self.return_type,
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1885,6 +1925,7 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[id as usize].name, &method.name.name),
             params,
             return_type: self.return_type,
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1917,6 +1958,7 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[class_id as usize].name, "message"),
             params: vec![this],
             return_type: IrType::String,
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1941,6 +1983,7 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[class_id as usize].name, "code"),
             params: vec![this],
             return_type: IrType::String,
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1968,6 +2011,7 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[class_id as usize].name, "cause"),
             params: vec![this],
             return_type: IrType::Nullable(nullable),
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -1996,6 +2040,7 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[class_id as usize].name, "stack_trace"),
             params: vec![this],
             return_type: IrType::Object(stack_trace_id),
+            gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,
             entry,
@@ -3519,6 +3564,7 @@ impl<'a> FunctionLowering<'a> {
             name: name.to_string(),
             params: slots,
             return_type: returns,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
             slots: inner.slots,
             blocks: inner.blocks,
             entry,

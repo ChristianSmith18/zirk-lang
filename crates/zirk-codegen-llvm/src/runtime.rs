@@ -108,6 +108,14 @@ pub mod symbols {
     /// Reports an exception that escaped `main` uncaught and terminates
     /// (roadmap Phase 4b).
     pub const UNCAUGHT_EXCEPTION: &str = "zirk_rt_uncaught_exception";
+    /// Pushes this function activation's shadow-stack frame
+    /// (`fase-4e-colector-mark-sweep`, design D2) — called once at function
+    /// entry, after every reference-typed slot has been zero-initialized
+    /// (design D5).
+    pub const PUSH_FRAME: &str = "zirk_rt_push_frame";
+    /// Pops the shadow-stack frame [`PUSH_FRAME`] pushed — called immediately
+    /// before every `Terminator::Return` lowers to `ret` (design D2).
+    pub const POP_FRAME: &str = "zirk_rt_pop_frame";
 }
 
 /// The runtime functions available to generated code.
@@ -144,6 +152,8 @@ pub struct Runtime<'ctx> {
     pub take_pending_exception: FunctionValue<'ctx>,
     pub is_instance: FunctionValue<'ctx>,
     pub uncaught_exception: FunctionValue<'ctx>,
+    pub push_frame: FunctionValue<'ctx>,
+    pub pop_frame: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -343,6 +353,18 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
 
+    // `roots`: the address of an array of root addresses (design D2) — each
+    // element is itself the address of a slot (or a slot's inner
+    // reference-typed field) holding a managed reference, not the reference
+    // itself, so the collector dereferences once more to reach the candidate
+    // object. `count`: how many elements that array has.
+    let push_frame = module.add_function(
+        symbols::PUSH_FRAME,
+        void.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let pop_frame = module.add_function(symbols::POP_FRAME, void.fn_type(&[], false), external);
+
     for handler in [
         overflow,
         division_by_zero,
@@ -395,5 +417,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         take_pending_exception,
         is_instance,
         uncaught_exception,
+        push_frame,
+        pop_frame,
     }
 }
