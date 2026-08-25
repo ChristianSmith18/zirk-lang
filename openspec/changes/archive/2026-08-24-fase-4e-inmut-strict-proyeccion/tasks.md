@@ -19,10 +19,10 @@
 
 - [x] 3.1 Add a short note to `docs/decisions/ADR-003-investigacion-fase-4.md` (a new short section, not editing the existing extensions) recording that the `inmut::strict` projection-write gap its Phase 4d/4e exploration surfaced is now closed, and restating precisely what is still open (field-declared strictness across a projection boundary, method calls through a strict receiver) so it is not read as "reachable-alias analysis is done."
 - [x] 3.2 Check `docs/handbook` for any `inmut::strict` material and confirm (or fix, if found otherwise) that none of it currently claims this projection-write case is implemented, and none needs a "not yet implemented" caveat removed (the proposal's Impact section already checked this before writing — recheck at implementation time in case handbook content changed since). (Updated `12-feature-status.md` rows for multi-decl/assign and memory/unsafe to reflect the new partial `inmut::strict` coverage; also fixed an unrelated stale bullet in `13-appendices/07-current-limitations.md` claiming `Fn(...)=>R` still "remains rejected in general type positions" — stale since `fase-4d-callables` archived, fixed here since it was found while doing this check.)
-- [ ] 3.3 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed per the script's own check).
-- [ ] 3.4 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable.
+- [x] 3.3 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed per the script's own check).
+- [x] 3.4 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable. (zirk-lang `7acb0c1`; zirk-lang-site `d5d4e2d`, synced from `7acb0c1` with `--audit-date 2026-08-24`.)
 
 ## 4. OpenSpec close-out
 
-- [ ] 4.1 Run `openspec validate fase-4e-inmut-strict-proyeccion` before archiving.
-- [ ] 4.2 Archive the change once implementation, tests, and documentation sync are complete.
+- [x] 4.1 Run `openspec validate fase-4e-inmut-strict-proyeccion` before archiving.
+- [x] 4.2 Archive the change once implementation, tests, and documentation sync are complete.
