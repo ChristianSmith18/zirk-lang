@@ -1,0 +1,5 @@
+fn main(): Void {
+    mut left: Int32 = 3;
+    mut right: Int32 = 4;
+    left, right = right, left, 9;
+}

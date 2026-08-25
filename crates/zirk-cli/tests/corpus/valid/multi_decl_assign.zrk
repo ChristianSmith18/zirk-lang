@@ -1,0 +1,22 @@
+// Comma-grouped declarations and simultaneous assignment (roadmap Phase 4d):
+// `openspec/specs/zirk-grammar/spec.md`'s "Comma-grouped declarations and
+// assignments are explicit" and `openspec/specs/zirk-type-system/spec.md`'s
+// "Multiple bindings and simultaneous assignment are atomic at the language
+// level".
+fn main(): Void {
+    // Shared-type declaration, no initializer: every binding gets the
+    // type's default independently.
+    mut first, second: Int32;
+    stdout.println(first);
+    stdout.println(second);
+
+    // Shared-type declaration with a matching initializer list.
+    mut left, right: Int32 = 3, 4;
+    stdout.println(left);
+    stdout.println(right);
+
+    // Simultaneous swap: neither source observes the other's write.
+    left, right = right, left;
+    stdout.println(left);
+    stdout.println(right);
+}

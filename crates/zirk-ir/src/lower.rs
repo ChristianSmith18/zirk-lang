@@ -1953,7 +1953,9 @@ impl<'a> FunctionLowering<'a> {
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
             ast::Stmt::Let(s) => self.lower_let(s),
+            ast::Stmt::MultiLet(s) => self.lower_multi_let(s),
             ast::Stmt::Assign(s) => self.lower_assign(s),
+            ast::Stmt::MultiAssign(s) => self.lower_multi_assign(s),
             ast::Stmt::If(s) => self.lower_if(s),
             ast::Stmt::Loop(s) => self.lower_loop(s),
             ast::Stmt::ForIn(s) => self.lower_for_in(s),
@@ -2019,6 +2021,133 @@ impl<'a> FunctionLowering<'a> {
 
         if let Some((operand, _)) = value {
             self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+        }
+    }
+
+    /// `mut first, second: String = a, b;` (roadmap Phase 4d) — the
+    /// comma-grouped form of `Self::lower_let`.
+    ///
+    /// The checker only pairs initializers to names when the arity matches
+    /// (`Checker::check_multi_let`); a mismatch is already a reported error,
+    /// so this still lowers every initializer for its side effects but pairs
+    /// none of them, and gives every binding its type's default value
+    /// (`Self::default_value`) — the same fallback the checker's own
+    /// `initialized` flag already assumed.
+    fn lower_multi_let(&mut self, stmt: &ast::MultiLetStmt) {
+        let mut shared_ty = stmt.ty.as_ref().map(|a| self.ir_type_from_ref(a));
+        let arity_matches = !stmt.inits.is_empty() && stmt.inits.len() == stmt.names.len();
+
+        let mut inits: Vec<Operand> = Vec::with_capacity(stmt.inits.len());
+        if arity_matches {
+            for init in &stmt.inits {
+                let operand = match shared_ty {
+                    Some(expected) => self.lower_expr_as(init, expected),
+                    None => self.lower_expr(init),
+                };
+                if shared_ty.is_none() {
+                    shared_ty = Some(self.type_of_operand(operand));
+                }
+                inits.push(operand);
+            }
+        } else {
+            for init in &stmt.inits {
+                self.lower_expr(init);
+            }
+        }
+
+        let ty = shared_ty.expect("the checker required a determinable shared type");
+
+        for (i, name) in stmt.names.iter().enumerate() {
+            let slot = self.declare_slot(&name.name, ty, name.span);
+            let value = if arity_matches {
+                Some(inits[i])
+            } else {
+                self.default_value(ty, name.span)
+            };
+            if let Some(value) = value {
+                self.emit_effect(InstKind::Store(slot, value), stmt.span);
+            }
+        }
+    }
+
+    /// The type an assignment target's storage holds, without lowering
+    /// anything — shared by `Self::lower_multi_assign`'s two phases so a
+    /// destination's expected type is known before any source is lowered.
+    fn assign_target_type(&self, target: &ast::AssignTarget) -> IrType {
+        match target {
+            ast::AssignTarget::Name(name) => self.slot_type(self.lookup_slot(&name.name)),
+            ast::AssignTarget::Field(field) => {
+                self.field_position(&field.object, &field.name.name).1
+            }
+        }
+    }
+
+    /// Commits an already-computed `value` to one assignment target — the
+    /// store-emission path `Self::lower_multi_assign`'s second phase reuses
+    /// per destination (design D3). `value` is always a plain operand by the
+    /// time this runs (loaded back from a temporary slot), so — unlike
+    /// `Self::lower_assign`'s own `Field` case — lowering it can never open a
+    /// block partway through the object/value pair, and no spill is needed.
+    fn store_assign_target(&mut self, target: &ast::AssignTarget, value: Operand, span: Span) {
+        match target {
+            ast::AssignTarget::Name(name) => {
+                let slot = self.lookup_slot(&name.name);
+                self.emit_effect(InstKind::Store(slot, value), span);
+            }
+            ast::AssignTarget::Field(field) => {
+                let object = self.lower_expr(&field.object);
+                let (index, _ty) = self.field_position(&field.object, &field.name.name);
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object,
+                        index,
+                        value,
+                    },
+                    span,
+                );
+            }
+        }
+    }
+
+    /// `left, right = right, left;` (roadmap Phase 4d) — the comma-grouped
+    /// form of `Self::lower_assign`.
+    ///
+    /// Design D3: every source is evaluated into a temporary, left to right,
+    /// *before* any destination is written; writes then commit left to
+    /// right. This ordering is what makes `left, right = right, left;` swap
+    /// correctly instead of the second read observing the first write.
+    fn lower_multi_assign(&mut self, stmt: &ast::MultiAssignStmt) {
+        let n = stmt.targets.len().min(stmt.values.len());
+
+        let mut temps: Vec<Option<(SlotId, IrType)>> = Vec::with_capacity(n);
+        for i in 0..n {
+            if let ast::AssignTarget::Name(name) = &stmt.targets[i]
+                && name.name == "_"
+            {
+                self.lower_expr(&stmt.values[i]);
+                temps.push(None);
+                continue;
+            }
+
+            let ty = self.assign_target_type(&stmt.targets[i]);
+            let value = self.lower_expr_as(&stmt.values[i], ty);
+            let slot = self.declare_slot("<multi_assign_tmp>", ty, stmt.values[i].span());
+            self.emit_effect(InstKind::Store(slot, value), stmt.values[i].span());
+            temps.push(Some((slot, ty)));
+        }
+
+        // Beyond the shorter list's length (an arity mismatch, already
+        // reported by the checker), the extra sources are still lowered for
+        // any side effect, same as `Checker::check_multi_assign`'s own
+        // leftover handling.
+        for value in &stmt.values[n..] {
+            self.lower_expr(value);
+        }
+
+        for (i, temp) in temps.iter().enumerate().take(n) {
+            let Some((slot, ty)) = *temp else { continue };
+            let value = self.emit(InstKind::Load(slot), ty, stmt.values[i].span());
+            self.store_assign_target(&stmt.targets[i], value, stmt.span);
         }
     }
 

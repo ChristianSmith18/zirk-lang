@@ -4115,8 +4115,16 @@ impl<'a> Checker<'a> {
                 self.check_let(s);
                 false
             }
+            Stmt::MultiLet(s) => {
+                self.check_multi_let(s);
+                false
+            }
             Stmt::Assign(s) => {
                 self.check_assign(s);
+                false
+            }
+            Stmt::MultiAssign(s) => {
+                self.check_multi_assign(s);
                 false
             }
             Stmt::If(s) => self.check_if(s),
@@ -4286,6 +4294,94 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `mut first, second: String;` (roadmap Phase 4d) — the comma-grouped
+    /// form of `Self::check_let`. Applies the shared type and permission to
+    /// every name independently (design D1), and does not support the
+    /// self-recursive-lambda pre-declaration `Self::check_let` does: that
+    /// shape is single-name only.
+    fn check_multi_let(&mut self, stmt: &MultiLetStmt) {
+        let annotated = stmt.ty.as_ref().map(|t| self.resolve_type(t));
+
+        if !stmt.inits.is_empty() && stmt.inits.len() != stmt.names.len() {
+            self.error(
+                codes::MULTI_LET_ARITY_MISMATCH,
+                stmt.span,
+                format!(
+                    "{} name(s) declared but {} initializer(s) given",
+                    stmt.names.len(),
+                    stmt.inits.len()
+                ),
+                "a comma-grouped declaration with an initializer list needs exactly one value per name",
+                Some("add or remove initializer expressions until the counts match".into()),
+            );
+        }
+
+        let arity_matches = !stmt.inits.is_empty() && stmt.inits.len() == stmt.names.len();
+
+        // Without an explicit annotation, the first initializer's type is
+        // the shared type — the same inference `Self::check_let` applies to
+        // its own single name. A mismatched arity has no sound per-name
+        // pairing to infer from, so it falls back to `Unknown` and the arity
+        // diagnostic above stands alone.
+        let ty = match annotated {
+            Some(t) => t,
+            None if arity_matches => {
+                self.expected_type = None;
+                let inferred = self.check_expr(&stmt.inits[0]);
+                if matches!(inferred.base, Base::Null) {
+                    self.error(
+                        codes::UNKNOWN_TYPE,
+                        stmt.span,
+                        "cannot infer the type of this declaration",
+                        "`null` alone does not say which type is absent",
+                        Some("write a shared `: Type` annotation".into()),
+                    );
+                    Type::UNKNOWN
+                } else {
+                    inferred
+                }
+            }
+            None => Type::UNKNOWN,
+        };
+
+        if ty == Type::VOID {
+            self.error(
+                codes::VOID_VARIABLE,
+                stmt.span,
+                "a variable cannot be of type Void",
+                "`Void` represents the absence of a value, so it cannot be stored",
+                None,
+            );
+        }
+
+        for (i, name) in stmt.names.iter().enumerate() {
+            if arity_matches {
+                // Position 0 was already checked above to infer `ty` when
+                // there was no annotation — checking it again here would
+                // double-report anything it found.
+                if !(i == 0 && annotated.is_none()) {
+                    self.expected_type = annotated;
+                    let actual = self.check_expr(&stmt.inits[i]);
+                    self.expect_assignable(ty, actual, stmt.inits[i].span(), "the initial value");
+                }
+                self.check_strict_alias(&stmt.inits[i], ty, stmt.mutability, &name.name, name.span);
+            }
+
+            self.declare_local(Binding {
+                name: name.name.clone(),
+                ty,
+                mutability: stmt.mutability,
+                span: name.span,
+                // No initializer list (or an arity mismatch already
+                // reported) still leaves every binding usable when its type
+                // has a default (`ZIRK_TYPE_SYSTEM` "Default
+                // initialization"), exactly as a comma-grouped declaration's
+                // spec requires.
+                initialized: arity_matches || ty.has_default(),
+            });
+        }
+    }
+
     /// The `mut`/`inmut`/`inmut::strict` matrix (D11), applied to objects and
     /// contracts: only naming another variable outright shares its reference,
     /// so that is the only shape this looks at. A strict reference must not
@@ -4379,16 +4475,28 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let AssignTarget::Name(name) = &stmt.target else {
-            let AssignTarget::Field(field) = &stmt.target else {
+        self.check_assign_target(&stmt.target, value, stmt.value.span());
+    }
+
+    /// The rules a single `(target, value)` pair of an assignment must obey
+    /// — `inmut`/`inmut::strict` rebinding rejection, `inmut::strict`
+    /// projection-mutation rejection, and positional type-checking.
+    ///
+    /// Shared by `Self::check_assign` and, once per position, by
+    /// `Self::check_multi_assign` (design D4) — a simultaneous assignment
+    /// obeys exactly the rules a single assignment already does, applied to
+    /// every destination.
+    fn check_assign_target(&mut self, target: &AssignTarget, value: Type, value_span: Span) {
+        let AssignTarget::Name(name) = target else {
+            let AssignTarget::Field(field) = target else {
                 unreachable!("an assignment target is a name or a field")
             };
-            let target = self.check_writable_field(field);
-            self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
+            let target_ty = self.check_writable_field(field);
+            self.expect_assignable(target_ty, value, value_span, "the assigned value");
             return;
         };
 
-        let Some(target) = self.require_writable(name) else {
+        let Some(target_ty) = self.require_writable(name) else {
             return;
         };
 
@@ -4405,8 +4513,67 @@ impl<'a> Checker<'a> {
         // the same dedicated diagnostic a second, differently-captured
         // literal gets, which is an accurate description either way: this
         // position cannot hold this closure.
-        self.expect_assignable(target, value, stmt.value.span(), "the assigned value");
+        self.expect_assignable(target_ty, value, value_span, "the assigned value");
         self.scopes.mark_initialized(&name.name);
+    }
+
+    /// `left, right = right, left;` (roadmap Phase 4d) — the comma-grouped
+    /// form of `Self::check_assign`.
+    ///
+    /// Requires equal arity (targeted diagnostic otherwise), rejects
+    /// duplicate destinations, and then applies `Self::check_assign_target`
+    /// once per position (design D4) — the same rules a single assignment
+    /// already enforces, fanned out.
+    fn check_multi_assign(&mut self, stmt: &MultiAssignStmt) {
+        if stmt.targets.len() != stmt.values.len() {
+            self.error(
+                codes::MULTI_ASSIGN_ARITY_MISMATCH,
+                stmt.span,
+                format!(
+                    "{} destination(s) but {} source(s)",
+                    stmt.targets.len(),
+                    stmt.values.len()
+                ),
+                "a simultaneous assignment must have exactly one source per destination",
+                Some("add or remove source expressions until the counts match".into()),
+            );
+        }
+
+        let keys: Vec<Option<String>> = stmt.targets.iter().map(assign_target_key).collect();
+        for i in 0..keys.len() {
+            let Some(key) = &keys[i] else { continue };
+            if let Some(j) = keys[..i].iter().position(|k| k.as_ref() == Some(key)) {
+                self.error(
+                    codes::DUPLICATE_ASSIGN_TARGET,
+                    stmt.targets[i].span(),
+                    "this destination is written twice in the same simultaneous assignment",
+                    format!("also written at position {}", j + 1),
+                    Some("assign to each destination at most once".into()),
+                );
+            }
+        }
+
+        let n = stmt.targets.len().min(stmt.values.len());
+        for i in 0..n {
+            let value = self.check_expr(&stmt.values[i]);
+
+            // `_` discards this position's value exactly as it does in a
+            // single assignment (`Self::check_assign`'s own handling).
+            if let AssignTarget::Name(name) = &stmt.targets[i]
+                && name.name == "_"
+            {
+                continue;
+            }
+
+            self.check_assign_target(&stmt.targets[i], value, stmt.values[i].span());
+        }
+
+        // Beyond the shorter list's length, only the checker's ordinary
+        // read-checking of extra sources still applies — there is no
+        // destination left to type-check them against.
+        for value in &stmt.values[n..] {
+            self.check_expr(value);
+        }
     }
 
     /// The type of a field being written to, reporting why it cannot be.
@@ -6913,11 +7080,26 @@ impl<'a> Checker<'a> {
                     self.check_recursive_reference(init, name, nested);
                 }
             }
+            Stmt::MultiLet(s) => {
+                for init in &s.inits {
+                    self.check_recursive_reference(init, name, nested);
+                }
+            }
             Stmt::Assign(s) => {
                 if let AssignTarget::Field(f) = &s.target {
                     self.check_recursive_reference(&f.object, name, nested);
                 }
                 self.check_recursive_reference(&s.value, name, nested);
+            }
+            Stmt::MultiAssign(s) => {
+                for target in &s.targets {
+                    if let AssignTarget::Field(f) = target {
+                        self.check_recursive_reference(&f.object, name, nested);
+                    }
+                }
+                for value in &s.values {
+                    self.check_recursive_reference(value, name, nested);
+                }
             }
             Stmt::If(s) => {
                 self.check_recursive_reference(&s.condition, name, nested);
@@ -8600,6 +8782,35 @@ fn assigned_fields(body: &Block) -> std::collections::HashSet<String> {
     found
 }
 
+/// A textual key identifying the place a simultaneous-assignment destination
+/// names, for `Checker::check_multi_assign`'s cross-destination duplicate
+/// check (design D4). Two destinations with the same key are provably the
+/// same place; `None` means the base is not a simple enough shape (`Path`,
+/// `This`, or a chain of safe-free `Field`s over one of those) to prove
+/// either way, so it is never reported as a duplicate.
+fn assign_target_key(target: &AssignTarget) -> Option<String> {
+    match target {
+        AssignTarget::Name(name) => Some(format!("name:{}", name.name)),
+        AssignTarget::Field(field) => {
+            let base = expr_place_key(&field.object)?;
+            Some(format!("{base}.{}", field.name.name))
+        }
+    }
+}
+
+/// The place an expression names, for `Self::assign_target_key`'s base.
+fn expr_place_key(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Path(ident) => Some(format!("name:{}", ident.name)),
+        Expr::This(_) => Some("this".to_string()),
+        Expr::Field(field) if !field.safe => {
+            let base = expr_place_key(&field.object)?;
+            Some(format!("{base}.{}", field.name.name))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a constructor body delegates to its base with `super(...)`.
 fn calls_super(body: &Block) -> bool {
     body.statements.iter().any(|statement| match statement {
@@ -8618,6 +8829,15 @@ fn collect_assigned_fields(statements: &[Stmt], found: &mut std::collections::Ha
                     && matches!(&*field.object, Expr::This(_))
                 {
                     found.insert(field.name.name.clone());
+                }
+            }
+            Stmt::MultiAssign(assign) => {
+                for target in &assign.targets {
+                    if let AssignTarget::Field(field) = target
+                        && matches!(&*field.object, Expr::This(_))
+                    {
+                        found.insert(field.name.name.clone());
+                    }
                 }
             }
             Stmt::If(conditional) => {

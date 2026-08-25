@@ -429,6 +429,99 @@ fn invalid_strict_reference_acquired_from_an_accessible_mutable_alias() {
     );
 }
 
+// --- Comma-grouped declarations and simultaneous assignment (roadmap Phase 4d) --
+
+#[test]
+fn valid_multi_let_type_and_permission_fan_out() {
+    accepted_body(
+        "mut first, second: String = \"a\", \"b\";
+         inmut third, fourth: Int32 = 1, 2;
+         first = \"c\";
+         second = \"d\";",
+    );
+}
+
+#[test]
+fn invalid_multi_let_initializer_arity_mismatch() {
+    let output = rejected_body("mut a, b: Int32 = 1, 2, 3;");
+    assert!(
+        output.contains(codes::MULTI_LET_ARITY_MISMATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_multi_let_missing_initializer_uses_type_default() {
+    // `zirk-type-system`'s "Default initialization": no initializer list
+    // still leaves every binding usable, defaulted independently.
+    accepted_body(
+        "mut a, b: Int32;
+         a = a + 1;
+         b = b + 1;",
+    );
+}
+
+#[test]
+fn invalid_multi_assign_arity_mismatch() {
+    let output = rejected_body(
+        "mut left: Int32 = 1;
+         mut right: Int32 = 2;
+         left, right = right, left, 9;",
+    );
+    assert!(
+        output.contains(codes::MULTI_ASSIGN_ARITY_MISMATCH.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_multi_assign_duplicate_destination() {
+    let output = rejected_body(
+        "mut a: Int32 = 1;
+         mut b: Int32 = 2;
+         a, a = b, 3;",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_ASSIGN_TARGET.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_multi_assign_rebinding_immutable() {
+    let output = rejected_body(
+        "inmut a: Int32 = 1;
+         mut b: Int32 = 2;
+         a, b = 5, 6;",
+    );
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_multi_assign_rebinding_strict() {
+    let output = rejected_body(
+        "inmut::strict a: Int32 = 1;
+         mut b: Int32 = 2;
+         a, b = 5, 6;",
+    );
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_multi_assign_swap_type_checks() {
+    accepted_body(
+        "mut left: Int32 = 3;
+         mut right: Int32 = 4;
+         left, right = right, left;",
+    );
+}
+
 #[test]
 fn valid_inmut_alias_of_a_mutable_object_reference() {
     // Only `mut` targets and `inmut::strict` sources trigger the matrix;

@@ -252,6 +252,69 @@ fn valid_inmut_strict_is_implemented() {
     assert_eq!(l.mutability, Mutability::Strict);
 }
 
+// --- Comma-grouped declarations (roadmap Phase 4d) --------------------------
+
+#[test]
+fn valid_multi_let_shared_type_no_initializer() {
+    let Stmt::MultiLet(m) = statements("mut first, second: String;").remove(0) else {
+        panic!("expected a comma-grouped declaration");
+    };
+
+    assert_eq!(m.mutability, Mutability::Mutable);
+    assert_eq!(m.names.len(), 2);
+    assert_eq!(m.names[0].name, "first");
+    assert_eq!(m.names[1].name, "second");
+    assert_eq!(m.ty.unwrap().name, "String");
+    assert!(m.inits.is_empty());
+}
+
+#[test]
+fn valid_multi_let_matching_initializer_list() {
+    let Stmt::MultiLet(m) = statements("mut a, b: Int32 = 1, 2;").remove(0) else {
+        panic!("expected a comma-grouped declaration");
+    };
+
+    assert_eq!(m.names.len(), 2);
+    assert_eq!(m.inits.len(), 2);
+}
+
+#[test]
+fn valid_multi_let_mismatched_initializer_arity_still_parses() {
+    // The parser preserves both arities; the checker reports the mismatch
+    // (design D1/D5) — this is not a parse error.
+    let Stmt::MultiLet(m) = statements("mut a, b: Int32 = 1, 2, 3;").remove(0) else {
+        panic!("expected a comma-grouped declaration");
+    };
+
+    assert_eq!(m.names.len(), 2);
+    assert_eq!(m.inits.len(), 3);
+}
+
+#[test]
+fn valid_multi_let_inmut_strict() {
+    let Stmt::MultiLet(m) = statements("inmut::strict a, b: Int32 = 1, 2;").remove(0) else {
+        panic!("expected a comma-grouped declaration");
+    };
+
+    assert_eq!(m.mutability, Mutability::Strict);
+}
+
+#[test]
+fn valid_single_name_declaration_is_unaffected() {
+    // Design D2: no comma at all still builds `Stmt::Let`, not `MultiLet`.
+    let stmt = statements("mut x: Int32 = 1;").remove(0);
+    assert!(matches!(stmt, Stmt::Let(_)));
+}
+
+#[test]
+fn invalid_multi_let_non_identifier_in_name_list() {
+    let output = errors("fn main(): Void { mut a, this.b: Int32; }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
 // --- Precedence and associativity --------------------------------------------
 
 #[test]
@@ -404,6 +467,57 @@ fn invalid_assignment_to_a_non_variable() {
     let output = errors("fn main(): Void { 1 = 5; }");
     assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()));
 }
+
+// --- Simultaneous assignment (roadmap Phase 4d) -----------------------------
+
+#[test]
+fn valid_simultaneous_assignment_swap() {
+    let Stmt::MultiAssign(m) = statements("left, right = right, left;").remove(0) else {
+        panic!("expected a simultaneous assignment");
+    };
+
+    assert_eq!(m.targets.len(), 2);
+    assert_eq!(m.values.len(), 2);
+    assert_eq!(m.targets[0].name(), "left");
+    assert_eq!(m.targets[1].name(), "right");
+}
+
+#[test]
+fn valid_simultaneous_assignment_mismatched_arity_still_parses() {
+    // `openspec/specs/zirk-grammar/spec.md`'s own "Assignment arity
+    // mismatch" scenario: both arities are preserved for the checker.
+    let Stmt::MultiAssign(m) = statements("left, right = right, left, extra;").remove(0) else {
+        panic!("expected a simultaneous assignment");
+    };
+
+    assert_eq!(m.targets.len(), 2);
+    assert_eq!(m.values.len(), 3);
+}
+
+#[test]
+fn valid_single_target_assignment_is_unaffected() {
+    // Design D2: no comma at all still builds `Stmt::Assign`, not
+    // `MultiAssign`.
+    let stmt = statements("x = 5;").remove(0);
+    assert!(matches!(stmt, Stmt::Assign(_)));
+}
+
+#[test]
+fn invalid_simultaneous_assignment_non_place_target() {
+    let output = errors("fn main(): Void { 1, x = 2, 3; }");
+    assert!(
+        output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        "{output}"
+    );
+}
+
+// No parenthesized-tuple destructuring surface exists in the grammar today
+// (`grep -rn "Tuple" crates/zirk-ast crates/zirk-parser` finds nothing), so
+// there is no `(a, b) = ...` production to disambiguate this bare
+// comma-grouped form from (design Risk #2, `design.md`). When tuple
+// destructuring is introduced, its own change must keep the parenthesized
+// form as the disambiguator and add the collision test this file cannot
+// write yet.
 
 // --- Optional semicolon --------------------------------------------------
 

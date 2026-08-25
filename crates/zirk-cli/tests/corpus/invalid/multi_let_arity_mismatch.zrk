@@ -1,0 +1,3 @@
+fn main(): Void {
+    mut a, b: Int32 = 1, 2, 3;
+}

@@ -503,8 +503,16 @@ pub enum Mutability {
 pub enum Stmt {
     /// `mut x: Int32 = 0;`
     Let(LetStmt),
+    /// `mut first, second: String;` (roadmap Phase 4d, comma-grouped
+    /// declarations) — a genuinely distinct shape from `Let`, not its N=1
+    /// case reused, and not a tuple: `design.md` D1/D2.
+    MultiLet(MultiLetStmt),
     /// `x = 1;`
     Assign(AssignStmt),
+    /// `left, right = right, left;` (roadmap Phase 4d, simultaneous
+    /// assignment) — one node carrying both comma-separated lists, arities
+    /// preserved even when they differ (`design.md` D1).
+    MultiAssign(MultiAssignStmt),
     /// `if cond { } else { }`
     If(IfStmt),
     /// `while cond { }`, `loop { }`, `do { } while cond;` and
@@ -532,7 +540,9 @@ impl Stmt {
     pub fn span(&self) -> Span {
         match self {
             Stmt::Let(s) => s.span,
+            Stmt::MultiLet(s) => s.span,
             Stmt::Assign(s) => s.span,
+            Stmt::MultiAssign(s) => s.span,
             Stmt::If(s) => s.span,
             Stmt::Loop(s) => s.span,
             Stmt::ForIn(s) => s.span,
@@ -659,11 +669,49 @@ pub struct LetStmt {
     pub span: Span,
 }
 
+/// `mut first, second: String;` — a comma-separated list of simple binding
+/// names sharing one type annotation and (optionally) one comma-separated
+/// initializer list (roadmap Phase 4d).
+///
+/// Kept as its own node rather than `LetStmt` with `names.len() == 1`
+/// (`design.md` D2): the single-name case keeps its existing diagnostics,
+/// spans and lowering unchanged. `inits` is empty when no initializer list
+/// is written; its length is preserved as parsed even when it does not match
+/// `names.len()`, so the checker can emit the targeted arity diagnostic
+/// (`design.md` D1/D5) instead of a generic one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiLetStmt {
+    pub mutability: Mutability,
+    pub names: Vec<Ident>,
+    /// The one type annotation shared by every name. Absent only when an
+    /// initializer list is present to infer it from, the same rule
+    /// `LetStmt` already applies to its own single name.
+    pub ty: Option<TypeRef>,
+    pub inits: Vec<Expr>,
+    pub span: Span,
+}
+
 /// Reassignment of an existing variable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AssignStmt {
     pub target: AssignTarget,
     pub value: Expr,
+    pub span: Span,
+}
+
+/// `left, right = right, left;` — simultaneous assignment to a
+/// comma-separated list of assignable places from a comma-separated list of
+/// source expressions (roadmap Phase 4d).
+///
+/// Both lists' lengths are preserved as parsed even when they differ, so the
+/// checker can emit the targeted arity diagnostic (`design.md` D1/D5)
+/// instead of a generic one. Lowering evaluates every `values[i]` before
+/// writing any `targets[i]` (`design.md` D3), which is what makes the swap
+/// scenario correct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiAssignStmt {
+    pub targets: Vec<AssignTarget>,
+    pub values: Vec<Expr>,
     pub span: Span,
 }
 
