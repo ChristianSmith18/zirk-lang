@@ -1,0 +1,12 @@
+// Writing to a field reached through a projection off an `inmut::strict`
+// binding is rejected, not just rebinding the strict name itself
+// (fase-4e-inmut-strict-proyeccion).
+class Point {
+    x: Int32;
+    construct(x: Int32) { this.x = x; }
+}
+
+fn main(): Void {
+    inmut::strict p = Point(1);
+    p.x = 5;
+}

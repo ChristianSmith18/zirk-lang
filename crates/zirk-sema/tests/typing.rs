@@ -429,6 +429,95 @@ fn invalid_strict_reference_acquired_from_an_accessible_mutable_alias() {
     );
 }
 
+// --- `inmut::strict` projection writes (fase-4e-inmut-strict-proyeccion) ----
+
+#[test]
+fn invalid_write_through_strict_projection() {
+    let output = rejected(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void {
+             inmut::strict p = Point(1);
+             p.x = 5;
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_write_through_multi_level_strict_projection() {
+    // Confirms the root-binding walk is not limited to one field access.
+    let output = rejected(
+        "class Inner { z: Int32; construct(z: Int32) { this.z = z; } }
+         class Middle { inner: Inner; construct(inner: Inner) { this.inner = inner; } }
+         class Outer { middle: Middle; construct(middle: Middle) { this.middle = middle; } }
+         fn main(): Void {
+             inmut::strict o = Outer(Middle(Inner(1)));
+             o.middle.inner.z = 5;
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_write_through_mut_projection() {
+    accepted(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void {
+             mut p = Point(1);
+             p.x = 5;
+         }",
+    );
+}
+
+#[test]
+fn valid_write_through_non_strict_inmut_projection() {
+    // `inmut` (non-strict) only prohibits rebinding `p` itself; mutating
+    // what it reaches is a matter of the field's own `inmut`, not the
+    // reference's (`ZIRK_SPEC_FINAL.md`/spec: only `inmut::strict`
+    // prohibits referent mutation).
+    accepted(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void {
+             inmut p = Point(1);
+             p.x = 5;
+         }",
+    );
+}
+
+#[test]
+fn invalid_multi_assign_write_through_strict_projection() {
+    let output = rejected(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void {
+             inmut::strict p = Point(1);
+             mut left: Int32 = 0;
+             left, p.x = 1, 5;
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_constructor_field_write_unaffected_by_strict_projection_check() {
+    // `Expr::This` returns `None` from `root_binding_mutability` (design D1
+    // of `fase-4e-inmut-strict-proyeccion`), so the in-constructor exemption
+    // keeps working regardless of the new projection check — a regression
+    // guard, not new behavior.
+    accepted(
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void { Point(1); }",
+    );
+}
+
 // --- Comma-grouped declarations and simultaneous assignment (roadmap Phase 4d) --
 
 #[test]
