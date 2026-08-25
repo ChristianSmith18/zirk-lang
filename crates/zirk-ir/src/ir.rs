@@ -186,6 +186,12 @@ pub enum IrType {
     /// per-type trick would be smaller for `String` and would need a separate
     /// rule for every type added later; one shape needs none.
     Nullable(Nullable),
+    /// `Pointer<T>` (roadmap Phase 4e, design D1/D8), identified by the id of
+    /// its pointee type in the module's own `pointer_types` table — kept as
+    /// an id rather than `Box<IrType>` so `IrType` stays `Copy`, the same
+    /// reason `Closure`/`Object`/`Value`/`Enum` are ids into a module table
+    /// instead of holding their shape inline.
+    Pointer(u32),
 }
 
 /// The types that have a nullable form.
@@ -273,6 +279,7 @@ impl IrType {
                 Nullable::Value(_) => "value?",
                 Nullable::Enum(_) => "enum?",
             },
+            IrType::Pointer(_) => "Pointer",
         }
     }
 
@@ -334,6 +341,21 @@ pub struct Module {
     /// none of whose variants carry data, has no entry here: it stays
     /// `Int32` and is never addressed through this table.
     pub enums: Vec<EnumLayout>,
+    /// Interned `Pointer<T>` pointee types, indexed by the id
+    /// [`IrType::Pointer`] carries (roadmap Phase 4e, design D1).
+    pub pointer_types: Vec<IrType>,
+    /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
+    /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
+    /// no Zirk-authored body.
+    pub externs: Vec<ExternFn>,
+}
+
+/// One `extern "C" fn` declaration (roadmap Phase 4e, design D7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFn {
+    pub name: String,
+    pub params: Vec<IrType>,
+    pub return_type: IrType,
 }
 
 /// What one object holds in memory.
@@ -479,6 +501,16 @@ impl Module {
         }
         self.strings.push(value.to_string());
         StringId(self.strings.len() as u32 - 1)
+    }
+
+    /// Interns a `Pointer<T>` pointee type, returning the id
+    /// [`IrType::Pointer`] carries.
+    pub fn intern_pointer_type(&mut self, pointee: IrType) -> u32 {
+        if let Some(index) = self.pointer_types.iter().position(|&t| t == pointee) {
+            return index as u32;
+        }
+        self.pointer_types.push(pointee);
+        (self.pointer_types.len() - 1) as u32
     }
 }
 
@@ -836,6 +868,39 @@ pub enum InstKind {
         callee: Operand,
         args: Vec<Operand>,
     },
+
+    /// `Pointer.from(place)` where `place` is a local/parameter slot
+    /// (roadmap Phase 4e, design D8) — codegen reuses the `alloca` already
+    /// computed for that slot; no new storage.
+    PointerFromSlot(SlotId),
+    /// `Pointer.from(place)` where `place` is a field of an object or value
+    /// (design D8) — codegen reuses the field's own already-computed GEP.
+    PointerFromField {
+        object: Operand,
+        index: u32,
+    },
+    /// `.read()` — a plain LLVM `load` through the pointer, typed by `T`.
+    PointerRead(Operand),
+    /// `.write(value)` — a plain LLVM `store` through the pointer.
+    PointerWrite {
+        pointer: Operand,
+        value: Operand,
+    },
+    /// `.offset(n)` — `getelementptr` in units of `T` (design D8).
+    PointerOffset {
+        pointer: Operand,
+        amount: Operand,
+    },
+    /// `.offset_bytes(n)` — `getelementptr` over an `i8`-typed view of the
+    /// same pointer (design D8).
+    PointerOffsetBytes {
+        pointer: Operand,
+        amount: Operand,
+    },
+    /// `.cast<U>()` — an LLVM pointer bitcast.
+    PointerCast(Operand),
+    /// `.is_null` — the one pointer operation that does not require `unsafe`.
+    PointerIsNull(Operand),
 }
 
 /// An input to an instruction.

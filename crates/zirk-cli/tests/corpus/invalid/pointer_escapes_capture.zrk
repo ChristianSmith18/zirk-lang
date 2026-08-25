@@ -1,0 +1,9 @@
+fn main(): Void {
+    mut x: Int32 = 1;
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        mut f: Fn() => Void = (): Void => {
+            mut q: Pointer<Int32> = p;
+        };
+    }
+}

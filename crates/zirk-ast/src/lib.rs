@@ -41,6 +41,8 @@ pub struct Program {
     pub contracts: Vec<ContractDecl>,
     pub functions: Vec<FnDecl>,
     pub type_aliases: Vec<TypeAliasDecl>,
+    /// `extern "C" fn name(...): T;` (roadmap Phase 4e, `ADR-015`).
+    pub externs: Vec<ExternFnDecl>,
     pub span: Span,
 }
 
@@ -332,6 +334,23 @@ pub struct FnDecl {
     pub body: Block,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
+    /// `unsafe fn`, whose whole body runs as if wrapped in `unsafe {}`
+    /// (roadmap Phase 4e).
+    pub is_unsafe: bool,
+    pub span: Span,
+}
+
+/// `extern "C" fn name(params): ReturnType;` — a bodyless native declaration
+/// (roadmap Phase 4e, `ADR-015-declaracion-extern.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFnDecl {
+    pub name: Ident,
+    /// The calling-convention literal as written, e.g. `"C"`. Kept even
+    /// though only `"C"` is accepted, so the checker/parser can name the
+    /// offending literal in its own diagnostic instead of losing it here.
+    pub convention: StrLit,
+    pub params: Vec<Param>,
+    pub return_type: TypeRef,
     pub span: Span,
 }
 
@@ -534,6 +553,15 @@ pub enum Stmt {
     Throw(ThrowStmt),
     /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
     Try(TryStmt),
+    /// `unsafe { }` used for its effect (roadmap Phase 4e). Shares
+    /// [`UnsafeBlock`] with [`Expr::Unsafe`] the same way `IfStmt` is shared
+    /// between `Stmt::If` and `Expr::If`.
+    Unsafe(UnsafeBlock),
+    /// `commit { }` used for its effect (roadmap Phase 4e). Valid only nested
+    /// inside `unsafe {}` — enforced by the checker (design D3), not here:
+    /// the grammar parses it anywhere so the checker can produce its own
+    /// contextual diagnostic instead of a raw parse error.
+    Commit(CommitBlock),
 }
 
 impl Stmt {
@@ -552,8 +580,27 @@ impl Stmt {
             Stmt::Block(b) => b.span,
             Stmt::Throw(s) => s.span,
             Stmt::Try(s) => s.span,
+            Stmt::Unsafe(s) => s.span,
+            Stmt::Commit(s) => s.span,
         }
     }
+}
+
+/// `unsafe { ... }`, in either statement or expression position (roadmap
+/// Phase 4e). See design D3/D4 for the checker context this opens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnsafeBlock {
+    pub body: Block,
+    pub span: Span,
+}
+
+/// `commit { ... }`, in either statement or expression position (roadmap
+/// Phase 4e). Legal only nested inside an enclosing `unsafe {}` — a rule the
+/// checker enforces (design D3), not the grammar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommitBlock {
+    pub body: Block,
+    pub span: Span,
 }
 
 /// `throw expr;` / `throw;` (roadmap Phase 4b).
@@ -845,6 +892,12 @@ pub enum Expr {
     Cast(CastExpr),
     /// `"text {expr} more text"` (roadmap Phase 3b).
     Interpolated(InterpolatedStrExpr),
+    /// `unsafe { ... }` used where a value is expected (roadmap Phase 4e),
+    /// e.g. `mut result = unsafe { ptr.read() };`. Shares [`UnsafeBlock`]
+    /// with the statement form the same way `Expr::If` shares `IfStmt`.
+    Unsafe(Box<UnsafeBlock>),
+    /// `commit { ... }` used where a value is expected (roadmap Phase 4e).
+    Commit(Box<CommitBlock>),
 }
 
 /// `expr as Type` or `<Type>expr`.
@@ -881,6 +934,8 @@ impl Expr {
             Expr::Println(e) => e.span,
             Expr::Cast(e) => e.span,
             Expr::Interpolated(e) => e.span,
+            Expr::Unsafe(e) => e.span,
+            Expr::Commit(e) => e.span,
         }
     }
 }

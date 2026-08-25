@@ -1,0 +1,7 @@
+extern "C" fn abs(n: Int32): Int32;
+
+fn main(): Void {
+    unsafe {
+        mut r: Int32 = abs(-7);
+    }
+}

@@ -126,6 +126,7 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
         contracts: Vec::new(),
         functions: Vec::new(),
         type_aliases: Vec::new(),
+        externs: Vec::new(),
         span: loaded.sources.entry().span(0, 0),
     };
 
@@ -143,6 +144,7 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
         program
             .type_aliases
             .extend(unit.program.type_aliases.iter().cloned());
+        program.externs.extend(unit.program.externs.iter().cloned());
     }
 
     program

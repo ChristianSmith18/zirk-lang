@@ -1,0 +1,5 @@
+fn main(): Void {
+    mut x: Int32 = 1;
+    mut p: Pointer<Int32> = Pointer.from(x);
+    mut v: Int32 = p.read();
+}

@@ -26,7 +26,7 @@ pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, PendingType, Type, TypeParamInfo, pending_type,
+    IntWidth, MethodInfo, PendingType, Type, TypeParamInfo, is_ffi_safe, pending_type,
 };
 
 /// Diagnostic codes of the checker.
@@ -168,4 +168,20 @@ pub mod codes {
     /// Two destinations of a simultaneous assignment resolve to the same
     /// place (design D4's cross-destination duplicate check).
     pub const DUPLICATE_ASSIGN_TARGET: Code = Code::new("E0443");
+    /// A type named in a `Pointer<T>` position, or an `extern "C" fn`
+    /// parameter/return, that has no stable C-ABI layout (roadmap Phase 4e,
+    /// design D2, `ADR-015`).
+    pub const NOT_FFI_SAFE: Code = Code::new("E0444");
+    /// A `Pointer<T>` operation requiring `unsafe` used outside one (roadmap
+    /// Phase 4e, design D3).
+    pub const POINTER_OP_OUTSIDE_UNSAFE: Code = Code::new("E0445");
+    /// `commit {}` used outside an enclosing `unsafe {}` (roadmap Phase 4e,
+    /// design D3).
+    pub const COMMIT_OUTSIDE_UNSAFE: Code = Code::new("E0446");
+    /// A call to an `extern "C" fn` missing its required `unsafe` and/or
+    /// `commit` boundary (roadmap Phase 4e, design D3, `ADR-015`).
+    pub const EXTERN_CALL_OUTSIDE_UNSAFE_COMMIT: Code = Code::new("E0447");
+    /// A `Pointer<T>` value returned, stored into a field, or captured by a
+    /// closure (roadmap Phase 4e, design D4 — the blanket escape rule).
+    pub const POINTER_ESCAPES: Code = Code::new("E0448");
 }

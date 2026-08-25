@@ -381,6 +381,7 @@ impl<'a> Parser<'a> {
         let mut contracts = Vec::new();
         let mut functions = Vec::new();
         let mut type_aliases = Vec::new();
+        let mut externs = Vec::new();
 
         while !self.at_eof() {
             if self.check_keyword(Keyword::Import) {
@@ -404,10 +405,40 @@ impl<'a> Parser<'a> {
                 span
             });
 
+            if self.check_keyword(Keyword::Extern) {
+                if let Some(e) = self.parse_extern_fn() {
+                    externs.push(e);
+                }
+                continue;
+            }
+
+            // `unsafe fn`: the modifier that makes the whole body run as if
+            // wrapped in `unsafe {}` (roadmap Phase 4e). Only meaningful in
+            // front of `fn` at the top level — `unsafe {}` blocks live in
+            // statement/expression position instead.
+            let unsafe_at = self.check_keyword(Keyword::Unsafe).then(|| {
+                let span = self.peek_span();
+                self.pos += 1;
+                span
+            });
+
             if self.check_keyword(Keyword::Fn) {
-                if let Some(f) = self.parse_fn(shared_at.is_some()) {
+                if let Some(f) = self.parse_fn(shared_at.is_some(), unsafe_at.is_some()) {
                     functions.push(f);
                 }
+                continue;
+            }
+
+            if let Some(span) = unsafe_at {
+                let found = self.peek().description();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "expected `fn` after `unsafe`",
+                    format!("found {found} after `unsafe`"),
+                    Some("`unsafe` modifies a top-level `fn` declaration".into()),
+                );
+                self.synchronize();
                 continue;
             }
 
@@ -512,6 +543,7 @@ impl<'a> Parser<'a> {
             contracts,
             functions,
             type_aliases,
+            externs,
             span: start.to(end),
         }
     }
@@ -1181,7 +1213,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_fn(&mut self, shared: bool) -> Option<FnDecl> {
+    fn parse_fn(&mut self, shared: bool, is_unsafe: bool) -> Option<FnDecl> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Fn);
 
@@ -1206,6 +1238,82 @@ impl<'a> Parser<'a> {
             throws,
             body,
             shared,
+            is_unsafe,
+            span,
+        })
+    }
+
+    /// `extern "C" fn name(params): ReturnType;` — a bodyless native
+    /// declaration (roadmap Phase 4e, `ADR-015-declaracion-extern.md`).
+    fn parse_extern_fn(&mut self) -> Option<ExternFnDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Extern);
+
+        let convention_span = self.peek_span();
+        let convention = if let TokenKind::Str(value) = self.peek().clone() {
+            self.pos += 1;
+            StrLit {
+                value,
+                span: convention_span,
+            }
+        } else {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                convention_span,
+                "expected a calling-convention literal",
+                format!("found {} after `extern`", self.peek().description()),
+                Some("write `extern \"C\" fn ...`".into()),
+            );
+            self.synchronize();
+            return None;
+        };
+
+        if convention.value != "C" {
+            self.error(
+                codes::EXTERN_BAD_CONVENTION,
+                convention.span,
+                "unsupported calling convention",
+                format!("found `\"{}\"`", convention.value),
+                Some("only `\"C\"` is accepted as an extern calling convention".into()),
+            );
+        }
+
+        self.expect(
+            &TokenKind::Keyword(Keyword::Fn),
+            "after the convention literal",
+        );
+        let name = self.expect_identifier("after `fn`")?;
+
+        self.expect(&TokenKind::LParen, "after the function name");
+        let params = self.parse_params();
+        self.expect(&TokenKind::RParen, "to close the parameter list");
+
+        let return_type = self.parse_return_type(&name)?;
+
+        let span = if matches!(self.peek(), TokenKind::LBrace) {
+            let body_span = self.peek_span();
+            // A body IS parsed (not omitted from the grammar) so the
+            // diagnostic can point at it precisely, per tasks.md 3.4.
+            let body = self.parse_block();
+            self.error(
+                codes::EXTERN_HAS_BODY,
+                body.map(|b| b.span).unwrap_or(body_span),
+                "an `extern` declaration cannot have a body",
+                "found a block after the extern signature",
+                Some("end the declaration with `;` instead".into()),
+            );
+            start.to(body_span)
+        } else {
+            let semi_span = self.peek_span();
+            self.expect(&TokenKind::Semicolon, "after an extern declaration");
+            start.to(semi_span)
+        };
+
+        Some(ExternFnDecl {
+            name,
+            convention,
+            params,
+            return_type,
             span,
         })
     }
@@ -1630,6 +1738,12 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Try) {
             return self.parse_try();
         }
+        if self.check_keyword(Keyword::Unsafe) {
+            return self.parse_unsafe_block().map(Stmt::Unsafe);
+        }
+        if self.check_keyword(Keyword::Commit) {
+            return self.parse_commit_block().map(Stmt::Commit);
+        }
         if matches!(self.peek(), TokenKind::LBrace) {
             return self.parse_block().map(Stmt::Block);
         }
@@ -2036,6 +2150,31 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// `unsafe { ... }` (roadmap Phase 4e). Parses in both statement and
+    /// expression position — see [`Stmt::Unsafe`]/[`Expr::Unsafe`].
+    fn parse_unsafe_block(&mut self) -> Option<UnsafeBlock> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Unsafe);
+        let body = self.parse_block()?;
+        Some(UnsafeBlock {
+            span: start.to(body.span),
+            body,
+        })
+    }
+
+    /// `commit { ... }` (roadmap Phase 4e). Parses anywhere `unsafe {}` does
+    /// — whether it is nested inside an enclosing `unsafe` is the checker's
+    /// job (design D3, tasks.md 3.3), not the grammar's.
+    fn parse_commit_block(&mut self) -> Option<CommitBlock> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Commit);
+        let body = self.parse_block()?;
+        Some(CommitBlock {
+            span: start.to(body.span),
+            body,
+        })
+    }
+
     /// `throw expr;` / `throw;` (roadmap Phase 4b).
     ///
     /// Whether a bare `throw;` is legal (only directly inside a `catch`) is
@@ -2321,6 +2460,12 @@ impl<'a> Parser<'a> {
         }
         if self.check_keyword(Keyword::Match) {
             return self.parse_match();
+        }
+        if self.check_keyword(Keyword::Unsafe) {
+            return self.parse_unsafe_block().map(|b| Expr::Unsafe(Box::new(b)));
+        }
+        if self.check_keyword(Keyword::Commit) {
+            return self.parse_commit_block().map(|b| Expr::Commit(Box::new(b)));
         }
 
         self.parse_ternary()
@@ -2984,7 +3129,17 @@ impl<'a> Parser<'a> {
                     let safe = matches!(self.peek(), TokenKind::QuestionDot);
                     self.pos += 1;
 
-                    let name = self.expect_identifier("after the access operator")?;
+                    // `Pointer.from(place)` (roadmap Phase 4e, `ADR-015`):
+                    // `from` is `Keyword::From` everywhere else (`implements
+                    // X from Y`), but unambiguously a field name right after
+                    // `.`/`?.` — nothing else can follow the access operator.
+                    let name = if let TokenKind::Keyword(Keyword::From) = self.peek() {
+                        let span = self.peek_span();
+                        self.pos += 1;
+                        Ident::new("from", span)
+                    } else {
+                        self.expect_identifier("after the access operator")?
+                    };
                     object = Expr::Field(FieldExpr {
                         span: object.span().to(name.span),
                         object: Box::new(object),

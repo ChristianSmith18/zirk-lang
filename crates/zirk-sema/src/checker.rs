@@ -11,7 +11,7 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, Type, TypeNames, TypeParamInfo, describe, pending_type,
+    IntWidth, MethodInfo, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe, pending_type,
 };
 use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
@@ -68,6 +68,12 @@ pub struct CheckedProgram {
     pub enum_instances: Vec<GenericEnumInstance>,
     /// Interned unions, indexed by the id their [`Base::Union`] carries.
     pub unions: Vec<Vec<Base>>,
+    /// Interned `Pointer<T>` pointee types, indexed by the id their
+    /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
+    pub pointer_types: Vec<Type>,
+    /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
+    /// `ADR-015`).
+    pub externs: HashMap<String, ExternSignature>,
     /// Which `Base::Instance` a generic class's construction call resolved
     /// to, keyed by the call's span — an id into `generic_instances`.
     ///
@@ -158,6 +164,13 @@ pub struct Capture {
     pub ty: Type,
 }
 
+/// A checked `extern "C" fn` declaration (roadmap Phase 4e, `ADR-015`).
+#[derive(Debug, Clone)]
+pub struct ExternSignature {
+    pub params: Vec<Type>,
+    pub returns: Type,
+}
+
 /// Checks a program, accumulating diagnostics in the sink.
 pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) -> CheckedProgram {
     Checker::new(sources, sink).run(program)
@@ -174,6 +187,7 @@ struct Names<'t> {
     contract_instances: &'t [GenericContractInstance],
     enum_instances: &'t [GenericEnumInstance],
     unions: &'t [Vec<Base>],
+    pointer_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -250,6 +264,13 @@ impl TypeNames for Names<'_> {
             .collect();
         names.join(" | ")
     }
+
+    fn pointer_element(&self, id: u32) -> Type {
+        self.pointer_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
 }
 
 struct Checker<'a> {
@@ -297,6 +318,15 @@ struct Checker<'a> {
     ///
     /// Zero means `break` and `continue` have nothing to jump out of.
     loop_depth: u32,
+    /// How many `unsafe` boundaries (an `unsafe {}` block or an `unsafe fn`
+    /// body) enclose the statement being checked (design D3, roadmap Phase
+    /// 4e). Zero means a pointer operation or an extern call has nothing
+    /// justifying it. Mirrors `loop_depth` exactly.
+    unsafe_depth: u32,
+    /// How many `commit {}` boundaries enclose the statement being checked
+    /// (design D3, roadmap Phase 4e). Zero means an extern call is still
+    /// missing its irreversible-effect boundary even inside `unsafe`.
+    commit_depth: u32,
     /// Captures collected for the lambda being checked, innermost last.
     capture_stack: Vec<Vec<Capture>>,
     /// The name of a recursive lambda's own binding, set only around
@@ -385,6 +415,11 @@ struct Checker<'a> {
     /// needs none of this, since it reaches `close()`/`is_closed()` by
     /// ordinary static method dispatch on the binding's own concrete class.
     native_resource: Option<NativeResource>,
+    /// Interned `Pointer<T>` pointee types, indexed by the id their
+    /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
+    pointer_types: Vec<Type>,
+    /// See [`CheckedProgram::externs`].
+    externs: HashMap<String, ExternSignature>,
 }
 
 /// See [`Checker::native_resource`].
@@ -431,6 +466,8 @@ impl<'a> Checker<'a> {
             this_type: None,
             in_constructor: false,
             loop_depth: 0,
+            unsafe_depth: 0,
+            commit_depth: 0,
             capture_stack: Vec::new(),
             recursive_binding: None,
             current_throws: Vec::new(),
@@ -452,6 +489,8 @@ impl<'a> Checker<'a> {
             native_resource: None,
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
+            pointer_types: Vec::new(),
+            externs: HashMap::new(),
         }
     }
 
@@ -489,6 +528,7 @@ impl<'a> Checker<'a> {
                 contract_instances: &self.contract_instances,
                 enum_instances: &self.enum_instances,
                 unions: &self.unions,
+                pointer_types: &self.pointer_types,
             },
         )
     }
@@ -540,6 +580,9 @@ impl<'a> Checker<'a> {
         for f in &program.functions {
             self.declare_function(f);
         }
+        for e in &program.externs {
+            self.declare_extern_fn(e);
+        }
 
         self.check_entrypoint(program);
 
@@ -572,6 +615,8 @@ impl<'a> Checker<'a> {
             variant_constructions: self.variant_constructions,
             native_result: self.native_result,
             native_exceptions: self.native_exceptions,
+            pointer_types: self.pointer_types,
+            externs: self.externs,
         }
     }
 
@@ -3166,6 +3211,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// `extern "C" fn name(params): ReturnType;` (roadmap Phase 4e,
+    /// `ADR-015`): resolves the signature and rejects any parameter or
+    /// return type without a stable C-ABI layout (task 4.5, design D2) —
+    /// return additionally allows `Void`, which [`is_ffi_safe`] itself
+    /// deliberately excludes (task 4.3).
+    fn declare_extern_fn(&mut self, f: &ExternFnDecl) {
+        let params: Vec<Type> = f
+            .params
+            .iter()
+            .map(|p| {
+                let ty = self.resolve_type(&p.ty);
+                if !ty.is_unknown() && !is_ffi_safe(ty, &self.pointer_types) {
+                    let name = self.name(ty);
+                    self.error(
+                        codes::NOT_FFI_SAFE,
+                        p.ty.span,
+                        format!("`{name}` cannot appear in an `extern \"C\" fn` signature"),
+                        "only Boolean, fixed-width integers, Float32/64, and Pointer<T> have a stable C-ABI layout",
+                        Some("pass an ABI-stable type, or marshal it manually through Pointer<Byte>".into()),
+                    );
+                }
+                ty
+            })
+            .collect();
+
+        let returns = self.resolve_type(&f.return_type);
+        if !returns.is_unknown()
+            && returns != Type::VOID
+            && !is_ffi_safe(returns, &self.pointer_types)
+        {
+            let name = self.name(returns);
+            self.error(
+                codes::NOT_FFI_SAFE,
+                f.return_type.span,
+                format!("`{name}` cannot be an `extern \"C\" fn`'s return type"),
+                "only Void, Boolean, fixed-width integers, Float32/64, and Pointer<T> have a stable C-ABI layout",
+                None,
+            );
+        }
+
+        if self.functions.contains_key(&f.name.name) || self.externs.contains_key(&f.name.name) {
+            self.error(
+                codes::DUPLICATE_FUNCTION,
+                f.name.span,
+                format!("`{}` is already defined", f.name.name),
+                "there is no overloading, and an extern declaration shares the same namespace as an ordinary function",
+                None,
+            );
+            return;
+        }
+
+        self.externs
+            .insert(f.name.name.clone(), ExternSignature { params, returns });
+    }
+
     /// Resolves one parameter, applying the rule that `name?: T` is nullable.
     fn resolve_param(&mut self, p: &Param) -> ParamInfo {
         let mut ty = self.resolve_type(&p.ty);
@@ -3419,6 +3519,7 @@ impl<'a> Checker<'a> {
                 Base::ContractInstance(id) => (16, id),
                 Base::EnumInstance(id) => (17, id),
                 Base::Union(id) => (18, id),
+                Base::Pointer(id) => (19, id),
             }
         }
         bases.sort_by_key(key);
@@ -3460,11 +3561,62 @@ impl<'a> Checker<'a> {
         if nullable { ty.as_nullable() } else { ty }
     }
 
+    /// `Pointer<T>` (roadmap Phase 4e, design D1/D2): resolves `T` and
+    /// rejects it when it has no stable C-ABI layout, naming `T` itself
+    /// (spec scenario "Disallowed element type") — checked here so every
+    /// position `Pointer<T>` can be written in (annotation, `Pointer.from`,
+    /// `.cast<U>()`) shares the one check.
+    fn resolve_pointer_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Pointer<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Pointer<T>` naming the pointee type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let pointee = self.resolve_type(&reference.arguments[0]);
+        if !pointee.is_unknown() && !is_ffi_safe(pointee, &self.pointer_types) {
+            let name = self.name(pointee);
+            self.error(
+                codes::NOT_FFI_SAFE,
+                reference.arguments[0].span,
+                format!("`{name}` has no stable C-ABI layout"),
+                "Pointer<T> only allows Boolean, fixed-width integers, Float32/64, and another Pointer<U>",
+                Some("use an ABI-stable element type".into()),
+            );
+        }
+
+        let id = self.intern_pointer_type(pointee);
+        let ty = Type::of(Base::Pointer(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    /// Interns a `Pointer<T>` pointee type, returning the id its
+    /// [`Base::Pointer`] carries.
+    fn intern_pointer_type(&mut self, pointee: Type) -> u32 {
+        if let Some(index) = self.pointer_types.iter().position(|&t| t == pointee) {
+            return index as u32;
+        }
+        self.pointer_types.push(pointee);
+        (self.pointer_types.len() - 1) as u32
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
         if let Some(function) = &reference.function {
             return self.resolve_fn_type_ref(function, reference.nullable);
+        }
+        if reference.name == "Pointer" {
+            return self.resolve_pointer_type_ref(reference);
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -4047,7 +4199,18 @@ impl<'a> Checker<'a> {
             });
         }
 
+        // `unsafe fn` runs its whole body as if wrapped in `unsafe {}`
+        // (roadmap Phase 4e) — no separate journal here: an `unsafe fn`'s
+        // caller is the one who decides whether its own enclosing `unsafe`
+        // block's journal covers the call, so this only opens the context a
+        // pointer operation/extern call inside the body checks against.
+        if f.is_unsafe {
+            self.unsafe_depth += 1;
+        }
         let always_returns = self.check_block(&f.body);
+        if f.is_unsafe {
+            self.unsafe_depth -= 1;
+        }
         self.scopes.pop();
 
         // Every path of a non-`Void` function must return a value.
@@ -4168,7 +4331,38 @@ impl<'a> Checker<'a> {
                 true
             }
             Stmt::Try(s) => self.check_try(s),
+            Stmt::Unsafe(s) => self.check_unsafe_block(s),
+            Stmt::Commit(s) => self.check_commit_block(s),
         }
+    }
+
+    /// `unsafe { ... }` (roadmap Phase 4e, design D3): opens the context a
+    /// pointer operation or `commit {}` inside the block checks against.
+    fn check_unsafe_block(&mut self, stmt: &UnsafeBlock) -> bool {
+        self.unsafe_depth += 1;
+        let returns = self.check_block(&stmt.body);
+        self.unsafe_depth -= 1;
+        returns
+    }
+
+    /// `commit { ... }` (roadmap Phase 4e, design D3): requires an enclosing
+    /// `unsafe {}`, checked before opening `commit`'s own context — mirrors
+    /// `Self::check_loop`'s pattern of validating context before entering a
+    /// nested checked region.
+    fn check_commit_block(&mut self, stmt: &CommitBlock) -> bool {
+        if self.unsafe_depth == 0 {
+            self.error(
+                codes::COMMIT_OUTSIDE_UNSAFE,
+                stmt.span,
+                "`commit {}` outside `unsafe`",
+                "a commit boundary only makes sense inside a reversible unsafe transaction",
+                Some("wrap this in `unsafe { commit { ... } }`".into()),
+            );
+        }
+        self.commit_depth += 1;
+        let returns = self.check_block(&stmt.body);
+        self.commit_depth -= 1;
+        returns
     }
 
     fn check_let(&mut self, stmt: &LetStmt) {
@@ -4492,6 +4686,9 @@ impl<'a> Checker<'a> {
                 unreachable!("an assignment target is a name or a field")
             };
             let target_ty = self.check_writable_field(field);
+            if self.reject_pointer_escape(value, value_span, "assigned to a field") {
+                return;
+            }
             self.expect_assignable(target_ty, value, value_span, "the assigned value");
             return;
         };
@@ -4898,6 +5095,12 @@ impl<'a> Checker<'a> {
             None => Type::VOID,
         };
 
+        if let Some(expr) = &stmt.value
+            && self.reject_pointer_escape(actual, expr.span(), "returned from a function")
+        {
+            return;
+        }
+
         if self.current_return == Type::VOID && stmt.value.is_some() {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -5208,6 +5411,8 @@ impl<'a> Checker<'a> {
             }
             Expr::Cast(e) => self.check_cast(e),
             Expr::Interpolated(e) => self.check_interpolated(e),
+            Expr::Unsafe(e) => self.check_unsafe_expr(e),
+            Expr::Commit(e) => self.check_commit_expr(e),
         }
     }
 
@@ -5245,6 +5450,13 @@ impl<'a> Checker<'a> {
 
         if actual.is_unknown() || target.is_unknown() {
             return target;
+        }
+
+        if matches!(
+            (actual.base, target.base),
+            (Base::Pointer(_), Base::Pointer(_))
+        ) {
+            self.require_unsafe(expr.span, "`.cast<U>()`");
         }
 
         if !self.casts_are_related(actual, target) {
@@ -5303,6 +5515,10 @@ impl<'a> Checker<'a> {
         if let (Base::Int(_), Base::Int(_)) = (target.base, actual.base) {
             return true;
         }
+        // `.cast<U>()` (design D8) — an LLVM pointer bitcast, unchecked.
+        if let (Base::Pointer(_), Base::Pointer(_)) = (target.base, actual.base) {
+            return true;
+        }
         // `Float` to `Float`, any width, unchecked (LLVM's `fptrunc`/`fpext`,
         // roadmap Phase 3b): narrowing may lose precision or overflow to an
         // infinity, exactly the kind of explicit-only conversion `as` exists
@@ -5350,6 +5566,17 @@ impl<'a> Checker<'a> {
         if matches!(
             (actual_bare.base, target_bare.base),
             (Base::Int(_), Base::Float(_)) | (Base::Float(_), Base::Int(_))
+        ) {
+            return true;
+        }
+        // `ptr as Pointer<U>` (roadmap Phase 4e, design D8): `.cast<U>()`'s
+        // spelling — no explicit-generic-argument call syntax exists in
+        // this grammar, so the pointer reinterpret-cast reuses the
+        // existing `as` cast expression instead of inventing one, since
+        // `Pointer<T>` is already an ordinary type reference there.
+        if matches!(
+            (actual_bare.base, target_bare.base),
+            (Base::Pointer(_), Base::Pointer(_))
         ) {
             return true;
         }
@@ -5524,16 +5751,42 @@ impl<'a> Checker<'a> {
     }
 
     fn record_capture(&mut self, binding: &Binding) {
+        let already_captured = self
+            .capture_stack
+            .last()
+            .is_some_and(|captures| captures.iter().any(|c| c.name == binding.name));
+        if already_captured {
+            return;
+        }
+        self.reject_pointer_escape(binding.ty, binding.span, "captured by a closure");
         let Some(captures) = self.capture_stack.last_mut() else {
             return;
         };
-        if captures.iter().any(|c| c.name == binding.name) {
-            return;
-        }
         captures.push(Capture {
             name: binding.name.clone(),
             ty: binding.ty,
         });
+    }
+
+    /// The blanket `Pointer<T>` escape rule (roadmap Phase 4e, design D4):
+    /// any value of type `Pointer<T>`, regardless of how it was produced, is
+    /// rejected as a `return` value, a field-assignment source, or a value
+    /// captured by a closure — sound but deliberately more conservative than
+    /// per-value provenance tracking (see `design.md`'s D4 for why this
+    /// slice does not build that instead). Returns whether it rejected.
+    fn reject_pointer_escape(&mut self, ty: Type, span: Span, escape: &str) -> bool {
+        if !matches!(ty.base, Base::Pointer(_)) {
+            return false;
+        }
+        let name = self.name(ty);
+        self.error(
+            codes::POINTER_ESCAPES,
+            span,
+            format!("`{name}` cannot be {escape}"),
+            "a Pointer<T> value cannot outlive the frame it was obtained in — this rule is conservative and does not track individual provenance",
+            Some("copy what it points to instead, or restructure so the pointer stays local".into()),
+        );
+        true
     }
 
     /// Records `this` as a capture, the same way [`Self::record_capture`]
@@ -6043,6 +6296,8 @@ impl<'a> Checker<'a> {
             // block ending in one is a block ending in an expression: which it
             // is depends on the position, not on the shape.
             Stmt::If(nested) => self.check_if_expr(nested),
+            Stmt::Unsafe(nested) => self.check_unsafe_expr(nested),
+            Stmt::Commit(nested) => self.check_commit_expr(nested),
             other => {
                 self.check_stmt(other);
                 self.error(
@@ -6057,6 +6312,35 @@ impl<'a> Checker<'a> {
         };
 
         self.scopes.pop();
+        ty
+    }
+
+    /// `unsafe { ... }` used where a value is expected (roadmap Phase 4e),
+    /// e.g. `mut result = unsafe { ptr.read() };` — same context-opening as
+    /// the statement form (`Self::check_unsafe_block`), but its body is
+    /// checked as a value via [`Self::check_block_value`].
+    fn check_unsafe_expr(&mut self, e: &UnsafeBlock) -> Type {
+        self.unsafe_depth += 1;
+        let ty = self.check_block_value(&e.body);
+        self.unsafe_depth -= 1;
+        ty
+    }
+
+    /// `commit { ... }` used where a value is expected (roadmap Phase 4e).
+    /// See [`Self::check_commit_block`] for the context rule this shares.
+    fn check_commit_expr(&mut self, e: &CommitBlock) -> Type {
+        if self.unsafe_depth == 0 {
+            self.error(
+                codes::COMMIT_OUTSIDE_UNSAFE,
+                e.span,
+                "`commit {}` outside `unsafe`",
+                "a commit boundary only makes sense inside a reversible unsafe transaction",
+                Some("wrap this in `unsafe { commit { ... } }`".into()),
+            );
+        }
+        self.commit_depth += 1;
+        let ty = self.check_block_value(&e.body);
+        self.commit_depth -= 1;
         ty
     }
 
@@ -6628,6 +6912,14 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
+        // `.is_null` (roadmap Phase 4e): the one `Pointer<T>` operation that
+        // needs no `unsafe` (spec scenario "Null raw pointer is inspected").
+        if let Base::Pointer(_) = object.base
+            && member.name == "is_null"
+        {
+            return Type::BOOLEAN;
+        }
+
         if object.nullable {
             if !safe {
                 self.reject_absent_receiver(object, object_span);
@@ -7187,6 +7479,8 @@ impl<'a> Checker<'a> {
                     self.check_recursive_reference_block(finally, name, nested);
                 }
             }
+            Stmt::Unsafe(s) => self.check_recursive_reference_block(&s.body, name, nested),
+            Stmt::Commit(s) => self.check_recursive_reference_block(&s.body, name, nested),
         }
     }
 
@@ -7299,6 +7593,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Expr::Unsafe(e) => self.check_recursive_reference_block(&e.body, name, nested),
+            Expr::Commit(e) => self.check_recursive_reference_block(&e.body, name, nested),
         }
     }
 
@@ -7912,6 +8208,130 @@ impl<'a> Checker<'a> {
         Some(self.check_direct_call(expr, &signature))
     }
 
+    /// A `Pointer<T>` operation requiring `unsafe` used outside one (design
+    /// D3, spec scenario "Pointer operation outside unsafe") — shared by
+    /// every pointer operation except `.is_null` (`Self::member_type`'s own
+    /// branch, exempted per the type-system spec delta).
+    fn require_unsafe(&mut self, span: Span, what: &str) {
+        if self.unsafe_depth == 0 {
+            self.error(
+                codes::POINTER_OP_OUTSIDE_UNSAFE,
+                span,
+                format!("{what} requires an enclosing `unsafe` boundary"),
+                "raw pointer construction, dereference and arithmetic are in the closed unsafe operation set",
+                Some("wrap it in an `unsafe { ... }` block".into()),
+            );
+        }
+    }
+
+    /// Whether `expr` is an lvalue `Pointer.from` may take the address of —
+    /// a local/parameter name, or a field projection (task 6.1).
+    fn is_addressable_place(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Path(_) | Expr::Field(_))
+    }
+
+    /// `Pointer.from(place)` (roadmap Phase 4e, design D8): the address of
+    /// an addressable local, parameter, or field, typed `Pointer<T>` where
+    /// `T` is `place`'s own type — which must itself be FFI-safe.
+    fn check_pointer_from(&mut self, expr: &CallExpr) -> Type {
+        self.require_unsafe(expr.span, "`Pointer.from`");
+
+        if expr.args.len() != 1 || expr.args[0].name.is_some() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Pointer.from` takes exactly one positional argument",
+                format!("received {}", expr.args.len()),
+                Some("write `Pointer.from(place)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let place = &expr.args[0].value;
+        if !self.is_addressable_place(place) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                place.span(),
+                "`Pointer.from` needs an addressable place",
+                "only a local, a parameter, or a field access has an address to take",
+                Some("pass a variable or a field access directly".into()),
+            );
+        }
+
+        let ty = self.check_expr(place);
+        if ty.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if !is_ffi_safe(ty, &self.pointer_types) {
+            let name = self.name(ty);
+            self.error(
+                codes::NOT_FFI_SAFE,
+                place.span(),
+                format!("`{name}` has no stable C-ABI layout"),
+                "Pointer<T> only allows Boolean, fixed-width integers, Float32/64, and another Pointer<U>",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        let id = self.intern_pointer_type(ty);
+        Type::of(Base::Pointer(id))
+    }
+
+    /// `.read()`/`.write(v)`/`.offset(n)`/`.offset_bytes(n)` (design D8) —
+    /// `Pointer<T>`'s closed operation set beyond `.is_null` (handled in
+    /// `Self::member_type` instead, since it needs no `unsafe`). Returns
+    /// `None` for a name this receiver has no such method by, so the
+    /// generic "unknown member" diagnostic still applies to a typo.
+    fn check_pointer_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Pointer(id) = object.base else {
+            return None;
+        };
+        let t = self
+            .pointer_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+
+        let (params, returns): (Vec<(&str, Type)>, Type) = match field.name.name.as_str() {
+            "read" => (Vec::new(), t),
+            "write" => (vec![("value", t)], Type::VOID),
+            "offset" => (vec![("n", Type::INT32)], object),
+            "offset_bytes" => (vec![("n", Type::INT32)], object),
+            _ => return None,
+        };
+
+        self.require_unsafe(expr.span, &format!("`.{}()`", field.name.name));
+
+        let signature = Signature {
+            name: field.name.name.clone(),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| ParamInfo {
+                    name: name.to_string(),
+                    ty,
+                    optional: false,
+                    has_default: false,
+                    variadic: false,
+                })
+                .collect(),
+            returns,
+            shared: true,
+            span: field.name.span,
+            type_params: Vec::new(),
+            throws: Vec::new(),
+        };
+        Some(self.check_direct_call(expr, &signature))
+    }
+
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
@@ -7936,6 +8356,19 @@ impl<'a> Checker<'a> {
                 self.variant_accesses.insert(field.span);
                 return self.check_variant_construction(expr, field, enum_id as u32, expected);
             }
+        }
+
+        // `Pointer.from(place)` (roadmap Phase 4e, design D1/D8): a static
+        // call on the compiler-built-in `Pointer` name, decided here for the
+        // same reason `LoadState.Loading(...)` above is — `Pointer` names a
+        // type, not a value with a member called `from`.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Pointer"
+            && field.name.name == "from"
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            return self.check_pointer_from(expr);
         }
 
         // `u.greeting()` calls a method. It is decided here and not by the
@@ -7998,6 +8431,20 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.check_result_method_call(expr, field, args[0], args[1]) {
                     return ty;
                 }
+            }
+
+            // `.read()`, `.write(v)`, `.offset(n)`, `.offset_bytes(n)`
+            // (roadmap Phase 4e, design D8) — `Pointer<T>`'s own closed
+            // operation set, recognized structurally by receiver type, the
+            // same way `Result<T,E>`'s is just above. `.is_null` is not
+            // here: it needs no `unsafe` (spec), so it is handled as a
+            // member read in `Self::check_field` instead.
+            if !field.safe
+                && !object.nullable
+                && let Base::Pointer(_) = object.base
+                && let Some(ty) = self.check_pointer_method_call(expr, field, object)
+            {
+                return ty;
             }
 
             // Calling through a value that may be absent is the same mistake
@@ -8070,6 +8517,43 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&callee.name).is_none()
         {
             let declared = self.resolved_name(&callee.name, callee.span);
+
+            // Calling an `extern "C" fn` (roadmap Phase 4e, design D3,
+            // `ADR-015`) — every call is treated as potentially
+            // irreversible, so it needs both `unsafe` and a nested `commit`,
+            // with no purity inference.
+            if let Some(signature) = self.externs.get(&declared).cloned() {
+                if self.unsafe_depth == 0 || self.commit_depth == 0 {
+                    self.error(
+                        codes::EXTERN_CALL_OUTSIDE_UNSAFE_COMMIT,
+                        expr.span,
+                        format!("calling `{}` needs `unsafe` and `commit`", callee.name),
+                        "every extern call is treated as potentially irreversible (ADR-015), with no purity inference",
+                        Some("wrap it in `unsafe { commit { ... } }`".into()),
+                    );
+                }
+                let synthetic = Signature {
+                    name: callee.name.clone(),
+                    params: signature
+                        .params
+                        .iter()
+                        .map(|&ty| ParamInfo {
+                            name: "_".to_string(),
+                            ty,
+                            optional: false,
+                            has_default: false,
+                            variadic: false,
+                        })
+                        .collect(),
+                    returns: signature.returns,
+                    shared: true,
+                    span: callee.span,
+                    type_params: Vec::new(),
+                    throws: Vec::new(),
+                };
+                return self.check_direct_call(expr, &synthetic);
+            }
+
             if let Some(signature) = self.functions.get(&declared).cloned() {
                 self.require_visible(signature.span, signature.shared, callee, "function");
                 return self.check_direct_call(expr, &signature);

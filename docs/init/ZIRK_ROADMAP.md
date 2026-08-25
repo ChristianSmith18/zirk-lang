@@ -216,17 +216,51 @@ deferred to a follow-up change.
 
 ### Phase 4e — Managed memory and unsafe boundaries
 
-- Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
-  public ownership syntax.
-- Implement safe/weak/dependent references, deep clone graph semantics and
-  automatic bounded native pinning.
-- Implement `inmut::strict` with reachable-alias analysis.
-- Implement `unsafe {}`, `Pointer<T>`, native slices, and compiler-enforced
-  memory-safety boundaries.
-- Implement transactional write journals and rollback for managed/validated
-  ranges, followed by explicit irreversible `commit` effects.
-- Finish resource transfer/dependency and throwable cleanup interactions that
-  require the complete memory model.
+**Status: in progress. `inmut::strict` projection-write checking
+(`fase-4e-inmut-strict-proyeccion`) and the `unsafe`/`Pointer<T>`/`extern`
+core (`fase-4e-unsafe-pointer-extern`) shipped; the memory-strategy decision
+(ADR-003), the transactional journal, native slices, and reference/clone
+delivery remain.**
+
+- [ ] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
+  public ownership syntax. **Not started** — ADR-003 itself remains open;
+  its own investigation document (`docs/decisions/ADR-003-investigacion-fase-4.md`)
+  now has real execution evidence for criterion 1 (closures that capture and
+  escape), gathered once `fase-4d-callables` made the scenario constructible.
+- [ ] Implement safe/weak/dependent references, deep clone graph semantics and
+  automatic bounded native pinning. **Not started** — depends on the ADR-003
+  decision above; `Weak<T>` and `Clone` have no trace anywhere in the
+  compiler today.
+- [x] Implement `inmut::strict` with reachable-alias analysis — **partial**:
+  direct rebinding (Phase 3) and writing through a field projection off a
+  strict binding (`fase-4e-inmut-strict-proyeccion`) are both rejected.
+  Strictness declared on a field itself, independent of its container's own
+  mutability, and a mutating method call reached through a strict
+  reference, remain open — not full reachable-alias analysis yet.
+- [x] Implement `unsafe {}`, `Pointer<T>`, native slices, and
+  compiler-enforced memory-safety boundaries — **partial**
+  (`fase-4e-unsafe-pointer-extern`): `unsafe fn`/`unsafe {}`/`commit {}`
+  parse and are context-checked; `Pointer<T>` (an ABI-stable element-type
+  subset) supports construction from an addressable local/field,
+  read/write/offset/offset-bytes/cast, with a conservative escape rule
+  (cannot be returned, stored in a field, or captured); `extern "C" fn`
+  declares and calls a native function (`docs/decisions/ADR-015-declaracion-extern.md`
+  closed the syntax this needed, which no prior spec had decided) under a
+  narrow ABI-safe type surface, resolved by the system linker with no new
+  library-linking manifest. **Not** covered: `NativeSlice<T>`/`NativeSliceMut<T>`
+  validated views, `.read_volatile()`/`.write_volatile()`, untagged
+  native-union access (no union type exists), weak atomic ordering
+  (`Atomic<T>` is Phase 5).
+- [ ] Implement transactional write journals and rollback for managed/validated
+  ranges, followed by explicit irreversible `commit` effects. **Not
+  implemented** — `unsafe {}`/`commit {}` parse and enforce context
+  correctly, but neither journals a write nor rolls anything back on
+  failure yet; `commit {}` does not yet durably publish anything either.
+  Design (D5/D6 of `fase-4e-unsafe-pointer-extern`'s own `design.md`) is
+  written and ready to implement against; cut from that change's own scope
+  when it did not fit in one pass, not abandoned.
+- [ ] Finish resource transfer/dependency and throwable cleanup interactions that
+  require the complete memory model. **Not started.**
 
 **Output:** complete failure and memory behavior, with no use-after-free,
 uncontrolled null dereference, silent cleanup loss, or undefined behavior in

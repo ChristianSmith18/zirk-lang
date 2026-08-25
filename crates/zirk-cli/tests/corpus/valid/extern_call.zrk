@@ -1,0 +1,10 @@
+extern "C" fn abs(n: Int32): Int32;
+
+fn main(): Void {
+    unsafe {
+        commit {
+            mut r: Int32 = abs(-7);
+            stdout.println(r.to_string());
+        }
+    }
+}

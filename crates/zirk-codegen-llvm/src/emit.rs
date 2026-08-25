@@ -84,6 +84,22 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         functions.insert(function.name.clone(), declared);
     }
 
+    // `extern "C" fn` declarations (roadmap Phase 4e, design D7) — declared
+    // under their own real symbol name, sharing `functions` with ordinary
+    // Zirk functions so `InstKind::Call` finds either uniformly (design D7:
+    // an extern call lowers through the same `Call` instruction).
+    for extern_fn in &module.externs {
+        let declared = declare_extern_fn(
+            context,
+            &llvm,
+            extern_fn,
+            &module.closures,
+            &module.values,
+            &module.enums,
+        );
+        functions.insert(extern_fn.name.clone(), declared);
+    }
+
     // String literals become private global constants. The runtime turns them
     // into `String` values; their layout stays opaque here (ADR-005).
     //
@@ -278,6 +294,11 @@ fn llvm_type_in<'ctx>(
             }
             context.struct_type(&fields, false).into()
         }
+        // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
+        // pointer — opaque at this level, since LLVM's own `ptr` type
+        // carries no pointee type; a load/store through it supplies `T`'s
+        // own LLVM type separately, at the instruction that needs it.
+        ir::IrType::Pointer(_) => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
@@ -393,6 +414,42 @@ fn declare_function<'ctx>(
         signature,
         None,
     )
+}
+
+/// `extern "C" fn` (roadmap Phase 4e, design D7, `ADR-015`): an ordinary
+/// LLVM external function declaration, with no body and the real (unprefixed)
+/// native symbol name — unlike an ordinary Zirk function, which gets
+/// [`FUNCTION_PREFIX`] and a `define`. Resolving it at link time is left
+/// entirely to the system linker, per ADR-015.
+fn declare_extern_fn<'ctx>(
+    context: &'ctx Context,
+    llvm: &LlvmModule<'ctx>,
+    extern_fn: &ir::ExternFn,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> FunctionValue<'ctx> {
+    let params: Vec<BasicMetadataTypeEnum> = extern_fn
+        .params
+        .iter()
+        .map(|&ty| {
+            llvm_type_in(context, ty, closures, values, enums)
+                .expect("an extern parameter cannot be Void")
+                .into()
+        })
+        .collect();
+
+    let signature = match llvm_type_in(context, extern_fn.return_type, closures, values, enums) {
+        Some(ty) => ty.fn_type(&params, false),
+        None => context.void_type().fn_type(&params, false),
+    };
+
+    let declared = llvm.add_function(&extern_fn.name, signature, None);
+    // LLVM's default call convention is already C (`CallConv::C == 0`);
+    // set explicitly so the declaration states it rather than relying on
+    // the default (spec scenario "Declaration becomes an external symbol").
+    declared.set_call_conventions(0);
+    declared
 }
 
 /// Emits the C `main` the operating system invokes.
@@ -535,6 +592,20 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     fn operand(&self, operand: ir::Operand) -> BasicValueEnum<'ctx> {
         self.values[&operand.0]
+    }
+
+    /// Shorthand for [`llvm_type_in`] against this function's own module
+    /// tables (roadmap Phase 4e — pointer lowering needs this repeatedly for
+    /// a pointee's own type, which carries no LLVM representation of its
+    /// own the way an opaque `ptr` does).
+    fn llvm_type(&self, ty: ir::IrType) -> Option<BasicTypeEnum<'ctx>> {
+        llvm_type_in(
+            self.context,
+            ty,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        )
     }
 
     /// The address of one field inside an object.
@@ -1633,6 +1704,104 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("indirect call");
 
                 call.try_as_basic_value().basic()
+            }
+
+            // `Pointer.from(place)` (roadmap Phase 4e, design D8): the
+            // already-computed `alloca` of the slot — no new storage.
+            ir::InstKind::PointerFromSlot(slot) => Some(self.slots[slot].into()),
+
+            // `Pointer.from(place)` where `place` is a field (design D8):
+            // the field's own already-computed GEP. Only an `Object`
+            // receiver is supported by this slice — a record/value class's
+            // field has no address of its own to take without deciding
+            // where the value itself lives first, which is out of scope
+            // here (the checker's escape rule and the FFI-safe element
+            // restriction already keep this narrow in practice).
+            ir::InstKind::PointerFromField { object, index } => {
+                Some(self.field_pointer(*object, *index).into())
+            }
+
+            // `.read()` (design D8): a plain LLVM `load`, typed by `T`.
+            ir::InstKind::PointerRead(pointer) => {
+                let element_ty = self
+                    .llvm_type(instruction.ty)
+                    .expect("Pointer<Void> is not constructed by this slice");
+                Some(
+                    self.builder
+                        .build_load(
+                            element_ty,
+                            self.operand(*pointer).into_pointer_value(),
+                            "ptr_read",
+                        )
+                        .expect("pointer read"),
+                )
+            }
+
+            // `.write(value)` (design D8): a plain LLVM `store`.
+            ir::InstKind::PointerWrite { pointer, value } => {
+                self.builder
+                    .build_store(
+                        self.operand(*pointer).into_pointer_value(),
+                        self.operand(*value),
+                    )
+                    .expect("pointer write");
+                None
+            }
+
+            // `.offset(n)` (design D8): `getelementptr` in units of `T`.
+            ir::InstKind::PointerOffset { pointer, amount } => {
+                let ir::IrType::Pointer(id) = instruction.ty else {
+                    unreachable!("a verified module types a pointer offset as a Pointer")
+                };
+                let element_ty = self
+                    .llvm_type(self.module.pointer_types[id as usize])
+                    .expect("Pointer<Void> is not constructed by this slice");
+                let offset = unsafe {
+                    self.builder
+                        .build_gep(
+                            element_ty,
+                            self.operand(*pointer).into_pointer_value(),
+                            &[self.operand(*amount).into_int_value()],
+                            "ptr_offset",
+                        )
+                        .expect("pointer offset")
+                };
+                Some(offset.into())
+            }
+
+            // `.offset_bytes(n)` (design D8): `getelementptr` over an
+            // `i8`-typed view of the same pointer.
+            ir::InstKind::PointerOffsetBytes { pointer, amount } => {
+                let byte_ty = self.context.i8_type();
+                let offset = unsafe {
+                    self.builder
+                        .build_gep(
+                            byte_ty,
+                            self.operand(*pointer).into_pointer_value(),
+                            &[self.operand(*amount).into_int_value()],
+                            "ptr_offset_bytes",
+                        )
+                        .expect("pointer byte offset")
+                };
+                Some(offset.into())
+            }
+
+            // `.cast<U>()` (design D8): an LLVM pointer bitcast. Under
+            // LLVM's opaque-pointer model a `ptr` value carries no pointee
+            // type of its own, so the operand is reused unchanged — only
+            // its declared `IrType` differs from here on.
+            ir::InstKind::PointerCast(operand) => Some(self.operand(*operand)),
+
+            // `.is_null` (roadmap Phase 4e): the one pointer operation with
+            // no `unsafe` requirement.
+            ir::InstKind::PointerIsNull(operand) => {
+                let ptr = self.operand(*operand).into_pointer_value();
+                Some(
+                    self.builder
+                        .build_is_null(ptr, "is_null")
+                        .expect("pointer null check")
+                        .into(),
+                )
             }
         };
 

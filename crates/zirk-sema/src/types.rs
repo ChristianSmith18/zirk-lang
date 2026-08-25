@@ -229,6 +229,14 @@ pub enum Base {
     /// `Iteration<Int32>`, identified by its index in the checker's table.
     /// See [`Base::Instance`], its class equivalent.
     EnumInstance(u32),
+    /// `Pointer<T>` (roadmap Phase 4e), identified by the index of its
+    /// pointee type `T` in the checker's `pointer_types` table.
+    ///
+    /// Its own `Base` variant rather than routed through `Base::Instance`
+    /// (design D1): the operation set is closed and compiler-built-in, so it
+    /// needs none of the constructor resolution or method-table dispatch a
+    /// user generic class does.
+    Pointer(u32),
     /// `A | B`, identified by its index in the checker's table.
     ///
     /// The table holds the normalized alternative list: order-independent,
@@ -453,6 +461,10 @@ impl Type {
             "UInt32" => Type::of(Base::Int(U32)),
             "UInt64" => Type::of(Base::Int(U64)),
             "UInt128" => Type::of(Base::Int(U128)),
+            // `Byte` is a recognized alias of `UInt8` (roadmap Phase 4e,
+            // design D2) — `Pointer<Byte>` is how the native-interoperability
+            // examples in `MEMORY_AND_UNSAFE_SEMANTICS.md` already spell it.
+            "Byte" => Type::of(Base::Int(U8)),
             "Float64" | "Float" => Type::FLOAT64,
             "Float16" => Type::of(Base::Float(FloatWidth::F16)),
             "Float32" => Type::of(Base::Float(FloatWidth::F32)),
@@ -463,6 +475,25 @@ impl Type {
             "Never" => Type::of(Base::Never),
             _ => return None,
         })
+    }
+}
+
+/// Whether `ty` has a stable C-ABI layout (roadmap Phase 4e, design D2,
+/// `ADR-015-declaracion-extern.md`): `Boolean`, every fixed-width `Int`/
+/// `UInt`, `Float32`/`Float64`, or another ABI-stable `Pointer<U>`, checked
+/// recursively. `Void` is deliberately excluded — it is allowed only as an
+/// `extern "C" fn`'s own return type, a check made at that call site rather
+/// than here (task 4.3).
+pub fn is_ffi_safe(ty: Type, pointer_types: &[Type]) -> bool {
+    if ty.nullable {
+        return false;
+    }
+    match ty.base {
+        Base::Boolean | Base::Int(_) | Base::Float(_) => true,
+        Base::Pointer(id) => pointer_types
+            .get(id as usize)
+            .is_some_and(|&inner| is_ffi_safe(inner, pointer_types)),
+        _ => false,
     }
 }
 
@@ -492,6 +523,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::ContractInstance(id) => names.contract_instance_name(id),
         Base::EnumInstance(id) => names.enum_instance_name(id),
         Base::Union(id) => names.union_name(id),
+        Base::Pointer(id) => format!("Pointer<{}>", describe(names.pointer_element(id), names)),
     };
 
     if ty.nullable {
@@ -512,6 +544,7 @@ pub trait TypeNames {
     fn contract_instance_name(&self, id: u32) -> String;
     fn enum_instance_name(&self, id: u32) -> String;
     fn union_name(&self, id: u32) -> String;
+    fn pointer_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -772,8 +805,10 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 4 brings errors and resources. `Result<T,E>` is implemented now
     // (roadmap Phase 4a — registered as a real enum, resolved by
     // `resolve_type_atom`'s enum lookup ahead of this list, the same way
-    // any other declared enum is); `Pointer`/`Resource` are still pending.
-    const PHASE_4: &[&str] = &["Pointer", "Resource"];
+    // any other declared enum is); `Pointer<T>` is implemented now too
+    // (roadmap Phase 4e, `fase-4e-unsafe-pointer-extern` — resolved as
+    // `Base::Pointer` ahead of this list); `Resource` is still pending.
+    const PHASE_4: &[&str] = &["Resource"];
     // Phase 5 brings concurrency.
     const PHASE_5: &[&str] = &["Task", "Channel", "Thread", "Atomic"];
     // Phase 7 brings the stdlib, and with it the collection and temporal

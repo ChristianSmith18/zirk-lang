@@ -4027,3 +4027,140 @@ fn invalid_match_with_binding_does_not_implement_resource() {
         "{output}"
     );
 }
+
+// --- Phase 4e: unsafe/Pointer<T>/commit/extern ------------------------------
+
+#[test]
+fn valid_pointer_from_read_write_inside_unsafe() {
+    accepted_body(
+        "mut x: Int32 = 1;
+         unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             mut v: Int32 = p.read();
+             p.write(v + 1);
+             mut q: Pointer<Int32> = p.offset(0);
+             mut r: Boolean = q.is_null;
+         }",
+    );
+}
+
+#[test]
+fn invalid_pointer_read_outside_unsafe() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         mut p: Pointer<Int32> = Pointer.from(x);
+         mut v: Int32 = p.read();",
+    );
+    assert!(
+        output.contains(codes::POINTER_OP_OUTSIDE_UNSAFE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_pointer_from_outside_unsafe() {
+    let output = rejected_body("mut x: Int32 = 1; mut p: Pointer<Int32> = Pointer.from(x);");
+    assert!(
+        output.contains(codes::POINTER_OP_OUTSIDE_UNSAFE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_pointer_disallowed_element_type() {
+    let output = rejected("fn f(p: Pointer<String>): Void { }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+}
+
+#[test]
+fn valid_byte_resolves_to_uint8() {
+    accepted_body(
+        "mut b: Byte = 1 as Byte;
+         mut u: UInt8 = b;",
+    );
+}
+
+#[test]
+fn invalid_commit_outside_unsafe() {
+    let output = rejected_body("commit { mut x: Int32 = 1; }");
+    assert!(
+        output.contains(codes::COMMIT_OUTSIDE_UNSAFE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_commit_inside_unsafe() {
+    accepted_body("unsafe { commit { mut x: Int32 = 1; } }");
+}
+
+#[test]
+fn valid_extern_call_inside_unsafe_and_commit() {
+    accepted(
+        "extern \"C\" fn abs(n: Int32): Int32;
+         fn main(): Void {
+             unsafe {
+                 commit {
+                     mut r: Int32 = abs(-1);
+                 }
+             }
+         }",
+    );
+}
+
+#[test]
+fn invalid_extern_call_missing_commit() {
+    let output = rejected(
+        "extern \"C\" fn abs(n: Int32): Int32;
+         fn main(): Void {
+             unsafe {
+                 mut r: Int32 = abs(-1);
+             }
+         }",
+    );
+    assert!(
+        output.contains(codes::EXTERN_CALL_OUTSIDE_UNSAFE_COMMIT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_extern_disallowed_parameter_type() {
+    let output = rejected("extern \"C\" fn f(s: String): Void;\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_pointer_escapes_as_return_value() {
+    let output = rejected(
+        "fn leak(x: Pointer<Int32>): Pointer<Int32> {
+             return x;
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_pointer_escapes_into_a_declared_field() {
+    let output = rejected(
+        "class Holder {
+             value: Pointer<Int32>;
+             construct(p: Pointer<Int32>) { this.value = p; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_pointer_escapes_via_closure_capture() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             mut f: Fn() => Void = (): Void => { mut q: Pointer<Int32> = p; };
+         }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}

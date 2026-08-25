@@ -1,0 +1,6 @@
+fn leak(x: Pointer<Int32>): Pointer<Int32> {
+    return x;
+}
+
+fn main(): Void {
+}

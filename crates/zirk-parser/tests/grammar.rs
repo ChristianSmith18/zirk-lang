@@ -140,6 +140,8 @@ fn shape(e: &Expr) -> String {
                 .collect();
             format!("interp({})", parts.join(", "))
         }
+        Expr::Unsafe(u) => format!("unsafe({} stmts)", u.body.statements.len()),
+        Expr::Commit(c) => format!("commit({} stmts)", c.body.statements.len()),
     }
 }
 
@@ -1866,4 +1868,80 @@ fn valid_declared_variance_on_a_type_parameter() {
 fn valid_type_parameter_without_variance_is_invariant() {
     let p = program("class Box<T> { value: T; }\nfn main(): Void { }");
     assert_eq!(p.classes[0].type_params[0].variance, Variance::Invariant);
+}
+
+// --- Phase 4e: unsafe/Pointer<T>/commit/extern -----------------------------
+
+#[test]
+fn valid_unsafe_fn_modifier() {
+    let p = program("unsafe fn danger(): Void { }");
+    assert!(p.functions[0].is_unsafe);
+}
+
+#[test]
+fn valid_unsafe_block_statement() {
+    let stmts = statements("unsafe { mut x: Int32 = 1; }");
+    assert!(matches!(stmts[0], Stmt::Unsafe(_)));
+}
+
+#[test]
+fn valid_unsafe_block_expression() {
+    let e = expression("unsafe { 1 }");
+    assert!(matches!(e, Expr::Unsafe(_)));
+}
+
+#[test]
+fn valid_commit_block_nested_in_unsafe() {
+    let stmts = statements("unsafe { commit { mut x: Int32 = 1; } }");
+    let Stmt::Unsafe(u) = &stmts[0] else {
+        panic!("expected an unsafe block")
+    };
+    assert!(matches!(u.body.statements[0], Stmt::Commit(_)));
+}
+
+#[test]
+fn valid_bare_commit_block_parses() {
+    // The grammar parses a bare `commit {}` outside `unsafe` too — the
+    // "only inside unsafe" rule is the checker's job (tasks.md 3.3).
+    let stmts = statements("commit { mut x: Int32 = 1; }");
+    assert!(matches!(stmts[0], Stmt::Commit(_)));
+}
+
+#[test]
+fn valid_extern_c_fn_declaration() {
+    let p = program("extern \"C\" fn strlen(s: Pointer<Byte>): UInt64;\nfn main(): Void { }");
+    assert_eq!(p.externs.len(), 1);
+    assert_eq!(p.externs[0].name.name, "strlen");
+    assert_eq!(p.externs[0].convention.value, "C");
+    assert_eq!(p.externs[0].params[0].ty.name, "Pointer");
+    assert_eq!(p.externs[0].return_type.name, "UInt64");
+}
+
+#[test]
+fn invalid_extern_unsupported_convention() {
+    let output = errors("extern \"system\" fn f(): Void;\nfn main(): Void { }");
+    assert!(
+        output.contains(zirk_parser::codes::EXTERN_BAD_CONVENTION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_extern_with_body() {
+    let output = errors("extern \"C\" fn f(): Void { }\nfn main(): Void { }");
+    assert!(
+        output.contains(zirk_parser::codes::EXTERN_HAS_BODY.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_pointer_type_in_every_position() {
+    let p = program(
+        "class Holder { value: Pointer<Int32>; }\nfn take(p: Pointer<Int32>): Pointer<Int32> { return p; }",
+    );
+    assert_eq!(p.classes[0].fields[0].ty.name, "Pointer");
+    assert_eq!(p.classes[0].fields[0].ty.arguments[0].name, "Int32");
+    assert_eq!(p.functions[0].params[0].ty.name, "Pointer");
+    assert_eq!(p.functions[0].return_type.name, "Pointer");
 }

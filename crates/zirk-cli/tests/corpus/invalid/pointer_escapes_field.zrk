@@ -1,0 +1,10 @@
+class Holder {
+    value: Pointer<Int32>;
+
+    construct(p: Pointer<Int32>) {
+        this.value = p;
+    }
+}
+
+fn main(): Void {
+}

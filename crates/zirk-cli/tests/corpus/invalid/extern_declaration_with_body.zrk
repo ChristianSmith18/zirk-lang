@@ -1,0 +1,4 @@
+extern "C" fn f(): Void { }
+
+fn main(): Void {
+}
