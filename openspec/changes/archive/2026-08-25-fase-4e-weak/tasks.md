@@ -40,10 +40,10 @@ Design decision taken (not resolved by design.md): whether `Base::Weak` particip
 - [x] 6.1 Update `docs/init/ZIRK_ROADMAP.md` Phase 4e's "Implement safe/weak/dependent references, deep clone graph semantics and automatic bounded native pinning" bullet — `Weak<T>` delivered; safe/dependent references, `Clone`, and pinning remain their own work, not delivered by this change.
 - [x] 6.2 Update `docs/handbook/13-appendices/07-current-limitations.md` and `docs/handbook/11-reference/12-feature-status.md`'s memory rows.
 - [x] 6.3 Check `docs/handbook` for any existing `Weak<T>` teaching material with a stale "not yet implemented" caveat or syntax that ended up differing from this change's actual implementation — reconcile either direction. (Found the same `Option<T>`/`None` staleness this change's own proposal already flagged in the spec, also present in three handbook pages: `11-reference/03-built-in-types.md`, `13-appendices/01-glossary.md`, `02-handbook/17-memory-and-safety/04-safe-references.md` (this last one's own code example used `Some(live) => ...`/`None => ...`, which do not exist in Zirk — rewritten to `match weak.upgrade() { null => ..., live => ... }`, the language's real nullable-narrowing form). `11-reference/13-type-member-index.md` already said `is_alive`/`from()`/`upgrade()` with no type mentioned — nothing to fix there.)
-- [ ] 6.4 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
-- [ ] 6.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable.
+- [x] 6.4 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
+- [x] 6.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable. (zirk-lang `fcb4dc2`; zirk-lang-site `454f967`, synced from `fcb4dc2` with `--audit-date 2026-08-25`.)
 
 ## 7. OpenSpec close-out
 
-- [ ] 7.1 Run `openspec validate fase-4e-weak` before archiving.
-- [ ] 7.2 Archive the change once implementation, tests, and documentation sync are complete.
+- [x] 7.1 Run `openspec validate fase-4e-weak` before archiving.
+- [x] 7.2 Archive the change once implementation, tests, and documentation sync are complete.
