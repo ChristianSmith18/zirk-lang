@@ -71,6 +71,9 @@ pub struct CheckedProgram {
     /// Interned `Pointer<T>` pointee types, indexed by the id their
     /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<Type>,
+    /// Interned `Weak<T>` referent types, indexed by the id their
+    /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
+    pub weak_types: Vec<Type>,
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
@@ -188,6 +191,7 @@ struct Names<'t> {
     enum_instances: &'t [GenericEnumInstance],
     unions: &'t [Vec<Base>],
     pointer_types: &'t [Type],
+    weak_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -267,6 +271,13 @@ impl TypeNames for Names<'_> {
 
     fn pointer_element(&self, id: u32) -> Type {
         self.pointer_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn weak_element(&self, id: u32) -> Type {
+        self.weak_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -418,6 +429,9 @@ struct Checker<'a> {
     /// Interned `Pointer<T>` pointee types, indexed by the id their
     /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
     pointer_types: Vec<Type>,
+    /// Interned `Weak<T>` referent types, indexed by the id their
+    /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
+    weak_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
 }
@@ -490,6 +504,7 @@ impl<'a> Checker<'a> {
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
             pointer_types: Vec::new(),
+            weak_types: Vec::new(),
             externs: HashMap::new(),
         }
     }
@@ -529,6 +544,7 @@ impl<'a> Checker<'a> {
                 enum_instances: &self.enum_instances,
                 unions: &self.unions,
                 pointer_types: &self.pointer_types,
+                weak_types: &self.weak_types,
             },
         )
     }
@@ -616,6 +632,7 @@ impl<'a> Checker<'a> {
             native_result: self.native_result,
             native_exceptions: self.native_exceptions,
             pointer_types: self.pointer_types,
+            weak_types: self.weak_types,
             externs: self.externs,
         }
     }
@@ -3520,6 +3537,7 @@ impl<'a> Checker<'a> {
                 Base::EnumInstance(id) => (17, id),
                 Base::Union(id) => (18, id),
                 Base::Pointer(id) => (19, id),
+                Base::Weak(id) => (20, id),
             }
         }
         bases.sort_by_key(key);
@@ -3609,6 +3627,56 @@ impl<'a> Checker<'a> {
         (self.pointer_types.len() - 1) as u32
     }
 
+    /// `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): resolves `T`
+    /// and rejects it when it is not a reference type (spec scenario
+    /// "Disallowed value-type referent") — a value type has no identity for
+    /// a weak reference to observe independently of its content. Checked
+    /// here so every position `Weak<T>` can be written in (annotation,
+    /// `Weak.from`) shares the one check, mirroring
+    /// [`Self::resolve_pointer_type_ref`].
+    fn resolve_weak_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Weak<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Weak<T>` naming the referent type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let referent = self.resolve_type(&reference.arguments[0]);
+        if !referent.is_unknown() && !self.is_reference_type(referent) {
+            let name = self.name(referent);
+            self.error(
+                codes::WEAK_DISALLOWED_REFERENT,
+                reference.arguments[0].span,
+                format!("`{name}` is not a reference type"),
+                "Weak<T> only allows a class or contract instance, since a value type has no identity to observe weakly",
+                Some("use a class or contract type as Weak<T>'s referent".into()),
+            );
+        }
+
+        let id = self.intern_weak_type(referent);
+        let ty = Type::of(Base::Weak(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    /// Interns a `Weak<T>` referent type, returning the id its
+    /// [`Base::Weak`] carries.
+    fn intern_weak_type(&mut self, referent: Type) -> u32 {
+        if let Some(index) = self.weak_types.iter().position(|&t| t == referent) {
+            return index as u32;
+        }
+        self.weak_types.push(referent);
+        (self.weak_types.len() - 1) as u32
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
@@ -3617,6 +3685,9 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Pointer" {
             return self.resolve_pointer_type_ref(reference);
+        }
+        if reference.name == "Weak" {
+            return self.resolve_weak_type_ref(reference);
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -6920,6 +6991,17 @@ impl<'a> Checker<'a> {
             return Type::BOOLEAN;
         }
 
+        // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`, design D4): an
+        // observational read of the same underlying state `.upgrade()`
+        // checks — never produces a strong reference, so it needs no method
+        // call and no `unsafe` (spec scenario "Is-alive is observational
+        // only").
+        if let Base::Weak(_) = object.base
+            && member.name == "is_alive"
+        {
+            return Type::BOOLEAN;
+        }
+
         if object.nullable {
             if !safe {
                 self.reject_absent_receiver(object, object_span);
@@ -8332,6 +8414,83 @@ impl<'a> Checker<'a> {
         Some(self.check_direct_call(expr, &signature))
     }
 
+    /// `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
+    /// constructs a weak handle to `value`'s referent, typed `Weak<T>`
+    /// where `T` is `value`'s own type — which must itself be a reference
+    /// type. No `unsafe` boundary required (spec: "without requiring an
+    /// unsafe boundary"), unlike `Pointer.from`.
+    fn check_weak_from(&mut self, expr: &CallExpr) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Weak.from` takes exactly one positional argument",
+                format!("received {}", expr.args.len()),
+                Some("write `Weak.from(value)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let value = &expr.args[0].value;
+        let ty = self.check_expr(value);
+        if ty.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if !self.is_reference_type(ty) {
+            let name = self.name(ty);
+            self.error(
+                codes::WEAK_DISALLOWED_REFERENT,
+                value.span(),
+                format!("`{name}` is not a reference type"),
+                "Weak<T> only allows a class or contract instance, since a value type has no identity to observe weakly",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        let id = self.intern_weak_type(ty);
+        Type::of(Base::Weak(id))
+    }
+
+    /// `.upgrade()` (roadmap Phase 4e, `fase-4e-weak`, design D4) —
+    /// `Weak<T>`'s one method: returns the referent when it is still
+    /// reachable, `null` otherwise, typed `T?`. `.is_alive` is handled in
+    /// `Self::member_type` instead, since it needs no method call. Returns
+    /// `None` for a name this receiver has no such method by, so the
+    /// generic "unknown member" diagnostic still applies to a typo.
+    fn check_weak_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Weak(id) = object.base else {
+            return None;
+        };
+        if field.name.name != "upgrade" {
+            return None;
+        }
+        let referent = self
+            .weak_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+
+        let signature = Signature {
+            name: field.name.name.clone(),
+            params: Vec::new(),
+            returns: referent.as_nullable(),
+            shared: true,
+            span: field.name.span,
+            type_params: Vec::new(),
+            throws: Vec::new(),
+        };
+        Some(self.check_direct_call(expr, &signature))
+    }
+
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
@@ -8369,6 +8528,18 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&base.name).is_none()
         {
             return self.check_pointer_from(expr);
+        }
+
+        // `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
+        // same treatment as `Pointer.from(place)` just above — `Weak` names
+        // a type, not a value with a member called `from`.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Weak"
+            && field.name.name == "from"
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            return self.check_weak_from(expr);
         }
 
         // `u.greeting()` calls a method. It is decided here and not by the
@@ -8443,6 +8614,19 @@ impl<'a> Checker<'a> {
                 && !object.nullable
                 && let Base::Pointer(_) = object.base
                 && let Some(ty) = self.check_pointer_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            // `.upgrade()` (roadmap Phase 4e, `fase-4e-weak`, design D4) —
+            // `Weak<T>`'s only method beyond `.is_alive` (handled as a member
+            // read in `Self::member_type` instead, since it needs no method
+            // call), recognized structurally by receiver type the same way
+            // `Pointer<T>`'s own methods are just above.
+            if !field.safe
+                && !object.nullable
+                && let Base::Weak(_) = object.base
+                && let Some(ty) = self.check_weak_method_call(expr, field, object)
             {
                 return ty;
             }

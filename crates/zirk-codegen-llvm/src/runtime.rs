@@ -116,6 +116,17 @@ pub mod symbols {
     /// Pops the shadow-stack frame [`PUSH_FRAME`] pushed — called immediately
     /// before every `Terminator::Return` lowers to `ret` (design D2).
     pub const POP_FRAME: &str = "zirk_rt_pop_frame";
+    /// The WeakCell sentinel descriptor (`fase-4e-weak`, design D2): a fixed
+    /// global symbol, not a per-class table like an ordinary object's own
+    /// descriptor — `WeakFrom` stores its address into a fresh WeakCell's
+    /// header word, and the collector's mark pass compares an object's own
+    /// descriptor against this same address to recognize one.
+    pub const WEAK_CELL_DESCRIPTOR: &str = "zirk_rt_weak_cell_descriptor";
+    /// Set to a nonzero byte the first time a `Weak<T>` is ever allocated
+    /// (`fase-4e-weak`, design's own risk mitigation) — the collector's
+    /// weak-clearing pass reads this before walking the allocation list, so
+    /// a program that never uses `Weak<T>` pays only the one check.
+    pub const WEAK_CELL_EVER_ALLOCATED: &str = "zirk_rt_weak_cell_ever_allocated";
 }
 
 /// The runtime functions available to generated code.
@@ -154,6 +165,12 @@ pub struct Runtime<'ctx> {
     pub uncaught_exception: FunctionValue<'ctx>,
     pub push_frame: FunctionValue<'ctx>,
     pub pop_frame: FunctionValue<'ctx>,
+    /// The WeakCell sentinel descriptor's own address (`fase-4e-weak`,
+    /// design D2) — a global, not a function, unlike everything else here.
+    pub weak_cell_descriptor: inkwell::values::PointerValue<'ctx>,
+    /// The WeakCell "ever allocated" flag's own address (`fase-4e-weak`) —
+    /// also a global: `WeakFrom` stores `1` into it directly, no call.
+    pub weak_cell_ever_allocated: inkwell::values::PointerValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -365,6 +382,17 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let pop_frame = module.add_function(symbols::POP_FRAME, void.fn_type(&[], false), external);
 
+    // Both globals (`fase-4e-weak`, design D2 and its risk mitigation): an
+    // `i8`, external linkage, no initializer here — `zirk-runtime` owns the
+    // one real definition, resolved at link time like every other symbol in
+    // this module.
+    let weak_cell_descriptor =
+        module.add_global(context.i8_type(), None, symbols::WEAK_CELL_DESCRIPTOR);
+    weak_cell_descriptor.set_linkage(Linkage::External);
+    let weak_cell_ever_allocated =
+        module.add_global(context.i8_type(), None, symbols::WEAK_CELL_EVER_ALLOCATED);
+    weak_cell_ever_allocated.set_linkage(Linkage::External);
+
     for handler in [
         overflow,
         division_by_zero,
@@ -419,5 +447,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         uncaught_exception,
         push_frame,
         pop_frame,
+        weak_cell_descriptor: weak_cell_descriptor.as_pointer_value(),
+        weak_cell_ever_allocated: weak_cell_ever_allocated.as_pointer_value(),
     }
 }

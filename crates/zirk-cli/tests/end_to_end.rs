@@ -949,3 +949,128 @@ fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_l
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "200000\n");
 }
+
+// --- Weak<T> soundness (`fase-4e-weak`, section 5) --------------------------
+//
+// Same standard as the collector soundness tests above: real `.zrk` programs,
+// compiled and run as actual processes, so the weak-clearing pass (design D3)
+// is proven end to end through real codegen — not just
+// `crates/zirk-runtime/src/collector.rs`'s own synthetic-object unit tests,
+// which prove the same properties at the mark/sweep level directly but never
+// touch codegen's own `WeakFrom`/`WeakUpgrade`/`WeakIsAlive` lowering.
+
+/// `Weak.from(m)` while `m` is still reachable through its own local:
+/// `.upgrade()` returns it and `.is_alive` is `true` (spec scenario "Upgrade
+/// while the referent is alive").
+#[test]
+fn weak_upgrade_and_is_alive_see_a_still_reachable_referent() {
+    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+
+    fn main(): Void {
+        mut m: Marker = Marker(42);
+        mut w: Weak<Marker> = Weak.from(m);
+        stdout.println(w.is_alive);
+        match w.upgrade() {
+            null => stdout.println(\"gone\");
+            found => stdout.println(found.id);
+        }
+    }";
+
+    let output = zirk_with_env(source, "weak_upgrade_alive", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "true\n42\n");
+}
+
+/// The only strong reference to `Marker(7)` is `m`, local to `make`; once
+/// `make` returns, nothing but the `Weak<Marker>` handle `main` kept still
+/// points at it. A collection forced by a tiny `ZIRK_GC_THRESHOLD` runs while
+/// evaluating `stdout.println(0)` — allocating the `String`/formatting work
+/// underneath `println` is enough to cross it — after which `.upgrade()`
+/// must return `null` and `.is_alive` must be `false` (spec scenario "Weak
+/// referent was reclaimed"). This is the load-bearing test of this change:
+/// if the weak-clearing pass (design D3) did not really run between mark and
+/// sweep, `.upgrade()` would either dereference freed memory or return a
+/// stale, dangling pointer instead of `null`.
+#[test]
+fn weak_upgrade_and_is_alive_see_a_collected_referent_as_gone() {
+    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+
+    fn make(): Weak<Marker> {
+        mut m: Marker = Marker(7);
+        return Weak.from(m);
+    }
+
+    fn main(): Void {
+        mut w: Weak<Marker> = make();
+        // `println`ing an `Int32` never allocates through the collector
+        // (`String` conversion is its own allocation path, outside
+        // `zirk_rt_alloc`'s reach) — an ordinary object construction is
+        // what actually crosses `ZIRK_GC_THRESHOLD` and forces a real
+        // mark-sweep collection.
+        mut trigger: Marker = Marker(0);
+        stdout.println(trigger.id);
+        stdout.println(w.is_alive);
+        match w.upgrade() {
+            null => stdout.println(\"gone\");
+            found => stdout.println(found.id);
+        }
+    }";
+
+    let output = zirk_with_env(
+        source,
+        "weak_upgrade_collected",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "0\nfalse\ngone\n",
+        "once the only strong reference is gone and a collection has run, \
+         `.upgrade()` must return null and `.is_alive` must be false — the \
+         weak-clearing pass must have actually run end to end"
+    );
+}
+
+/// A `Weak<T>` handle does not keep its referent alive by itself (spec: "SHALL
+/// NOT keep its referent alive"). `w` stays reachable the entire time (it is
+/// `main`'s own local), but `Marker(9)`'s only *strong* reference is `make`'s
+/// own local `m`, gone the moment `make` returns. If a `Weak<T>` handle were
+/// mistakenly treated as a strong root (the very bug design D2's sentinel
+/// descriptor exists to prevent), `.upgrade()` would keep returning the
+/// object forever, since `w` never goes out of scope in `main`.
+#[test]
+fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
+    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+
+    fn make(): Weak<Marker> {
+        mut m: Marker = Marker(9);
+        return Weak.from(m);
+    }
+
+    fn main(): Void {
+        mut w: Weak<Marker> = make();
+        // See `weak_upgrade_and_is_alive_see_a_collected_referent_as_gone`'s
+        // own comment: an object construction, not a `println`, is what
+        // actually crosses `ZIRK_GC_THRESHOLD`.
+        mut trigger: Marker = Marker(0);
+        stdout.println(trigger.id);
+        mut stillAlive: Boolean = w.is_alive;
+        stdout.println(stillAlive);
+    }";
+
+    let output = zirk_with_env(
+        source,
+        "weak_handle_does_not_root_its_referent",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "0\nfalse\n",
+        "the Weak<Marker> handle `w` is still reachable throughout, but its \
+         referent must be collected anyway once nothing strong reaches it"
+    );
+}

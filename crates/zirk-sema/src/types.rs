@@ -237,6 +237,17 @@ pub enum Base {
     /// needs none of the constructor resolution or method-table dispatch a
     /// user generic class does.
     Pointer(u32),
+    /// `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1), identified by
+    /// the index of its referent type `T` in the checker's `weak_types`
+    /// table.
+    ///
+    /// Its own `Base` variant, parallel to [`Base::Pointer`] rather than
+    /// routed through [`Base::Instance`] (design D1): the operation set is
+    /// closed and compiler-built-in, so it needs none of the constructor
+    /// resolution or method-table dispatch a user generic class does. `T` is
+    /// restricted to a reference type (checked against `is_reference_type`
+    /// at resolution, not stored here).
+    Weak(u32),
     /// `A | B`, identified by its index in the checker's table.
     ///
     /// The table holds the normalized alternative list: order-independent,
@@ -524,6 +535,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::EnumInstance(id) => names.enum_instance_name(id),
         Base::Union(id) => names.union_name(id),
         Base::Pointer(id) => format!("Pointer<{}>", describe(names.pointer_element(id), names)),
+        Base::Weak(id) => format!("Weak<{}>", describe(names.weak_element(id), names)),
     };
 
     if ty.nullable {
@@ -545,6 +557,7 @@ pub trait TypeNames {
     fn enum_instance_name(&self, id: u32) -> String;
     fn union_name(&self, id: u32) -> String;
     fn pointer_element(&self, id: u32) -> Type;
+    fn weak_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.

@@ -4164,3 +4164,60 @@ fn invalid_pointer_escapes_via_closure_capture() {
     );
     assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
 }
+
+// --- Phase 4e: Weak<T> (`fase-4e-weak`) -------------------------------------
+
+#[test]
+fn valid_weak_of_a_class_referent() {
+    accepted(
+        "class Marker { construct() { } }
+         fn main(): Void {
+             mut m: Marker = Marker();
+             mut w: Weak<Marker> = Weak.from(m);
+         }",
+    );
+}
+
+#[test]
+fn valid_weak_upgrade_and_is_alive() {
+    accepted(
+        "class Marker { construct() { } }
+         fn main(): Void {
+             mut m: Marker = Marker();
+             mut w: Weak<Marker> = Weak.from(m);
+             mut alive: Boolean = w.is_alive;
+             mut upgraded: Marker? = w.upgrade();
+         }",
+    );
+}
+
+#[test]
+fn invalid_weak_of_a_scalar_referent() {
+    let output = rejected("fn f(w: Weak<Int32>): Void { }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::WEAK_DISALLOWED_REFERENT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_weak_of_a_record_referent() {
+    let output = rejected(
+        "record Point { x: Int32; y: Int32; }
+         fn f(w: Weak<Point>): Void { }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::WEAK_DISALLOWED_REFERENT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_weak_from_of_a_scalar_value() {
+    let output = rejected_body("mut w: Weak<Int32> = Weak.from(1);");
+    assert!(
+        output.contains(codes::WEAK_DISALLOWED_REFERENT.as_str()),
+        "{output}"
+    );
+}

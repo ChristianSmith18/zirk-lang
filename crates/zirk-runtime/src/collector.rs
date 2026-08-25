@@ -68,6 +68,62 @@ pub(crate) const HEADER_BYTES: usize = 3 * std::mem::size_of::<usize>();
 /// zero on its own.
 const MARK_BIT: usize = 1;
 
+/// Word offset of a WeakCell's own single field — the target's address
+/// (`fase-4e-weak`, design D1/D2) — right after the three-word header,
+/// the same convention `crates/zirk-codegen-llvm/src/emit.rs`'s
+/// `OBJECT_HEADER_FIELDS` uses for an ordinary object's own first field.
+const WEAK_TARGET_WORD: usize = 3;
+
+/// The WeakCell sentinel descriptor (`fase-4e-weak`, design D2): a fixed
+/// static, not a per-class table like an ordinary object's own descriptor.
+/// `crates/zirk-codegen-llvm/src/runtime.rs` declares an external global of
+/// the same name and stores its address into a fresh WeakCell's header word
+/// 0 (`InstKind::WeakFrom`'s own lowering) — this is the one real
+/// definition, resolved at link time.
+///
+/// Its value is never read; only its address matters, as a sentinel every
+/// WeakCell's descriptor word compares equal to and no real class descriptor
+/// ever does (those are codegen-emitted per-class globals of their own).
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static zirk_rt_weak_cell_descriptor: u8 = 0;
+
+/// Set to a nonzero byte the first time a `Weak<T>` is ever allocated
+/// (`fase-4e-weak`, design's own risk mitigation) — [`InstKind::WeakFrom`]'s
+/// own lowering stores `1` into it directly (a plain store, no runtime
+/// call), and [`clear_dead_weak_cells`] reads it before walking the
+/// allocation list at all, so a program that never uses `Weak<T>` pays only
+/// the one check per collection.
+///
+/// `static mut` rather than an ordinary immutable `static`, since generated
+/// code writes to it directly — read and written only as a whole byte, never
+/// referenced, so this is sound under the single-threaded execution model
+/// this collector already assumes everywhere else (no `parallel`/`thread`
+/// until Phase 5, `docs/decisions/ADR-003-memoria.md`'s own closing note).
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static mut zirk_rt_weak_cell_ever_allocated: u8 = 0;
+
+#[inline]
+fn weak_cell_descriptor() -> *mut c_void {
+    (&raw const zirk_rt_weak_cell_descriptor) as *mut c_void
+}
+
+#[inline]
+fn weak_cell_ever_allocated() -> bool {
+    unsafe { zirk_rt_weak_cell_ever_allocated != 0 }
+}
+
+#[inline]
+unsafe fn get_weak_target(object: *mut c_void) -> *mut c_void {
+    unsafe { *(header_word(object, WEAK_TARGET_WORD) as *mut *mut c_void) }
+}
+
+#[inline]
+unsafe fn set_weak_target(object: *mut c_void, value: *mut c_void) {
+    unsafe { *(header_word(object, WEAK_TARGET_WORD) as *mut *mut c_void) = value };
+}
+
 struct Frame {
     /// Address of an array of root addresses (design D2): element `i` is
     /// the address of a reference-typed slot (or one of its own
@@ -265,6 +321,7 @@ pub(crate) fn allocation_align(requested: usize) -> usize {
 
 fn collect() {
     mark();
+    clear_dead_weak_cells();
     sweep();
 }
 
@@ -294,11 +351,60 @@ fn mark_object(object: *mut c_void) {
     unsafe { set_next_raw(object, next_raw | MARK_BIT) };
 
     let descriptor = unsafe { *(object as *mut *mut c_void) };
+
+    // A WeakCell is marked as reachable exactly like any other object right
+    // above — but its own single field is never traced as a strong edge
+    // (`fase-4e-weak`, design D2): that is what lets [`clear_dead_weak_cells`]
+    // observe, between this pass and [`sweep`], whether its target survived
+    // on its own merits.
+    if std::ptr::eq(descriptor, weak_cell_descriptor()) {
+        return;
+    }
+
     let offsets = unsafe { gc_field_offsets(descriptor as *const c_void) };
     for &offset in offsets {
         let field_addr = (object as usize + offset) as *mut *mut c_void;
         let child = unsafe { *field_addr };
         mark_object(child);
+    }
+}
+
+/// Nulls every live WeakCell's target field whose referent turns out to be
+/// unreachable after [`mark`] — strictly before [`sweep`] frees that
+/// referent's storage (`fase-4e-weak`, design D3): `.upgrade()`/`.is_alive`
+/// must never observe reclaimed memory, by construction, not by a race
+/// against `dealloc`.
+///
+/// Walks the same intrusive all-allocations list [`sweep`] does, once, but
+/// skips the walk entirely when no `Weak<T>` has ever been allocated in the
+/// running program (design's own risk mitigation) — a program that never
+/// uses `Weak<T>` pays only [`weak_cell_ever_allocated`]'s own check.
+fn clear_dead_weak_cells() {
+    if !weak_cell_ever_allocated() {
+        return;
+    }
+
+    #[cfg(test)]
+    tests::note_clear_dead_weak_cells_ran();
+
+    let mut current = ALL_OBJECTS.with(Cell::get);
+    while !current.is_null() {
+        let next_raw = unsafe { get_next_raw(current) };
+
+        if is_marked(next_raw) {
+            let descriptor = unsafe { *(current as *mut *mut c_void) };
+            if descriptor == weak_cell_descriptor() {
+                let target = unsafe { get_weak_target(current) };
+                if !target.is_null() {
+                    let target_next_raw = unsafe { get_next_raw(target) };
+                    if !is_marked(target_next_raw) {
+                        unsafe { set_weak_target(current, std::ptr::null_mut()) };
+                    }
+                }
+            }
+        }
+
+        current = next_ptr(next_raw);
     }
 }
 
@@ -361,7 +467,35 @@ mod tests {
         words
     }
 
-    fn reset_state() {
+    thread_local! {
+        /// How many times [`clear_dead_weak_cells`] actually ran its walk
+        /// (not skipped by the "ever allocated" check) — `fase-4e-weak`
+        /// task 4.3's own instrumentation hook, confirming the skip is real
+        /// rather than assumed.
+        static CLEAR_DEAD_WEAK_CELLS_RUNS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note_clear_dead_weak_cells_ran() {
+        CLEAR_DEAD_WEAK_CELLS_RUNS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Serializes every collector test (`fase-4e-weak`): unlike every other
+    /// piece of state this module resets between tests, the WeakCell "ever
+    /// allocated" flag ([`zirk_rt_weak_cell_ever_allocated`]) is a real
+    /// process-global, not `thread_local!` — correctly so, since it must
+    /// reflect one running *program's* history, not one test worker
+    /// thread's. Libtest runs `#[test]`s across several worker threads by
+    /// default, so without this, one thread's [`reset_state`] clearing the
+    /// flag to `0` could race a different thread's in-flight `collect()`
+    /// that still needed it `true`. [`reset_state`]'s returned guard must be
+    /// held for the whole test body, not just its own call.
+    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "the guard must stay bound for the whole test body, not just this call"]
+    fn reset_state() -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         FRAMES.with(|f| f.borrow_mut().clear());
         // Sweeps away anything a previous test in this thread left behind,
         // without asserting on it — tests run single-threaded within one
@@ -369,11 +503,14 @@ mod tests {
         sweep();
         ALL_OBJECTS.with(|c| c.set(std::ptr::null_mut()));
         LIVE_BYTES.with(|c| c.set(0));
+        unsafe { zirk_rt_weak_cell_ever_allocated = 0 };
+        CLEAR_DEAD_WEAK_CELLS_RUNS.with(|c| c.set(0));
+        guard
     }
 
     #[test]
     fn an_unreachable_cycle_is_fully_reclaimed() {
-        reset_state();
+        let _guard = reset_state();
         // Two objects, each holding the other at header-relative offset 24
         // (right after the 3-word header) — a cycle with no root pointing
         // into it at all.
@@ -397,7 +534,7 @@ mod tests {
 
     #[test]
     fn an_object_reachable_only_through_a_pushed_frame_survives() {
-        reset_state();
+        let _guard = reset_state();
         let descriptor = descriptor_with_fields(&[]);
         let object = unsafe { synthetic_object(descriptor.as_ptr() as *const c_void, 0) };
 
@@ -423,7 +560,7 @@ mod tests {
 
     #[test]
     fn a_field_reached_transitively_through_a_root_survives() {
-        reset_state();
+        let _guard = reset_state();
         let leaf_descriptor = descriptor_with_fields(&[]);
         let parent_descriptor = descriptor_with_fields(&[24]);
 
@@ -448,7 +585,7 @@ mod tests {
 
     #[test]
     fn the_threshold_trigger_fires_at_the_configured_point_and_not_before() {
-        reset_state();
+        let _guard = reset_state();
         THRESHOLD.with(|c| c.set(16));
 
         // Below the threshold: no collection, nothing to reclaim yet since
@@ -473,5 +610,142 @@ mod tests {
         );
 
         THRESHOLD.with(|c| c.set(default_threshold()));
+    }
+
+    // --- Weak<T> (`fase-4e-weak`) -------------------------------------------
+
+    /// Builds a synthetic WeakCell: the sentinel descriptor, one extra
+    /// field's worth of storage, its target field set to `target` — the
+    /// exact shape `InstKind::WeakFrom`'s own lowering builds, without going
+    /// through codegen at all. Sets [`zirk_rt_weak_cell_ever_allocated`]
+    /// itself, the same thing real codegen does right after allocating —
+    /// callers of this helper never need to set it separately.
+    unsafe fn synthetic_weak_cell(target: *mut c_void) -> *mut c_void {
+        unsafe {
+            let cell = synthetic_object(weak_cell_descriptor() as *const c_void, 8);
+            set_weak_target(cell, target);
+            zirk_rt_weak_cell_ever_allocated = 1;
+            cell
+        }
+    }
+
+    #[test]
+    fn a_weak_cells_target_that_survives_collection_keeps_being_observed() {
+        let _guard = reset_state();
+        let leaf_descriptor = descriptor_with_fields(&[]);
+        unsafe {
+            let leaf = synthetic_object(leaf_descriptor.as_ptr() as *const c_void, 0);
+            let cell = synthetic_weak_cell(leaf);
+
+            let mut leaf_slot: *mut c_void = leaf;
+            let mut cell_slot: *mut c_void = cell;
+            let mut roots: [*mut c_void; 2] = [
+                (&mut leaf_slot as *mut *mut c_void) as *mut c_void,
+                (&mut cell_slot as *mut *mut c_void) as *mut c_void,
+            ];
+            zirk_rt_push_frame(roots.as_mut_ptr(), 2);
+
+            collect();
+            assert_eq!(
+                get_weak_target(cell),
+                leaf,
+                "a referent kept alive by its own root must not have its weak target cleared"
+            );
+            zirk_rt_pop_frame();
+        }
+    }
+
+    #[test]
+    fn a_weak_cells_target_that_is_collected_has_its_field_nulled_not_dangling() {
+        let _guard = reset_state();
+        let leaf_descriptor = descriptor_with_fields(&[]);
+        unsafe {
+            // `leaf` has no root of its own — the WeakCell is the only
+            // thing that ever points at it, and a WeakCell's own field is
+            // never a strong edge (design D2), so `leaf` must not survive.
+            let leaf = synthetic_object(leaf_descriptor.as_ptr() as *const c_void, 0);
+            let cell = synthetic_weak_cell(leaf);
+
+            let mut cell_slot: *mut c_void = cell;
+            let mut roots: [*mut c_void; 1] = [(&mut cell_slot as *mut *mut c_void) as *mut c_void];
+            zirk_rt_push_frame(roots.as_mut_ptr(), 1);
+
+            collect();
+            assert!(
+                get_weak_target(cell).is_null(),
+                "an unreachable referent's weak target must be cleared before its storage is \
+                 reclaimed, never left dangling"
+            );
+            assert_eq!(
+                LIVE_BYTES.with(Cell::get),
+                get_size(cell),
+                "only the WeakCell itself should remain live; its collected referent's bytes \
+                 must be gone from the live total"
+            );
+            zirk_rt_pop_frame();
+        }
+    }
+
+    #[test]
+    fn an_unreachable_weak_cell_is_collected_like_any_other_object() {
+        let _guard = reset_state();
+        unsafe {
+            let _cell = synthetic_weak_cell(std::ptr::null_mut());
+
+            assert!(LIVE_BYTES.with(Cell::get) > 0);
+            collect();
+            assert_eq!(
+                LIVE_BYTES.with(Cell::get),
+                0,
+                "an unrooted WeakCell is an ordinary allocation once nothing reaches it"
+            );
+            assert!(ALL_OBJECTS.with(Cell::get).is_null());
+        }
+    }
+
+    #[test]
+    fn a_weak_cells_target_field_is_never_traced_as_a_strong_root() {
+        let _guard = reset_state();
+        let leaf_descriptor = descriptor_with_fields(&[]);
+        unsafe {
+            // The *only* path to `leaf` is through the WeakCell's own
+            // field — no other root reaches it at all.
+            let leaf = synthetic_object(leaf_descriptor.as_ptr() as *const c_void, 0);
+            let cell = synthetic_weak_cell(leaf);
+
+            let mut cell_slot: *mut c_void = cell;
+            let mut roots: [*mut c_void; 1] = [(&mut cell_slot as *mut *mut c_void) as *mut c_void];
+            zirk_rt_push_frame(roots.as_mut_ptr(), 1);
+
+            collect();
+            assert!(
+                get_weak_target(cell).is_null(),
+                "a WeakCell must not keep its referent alive merely by pointing at it"
+            );
+            zirk_rt_pop_frame();
+        }
+    }
+
+    #[test]
+    fn clear_dead_weak_cells_runs_only_once_a_weak_cell_has_been_allocated() {
+        let _guard = reset_state();
+        // An ordinary object graph — no `Weak<T>` anywhere.
+        let descriptor = descriptor_with_fields(&[]);
+        unsafe { synthetic_object(descriptor.as_ptr() as *const c_void, 0) };
+
+        collect();
+        assert_eq!(
+            CLEAR_DEAD_WEAK_CELLS_RUNS.with(Cell::get),
+            0,
+            "the weak-clearing pass must be skipped entirely when no Weak<T> was ever allocated"
+        );
+
+        unsafe { zirk_rt_weak_cell_ever_allocated = 1 };
+        collect();
+        assert_eq!(
+            CLEAR_DEAD_WEAK_CELLS_RUNS.with(Cell::get),
+            1,
+            "the weak-clearing pass must run once a Weak<T> has been allocated"
+        );
     }
 }

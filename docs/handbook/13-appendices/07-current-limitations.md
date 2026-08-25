@@ -21,10 +21,12 @@ Current high-impact delivery limits include:
 - Managed memory reclaims automatically now: `docs/decisions/ADR-003-memoria.md`
   closed on a non-moving mark-sweep collector, real (not a placeholder),
   reclaiming unreachable memory including cycles without exposing GC,
-  ownership, or moves as source semantics. `Weak<T>`, dependent references,
-  automatic pinning, and full deep-graph cloning remain Phase 4e work — a
-  live/dead distinction now exists for them to build against, but none are
-  implemented yet. `inmut::strict` rejects a direct rebinding and a write through a field
+  ownership, or moves as source semantics. `Weak<T>` is delivered
+  (`Weak.from`, `.upgrade(): T?`, `.is_alive`) — a small collector-tracked
+  indirection cell whose target is cleared before the collector frees it,
+  never after, so `.upgrade()`/`.is_alive` never observe reclaimed memory.
+  Dependent references, automatic pinning, and full deep-graph cloning
+  remain Phase 4e work. `inmut::strict` rejects a direct rebinding and a write through a field
   projection off a strict binding; strictness declared on a field itself
   (independent of its container's own mutability) and a mutating method call
   reached through a strict reference remain open. `unsafe fn`/`unsafe {}`/
