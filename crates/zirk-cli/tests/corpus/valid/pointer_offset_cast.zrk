@@ -1,0 +1,12 @@
+fn main(): Void {
+    mut x: Int32 = -1;
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        mut q: Pointer<Int32> = p.offset(0);
+        mut u: Pointer<UInt32> = q as Pointer<UInt32>;
+        mut bits: UInt32 = u.read();
+        mut n: Boolean = p.is_null;
+        stdout.println(bits.to_string());
+        stdout.println(n.to_string());
+    }
+}

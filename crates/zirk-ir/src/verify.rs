@@ -682,6 +682,26 @@ fn verify_instruction(
             expect(inst.ty, op.result_type(left_ty), position, "Binary", report);
         }
 
+        // An `extern "C" fn` (roadmap Phase 4e, design D7) shares this same
+        // instruction — no body to check argument count against a
+        // `Function`'s own slots, only its declared signature.
+        InstKind::Call { callee, args } if module.function(callee).is_none() => {
+            match module.externs.iter().find(|e| &e.name == callee) {
+                None => report(format!(
+                    "{position}: calls `{callee}`, which does not exist"
+                )),
+                Some(target) => {
+                    if args.len() != target.params.len() {
+                        report(format!(
+                            "{position}: calls `{callee}` with {} argument(s), expected {}",
+                            args.len(),
+                            target.params.len()
+                        ));
+                    }
+                    expect(inst.ty, target.return_type, position, "Call", report);
+                }
+            }
+        }
         InstKind::Call { callee, args } => match module.function(callee) {
             None => report(format!(
                 "{position}: calls `{callee}`, which does not exist"
@@ -867,6 +887,104 @@ fn verify_instruction(
                 }
             }
         }
+
+        InstKind::PointerFromSlot(slot) => {
+            let Some(declared) = function.slot(*slot) else {
+                report(format!(
+                    "{position}: PointerFromSlot names slot {slot:?}, which does not exist"
+                ));
+                return;
+            };
+            if !matches!(inst.ty, IrType::Pointer(id) if module.pointer_types.get(id as usize) == Some(&declared.ty))
+            {
+                report(format!(
+                    "{position}: PointerFromSlot declares {}, expected a Pointer to {}",
+                    inst.ty.as_str(),
+                    declared.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerFromField { object, .. } => {
+            if let Some(ty) = type_of(object)
+                && !matches!(ty, IrType::Object(_) | IrType::Value(_))
+            {
+                report(format!(
+                    "{position}: PointerFromField reads {}, which is not an object or value",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Pointer(_)) {
+                report(format!(
+                    "{position}: PointerFromField declares {}, expected a Pointer",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerRead(pointer) => {
+            if let Some(ty) = type_of(pointer)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: PointerRead reads through {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerWrite { pointer, .. } => {
+            expect(inst.ty, IrType::Void, position, "PointerWrite", report);
+            if let Some(ty) = type_of(pointer)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: PointerWrite writes through {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerOffset { pointer, .. } | InstKind::PointerOffsetBytes { pointer, .. } => {
+            if let Some(ty) = type_of(pointer)
+                && ty != inst.ty
+            {
+                report(format!(
+                    "{position}: pointer offset declares {}, expected {} (the operand's own type)",
+                    inst.ty.as_str(),
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Pointer(_)) {
+                report(format!(
+                    "{position}: pointer offset declares {}, expected a Pointer",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerCast(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: PointerCast converts {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Pointer(_)) {
+                report(format!(
+                    "{position}: PointerCast declares {}, expected a Pointer",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PointerIsNull(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "PointerIsNull", report);
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: PointerIsNull reads {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -1030,6 +1148,16 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             let mut operands = vec![*callee];
             operands.extend(args.iter().copied());
             operands
+        }
+        InstKind::PointerFromSlot(_) => Vec::new(),
+        InstKind::PointerFromField { object, .. } => vec![*object],
+        InstKind::PointerRead(operand)
+        | InstKind::PointerCast(operand)
+        | InstKind::PointerIsNull(operand) => vec![*operand],
+        InstKind::PointerWrite { pointer, value } => vec![*pointer, *value],
+        InstKind::PointerOffset { pointer, amount }
+        | InstKind::PointerOffsetBytes { pointer, amount } => {
+            vec![*pointer, *amount]
         }
     }
 }

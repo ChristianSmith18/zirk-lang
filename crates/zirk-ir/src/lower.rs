@@ -278,6 +278,40 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         ..Module::default()
     };
 
+    // `checked.pointer_types` is pushed first, in the same order, so
+    // `Base::Pointer(id)`/`IrType::Pointer(id)` always name the same
+    // pointee — see `ir_type`'s own comment on this arm.
+    module.pointer_types = checked
+        .pointer_types
+        .iter()
+        .map(|&pointee| ir_type(pointee, instance_base, enum_instance_base, checked))
+        .collect();
+
+    // `extern "C" fn` declarations (roadmap Phase 4e, design D7, `ADR-015`):
+    // no body to lower, only a declaration codegen turns into an LLVM
+    // `declare`.
+    module.externs = program
+        .externs
+        .iter()
+        .filter_map(|e| {
+            let signature = checked.externs.get(&e.name.name)?;
+            Some(ExternFn {
+                name: e.name.name.clone(),
+                params: signature
+                    .params
+                    .iter()
+                    .map(|&t| ir_type(t, instance_base, enum_instance_base, checked))
+                    .collect(),
+                return_type: ir_type(
+                    signature.returns,
+                    instance_base,
+                    enum_instance_base,
+                    checked,
+                ),
+            })
+        })
+        .collect();
+
     // One entry per `checked.fn_types` id, pushed first and in order so
     // `Base::Function(id)` and `IrType::Closure(id)` share the same number
     // (`Self::ir_type`'s own `Base::Function` arm relies on this).
@@ -911,6 +945,14 @@ fn ir_type(
         // read the *slot's* type, not the checker's).
         Base::Function(id) => IrType::Closure(id),
 
+        // `checked.pointer_types` and `module.pointer_types` are populated in
+        // the same order, once, before any function is lowered (`Self::lower`,
+        // right after `module` is built) — so a `Base::Pointer` id and the
+        // `IrType::Pointer` id it maps to are always the same number, the
+        // same "pushed first, in order" trick `checked.fn_types`/
+        // `module.closures` already share (roadmap Phase 4e, design D1).
+        Base::Pointer(id) => IrType::Pointer(id),
+
         Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
@@ -1243,6 +1285,22 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every callable type it type-checked")
                 as u32;
             return Type::of(Base::Function(id));
+        }
+
+        // `Pointer<T>` (roadmap Phase 4e, design D1): interned the same way
+        // `Fn(...) => R` above is — looked up in `checked.pointer_types` by
+        // structural equality, matching the exact id `Checker::resolve_pointer_type_ref`
+        // used, rather than interning a second, unrelated table here.
+        if reference.name == "Pointer" {
+            let pointee = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .pointer_types
+                .iter()
+                .position(|&t| t == pointee)
+                .expect("the checker interned every Pointer<T> it type-checked")
+                as u32;
+            return Type::of(Base::Pointer(id));
         }
 
         let declared = self.declaration_of(&reference.name, reference.span);
@@ -1756,7 +1814,12 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
-            | IrType::Enum(_) => {
+            | IrType::Enum(_)
+            // A `Pointer<T>` field is unreachable in a verified program: the
+            // checker's escape rule (design D4) rejects every assignment of
+            // a `Pointer<T>` value into a field, so nothing here ever needs
+            // a default for one.
+            | IrType::Pointer(_) => {
                 return None;
             }
         })
@@ -1968,6 +2031,15 @@ impl<'a> FunctionLowering<'a> {
             ast::Stmt::Block(b) => self.lower_block(b),
             ast::Stmt::Throw(s) => self.lower_throw(s),
             ast::Stmt::Try(s) => self.lower_try(s),
+            // `unsafe { }`/`commit { }` lower as an ordinary block (roadmap
+            // Phase 4e). The transactional journal (design D5/D6) is
+            // explicitly deferred — see `openspec/changes/fase-4e-unsafe-pointer-extern/tasks.md`
+            // section 8: this slice ships the pointer core and `extern`
+            // (D1-D4, D7-D8) without rollback-on-failure, which the checker
+            // still enforces at the *context* level (unsafe/commit depth)
+            // regardless of whether a write inside is journaled.
+            ast::Stmt::Unsafe(s) => self.lower_block(&s.body),
+            ast::Stmt::Commit(s) => self.lower_block(&s.body),
         }
     }
 
@@ -3032,6 +3104,12 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if self.is_pointer_from_call(e) {
+                    return self.lower_pointer_from(&e.args[0].value, span);
+                }
+                if self.is_pointer_method_call(e) {
+                    return self.lower_pointer_method_call(e, span);
+                }
                 if let Some(target) = self.context_conversion_target(e) {
                     let target_ty = self.ir_type(target);
                     return self.lower_context_tree(target_ty, &e.args[0].value);
@@ -3107,6 +3185,13 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Cast(e) => self.lower_cast(e, span),
 
             ast::Expr::Interpolated(e) => self.lower_interpolated(e, span),
+
+            // `unsafe { }`/`commit { }` used as a value (roadmap Phase 4e) —
+            // same no-journal lowering as the statement form (`Self::lower_stmt`'s
+            // own comment on the D5/D6 cut), evaluated for its last
+            // expression instead of only its effects.
+            ast::Expr::Unsafe(u) => self.lower_block_value(&u.body),
+            ast::Expr::Commit(c) => self.lower_block_value(&c.body),
 
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
@@ -5634,6 +5719,11 @@ impl<'a> FunctionLowering<'a> {
         if let (IrType::Float(_), IrType::Int(_)) = (actual_ty, target_ty) {
             return self.emit(InstKind::FloatToInt(value), target_ty, span);
         }
+        // `ptr as Pointer<U>` — `.cast<U>()`'s spelling (design D8, tasks.md
+        // 6.2's decision note): an LLVM pointer bitcast, unchecked.
+        if let (IrType::Pointer(_), IrType::Pointer(_)) = (actual_ty, target_ty) {
+            return self.emit(InstKind::PointerCast(value), target_ty, span);
+        }
 
         let IrType::Object(target_class) = target_ty else {
             unreachable!(
@@ -5671,6 +5761,16 @@ impl<'a> FunctionLowering<'a> {
     /// The checker already decided which one it is and recorded the answer, so
     /// this reads the decision rather than repeating it with the same tables.
     fn lower_field(&mut self, expr: &ast::FieldExpr, span: Span) -> Operand {
+        if expr.name.name == "is_null"
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Pointer(_)
+            )
+        {
+            let pointer = self.lower_expr(&expr.object);
+            return self.emit(InstKind::PointerIsNull(pointer), IrType::Boolean, span);
+        }
+
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -5971,6 +6071,17 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        // `.is_null` (roadmap Phase 4e) — the one `Pointer<T>` operation
+        // that needs no `unsafe` (`Checker::member_type`'s own matching
+        // branch).
+        if expr.name.name == "is_null"
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Pointer(_)
+            )
+        {
+            return IrType::Boolean;
+        }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -6002,6 +6113,114 @@ impl<'a> FunctionLowering<'a> {
     /// Unwraps a nullable object type first: `?.`'s own lowering already
     /// established that the receiver is not null before this runs, the same
     /// way `??`'s does for its right-hand side.
+    /// Whether `e` is `Pointer.from(place)` (roadmap Phase 4e, design D1) —
+    /// the compiler-built-in static call `Checker::check_pointer_from`
+    /// already recognized the same way.
+    fn is_pointer_from_call(&self, e: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*e.callee else {
+            return false;
+        };
+        let ast::Expr::Path(base) = &*field.object else {
+            return false;
+        };
+        base.name == "Pointer"
+            && field.name.name == "from"
+            && self.try_lookup_slot(&base.name).is_none()
+    }
+
+    /// Whether `e` is `.read()`/`.write(v)`/`.offset(n)`/`.offset_bytes(n)`
+    /// on a `Pointer<T>` receiver (design D8). `.is_null` is not here — it
+    /// is a member read (`Self::field_type_of`/`Self::lower_field`), never a
+    /// call.
+    fn is_pointer_method_call(&self, e: &ast::CallExpr) -> bool {
+        if self.is_pointer_from_call(e) {
+            return false;
+        }
+        let ast::Expr::Field(field) = &*e.callee else {
+            return false;
+        };
+        if !matches!(
+            field.name.name.as_str(),
+            "read" | "write" | "offset" | "offset_bytes"
+        ) {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Pointer(_)
+        )
+    }
+
+    /// `Pointer.from(place)` (design D8): the address already computed for
+    /// `place`'s own storage — no allocation, just exposing it.
+    fn lower_pointer_from(&mut self, place: &ast::Expr, span: Span) -> Operand {
+        let pointee = self.type_of(place, place.span());
+        let id =
+            self.module
+                .pointer_types
+                .iter()
+                .position(|&t| t == pointee)
+                .expect("the checker interned every Pointer<T> it type-checked") as u32;
+        let ty = IrType::Pointer(id);
+
+        match place {
+            ast::Expr::Path(ident) => {
+                let slot = self.lookup_slot(&ident.name);
+                self.emit(InstKind::PointerFromSlot(slot), ty, span)
+            }
+            ast::Expr::Field(field) => {
+                let (index, _) = self.field_position(&field.object, &field.name.name);
+                let object = self.lower_expr(&field.object);
+                self.emit(InstKind::PointerFromField { object, index }, ty, span)
+            }
+            _ => unreachable!("the checker only accepts an addressable place"),
+        }
+    }
+
+    /// `.read()`/`.write(v)`/`.offset(n)`/`.offset_bytes(n)` (design D8).
+    fn lower_pointer_method_call(&mut self, e: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*e.callee else {
+            unreachable!("checked by `Self::is_pointer_method_call`")
+        };
+        let pointer = self.lower_expr(&field.object);
+        let IrType::Pointer(id) = self.type_of_operand(pointer) else {
+            unreachable!("checked by `Self::is_pointer_method_call`")
+        };
+
+        match field.name.name.as_str() {
+            "read" => {
+                let t = self.module.pointer_types[id as usize];
+                self.emit(InstKind::PointerRead(pointer), t, span)
+            }
+            "write" => {
+                let t = self.module.pointer_types[id as usize];
+                let value = self.lower_expr_as(&e.args[0].value, t);
+                self.emit(
+                    InstKind::PointerWrite { pointer, value },
+                    IrType::Void,
+                    span,
+                )
+            }
+            "offset" => {
+                let amount = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                self.emit(
+                    InstKind::PointerOffset { pointer, amount },
+                    IrType::Pointer(id),
+                    span,
+                )
+            }
+            "offset_bytes" => {
+                let amount = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                self.emit(
+                    InstKind::PointerOffsetBytes { pointer, amount },
+                    IrType::Pointer(id),
+                    span,
+                )
+            }
+            _ => unreachable!("checked by `Self::is_pointer_method_call`"),
+        }
+    }
+
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
         match self.type_of(object, object.span()).unwrapped() {
             IrType::Object(id) => {
@@ -6132,6 +6351,8 @@ impl<'a> FunctionLowering<'a> {
             // Same reason as in the checker: an `if` is parsed as a statement
             // wherever it appears, and the position decides what it is.
             ast::Stmt::If(nested) => self.lower_if_expr(nested, nested.span),
+            ast::Stmt::Unsafe(nested) => self.lower_block_value(&nested.body),
+            ast::Stmt::Commit(nested) => self.lower_block_value(&nested.body),
             _ => unreachable!("a verified block used as a value ends in an expression"),
         };
 
@@ -6144,6 +6365,8 @@ impl<'a> FunctionLowering<'a> {
         match block.statements.last() {
             Some(ast::Stmt::Expr(e)) => self.type_of(&e.expr, e.expr.span()),
             Some(ast::Stmt::If(nested)) => self.block_value_type(&nested.then_branch),
+            Some(ast::Stmt::Unsafe(nested)) => self.block_value_type(&nested.body),
+            Some(ast::Stmt::Commit(nested)) => self.block_value_type(&nested.body),
             _ => unreachable!("a verified block used as a value ends in an expression"),
         }
     }
@@ -6154,6 +6377,13 @@ impl<'a> FunctionLowering<'a> {
     /// them would leave a value nobody reads.
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
+            // `.write(v)` as a bare statement (roadmap Phase 4e) — checked
+            // ahead of the later "void call by name" arm below, whose own
+            // guard calls `Self::callee_name` unconditionally and panics on
+            // a `Field` callee (`.write` is never a plain-name call).
+            ast::Expr::Call(e) if self.is_pointer_method_call(e) => {
+                self.lower_pointer_method_call(e, expr.span());
+            }
             ast::Expr::Println(e) => {
                 let operand = self.lower_println_argument(e, expr.span());
                 self.emit_effect(InstKind::Println(operand), expr.span());
@@ -6357,6 +6587,20 @@ impl<'a> FunctionLowering<'a> {
     /// argument.
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
         let name = self.callee_name(call);
+
+        // `extern "C" fn` (roadmap Phase 4e, `ADR-015`): a single-item
+        // declaration with no optional/default/variadic/named parameters —
+        // every argument is positional, so this needs none of the
+        // held-argument reordering below.
+        if let Some(signature) = self.checked.externs.get(&name).cloned() {
+            let expected: Vec<IrType> = signature
+                .params
+                .iter()
+                .map(|&ty| self.ir_type(ty))
+                .collect();
+            return self.lower_held_args(&call.args, &expected);
+        }
+
         let signature = self
             .checked
             .functions
@@ -6467,6 +6711,17 @@ impl<'a> FunctionLowering<'a> {
         // its own callee (`field_type_of`) would try to resolve `to_string`
         // as a *field*, which panics for anything that is not an
         // `Object`/`Value` (a native scalar has no fields at all).
+        // Neither is `Pointer.from(place)`/a `Pointer<T>` method (roadmap
+        // Phase 4e) — checked first and unconditionally, before any of the
+        // calls below: `Pointer.from(...)`'s own callee object is
+        // `Expr::Path("Pointer")`, which names no variable or function, so
+        // `Self::type_of` would panic trying to resolve it as either
+        // (exactly the failure mode this whole guard exists to avoid for
+        // `to_string`/method calls, per the comment above).
+        if self.is_pointer_from_call(call) || self.is_pointer_method_call(call) {
+            return false;
+        }
+
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
             || self.safe_method_call_info(call).is_some()
@@ -6490,8 +6745,14 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn signature_return(&self, name: &str) -> IrType {
+        if let Some(signature) = self.checked.functions.get(name) {
+            return self.ir_type(signature.returns);
+        }
+        // `extern "C" fn` (roadmap Phase 4e, design D7) — a call to one
+        // reaches the same `Call`-lowering path as an ordinary function,
+        // named by its own real symbol; only its declaration differs.
         self.checked
-            .functions
+            .externs
             .get(name)
             .map(|s| self.ir_type(s.returns))
             .expect("a verified program only calls declared functions")
@@ -6583,6 +6844,32 @@ impl<'a> FunctionLowering<'a> {
                 self.ir_type(self.context_conversion_target(e).expect("checked above"))
             }
             ast::Expr::Call(e) if self.is_fatal_error_call(e) => IrType::Never,
+            ast::Expr::Call(e) if self.is_pointer_from_call(e) => {
+                let place = &e.args[0].value;
+                let pointee = self.type_of(place, place.span());
+                let id = self
+                    .module
+                    .pointer_types
+                    .iter()
+                    .position(|&t| t == pointee)
+                    .expect("the checker interned every Pointer<T> it type-checked")
+                    as u32;
+                IrType::Pointer(id)
+            }
+            ast::Expr::Call(e) if self.is_pointer_method_call(e) => {
+                let ast::Expr::Field(field) = &*e.callee else {
+                    unreachable!("checked by `Self::is_pointer_method_call`")
+                };
+                let IrType::Pointer(id) = self.type_of(&field.object, field.object.span()) else {
+                    unreachable!("checked by `Self::is_pointer_method_call`")
+                };
+                match field.name.name.as_str() {
+                    "read" => self.module.pointer_types[id as usize],
+                    "write" => IrType::Void,
+                    "offset" | "offset_bytes" => IrType::Pointer(id),
+                    _ => unreachable!("checked by `Self::is_pointer_method_call`"),
+                }
+            }
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {
                     return self.ir_type(method.returns);
@@ -6665,6 +6952,8 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Cast(e) => self.ir_type_from_ref(&e.target),
             ast::Expr::Interpolated(_) => IrType::String,
+            ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
+            ast::Expr::Commit(c) => self.block_value_type(&c.body),
         }
     }
 

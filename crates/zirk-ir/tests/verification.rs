@@ -29,6 +29,8 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         objects: Vec::new(),
         values: Vec::new(),
         enums: Vec::new(),
+        pointer_types: Vec::new(),
+        externs: Vec::new(),
     }
 }
 
@@ -284,6 +286,8 @@ fn a_binary_operation_between_different_types_is_rejected() {
         objects: Vec::new(),
         values: Vec::new(),
         enums: Vec::new(),
+        pointer_types: Vec::new(),
+        externs: Vec::new(),
     };
 
     let errors = errors_of(&module);

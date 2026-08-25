@@ -1,0 +1,4 @@
+extern "system" fn f(): Void;
+
+fn main(): Void {
+}

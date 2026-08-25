@@ -18,12 +18,22 @@ Current high-impact delivery limits include:
   one-resource `match with`, but final suppressed/combined cleanup failures,
   grouped acquisition, complete stack traces, throwable immutability,
   cancellation cleanup, resource transfer, and dependent lifetimes remain.
-- Managed memory, weak/dependent references, full deep-graph cloning,
-  transactional unsafe rollback, and irreversible `commit` effects remain
-  Phase 4e work. `inmut::strict` rejects a direct rebinding and a write
-  through a field projection off a strict binding; strictness declared on a
-  field itself (independent of its container's own mutability) and a
-  mutating method call reached through a strict reference remain open.
+- Managed memory (ADR-003's strategy decision remains open), weak/dependent
+  references, and full deep-graph cloning remain Phase 4e work.
+  `inmut::strict` rejects a direct rebinding and a write through a field
+  projection off a strict binding; strictness declared on a field itself
+  (independent of its container's own mutability) and a mutating method call
+  reached through a strict reference remain open. `unsafe fn`/`unsafe {}`/
+  `commit {}` parse and are context-checked; `Pointer<T>` (an ABI-safe
+  element-type subset) supports construction/read/write/offset/cast with a
+  conservative escape rule; `extern "C" fn` declares and calls a native
+  function under a narrow ABI-safe signature. The transactional
+  journal/rollback contract itself is not implemented — `unsafe {}` does not
+  yet record writes and `commit {}` does not yet durably publish anything, so
+  nothing rolls back on failure yet. `NativeSlice<T>`/`NativeSliceMut<T>`,
+  volatile access, untagged native-union access (no union type exists), weak
+  atomic ordering (`Atomic<T>` is Phase 5), and a native-library-linking
+  manifest also remain.
 - Several Phase 3 constructs parse and type-check more broadly than they lower:
   user generic contracts/enums, abstract-class dynamic dispatch, value-type
   contract dispatch, and derived structural equality require remaining stages.

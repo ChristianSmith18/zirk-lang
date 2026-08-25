@@ -53,4 +53,8 @@ pub mod codes {
     pub const ABSTRACT_OUTSIDE_ABSTRACT_CLASS: Code = Code::new("E0312");
     /// A `try` with neither a `catch` nor a `finally` (roadmap Phase 4b).
     pub const EMPTY_TRY: Code = Code::new("E0313");
+    /// An `extern "C" fn` declaration written with a body (roadmap Phase 4e).
+    pub const EXTERN_HAS_BODY: Code = Code::new("E0314");
+    /// An `extern` calling-convention literal other than `"C"` (roadmap Phase 4e).
+    pub const EXTERN_BAD_CONVENTION: Code = Code::new("E0315");
 }

@@ -96,6 +96,12 @@ pub enum Keyword {
     /// positions. `in` is shared with `for ... in`, so only `out` needs a
     /// keyword of its own.
     Out,
+    /// `commit { }`, the irreversible-effect boundary nested inside `unsafe`
+    /// (roadmap Phase 4e).
+    Commit,
+    /// `extern "C" fn name(...): T;`, a bodyless native declaration (roadmap
+    /// Phase 4e, `ADR-015-declaracion-extern.md`).
+    Extern,
 }
 
 impl Keyword {
@@ -162,6 +168,8 @@ impl Keyword {
             "null" => Null,
             "default" => Default,
             "out" => Out,
+            "commit" => Commit,
+            "extern" => Extern,
             _ => return None,
         })
     }
@@ -226,6 +234,8 @@ impl Keyword {
             Null => "null",
             Default => "default",
             Out => "out",
+            Commit => "commit",
+            Extern => "extern",
         }
     }
 
@@ -242,14 +252,18 @@ impl Keyword {
         Some(match self {
             // `match ... with` is implemented (roadmap Phase 4c: `Resource<E>`
             // and scoped acquisition), so `With` is no longer gated here —
-            // `parse_match` consumes it directly. `unsafe`/`Pointer<T>` are
-            // the memory-strategy half of Phase 4, not exceptions or
-            // resources. `default` labels the catch-all arm of a `try`, so it
-            // arrives with error handling and not with the decorators it used
-            // to be filed under — but `catch Throwable(e)` already means
-            // "catch everything" for this phase's scope, so `default` stays
-            // gated until `match with` needs its own catch-all arm.
-            Unsafe | Default => Phase::FOUR,
+            // `parse_match` consumes it directly. `unsafe`/`Pointer<T>`/
+            // `commit`/`extern` are implemented as of Phase 4e
+            // (`fase-4e-unsafe-pointer-extern`), so `Unsafe` is no longer
+            // gated here either — `Commit`/`Extern` were never gated (they
+            // ship directly in this change, per design D-nothing: there was
+            // no earlier phase claiming them). `default` labels the
+            // catch-all arm of a `try`, so it arrives with error handling
+            // and not with the decorators it used to be filed under — but
+            // `catch Throwable(e)` already means "catch everything" for this
+            // phase's scope, so `default` stays gated until `match with`
+            // needs its own catch-all arm.
+            Default => Phase::FOUR,
             Task | Await | Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.
@@ -606,6 +620,22 @@ mod tests {
     fn later_phase_keywords_declare_their_phase() {
         assert!(!Keyword::Task.in_subset());
         assert_eq!(Keyword::Task.phase(), Some(Phase::FIVE));
+    }
+
+    #[test]
+    fn unsafe_commit_and_extern_are_in_the_subset() {
+        for k in [Keyword::Unsafe, Keyword::Commit, Keyword::Extern] {
+            assert!(k.in_subset(), "`{}` should be implemented", k.as_str());
+            assert_eq!(k.phase(), None, "`{}`", k.as_str());
+        }
+    }
+
+    #[test]
+    fn commit_and_extern_resolve_from_text() {
+        assert_eq!(Keyword::from_text("commit"), Some(Keyword::Commit));
+        assert_eq!(Keyword::from_text("extern"), Some(Keyword::Extern));
+        assert_eq!(Keyword::Commit.as_str(), "commit");
+        assert_eq!(Keyword::Extern.as_str(), "extern");
     }
 
     #[test]
