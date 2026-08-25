@@ -43,13 +43,13 @@
 
 ## 7. Documentation and status sync
 
-- [ ] 7.1 Update `docs/handbook/11-reference/12-feature-status.md` row for "multiple declarations and simultaneous assignment" from "defined / not implemented" to delivered, matching the actual scope shipped.
-- [ ] 7.2 Update `docs/init/ZIRK_ROADMAP.md` Phase 4d status line to record both slices (`fase-4d-callables` and this change) complete, removing "remain pending, tracked as a separate change."
-- [ ] 7.3 Add or update a handbook example demonstrating the syntax if the handbook documents this construct elsewhere with a "not yet implemented" caveat.
-- [ ] 7.4 Commit the zirk-lang documentation/status changes, then run `./scripts/sync-website-content.sh` from the repo root; if project-status evidence changed, review `../zirk-lang-site`'s site-owned status catalog and pass `--audit-date YYYY-MM-DD` with today's date.
-- [ ] 7.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable.
+- [x] 7.1 Update `docs/handbook/11-reference/12-feature-status.md` row for "multiple declarations and simultaneous assignment" from "defined / not implemented" to delivered, matching the actual scope shipped.
+- [x] 7.2 Update `docs/init/ZIRK_ROADMAP.md` Phase 4d status line to record both slices (`fase-4d-callables` and this change) complete, removing "remain pending, tracked as a separate change."
+- [x] 7.3 Add or update a handbook example demonstrating the syntax if the handbook documents this construct elsewhere with a "not yet implemented" caveat. (Checked: `docs/handbook/02-handbook/02-bindings-and-values/07a-multiple-bindings-and-assignment.md` already documents the syntax normatively with no "not yet implemented" caveat — nothing to update.)
+- [x] 7.4 Commit the zirk-lang documentation/status changes, then run `./scripts/sync-website-content.sh` from the repo root; if project-status evidence changed, review `../zirk-lang-site`'s site-owned status catalog and pass `--audit-date YYYY-MM-DD` with today's date.
+- [x] 7.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable. (zirk-lang `0cfe4d8`; zirk-lang-site `9ffdc62`, synced from `0cfe4d8` with `--audit-date 2026-08-24`.)
 
 ## 8. OpenSpec close-out
 
-- [ ] 8.1 Run `openspec validate --change fase-4d-declaraciones-multiples` (or repo-equivalent) before archiving.
-- [ ] 8.2 Archive the change once implementation, tests, and documentation sync are complete.
+- [x] 8.1 Run `openspec validate --change fase-4d-declaraciones-multiples` (or repo-equivalent) before archiving.
+- [x] 8.2 Archive the change once implementation, tests, and documentation sync are complete.
