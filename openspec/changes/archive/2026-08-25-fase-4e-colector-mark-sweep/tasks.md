@@ -51,10 +51,10 @@
 - [x] 5.1 Update `docs/init/ZIRK_ROADMAP.md` Phase 4e's "Deliver the strategy chosen by the Phase 0 memory ADR" bullet to record the collector delivered — `Weak<T>`/dependent references/deep clone remain their own bullets, not delivered by this change.
 - [x] 5.2 Update `docs/handbook/13-appendices/07-current-limitations.md` and `docs/handbook/11-reference/12-feature-status.md`'s memory rows to reflect a real collector now exists (still non-moving-only, still no `Weak<T>`/clone, still no dependent-reference/pinning machinery).
 - [x] 5.3 Check whether `crates/zirk-runtime/src/memory.rs`'s own doc comment ("This is not an oversight... a program of this phase terminates and the OS reclaims everything") needs updating now that it's no longer accurate — it should be, since this is exactly the kind of comment that actively misleads a future reader if left in place. (Already rewritten as an effect of implementation; cleaned up a garbled sentence left from that edit — "Through Phase 4e's own... closure, this deliberately never freed" didn't parse as English — now "Until Phase 4e's memory ADR closed... this deliberately never freed".)
-- [ ] 5.4 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
-- [ ] 5.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable.
+- [x] 5.4 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
+- [x] 5.5 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable. (zirk-lang `10a7173`; zirk-lang-site `681c698`, synced from `10a7173` with `--audit-date 2026-08-25`.)
 
 ## 6. OpenSpec close-out
 
-- [ ] 6.1 Run `openspec validate fase-4e-colector-mark-sweep` before archiving.
-- [ ] 6.2 Archive the change once implementation, tests, and documentation sync are complete.
+- [x] 6.1 Run `openspec validate fase-4e-colector-mark-sweep` before archiving.
+- [x] 6.2 Archive the change once implementation, tests, and documentation sync are complete.
