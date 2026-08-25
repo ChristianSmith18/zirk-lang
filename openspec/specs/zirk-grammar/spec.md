@@ -549,7 +549,7 @@ El parser SHALL reconocer `class`, sus campos y métodos, `construct`, `this`, l
 - **THEN** se produce una declaración con un contrato implementado, un campo y un constructor
 
 #### Scenario: Herencia y contratos combinados
-- **WHEN** se parsea `class Admin extends User implements Auditable, Cloneable { }`
+- **WHEN** se parsea `class Admin extends User implements Auditable, Clone { }`
 - **THEN** se produce una declaración con una superclase y dos contratos
 
 #### Scenario: `construct` fuera de una clase

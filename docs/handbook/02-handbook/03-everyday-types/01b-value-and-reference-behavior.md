@@ -45,7 +45,7 @@ type's name.
 
 ## Cloning
 
-`clone()` is not universal. A type implements `Cloneable` only when it can
+`clone()` is not universal. A type implements `Clone` only when it can
 produce an independent logical copy. A String clone owns independent mutable
 content; a native handle or resource may deliberately be non-cloneable.
 

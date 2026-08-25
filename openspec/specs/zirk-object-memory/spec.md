@@ -46,3 +46,11 @@ Así el prefijo del layout de una subclase coincide con el de su superclase, y e
 #### Scenario: Acceso a través del tipo base
 - **WHEN** una variable del tipo base sostiene una instancia de la subclase y se lee un campo heredado
 - **THEN** se lee el valor correcto sin comprobación en tiempo de ejecución
+
+### Requirement: Deep-clone traversal state is collector-safe for its whole duration
+
+A `clone()` call's memoization table (mapping each already-cloned source address to its new clone's address) SHALL be scoped to one top-level `clone()` invocation, and every partially-built clone allocation reachable from that call SHALL remain reachable to the collector for the call's entire duration, so a collection triggered by one of the call's own allocations cannot reclaim a partially-built clone or the objects it already points to.
+
+#### Scenario: Collection triggered mid-clone
+- **WHEN** allocating a node during a deep `clone()` call crosses the collector's threshold and triggers a collection
+- **THEN** every clone allocation produced so far by that call remains reachable and is not collected

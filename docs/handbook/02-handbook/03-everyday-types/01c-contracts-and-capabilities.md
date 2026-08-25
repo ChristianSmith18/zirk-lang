@@ -5,7 +5,7 @@ class provides every method. Typical capabilities include:
 
 ```text
 Equatable<Self>          Comparable<Self>
-Hashable                 Cloneable
+Hashable                 Clone
 Addable<Self, Output>    Subtractable<Self, Output>
 Multipliable<Self, Output>
 Dividable<Self, Output>  Remainder<Self, Output>
