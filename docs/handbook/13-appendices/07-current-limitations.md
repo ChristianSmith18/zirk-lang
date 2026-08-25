@@ -8,15 +8,22 @@ stage implements them.
 
 Current high-impact delivery limits include:
 
-- `Fn(P...) => R` is final syntax but remains rejected in general type
-  positions; closures therefore cannot yet escape their creating function.
+- `Fn(P...) => R` is parseable and type-checked in every position (Phase 4d),
+  and a named function, capture-less lambda, or a single capturing closure
+  literal written directly at a local's initializer or a function's `return`
+  freely satisfies it — but general callable-type polymorphism across two or
+  more *differently-captured* closures at one position still needs the
+  captures heap-boxed behind a uniform representation, not built yet.
 - Phase 4a–4c implement expected errors, explicit exceptions, and the initial
   one-resource `match with`, but final suppressed/combined cleanup failures,
   grouped acquisition, complete stack traces, throwable immutability,
   cancellation cleanup, resource transfer, and dependent lifetimes remain.
 - Managed memory, weak/dependent references, full deep-graph cloning,
-  `inmut::strict` alias enforcement, transactional unsafe rollback, and
-  irreversible `commit` effects remain Phase 4e work.
+  transactional unsafe rollback, and irreversible `commit` effects remain
+  Phase 4e work. `inmut::strict` rejects a direct rebinding and a write
+  through a field projection off a strict binding; strictness declared on a
+  field itself (independent of its container's own mutability) and a
+  mutating method call reached through a strict reference remain open.
 - Several Phase 3 constructs parse and type-check more broadly than they lower:
   user generic contracts/enums, abstract-class dynamic dispatch, value-type
   contract dispatch, and derived structural equality require remaining stages.

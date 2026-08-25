@@ -171,6 +171,67 @@ Resultado: `survivor` / `survivor` / `1` — el objeto capturado mantiene su ide
 
 **Conclusión para ADR-003:** estos tres probes no cierran el criterio 1 — ese sigue bloqueado por D9 exactamente como decía el documento original, y esta sección no propone tocar D9. Lo que sí aportan es evidencia de ejecución real, en el patrón más cercano disponible hoy, de que: (a) un objeto capturado por campo sobrevive correcto más allá del scope que lo creó (probe 8); (b) la semántica de alias/referencia-compartida se preserva a través de ese escape, igual que exige el modelo público de memoria (probe 9); y (c) esa corrección no se degrada bajo presión de alocación sostenida, dentro de los límites de lo que el runtime actual puede realmente poner a prueba (probe 10). Ninguno de los tres sustituye al caso que el criterio 1 pide medir — una closure real que escapa — y quien cierre ADR-003 debería seguir tratando ese caso como no medido, no como aproximadamente medido.
 
+## Extensión: el criterio 1 ya es medible — D9 se resolvió parcialmente
+
+Esta sección se agregó en una sesión posterior (24 de agosto de 2026), después de que `fase-4d-callables` (archivada) y `fase-4d-declaraciones-multiples` (archivada el mismo día) llegaran a `develop`. Mismo método que el resto del documento: un programa `.zrk` real, compilado y ejecutado con `cargo run -p zirk-cli -- run archivo.zrk` (con `LLVM_SYS_201_PREFIX=/opt/homebrew/opt/llvm@20`), más lectura del código fuente relevante. El archivo completo quedó en el scratchpad de la sesión, no en el repositorio. **Nada en `crates/*/src/*.rs` fue modificado para esta sección.**
+
+El documento original decía, sin ambigüedad, que el criterio 1 de ADR-003 ("comportamiento con ciclos entre objetos y con closures que capturan") **no podía medirse** porque D9 bloqueaba que una closure escapara de su marco creador. Eso ya no es cierto: `fase-4d-callables` resolvió D9 para el caso de un solo literal de closure capturador escrito directamente en el inicializador de un local o en el `return` de una función (diseño D12/D14/D15), precisamente el caso que da sentido al criterio 1. Nadie había corrido ese escenario contra el compilador actual hasta este probe.
+
+### Probe 11 — una closure real que captura un objeto compartido y escapa de su marco creador
+
+`make_incrementer(c: Counter): Fn() => Int32` retorna `(): Int32 => c.bump();` — una closure que captura por valor una referencia a `Counter` (que, por ser tipo referencia, preserva aliasing al mismo objeto de heap, tal como exige `MEMORY_AND_UNSAFE_SEMANTICS.md` §1–2). `main` construye un `Counter` compartido, llama `make_incrementer(shared)` dos veces guardando cada resultado en un local **sin anotación de tipo explícita** (`mut inc_a = make_incrementer(shared);`), invoca ambas closures, luego ejecuta `churn_garbage(2_000_000)` — el generador de ciclos de dos nodos ya usado en los probes 5 y 10 — y vuelve a invocar ambas closures.
+
+**Resultado, con salida real:**
+
+```
+1
+2
+2
+3
+4
+4
+```
+
+`inc_a()` primero (1), `inc_b()` después sobre el mismo `Counter` compartido (2), `shared.count` confirma el alias (2) — exactamente el patrón captura-por-referencia-compartida del probe 9, pero ahora con una closure de verdad en vez de un campo de objeto. Después de 2.000.000 de iteraciones de churn (4.000.000 de objetos `Node` alocados y nunca liberados, ~130 MB RSS, consistente con el probe 5), ambas closures siguen funcionando correctamente sobre el mismo `Counter`: `inc_a()` → 3, `inc_b()` → 4, `shared.count` → 4. El marco de `make_incrementer` terminó dos veces antes de que ninguna de estas últimas tres líneas se ejecutara.
+
+**Esto responde, con evidencia de ejecución real, la pregunta que el criterio 1 de ADR-003 pedía medir desde la Fase 0**: una closure que captura un objeto por referencia compartida sobrevive correcta, con identidad y aliasing intactos, más allá del scope que la creó — incluso bajo presión de alocación sostenida no relacionada — bajo el runtime actual (que nunca libera ni mueve nada). Sigue aplicando la misma limitación que el probe 10 ya señalaba: esto prueba que alocar mucho en el medio no corrompe por sí solo una closure escapada bajo el runtime de hoy; no prueba que un colector real con trazado o compactación preservaría la misma corrección — esa sigue siendo la pregunta que Fase 4 debe cerrar con una estrategia concreta.
+
+### Hallazgo no buscado: el alcance exacto de D14 en la práctica
+
+Escribir este probe con el tipo explícito `Fn() => Int32` en `inc_a`/`inc_b` (en vez de dejarlo inferido) lo rompe:
+
+```
+error[E0439]: this position cannot hold this closure
+   |
+34 |     mut inc_a: Fn() => Int32 = make_incrementer(shared);
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^
+   = cause: a capturing closure only satisfies a callable type when its own
+     literal is written directly at that position; a different closure — or
+     one reached through a variable — would need its captures boxed behind a
+     uniform representation, which is not implemented yet
+```
+
+El diseño D14 de `fase-4d-callables` exige que el *literal* de la closure esté escrito directamente en la posición anotada (el inicializador del local, o el `return` de la función) — el valor que produce **llamar** a una función que retorna `Fn(...) => R`, incluso si esa función solo contiene un único literal en su propio `return`, no cuenta como "escrito directamente" en el local que recibe el resultado de la llamada. Sin anotación explícita, la inferencia de tipos simplemente conserva el `Base::Function` id exacto que ya trae el valor devuelto — sin pasar por ninguna posición anotada — y por eso sí compila. Es un límite real y ya documentado en el propio mensaje de error (D13, la polimorfía general con boxing, sigue sin implementar), no un bug, pero vale la pena que quien use `Fn(...) => R` en programas reales sepa que **anotar explícitamente el tipo de retorno de una función que a su vez retorna otra función capturadora, y luego anotar también el local que recibe esa llamada, es hoy una combinación que se rechaza** — mientras que omitir la segunda anotación no.
+
+### Conclusión para ADR-003
+
+El criterio 1 deja de estar en la lista de "preguntas que siguen abiertas" del documento original. Sigue habiendo una limitación honesta que declarar (el runtime actual nunca libera ni mueve nada, así que esto no sustituye medir contra un colector real), pero la pregunta específica — ¿sobrevive correcta una closure que escapa y mantiene vivo un objeto capturado? — ya tiene evidencia de ejecución real, no solo del spec. Combinado con lo que ya estaba confirmado (probes 1, 3, 4, 5, 8, 9, 10), de los cuatro criterios de cierre de ADR-003 solo el 2 (barrera en `parallel for`, bloqueado por Fase 5) y el 3 (frontera ABI C, bloqueado por `unsafe`/`Pointer<T>` sin implementar) siguen sin ninguna superficie de lenguaje sobre la cual medir; el 4 (pausas contra presupuesto) sigue sin aplicar porque no hay colector implementado. El criterio 1 y buena parte de la evidencia de comportamiento con ciclos y grafos ya están cubiertos.
+
+## Extensión: el gap de escritura por proyección a través de `inmut::strict` queda cerrado
+
+Esta sección se agregó en la misma sesión que la extensión anterior (24 de agosto de 2026), después de implementar `fase-4d-declaraciones-multiples` y de mapear, en modo de exploración, el estado real de cada pieza de la Fase 4e contra el código (no contra la especificación).
+
+Ese mapeo confirmó, leyendo `Checker::check_writable_field` en `crates/zirk-sema/src/checker.rs`, que el gap que `fase-4d-declaraciones-multiples` había documentado (`p.x = 5;` con `p: inmut::strict` compilaba sin rechazo) no era un descuido nuevo: el propio comentario de esa función ya lo admitía por escrito ("where the object came from does not enter into it here"), y el change que introdujo `inmut::strict` (`fase-3-objects-and-type-system`, tarea 5.15) había documentado explícitamente que solo cubría el caso más estrecho — una nueva ligadura inicializada directamente desde el nombre de otra variable — dejando fuera, a propósito, "mutar una proyección... a través de un referente `inmut::strict`".
+
+De las piezas de la Fase 4e, esta era la única completamente autocontenida: a diferencia de `Weak<T>`, `Clone` profundo o un recolector real, no depende de que ADR-003 cierre su elección de estrategia de memoria — es análisis estático de alias en el checker, igual que el resto de la matriz D11.
+
+`fase-4e-inmut-strict-proyeccion` (archivada el mismo día) lo cerró: el checker ahora camina la cadena de proyección (`p.a.b.c = x;`, no solo `p.x = x;`) hasta su ligadura raíz y rechaza la escritura si esa raíz es `inmut::strict`.
+
+**Lo que sigue abierto, para que nadie lea esto como "reachable-alias analysis está completo":**
+- Mutabilidad estricta declarada en un campo (`FieldDecl.mutability`), propagándose de forma independiente de la mutabilidad de su contenedor — no implementado.
+- Llamar a un método mutador a través de una referencia `inmut::strict` (`strictObj.mutate();`) — un camino de escape distinto (por `this` dentro del método llamado), no cubierto por este mecanismo en absoluto.
+- Un hallazgo lateral, no un gap de esta pieza: hoy no existe sintaxis de mutabilidad para parámetros de función (`Param` en `zirk-ast` no tiene campo `mutability`; todo parámetro se liga como `Mutability::Immutable` en el checker) — así que un parámetro `inmut::strict` no puede escribirse en un `.zrk` todavía, y por lo tanto tampoco puede ejercitarse contra este mecanismo.
+
 ## Consecuencias
 
-Este documento no cierra ni reabre ADR-003, ni cambia su estado. Es un insumo: la persona que decida la estrategia final de memoria en Fase 4 tiene ahora evidencia de ejecución real donde antes solo había restricciones deducidas del spec, más una lista concreta de qué preguntas de ADR-003 siguen sin poder medirse y por qué.
+Este documento no cierra ni reabre ADR-003, ni cambia su estado. Es un insumo: la persona que decida la estrategia final de memoria en Fase 4 tiene ahora evidencia de ejecución real donde antes solo había restricciones deducidas del spec, más una lista concreta de qué preguntas de ADR-003 siguen sin poder medirse y por qué — y, desde la primera extensión, una de esas preguntas (el criterio 1) ya tiene esa evidencia. La segunda extensión no es sobre ADR-003 en sí (es un gap de `inmut::strict`, no de la estrategia de memoria), pero queda registrada aquí porque este documento es donde se mapeó el estado real de toda la Fase 4e.

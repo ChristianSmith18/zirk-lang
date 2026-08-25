@@ -4578,10 +4578,11 @@ impl<'a> Checker<'a> {
 
     /// The type of a field being written to, reporting why it cannot be.
     ///
-    /// A field is writable when its own `inmut` allows it. Where the object
-    /// came from does not enter into it here: whether the *reference* permits
-    /// mutation is the `mut`/`inmut`/`inmut::strict` matrix, which lands with
-    /// the rest of reference mutability.
+    /// A field is writable when its own `inmut` allows it, and when the
+    /// reference used to reach it is not `inmut::strict` (design D2 of
+    /// `fase-4e-inmut-strict-proyeccion`: whether the *reference* permits
+    /// mutation is the `mut`/`inmut`/`inmut::strict` matrix, checked here via
+    /// `Self::root_binding_mutability`).
     fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
         let object = self.check_expr(&field.object);
         let ty = self.member_type(object, &field.name, field.object.span(), false);
@@ -4606,7 +4607,39 @@ impl<'a> Checker<'a> {
             );
         }
 
+        if let Some((root_name, Mutability::Strict)) = self.root_binding_mutability(&field.object) {
+            self.error(
+                codes::STRICT_ALIAS_VIOLATION,
+                field.name.span,
+                format!("cannot write to `{}` through `{root_name}`", field.name.name),
+                format!(
+                    "`{root_name}` is `inmut::strict`; writing through a projection of an `inmut::strict` reference is a mutation of the same guarantee it protects"
+                ),
+                Some(format!(
+                    "declare `{root_name}` with `mut` if the fields it reaches must change"
+                )),
+            );
+        }
+
         ty
+    }
+
+    /// Walks a projection's root binding (design D1 of
+    /// `fase-4e-inmut-strict-proyeccion`): `Expr::Path` resolves the binding
+    /// and returns its name and declared mutability; `Expr::Field` recurses
+    /// into its own object; every other shape (`Expr::This`, a call result,
+    /// an index expression, …) returns `None` — deliberately conservative,
+    /// matching `Self::check_strict_alias`'s own precedent of only handling
+    /// shapes the checker can prove something about.
+    fn root_binding_mutability(&self, expr: &Expr) -> Option<(String, Mutability)> {
+        match expr {
+            Expr::Path(ident) => {
+                let resolved = self.scopes.resolve(&ident.name)?;
+                Some((ident.name.clone(), resolved.binding.mutability))
+            }
+            Expr::Field(inner) => self.root_binding_mutability(&inner.object),
+            _ => None,
+        }
     }
 
     /// Resolves a name that is about to be written to, reporting why it cannot
