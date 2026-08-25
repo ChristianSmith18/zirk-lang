@@ -218,9 +218,10 @@ deferred to a follow-up change.
 
 **Status: in progress. ADR-003 closed (non-moving mark-sweep); the real
 collector, `inmut::strict` projection-write checking
-(`fase-4e-inmut-strict-proyeccion`), and the `unsafe`/`Pointer<T>`/`extern`
-core (`fase-4e-unsafe-pointer-extern`) shipped; the transactional journal,
-native slices, and reference/clone delivery remain.**
+(`fase-4e-inmut-strict-proyeccion`), the `unsafe`/`Pointer<T>`/`extern`
+core (`fase-4e-unsafe-pointer-extern`), `Weak<T>` (`fase-4e-weak`), and
+deep `clone()` for reference graphs (`fase-4e-clone`) shipped; the
+transactional journal and native slices remain.**
 
 - [x] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
   public ownership syntax — **delivered** (`fase-4e-colector-mark-sweep`):
@@ -241,19 +242,41 @@ native slices, and reference/clone delivery remain.**
   argument — closed by spilling every such value to a synthetic root slot
   the instant it is produced.
 - [x] Implement safe/weak/dependent references, deep clone graph semantics and
-  automatic bounded native pinning — **partial** (`fase-4e-weak`): `Weak<T>`
-  delivered, restricted to reference-typed referents, with `Weak.from`,
-  `.upgrade(): T?`, and `.is_alive: Boolean`. Represented as a small
-  collector-tracked indirection cell (a "WeakCell") whose own target field
-  is never traced as a strong edge during mark, and gets cleared — before
-  the collector frees the referent, never after — by a dedicated pass
-  between mark and sweep, skipped entirely in any program that never
-  allocates a `Weak<T>`. Corrected the pre-existing "Weak references"
-  requirement's own wording along the way: it named `Option<T>`/`None`,
-  neither of which exists in Zirk — the delivered (and now normative)
-  signature is `upgrade(): T?`, `null`, matching the language's real
-  nullable idiom. **Not** covered: dependent references, deep `clone()`,
-  and automatic bounded native pinning remain their own, separate work.
+  automatic bounded native pinning — **partial** (`fase-4e-weak`,
+  `fase-4e-clone`): `Weak<T>` delivered, restricted to reference-typed
+  referents, with `Weak.from`, `.upgrade(): T?`, and `.is_alive: Boolean`.
+  Represented as a small collector-tracked indirection cell (a "WeakCell")
+  whose own target field is never traced as a strong edge during mark, and
+  gets cleared — before the collector frees the referent, never after — by
+  a dedicated pass between mark and sweep, skipped entirely in any program
+  that never allocates a `Weak<T>`. Corrected the pre-existing "Weak
+  references" requirement's own wording along the way: it named
+  `Option<T>`/`None`, neither of which exists in Zirk — the delivered (and
+  now normative) signature is `upgrade(): T?`, `null`, matching the
+  language's real nullable idiom. Deep `clone()` also delivered
+  (`fase-4e-clone`): compiler-derived for a `class` whose every field is
+  itself `Clone`, preserving internal sharing and cycles within the new
+  graph via a runtime memoization map keyed by source address, driven by
+  the object's own runtime descriptor (so it walks a polymorphic
+  subclass's real fields, not just its declared static type — the same
+  descriptor-embedded field table `mark_object` already reads), and
+  rejected at compile time — naming the offending field or transitive path
+  — when the field graph reaches a `Pointer<T>`, a `Resource`, or another
+  non-`Clone` member. Also corrected a wording inconsistency found while
+  scoping this: `Cloneable` appeared in two isolated spec scenarios against
+  `Clone` everywhere else (including the primary deep-clone-contract text
+  itself); both corrected to `Clone`. A genuine collector bug surfaced by
+  `Clone`'s own end-to-end soundness test was fixed along the way: an
+  absent nullable's payload was left as LLVM `undef` rather than zeroed,
+  which the collector's own `mark_object` (and now `Clone`'s traversal)
+  reads unconditionally regardless of the nullable's flag — `undef` could
+  lower to any bit pattern and crash a pointer dereference; now zeroed.
+  **Not** covered: dependent references and automatic bounded native
+  pinning remain their own, separate work. `record`/`value class` and
+  enum-typed fields are excluded from `Clone` derivation for now (records
+  have no identity; a latent, pre-existing codegen gap leaves an enum's
+  inactive-variant fields `undef`, which the shared field-offset walk would
+  read unconditionally — too broad a fix for this change's own scope).
 - [x] Implement `inmut::strict` with reachable-alias analysis — **partial**:
   direct rebinding (Phase 3) and writing through a field projection off a
   strict binding (`fase-4e-inmut-strict-proyeccion`) are both rejected.

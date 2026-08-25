@@ -1074,3 +1074,235 @@ fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
          referent must be collected anyway once nothing strong reaches it"
     );
 }
+
+// --- Clone soundness (`fase-4e-clone`, section 6) ---------------------------
+//
+// Same standard as the collector/Weak<T> soundness tests above: real `.zrk`
+// programs, compiled and run as actual processes, so `zirk_rt_clone`'s
+// sharing/cycle/collector-safety guarantees (design D2/D3) are proven end to
+// end through real codegen, not just `crates/zirk-runtime/src/clone.rs`'s
+// own synthetic-object unit tests.
+
+/// A class with a couple of scalar fields: the clone has independent
+/// identity (`is` false against the source) and equal field values.
+#[test]
+fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
+    let source = "class Point {
+        mut x: Int32;
+        mut y: Int32;
+        construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
+    }
+
+    fn main(): Void {
+        mut a: Point = Point(1, 2);
+        mut b: Point = a.clone();
+        stdout.println(a is b);
+        stdout.println(b.x);
+        stdout.println(b.y);
+    }";
+
+    let output = zirk_with_env(source, "clone_simple_object", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "false\n1\n2\n");
+}
+
+/// The spec's own named invariant (`zirk-memory-safety`'s "Deep clone
+/// contract", scenario "Graph contains shared child"): `a.left is a.right`
+/// before cloning (both fields alias the same child); after `mut b =
+/// a.clone()`, `b.left is b.right` must be `true` (the shared child clones
+/// to *one* new shared clone, not two independent copies) and `b.left is
+/// a.left` must be `false` (the clone never retains an alias to the source).
+/// The single most important test in this change.
+#[test]
+fn clone_preserves_internal_sharing_of_a_shared_child() {
+    let source = "class Child {
+        mut value: Int32;
+        construct(value: Int32) { this.value = value; }
+    }
+
+    class Parent {
+        mut left: Child;
+        mut right: Child;
+        construct(left: Child, right: Child) { this.left = left; this.right = right; }
+    }
+
+    fn main(): Void {
+        mut c: Child = Child(1);
+        mut a: Parent = Parent(c, c);
+        stdout.println(a.left is a.right);
+
+        mut b: Parent = a.clone();
+        stdout.println(b.left is b.right);
+        stdout.println(b.left is a.left);
+    }";
+
+    let output = zirk_with_env(source, "clone_shared_child", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "true\ntrue\nfalse\n",
+        "b.left is b.right must be true (one shared clone) and b.left is \
+         a.left must be false (never an alias back into the source)"
+    );
+}
+
+/// A cyclic graph (a node whose field points back to itself) clones without
+/// stack overflow or an infinite loop, and the cloned cycle points within
+/// the new graph, never back into the source graph (spec scenario "Graph
+/// contains a cycle").
+#[test]
+fn clone_of_a_self_referential_cycle_terminates_within_the_new_graph() {
+    let source = "class Node {
+        mut next: Node?;
+        construct() { }
+    }
+
+    fn main(): Void {
+        mut a: Node = Node();
+        a.next = a;
+        stdout.println(a.next is a);
+
+        mut b: Node = a.clone();
+        match b.next {
+            null => stdout.println(\"null\");
+            n => {
+                stdout.println(n is b);
+                stdout.println(n is a);
+            }
+        }
+    }";
+
+    let output = zirk_with_env(source, "clone_cycle", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "true\ntrue\nfalse\n",
+        "the cloned cycle must point within the new graph (n is b) and \
+         never back into the source (n is a must be false)"
+    );
+}
+
+/// Mutating the clone does not affect the source, and vice versa (the
+/// "never retains an alias to a cloned mutable source node" guarantee,
+/// observed concretely rather than only through identity comparisons).
+#[test]
+fn mutating_a_clone_does_not_affect_the_source_or_vice_versa() {
+    let source = "class Counter {
+        mut value: Int32;
+        construct(value: Int32) { this.value = value; }
+    }
+
+    fn main(): Void {
+        mut a: Counter = Counter(1);
+        mut b: Counter = a.clone();
+
+        b.value = 99;
+        stdout.println(a.value);
+        stdout.println(b.value);
+
+        a.value = -1;
+        stdout.println(a.value);
+        stdout.println(b.value);
+    }";
+
+    let output = zirk_with_env(source, "clone_mutation_independence", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "1\n99\n-1\n99\n");
+}
+
+/// Forces a collection mid-clone (`ZIRK_GC_THRESHOLD=1`, the same mechanism
+/// the collector/`Weak<T>` e2e tests above use) on a chain long enough that
+/// cloning it crosses the threshold partway through — confirms the finished
+/// clone is fully correct (nothing partially built gets collected), the
+/// concrete end-to-end test for `zirk-object-memory`'s own "Deep-clone
+/// traversal state is collector-safe for its whole duration" requirement.
+#[test]
+fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
+    let source = "class Node {
+        mut value: Int32;
+        mut next: Node?;
+        construct(value: Int32) { this.value = value; this.next = null; }
+    }
+
+    fn build(n: Int32): Node {
+        mut head: Node = Node(0);
+        mut i: Int32 = 1;
+        while i < n {
+            mut fresh: Node = Node(i);
+            fresh.next = head;
+            head = fresh;
+            i = i + 1;
+        }
+        return head;
+    }
+
+    fn sum(start: Node): Int32 {
+        mut total: Int32 = 0;
+        mut current: Node? = start;
+        while true {
+            match current {
+                null => { return total; }
+                n => {
+                    total = total + n.value;
+                    current = n.next;
+                }
+            }
+        }
+        return total;
+    }
+
+    fn main(): Void {
+        mut a: Node = build(200);
+        mut b: Node = a.clone();
+        stdout.println(sum(a));
+        stdout.println(sum(b));
+        stdout.println(a is b);
+    }";
+
+    let output = zirk_with_env(
+        source,
+        "clone_gc_mid_clone",
+        &[("ZIRK_GC_THRESHOLD", "256")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "19900\n19900\nfalse\n",
+        "the clone must be complete and correct even though a collection \
+         was forced partway through building it"
+    );
+}
+
+/// A class with a `Pointer<T>` field fails to compile `.clone()` with a
+/// diagnostic naming that field (spec scenario "Graph reaches a non-Clone
+/// member").
+#[test]
+fn clone_of_a_class_reaching_a_pointer_field_is_rejected_at_compile_time() {
+    let source = "class Holder {
+        mut p: Pointer<Int32>;
+        construct(p: Pointer<Int32>) { this.p = p; }
+    }
+
+    fn main(): Void {
+        mut x: Int32 = 1;
+        unsafe {
+            mut h: Holder = Holder(Pointer.from(x));
+            mut clone: Holder = h.clone();
+        }
+    }";
+
+    let output = zirk_with_env(source, "clone_rejects_pointer_field", &[]);
+
+    assert_ne!(output.status, 0, "a Pointer<T> field must reject Clone");
+    assert!(
+        output.stderr.contains("E0450"),
+        "stderr:\n{}",
+        output.stderr
+    );
+    assert!(output.stderr.contains("p"), "stderr:\n{}", output.stderr);
+}

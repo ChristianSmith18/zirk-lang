@@ -25,8 +25,15 @@ Current high-impact delivery limits include:
   (`Weak.from`, `.upgrade(): T?`, `.is_alive`) — a small collector-tracked
   indirection cell whose target is cleared before the collector frees it,
   never after, so `.upgrade()`/`.is_alive` never observe reclaimed memory.
-  Dependent references, automatic pinning, and full deep-graph cloning
-  remain Phase 4e work. `inmut::strict` rejects a direct rebinding and a write through a field
+  Deep `clone()` is delivered for `class` receivers: compiler-derived when
+  every field is itself `Clone`, preserving internal sharing and cycles
+  through a runtime memoization map, and rejected at compile time when the
+  field graph reaches a `Pointer<T>`, `Resource`, or other non-`Clone`
+  member. `record`/`value class` and enum-typed fields do not yet derive
+  `Clone` (records have no identity of their own; a pre-existing codegen
+  gap leaves an enum's inactive-variant fields uninitialized in a way the
+  shared field-offset walk would read unconditionally). Dependent
+  references and automatic pinning remain Phase 4e work. `inmut::strict` rejects a direct rebinding and a write through a field
   projection off a strict binding; strictness declared on a field itself
   (independent of its container's own mutability) and a mutating method call
   reached through a strict reference remain open. `unsafe fn`/`unsafe {}`/

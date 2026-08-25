@@ -1032,6 +1032,17 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::Clone(value) => {
+            if let Some(ty) = type_of(value)
+                && inst.ty != ty
+            {
+                report(format!(
+                    "{position}: Clone declares {}, expected {} (the receiver's own type)",
+                    inst.ty.as_str(),
+                    ty.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -1208,6 +1219,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         }
         InstKind::WeakFrom(operand)
         | InstKind::WeakUpgrade(operand)
-        | InstKind::WeakIsAlive(operand) => vec![*operand],
+        | InstKind::WeakIsAlive(operand)
+        | InstKind::Clone(operand) => vec![*operand],
     }
 }

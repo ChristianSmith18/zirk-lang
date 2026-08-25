@@ -4221,3 +4221,159 @@ fn invalid_weak_from_of_a_scalar_value() {
         "{output}"
     );
 }
+
+// --- Phase 4e: Clone (`fase-4e-clone`) --------------------------------------
+
+#[test]
+fn valid_class_with_only_scalar_fields_derives_clone() {
+    accepted(
+        "class Point { mut x: Int32; mut y: Int32; construct(x: Int32, y: Int32) { this.x = x; this.y = y; } }
+         fn main(): Void {
+             mut p: Point = Point(1, 2);
+             mut q: Point = p.clone();
+         }",
+    );
+}
+
+#[test]
+fn valid_class_with_a_clone_class_typed_field_derives_clone() {
+    accepted(
+        "class Leaf { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         class Parent { mut leaf: Leaf; construct(leaf: Leaf) { this.leaf = leaf; } }
+         fn main(): Void {
+             mut leaf: Leaf = Leaf(1);
+             mut parent: Parent = Parent(leaf);
+             mut clone: Parent = parent.clone();
+         }",
+    );
+}
+
+#[test]
+fn invalid_class_with_a_pointer_field_is_not_clone() {
+    let output = rejected(
+        "class Holder { mut p: Pointer<Int32>; construct(p: Pointer<Int32>) { this.p = p; } }
+         fn main(): Void {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut h: Holder = Holder(Pointer.from(x));
+                 mut clone: Holder = h.clone();
+             }
+         }",
+    );
+    assert!(output.contains(codes::NOT_CLONE.as_str()), "{output}");
+    assert!(output.contains("p"), "{output}");
+}
+
+#[test]
+fn invalid_class_that_implements_resource_is_not_clone() {
+    let output = rejected(
+        "class OpenError implements Error {
+             inmut reason: String;
+             construct(reason: String) { this.reason = reason; }
+             override fn message(): String { return this.reason; }
+             override fn code(): String { return \"OPEN\"; }
+             override fn cause(): Error? { return null; }
+         }
+         class FakeFile implements Resource<OpenError> {
+             inmut name: String;
+             mut closed: Boolean;
+             construct(name: String) { this.name = name; this.closed = false; }
+             override fn close(): Result<Void, OpenError> { this.closed = true; return Result.Ok(_void()); }
+             override fn is_closed(): Boolean { return this.closed; }
+             fn _void(): Void { return; }
+         }
+         fn main(): Void {
+             mut f: FakeFile = FakeFile(\"a.txt\");
+             mut clone: FakeFile = f.clone();
+         }",
+    );
+    assert!(output.contains(codes::NOT_CLONE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_class_with_a_non_clone_nested_field_names_the_transitive_path() {
+    let output = rejected(
+        "class Inner { mut p: Pointer<Int32>; construct(p: Pointer<Int32>) { this.p = p; } }
+         class Outer { mut inner: Inner; construct(inner: Inner) { this.inner = inner; } }
+         fn main(): Void {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut inner: Inner = Inner(Pointer.from(x));
+                 mut outer: Outer = Outer(inner);
+                 mut clone: Outer = outer.clone();
+             }
+         }",
+    );
+    assert!(output.contains(codes::NOT_CLONE.as_str()), "{output}");
+    assert!(output.contains("inner"), "{output}");
+    assert!(output.contains("p"), "{output}");
+}
+
+// A generic function's own `<T from ...>` unconditionally reports
+// `NOT_LOWERED` today (`Checker::enter_type_params`'s own doc comment: "the
+// grammar and the type rules for a generic body exist... but lowering does
+// not yet"), independent of Clone — the same reason
+// `valid_call_infers_a_type_that_satisfies_the_constraint` above already
+// uses `rejected()` rather than `accepted()` for an ordinary `from`
+// constraint. These two mirror that exact precedent: constraint
+// satisfaction is checked by asserting `TYPE_MISMATCH`'s absence/presence,
+// not by asserting zero errors overall.
+
+#[test]
+fn valid_generic_bound_t_from_clone_is_accepted_for_a_clone_type() {
+    let output = rejected(
+        "class Marker { mut id: Int32; construct(id: Int32) { this.id = id; } }
+         fn dup<T from Clone>(value: T): Void { }
+         fn main(): Void {
+             mut m: Marker = Marker(1);
+             dup(m);
+         }",
+    );
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_bound_t_from_clone_is_rejected_for_a_non_clone_type() {
+    let output = rejected(
+        "class Holder { mut p: Pointer<Int32>; construct(p: Pointer<Int32>) { this.p = p; } }
+         fn dup<T from Clone>(value: T): Void { }
+         fn main(): Void {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut h: Holder = Holder(Pointer.from(x));
+                 dup(h);
+             }
+         }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("Clone"), "{output}");
+}
+
+#[test]
+fn valid_class_may_write_implements_clone_explicitly() {
+    accepted(
+        "class Point implements Clone { mut x: Int32; construct(x: Int32) { this.x = x; } }
+         fn main(): Void {
+             mut p: Point = Point(1);
+             mut q: Point = p.clone();
+         }",
+    );
+}
+
+#[test]
+fn valid_manual_clone_implementation_is_dispatched_as_an_ordinary_method() {
+    // `Greeter`-typed field: not `Clone`-derivable on its own (a
+    // contract-typed member's implementors are not all known to be
+    // `Clone`), but a manual `clone()` body bypasses derivation entirely —
+    // `Self::check_method_call_on`'s own gate never reaches
+    // `check_derived_clone_call` once the class declares the method itself.
+    accepted(
+        "interface Greeter { fn greet(): String; }
+         class Loud implements Greeter { construct() { } fn greet(): String { return \"hi\"; } }
+         class Holder { mut g: Greeter; construct(g: Greeter) { this.g = g; } fn clone(): Holder { return this; } }
+         fn main(): Void {
+             mut h: Holder = Holder(Loud());
+             mut clone: Holder = h.clone();
+         }",
+    );
+}

@@ -188,4 +188,11 @@ pub mod codes {
     /// `fase-4e-weak`): `T` has no identity for a weak reference to observe
     /// independently of its content.
     pub const WEAK_DISALLOWED_REFERENT: Code = Code::new("E0449");
+    /// `.clone()` called (or `T from Clone` required) on a type that is
+    /// neither `Clone`-derivable nor manually implements `clone()`: its
+    /// field graph reaches a `Resource`, `Pointer<T>`, a contract-typed
+    /// member, or another non-`Clone` member (roadmap Phase 4e,
+    /// `fase-4e-clone`, design D1/D4). Named after the specific offending
+    /// field/transitive path, not a generic "not Clone" message.
+    pub const NOT_CLONE: Code = Code::new("E0450");
 }

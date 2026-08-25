@@ -434,6 +434,22 @@ struct Checker<'a> {
     weak_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
+    /// Id of the language's own `Clone` contract, minted by
+    /// [`Self::register_native_clone_contract`] (roadmap Phase 4e,
+    /// `fase-4e-clone`, design D1) — unlike `Iterable`/`Resource`, it
+    /// carries no methods of its own: whether a type actually satisfies it
+    /// is decided structurally by [`Self::is_clone_type`], not by dispatch
+    /// through this contract's (empty) method table. Registered so
+    /// `implements Clone` and `T from Clone` both resolve to a real name
+    /// instead of `UNKNOWN_TYPE`.
+    native_clone: Option<u32>,
+    /// Per-class memoized answer to "is every field of this class's
+    /// declared shape `Clone`" (design D1) — populated by
+    /// [`Self::class_is_clone`], only once its own top-level call (not a
+    /// nested one reached through a cycle) has fully unwound, so a
+    /// provisional cycle-breaking `true` seen mid-computation is never
+    /// cached as final ahead of the fields that would actually disprove it.
+    clone_cache: HashMap<u32, bool>,
 }
 
 /// See [`Checker::native_resource`].
@@ -506,6 +522,8 @@ impl<'a> Checker<'a> {
             pointer_types: Vec::new(),
             weak_types: Vec::new(),
             externs: HashMap::new(),
+            native_clone: None,
+            clone_cache: HashMap::new(),
         }
     }
 
@@ -553,6 +571,7 @@ impl<'a> Checker<'a> {
 
     fn run(mut self, program: &Program) -> CheckedProgram {
         self.register_native_iteration_contracts();
+        self.register_native_clone_contract();
         self.register_native_functions();
         self.register_native_result_enum();
         self.register_native_exception_hierarchy();
@@ -993,6 +1012,38 @@ impl<'a> Checker<'a> {
             iterator,
             iteration,
         });
+    }
+
+    /// Registers `Clone` as if it were declared by the language itself
+    /// (roadmap Phase 4e, `fase-4e-clone`, design D1), the same
+    /// "inject the tables directly" mechanism
+    /// [`Self::register_native_iteration_contracts`] uses.
+    ///
+    /// Unlike `Iterable`/`Iterator`/`Resource`, `Clone` carries no methods
+    /// in its own table: whether a type satisfies it is never decided by
+    /// dispatching through a `Clone`-shaped vtable entry (there is no
+    /// vtable entry — `.clone()` is either an ordinary method a class wrote
+    /// itself, or the compiler's own derived operation, chosen by
+    /// [`Self::check_method_call_on`] before it ever reaches contract
+    /// dispatch). Registering it here exists only so `implements Clone`
+    /// (the grammar's own scenario) and `T from Clone` (the type-system's
+    /// "Generic projection needs Clone" scenario) both resolve to a real
+    /// name instead of `UNKNOWN_TYPE` — [`Self::satisfies_constraint`] and
+    /// [`Self::check_method_call_on`]'s own derivation check
+    /// (`Self::is_clone_type`) are what actually decide `Clone`-ness,
+    /// structurally, not this table entry.
+    fn register_native_clone_contract(&mut self) {
+        let at = Span::empty(0);
+        let clone = self.contracts.len() as u32;
+        self.contracts.push(ContractType {
+            name: "Clone".into(),
+            kind: ContractKind::Interface,
+            methods: Vec::new(),
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+        self.native_clone = Some(clone);
     }
 
     /// Registers `fatalError(message: String): Never` as if it were an
@@ -1507,7 +1558,7 @@ impl<'a> Checker<'a> {
     /// injected directly into the tables rather than parsed, so application
     /// code cannot reopen them.
     fn is_native_contract_name(name: &str) -> bool {
-        matches!(name, "Iterable" | "Iterator" | "Resource")
+        matches!(name, "Iterable" | "Iterator" | "Resource" | "Clone")
     }
 
     fn contract_id(&self, name: &str) -> Option<u32> {
@@ -3881,7 +3932,24 @@ impl<'a> Checker<'a> {
     /// Whether a type argument satisfies one of its parameter's `from`
     /// constraints: it either is the constraint, or (for a class) extends or
     /// implements it.
-    fn satisfies_constraint(&self, arg: Type, constraint: Type) -> bool {
+    ///
+    /// `Clone` (roadmap Phase 4e, `fase-4e-clone`, design D1/D4) is special:
+    /// unlike an ordinary contract, satisfying it is never decided by an
+    /// explicit `implements Clone` alone (`is_subclass_of`'s
+    /// `Base::Contract` arm, which only checks the class's own
+    /// `contracts` list) — it is decided structurally, by whether `arg`'s
+    /// whole field graph is itself `Clone` (`Self::is_clone_type`), the
+    /// same derivation `.clone()` itself requires. This is what makes
+    /// `T from Clone` (the "Generic projection needs Clone" scenario) work
+    /// without every `Clone`-eligible class needing to spell out
+    /// `implements Clone` by hand.
+    fn satisfies_constraint(&mut self, arg: Type, constraint: Type) -> bool {
+        if let Some(clone_id) = self.native_clone
+            && constraint == Type::of(Base::Contract(clone_id))
+        {
+            let mut in_progress = Vec::new();
+            return self.is_clone_type(arg, &mut in_progress);
+        }
         arg == constraint || self.is_subclass_of(arg, constraint)
     }
 
@@ -4724,6 +4792,182 @@ impl<'a> Checker<'a> {
             }
             Base::Contract(_) | Base::ContractInstance(_) => true,
             _ => false,
+        }
+    }
+
+    /// Whether `id` `implements Resource<E>` for some `E` — the same test
+    /// [`Self::check_resource_binding_type`] applies, factored out so
+    /// [`Self::class_is_clone`] can reuse it (design D1:
+    /// `zirk-resources`'s "`Resource` SHALL NOT imply `Clone`").
+    fn class_implements_resource(&self, id: u32) -> bool {
+        let Some(native_resource) = self.native_resource else {
+            return false;
+        };
+        self.classes[id as usize]
+            .contract_instances
+            .iter()
+            .any(|&inst| {
+                self.contract_instances[inst as usize].contract == native_resource.resource
+            })
+    }
+
+    /// Whether `ty` is `Clone` (roadmap Phase 4e, `fase-4e-clone`, design
+    /// D1): a scalar carries no identity, so it is trivially independent
+    /// already; a class is `Clone` iff every field of its declared shape is
+    /// (recursively, [`Self::class_is_clone`]); an enum (algebraic or not)
+    /// is `Clone` iff every variant's associated field types are, the same
+    /// shape one level over. `Pointer<T>`, `Weak<T>`, a contract-typed
+    /// member (its concrete implementor is not statically known, so it is
+    /// not safe to assume all of them are `Clone`), a generic class
+    /// instantiation, and a function/closure value are all conservatively
+    /// not `Clone` — matching the spec's explicit rejection list
+    /// (`Resource`/`Pointer<T>`/lock/`Task<T>`) plus this change's own
+    /// scope limits for the members the spec does not name at all
+    /// (`Weak<T>`'s clone semantics are genuinely undefined by the spec and
+    /// out of this change's stated scope; a contract-typed field the same
+    /// way `Instance`/`Function` already are for unrelated reasons
+    /// elsewhere in this checker).
+    ///
+    /// `in_progress` is [`Self::class_is_clone`]'s own cycle guard, threaded
+    /// through so a class reached again through one of its own fields (a
+    /// self-referential or mutually-recursive graph, `design` risk "Recursive
+    /// traversal") is treated as provisionally `Clone` rather than recursing
+    /// forever — see that function's own doc comment for why this is sound.
+    fn is_clone_type(&mut self, ty: Type, in_progress: &mut Vec<u32>) -> bool {
+        if ty.nullable {
+            return self.is_clone_type(ty.without_null(), in_progress);
+        }
+        match ty.base {
+            Base::Void
+            | Base::Int(_)
+            | Base::Float(_)
+            | Base::Char
+            | Base::Boolean
+            | Base::String
+            | Base::Null => true,
+            Base::Class(id) => self.class_is_clone(id, in_progress),
+            // `Pointer<T>`, `Weak<T>`, a contract/contract-instance-typed
+            // member, a generic class instantiation and a function/closure
+            // value: see this function's own doc comment.
+            //
+            // An enum (`Base::Enum`/`Base::EnumInstance`), algebraic or not,
+            // is conservatively excluded too — not for a structural reason
+            // (a genuinely scalar-only enum's own field graph is trivially
+            // `Clone`), but because of a runtime layout hazard this change's
+            // own end-to-end tests found while exercising `Node?` (found
+            // and fixed for `Nullable` specifically —
+            // `crates/zirk-codegen-llvm/src/emit.rs`'s `InstKind::NullValue`
+            // arm's own doc comment tells that story): `BuildEnum`'s own
+            // codegen (`emit.rs`) only inserts the *active* variant's own
+            // fields into the flattened enum struct, leaving every other
+            // variant's own field slots undefined — but
+            // `gc_field_offsets`/`gc_reference_paths` walks *every*
+            // variant's fields unconditionally, regardless of which one is
+            // active, the same class of hazard `NullValue`'s undef payload
+            // was. Unlike `Nullable` (one small, fully-audited fix), fixing
+            // this for every enum shape is a larger, separate surface this
+            // change's own scope and test coverage do not reach — excluding
+            // enum-typed fields from `Clone` derivation entirely is the
+            // correctness-first choice until that is addressed on its own.
+            _ => false,
+        }
+    }
+
+    /// Whether class `id` derives `Clone` (design D1): every field of its
+    /// declared shape (inherited fields included, since [`ClassType::fields`]
+    /// already flattens the hierarchy) is itself `Clone`, and it does not
+    /// `implement Resource<E>` (`zirk-resources`'s "`Resource` SHALL NOT
+    /// imply `Clone`", enforced here regardless of whether every field
+    /// would otherwise qualify).
+    ///
+    /// Memoized in [`Checker::clone_cache`], but **only once the call that
+    /// is genuinely outermost for `id` (not one reached through a cycle)
+    /// has fully unwound**: a class reached again through its own field
+    /// graph returns a provisional `true` (`in_progress.contains(&id)`)
+    /// without being cached, since that provisional answer is only correct
+    /// if the *rest* of the cycle turns out `Clone` too — something not yet
+    /// known partway through the recursion that produced it. Caching only
+    /// at the true top level means a provisional answer is never persisted
+    /// ahead of the fields that would actually disprove it; a nested call's
+    /// answer is simply recomputed next time, which costs nothing this
+    /// checker cannot afford (class graphs are small, and derivation runs
+    /// only at a `.clone()`/`T from Clone` use site, not per statement).
+    fn class_is_clone(&mut self, id: u32, in_progress: &mut Vec<u32>) -> bool {
+        if let Some(cached) = self.clone_cache.get(&id) {
+            return *cached;
+        }
+        // A `record`/`value class` has no identity of its own (task 11.5:
+        // inline, no allocation, no `is`), so it never needs the reference-
+        // graph traversal this change builds — its own field values are
+        // already independently copied wherever it is copied (assignment,
+        // pass, return), by ordinary value semantics. Deep-cloning the
+        // *reference*-typed fields it might itself carry (a record holding
+        // a class reference) would need the runtime's own generic clone
+        // traversal to have an `IrType::Value` entry point too, which this
+        // change's own IR/codegen (`InstKind::Clone`, `is_derived_clone_call`)
+        // does not build — scoped out deliberately (reference-graph `Clone`
+        // is this change's stated focus; a record wanting the same needs a
+        // manual `clone()` implementation, the general escape hatch, same
+        // as any other member this checker cannot derive automatically).
+        if self.classes[id as usize].kind != ClassKind::Class {
+            self.clone_cache.insert(id, false);
+            return false;
+        }
+        if in_progress.contains(&id) {
+            return true;
+        }
+        if self.class_implements_resource(id) {
+            self.clone_cache.insert(id, false);
+            return false;
+        }
+        let is_outermost = in_progress.is_empty();
+        in_progress.push(id);
+        let fields = self.classes[id as usize].fields.clone();
+        let eligible = fields.iter().all(|f| self.is_clone_type(f.ty, in_progress));
+        in_progress.pop();
+        if is_outermost {
+            self.clone_cache.insert(id, eligible);
+        }
+        eligible
+    }
+
+    /// For a diagnostic only (design D4): `ty` is assumed itself not
+    /// `Clone` (a prior [`Self::is_clone_type`] call said so) — this walks
+    /// the same shape again, this time collecting a human-readable path to
+    /// the first offending field, so the diagnostic names the concrete
+    /// member that broke the chain rather than a generic "is not `Clone`"
+    /// message (matching the `STRICT_ALIAS_VIOLATION`-style precedent of
+    /// naming the concrete offending member).
+    fn find_non_clone_path(&mut self, ty: Type) -> String {
+        if ty.nullable {
+            return self.find_non_clone_path(ty.without_null());
+        }
+        match ty.base {
+            Base::Class(id) => {
+                if self.class_implements_resource(id) {
+                    return format!("`{}` (it implements `Resource<E>`)", self.name(ty));
+                }
+                let fields = self.classes[id as usize].fields.clone();
+                for f in &fields {
+                    let mut probe = Vec::new();
+                    if !self.is_clone_type(f.ty, &mut probe) {
+                        let deeper = self.find_non_clone_path(f.ty);
+                        return format!("field `{}` of `{}`, {deeper}", f.name, self.name(ty));
+                    }
+                }
+                format!("`{}`", self.name(ty))
+            }
+            Base::Pointer(_) => format!("`{}`, an unsafe pointer", self.name(ty)),
+            Base::Weak(_) => format!("`{}`, a weak reference", self.name(ty)),
+            Base::Contract(_) | Base::ContractInstance(_) => format!(
+                "`{}` (a contract-typed member — not every implementor is known to be `Clone`)",
+                self.name(ty)
+            ),
+            Base::Instance(_) => {
+                format!("`{}` (a generic class instantiation)", self.name(ty))
+            }
+            Base::Function(_) => format!("`{}`, a function/closure value", self.name(ty)),
+            _ => format!("`{}`", self.name(ty)),
         }
     }
 
@@ -7143,6 +7387,21 @@ impl<'a> Checker<'a> {
     /// (task 7.4).
     fn check_param_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
         let constraints = self.type_params[id as usize].constraints.clone();
+
+        // `value.clone()` where `T from Clone` (roadmap Phase 4e,
+        // `fase-4e-clone`, the type-system spec's "Generic projection needs
+        // Clone" scenario): `Clone`'s own contract table carries no
+        // `clone` method (`Self::register_native_clone_contract`'s own doc
+        // comment), so the ordinary constraint-method loop below would
+        // never find it — typed directly to `T` itself here instead.
+        if field.name.name == "clone"
+            && expr.args.is_empty()
+            && let Some(clone_id) = self.native_clone
+            && constraints.contains(&Type::of(Base::Contract(clone_id)))
+        {
+            return Type::of(Base::Param(id));
+        }
+
         for constraint in &constraints {
             let found = match constraint.base {
                 Base::Contract(cid) => {
@@ -7964,6 +8223,22 @@ impl<'a> Checker<'a> {
     /// three-way dispatch for both the plain and the safe case.
     fn check_method_call_on(&mut self, object: Type, expr: &CallExpr, field: &FieldExpr) -> Type {
         if let Base::Class(id) = object.base {
+            // `.clone()` (roadmap Phase 4e, `fase-4e-clone`, design D1/D4):
+            // a class that declares its own `clone` method (the manual
+            // implementation escape hatch) is dispatched exactly like any
+            // other method call, below — this only intercepts the case
+            // nothing declares, which is the compiler-derived operation.
+            // Gated on a bare, no-argument `.clone()` so `.clone(x)` (a
+            // typo, or a real user method with that name and a different
+            // arity) still reaches the ordinary "unknown/wrong-arity"
+            // diagnostics via `Self::check_method_call` instead of being
+            // silently swallowed here.
+            if field.name.name == "clone"
+                && expr.args.is_empty()
+                && self.classes[id as usize].method("clone").is_none()
+            {
+                return self.check_derived_clone_call(object, id, field);
+            }
             return self.check_method_call(expr, field, id, &[]);
         }
         if let Base::Contract(id) = object.base {
@@ -7983,6 +8258,32 @@ impl<'a> Checker<'a> {
             return self.check_method_call(expr, field, instance.class, &subst);
         }
         unreachable!("caller already matched object.base against these three")
+    }
+
+    /// The compiler-derived `.clone(): T` (roadmap Phase 4e, `fase-4e-clone`,
+    /// design D1/D4) — reached only when `id` declares no `clone` method of
+    /// its own (`Self::check_method_call_on`'s own gate). Types to `T`
+    /// itself (`object`, unchanged) when `id`'s field graph is `Clone`;
+    /// otherwise rejects with `NOT_CLONE`, naming the specific field/path
+    /// that broke the chain (design D4).
+    fn check_derived_clone_call(&mut self, object: Type, id: u32, field: &FieldExpr) -> Type {
+        let mut in_progress = Vec::new();
+        if self.class_is_clone(id, &mut in_progress) {
+            return object;
+        }
+        let name = self.classes[id as usize].name.clone();
+        let path = self.find_non_clone_path(object);
+        self.error(
+            codes::NOT_CLONE,
+            field.name.span,
+            format!("`{name}` is not `Clone`"),
+            format!("its field graph reaches {path}, which is not `Clone`"),
+            Some(
+                "implement `Clone` manually (declare your own `clone(): T`), or remove/replace the offending member"
+                    .into(),
+            ),
+        );
+        Type::UNKNOWN
     }
 
     /// `object.method(...)`.

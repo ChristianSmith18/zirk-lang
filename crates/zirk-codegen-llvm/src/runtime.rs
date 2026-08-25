@@ -127,6 +127,12 @@ pub mod symbols {
     /// weak-clearing pass reads this before walking the allocation list, so
     /// a program that never uses `Weak<T>` pays only the one check.
     pub const WEAK_CELL_EVER_ALLOCATED: &str = "zirk_rt_weak_cell_ever_allocated";
+    /// The deep-clone-graph traversal (roadmap Phase 4e, `fase-4e-clone`,
+    /// design D2): one generic, descriptor-driven entry point for the whole
+    /// recursive clone — see `InstKind::Clone`'s own doc comment for why
+    /// the traversal lives here rather than being unrolled across several
+    /// IR instructions.
+    pub const CLONE: &str = "zirk_rt_clone";
 }
 
 /// The runtime functions available to generated code.
@@ -171,6 +177,9 @@ pub struct Runtime<'ctx> {
     /// The WeakCell "ever allocated" flag's own address (`fase-4e-weak`) —
     /// also a global: `WeakFrom` stores `1` into it directly, no call.
     pub weak_cell_ever_allocated: inkwell::values::PointerValue<'ctx>,
+    /// `zirk_rt_clone` (roadmap Phase 4e, `fase-4e-clone`, design D2) — the
+    /// whole deep-clone-graph traversal, one call per `.clone()` site.
+    pub clone: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -299,6 +308,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into()], false),
         external,
     );
+
+    let clone = module.add_function(symbols::CLONE, ptr.fn_type(&[ptr.into()], false), external);
     // Declared so the allocator can reach it, and marked `noreturn` with the
     // rest: generated code never calls it directly, the runtime does.
     let allocation_failed = module.add_function(
@@ -449,5 +460,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         pop_frame,
         weak_cell_descriptor: weak_cell_descriptor.as_pointer_value(),
         weak_cell_ever_allocated: weak_cell_ever_allocated.as_pointer_value(),
+        clone,
     }
 }
