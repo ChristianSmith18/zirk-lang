@@ -6,25 +6,28 @@
 //! Neither the IR nor codegen knows what happens on the other side of this
 //! boundary.
 //!
-//! # It does not free
+//! # It frees, now
 //!
-//! That is not an oversight. Freeing requires having decided **when**, and that
-//! is precisely the question ADR-003 leaves open until the memory phase:
-//! generational GC, reference counting with cycle detection, regions, or a
-//! hybrid. Each answers "when" differently.
+//! Until Phase 4e's memory ADR closed ("Cierre de la decisión",
+//! `docs/decisions/ADR-003-memoria.md`), this deliberately never freed
+//! anything — cycles need trace-based collection, not counting, and getting
+//! that wrong quietly is worse than not trying, so the bound was written down
+//! ("a program of this phase terminates and the operating system reclaims
+//! everything") rather than papered over with a reference count that could
+//! not honor it.
 //!
-//! Writing a reference count here because it is the easiest thing to reach for
-//! would be work to undo — `ZIRK_RUNTIME_SPEC.md` section 9 requires collecting
-//! cycles, and plain counting cannot — with the added trap that a half-built
-//! count appears to work until the first cycle.
-//!
-//! A program of this phase terminates and the operating system reclaims
-//! everything. That is the bound, and it is written down rather than assumed.
+//! `fase-4e-colector-mark-sweep` is that trace-based collector, real: this
+//! function now links every allocation onto [`crate::collector`]'s own
+//! intrusive all-allocations list and triggers a mark-sweep collection
+//! cooperatively (design D3) when the configured live-byte threshold is
+//! crossed, before serving a new allocation. `crate::collector` owns mark and
+//! sweep; this module stays the single entry point that decides an
+//! allocation happens at all and hands back zeroed memory, exactly as before.
 
 use std::alloc::{Layout, alloc_zeroed};
 use std::ffi::c_void;
 
-/// Allocates an object of `size` bytes aligned to `align`.
+/// Allocates an object of `size` bytes aligned to at least `align`.
 ///
 /// The memory is **zeroed**, which is what makes a partially built object
 /// readable rather than a window onto whatever the allocator last held there.
@@ -32,19 +35,36 @@ use std::ffi::c_void;
 /// so nothing observable depends on this — it is the second lock on the same
 /// door, and the one that still holds if the first one is ever wrong.
 ///
+/// Before allocating, this may run a full garbage collection (design D3,
+/// `fase-4e-colector-mark-sweep`) if doing so is needed to stay under the
+/// configured live-byte threshold — transparent to the caller either way:
+/// the returned pointer is always zeroed, fresh, and not equal to any other
+/// live object's address.
+///
 /// # Safety
 ///
-/// `size` and `align` must form a valid layout: `align` a power of two, and
-/// `size` rounded up to it not overflowing `isize`. Codegen computes both from
-/// the type it is building.
+/// `size` and `align` must form a valid layout up to alignment: `align` a
+/// power of two, and `size` rounded up to it not overflowing `isize`.
+/// Codegen computes both from the type it is building. The actual alignment
+/// used may be wider than requested
+/// ([`crate::collector::allocation_align`]) — always safe, since
+/// over-aligning a base allocation never invalidates a narrower alignment
+/// requirement.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_alloc(size: usize, align: usize) -> *mut c_void {
     // A zero-sized object still has identity, so it still needs an address of
     // its own: `is` compares references, and two zero-sized objects that
-    // shared an address would be indistinguishable.
-    let size = size.max(1);
+    // shared an address would be indistinguishable. Every real allocation is
+    // already at least header-sized (`object_struct` emits the header as its
+    // first three fields), but this floor is enforced regardless: `register`
+    // unconditionally writes into the header's `next`/`size` words, so
+    // serving anything smaller would write past the allocation.
+    let size = size.max(1).max(crate::collector::HEADER_BYTES);
+    let align = crate::collector::allocation_align(align);
 
-    let Ok(layout) = Layout::from_size_align(size, align.max(1)) else {
+    crate::collector::maybe_collect(size);
+
+    let Ok(layout) = Layout::from_size_align(size, align) else {
         crate::failure::zirk_rt_allocation_failed()
     };
 
@@ -52,8 +72,19 @@ pub unsafe extern "C" fn zirk_rt_alloc(size: usize, align: usize) -> *mut c_void
     if pointer.is_null() {
         crate::failure::zirk_rt_allocation_failed()
     }
+    let pointer = pointer as *mut c_void;
 
-    pointer as *mut c_void
+    // Links this allocation onto the collector's own intrusive list and
+    // initializes its `next`/`size` header words (design D1) — the
+    // descriptor word (word 0) is left exactly as `alloc_zeroed` left it
+    // (null) until the caller's own codegen stores it right after this call
+    // returns; nothing can trigger a collection in that window (single-
+    // threaded, and a collection only ever runs at the top of this
+    // function), so a momentarily null descriptor is never observed by the
+    // collector.
+    unsafe { crate::collector::register(pointer, size) };
+
+    pointer
 }
 
 /// Finds the dispatch table a descriptor holds for a contract.
@@ -165,13 +196,20 @@ mod tests {
 
     #[test]
     fn an_allocation_is_zeroed() {
-        let size = 32;
+        // Bytes past the collector's own 3-word header (`next`/`size`,
+        // `fase-4e-colector-mark-sweep` design D1) are the part a
+        // constructor actually writes into — those are what must read as
+        // freshly zeroed, not the header words the collector itself just
+        // wrote non-zero bookkeeping (a real `size`, and possibly a `next`
+        // link) into.
+        let size = crate::collector::HEADER_BYTES + 16;
         let pointer = unsafe { zirk_rt_alloc(size, 8) } as *const u8;
-        let bytes = unsafe { std::slice::from_raw_parts(pointer, size) };
+        let fields =
+            unsafe { std::slice::from_raw_parts(pointer.add(crate::collector::HEADER_BYTES), 16) };
 
         assert!(
-            bytes.iter().all(|b| *b == 0),
-            "a fresh object must not show whatever was there before"
+            fields.iter().all(|b| *b == 0),
+            "a fresh object's own fields must not show whatever was there before"
         );
     }
 

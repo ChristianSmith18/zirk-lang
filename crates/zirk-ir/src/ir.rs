@@ -301,6 +301,41 @@ impl IrType {
         // `Char` shares `String`'s opaque runtime representation (ADR-014).
         matches!(self, IrType::String | IrType::Char)
     }
+
+    /// Whether a value of this type carries (directly, or nested inside a
+    /// `Value`/`Enum`/`Closure`) at least one collector-managed heap
+    /// reference (`fase-4e-colector-mark-sweep`, design D2/D4).
+    ///
+    /// `String`/`Char` are deliberately excluded: they are heap-allocated too,
+    /// but through `zirk-runtime`'s own string module, not `zirk_rt_alloc` —
+    /// out of this collector's reach, unchanged from today's "never frees"
+    /// behavior (design D4 names exactly `Object`, `Contract`, and any
+    /// `Value`/`Enum`/`Closure` that contains one — nothing else).
+    ///
+    /// A slot/instruction result of this kind is what both the shadow-stack
+    /// root descriptor (D2) and the D4 synthetic-slot spill key off of. A
+    /// `Value`/`Enum`/`Closure` layout can never nest itself (that would be an
+    /// infinitely sized type, already rejected upstream), so this recursion
+    /// always terminates.
+    pub fn is_managed_reference(self, module: &Module) -> bool {
+        match self {
+            IrType::Object(_) | IrType::Contract(_) => true,
+            IrType::Nullable(n) => n.inner().is_managed_reference(module),
+            IrType::Value(id) => module.values[id as usize]
+                .fields
+                .iter()
+                .any(|f| f.ty.is_managed_reference(module)),
+            IrType::Enum(id) => module.enums[id as usize]
+                .fields
+                .iter()
+                .any(|f| f.ty.is_managed_reference(module)),
+            IrType::Closure(id) => module.closures[id as usize]
+                .captures
+                .iter()
+                .any(|c| c.is_managed_reference(module)),
+            _ => false,
+        }
+    }
 }
 
 /// Identifier of a basic block within a function.
@@ -361,13 +396,18 @@ pub struct ExternFn {
 /// What one object holds in memory.
 ///
 /// ```text
-///    object  =  [ type descriptor | field₁ | field₂ | … ]
+///    object  =  [ type descriptor | next (mark bit) | size | field₁ | field₂ | … ]
 /// ```
 ///
-/// The header carries **only** the descriptor for now. What the memory phase
-/// needs — marks, counts, whatever the strategy asks for — is added there, and
-/// that is why the header exists as a separate concept from the start instead
-/// of appearing when it is needed. Decision D2.
+/// The header grew from one word to three in `fase-4e-colector-mark-sweep`
+/// (ADR-003's "Cierre de la decisión", design D1): the dispatch descriptor
+/// (unchanged — every existing reader keeps reading it unmasked), an
+/// intrusive `next`-allocation pointer the collector's sweep walks (mark bit
+/// hidden in its low bit), and the allocation's own byte size (so sweep can
+/// `dealloc` correctly). Nothing here fixes the header's word count as a
+/// literal — codegen (`OBJECT_HEADER_FIELDS`, `crates/zirk-codegen-llvm`) is
+/// the single place that does, so growing it is a codegen-only change; this
+/// layout only ever describes fields *after* the header, whatever it is.
 ///
 /// Inherited fields come before a class's own, in the order the hierarchy
 /// declares them, so a subclass's prefix matches its superclass's and reaching
@@ -527,6 +567,12 @@ pub struct Function {
     /// The block execution starts at.
     pub entry: BlockId,
     pub span: Span,
+    /// The static shadow-stack root descriptor (`fase-4e-colector-mark-sweep`,
+    /// design D2): every slot — named or D4's synthetic ones — whose type is
+    /// [`IrType::is_managed_reference`]. Codegen turns this into the actual
+    /// root addresses pushed at function entry and popped before every
+    /// `Terminator::Return`.
+    pub gc_roots: Vec<SlotId>,
 }
 
 impl Function {

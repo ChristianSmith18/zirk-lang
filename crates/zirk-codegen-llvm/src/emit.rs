@@ -168,6 +168,32 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
                 fields.push(table_of(&table.methods, &symbol).into());
             }
 
+            // Appended after the contract tables (`fase-4e-colector-mark-sweep`,
+            // design D6): how many collector-managed reference fields this
+            // class's objects carry, and each one's byte offset. Nothing but
+            // the collector's own mark phase reads past the contract
+            // section, so this is purely additive — every existing reader
+            // above (`zirk_rt_contract_table`, `zirk_rt_check_cast`,
+            // `zirk_rt_is_instance`) still stops exactly where it always did.
+            let struct_type = object_struct(
+                context,
+                layout,
+                &module.closures,
+                &module.values,
+                &module.enums,
+            );
+            let mut gc_paths: Vec<Vec<u32>> = Vec::new();
+            for (index, field) in layout.fields.iter().enumerate() {
+                if field.ty.is_managed_reference(module) {
+                    let mut prefix = vec![index as u32 + OBJECT_HEADER_FIELDS];
+                    gc_reference_paths(module, field.ty, &mut prefix, &mut gc_paths);
+                }
+            }
+            fields.push(word.const_int(gc_paths.len() as u64, false).into());
+            for path in &gc_paths {
+                fields.push(const_field_offset(context, struct_type, path).into());
+            }
+
             let descriptor = context.const_struct(&fields, false);
             let global = llvm.add_global(
                 descriptor.get_type(),
@@ -272,27 +298,16 @@ fn llvm_type_in<'ctx>(
         // A present flag next to the value. The flag comes first so the struct
         // has the same shape whatever the payload is.
         ir::IrType::Nullable(base) => {
-            let inner = llvm_type_in(context, base.inner(), closures, values, enums)
-                .expect("a nullable payload is not Void");
-            context
-                .struct_type(&[context.bool_type().into(), inner], false)
-                .into()
+            nullable_struct(context, base.inner(), closures, values, enums).into()
         }
         // A closure is its function pointer followed by its captures, inline.
-        // Nothing is allocated: it cannot escape in this phase (D10).
+        // Nothing is allocated: it escapes as a value, never through a
+        // heap indirection of its own (design D10 of `fase-4d-callables`).
         ir::IrType::Closure(id) => {
             let layout = closures
                 .get(id as usize)
                 .expect("a verified module declares every closure layout");
-            let mut fields: Vec<BasicTypeEnum> =
-                vec![context.ptr_type(AddressSpace::default()).into()];
-            for capture in &layout.captures {
-                fields.push(
-                    llvm_type_in(context, *capture, closures, values, enums)
-                        .expect("a capture is not Void"),
-                );
-            }
-            context.struct_type(&fields, false).into()
+            closure_struct(context, layout, closures, values, enums).into()
         }
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
@@ -352,14 +367,164 @@ fn enum_struct<'ctx>(
 /// Where a field sits inside an enum's struct, discriminant included.
 const ENUM_HEADER_FIELDS: u32 = 1;
 
+/// The struct a nullable value occupies: a present flag, then the payload —
+/// the flag comes first so the struct has the same shape whatever the
+/// payload is. Field 1 is always the payload, whatever `inner` is (used by
+/// the GC root/field walk, `gc_reference_paths`, to step through a
+/// `Nullable(Object|Value|Enum)` uniformly).
+fn nullable_struct<'ctx>(
+    context: &'ctx Context,
+    inner: ir::IrType,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> inkwell::types::StructType<'ctx> {
+    let inner_ty = llvm_type_in(context, inner, closures, values, enums)
+        .expect("a nullable payload is not Void");
+    context.struct_type(&[context.bool_type().into(), inner_ty], false)
+}
+
+/// Where a nullable's payload sits, its present flag included.
+const NULLABLE_HEADER_FIELDS: u32 = 1;
+
+/// The struct a closure value occupies: its function pointer, then its
+/// captures inline, in declaration order. Capture `i` sits at field
+/// `i + CLOSURE_HEADER_FIELDS`.
+fn closure_struct<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::ClosureLayout,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> inkwell::types::StructType<'ctx> {
+    let mut fields: Vec<BasicTypeEnum> = vec![context.ptr_type(AddressSpace::default()).into()];
+    for capture in &layout.captures {
+        fields.push(
+            llvm_type_in(context, *capture, closures, values, enums)
+                .expect("a capture is not Void"),
+        );
+    }
+    context.struct_type(&fields, false)
+}
+
+/// Where a capture sits inside a closure's struct, the function pointer
+/// included.
+const CLOSURE_HEADER_FIELDS: u32 = 1;
+
+/// The leaf field-index path (design D2/D6 of `fase-4e-colector-mark-sweep`)
+/// to every collector-managed reference `ty` carries, directly or nested
+/// inside a `Value`/`Enum`/`Closure`/`Nullable`.
+///
+/// `prefix` is the path already walked to reach `ty` itself (empty for a
+/// bare slot's own type); each element of `out` is a *complete* path from
+/// whatever the caller's own base struct/slot is. The same path shape
+/// serves two different appliers: [`FunctionEmitter::apply_gc_path`] walks
+/// it with live `build_struct_gep` instructions against a real address (the
+/// function-frame shadow-stack roots, design D2); [`const_field_offset`]
+/// walks the identical path as an LLVM constant expression to bake a byte
+/// offset into a class's static descriptor (the heap-object field walk,
+/// design D6) — one path-collector, two appliers, so they cannot drift
+/// apart.
+///
+/// A `Value`/`Enum`/`Closure` layout can never nest itself (infinite size,
+/// already rejected upstream), so this recursion always terminates.
+fn gc_reference_paths(
+    module: &ir::Module,
+    ty: ir::IrType,
+    prefix: &mut Vec<u32>,
+    out: &mut Vec<Vec<u32>>,
+) {
+    match ty {
+        ir::IrType::Object(_) | ir::IrType::Contract(_) => out.push(prefix.clone()),
+        ir::IrType::Nullable(n) => {
+            let inner = n.inner();
+            if inner.is_managed_reference(module) {
+                prefix.push(NULLABLE_HEADER_FIELDS);
+                gc_reference_paths(module, inner, prefix, out);
+                prefix.pop();
+            }
+        }
+        ir::IrType::Value(id) => {
+            for (index, field) in module.values[id as usize].fields.iter().enumerate() {
+                if field.ty.is_managed_reference(module) {
+                    prefix.push(index as u32);
+                    gc_reference_paths(module, field.ty, prefix, out);
+                    prefix.pop();
+                }
+            }
+        }
+        ir::IrType::Enum(id) => {
+            for (index, field) in module.enums[id as usize].fields.iter().enumerate() {
+                if field.ty.is_managed_reference(module) {
+                    prefix.push(index as u32 + ENUM_HEADER_FIELDS);
+                    gc_reference_paths(module, field.ty, prefix, out);
+                    prefix.pop();
+                }
+            }
+        }
+        ir::IrType::Closure(id) => {
+            for (index, capture) in module.closures[id as usize].captures.iter().enumerate() {
+                if capture.is_managed_reference(module) {
+                    prefix.push(index as u32 + CLOSURE_HEADER_FIELDS);
+                    gc_reference_paths(module, *capture, prefix, out);
+                    prefix.pop();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`gc_reference_paths`] with a fresh, empty prefix — the shape a bare
+/// slot's own type needs (there is no enclosing field index to seed it
+/// with).
+fn gc_reference_paths_of(module: &ir::Module, ty: ir::IrType) -> Vec<Vec<u32>> {
+    let mut out = Vec::new();
+    gc_reference_paths(module, ty, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The byte offset `path` (design D6, [`gc_reference_paths`]) reaches inside
+/// a value of `struct_type`, as an LLVM constant expression — the classic
+/// null-pointer-GEP-then-`ptrtoint` idiom, which folds to the real,
+/// target-specific offset when LLVM lowers it, the same way
+/// `StructType::size_of` (used for `Alloc`'s own size argument) already
+/// resolves a target-specific size without this crate ever consulting
+/// `TargetData` itself.
+fn const_field_offset<'ctx>(
+    context: &'ctx Context,
+    struct_type: inkwell::types::StructType<'ctx>,
+    path: &[u32],
+) -> inkwell::values::IntValue<'ctx> {
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let null = ptr_type.const_null();
+    let i32_type = context.i32_type();
+    let mut indices: Vec<inkwell::values::IntValue> = vec![i32_type.const_int(0, false)];
+    indices.extend(
+        path.iter()
+            .map(|&index| i32_type.const_int(u64::from(index), false)),
+    );
+    let field_ptr = unsafe { null.const_gep(struct_type, &indices) };
+    field_ptr.const_to_int(context.i64_type())
+}
+
 /// The struct an object of this layout occupies.
 ///
 /// ```text
-///    [ type descriptor | field₁ | field₂ | … ]
+///    [ type descriptor | next (mark bit) | size | field₁ | field₂ | … ]
 /// ```
 ///
 /// The descriptor comes first so every object starts the same way, whatever
-/// its fields — which is what will let a subclass share its base's prefix.
+/// its fields — which is what lets a subclass share its base's prefix. The
+/// two collector-bookkeeping words after it (`fase-4e-colector-mark-sweep`,
+/// design D1) are new: `next` threads every allocation onto the sweep's
+/// intrusive list (its low bit doubles as the mark bit — nobody but the
+/// collector itself reads this field), and `size` is the allocation's own
+/// byte size, so sweep can `dealloc` correctly. Both are initialized by
+/// `zirk_rt_alloc` itself, not here (task 2.1's own resolution — see its
+/// note in `tasks.md`): the allocator already receives `size` as a
+/// parameter, so it is the single source of truth for it, the same way the
+/// descriptor word is this function's own.
 fn object_struct<'ctx>(
     context: &'ctx Context,
     layout: &ir::ObjectLayout,
@@ -367,7 +532,8 @@ fn object_struct<'ctx>(
     values: &[ir::ValueLayout],
     enums: &[ir::EnumLayout],
 ) -> inkwell::types::StructType<'ctx> {
-    let mut fields: Vec<BasicTypeEnum> = vec![context.ptr_type(AddressSpace::default()).into()];
+    let ptr = context.ptr_type(AddressSpace::default());
+    let mut fields: Vec<BasicTypeEnum> = vec![ptr.into(), ptr.into(), context.i64_type().into()];
     for field in &layout.fields {
         fields.push(
             llvm_type_in(context, field.ty, closures, values, enums)
@@ -377,8 +543,9 @@ fn object_struct<'ctx>(
     context.struct_type(&fields, false)
 }
 
-/// Where a field sits inside the struct, header included.
-const OBJECT_HEADER_FIELDS: u32 = 1;
+/// Where a field sits inside the struct, header included (design D1: three
+/// words now — descriptor, `next`, `size` — not one).
+const OBJECT_HEADER_FIELDS: u32 = 3;
 
 fn declare_function<'ctx>(
     context: &'ctx Context,
@@ -564,6 +731,86 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             self.slots.insert(ir::SlotId(index as u32), pointer);
         }
 
+        // Design D5 (`fase-4e-colector-mark-sweep`): every reference-typed
+        // slot is zero-initialized immediately after its own `alloca`,
+        // before any other codegen for this function runs — so a
+        // collection that happens before the slot's first real write never
+        // reads whatever garbage the stack held as a candidate pointer.
+        for &slot_id in &function.gc_roots {
+            let slot = &function.slots[slot_id.0 as usize];
+            let ty = self
+                .llvm_type(slot.ty)
+                .expect("a gc-root slot cannot be Void");
+            let pointer = self.slots[&slot_id];
+            self.builder
+                .build_store(pointer, ty.const_zero())
+                .expect("zero-initialize a reference slot");
+        }
+
+        // Design D2: this activation's shadow-stack frame is pushed once,
+        // right here — after every reference slot above is zeroed, before
+        // anything else in the function body runs. Each root is the
+        // *address* of a reference-typed slot (or, for a `Value`/`Enum`/
+        // `Closure` slot, one of its own reference-typed fields, found via
+        // `gc_reference_paths`) — not the reference's value itself, which
+        // is why the collector's own mark phase dereferences each entry
+        // once more to reach the candidate object.
+        let mut root_addrs: Vec<PointerValue> = Vec::new();
+        for &slot_id in &function.gc_roots {
+            let slot = &function.slots[slot_id.0 as usize];
+            let base_ptr = self.slots[&slot_id];
+            for path in gc_reference_paths_of(self.module, slot.ty) {
+                root_addrs.push(self.apply_gc_path(base_ptr, slot.ty, &path));
+            }
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        if root_addrs.is_empty() {
+            self.builder
+                .build_call(
+                    self.runtime.push_frame,
+                    &[
+                        ptr_type.const_null().into(),
+                        i64_type.const_int(0, false).into(),
+                    ],
+                    "",
+                )
+                .expect("push an empty gc frame");
+        } else {
+            let array_ty = ptr_type.array_type(root_addrs.len() as u32);
+            let array = self
+                .builder
+                .build_alloca(array_ty, "gc_roots")
+                .expect("gc roots array allocation");
+            for (index, addr) in root_addrs.iter().enumerate() {
+                let element_ptr = unsafe {
+                    self.builder.build_gep(
+                        array_ty,
+                        array,
+                        &[
+                            self.context.i32_type().const_int(0, false),
+                            self.context.i32_type().const_int(index as u64, false),
+                        ],
+                        "gc_root_slot",
+                    )
+                }
+                .expect("gc root array index");
+                self.builder
+                    .build_store(element_ptr, *addr)
+                    .expect("store a gc root address");
+            }
+            self.builder
+                .build_call(
+                    self.runtime.push_frame,
+                    &[
+                        array.into(),
+                        i64_type.const_int(root_addrs.len() as u64, false).into(),
+                    ],
+                    "",
+                )
+                .expect("push the gc frame");
+        }
+
         // Parameters arrive as values and are stored into their slots, so
         // reading them is uniform with any other local.
         for (index, slot) in function.params.iter().enumerate() {
@@ -606,6 +853,89 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             &self.module.values,
             &self.module.enums,
         )
+    }
+
+    /// Walks a live GC reference path (`gc_reference_paths`) from a real base
+    /// address, with real `build_struct_gep` instructions — the shadow-stack
+    /// frame's own applier (design D2), as opposed to [`const_field_offset`]
+    /// which walks the identical path shape as a compile-time constant for a
+    /// class's static descriptor (design D6). Terminates the moment `path`
+    /// runs out: that is the leaf, the address of the reference itself.
+    fn apply_gc_path(
+        &self,
+        ptr: PointerValue<'ctx>,
+        ty: ir::IrType,
+        path: &[u32],
+    ) -> PointerValue<'ctx> {
+        let Some((&index, rest)) = path.split_first() else {
+            return ptr;
+        };
+        match ty {
+            ir::IrType::Nullable(n) => {
+                let inner = n.inner();
+                let struct_type = nullable_struct(
+                    self.context,
+                    inner,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let next = self
+                    .builder
+                    .build_struct_gep(struct_type, ptr, index, "gc_step")
+                    .expect("gc nullable step");
+                self.apply_gc_path(next, inner, rest)
+            }
+            ir::IrType::Value(id) => {
+                let layout = &self.module.values[id as usize];
+                let struct_type = value_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let field_ty = layout.fields[index as usize].ty;
+                let next = self
+                    .builder
+                    .build_struct_gep(struct_type, ptr, index, "gc_step")
+                    .expect("gc value step");
+                self.apply_gc_path(next, field_ty, rest)
+            }
+            ir::IrType::Enum(id) => {
+                let layout = &self.module.enums[id as usize];
+                let struct_type = enum_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let field_ty = layout.fields[(index - ENUM_HEADER_FIELDS) as usize].ty;
+                let next = self
+                    .builder
+                    .build_struct_gep(struct_type, ptr, index, "gc_step")
+                    .expect("gc enum step");
+                self.apply_gc_path(next, field_ty, rest)
+            }
+            ir::IrType::Closure(id) => {
+                let layout = &self.module.closures[id as usize];
+                let struct_type = closure_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let field_ty = layout.captures[(index - CLOSURE_HEADER_FIELDS) as usize];
+                let next = self
+                    .builder
+                    .build_struct_gep(struct_type, ptr, index, "gc_step")
+                    .expect("gc closure step");
+                self.apply_gc_path(next, field_ty, rest)
+            }
+            _ => unreachable!("a gc path only steps through Value/Enum/Closure/Nullable"),
+        }
     }
 
     /// The address of one field inside an object.
@@ -2525,6 +2855,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.builder.position_at_end(continuation);
     }
 
+    /// Design D2: pops this activation's shadow-stack frame, pushed once at
+    /// entry — called right before every `Terminator::Return` lowers to
+    /// `ret`, the only way a function ends in this IR (roadmap Phase 4b's
+    /// own exceptions propagate through an explicit pending-exception check
+    /// and an ordinary early `Return`, never LLVM unwind tables — so this
+    /// one call site covers every exit path, early returns included).
+    fn pop_gc_frame(&self) {
+        self.builder
+            .build_call(self.runtime.pop_frame, &[], "")
+            .expect("pop the gc frame");
+    }
+
     fn emit_terminator(&mut self, terminator: &ir::Terminator) {
         match terminator {
             // LLVM has this exact concept, so nothing is invented here.
@@ -2534,10 +2876,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("unreachable terminator");
             }
             ir::Terminator::Return(None) => {
+                self.pop_gc_frame();
                 self.builder.build_return(None).expect("empty return");
             }
             ir::Terminator::Return(Some(operand)) => {
                 let value = self.operand(*operand);
+                self.pop_gc_frame();
                 self.builder
                     .build_return(Some(&value as &dyn BasicValue))
                     .expect("return with a value");

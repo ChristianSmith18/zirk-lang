@@ -717,3 +717,235 @@ fn a_private_enum_is_not_reachable_from_another_file() {
         output.stderr
     );
 }
+
+// --- Collector soundness (`fase-4e-colector-mark-sweep`, section 4) --------
+//
+// These are the load-bearing tests of that change: real `.zrk` programs,
+// compiled and run as actual processes, against the real mark-sweep
+// collector — not the runtime's own synthetic-object unit tests
+// (`crates/zirk-runtime/src/collector.rs`), which prove the same properties
+// at the mark/sweep level directly but never touch codegen's own shadow-stack
+// instrumentation (design D2/D4/D5). `ZIRK_GC_THRESHOLD` (bytes) forces
+// collections to happen deterministically at a specific point, rather than
+// hoping the default 1 MiB threshold happens to be crossed.
+
+/// Like [`zirk`], but with extra environment variables set on the child
+/// process and the source given inline rather than copied from the corpus —
+/// these fixtures exist only to control `ZIRK_GC_THRESHOLD`, so they do not
+/// belong alongside the generic corpus (whose runner has no per-file way to
+/// set one).
+fn zirk_with_env(source_text: &str, name: &str, env: &[(&str, &str)]) -> Output {
+    let dir = workspace(name);
+    let file = dir.join("main.zrk");
+    std::fs::write(&file, source_text).expect("write the source fixture");
+
+    let mut command = Command::new(compiler());
+    command
+        .arg("run")
+        .arg(file.file_name().expect("file name"))
+        .current_dir(&dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let output = command.output().expect("run the compiler");
+    Output {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Design D4's own motivating hazard, reproduced end to end: `show(Marker(111),
+/// Marker(222))` evaluates its two managed-reference arguments left to
+/// right. With the collection threshold forced down to 1 byte, allocating
+/// `Marker(222)` cannot help but cross it, triggering a real mark-sweep
+/// collection while `Marker(111)`'s result lives *only* in whatever D4's
+/// synthetic slot spilled it to (it has not reached a named local, and the
+/// `show` call that would consume it has not happened yet). If that spill,
+/// or the zero-init that keeps the shadow stack from reading garbage in the
+/// slot before it (D5), were missing or wrong, this either prints the wrong
+/// id, prints garbage, or the process crashes outright — not a subtle
+/// off-by-one, a use-after-free.
+#[test]
+fn d4_hazard_the_first_constructor_argument_survives_a_collection_triggered_by_the_second() {
+    let source = "class Marker {
+        id: Int32;
+        construct(id: Int32) { this.id = id; }
+    }
+
+    fn show(a: Marker, b: Marker): Void {
+        stdout.println(a.id);
+        stdout.println(b.id);
+    }
+
+    fn main(): Void {
+        show(Marker(111), Marker(222));
+    }";
+
+    let output = zirk_with_env(source, "gc_d4_hazard", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "111\n222\n",
+        "the first argument's object must survive intact, not be collected \
+         out from under the second argument's own construction"
+    );
+}
+
+/// A sanity control for the test above: the same program, with the default
+/// (generous) threshold, so a regression that happens to depend on the
+/// *particular* low threshold used above (rather than on D4 itself) would
+/// still be caught by comparison.
+#[test]
+fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
+    let source = "class Marker {
+        id: Int32;
+        construct(id: Int32) { this.id = id; }
+    }
+
+    fn show(a: Marker, b: Marker): Void {
+        stdout.println(a.id);
+        stdout.println(b.id);
+    }
+
+    fn main(): Void {
+        show(Marker(111), Marker(222));
+    }";
+
+    let output = zirk_with_env(source, "gc_d4_hazard_control", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "111\n222\n");
+}
+
+/// `docs/decisions/ADR-003-investigacion-fase-4.md`'s probe 1 cycle (two
+/// `Node`s referencing each other through a nullable field), discarded
+/// immediately, repeated under sustained allocation pressure with a small
+/// forced threshold — mirroring probe 5's own loop shape, scaled down to a
+/// bound this suite can run quickly.
+///
+/// What this proves directly: the collector runs repeatedly against a
+/// program that is *entirely* built from unreachable cycles (nothing else
+/// this program allocates is ever kept) without crashing, hanging, or
+/// corrupting the run — real evidence, not merely that the process exits
+/// zero, since a cycle is exactly the shape a naive "collect only what has
+/// zero incoming references" scheme would leak forever. What it does *not*
+/// prove by itself — this suite has no portable way to observe another
+/// process' RSS — is the exact byte count reclaimed; that half is covered
+/// directly, at the byte level, by `crates/zirk-runtime/src/collector.rs`'s
+/// own `an_unreachable_cycle_is_fully_reclaimed` unit test, which asserts
+/// live-byte accounting drops to exactly zero for this identical shape.
+#[test]
+fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_threshold() {
+    let source = "class Node {
+        mut next: Node?;
+        construct() { }
+    }
+
+    fn churn(n: Int32): Void {
+        mut i = 0;
+        while i < n {
+            mut a = Node();
+            mut b = Node();
+            a.next = b;
+            b.next = a;
+            i = i + 1;
+        }
+    }
+
+    fn main(): Void {
+        churn(300000);
+        stdout.println(\"done\");
+    }";
+
+    let output = zirk_with_env(source, "gc_cycle_churn", &[("ZIRK_GC_THRESHOLD", "8192")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "done\n");
+}
+
+/// An object reachable only from a still-active *outer* frame (`main`'s own
+/// `kept`) survives collections triggered by unrelated allocation happening
+/// entirely inside an *inner*, unrelated call (`churn`) — design D2's own
+/// claim that the shadow stack is a stack of every active frame, not just
+/// the innermost one.
+#[test]
+fn a_still_active_outer_frames_root_survives_unrelated_allocation_in_an_inner_call() {
+    let source = "class Holder {
+        value: Int32;
+        construct(value: Int32) { this.value = value; }
+    }
+
+    fn churn(n: Int32): Void {
+        mut i = 0;
+        while i < n {
+            mut throwaway = Holder(0);
+            i = i + 1;
+        }
+    }
+
+    fn main(): Void {
+        mut kept = Holder(999);
+        churn(50000);
+        stdout.println(kept.value);
+    }";
+
+    let output = zirk_with_env(
+        source,
+        "gc_outer_frame_survives",
+        &[("ZIRK_GC_THRESHOLD", "4096")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "999\n",
+        "`kept` must survive every collection `churn` triggers, since main's \
+         own frame — where `kept` is rooted — is still active the entire time"
+    );
+}
+
+/// An object local to `use_once` becomes unreachable the moment its frame
+/// pops (`return`, design D2's `zirk_rt_pop_frame`) — called 200,000 times
+/// under a small forced threshold, so the collector must repeatedly notice
+/// and reclaim each call's own now-dead `Scratch` while correctly leaving
+/// every *other* call's still-in-progress state alone. Same evidence shape
+/// and same honest limit as the cycle-churn test above: this proves the
+/// program runs correctly to completion under that pressure, not the exact
+/// byte count reclaimed — that half is `crates/zirk-runtime/src/collector.rs`'s
+/// own `an_object_reachable_only_through_a_pushed_frame_survives` unit test,
+/// which directly asserts an object becomes unreachable (and is reclaimed on
+/// the next collection) the moment its frame pops.
+#[test]
+fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_loop() {
+    let source = "class Scratch {
+        value: Int32;
+        construct(value: Int32) { this.value = value; }
+    }
+
+    fn use_once(v: Int32): Int32 {
+        mut s = Scratch(v);
+        return s.value;
+    }
+
+    fn main(): Void {
+        mut i = 0;
+        mut total = 0;
+        while i < 200000 {
+            total = total + use_once(1);
+            i = i + 1;
+        }
+        stdout.println(total);
+    }";
+
+    let output = zirk_with_env(
+        source,
+        "gc_frame_pop_reclaims",
+        &[("ZIRK_GC_THRESHOLD", "4096")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "200000\n");
+}

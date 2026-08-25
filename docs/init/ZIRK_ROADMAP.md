@@ -216,20 +216,34 @@ deferred to a follow-up change.
 
 ### Phase 4e — Managed memory and unsafe boundaries
 
-**Status: in progress. `inmut::strict` projection-write checking
-(`fase-4e-inmut-strict-proyeccion`) and the `unsafe`/`Pointer<T>`/`extern`
-core (`fase-4e-unsafe-pointer-extern`) shipped; the memory-strategy decision
-(ADR-003), the transactional journal, native slices, and reference/clone
-delivery remain.**
+**Status: in progress. ADR-003 closed (non-moving mark-sweep); the real
+collector, `inmut::strict` projection-write checking
+(`fase-4e-inmut-strict-proyeccion`), and the `unsafe`/`Pointer<T>`/`extern`
+core (`fase-4e-unsafe-pointer-extern`) shipped; the transactional journal,
+native slices, and reference/clone delivery remain.**
 
-- [ ] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
-  public ownership syntax. **Not started** — ADR-003 itself remains open;
-  its own investigation document (`docs/decisions/ADR-003-investigacion-fase-4.md`)
-  now has real execution evidence for criterion 1 (closures that capture and
-  escape), gathered once `fase-4d-callables` made the scenario constructible.
+- [x] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
+  public ownership syntax — **delivered** (`fase-4e-colector-mark-sweep`):
+  `docs/decisions/ADR-003-memoria.md` closed on non-moving mark-sweep, with
+  root enumeration via a function-granularity shadow stack (every function's
+  managed-reference-typed slots — named locals and compiler-synthesized
+  spills of otherwise-transient SSA values, design D4 — are pushed as roots
+  on entry and popped before every `return`) and cooperative,
+  allocation-triggered, single-threaded collection. `zirk_rt_alloc` stops
+  being "never frees"; the object header grows from one word to three
+  (dispatch descriptor unchanged, plus an intrusive next-allocation link
+  with the mark bit in its low bit, plus the allocation's own size) exactly
+  as `ADR-012` anticipated. Verified against real allocation-pressure
+  programs, including the specific hazard the design work surfaced before
+  any code was written: a managed-reference value that lives only in an
+  LLVM SSA register between two constructor arguments of one call, which a
+  naïve shadow stack cannot see and would collect out from under the first
+  argument — closed by spilling every such value to a synthetic root slot
+  the instant it is produced.
 - [ ] Implement safe/weak/dependent references, deep clone graph semantics and
-  automatic bounded native pinning. **Not started** — depends on the ADR-003
-  decision above; `Weak<T>` and `Clone` have no trace anywhere in the
+  automatic bounded native pinning. **Not started** — `Weak<T>` and `Clone`
+  now have a real live/dead distinction to build against (the collector
+  above), which did not exist before; still no trace of either in the
   compiler today.
 - [x] Implement `inmut::strict` with reachable-alias analysis — **partial**:
   direct rebinding (Phase 3) and writing through a field projection off a
