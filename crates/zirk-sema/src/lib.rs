@@ -156,4 +156,16 @@ pub mod codes {
     /// reading a captured value. Caught here so a program that would panic
     /// during lowering is rejected with a diagnostic instead.
     pub const RECURSIVE_BINDING_NOT_A_VALUE: Code = Code::new("E0440");
+    /// A comma-grouped declaration (roadmap Phase 4d) whose initializer-list
+    /// arity does not match its binding-name-list arity — distinct from the
+    /// generic [`TYPE_MISMATCH`] per the grammar spec's "targeted
+    /// count-mismatch diagnostic".
+    pub const MULTI_LET_ARITY_MISMATCH: Code = Code::new("E0441");
+    /// A simultaneous assignment (roadmap Phase 4d) whose source-list arity
+    /// does not match its destination-list arity — distinct from
+    /// [`TYPE_MISMATCH`], same reason as [`MULTI_LET_ARITY_MISMATCH`].
+    pub const MULTI_ASSIGN_ARITY_MISMATCH: Code = Code::new("E0442");
+    /// Two destinations of a simultaneous assignment resolve to the same
+    /// place (design D4's cross-destination duplicate check).
+    pub const DUPLICATE_ASSIGN_TARGET: Code = Code::new("E0443");
 }

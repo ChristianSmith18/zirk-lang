@@ -168,9 +168,8 @@ pending final behavior.
 
 ### Phase 4d — Callable and binding completion
 
-**Status: callable-type slice complete for its scoped delivery
-(`fase-4d-callables`); multiple declarations and simultaneous assignment
-remain pending, tracked as a separate change.**
+**Status: complete for its scoped delivery — both slices shipped
+(`fase-4d-callables`; `fase-4d-declaraciones-multiples`).**
 
 - [x] Parse and type `Function(P...) => R` and preferred alias `Fn(P...) => R`
   in parameters, returns, attributes, generic arguments, and local
@@ -192,18 +191,28 @@ remain pending, tracked as a separate change.**
   rule only covers the two positions — a local's own initializer, a
   function's own return — where exactly one static AST occurrence can size
   the position soundly without D13's boxing).
-- [ ] Implement same-type multiple declarations with independent defaults.
-- [ ] Implement exact-arity simultaneous assignment: evaluate all sources
-  before writes, reject duplicate or immutable destinations, and preserve
-  projection copy/place semantics.
+- [x] Implement same-type multiple declarations with independent defaults.
+- [x] Implement exact-arity simultaneous assignment: evaluate all sources
+  before writes, reject duplicate destinations, and preserve projection
+  copy/place semantics. **Note:** this reuses the single-target assignment's
+  existing writability rule set unchanged (design D4), which today only
+  checks a field's own `inmut`, not the strict-aliasing of an
+  `inmut::strict` base reference (`p.x = 5;` through `p: inmut::strict`
+  already compiles on `main` before this change) — a pre-existing gap in
+  `inmut::strict` projection-write checking, reproduced faithfully rather
+  than fixed here; tracked under Phase 4e's `inmut::strict` reachable-alias
+  analysis.
 
 **Output:** a named function or capture-less lambda interoperates with
 `Fn(...) => R` anywhere it is written; a single capturing closure escapes its
 creating function through a typed local or a `return`, including recursive
 lambdas; `is` works between callables. `left, right = right, left` and `mut
-a, b: String;` remain unimplemented, and general callable-type polymorphism
-(any two differently-captured closures sharing one position) is deferred to a
-follow-up change.
+a, b: String;` are implemented — comma-grouped declarations share one type
+annotation and independent defaults, and simultaneous assignment evaluates
+every source before any destination write, rejects arity mismatches and
+duplicate destinations with dedicated diagnostics. General callable-type
+polymorphism (any two differently-captured closures sharing one position) is
+deferred to a follow-up change.
 
 ### Phase 4e — Managed memory and unsafe boundaries
 

@@ -1845,6 +1845,13 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier("after `mut` or `inmut`")?;
 
+        // A comma-grouped declaration (roadmap Phase 4d): `mut first, second:
+        // String;`. Kept as its own node (design D1/D2) rather than folding
+        // this into `LetStmt` — the single-name path below is left untouched.
+        if matches!(self.peek(), TokenKind::Comma) {
+            return self.parse_multi_let(start, mutability, name);
+        }
+
         let ty = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type()?)
         } else {
@@ -1880,6 +1887,63 @@ impl<'a> Parser<'a> {
             name,
             ty,
             init,
+            span: start.to(end),
+        }))
+    }
+
+    /// `mut first, second: String = a, b;` — the comma-grouped form of
+    /// `Self::parse_let`, entered once a comma is seen after the first name.
+    ///
+    /// The initializer list's arity is preserved exactly as written, even
+    /// when it does not match `names.len()`: the checker emits the targeted
+    /// diagnostic (design D1/D5), not the parser.
+    fn parse_multi_let(
+        &mut self,
+        start: Span,
+        mutability: Mutability,
+        first: Ident,
+    ) -> Option<Stmt> {
+        let mut names = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            let name = self.expect_identifier("in a comma-separated declaration list")?;
+            names.push(name);
+        }
+
+        let ty = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        let inits = if self.eat(&TokenKind::Assign) {
+            let mut list = vec![self.parse_expr()?];
+            while self.eat(&TokenKind::Comma) {
+                list.push(self.parse_expr()?);
+            }
+            list
+        } else {
+            Vec::new()
+        };
+
+        if ty.is_none() && inits.is_empty() {
+            let span = start.to(names.last().expect("at least one name").span);
+            self.error(
+                codes::UNTYPED_DECLARATION,
+                span,
+                "cannot determine the type of this declaration",
+                "the declaration has neither a type annotation nor an initial value",
+                Some("write a shared `: Type` or give every name an initial value".into()),
+            );
+        }
+
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(Stmt::MultiLet(MultiLetStmt {
+            mutability,
+            names,
+            ty,
+            inits,
             span: start.to(end),
         }))
     }
@@ -2067,6 +2131,14 @@ impl<'a> Parser<'a> {
 
         let expr = self.parse_expr_inner()?;
 
+        // Simultaneous assignment (roadmap Phase 4d): `left, right = right,
+        // left;`. A comma here can only start a comma-separated list of
+        // assignment targets — there is no other statement shape that puts a
+        // bare top-level comma after a leading expression.
+        if matches!(self.peek(), TokenKind::Comma) {
+            return self.parse_multi_assign(start, expr);
+        }
+
         // An increment that *is* the whole statement: its value goes nowhere.
         if let Expr::Increment(inc) = &expr {
             let end = self.peek_span();
@@ -2132,6 +2204,62 @@ impl<'a> Parser<'a> {
         Some(Stmt::Expr(ExprStmt {
             span: start.to(end),
             expr,
+        }))
+    }
+
+    /// `left, right = right, left;` — the comma-grouped form of assignment,
+    /// entered once a comma is seen after the first parsed expression.
+    ///
+    /// Both lists' arities are preserved exactly as parsed, even when they
+    /// differ (design D1/D5's "Assignment arity mismatch" scenario) — the
+    /// checker reports the mismatch, not the parser.
+    fn parse_multi_assign(&mut self, start: Span, first_expr: Expr) -> Option<Stmt> {
+        let mut targets = Vec::new();
+
+        let Some(first_target) = as_assignable(&first_expr) else {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                first_expr.span(),
+                "the left-hand side of an assignment must be a place",
+                "only a name or a field names storage that can be written",
+                None,
+            );
+            return None;
+        };
+        targets.push(first_target);
+
+        while self.eat(&TokenKind::Comma) {
+            let expr = self.parse_expr_inner()?;
+            let Some(target) = as_assignable(&expr) else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    expr.span(),
+                    "the left-hand side of an assignment must be a place",
+                    "only a name or a field names storage that can be written",
+                    None,
+                );
+                return None;
+            };
+            targets.push(target);
+        }
+
+        self.expect(
+            &TokenKind::Assign,
+            "after a comma-separated list of assignment targets",
+        );
+
+        let mut values = vec![self.parse_expr()?];
+        while self.eat(&TokenKind::Comma) {
+            values.push(self.parse_expr()?);
+        }
+
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+
+        Some(Stmt::MultiAssign(MultiAssignStmt {
+            targets,
+            values,
+            span: start.to(end),
         }))
     }
 
