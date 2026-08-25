@@ -681,7 +681,7 @@ mutación alcanzable. Una referencia strict NO SHALL convertirse en alias
 mutable ni adquirirse mientras permanezca accesible un alias mutable.
 
 #### Scenario: Clon mutable desde referencia strict
-- **WHEN** un objeto strict implementa `Cloneable` y se clona a un binding `mut`
+- **WHEN** un objeto strict implementa `Clone` y se clona a un binding `mut`
 - **THEN** el clon independiente puede mutarse sin alterar el objeto original
 
 ### Requirement: Resolución de constructores
