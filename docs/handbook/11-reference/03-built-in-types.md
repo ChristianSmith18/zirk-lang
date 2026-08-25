@@ -16,7 +16,7 @@ This catalog is the quick lookup for Zirk's compiler-known types. For semantics 
 | Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Range<T>` | native reference containers except value-like `Range` | empty where meaningful |
 | Callable | `Function(P...) => R`; `Fn(P...) => R` | signature-compatible callable identity with compiler-managed environment | no implicit default |
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[]` access | component defaults where explicitly constructed |
-| Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `Option<T>` | no implicit default |
+| Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `T?` | no implicit default |
 | Native memory | `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>` | unsafe raw address or bounded dependent native view | null only for raw pointer |
 | Concurrency | `Task<T>`, `TaskSettlement<T>`, `Channel<T>`, `Thread<T>` | scoped execution and typed coordination | no implicit default |
 | Synchronization | `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `Atomic<T>` | contract-controlled shared state | type-specific |

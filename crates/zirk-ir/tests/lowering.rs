@@ -1442,3 +1442,75 @@ fn multi_argument_constructor_calls_spill_each_argument_before_the_next_is_built
         );
     }
 }
+
+// --- Weak<T> (roadmap Phase 4e, `fase-4e-weak`) -----------------------------
+
+const MARKER: &str = "class Marker { construct() { } }";
+
+#[test]
+fn weak_from_upgrade_and_is_alive_lower_to_the_expected_instructions() {
+    let source = format!(
+        "{MARKER}\nfn main(): Void {{
+             mut m: Marker = Marker();
+             mut w: Weak<Marker> = Weak.from(m);
+             mut alive: Boolean = w.is_alive;
+             mut u: Marker? = w.upgrade();
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::WeakFrom(_))),
+        "Weak.from(m) must lower to WeakFrom, found {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::WeakIsAlive(_))),
+        "w.is_alive must lower to WeakIsAlive, found {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::WeakUpgrade(_))),
+        "w.upgrade() must lower to WeakUpgrade, found {kinds:?}"
+    );
+}
+
+/// Design D4's own claim (`fase-4e-weak/design.md`): `.upgrade()`'s `T?`
+/// result is a managed-reference-typed instruction result like any other,
+/// so it goes through `fase-4e-colector-mark-sweep`'s own unconditional
+/// synthetic-slot spill and root descriptor with no change needed for
+/// `Weak<T>` specifically — checked here rather than assumed, per the
+/// task's own instruction.
+#[test]
+fn weak_upgrade_result_and_the_handle_itself_are_both_gc_roots() {
+    let source = format!(
+        "{MARKER}\nfn main(): Void {{
+             mut m: Marker = Marker();
+             mut w: Weak<Marker> = Weak.from(m);
+             mut u: Marker? = w.upgrade();
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let marker_id = module.object_id("Marker").expect("Marker is a class");
+
+    let has_weak_root = main.gc_roots.iter().any(|&id| {
+        matches!(main.slot(id).unwrap().ty, IrType::Weak(weak_id) if module.weak_types[weak_id as usize] == IrType::Object(marker_id))
+    });
+    assert!(
+        has_weak_root,
+        "the Weak<Marker>-typed local `w` must be a gc root, since a Weak<T> \
+         handle is itself a managed reference (design D1/D2)"
+    );
+
+    let has_upgrade_root = main.gc_roots.iter().any(|&id| {
+        matches!(
+            main.slot(id).unwrap().ty,
+            IrType::Nullable(Nullable::Object(id)) if id == marker_id
+        )
+    });
+    assert!(
+        has_upgrade_root,
+        "the Marker?-typed local `u` (from .upgrade()) must be a gc root"
+    );
+}

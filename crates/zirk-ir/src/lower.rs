@@ -287,6 +287,15 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|&pointee| ir_type(pointee, instance_base, enum_instance_base, checked))
         .collect();
 
+    // `checked.weak_types` is pushed first, in the same order, for the same
+    // reason `pointer_types` is just above (roadmap Phase 4e, `fase-4e-weak`,
+    // design D1).
+    module.weak_types = checked
+        .weak_types
+        .iter()
+        .map(|&referent| ir_type(referent, instance_base, enum_instance_base, checked))
+        .collect();
+
     // `extern "C" fn` declarations (roadmap Phase 4e, design D7, `ADR-015`):
     // no body to lower, only a declaration codegen turns into an LLVM
     // `declare`.
@@ -954,6 +963,11 @@ fn ir_type(
         // `module.closures` already share (roadmap Phase 4e, design D1).
         Base::Pointer(id) => IrType::Pointer(id),
 
+        // `checked.weak_types` and `module.weak_types` are populated the
+        // same way and for the same reason `pointer_types` is, just above
+        // (roadmap Phase 4e, `fase-4e-weak`, design D1).
+        Base::Weak(id) => IrType::Weak(id),
+
         Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
@@ -1337,6 +1351,20 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Pointer<T> it type-checked")
                 as u32;
             return Type::of(Base::Pointer(id));
+        }
+
+        // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
+        // treatment as `Pointer<T>` above.
+        if reference.name == "Weak" {
+            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .weak_types
+                .iter()
+                .position(|&t| t == referent)
+                .expect("the checker interned every Weak<T> it type-checked")
+                as u32;
+            return Type::of(Base::Weak(id));
         }
 
         let declared = self.declaration_of(&reference.name, reference.span);
@@ -1859,7 +1887,11 @@ impl<'a> FunctionLowering<'a> {
             // checker's escape rule (design D4) rejects every assignment of
             // a `Pointer<T>` value into a field, so nothing here ever needs
             // a default for one.
-            | IrType::Pointer(_) => {
+            | IrType::Pointer(_)
+            // A `Weak<T>` field has no default the same way an ordinary
+            // class reference does not (roadmap Phase 4e, `fase-4e-weak`):
+            // it is a reference, and there is no handle to default to.
+            | IrType::Weak(_) => {
                 return None;
             }
         })
@@ -3154,6 +3186,12 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if self.is_pointer_method_call(e) {
                     return self.lower_pointer_method_call(e, span);
+                }
+                if self.is_weak_from_call(e) {
+                    return self.lower_weak_from(&e.args[0].value, span);
+                }
+                if self.is_weak_method_call(e) {
+                    return self.lower_weak_method_call(e, span);
                 }
                 if let Some(target) = self.context_conversion_target(e) {
                     let target_ty = self.ir_type(target);
@@ -5817,6 +5855,19 @@ impl<'a> FunctionLowering<'a> {
             return self.emit(InstKind::PointerIsNull(pointer), IrType::Boolean, span);
         }
 
+        // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`, design D4): the same
+        // null-check `.upgrade()` does, without producing a new strong
+        // reference.
+        if expr.name.name == "is_alive"
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Weak(_)
+            )
+        {
+            let weak = self.lower_expr(&expr.object);
+            return self.emit(InstKind::WeakIsAlive(weak), IrType::Boolean, span);
+        }
+
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -6128,6 +6179,16 @@ impl<'a> FunctionLowering<'a> {
         {
             return IrType::Boolean;
         }
+        // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`) — see
+        // `Self::lower_field`'s matching branch.
+        if expr.name.name == "is_alive"
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Weak(_)
+            )
+        {
+            return IrType::Boolean;
+        }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -6265,6 +6326,70 @@ impl<'a> FunctionLowering<'a> {
             }
             _ => unreachable!("checked by `Self::is_pointer_method_call`"),
         }
+    }
+
+    /// Whether `e` is `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`,
+    /// design D1) — the compiler-built-in static call
+    /// `Checker::check_weak_from` already recognized the same way.
+    fn is_weak_from_call(&self, e: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*e.callee else {
+            return false;
+        };
+        let ast::Expr::Path(base) = &*field.object else {
+            return false;
+        };
+        base.name == "Weak"
+            && field.name.name == "from"
+            && self.try_lookup_slot(&base.name).is_none()
+    }
+
+    /// Whether `e` is `.upgrade()` on a `Weak<T>` receiver (design D4).
+    /// `.is_alive` is not here — it is a member read
+    /// (`Self::field_type_of`/`Self::lower_field`), never a call.
+    fn is_weak_method_call(&self, e: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*e.callee else {
+            return false;
+        };
+        if field.name.name != "upgrade" {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Weak(_)
+        )
+    }
+
+    /// `Weak.from(value)` (design D1): allocates a fresh WeakCell and stores
+    /// `value`'s own address into it — `value` is already a managed
+    /// reference, so unlike `Pointer.from` this lowers the value itself
+    /// rather than taking the address of an addressable place.
+    fn lower_weak_from(&mut self, value: &ast::Expr, span: Span) -> Operand {
+        let referent = self.type_of(value, value.span());
+        let id = self
+            .module
+            .weak_types
+            .iter()
+            .position(|&t| t == referent)
+            .expect("the checker interned every Weak<T> it type-checked") as u32;
+        let ty = IrType::Weak(id);
+        let target = self.lower_expr(value);
+        self.emit(InstKind::WeakFrom(target), ty, span)
+    }
+
+    /// `.upgrade()` (design D4).
+    fn lower_weak_method_call(&mut self, e: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*e.callee else {
+            unreachable!("checked by `Self::is_weak_method_call`")
+        };
+        let weak = self.lower_expr(&field.object);
+        let IrType::Weak(id) = self.type_of_operand(weak) else {
+            unreachable!("checked by `Self::is_weak_method_call`")
+        };
+        let referent = self.module.weak_types[id as usize];
+        let result_ty = IrType::Nullable(
+            Nullable::of(referent).expect("a Weak<T> referent has a nullable form"),
+        );
+        self.emit(InstKind::WeakUpgrade(weak), result_ty, span)
     }
 
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
@@ -6767,6 +6892,11 @@ impl<'a> FunctionLowering<'a> {
         if self.is_pointer_from_call(call) || self.is_pointer_method_call(call) {
             return false;
         }
+        // Neither is `Weak.from(value)`/a `Weak<T>` method (roadmap Phase
+        // 4e, `fase-4e-weak`) — same reasoning as `Pointer.from` above.
+        if self.is_weak_from_call(call) || self.is_weak_method_call(call) {
+            return false;
+        }
 
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
@@ -6915,6 +7045,30 @@ impl<'a> FunctionLowering<'a> {
                     "offset" | "offset_bytes" => IrType::Pointer(id),
                     _ => unreachable!("checked by `Self::is_pointer_method_call`"),
                 }
+            }
+            ast::Expr::Call(e) if self.is_weak_from_call(e) => {
+                let value = &e.args[0].value;
+                let referent = self.type_of(value, value.span());
+                let id = self
+                    .module
+                    .weak_types
+                    .iter()
+                    .position(|&t| t == referent)
+                    .expect("the checker interned every Weak<T> it type-checked")
+                    as u32;
+                IrType::Weak(id)
+            }
+            ast::Expr::Call(e) if self.is_weak_method_call(e) => {
+                let ast::Expr::Field(field) = &*e.callee else {
+                    unreachable!("checked by `Self::is_weak_method_call`")
+                };
+                let IrType::Weak(id) = self.type_of(&field.object, field.object.span()) else {
+                    unreachable!("checked by `Self::is_weak_method_call`")
+                };
+                let referent = self.module.weak_types[id as usize];
+                IrType::Nullable(
+                    Nullable::of(referent).expect("a Weak<T> referent has a nullable form"),
+                )
             }
             ast::Expr::Call(e) => {
                 if let Some(method) = self.contract_method_of(e) {

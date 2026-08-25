@@ -240,11 +240,20 @@ native slices, and reference/clone delivery remain.**
   naïve shadow stack cannot see and would collect out from under the first
   argument — closed by spilling every such value to a synthetic root slot
   the instant it is produced.
-- [ ] Implement safe/weak/dependent references, deep clone graph semantics and
-  automatic bounded native pinning. **Not started** — `Weak<T>` and `Clone`
-  now have a real live/dead distinction to build against (the collector
-  above), which did not exist before; still no trace of either in the
-  compiler today.
+- [x] Implement safe/weak/dependent references, deep clone graph semantics and
+  automatic bounded native pinning — **partial** (`fase-4e-weak`): `Weak<T>`
+  delivered, restricted to reference-typed referents, with `Weak.from`,
+  `.upgrade(): T?`, and `.is_alive: Boolean`. Represented as a small
+  collector-tracked indirection cell (a "WeakCell") whose own target field
+  is never traced as a strong edge during mark, and gets cleared — before
+  the collector frees the referent, never after — by a dedicated pass
+  between mark and sweep, skipped entirely in any program that never
+  allocates a `Weak<T>`. Corrected the pre-existing "Weak references"
+  requirement's own wording along the way: it named `Option<T>`/`None`,
+  neither of which exists in Zirk — the delivered (and now normative)
+  signature is `upgrade(): T?`, `null`, matching the language's real
+  nullable idiom. **Not** covered: dependent references, deep `clone()`,
+  and automatic bounded native pinning remain their own, separate work.
 - [x] Implement `inmut::strict` with reachable-alias analysis — **partial**:
   direct rebinding (Phase 3) and writing through a field projection off a
   strict binding (`fase-4e-inmut-strict-proyeccion`) are both rejected.

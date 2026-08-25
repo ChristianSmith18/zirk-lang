@@ -10,12 +10,12 @@ A reference derived inside `match with` cannot escape after the resource closes.
 mut weak = Weak.from(cache);
 
 match weak.upgrade() {
-    Some(live) => live.refresh(),
-    None => rebuild_cache(),
+    null => rebuild_cache(),
+    live => live.refresh(),
 }
 ```
 
-`upgrade(): Option<T>` is required before use. `is_alive` is only an immediate
+`upgrade(): T?` is required before use. `is_alive` is only an immediate
 observation and cannot replace upgrading. Native views, borrowed iterators,
 resource-derived handles, and internal-storage views are dependent references;
 the compiler rejects any escape beyond their owner.

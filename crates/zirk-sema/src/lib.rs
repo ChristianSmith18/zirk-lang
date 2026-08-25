@@ -184,4 +184,8 @@ pub mod codes {
     /// A `Pointer<T>` value returned, stored into a field, or captured by a
     /// closure (roadmap Phase 4e, design D4 — the blanket escape rule).
     pub const POINTER_ESCAPES: Code = Code::new("E0448");
+    /// A `Weak<T>` named with a value-type referent (roadmap Phase 4e,
+    /// `fase-4e-weak`): `T` has no identity for a weak reference to observe
+    /// independently of its content.
+    pub const WEAK_DISALLOWED_REFERENT: Code = Code::new("E0449");
 }

@@ -192,6 +192,14 @@ pub enum IrType {
     /// reason `Closure`/`Object`/`Value`/`Enum` are ids into a module table
     /// instead of holding their shape inline.
     Pointer(u32),
+    /// `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1), identified by
+    /// the id of its referent type in the module's own `weak_types` table —
+    /// kept as an id for the same reason `Pointer` is.
+    ///
+    /// A `Weak<T>` value is itself a managed reference: a pointer to a
+    /// collector-tracked WeakCell allocation (design D1/D2), unlike
+    /// `Pointer<T>`'s own raw, unmanaged pointer.
+    Weak(u32),
 }
 
 /// The types that have a nullable form.
@@ -280,6 +288,7 @@ impl IrType {
                 Nullable::Enum(_) => "enum?",
             },
             IrType::Pointer(_) => "Pointer",
+            IrType::Weak(_) => "Weak",
         }
     }
 
@@ -319,7 +328,13 @@ impl IrType {
     /// always terminates.
     pub fn is_managed_reference(self, module: &Module) -> bool {
         match self {
-            IrType::Object(_) | IrType::Contract(_) => true,
+            // A `Weak<T>` value is a pointer to a collector-tracked WeakCell
+            // (`fase-4e-weak`, design D1/D2) — an ordinary managed reference
+            // as far as root enumeration and the GC field-offset table are
+            // concerned; the collector's own mark pass is what stops short
+            // of tracing *through* it as a strong edge (design D2), not
+            // anything decided here.
+            IrType::Object(_) | IrType::Contract(_) | IrType::Weak(_) => true,
             IrType::Nullable(n) => n.inner().is_managed_reference(module),
             IrType::Value(id) => module.values[id as usize]
                 .fields
@@ -379,6 +394,10 @@ pub struct Module {
     /// Interned `Pointer<T>` pointee types, indexed by the id
     /// [`IrType::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<IrType>,
+    /// Interned `Weak<T>` referent types, indexed by the id
+    /// [`IrType::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design
+    /// D1).
+    pub weak_types: Vec<IrType>,
     /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
     /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
     /// no Zirk-authored body.
@@ -551,6 +570,16 @@ impl Module {
         }
         self.pointer_types.push(pointee);
         (self.pointer_types.len() - 1) as u32
+    }
+
+    /// Interns a `Weak<T>` referent type, returning the id
+    /// [`IrType::Weak`] carries.
+    pub fn intern_weak_type(&mut self, referent: IrType) -> u32 {
+        if let Some(index) = self.weak_types.iter().position(|&t| t == referent) {
+            return index as u32;
+        }
+        self.weak_types.push(referent);
+        (self.weak_types.len() - 1) as u32
     }
 }
 
@@ -947,6 +976,23 @@ pub enum InstKind {
     PointerCast(Operand),
     /// `.is_null` — the one pointer operation that does not require `unsafe`.
     PointerIsNull(Operand),
+
+    /// `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
+    /// allocates a fresh WeakCell and stores `value`'s own address (already
+    /// a managed reference — no address-of needed, unlike `Pointer.from`)
+    /// into its single field. Produces a `Weak<T>` value: a pointer to the
+    /// WeakCell, itself an ordinary collector-tracked allocation.
+    WeakFrom(Operand),
+    /// `.upgrade()` (design D4): reads the WeakCell's target field and
+    /// produces the nullable result — present when the referent is still
+    /// reachable, absent (`null`) otherwise. This is a managed-reference-
+    /// typed instruction result when present, so it goes through the same
+    /// unconditional synthetic-slot spill every such result already does
+    /// (`fase-4e-colector-mark-sweep` design D4) — nothing new needed here.
+    WeakUpgrade(Operand),
+    /// `.is_alive` (design D4): the same null-check `.upgrade()` does,
+    /// without producing a new strong reference.
+    WeakIsAlive(Operand),
 }
 
 /// An input to an instruction.

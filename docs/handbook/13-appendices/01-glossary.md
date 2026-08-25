@@ -23,7 +23,7 @@
 - **Share:** compiler-derived permission for concurrent contexts to use the same
   referent safely, normally through strict immutability or synchronization.
 - **Weak reference:** non-owning `Weak<T>` observation that upgrades through
-  `Option<T>` and does not keep its referent alive.
+  `T?` and does not keep its referent alive.
 - **Dependent reference:** view or handle whose safe lifetime is bounded by an
   owner and checked internally without public lifetime syntax.
 - **Unsafe transaction:** an unsafe block whose managed and validated-range

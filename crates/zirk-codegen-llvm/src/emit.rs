@@ -314,6 +314,10 @@ fn llvm_type_in<'ctx>(
         // carries no pointee type; a load/store through it supplies `T`'s
         // own LLVM type separately, at the instruction that needs it.
         ir::IrType::Pointer(_) => context.ptr_type(AddressSpace::default()).into(),
+        // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): a pointer
+        // to a WeakCell — an ordinary collector-tracked allocation, opaque
+        // at this level the same way `Object`/`Contract` are.
+        ir::IrType::Weak(_) => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
@@ -435,7 +439,14 @@ fn gc_reference_paths(
     out: &mut Vec<Vec<u32>>,
 ) {
     match ty {
-        ir::IrType::Object(_) | ir::IrType::Contract(_) => out.push(prefix.clone()),
+        // A `Weak<T>` field is a managed pointer to a WeakCell, walked the
+        // same way an `Object`/`Contract` field is (roadmap Phase 4e,
+        // `fase-4e-weak`) — the path stops at the field itself; the
+        // collector's own mark pass is what stops short of tracing *through*
+        // the WeakCell (design D2), not this table.
+        ir::IrType::Object(_) | ir::IrType::Contract(_) | ir::IrType::Weak(_) => {
+            out.push(prefix.clone())
+        }
         ir::IrType::Nullable(n) => {
             let inner = n.inner();
             if inner.is_managed_reference(module) {
@@ -546,6 +557,31 @@ fn object_struct<'ctx>(
 /// Where a field sits inside the struct, header included (design D1: three
 /// words now — descriptor, `next`, `size` — not one).
 const OBJECT_HEADER_FIELDS: u32 = 3;
+
+/// The struct a WeakCell occupies (roadmap Phase 4e, `fase-4e-weak`, design
+/// D1/D2):
+///
+/// ```text
+///    [ sentinel descriptor | next (mark bit) | size | target ]
+/// ```
+///
+/// The same three-word header every collector allocation carries
+/// ([`object_struct`]'s own doc comment), then one field: the target's own
+/// address. Unlike [`object_struct`], this is not per-class — every
+/// WeakCell in the program shares this one shape, since `Weak<T>`'s
+/// operation set is closed and compiler-built-in (design D1).
+fn weak_cell_struct_type<'ctx>(context: &'ctx Context) -> inkwell::types::StructType<'ctx> {
+    let ptr = context.ptr_type(AddressSpace::default());
+    context.struct_type(
+        &[
+            ptr.into(),
+            ptr.into(),
+            context.i64_type().into(),
+            ptr.into(),
+        ],
+        false,
+    )
+}
 
 fn declare_function<'ctx>(
     context: &'ctx Context,
@@ -2130,6 +2166,130 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.builder
                         .build_is_null(ptr, "is_null")
                         .expect("pointer null check")
+                        .into(),
+                )
+            }
+
+            // `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design
+            // D1/D2): an ordinary heap allocation — the same `alloc` call
+            // `Alloc` itself uses — whose header carries the WeakCell
+            // sentinel descriptor instead of a real class descriptor, and
+            // whose one field is `value`'s own address. The "ever
+            // allocated" flag is set unconditionally right after: a plain
+            // store, no call, since nothing here needs to know its previous
+            // value (design's own risk mitigation, task 4.3).
+            ir::InstKind::WeakFrom(value) => {
+                let struct_type = weak_cell_struct_type(self.context);
+                let size = struct_type.size_of().expect("a sized WeakCell");
+                let align = struct_type.get_alignment();
+
+                let cell = self
+                    .builder
+                    .build_call(
+                        self.runtime.alloc,
+                        &[size.into(), align.into()],
+                        "weak_cell",
+                    )
+                    .expect("call the allocator")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the allocator returns a pointer")
+                    .into_pointer_value();
+
+                self.builder
+                    .build_store(cell, self.runtime.weak_cell_descriptor)
+                    .expect("store the WeakCell sentinel descriptor");
+
+                let target_field = self
+                    .builder
+                    .build_struct_gep(struct_type, cell, OBJECT_HEADER_FIELDS, "weak_target_init")
+                    .expect("the WeakCell struct has a field past its header");
+                self.builder
+                    .build_store(target_field, self.operand(*value))
+                    .expect("store the weak target");
+
+                self.builder
+                    .build_store(
+                        self.runtime.weak_cell_ever_allocated,
+                        self.context.i8_type().const_int(1, false),
+                    )
+                    .expect("set the WeakCell ever-allocated flag");
+
+                Some(cell.into())
+            }
+
+            // `.upgrade()` (design D4): reads the WeakCell's target field and
+            // builds the `T?` result — present exactly when the target is
+            // not null. No collector-specific check needed here: mark/sweep
+            // (design D3) guarantees the field itself is already null by the
+            // time it is observed as dead, so a plain null check is
+            // sufficient and correct by construction.
+            ir::InstKind::WeakUpgrade(weak) => {
+                let struct_type = weak_cell_struct_type(self.context);
+                let cell = self.operand(*weak).into_pointer_value();
+                let target_field = self
+                    .builder
+                    .build_struct_gep(struct_type, cell, OBJECT_HEADER_FIELDS, "weak_target")
+                    .expect("the WeakCell struct has a field past its header");
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let target = self
+                    .builder
+                    .build_load(ptr_ty, target_field, "weak_target_value")
+                    .expect("load the weak target")
+                    .into_pointer_value();
+                let is_null = self
+                    .builder
+                    .build_is_null(target, "weak_target_is_null")
+                    .expect("weak target null check");
+                let present = self
+                    .builder
+                    .build_not(is_null, "weak_target_present")
+                    .expect("negation");
+
+                let ty = llvm_type_in(
+                    self.context,
+                    instruction.ty,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("a nullable type has a representation")
+                .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(ty.get_undef(), present, 0, "present")
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag.into_struct_value(), target, 1, "wrapped")
+                        .expect("payload")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            // `.is_alive` (design D4): the same null check `.upgrade()`
+            // does, without building a nullable payload.
+            ir::InstKind::WeakIsAlive(weak) => {
+                let struct_type = weak_cell_struct_type(self.context);
+                let cell = self.operand(*weak).into_pointer_value();
+                let target_field = self
+                    .builder
+                    .build_struct_gep(struct_type, cell, OBJECT_HEADER_FIELDS, "weak_target")
+                    .expect("the WeakCell struct has a field past its header");
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let target = self
+                    .builder
+                    .build_load(ptr_ty, target_field, "weak_target_value")
+                    .expect("load the weak target")
+                    .into_pointer_value();
+                let is_null = self
+                    .builder
+                    .build_is_null(target, "weak_target_is_null")
+                    .expect("weak target null check");
+                Some(
+                    self.builder
+                        .build_not(is_null, "weak_target_present")
+                        .expect("negation")
                         .into(),
                 )
             }

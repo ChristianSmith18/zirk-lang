@@ -985,6 +985,53 @@ fn verify_instruction(
                 ));
             }
         }
+
+        InstKind::WeakFrom(value) => {
+            if let Some(ty) = type_of(value)
+                && !matches!(inst.ty, IrType::Weak(id) if module.weak_types.get(id as usize) == Some(&ty))
+            {
+                report(format!(
+                    "{position}: WeakFrom wraps {}, declares {}, expected a Weak of the wrapped type",
+                    ty.as_str(),
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::WeakUpgrade(weak) => match type_of(weak) {
+            Some(IrType::Weak(id)) => {
+                let expected = module
+                    .weak_types
+                    .get(id as usize)
+                    .copied()
+                    .and_then(Nullable::of)
+                    .map(IrType::Nullable);
+                if let Some(expected) = expected
+                    && inst.ty != expected
+                {
+                    report(format!(
+                        "{position}: WeakUpgrade declares {}, expected {}",
+                        inst.ty.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            Some(other) => report(format!(
+                "{position}: WeakUpgrade reads through {}, which is not a Weak",
+                other.as_str()
+            )),
+            None => {}
+        },
+        InstKind::WeakIsAlive(weak) => {
+            expect(inst.ty, IrType::Boolean, position, "WeakIsAlive", report);
+            if let Some(ty) = type_of(weak)
+                && !matches!(ty, IrType::Weak(_))
+            {
+                report(format!(
+                    "{position}: WeakIsAlive reads {}, which is not a Weak",
+                    ty.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -1159,5 +1206,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::PointerOffsetBytes { pointer, amount } => {
             vec![*pointer, *amount]
         }
+        InstKind::WeakFrom(operand)
+        | InstKind::WeakUpgrade(operand)
+        | InstKind::WeakIsAlive(operand) => vec![*operand],
     }
 }

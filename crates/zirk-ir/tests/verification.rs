@@ -31,6 +31,7 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         values: Vec::new(),
         enums: Vec::new(),
         pointer_types: Vec::new(),
+        weak_types: Vec::new(),
         externs: Vec::new(),
     }
 }
@@ -289,6 +290,7 @@ fn a_binary_operation_between_different_types_is_rejected() {
         values: Vec::new(),
         enums: Vec::new(),
         pointer_types: Vec::new(),
+        weak_types: Vec::new(),
         externs: Vec::new(),
     };
 
