@@ -104,10 +104,10 @@
 - [x] 13.2 Update `docs/handbook/13-appendices/07-current-limitations.md`'s memory/unsafe bullet (already touched by `fase-4e-inmut-strict-proyeccion`) to reflect this slice.
 - [x] 13.3 Update `docs/handbook/11-reference/12-feature-status.md`'s "memory, native views and transactional unsafe" row.
 - [x] 13.4 Check `docs/handbook` for any existing `unsafe`/`Pointer<T>`/`extern` teaching material that currently carries a "not yet implemented" caveat this change should remove, or that documents syntax this change's actual implementation ended up differing from — reconcile either direction. (Checked `05-native-and-low-level/{01-c-abi,02-importing-c}.md`, `02-handbook/17-memory-and-safety/{05-pointers,07-unsafe-blocks,12-transactional-unsafe-and-commit}.md` — all conceptual/prose, no literal `extern`/`Pointer<T>` code syntax that conflicts with this change's actual grammar, and none carry a stale caveat. Nothing to reconcile.)
-- [ ] 13.5 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
-- [ ] 13.6 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable.
+- [x] 13.5 Commit the zirk-lang changes, then run `./scripts/sync-website-content.sh` from the repo root (with `--audit-date YYYY-MM-DD` using today's date if project-status evidence changed).
+- [x] 13.6 Report both the zirk-lang and zirk-lang-site revisions used so the synchronization is auditable. (zirk-lang `8adf869`; zirk-lang-site `277eed1`, synced from `8adf869` with `--audit-date 2026-08-24`.)
 
 ## 14. OpenSpec close-out
 
-- [ ] 14.1 Run `openspec validate fase-4e-unsafe-pointer-extern` before archiving.
-- [ ] 14.2 Archive the change once implementation, tests, and documentation sync are complete.
+- [x] 14.1 Run `openspec validate fase-4e-unsafe-pointer-extern` before archiving.
+- [x] 14.2 Archive the change once implementation, tests, and documentation sync are complete. Scope actually delivered: D1-D4/D7-D8 (pointer core, `extern`) — D5/D6 (transactional journal) is genuine remaining Phase 4e work, tracked in `ZIRK_ROADMAP.md`, not a separate open change.
