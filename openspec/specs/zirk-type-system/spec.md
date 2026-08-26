@@ -408,6 +408,14 @@ Records SHALL be immutable with structural field equality; value classes SHALL b
 - **WHEN** an array literal contains three elements
 - **THEN** its length is fixed at three and append/remove operations are rejected
 
+#### Scenario: Structural field equality compares every field
+- **WHEN** `==` compares two values of the same `record` or `value class` type
+- **THEN** the result is the conjunction of each field's own equality, recursing into a nested `record`/`value class` field
+
+#### Scenario: Structural field equality short-circuits on the first difference
+- **WHEN** two `record`/`value class` values differ in their first field
+- **THEN** `==` evaluates `false` without necessarily comparing the remaining fields
+
 #### Scenario: String iteration
 - **WHEN** a string is consumed by `for ... in`
 - **THEN** iteration produces the string's public character units in order
