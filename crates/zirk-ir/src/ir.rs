@@ -200,6 +200,14 @@ pub enum IrType {
     /// collector-tracked WeakCell allocation (design D1/D2), unlike
     /// `Pointer<T>`'s own raw, unmanaged pointer.
     Weak(u32),
+    /// The `*mut Journal` handle an `unsafe { ... }` block's own undo log is
+    /// referred to by (roadmap Phase 4e, `fase-4e-unsafe-journal`, design
+    /// D1/D4) — an ordinary `zirk-runtime`-internal allocation, never a
+    /// collector-tracked one (same category as `Weak<T>`'s WeakCell context
+    /// or `fase-4e-clone`'s memoization table): carries no type parameter,
+    /// unlike `Pointer`/`Weak`, since a journal is opaque to the type it
+    /// guards — it only ever stores and restores raw bytes.
+    JournalHandle,
 }
 
 /// The types that have a nullable form.
@@ -289,6 +297,7 @@ impl IrType {
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
+            IrType::JournalHandle => "JournalHandle",
         }
     }
 
@@ -1032,6 +1041,50 @@ pub enum InstKind {
     /// reads from each object's header, instead of unrolled across several
     /// IR instructions) moved.
     Clone(Operand),
+
+    /// Begins a new per-`unsafe`-block undo log (roadmap Phase 4e,
+    /// `fase-4e-unsafe-journal`, design D1): `journal_begin` on entry to an
+    /// `unsafe { ... }` block. The result is an ordinary local SSA pointer
+    /// value, spilled to a slot like any other cross-block pointer, never a
+    /// GC root — a `zirk-runtime`-internal allocation outside the
+    /// collector's own object model (design D4).
+    JournalBegin,
+    /// Snapshots slot `slot`'s current bytes into `journal`'s undo log,
+    /// immediately before the `Store` it guards executes (design D1/D3) —
+    /// the slot's own static type (already known at this call site from
+    /// [`Slot::ty`]) is what sizes the snapshot; no runtime size discovery.
+    /// Never emitted for a slot declared inside the same `unsafe` block
+    /// (design D1's own exemption): nothing outside the block could observe
+    /// rolling back a write to storage the block itself allocated.
+    JournalRecordSlot {
+        journal: Operand,
+        slot: SlotId,
+    },
+    /// Snapshots object field `index`'s current bytes into `journal`'s undo
+    /// log, immediately before the `StoreField` it guards executes (design
+    /// D1/D3) — sized from the field's own static type. Unlike
+    /// [`InstKind::JournalRecordSlot`], every `StoreField` inside an active,
+    /// not-yet-committed `unsafe` block is journaled unconditionally: a
+    /// field belongs to heap state, not to this function's own lexical
+    /// scoping, so there is no "declared inside the block" exemption to
+    /// apply to it (accepted minor over-journaling, same trade-off design's
+    /// own risk list already accepts for duplicate records).
+    JournalRecordField {
+        journal: Operand,
+        object: Operand,
+        index: u32,
+    },
+    /// Durably commits `journal`: discards the undo log without restoring,
+    /// and frees the journal itself (design D1) — the success path, taken
+    /// both at an `unsafe {}` block's own normal fall-through exit and at
+    /// `commit {}`'s own entry, against the *enclosing* `unsafe` block's
+    /// journal (design D2).
+    JournalCommit(Operand),
+    /// Rolls `journal` back: restores every recorded snapshot in reverse
+    /// order, then discards and frees the log (design D1/D2) — the failure
+    /// path, taken instead of [`InstKind::JournalCommit`] at an `unsafe {}`
+    /// block's own exit check point when an exception is pending.
+    JournalRollback(Operand),
 }
 
 /// An input to an instruction.

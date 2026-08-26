@@ -1,0 +1,44 @@
+class ValidationError implements Throwable {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "VALIDATION";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut c: Counter = Counter(1);
+    try {
+        unsafe {
+            c.value = 42;
+            commit {
+                stdout.println("committing");
+            }
+            throw ValidationError("late failure");
+        }
+    } catch ValidationError(e) {
+        stdout.println(e.message());
+    }
+    stdout.println(c.value);
+}
