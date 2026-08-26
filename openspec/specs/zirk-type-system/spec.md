@@ -618,6 +618,10 @@ The type system SHALL define `Weak<T>`, `Pointer<T>`, `NativeSlice<T>`, `NativeS
 - **WHEN** an expression has type `Task<Result<User, LoadError>>`
 - **THEN** awaiting it has type `Result<User, LoadError>`
 
+#### Scenario: NativeSlice element type is ABI-safe only
+- **WHEN** `NativeSlice<T>`/`NativeSliceMut<T>` is instantiated with an element type outside the ABI-safe subset (`Void`/`Boolean`/fixed-width `Int`/`UInt`/`Float32`/`Float64`/nested `Pointer<T>`)
+- **THEN** the checker rejects the instantiation, naming the unsupported element type
+
 ### Requirement: Derived concurrent capabilities
 Transferability and shareability SHALL be compiler-derived, non-forgeable properties based on the complete reachable type graph, mutability, resource ownership, and synchronization contract.
 

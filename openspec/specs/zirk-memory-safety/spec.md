@@ -61,6 +61,14 @@ Pointer arithmetic SHALL be measured in elements, byte offsets SHALL be explicit
 - **WHEN** native code returns a null `Pointer<T>`
 - **THEN** `is_null` can inspect it without creating a nullable safe reference
 
+#### Scenario: View indexing stays bounds-checked
+- **WHEN** safe code indexes a validated `NativeSlice<T>`/`NativeSliceMut<T>` with an out-of-range position
+- **THEN** the operation fails with a controlled bounds error rather than reading or writing outside the validated extent
+
+#### Scenario: Construction validates before a view exists
+- **WHEN** `pointer.as_slice(length)` or `pointer.as_slice_mut(length)` is called with a null pointer, misaligned address, or unrepresentable extent
+- **THEN** construction returns `Error` and no `NativeSlice<T>`/`NativeSliceMut<T>` value is produced
+
 ### Requirement: Transactional unsafe mutation
 An ordinary unsafe block SHALL isolate and journal writes to Zirk-managed state and validated native ranges, SHALL commit them on success, and SHALL close newly acquired resources and roll them back on a controlled `Error`, exception, runtime trap, or cancellation before commit.
 
