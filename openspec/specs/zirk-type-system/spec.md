@@ -402,7 +402,7 @@ User-defined types SHALL implement language operator contracts through reserved 
 - **THEN** the checker rejects reopening the native type
 
 ### Requirement: Value, enum, array, iteration, and generator semantics
-Records SHALL be immutable with structural field equality; value classes SHALL be distinct domain types without observable identity and SHALL be storable inline; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields.
+Records SHALL be immutable with structural field equality; value classes SHALL be distinct domain types without observable identity and SHALL be storable inline; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
 
 #### Scenario: Enum default and explicit mapping
 - **WHEN** `Direction.North` has no mapping and `Code.North` maps to `"N"`
@@ -419,6 +419,10 @@ Records SHALL be immutable with structural field equality; value classes SHALL b
 #### Scenario: Structural field equality short-circuits on the first difference
 - **WHEN** two `record`/`value class` values differ in their first field
 - **THEN** `==` evaluates `false` without necessarily comparing the remaining fields
+
+#### Scenario: A contract-typed view of a record grants no new identity
+- **WHEN** the same `record` value is held through two separately-produced contract-typed references
+- **THEN** `is` between them is not guaranteed `true`, and neither reference exposes a way to mutate the original value's storage
 
 #### Scenario: String iteration
 - **WHEN** a string is consumed by `for ... in`
