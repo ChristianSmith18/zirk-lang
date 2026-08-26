@@ -149,6 +149,10 @@ pub mod symbols {
     /// order, then discards the log (design D1/D2) —
     /// `InstKind::JournalRollback`'s own lowering.
     pub const JOURNAL_ROLLBACK: &str = "zirk_rt_journal_rollback";
+    /// `pointer.as_slice(length)`/`.as_slice_mut(length)`'s own runtime
+    /// validation (roadmap Phase 4e, `fase-4e-native-slice`, design D3/D5,
+    /// `InstKind::NativeSliceValidate`'s own doc comment).
+    pub const NATIVE_SLICE_VALIDATE: &str = "zirk_rt_native_slice_validate";
 }
 
 /// The runtime functions available to generated code.
@@ -205,6 +209,10 @@ pub struct Runtime<'ctx> {
     pub journal_commit: FunctionValue<'ctx>,
     /// `zirk_rt_journal_rollback` (design D1/D2).
     pub journal_rollback: FunctionValue<'ctx>,
+    /// `zirk_rt_native_slice_validate` (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D3/D5) — one call per
+    /// `.as_slice(length)`/`.as_slice_mut(length)` construction.
+    pub native_slice_validate: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -351,6 +359,20 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let journal_rollback = module.add_function(
         symbols::JOURNAL_ROLLBACK,
         void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    // `zirk_rt_native_slice_validate(pointer, length, elem_size, elem_align,
+    // known_length) -> bool` (roadmap Phase 4e, `fase-4e-native-slice`,
+    // design D3/D5): `known_length` is `i64` with `-1` meaning "opaque
+    // provenance, trusted" (`InstKind::NativeSliceValidate`'s own doc
+    // comment) — a signed width is what makes that sentinel representable
+    // without a separate "is this known" flag.
+    let native_slice_validate = module.add_function(
+        symbols::NATIVE_SLICE_VALIDATE,
+        context.bool_type().fn_type(
+            &[ptr.into(), i64.into(), i64.into(), i64.into(), i64.into()],
+            false,
+        ),
         external,
     );
     // Declared so the allocator can reach it, and marked `noreturn` with the
@@ -508,5 +530,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         journal_record,
         journal_commit,
         journal_rollback,
+        native_slice_validate,
     }
 }

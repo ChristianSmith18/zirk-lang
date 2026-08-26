@@ -1,0 +1,14 @@
+// The "Native view escapes its borrow" scenario (roadmap Phase 4e,
+// `fase-4e-native-slice`, design D4): a `NativeSlice<T>` whose validated
+// owner (`x`, a `Pointer<Int32>` local to this function) ends when the
+// function returns cannot escape either.
+fn make(): NativeSlice<Int32> {
+    mut x: Int32 = 1;
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        return p.as_slice(1).unwrap();
+    }
+}
+
+fn main(): Void {
+}

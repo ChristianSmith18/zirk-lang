@@ -195,4 +195,14 @@ pub mod codes {
     /// `fase-4e-clone`, design D1/D4). Named after the specific offending
     /// field/transitive path, not a generic "not Clone" message.
     pub const NOT_CLONE: Code = Code::new("E0450");
+    /// `expr[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design D5)
+    /// on a receiver type the checker's indexing dispatch table has no
+    /// entry for — a parse-time-valid expression the checker rejects,
+    /// naming the receiver type (spec scenario "Indexing an unsupported
+    /// receiver type is a checker error, not a parse error").
+    pub const INDEXING_NOT_SUPPORTED: Code = Code::new("E0451");
+    /// `view[i] = x` where `view`'s indexing entry does not permit a write
+    /// (roadmap Phase 4e, `fase-4e-native-slice`, design D5) — today, a
+    /// `NativeSlice<T>` (read-only) on the left of `=`.
+    pub const INDEX_NOT_WRITABLE: Code = Code::new("E0452");
 }

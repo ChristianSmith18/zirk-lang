@@ -57,23 +57,26 @@ fn instructions(function: &Function) -> Vec<InstKind> {
         .collect()
 }
 
-/// The fixed `code()` strings of the four native failure classes
-/// (`fase-4d-runtimeerror`, design D8), in the order
+/// The fixed `code()` strings of the native failure classes
+/// (`fase-4d-runtimeerror`, design D8; roadmap Phase 4e,
+/// `fase-4e-native-slice`, two more), in the order
 /// `Checker::register_native_exception_hierarchy` registers the classes and
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
-/// string table starts with these four, whether or not the program itself
-/// ever names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 4] = [
+/// string table starts with these, whether or not the program itself ever
+/// names one of the classes or triggers a native check.
+const NATIVE_FAILURE_CODES: [&str; 6] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
     "E_FLOAT_NAN",
+    "E_INDEX_OUT_OF_BOUNDS",
+    "E_NATIVE_ERROR",
 ];
 
 const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
 
 /// The module string table a program's own literals produce, prefixed by
-/// the four always-present native failure codes above.
+/// the always-present native failure codes above.
 fn native_failure_codes_then<const N: usize>(rest: [&str; N]) -> Vec<String> {
     NATIVE_FAILURE_CODES
         .iter()
@@ -137,11 +140,11 @@ fn a_boolean_literal_lowers_to_a_constant() {
 #[test]
 fn a_string_literal_goes_into_the_module_table() {
     let module = compile("fn main(): Void { mut x: String = \"hola\"; }");
-    // The four native failure classes' own `code()` bodies
+    // The native failure classes' own `code()` bodies
     // (`fase-4d-runtimeerror`, design D8) intern their fixed code strings
     // unconditionally, the same way `UNREACHABLE_ABSTRACT_METHOD` is always
     // synthesized whether or not a program ever names an `abstract class` —
-    // so every module's string table starts with those four, regardless of
+    // so every module's string table starts with those, regardless of
     // what the program itself writes.
     assert_eq!(module.strings, native_failure_codes_then(["hola"]));
 }
@@ -1774,5 +1777,133 @@ fn an_exception_escaping_unsafe_emits_journal_rollback() {
             .iter()
             .any(|k| matches!(k, InstKind::JournalRollback(_))),
         "an exception escaping the block must roll back, found {kinds:?}"
+    );
+}
+
+// --- NativeSlice<T>/NativeSliceMut<T> (roadmap Phase 4e, `fase-4e-native-slice`) --
+
+/// `pointer.as_slice(length)` lowers to a validation call
+/// (`InstKind::NativeSliceValidate`) producing a `Result` — design D1/D3.
+#[test]
+fn as_slice_construction_lowers_to_a_validation_call_producing_a_result() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        mut view: NativeSlice<Int32> = unsafe {
+            mut p: Pointer<Int32> = Pointer.from(x);
+            p.as_slice(1).unwrap()
+        };
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::NativeSliceValidate { .. })),
+        "as_slice must lower through a validation call, found {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::BuildEnum { .. })),
+        "as_slice must build a Result value, found {kinds:?}"
+    );
+}
+
+/// `view[i]` (read) lowers to a bounds check (a comparison against the
+/// carried length) followed by the actual load — design D2/D3/D5.
+#[test]
+fn index_read_lowers_to_a_bounds_check_then_a_load() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        mut view: NativeSlice<Int32> = unsafe {
+            mut p: Pointer<Int32> = Pointer.from(x);
+            p.as_slice(1).unwrap()
+        };
+        mut v: Int32 = view[0];
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(
+            k,
+            InstKind::Binary {
+                op: BinaryOp::GtEq,
+                ..
+            }
+        )),
+        "an index read must lower through a bounds comparison, found {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::NativeSliceLoad { .. })),
+        "an index read must lower to NativeSliceLoad, found {kinds:?}"
+    );
+}
+
+/// `view[i] = value` (write) lowers to the same bounds check followed by an
+/// actual store, only ever against a `NativeSliceMut<T>` receiver.
+#[test]
+fn index_write_lowers_to_a_bounds_check_then_a_store() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        mut view: NativeSliceMut<Int32> = unsafe {
+            mut p: Pointer<Int32> = Pointer.from(x);
+            p.as_slice_mut(1).unwrap()
+        };
+        view[0] = 42;
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(
+            k,
+            InstKind::Binary {
+                op: BinaryOp::GtEq,
+                ..
+            }
+        )),
+        "an index write must lower through a bounds comparison, found {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::NativeSliceStore { .. })),
+        "an index write must lower to NativeSliceStore, found {kinds:?}"
+    );
+}
+
+/// A `NativeSlice<T>`/`NativeSliceMut<T>`-typed slot is never a gc root
+/// (design D2): a view is a plain two-word `(pointer, length)` pair, not a
+/// collector-tracked allocation, confirmed rather than assumed the same way
+/// `fase-4e-weak`'s own task 2.3 checked `WeakUpgrade`'s result.
+#[test]
+fn a_native_slice_slot_is_never_a_gc_root() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        mut view: NativeSlice<Int32> = unsafe {
+            mut p: Pointer<Int32> = Pointer.from(x);
+            p.as_slice(1).unwrap()
+        };
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+
+    let has_native_slice_root = main.gc_roots.iter().any(|&id| {
+        matches!(
+            main.slot(id).unwrap().ty,
+            IrType::NativeSlice(_) | IrType::NativeSliceMut(_)
+        )
+    });
+    assert!(
+        !has_native_slice_root,
+        "a NativeSlice-typed slot must never be a gc root, gc_roots={:?}",
+        main.gc_roots
     );
 }
