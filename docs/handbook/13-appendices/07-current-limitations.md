@@ -68,9 +68,17 @@ Current high-impact delivery limits include:
   native-library-linking manifest, and general provenance tracking for a
   view's known extent beyond the one recognized syntactic shape also
   remain.
-- Several Phase 3 constructs parse and type-check more broadly than they lower:
-  user generic contracts/enums, abstract-class dynamic dispatch, value-type
-  contract dispatch, and derived structural equality require remaining stages.
+- Several Phase 3 constructs parse and type-check more broadly than they lower.
+  Delivered since: a user-declared `abstract class` now dispatches dynamically
+  through its concrete adopters (`fase-3-abstract-dispatch`), reusing the same
+  vtable mechanism the compiler's own `Throwable` hierarchy already proved —
+  fixing, along the way, three latent gaps in the general class-declaration
+  path (method `overridden` flags never set for a user abstract class,
+  method-index seeding scoped only to the three native exception classes,
+  hierarchy ordering that ignored `implements`) and a pre-existing diagnostic
+  bug (`MISSING_OVERRIDE` reported instead of `MISSING_IMPLEMENTATION` when no
+  override at all was supplied). Still required: user generic contracts,
+  value-type contract dispatch, and derived structural equality.
 - `Float128` arithmetic lacks complete Windows verification and `Float128`
   currently lacks `to_string()` support.
 - Standard-library, structured-concurrency, packaging, developer-tooling,
