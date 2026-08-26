@@ -1,20 +1,35 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Zirk is a compiled language implemented in Rust with an LLVM 20 backend.
+  Public language documentation lives under docs/handbook, while implementation
+  status is reported through Feature Status, Current Limitations, the compiler
+  pipeline, the handbook roadmap, and docs/init/ZIRK_ROADMAP.md.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  The companion public website is maintained in the sibling repository
+  ../zirk-lang-site. It imports the handbook and project-status evidence from an
+  exact clean zirk-lang commit. Its source descriptors pin the commit, handbook
+  digest, public document count, and checksums for the six status sources.
+
+  Any change that affects public documentation, normative behavior, compiler or
+  toolchain delivery status, limitations, phase status, roadmap wording, or a
+  public example must update zirk-lang-site in the same workstream. Do not mark
+  that work complete while the website still describes an older public state.
+
+  After the relevant zirk-lang changes are committed, run
+  ./scripts/sync-website-content.sh. If any project-status evidence changed,
+  review the website's site-owned status catalog and pass an explicit reviewed
+  date with --audit-date YYYY-MM-DD. The script updates mechanical hashes and
+  generated content; it does not infer or approve public implementation claims.
+
+rules:
+  proposal:
+    - State whether the change affects public documentation, syntax examples, normative semantics, implementation status, limitations, or roadmap content.
+    - When public content or status is affected, include ../zirk-lang-site as an impacted companion repository and describe the required website update.
+  design:
+    - Preserve the distinction between normative Zirk 1.x behavior, the currently delivered compiler subset, active work, and future roadmap scope.
+    - Treat website status copy as reviewed content; never derive implementation claims from source presence, commits, documentation existence, or OpenSpec task counts alone.
+  tasks:
+    - For public documentation or status changes, include tasks to update the authoritative zirk-lang documents first, commit them, run ./scripts/sync-website-content.sh, review the zirk-lang-site diff, and validate both repositories.
+    - If project-status evidence changes, require a human review of the zirk-lang-site status catalog and an explicit --audit-date YYYY-MM-DD.
+    - Keep commits for zirk-lang and zirk-lang-site separate and report both revisions so the synchronization is auditable.
