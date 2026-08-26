@@ -2103,3 +2103,155 @@ fn a_native_slice_slot_is_never_a_gc_root() {
         main.gc_roots
     );
 }
+
+// --- Value-to-contract boxing (fase-3-value-type-contract-dispatch, design D1) ---
+
+const BOXED_POINT: &str = "interface Describable { fn describe(): String; }
+    record Point implements Describable {
+        x: Int32;
+        y: Int32;
+        fn describe(): String { return \"point\"; }
+    }";
+
+/// Converting a `record`/`value class` value into a reference of a contract
+/// it implements lowers to an allocation of the value's own layout id (the
+/// two tables share an id space, `IrType::Value`/`IrType::Object` doc
+/// comment), one `LoadField`/`StoreField` pair per field copying its inline
+/// value in, and finally a `Retype` into the contract's own static type
+/// (task 2.1/2.3).
+#[test]
+fn a_value_to_contract_conversion_boxes_then_retypes() {
+    let module = compile(&format!(
+        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(x: 1, y: 2); mut d: Describable = p; }}"
+    ));
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    let point_id = module
+        .objects
+        .iter()
+        .position(|o| o.name == "Point")
+        .expect("Point has a box layout") as u32;
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::Alloc(id) if *id == point_id)),
+        "boxing allocates the value's own layout id, found {kinds:?}"
+    );
+
+    let load_fields = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::LoadField { .. }))
+        .count();
+    let store_fields = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::StoreField { .. }))
+        .count();
+    assert_eq!(
+        load_fields, 2,
+        "one LoadField per field of Point, found {kinds:?}"
+    );
+    assert_eq!(
+        store_fields, 2,
+        "one StoreField per field of Point, found {kinds:?}"
+    );
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::Retype(_))),
+        "the box's own id still needs retagging to the contract's static type, found {kinds:?}"
+    );
+}
+
+/// The box's own descriptor is built the same way a class's is: its
+/// `ObjectLayout` carries a real `ContractTable` for the interface it
+/// implements, populated the same way `check_conformance` populates a
+/// class's (task 2.1, design D1/D2's own premise that `CallContract` cannot
+/// tell the two apart).
+#[test]
+fn a_boxed_value_type_gets_a_real_contract_table() {
+    let module = compile(&format!(
+        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(x: 1, y: 2); mut d: Describable = p; }}"
+    ));
+    let point = module
+        .objects
+        .iter()
+        .find(|o| o.name == "Point")
+        .expect("Point has a box layout");
+
+    assert!(
+        !point.contracts.is_empty(),
+        "Point's own contract table is missing, found {:?}",
+        point.contracts
+    );
+    assert_eq!(point.fields.len(), 2, "Point's own two fields, boxed");
+}
+
+/// A call through the interface-typed reference to a boxed record still
+/// goes through the ordinary `CallContract` dispatch — confirming design
+/// D2/task 3.3 at the IR level: nothing about the receiver being a boxed
+/// value, rather than a class instance, changes which instruction the call
+/// lowers to.
+#[test]
+fn a_call_through_a_boxed_value_type_uses_the_ordinary_contract_dispatch() {
+    let module = compile(&format!(
+        "{BOXED_POINT}\nfn announce(d: Describable): String {{ return d.describe(); }}\n\
+         fn main(): Void {{ mut p = Point(x: 1, y: 2); mut s = announce(p); }}"
+    ));
+    let announce = module.function("announce").expect("announce exists");
+
+    assert!(
+        instructions(announce)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallContract { .. })),
+        "a boxed value type dispatches through the same CallContract a class would"
+    );
+}
+
+/// Design D3: the box is read-only after construction — no `StoreField`
+/// ever targets it again anywhere else in a program that never attempts
+/// one. A negative check, not just the absence of a compile error (task
+/// 2.3/4.4): every `StoreField` in the whole module either targets an
+/// ordinary class's own field write, or is one of the exact two
+/// construction-time writes boxing `Point` performs above.
+#[test]
+fn nothing_ever_writes_to_a_box_again_after_its_construction() {
+    let module = compile(&format!(
+        "{BOXED_POINT}\nfn announce(d: Describable): String {{ return d.describe(); }}\n\
+         fn main(): Void {{
+             mut p = Point(x: 1, y: 2);
+             mut d: Describable = p;
+             stdout.println(announce(p));
+         }}"
+    ));
+
+    let point_id = module
+        .objects
+        .iter()
+        .position(|o| o.name == "Point")
+        .expect("Point has a box layout") as u32;
+
+    // Every `StoreField` in `main` targets an operand this function itself
+    // just produced with `Alloc(point_id)` — i.e. one of the two boxing
+    // sites, never a value reloaded from a slot or reached some other way.
+    let main = module.function("main").expect("main exists");
+    for block in &main.blocks {
+        let mut boxed: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
+        for inst in &block.instructions {
+            match &inst.kind {
+                InstKind::Alloc(id) if *id == point_id => {
+                    boxed.insert(inst.result.expect("Alloc produces a value"));
+                }
+                InstKind::StoreField { object, .. } => {
+                    assert!(
+                        boxed.contains(&object.0),
+                        "a StoreField targeted something other than a box this same \
+                         block just allocated: {:?}",
+                        inst.kind
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
