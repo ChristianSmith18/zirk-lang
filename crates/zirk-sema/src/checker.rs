@@ -1892,7 +1892,21 @@ impl<'a> Checker<'a> {
         }
 
         for method in &required_methods {
-            let Some(supplied) = self.classes[class as usize].method(&method.name).cloned() else {
+            // `Self::declare_class_members` seeds `class`'s own flattened
+            // method list from the abstract class's (D1/D3, so every adopter
+            // shares its virtual index) before this runs, so `.method(...)`
+            // below finds an entry even when `class` never wrote an
+            // `override` at all — still exactly the abstract's own
+            // placeholder, `owner == abstract_id`, unless some declaration
+            // in `class`'s own chain replaced it. Treating that placeholder
+            // as "supplied" would turn a genuinely missing override into a
+            // spurious `MISSING_OVERRIDE` pointing at the abstract class's
+            // own declaration instead of the right `MISSING_IMPLEMENTATION`.
+            let supplied = self.classes[class as usize]
+                .method(&method.name)
+                .filter(|m| m.owner != abstract_id)
+                .cloned();
+            let Some(supplied) = supplied else {
                 self.error(
                     codes::MISSING_IMPLEMENTATION,
                     at,
@@ -2423,8 +2437,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The declarations ordered so a class always follows its base.
-    fn in_hierarchy_order<'p>(&self, program: &'p Program) -> Vec<&'p ClassDecl> {
+    /// The declarations ordered so a class always follows its base, and
+    /// follows any `abstract class` it `implements` too.
+    ///
+    /// The latter is what lets [`Self::declare_class_members`] seed an
+    /// adopter's flattened method list from the abstract class's own (the
+    /// same way it already seeds from `base`): that seeding reads
+    /// `self.classes[abstract_id].methods`, which is only populated once
+    /// *that* class has had its own turn through
+    /// [`Self::declare_class_members`]. Ignoring `implements` here — as a
+    /// version of this ordering that only looked at `base` did — would seed
+    /// from whatever the abstract class's methods happened to be zero-valued
+    /// at (the pre-declaration default) whenever the adopter is declared
+    /// earlier in the file than the abstract class it implements.
+    fn in_hierarchy_order<'p>(&mut self, program: &'p Program) -> Vec<&'p ClassDecl> {
         let mut ordered: Vec<&ClassDecl> = Vec::new();
         let mut pending: Vec<&ClassDecl> = program.classes.iter().collect();
 
@@ -2433,7 +2459,7 @@ impl<'a> Checker<'a> {
         while !pending.is_empty() {
             let mut placed = Vec::new();
             pending.retain(|decl| {
-                let ready = match self
+                let base_ready = match self
                     .class_id(&decl.name.name)
                     .map(|id| self.classes[id as usize].base)
                 {
@@ -2442,6 +2468,21 @@ impl<'a> Checker<'a> {
                         .any(|d| self.class_id(&d.name.name) == Some(base)),
                     _ => true,
                 };
+                let implements_ready = decl.implements.iter().all(|named| {
+                    let resolved = self.resolved_name(&named.name, named.span);
+                    match self
+                        .classes
+                        .iter()
+                        .position(|c| c.name == resolved && c.kind == ClassKind::Abstract)
+                        .map(|i| i as u32)
+                    {
+                        Some(abstract_id) => ordered
+                            .iter()
+                            .any(|d| self.class_id(&d.name.name) == Some(abstract_id)),
+                        None => true,
+                    }
+                });
+                let ready = base_ready && implements_ready;
                 if ready {
                     placed.push(*decl);
                 }
@@ -2473,14 +2514,13 @@ impl<'a> Checker<'a> {
             ClassKind::Class => {}
             ClassKind::Abstract => {
                 // Nothing to lower on its own — no `construct`, no state, no
-                // layout — but a value typed through it would need dynamic
-                // dispatch through its adopter the way a contract's does,
-                // and that path does not exist for it yet.
-                self.not_lowered(
-                    decl.name.span,
-                    "an abstract class",
-                    "implement its requirements directly on the concrete class for now, without naming the abstract class as a type",
-                );
+                // layout. A value typed through it dispatches dynamically
+                // through its adopter, the same mechanism the native
+                // `Throwable` hierarchy already uses: every method declared
+                // here is unconditionally `overridden` (below), and every
+                // adopter seeds its own flattened method list from this
+                // class's (below too), so `CallVirtual` has a shared index to
+                // read regardless of which concrete adopter is behind it.
             }
             // A record or value class lowers to an inline value (roadmap
             // task 11.5) — but only a non-generic one: combining that with
@@ -2603,32 +2643,39 @@ impl<'a> Checker<'a> {
 
         // Seeded here too, ahead of `check_conformance` (which resolves
         // `implements` generally, too late for this): a class implementing
-        // one of the compiler-known `Error`/`Throwable`/`RuntimeError`
-        // (roadmap Phase 4b) needs its `message`/`code`/`cause`/
-        // `stack_trace` slots to land at the *same* indices those classes
-        // themselves use, or `overridden: true` virtual dispatch through a
-        // value statically typed as one of them (`catch Throwable(e)`,
-        // `e.message()`) calls whatever happens to sit at that index in an
-        // unrelated class instead. Scoped narrowly to these three specific
-        // ids — not a general "seed from every implemented abstract class"
-        // change, which would need its own conflict/diamond resolution this
-        // pass does not build.
-        if let Some(native) = self.native_exceptions {
-            for named in &decl.implements {
-                let resolved = self.resolved_name(&named.name, named.span);
-                let Some(id) = self
-                    .classes
-                    .iter()
-                    .position(|c| c.name == resolved)
-                    .map(|i| i as u32)
-                else {
-                    continue;
-                };
-                if (id == native.error || id == native.throwable || id == native.runtime_error)
-                    && methods.is_empty()
-                {
-                    methods = self.classes[id as usize].methods.clone();
-                }
+        // an `abstract class` — the compiler-known `Error`/`Throwable`/
+        // `RuntimeError` (roadmap Phase 4b) included, since those are
+        // `ClassKind::Abstract` too and this subsumes their old
+        // three-id-only special case — needs its required methods to land
+        // at the *same* indices the abstract class itself uses, or the
+        // `overridden: true` virtual dispatch through a value statically
+        // typed as the abstract class (`catch Throwable(e)`, `e.message()`;
+        // a user `Shape`'s `e.area()`) calls whatever happens to sit at that
+        // index in an unrelated class instead.
+        //
+        // Scoped to a single abstract class per adopter — the first one
+        // found while `methods` is still empty, mirroring how the old
+        // three-id-only version already behaved when a class named more
+        // than one of them — since reconciling *several* abstract classes'
+        // method lists into one adopter's table is a conflict/diamond
+        // resolution problem this pass does not build (`design.md`'s
+        // explicitly out-of-scope "multiple abstract-class inheritance").
+        // `Self::in_hierarchy_order` guarantees the abstract class named
+        // here has already had its own turn through this function, so its
+        // `methods` below is the real flattened list, not the pre-
+        // declaration default.
+        for named in &decl.implements {
+            let resolved = self.resolved_name(&named.name, named.span);
+            let Some(id) = self
+                .classes
+                .iter()
+                .position(|c| c.name == resolved && c.kind == ClassKind::Abstract)
+                .map(|i| i as u32)
+            else {
+                continue;
+            };
+            if methods.is_empty() {
+                methods = self.classes[id as usize].methods.clone();
             }
         }
 
@@ -2677,7 +2724,15 @@ impl<'a> Checker<'a> {
                 span: method.name.span,
                 index: 0,
                 owner: id,
-                overridden: false,
+                // An abstract class's own method has no body of its own
+                // (rejected above if it tried to write one): every adopter
+                // necessarily supplies its own override, so a call through a
+                // value statically typed as the abstract class always needs
+                // `CallVirtual`, the same way the native `Throwable`
+                // hierarchy's own methods are unconditionally `overridden:
+                // true` at registration (`checker.rs`'s
+                // `register_native_exception_hierarchy`).
+                overridden: decl.kind == ClassKind::Abstract,
                 from_contract: None,
                 throws,
             };
