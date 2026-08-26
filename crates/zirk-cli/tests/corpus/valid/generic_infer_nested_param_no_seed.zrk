@@ -1,0 +1,35 @@
+// `fase-3-generic-substitution-recursion`, `Checker::infer_type_params`
+// (design D2): with no expected-type annotation to seed `T` from, `w`'s own
+// declaration must infer `OnlyBox<T>`'s `T` purely from `Wrap`'s constructor
+// argument, whose declared type (`Box<T>`) nests it inside another generic
+// instantiation rather than naming it directly. Before this fix,
+// `infer_type_params` only matched a parameter type that was directly
+// `Base::Param`, so `T` was never solved here (`Wrap` cannot infer `T`), and
+// `substitute` separately left `Box<T>` unsubstituted even where a solution
+// was known, rejecting the assignment against `Box<Int32>` regardless.
+enum Box<T> {
+    Full(value: T),
+    Empty,
+}
+
+enum OnlyBox<T> {
+    Wrap(value: Box<T>),
+}
+
+fn unwrap(b: Box<Int32>): String {
+    return match b {
+        Box.Full(v) => "full:" + v.to_string();
+        Box.Empty => "empty";
+    };
+}
+
+fn describe(w: OnlyBox<Int32>): String {
+    return match w {
+        OnlyBox.Wrap(value) => unwrap(value);
+    };
+}
+
+fn main(): Void {
+    mut w = OnlyBox.Wrap(Box.Full(9));
+    stdout.println(describe(w));
+}
