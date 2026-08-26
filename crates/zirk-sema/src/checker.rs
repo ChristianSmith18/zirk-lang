@@ -3282,7 +3282,30 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let type_params = self.enter_type_params(&decl.type_params);
+        // Unlike a function's or method's, an enum's own type parameters
+        // (fase-3-generic-enums) are not gated `NOT_LOWERED`: `enter_type_params`
+        // reports that unconditionally on first use, which is right for a
+        // generic function (truly unimplemented) but wrong here, since a
+        // generic enum's `T` lowers by direct substitution the same way a
+        // class's own does — a class avoids the same blanket gate by minting
+        // its type parameter ids through `Self::mint_type_param_ids` instead
+        // (see `Self::register_class`), so an enum does the same here rather
+        // than going through `enter_type_params`.
+        let type_params = self.mint_type_param_ids(&decl.type_params);
+        self.type_param_scope.push(
+            decl.type_params
+                .iter()
+                .zip(&type_params)
+                .map(|(p, &id)| (p.name.name.clone(), id))
+                .collect(),
+        );
+        self.report_declared_variance(&decl.type_params);
+        for (p, &id) in decl.type_params.iter().zip(&type_params) {
+            let constraints: Vec<Type> =
+                p.constraints.iter().map(|c| self.resolve_type(c)).collect();
+            self.type_params[id as usize].constraints = constraints;
+        }
+
         let mut variants: Vec<EnumVariantInfo> = Vec::new();
         for variant in &decl.variants {
             if variants.iter().any(|v| v.name == variant.name.name) {
@@ -4342,23 +4365,14 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // `Iteration<T>`, written as `next()`'s return type, and `Result<T,E>`
-        // (roadmap Phase 4a) are the generic enum instantiations that lower:
-        // a dedicated specialization pass builds one concrete `EnumLayout`
-        // per instantiation the program actually names, the same way a
-        // generic class's does (roadmap task 13.5/11.1).
-        let is_native = self
-            .native_iteration
-            .is_some_and(|n| enum_id == n.iteration)
-            || self.native_result == Some(enum_id);
-        if !is_native {
-            self.not_lowered(
-                reference.span,
-                "a generic enum instantiation",
-                "name the enum without `<...>` for now, or model the concrete case as its own type",
-            );
-        }
-
+        // `Iteration<T>` and `Result<T,E>` were the first generic enum
+        // instantiations verified to lower: a dedicated specialization pass
+        // (`specialize_enum`, `zirk-ir`) builds one concrete `EnumLayout` per
+        // instantiation the program actually names, the same way a generic
+        // class's does (roadmap task 13.5/11.1). That pass runs generically
+        // over every enum instantiation `checked.enum_instances` records, so
+        // a user-declared generic enum lowers the same way (fase-3-generic-
+        // enums) — there is nothing native-specific left to gate here.
         Type::of(Base::EnumInstance(
             self.intern_enum_instance(GenericEnumInstance { enum_id, args }),
         ))

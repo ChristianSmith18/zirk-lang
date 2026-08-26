@@ -1272,6 +1272,83 @@ fn destructuring_a_variant_reads_its_flattened_fields() {
     );
 }
 
+// --- Enums genéricos declarados por el usuario (fase-3-generic-enums) -------
+
+#[test]
+fn a_user_generic_enum_instantiated_twice_produces_two_independent_layouts() {
+    // Design D2's baseline shape: a single-type-parameter user enum
+    // instantiated at two different type arguments in the same program.
+    // `specialize_enum` (`zirk-ir/src/lower.rs`) must build one concrete
+    // `EnumLayout` per distinct instantiation the program actually names.
+    let module = compile(
+        "enum Box<T> { Full(value: T), Empty }
+         fn main(): Void {
+             mut a: Box<Int32> = Box.Full(1);
+             mut b: Box<String> = Box.Full(\"x\");
+         }",
+    );
+
+    let boxes: Vec<_> = module
+        .enums
+        .iter()
+        .filter(|e| e.name.starts_with("Box$"))
+        .collect();
+    assert_eq!(
+        boxes.len(),
+        2,
+        "two distinct instantiations, two distinct layouts: {:#?}",
+        module.enums
+    );
+}
+
+#[test]
+fn a_user_generic_enum_named_twice_at_the_same_type_reuses_one_layout() {
+    // The other half of D2's baseline shape: naming the *same* instantiation
+    // more than once must not produce a duplicate layout — the checker's own
+    // `intern_enum_instance` already deduplicates by structural equality
+    // before `specialize_enum` ever runs, so this is a property of
+    // `checked.enum_instances`, not something `specialize_enum` has to
+    // re-derive.
+    let module = compile(
+        "enum Box<T> { Full(value: T), Empty }
+         fn one(): Box<Int32> { return Box.Full(1); }
+         fn two(): Box<Int32> { return Box.Full(2); }
+         fn main(): Void { }",
+    );
+
+    let boxes: Vec<_> = module
+        .enums
+        .iter()
+        .filter(|e| e.name.starts_with("Box$"))
+        .collect();
+    assert_eq!(
+        boxes.len(),
+        1,
+        "one instantiation named twice is still one layout: {:#?}",
+        module.enums
+    );
+}
+
+#[test]
+fn a_multi_type_parameter_user_enum_specializes_both_parameters() {
+    // Design D2's second baseline shape: more than one type variable per
+    // instantiation.
+    let module = compile(
+        "enum Either<L, R> { Left(value: L), Right(value: R) }
+         fn main(): Void {
+             mut a: Either<Int32, String> = Either.Left(1);
+         }",
+    );
+
+    let layout = module
+        .enums
+        .iter()
+        .find(|e| e.name.starts_with("Either$"))
+        .expect("Either<Int32, String> has its own layout");
+    assert_eq!(layout.fields.len(), 2, "one field per variant's payload");
+    assert_eq!(layout.variants.len(), 2);
+}
+
 // --- Casts comprobados (roadmap task 11.6) -----------------------------------
 
 const ANIMALS: &str = "class Animal { construct() { } }
