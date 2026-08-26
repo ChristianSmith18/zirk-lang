@@ -1,0 +1,43 @@
+// `fase-3-generic-substitution-recursion`: a generic enum's own variant
+// payload naming another generic instantiation containing the enum's type
+// parameter (`Wrapper<T> { Inner(value: Box<T>) }`, the `Bar<Baz<T>>` shape
+// `fase-3-generic-enums` reported and left unfixed). Before the checker fix,
+// `Wrapper.Inner(Box.Full(9))` constructed against expected `Wrapper<Int32>`
+// failed: `substitute(Box<T>, {T: Int32})` left `Box<T>` unchanged because
+// its own top-level type was `EnumInstance`, not `Param`, so
+// `expect_assignable` saw `Box<Int32>` where it expected the
+// never-substituted `Box<T>`. Fixing that alone was not sufficient to run
+// this program: `zirk-ir`'s own `specialize_enum` had the identical shallow
+// bug in a separate, local substitution — fixed alongside the checker fix
+// (see `substitute_generic_type` in `crates/zirk-ir/src/lower.rs`) so a
+// nested payload's field resolves to the right specialized layout instead of
+// the still-generic template's.
+enum Box<T> {
+    Full(value: T),
+    Empty,
+}
+
+enum Wrapper<T> {
+    Inner(value: Box<T>),
+}
+
+fn unwrap(b: Box<Int32>): String {
+    return match b {
+        Box.Full(v) => "full:" + v.to_string();
+        Box.Empty => "empty";
+    };
+}
+
+fn describe(w: Wrapper<Int32>): String {
+    return match w {
+        Wrapper.Inner(value) => unwrap(value);
+    };
+}
+
+fn main(): Void {
+    mut a: Wrapper<Int32> = Wrapper.Inner(Box.Full(9));
+    mut b: Wrapper<Int32> = Wrapper.Inner(Box.Empty);
+
+    stdout.println(describe(a));
+    stdout.println(describe(b));
+}

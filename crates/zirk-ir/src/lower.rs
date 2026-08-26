@@ -744,11 +744,112 @@ fn specialize_class(
     }
 }
 
+/// Replaces `T` in `ty` per `subst`, recursing into a nested
+/// `Base::EnumInstance`/`Base::ContractInstance`/`Base::Instance`'s own type
+/// arguments at any depth — the `specialize_enum`-side counterpart of the
+/// checker's `Checker::substitute_type` (`zirk-sema/src/checker.rs`).
+///
+/// Unlike the checker's version this cannot *intern* a new instance —
+/// `checked` is a finished, immutable table by the time lowering runs — so a
+/// substituted nested instantiation is looked up by structural equality
+/// instead. It is always found: whatever concrete nested instantiation a
+/// verified program's substitution produces (`Box<T>` becoming `Box<Int32>`
+/// inside `Wrapper<T>`'s own payload, `fase-3-generic-substitution-recursion`)
+/// was already interned during checking by the very fix
+/// (`Checker::substitute`'s own recursive case) that lets such a program
+/// pass the checker at all — a lookup miss here would mean the checker
+/// accepted a combination it never actually recorded, which is a checker bug
+/// to fix there, not a case to paper over here by leaving `ty` unsubstituted
+/// (that is exactly the shallow bug this function replaces: an unsubstituted
+/// nested instantiation silently pointed lowering at the wrong specialized
+/// layout instead of failing loudly).
+fn substitute_generic_type(checked: &CheckedProgram, ty: Type, subst: &[(u32, Type)]) -> Type {
+    if let Base::Param(id) = ty.base
+        && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
+    {
+        return if ty.nullable {
+            replacement.as_nullable()
+        } else {
+            replacement
+        };
+    }
+
+    let base = match ty.base {
+        Base::ContractInstance(inst_id) => {
+            let instance = checked.contract_instances[inst_id as usize].clone();
+            let args: Vec<Type> = instance
+                .args
+                .iter()
+                .map(|&a| substitute_generic_type(checked, a, subst))
+                .collect();
+            let found = checked
+                .contract_instances
+                .iter()
+                .position(|i| i.contract == instance.contract && i.args == args)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a verified program only substitutes into a contract instantiation the checker already interned"
+                    )
+                });
+            Base::ContractInstance(found as u32)
+        }
+        Base::EnumInstance(inst_id) => {
+            let instance = checked.enum_instances[inst_id as usize].clone();
+            let args: Vec<Type> = instance
+                .args
+                .iter()
+                .map(|&a| substitute_generic_type(checked, a, subst))
+                .collect();
+            let found = checked
+                .enum_instances
+                .iter()
+                .position(|i| i.enum_id == instance.enum_id && i.args == args)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a verified program only substitutes into an enum instantiation the checker already interned"
+                    )
+                });
+            Base::EnumInstance(found as u32)
+        }
+        Base::Instance(inst_id) => {
+            let instance = checked.generic_instances[inst_id as usize].clone();
+            let args: Vec<Type> = instance
+                .args
+                .iter()
+                .map(|&a| substitute_generic_type(checked, a, subst))
+                .collect();
+            let found = checked
+                .generic_instances
+                .iter()
+                .position(|i| i.class == instance.class && i.args == args)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a verified program only substitutes into a class instantiation the checker already interned"
+                    )
+                });
+            Base::Instance(found as u32)
+        }
+        _ => return ty,
+    };
+
+    Type {
+        base,
+        nullable: ty.nullable,
+    }
+}
+
 /// One generic enum's own `T` replaced by one instantiation's concrete
 /// arguments (roadmap task 13.5) — the enum equivalent of
 /// [`specialize_class`], for the same reason: `Iteration<T>`'s payload is
 /// inline, so its representation genuinely depends on `T` the way a
 /// contract's dispatch table never does.
+///
+/// Recurses into a variant payload that nests `T` inside another generic
+/// instantiation (`Bar<Baz<T>>`, `fase-3-generic-substitution-recursion`) via
+/// [`substitute_generic_type`] — unlike [`specialize_class`], nothing gates a
+/// generic enum's own lowering to the directly-named-`T` case, so this one
+/// has always needed to handle the nested shape once the checker itself
+/// stopped rejecting it.
 fn specialize_enum(
     checked: &CheckedProgram,
     instance: zirk_sema::GenericEnumInstance,
@@ -762,19 +863,6 @@ fn specialize_enum(
         .zip(instance.args.iter().copied())
         .collect();
 
-    let substitute = |ty: Type| -> Type {
-        if let Base::Param(id) = ty.base
-            && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
-        {
-            return if ty.nullable {
-                replacement.as_nullable()
-            } else {
-                replacement
-            };
-        }
-        ty
-    };
-
     EnumType {
         name: format!("{}${}", original.name, index),
         variants: original
@@ -785,7 +873,7 @@ fn specialize_enum(
                     .associated
                     .iter()
                     .map(|f| AssociatedFieldInfo {
-                        ty: substitute(f.ty),
+                        ty: substitute_generic_type(checked, f.ty, &subst),
                         ..f.clone()
                     })
                     .collect(),

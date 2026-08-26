@@ -1,0 +1,41 @@
+// `fase-3-generic-substitution-recursion` (design's own flagged risk): the
+// recursive unification/substitution must work at any nesting depth, not
+// just one level — verified here with a declared parameter type that nests
+// the type parameter two levels deep (`Box<Box<T>>`), not the single level
+// `generic_infer_nested_param_no_seed.zrk` already covers. `w` also carries
+// no expected-type annotation, so `T` is solvable only by `infer_type_params`
+// walking `Box<Box<T>>` two levels deep against the argument's actual
+// `Box<Box<Int32>>`.
+enum Box<T> {
+    Full(value: T),
+    Empty,
+}
+
+enum OnlyBox<T> {
+    Wrap(value: Box<Box<T>>),
+}
+
+fn unwrapInner(b: Box<Int32>): String {
+    return match b {
+        Box.Full(v) => v.to_string();
+        Box.Empty => "empty";
+    };
+}
+
+fn unwrapOuter(b: Box<Box<Int32>>): String {
+    return match b {
+        Box.Full(inner) => unwrapInner(inner);
+        Box.Empty => "empty";
+    };
+}
+
+fn describe(w: OnlyBox<Int32>): String {
+    return match w {
+        OnlyBox.Wrap(value) => unwrapOuter(value);
+    };
+}
+
+fn main(): Void {
+    mut w = OnlyBox.Wrap(Box.Full(Box.Full(7)));
+    stdout.println(describe(w));
+}
