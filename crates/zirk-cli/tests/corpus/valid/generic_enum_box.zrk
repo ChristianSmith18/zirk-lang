@@ -1,0 +1,36 @@
+// A user-declared generic enum (`fase-3-generic-enums`) instantiates and
+// lowers the same way the two compiler-native generic enums
+// (`Iteration<T>`, `Result<T,E>`) already do: `specialize_enum` builds one
+// concrete layout per distinct instantiation the program names.
+enum Box<T> {
+    Full(value: T),
+    Empty,
+}
+
+fn describe_int(b: Box<Int32>): String {
+    return match b {
+        Box.Full(value) => "full:" + value.to_string();
+        Box.Empty => "empty";
+    };
+}
+
+fn describe_string(b: Box<String>): String {
+    return match b {
+        Box.Full(value) => "full:" + value;
+        Box.Empty => "empty";
+    };
+}
+
+fn main(): Void {
+    // Two different type arguments in the same program: both must produce
+    // correct, independent results.
+    mut a: Box<Int32> = Box.Full(42);
+    mut b: Box<Int32> = Box.Empty;
+    mut c: Box<String> = Box.Full("hola");
+    mut d: Box<String> = Box.Empty;
+
+    stdout.println(describe_int(a));
+    stdout.println(describe_int(b));
+    stdout.println(describe_string(c));
+    stdout.println(describe_string(d));
+}
