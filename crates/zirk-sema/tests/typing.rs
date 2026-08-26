@@ -2715,11 +2715,86 @@ fn invalid_mutating_a_record_field_from_a_method() {
 
 #[test]
 fn valid_record_equality_is_derived_without_a_reserved_method() {
-    let output = rejected(
+    // `fase-3-structural-equality`: `==` on a record fully compiles now —
+    // not only free of `TYPE_MISMATCH` (already true before this change),
+    // but of `NOT_LOWERED` too, since `zirk-ir` now lowers it to a
+    // field-by-field comparison instead of gating it.
+    accepted(
         "record Point { x: Int32; y: Int32; }
          fn main(): Void { mut a = Point(x: 1, y: 2); mut b = Point(x: 1, y: 2); stdout.println(a == b); }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_value_class_equality_is_derived_without_a_reserved_method() {
+    accepted(
+        "value class Money(amount: Int32, currency: String);
+         fn main(): Void { mut a = Money(amount: 1, currency: \"USD\"); mut b = Money(amount: 1, currency: \"USD\"); stdout.println(a == b); }",
+    );
+}
+
+#[test]
+fn valid_record_equality_over_a_nested_record_field() {
+    // Design D1: a nested `record`/`value class` field recurses the same
+    // way its own top-level `==` would.
+    accepted(
+        "record Point { x: Int32; y: Int32; }
+         record Line { start: Point; end: Point; }
+         fn main(): Void {
+             mut a = Line(start: Point(x: 0, y: 0), end: Point(x: 1, y: 1));
+             mut b = Line(start: Point(x: 0, y: 0), end: Point(x: 1, y: 1));
+             stdout.println(a == b);
+         }",
+    );
+}
+
+#[test]
+fn valid_record_equality_over_a_class_field_with_its_own_equals() {
+    // Design D2: a reference-typed field compares by whatever the
+    // existing rule for that class's own `==` already is — here, its own
+    // `_equals`.
+    accepted(
+        "class Id {
+             value: Int32;
+             construct(value: Int32) { this.value = value; }
+             fn _equals(other: Id): Boolean { return this.value == other.value; }
+         }
+         record Tagged { id: Id; }
+         fn main(): Void {
+             mut a = Tagged(id: Id(1));
+             mut b = Tagged(id: Id(1));
+             stdout.println(a == b);
+         }",
+    );
+}
+
+#[test]
+fn valid_record_equality_over_a_class_field_without_equals_uses_identity() {
+    // Design D2's other branch: no `_equals` declared, so the field
+    // compares by identity (`is`), never a `TYPE_MISMATCH`/`NOT_LOWERED`
+    // the way a bare top-level `class == class` with no `_equals` would.
+    accepted(
+        "class Box { value: Int32; construct(value: Int32) { this.value = value; } }
+         record Tagged { box: Box; }
+         fn main(): Void {
+             mut b = Box(1);
+             mut a = Tagged(box: b);
+             mut c = Tagged(box: b);
+             stdout.println(a == c);
+         }",
+    );
+}
+
+#[test]
+fn invalid_record_equality_over_an_unsupported_field_type_is_not_lowered() {
+    // Design D3: a residual unsupported field type (here, `T?`) keeps the
+    // existing checked-but-not-compilable diagnostic, scoped to just that
+    // field rather than the whole comparison unconditionally.
+    let output = rejected(
+        "record Box { value: Int32?; }
+         fn main(): Void { mut a = Box(value: 1); mut b = Box(value: 1); stdout.println(a == b); }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]

@@ -3236,6 +3236,20 @@ impl<'a> FunctionLowering<'a> {
                 result
             }
 
+            // `x == y` / `x != y` where both operands are a `record`/`value
+            // class` (`fase-3-structural-equality`, design D1): a `record`/
+            // `value class` never defines `_equals` (the check just above
+            // only ever matches `IrType::Object`, never `IrType::Value`),
+            // so this is the only place its comparison is built — a
+            // conjunction of per-field comparisons, generated at this call
+            // site rather than through a synthesized per-type function.
+            ast::Expr::Binary(e)
+                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && matches!(self.type_of(&e.left, e.left.span()), IrType::Value(_)) =>
+            {
+                self.lower_structural_equality(e, span)
+            }
+
             ast::Expr::Binary(e)
                 if is_string_operator(
                     self.type_of(&e.left, e.left.span()),
@@ -3539,6 +3553,183 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), IrType::Boolean, span)
+    }
+
+    /// Lowers `x == y` / `x != y` between two values of the same `record`/
+    /// `value class` type (`fase-3-structural-equality`, design D1): both
+    /// operands are lowered once, then compared field by field through
+    /// [`Self::lower_field_conjunction`]; `!=` is the same comparison
+    /// negated, the same split every other `Eq`/`NotEq` lowering in this
+    /// file already uses.
+    fn lower_structural_equality(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+        let held = self.lower_and_hold(&expr.left, self.opens_blocks(&expr.right));
+        let right = self.lower_expr(&expr.right);
+        let left = self.reload(held, expr.left.span());
+
+        let IrType::Value(id) = self.type_of(&expr.left, expr.left.span()) else {
+            unreachable!("this arm only ever matches a `record`/`value class` left operand")
+        };
+
+        let result = self.lower_field_conjunction(id, left, right, span);
+
+        if expr.op == ast::BinaryOp::NotEq {
+            return self.emit(
+                InstKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: result,
+                },
+                IrType::Boolean,
+                span,
+            );
+        }
+        result
+    }
+
+    /// ANDs together every field's own equality between two `record`/`value
+    /// class` values of the same layout `id`, short-circuiting on the first
+    /// difference — the same block-per-decision shape
+    /// [`Self::lower_short_circuit`] uses for `&&`, generalized here from
+    /// two operands to however many fields the type declares (design D1).
+    ///
+    /// A type with no fields (possible for a `record` with an empty field
+    /// list) is trivially always equal to itself.
+    fn lower_field_conjunction(
+        &mut self,
+        id: u32,
+        left: Operand,
+        right: Operand,
+        span: Span,
+    ) -> Operand {
+        let fields = self.module.values[id as usize].fields.clone();
+        if fields.is_empty() {
+            return self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+        }
+
+        // Every field but the last is read from a different block than the
+        // one before it (the short-circuit branch below moves the
+        // insertion point) — an IR value does not cross blocks in this
+        // representation, so `left`/`right` themselves are spilled to a
+        // slot here and reloaded fresh at each field access, the same
+        // `Self::lower_and_hold`/`reload` pattern used everywhere else an
+        // earlier operand is held across a branch.
+        let value_ty = IrType::Value(id);
+        let left_slot = self.declare_slot("<structeq.left>", value_ty, span);
+        let right_slot = self.declare_slot("<structeq.right>", value_ty, span);
+        self.emit_effect(InstKind::Store(left_slot, left), span);
+        self.emit_effect(InstKind::Store(right_slot, right), span);
+
+        let result = self.declare_slot("<structeq>", IrType::Boolean, span);
+        let continue_block = self.new_block();
+
+        for (index, field) in fields.iter().enumerate() {
+            let left = self.emit(InstKind::Load(left_slot), value_ty, span);
+            let right = self.emit(InstKind::Load(right_slot), value_ty, span);
+            let l_field = self.emit(
+                InstKind::LoadField {
+                    object: left,
+                    index: index as u32,
+                },
+                field.ty,
+                span,
+            );
+            let r_field = self.emit(
+                InstKind::LoadField {
+                    object: right,
+                    index: index as u32,
+                },
+                field.ty,
+                span,
+            );
+            let field_eq = self.lower_field_equality(field.ty, l_field, r_field, span);
+
+            if index + 1 == fields.len() {
+                // The last field decides the whole result outright, however
+                // it came out — nothing left to short-circuit against.
+                self.emit_effect(InstKind::Store(result, field_eq), span);
+                self.terminate(Terminator::Jump(continue_block));
+            } else {
+                let rest_block = self.new_block();
+                let false_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: field_eq,
+                    then_block: rest_block,
+                    else_block: false_block,
+                });
+
+                self.current = false_block;
+                let false_val = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+                self.emit_effect(InstKind::Store(result, false_val), span);
+                self.terminate(Terminator::Jump(continue_block));
+
+                self.current = rest_block;
+            }
+        }
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), IrType::Boolean, span)
+    }
+
+    /// One field's own equality, as part of a `record`/`value class`'s
+    /// derived comparison — `left`/`right` are that field already loaded
+    /// from both operands.
+    ///
+    /// A nested `record`/`value class` field recurses the same way its own
+    /// top-level `==` would (design D1); a `class` reference compares by
+    /// whatever the existing rule for that class's own `==` already is —
+    /// its own `_equals` if declared, `is` identity otherwise (design D2,
+    /// confirmed against `Checker::operator_method_of`'s own resolution —
+    /// there is no error here the way a bare top-level `x == y` between two
+    /// `class` instances with no `_equals` gets: the checker's own
+    /// `structural_equality_unsupported_field` already lets a `class` field
+    /// through unconditionally, precisely because this is what it resolves
+    /// to). Every other field type reaching here (a scalar, `String`,
+    /// `Char`, or a payload-less enum) is exactly what the ordinary
+    /// `Binary { op: Eq }` shape already compares correctly on its own —
+    /// the same instruction the pre-existing generic `Eq`/`NotEq` lowering
+    /// arm emits for those types outside a `record`/`value class` too.
+    fn lower_field_equality(
+        &mut self,
+        field_ty: IrType,
+        left: Operand,
+        right: Operand,
+        span: Span,
+    ) -> Operand {
+        match field_ty {
+            IrType::Value(id) => self.lower_field_conjunction(id, left, right, span),
+            IrType::Object(id) => {
+                if let Some(method) = self.checked.classes[id as usize].method("_equals") {
+                    let symbol = body_symbol(self.checked, method);
+                    let returns = self.ir_type(method.returns);
+                    self.emit(
+                        InstKind::Call {
+                            callee: symbol,
+                            args: vec![left, right],
+                        },
+                        returns,
+                        span,
+                    )
+                } else {
+                    self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Identical,
+                            left,
+                            right,
+                        },
+                        IrType::Boolean,
+                        span,
+                    )
+                }
+            }
+            _ => self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left,
+                    right,
+                },
+                IrType::Boolean,
+                span,
+            ),
+        }
     }
 
     /// Lowers `a ?? b` into an explicit null check with two blocks.
@@ -5512,7 +5703,18 @@ impl<'a> FunctionLowering<'a> {
                 matches!(
                     e.op,
                     ast::BinaryOp::Coalesce | ast::BinaryOp::And | ast::BinaryOp::Or
-                ) || self.opens_blocks(&e.left)
+                ) ||
+                // Structural equality on a `record`/`value class`
+                // (`fase-3-structural-equality`, design D1) opens the same
+                // per-field branch-and-join shape `&&`/`||` do — an earlier
+                // operand held across one of these must go through a slot
+                // exactly like it would across a plain `&&`.
+                (matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && matches!(
+                        self.type_of(&e.left, e.left.span()),
+                        IrType::Value(_)
+                    ))
+                    || self.opens_blocks(&e.left)
                     || self.opens_blocks(&e.right)
             }
             ast::Expr::Unary(e) => self.opens_blocks(&e.operand),
