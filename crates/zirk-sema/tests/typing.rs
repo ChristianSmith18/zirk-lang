@@ -3499,7 +3499,10 @@ const SHAPE: &str = "abstract class Shape {
 
 #[test]
 fn valid_class_adopts_an_abstract_class() {
-    let output = rejected(&format!(
+    // Naming the abstract class as a type is itself accepted now
+    // (fase-3-abstract-dispatch), so a fully-conforming adopter with no
+    // other use of `Shape` produces no diagnostic at all.
+    accepted(&format!(
         "{SHAPE}
          class Circle implements Shape {{
              name: String;
@@ -3508,15 +3511,6 @@ fn valid_class_adopts_an_abstract_class() {
          }}
          fn main(): Void {{ }}"
     ));
-    assert!(
-        !output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
-        "{output}"
-    );
-    assert!(
-        !output.contains(codes::MISSING_OVERRIDE.as_str()),
-        "{output}"
-    );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
@@ -3602,9 +3596,101 @@ fn invalid_abstract_class_declares_a_construct() {
 }
 
 #[test]
-fn invalid_abstract_class_is_not_lowered_yet() {
-    let output = rejected(&format!("{SHAPE}\nfn main(): Void {{ }}"));
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+fn valid_abstract_class_alone_is_lowered() {
+    // Naming and declaring an `abstract class` no longer trips
+    // `NOT_LOWERED` on its own (fase-3-abstract-dispatch): only its own
+    // `construct`/state/layout stayed rejected, not the declaration itself.
+    accepted(&format!("{SHAPE}\nfn main(): Void {{ }}"));
+}
+
+#[test]
+fn valid_abstract_class_named_as_a_parameter_type_dispatches() {
+    // The specific gap fase-3-abstract-dispatch closes: a value statically
+    // typed through the abstract class, not just structurally conforming to
+    // it, is now accepted and lowered.
+    accepted(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): Int32 {{ return 3; }}
+         }}
+         fn describe(s: Shape): Int32 {{ return s.area(); }}
+         fn main(): Void {{ describe(Circle(\"c\")); }}"
+    ));
+}
+
+#[test]
+fn valid_two_adopters_of_the_same_abstract_class_get_consistent_indices() {
+    // design.md D1/D3: every concrete adopter of the same abstract class
+    // must assign that class's methods the same index in its own flattened
+    // method list, or `CallVirtual`'s shared index would read the wrong
+    // slot depending on which adopter backs the value.
+    accepted(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): Int32 {{ return 3; }}
+         }}
+         class Square implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): Int32 {{ return 4; }}
+         }}
+         fn describe(s: Shape): Int32 {{ return s.area(); }}
+         fn main(): Void {{
+             describe(Circle(\"c\"));
+             describe(Square(\"s\"));
+         }}"
+    ));
+}
+
+#[test]
+fn valid_abstract_class_implemented_before_its_own_declaration() {
+    // `Self::in_hierarchy_order` has to place the abstract class before any
+    // adopter that implements it, even when the adopter is declared earlier
+    // in the file — otherwise the adopter would seed its method list from
+    // the abstract class's still-empty, pre-declaration default.
+    accepted(
+        "class Circle implements Shape {
+             name: String;
+             construct(name: String) { this.name = name; }
+             override fn area(): Int32 { return 3; }
+         }
+         abstract class Shape {
+             name: String;
+             abstract fn area(): Int32;
+         }
+         fn describe(s: Shape): Int32 { return s.area(); }
+         fn main(): Void { describe(Circle(\"c\")); }",
+    );
+}
+
+#[test]
+fn valid_class_implements_an_abstract_class_and_an_interface() {
+    // design.md's Risk / tasks.md 1.3: an abstract class and a plain
+    // interface contributing to the same adopter's flattened method list
+    // must not collide on index assignment.
+    accepted(&format!(
+        "{SHAPE}
+         interface Describable {{
+             fn describe(): String;
+         }}
+         class Circle implements Shape, Describable {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             override fn area(): Int32 {{ return 3; }}
+             fn describe(): String {{ return this.name; }}
+         }}
+         fn print_area(s: Shape): Int32 {{ return s.area(); }}
+         fn print_description(d: Describable): String {{ return d.describe(); }}
+         fn main(): Void {{
+             mut c = Circle(\"c\");
+             print_area(c);
+             print_description(c);
+         }}"
+    ));
 }
 
 // --- `throw`/`try`/`catch`/`finally` (roadmap Phase 4b) ----------------------

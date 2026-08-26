@@ -1,0 +1,32 @@
+// A concrete class implementing both a user `abstract class` and a plain
+// interface in the same `implements` list (design.md's Risk / tasks.md
+// 1.3): both must dispatch correctly through their own respective typed
+// variable, without colliding on index assignment.
+abstract class Shape {
+    abstract fn area(): Int32;
+}
+
+interface Describable {
+    fn describe(): String;
+}
+
+class Circle implements Shape, Describable {
+    radius: Int32;
+    construct(radius: Int32) { this.radius = radius; }
+    override fn area(): Int32 { return this.radius * this.radius * 3; }
+    fn describe(): String { return "circle"; }
+}
+
+fn print_area(shape: Shape): Void {
+    stdout.println(shape.area());
+}
+
+fn print_description(d: Describable): Void {
+    stdout.println(d.describe());
+}
+
+fn main(): Void {
+    mut c = Circle(3);
+    print_area(c);
+    print_description(c);
+}
