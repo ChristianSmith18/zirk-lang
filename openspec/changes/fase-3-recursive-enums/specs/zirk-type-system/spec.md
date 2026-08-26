@@ -1,13 +1,15 @@
 ## ADDED Requirements
 
-### Requirement: An enum declaration may reference its own type
+### Requirement: Enum declaration order is independent of self- and mutual references
 
-An enum's variant payload MAY name the enum's own type, including a self-instantiation of its own generic type parameters, and declaration order between an enum and a class or another enum that reference each other SHALL NOT matter.
+Declaration order between an enum and a class, or between two enums, that reference each other SHALL NOT matter. An enum's variant payload naming its own type, or another enum's, directly and with no indirection in between SHALL be rejected at compile time rather than compiled into an unbounded-size representation.
 
-#### Scenario: Non-generic recursive enum declares
-- **WHEN** `enum IntList { Nil, Cons(head: Int32, tail: IntList) }` is declared
-- **THEN** it declares successfully and `IntList` values can be constructed and pattern-matched at any depth
+#### Scenario: Enum and class reference each other regardless of order
+- **WHEN** an enum's variant payload names a class, and that class has a field naming the enum back, in either declaration order
+- **THEN** both declarations resolve correctly
 
-#### Scenario: Generic recursive enum declares and specializes
-- **WHEN** `enum Tree<T> { Leaf, Node(value: T, left: Tree<T>, right: Tree<T>) }` is instantiated as `Tree<Int32>`
-- **THEN** it declares successfully and the instantiation lowers to one concrete layout, reused for every recursive occurrence of `Tree<Int32>` within it
+#### Scenario: A directly self-referential enum field is rejected, not miscompiled
+- **WHEN** an enum's variant payload names its own type with no indirection in between (for example `enum IntList { Nil, Cons(head: Int32, tail: IntList) }`)
+- **THEN** compilation fails with a diagnostic naming the cycle, rather than crashing or producing an unbounded-size type
+
+NOTE (not applied to the main spec): a self-referential enum's variant payload actually being constructible and pattern-matchable — the scenario this requirement's own name might suggest — is not delivered by this change. It requires automatic heap indirection ("boxing") for a self-referential field: a new `IrType` case, a runtime allocation kind, and GC integration, none of which exists today. That is its own future change; this change only makes the hazard a clean diagnostic instead of a compiler crash, and delivers the real, unrelated declaration-order independence for the non-cyclic case (an enum and a class referencing each other).
