@@ -141,8 +141,28 @@ the cycle, before it can reach IR lowering. Actually constructing and using
 a self-referential enum (`enum IntList { Nil, Cons(head: Int32, tail:
 IntList) }`) still needs automatic heap indirection ("boxing") — a new
 `IrType` case, a runtime allocation kind, and GC integration — none of which
-exists yet; tracked as its own future change, not invented here. Generic
-contracts and value-type contract dispatch remain.
+exists yet; tracked as its own future change, not invented here.
+`fase-3-value-type-contract-dispatch` (merged) closed the last large open
+design question Phase 3 left behind: a `record` implementing a contract
+now dispatches correctly through a contract-typed reference. The
+design converts a value to a contract-typed reference by boxing it into an
+ordinary, collector-tracked heap allocation carrying a real descriptor —
+built by reusing the exact same object-layout construction a `class`
+already goes through, not a second, divergent builder — so `CallContract`'s
+own existing dispatch needed zero changes, exactly as design predicted.
+Implementation found one real bug design's own reasoning had implicitly
+missed: a value type's own method is compiled expecting `this` by value,
+while `CallContract` always calls through a pointer, so pointing a contract
+table straight at the value's own method body silently miscompiled. Fixed
+with a small per-method unboxing thunk, synthesized only for a value
+type's own contract-method bodies (a trait's inherited default already
+expects a pointer receiver, so needs none). Verified against the scenario
+that specifically rules out a static-monomorphization alternative: two
+different concrete `record` adopters dispatched correctly through the same
+unchanged, non-generic call site. `value class` cannot exercise this yet —
+a pre-existing, separate gap: its own compact declaration grammar has no
+`implements` clause or method-body syntax at all today. Generic contracts
+remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.

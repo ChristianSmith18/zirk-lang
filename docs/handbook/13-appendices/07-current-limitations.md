@@ -109,8 +109,24 @@ Current high-impact delivery limits include:
   overflow; it is now a clean compile-time diagnostic naming the cycle
   instead. Delivering actual construction/pattern-matching needs automatic
   heap indirection ("boxing") for such a field — a new `IrType` case plus
-  runtime/GC integration — tracked as its own future change. Still
-  required: user generic contracts and value-type contract dispatch.
+  runtime/GC integration — tracked as its own future change.
+  `fase-3-value-type-contract-dispatch` closed the last large open design
+  question from Phase 3: a `record` implementing a contract now dispatches
+  correctly through a contract-typed reference. Converting a value to a
+  contract-typed reference boxes it into an ordinary, collector-tracked
+  heap allocation with a real descriptor, built by reusing the exact same
+  object-layout construction a `class` already goes through — no new,
+  divergent descriptor builder, and `CallContract`'s own existing dispatch
+  needed zero changes. A real bug was found and fixed along the way: a
+  value type's own method is compiled expecting `this` by value, but
+  `CallContract` always calls through a pointer, so pointing a contract
+  table straight at the value's own method silently miscompiled — fixed
+  with a small per-method unboxing thunk, needed only for a value type's
+  own method bodies (a trait's inherited default already expects a
+  pointer receiver). `value class` cannot exercise this yet: its own
+  compact declaration grammar has no `implements` clause or method-body
+  syntax at all, independent of this feature — extending that grammar is
+  its own, separate future work. Still required: user generic contracts.
 - `Float128` arithmetic lacks complete Windows verification and `Float128`
   currently lacks `to_string()` support.
 - Standard-library, structured-concurrency, packaging, developer-tooling,
