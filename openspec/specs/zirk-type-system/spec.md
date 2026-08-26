@@ -22,6 +22,10 @@ observation and checked casts SHALL remain separate operations.
 - **WHEN** two constructed generic types reuse an implementation representation
 - **THEN** their `Type` identities remain distinct when their type arguments differ
 
+#### Scenario: A user-declared generic enum instantiates like a compiler-native one
+- **WHEN** a program declares `enum Bar<T> { ... }` and instantiates it as `Bar<Int32>`
+- **THEN** the instantiation lowers to its own concrete layout, the same mechanism already used for `Result<T,E>`
+
 ### Requirement: Structural runtime metadata is explicitly generated
 General runtime reflection MUST NOT enumerate members, invoke string-named
 methods, access fields dynamically, retain decorators automatically, or expose
