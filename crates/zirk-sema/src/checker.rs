@@ -6582,23 +6582,33 @@ impl<'a> Checker<'a> {
 
         // A record or value class always has one: equality is derived from
         // every field, per `ZIRK_LANGUAGE_SPEC.md` section 7, not opted into
-        // with a reserved method the way a plain class's is. Lowering it —
-        // a field-by-field comparison, recursing into a nested record —
-        // does not exist yet for anything beyond a scalar or nested-value
-        // field (roadmap task 11.5 built the value representation itself,
-        // not the comparison over it), so it is gated the same way any
-        // other checked-but-not-compilable construct is.
+        // with a reserved method the way a plain class's is (`fase-3-
+        // structural-equality`, design D1/D2). `zirk-ir`'s
+        // `FunctionLowering::lower_structural_equality` lowers it to a
+        // conjunction of per-field comparisons — but only for a field type
+        // that comparison chain knows how to compare (a scalar/`String`/
+        // `Char`, a nested `record`/`value class` recursively, or a
+        // `class` reference via its own `_equals`-or-identity rule, D2).
+        // A residual unsupported field type (`T?`, a closure, a contract,
+        // an algebraic enum with payload, …) keeps the same
+        // checked-but-not-compilable diagnostic this whole comparison used
+        // to get unconditionally, but now scoped to just that field (D3).
         if let Base::Class(id) = left.base
             && matches!(
                 self.classes[id as usize].kind,
                 ClassKind::Record | ClassKind::ValueClass
             )
         {
-            self.not_lowered(
-                expr.span,
-                "structural equality on a record or value class",
-                "compare its fields individually for now",
-            );
+            if let Some(unsupported) = self.structural_equality_unsupported_field(left) {
+                let name = self.name(unsupported);
+                self.not_lowered(
+                    expr.span,
+                    &format!(
+                        "structural equality on a record or value class with a field of type `{name}`"
+                    ),
+                    "compare its fields individually for now",
+                );
+            }
             return;
         }
         if let Base::Class(id) = left.base
@@ -6621,6 +6631,54 @@ impl<'a> Checker<'a> {
             "`==` compares content, and this type has not said what its content comparison is",
             Some(help),
         );
+    }
+
+    /// Whether `ty` is a field type derived structural equality's own
+    /// lowering (`zirk-ir`'s `lower_structural_equality`) knows how to
+    /// compare, checked recursively for a nested `record`/`value class`
+    /// field — returns the first unsupported type found, if any.
+    ///
+    /// A scalar (`Int*`/`Float*`/`Boolean`/`Char`), `String`, and a
+    /// payload-less (traditional) enum compare directly; a `record`/`value
+    /// class` field recurses into its own fields the same way; a `class`
+    /// reference is always fine, whatever its own equality resolves to
+    /// (D2 — its own `_equals` if declared, `is` identity otherwise, never
+    /// an error at this recursive position). Everything else — `T?`, a
+    /// closure, a contract, an algebraic enum carrying a payload, a
+    /// generic parameter — has no comparison this lowering builds yet.
+    fn structural_equality_unsupported_field(&self, ty: Type) -> Option<Type> {
+        // `T?` (`Type::nullable`, not a `Base` variant of its own) has no
+        // comparison this lowering builds yet: `IrType::Nullable` is a
+        // `{present, payload}` struct, not one of the shapes
+        // `lower_field_equality`'s fallback `Binary { op: Eq }` arm
+        // actually codegens (a scalar/`String`/`Char`) or its two other
+        // arms specifically handle (`Value`/`Object`).
+        if ty.nullable {
+            return Some(ty);
+        }
+        match ty.base {
+            Base::Int(_) | Base::Float(_) | Base::Boolean | Base::Char | Base::String => None,
+            Base::Enum(id) => {
+                let all_bare = self.enums[id as usize]
+                    .variants
+                    .iter()
+                    .all(|v| v.associated.is_empty());
+                if all_bare { None } else { Some(ty) }
+            }
+            Base::Class(id) => match self.classes[id as usize].kind {
+                ClassKind::Record | ClassKind::ValueClass => self.classes[id as usize]
+                    .fields
+                    .iter()
+                    .find_map(|f| self.structural_equality_unsupported_field(f.ty)),
+                // A plain `class` field always resolves (D2): its own
+                // `_equals` if it declares one, identity otherwise — never
+                // the "does not define equality" error that only applies
+                // to a bare top-level `==` between two of them.
+                ClassKind::Class => None,
+                ClassKind::Abstract => Some(ty),
+            },
+            _ => Some(ty),
+        }
     }
 
     /// An arithmetic operator, resolved by what its operands support.
