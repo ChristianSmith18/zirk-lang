@@ -1,0 +1,10 @@
+// The generic case of the same hazard as `recursive_enum_intlist_not_lowered.zrk`:
+// `Tree<T>`'s own recursive fields are exactly `Tree<T>`, the same
+// instantiation being declared, not a nested distinct one — so this is not
+// about generic substitution, it is the same unindirected inline-embedding
+// cycle a non-generic self-referential enum hits.
+enum Tree<T> { Leaf, Node(value: T, left: Tree<T>, right: Tree<T>) }
+
+fn main(): Void {
+    mut t: Tree<Int32> = Tree.Leaf;
+}

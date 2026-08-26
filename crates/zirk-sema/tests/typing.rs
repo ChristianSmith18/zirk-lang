@@ -2637,6 +2637,64 @@ fn invalid_generic_enum_type_argument_violating_a_constraint_is_still_rejected()
 }
 
 #[test]
+fn invalid_non_generic_recursive_enum_is_not_lowered_yet() {
+    // `fase-3-recursive-enums`: `register_enum` registers `IntList`'s own
+    // name and arity ahead of `declare_enum_variants` resolving `tail`'s
+    // type, the same two-phase split `register_class`/`declare_class_members`
+    // already use for a self-referencing class field — so the *declaration*
+    // itself resolves the name correctly now. But every enum still lowers to
+    // an inline-flattened struct with no indirection anywhere in the
+    // pipeline: a variant field that embeds the enum's own type with nothing
+    // in between asks for an infinitely-sized type and crashed the compiler
+    // with a stack overflow before this diagnostic existed (confirmed against
+    // a real build, not assumed). Boxing a genuinely self-referential field
+    // is its own future design (a new `IrType` case, a runtime allocation
+    // kind, GC rules) — gated the same way any other checked-but-not-yet-
+    // compilable construct is, rather than left to crash.
+    let output = rejected(
+        "enum IntList { Nil, Cons(head: Int32, tail: IntList) }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_generic_recursive_enum_is_not_lowered_yet() {
+    // The generic case: `Tree<T>`'s own recursive field is exactly `Tree<T>`,
+    // the same instantiation being declared, not a nested distinct one — so
+    // `fase-3-generic-substitution-recursion`'s own gap does not apply here.
+    // It still hits the same inline-embedding hazard `IntList` does.
+    let output = rejected(
+        "enum Tree<T> { Leaf, Node(value: T, left: Tree<T>, right: Tree<T>) }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn valid_class_and_enum_reference_each_other_enum_declared_first() {
+    // Design's second flagged risk: a mutually-recursive class/enum pair.
+    // Enum declared first in the file, referencing a class declared after
+    // it; the class also references the enum back.
+    accepted(
+        "enum Wrapper { Has(value: Box), Empty }
+         class Box { field: Wrapper; construct(field: Wrapper) { this.field = field; } }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn valid_class_and_enum_reference_each_other_class_declared_first() {
+    // Same mutual reference, opposite declaration order — order must not
+    // matter either way.
+    accepted(
+        "class Box { field: Wrapper; construct(field: Wrapper) { this.field = field; } }
+         enum Wrapper { Has(value: Box), Empty }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
 fn invalid_literal_pattern_destructuring_a_variant_is_not_lowered_yet() {
     // A binding or a wildcard destructures a variant's field for real
     // (task 11.4); a literal sub-pattern would need combined-condition
