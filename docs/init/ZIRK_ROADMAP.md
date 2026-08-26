@@ -89,9 +89,18 @@ still without classes or concurrency.
 ## Phase 3 — Objects and the type system
 
 **Status: complete for its scoped delivery.** The archived
-`fase-3-objects-and-type-system` change records remaining pipeline limitations
-for generic contracts, abstract dispatch, value-type contract dispatch, and
-derived structural equality.
+`fase-3-objects-and-type-system` change recorded remaining pipeline
+limitations for generic contracts/enums, abstract dispatch, value-type
+contract dispatch, and derived structural equality. `fase-3-abstract-dispatch`
+(merged) closed the abstract-dispatch gap: a user-declared `abstract class`
+now dispatches dynamically through its concrete adopters, reusing the vtable
+mechanism the compiler's own `Throwable` hierarchy already proved in
+production. Doing so surfaced and fixed three latent gaps in the general
+class-declaration path that had never been exercised for a user abstract
+class (method `overridden` flags, method-index seeding, `implements`-aware
+hierarchy ordering) and a pre-existing diagnostic bug (`MISSING_OVERRIDE`
+reported instead of `MISSING_IMPLEMENTATION`). Generic contracts, value-type
+contract dispatch, and derived structural equality remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
