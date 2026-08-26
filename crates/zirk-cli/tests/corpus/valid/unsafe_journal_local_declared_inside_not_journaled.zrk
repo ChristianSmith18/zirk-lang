@@ -1,0 +1,36 @@
+class ValidationError implements Throwable {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "VALIDATION";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn main(): Void {
+    try {
+        unsafe {
+            mut local: Int32 = 1;
+            local = 2;
+            throw ValidationError("boom");
+        }
+    } catch ValidationError(e) {
+        stdout.println(e.message());
+    }
+    stdout.println("done");
+}

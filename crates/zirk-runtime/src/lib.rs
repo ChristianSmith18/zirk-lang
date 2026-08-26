@@ -37,6 +37,7 @@ mod collector;
 mod exceptions;
 mod failure;
 mod io;
+mod journal;
 mod memory;
 mod string;
 
@@ -45,6 +46,9 @@ pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error, zirk_rt_overflow,
 };
 pub use io::zirk_io_println;
+pub use journal::{
+    zirk_rt_journal_begin, zirk_rt_journal_commit, zirk_rt_journal_record, zirk_rt_journal_rollback,
+};
 pub use memory::zirk_rt_alloc;
 pub use string::{
     zirk_str_concat, zirk_str_eq, zirk_str_from_bool, zirk_str_from_f32, zirk_str_from_f64,
