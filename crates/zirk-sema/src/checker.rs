@@ -9825,6 +9825,81 @@ impl<'a> Checker<'a> {
         )
     }
 
+    /// Walks a declared parameter type in parallel with an argument's actual
+    /// type, recording a solution for every `Base::Param` leaf found —
+    /// including one nested inside a matching `Base::EnumInstance`/
+    /// `Base::ContractInstance`/`Base::Instance` shape, at any depth (design
+    /// D2). This is the discovery half of substitution: `substitute`
+    /// performs the replacement once a solution like the ones recorded here
+    /// is already known. A shape mismatch (e.g. the actual type is not the
+    /// same generic instantiation as the declared one) simply infers
+    /// nothing at that leaf — `expect_assignable`, run later against the
+    /// substituted parameter type, is what reports the real type error.
+    fn unify_declared_with_actual(
+        &mut self,
+        declared: Type,
+        actual: Type,
+        substitution: &mut HashMap<u32, Type>,
+        call_span: Span,
+        name: &str,
+    ) {
+        match declared.base {
+            Base::Param(id) => match substitution.get(&id) {
+                Some(&solved) if solved != actual => {
+                    let a = self.name(solved);
+                    let b = self.name(actual);
+                    let param_name = self.type_params[id as usize].name.clone();
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        call_span,
+                        format!("`{name}` cannot infer `{param_name}`"),
+                        format!(
+                            "it would have to be both `{a}` and `{b}` at once, one per argument"
+                        ),
+                        None,
+                    );
+                }
+                _ => {
+                    substitution.insert(id, actual);
+                }
+            },
+            Base::EnumInstance(decl_inst) => {
+                if let Base::EnumInstance(actual_inst) = actual.without_null().base {
+                    let decl_instance = self.enum_instances[decl_inst as usize].clone();
+                    let actual_instance = self.enum_instances[actual_inst as usize].clone();
+                    if decl_instance.enum_id == actual_instance.enum_id {
+                        for (&d, &a) in decl_instance.args.iter().zip(actual_instance.args.iter()) {
+                            self.unify_declared_with_actual(d, a, substitution, call_span, name);
+                        }
+                    }
+                }
+            }
+            Base::ContractInstance(decl_inst) => {
+                if let Base::ContractInstance(actual_inst) = actual.without_null().base {
+                    let decl_instance = self.contract_instances[decl_inst as usize].clone();
+                    let actual_instance = self.contract_instances[actual_inst as usize].clone();
+                    if decl_instance.contract == actual_instance.contract {
+                        for (&d, &a) in decl_instance.args.iter().zip(actual_instance.args.iter()) {
+                            self.unify_declared_with_actual(d, a, substitution, call_span, name);
+                        }
+                    }
+                }
+            }
+            Base::Instance(decl_inst) => {
+                if let Base::Instance(actual_inst) = actual.without_null().base {
+                    let decl_instance = self.generic_instances[decl_inst as usize].clone();
+                    let actual_instance = self.generic_instances[actual_inst as usize].clone();
+                    if decl_instance.class == actual_instance.class {
+                        for (&d, &a) in decl_instance.args.iter().zip(actual_instance.args.iter()) {
+                            self.unify_declared_with_actual(d, a, substitution, call_span, name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Infers each of a callable's own type parameters from the concrete
     /// arguments given to it (roadmap task 7.6), pre-populated with `seed`
     /// (roadmap Phase 4a — see [`Self::check_direct_call_with_subst_seeded`]).
@@ -9851,9 +9926,6 @@ impl<'a> Checker<'a> {
             let Some(param) = signature.params.get(index) else {
                 continue;
             };
-            let Base::Param(id) = param.ty.base else {
-                continue;
-            };
             let actual = match slot {
                 ArgSlot::Given { ty, .. } => Some(*ty),
                 ArgSlot::Variadic(items) => items.first().map(|&(ty, _)| ty),
@@ -9864,25 +9936,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            match substitution.get(&id) {
-                Some(&solved) if solved != actual => {
-                    let a = self.name(solved);
-                    let b = self.name(actual);
-                    let param_name = self.type_params[id as usize].name.clone();
-                    self.error(
-                        codes::TYPE_MISMATCH,
-                        call_span,
-                        format!("`{name}` cannot infer `{param_name}`"),
-                        format!(
-                            "it would have to be both `{a}` and `{b}` at once, one per argument"
-                        ),
-                        None,
-                    );
-                }
-                _ => {
-                    substitution.insert(id, actual);
-                }
-            }
+            self.unify_declared_with_actual(param.ty, actual, &mut substitution, call_span, name);
         }
 
         for &id in &signature.type_params {
@@ -9923,18 +9977,70 @@ impl<'a> Checker<'a> {
 
     /// Replaces a callable's own type parameter with what it was inferred
     /// to be. Anything else — including another declaration's `T` — passes
-    /// through unchanged.
-    fn substitute(&self, ty: Type, substitution: &HashMap<u32, Type>) -> Type {
-        let Base::Param(id) = ty.base else {
-            return ty;
+    /// through unchanged, except that a nested `Base::EnumInstance`/
+    /// `Base::ContractInstance`/`Base::Instance`'s own type arguments are
+    /// substituted recursively (any depth), mirroring `substitute_type`
+    /// (`checker.rs:4389`). The two functions remain separate rather than
+    /// unified outright (design D1's fallback): `substitute_type` takes
+    /// `&mut self` and a `&[(u32, Type)]` slice for its own call sites,
+    /// while this one takes a `&HashMap<u32, Type>` — converting every
+    /// caller's substitution map to a slice was a larger, riskier touch
+    /// than porting the recursive-args logic here.
+    fn substitute(&mut self, ty: Type, substitution: &HashMap<u32, Type>) -> Type {
+        if let Base::Param(id) = ty.base {
+            let Some(&solved) = substitution.get(&id) else {
+                return ty;
+            };
+            return if ty.nullable {
+                solved.as_nullable()
+            } else {
+                solved
+            };
+        }
+
+        let base = match ty.base {
+            Base::ContractInstance(inst_id) => {
+                let instance = self.contract_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute(a, substitution))
+                    .collect();
+                Base::ContractInstance(self.intern_contract_instance(GenericContractInstance {
+                    contract: instance.contract,
+                    args,
+                }))
+            }
+            Base::EnumInstance(inst_id) => {
+                let instance = self.enum_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute(a, substitution))
+                    .collect();
+                Base::EnumInstance(self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: instance.enum_id,
+                    args,
+                }))
+            }
+            Base::Instance(inst_id) => {
+                let instance = self.generic_instances[inst_id as usize].clone();
+                let args: Vec<Type> = instance
+                    .args
+                    .iter()
+                    .map(|&a| self.substitute(a, substitution))
+                    .collect();
+                Base::Instance(self.intern_instance(GenericInstance {
+                    class: instance.class,
+                    args,
+                }))
+            }
+            _ => return ty,
         };
-        let Some(&solved) = substitution.get(&id) else {
-            return ty;
-        };
-        if ty.nullable {
-            solved.as_nullable()
-        } else {
-            solved
+
+        Type {
+            base,
+            nullable: ty.nullable,
         }
     }
 
