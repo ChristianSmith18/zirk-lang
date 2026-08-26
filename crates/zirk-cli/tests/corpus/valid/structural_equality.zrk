@@ -1,0 +1,69 @@
+// Derived structural equality for `record`/`value class` (roadmap task
+// 11.5's own gap, closed by `fase-3-structural-equality`): `==`/`!=`
+// compares every field, recursing into a nested `record`/`value class`
+// field, and short-circuits on the first difference (design D1).
+
+record Point {
+    x: Int32;
+    y: Int32;
+}
+
+record Line {
+    start: Point;
+    end: Point;
+}
+
+value class Money(amount: Int32, currency: String);
+
+// A `class` field inside a `record` compares by its own `==` rule
+// (design D2): here, its own `_equals`. `Tick.value` printing lets the
+// short-circuit test below observe whether it was ever reached.
+class Tick {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+    fn _equals(other: Tick): Boolean {
+        stdout.println("tick compared");
+        return this.value == other.value;
+    }
+}
+
+record Timed {
+    at: Int32;
+    tick: Tick;
+}
+
+fn main(): Void {
+    // A flat record: equal and unequal cases, plus `!=`.
+    mut a = Point(x: 1, y: 2);
+    mut b = Point(x: 1, y: 2);
+    mut c = Point(x: 1, y: 9);
+    stdout.println(a == b);
+    stdout.println(a == c);
+    stdout.println(a != b);
+    stdout.println(a != c);
+
+    // `value class`, same rules.
+    mut m1 = Money(amount: 100, currency: "USD");
+    mut m2 = Money(amount: 100, currency: "USD");
+    mut m3 = Money(amount: 100, currency: "EUR");
+    stdout.println(m1 == m2);
+    stdout.println(m1 == m3);
+
+    // A nested record field: equal only when the nested field is too.
+    mut l1 = Line(start: Point(x: 0, y: 0), end: Point(x: 3, y: 4));
+    mut l2 = Line(start: Point(x: 0, y: 0), end: Point(x: 3, y: 4));
+    mut l3 = Line(start: Point(x: 0, y: 0), end: Point(x: 3, y: 5));
+    stdout.println(l1 == l2);
+    stdout.println(l1 == l3);
+
+    // Short-circuit: `at` differs first, so `tick`'s own `_equals` (which
+    // prints when it runs) must never be reached.
+    mut t1 = Timed(at: 1, tick: Tick(0));
+    mut t2 = Timed(at: 2, tick: Tick(0));
+    stdout.println(t1 == t2);
+
+    // Same `at`, so the `tick` field's `_equals` does run this time.
+    mut t3 = Timed(at: 1, tick: Tick(5));
+    mut t4 = Timed(at: 1, tick: Tick(5));
+    stdout.println(t3 == t4);
+}
