@@ -77,8 +77,16 @@ Current high-impact delivery limits include:
   method-index seeding scoped only to the three native exception classes,
   hierarchy ordering that ignored `implements`) and a pre-existing diagnostic
   bug (`MISSING_OVERRIDE` reported instead of `MISSING_IMPLEMENTATION` when no
-  override at all was supplied). Still required: user generic contracts,
-  value-type contract dispatch, and derived structural equality.
+  override at all was supplied). Derived structural equality for
+  `record`/`value class` is also delivered (`fase-3-structural-equality`):
+  `==`/`!=` compares every field, recursing into a nested `record`/`value
+  class` field, and short-circuits on the first difference — a `class`-typed
+  field compares by its own existing rule (its `_equals` if declared,
+  otherwise `is`). A field whose type doesn't fit a scalar, nested-value,
+  or object shape (for example `T?` or an algebraic enum payload) still
+  reports `NOT_LOWERED`, now scoped to that specific field rather than
+  rejecting the whole comparison. Still required: user generic contracts
+  and value-type contract dispatch.
 - `Float128` arithmetic lacks complete Windows verification and `Float128`
   currently lacks `to_string()` support.
 - Standard-library, structured-concurrency, packaging, developer-tooling,

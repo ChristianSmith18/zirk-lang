@@ -99,8 +99,17 @@ production. Doing so surfaced and fixed three latent gaps in the general
 class-declaration path that had never been exercised for a user abstract
 class (method `overridden` flags, method-index seeding, `implements`-aware
 hierarchy ordering) and a pre-existing diagnostic bug (`MISSING_OVERRIDE`
-reported instead of `MISSING_IMPLEMENTATION`). Generic contracts, value-type
-contract dispatch, and derived structural equality remain.
+reported instead of `MISSING_IMPLEMENTATION`). `fase-3-structural-equality`
+(merged) closed the derived-equality gap: `==`/`!=` on a `record`/`value
+class` now lowers to a field-by-field, short-circuiting comparison —
+recursing into a nested `record`/`value class` field and dispatching a
+`class`-typed field to its own existing equality rule (`_equals` if
+declared, otherwise `is`) — reusing the same short-circuit block shape `&&`
+already builds, generalized from two operands to however many fields a type
+declares. A residual field type that fits none of these shapes (e.g. `T?`)
+keeps its own `NOT_LOWERED` diagnostic, now scoped to that field rather than
+the whole comparison. Generic contracts and value-type contract dispatch
+remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
