@@ -2598,14 +2598,42 @@ fn valid_algebraic_variant_matches_named_arguments() {
 }
 
 #[test]
-fn invalid_generic_enum_with_data_is_not_lowered_yet() {
-    // A non-generic algebraic enum fully lowers (task 11.3); combining that
-    // with per-instantiation specialization (11.1) is out of scope.
-    let output = rejected(
+fn valid_generic_enum_with_data_instantiates_like_a_native_one() {
+    // `fase-3-generic-enums`: a user-declared generic enum instantiates and
+    // type-checks the same way `Result<T,E>` already does — the checker's
+    // own `is_native` gate at `resolve_enum_reference` was a scope fence,
+    // not a mechanism limit (`specialize_enum` runs generically over every
+    // enum instantiation regardless of which enum it is).
+    accepted(
         "enum Box<T> { Full(value: T), Empty }
-         fn main(): Void { }",
+         fn main(): Void { mut b: Box<Int32> = Box.Full(1); }",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn valid_generic_enum_with_multiple_type_parameters() {
+    // Design D2's first shape to verify: more than one type variable per
+    // instantiation.
+    accepted(
+        "enum Either<L, R> { Left(value: L), Right(value: R) }
+         fn main(): Void {
+             mut a: Either<Int32, String> = Either.Left(1);
+             mut b: Either<Int32, String> = Either.Right(\"x\");
+         }",
+    );
+}
+
+#[test]
+fn invalid_generic_enum_type_argument_violating_a_constraint_is_still_rejected() {
+    // Lifting the `NOT_LOWERED` gate does not relax constraint checking: a
+    // type argument that does not satisfy the parameter's `from` constraint
+    // is rejected the same way it already was before this change.
+    let output = rejected(
+        "class Animal { construct() { } }
+         enum Holder<T from Animal> { Has(value: T) }
+         fn main(): Void { mut h: Holder<Int32> = Holder.Has(1); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]

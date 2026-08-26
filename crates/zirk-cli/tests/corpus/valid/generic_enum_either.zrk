@@ -1,0 +1,21 @@
+// A multi-type-parameter user generic enum (`fase-3-generic-enums`, design
+// D2's first shape): constructed and matched on both variants.
+enum Either<L, R> {
+    Left(value: L),
+    Right(value: R),
+}
+
+fn describe(e: Either<Int32, String>): String {
+    return match e {
+        Either.Left(value) => "left:" + value.to_string();
+        Either.Right(value) => "right:" + value;
+    };
+}
+
+fn main(): Void {
+    mut a: Either<Int32, String> = Either.Left(7);
+    mut b: Either<Int32, String> = Either.Right("hola");
+
+    stdout.println(describe(a));
+    stdout.println(describe(b));
+}
