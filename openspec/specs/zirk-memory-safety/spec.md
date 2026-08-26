@@ -82,6 +82,10 @@ An unsafe transaction MUST NOT suspend, await, spawn a task or thread, or expose
 - **WHEN** an ordinary transactional unsafe block contains `await`
 - **THEN** compilation fails and requires completion or commit before suspension
 
+#### Scenario: Commit publishes pending writes before an irreversible effect
+- **WHEN** an `unsafe {}` block has journaled managed writes and then enters `commit {}`
+- **THEN** every journaled write is durably committed before `commit`'s own body executes
+
 ### Requirement: Honest failure boundary
 Zirk SHALL guarantee rollback only for controlled failures detected before irreversible commit and MUST NOT claim recovery after arbitrary native corruption, invalid instructions, abrupt process termination, or true undefined behavior.
 
