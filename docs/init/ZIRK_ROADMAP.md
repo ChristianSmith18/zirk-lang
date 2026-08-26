@@ -220,9 +220,12 @@ deferred to a follow-up change.
 collector, `inmut::strict` projection-write checking
 (`fase-4e-inmut-strict-proyeccion`), the `unsafe`/`Pointer<T>`/`extern`
 core (`fase-4e-unsafe-pointer-extern`), `Weak<T>` (`fase-4e-weak`), deep
-`clone()` for reference graphs (`fase-4e-clone`), and the transactional
-unsafe journal/rollback (`fase-4e-unsafe-journal`) shipped; native slices
-remain.**
+`clone()` for reference graphs (`fase-4e-clone`), the transactional
+unsafe journal/rollback (`fase-4e-unsafe-journal`), and
+`NativeSlice<T>`/`NativeSliceMut<T>` (`fase-4e-native-slice`, which also
+delivered general `expr[index]` grammar) shipped. Remaining Phase 4e
+material work: dependent references, automatic pinning, and the
+open items each delivered piece above still lists.**
 
 - [x] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
   public ownership syntax — **delivered** (`fase-4e-colector-mark-sweep`):
@@ -286,18 +289,36 @@ remain.**
   reference, remain open — not full reachable-alias analysis yet.
 - [x] Implement `unsafe {}`, `Pointer<T>`, native slices, and
   compiler-enforced memory-safety boundaries — **partial**
-  (`fase-4e-unsafe-pointer-extern`): `unsafe fn`/`unsafe {}`/`commit {}`
-  parse and are context-checked; `Pointer<T>` (an ABI-stable element-type
-  subset) supports construction from an addressable local/field,
-  read/write/offset/offset-bytes/cast, with a conservative escape rule
-  (cannot be returned, stored in a field, or captured); `extern "C" fn`
-  declares and calls a native function (`docs/decisions/ADR-015-declaracion-extern.md`
-  closed the syntax this needed, which no prior spec had decided) under a
-  narrow ABI-safe type surface, resolved by the system linker with no new
-  library-linking manifest. **Not** covered: `NativeSlice<T>`/`NativeSliceMut<T>`
-  validated views, `.read_volatile()`/`.write_volatile()`, untagged
-  native-union access (no union type exists), weak atomic ordering
-  (`Atomic<T>` is Phase 5).
+  (`fase-4e-unsafe-pointer-extern`, `fase-4e-native-slice`): `unsafe fn`/
+  `unsafe {}`/`commit {}` parse and are context-checked; `Pointer<T>` (an
+  ABI-stable element-type subset) supports construction from an
+  addressable local/field, read/write/offset/offset-bytes/cast, with a
+  conservative escape rule (cannot be returned, stored in a field, or
+  captured); `extern "C" fn` declares and calls a native function
+  (`docs/decisions/ADR-015-declaracion-extern.md` closed the syntax this
+  needed, which no prior spec had decided) under a narrow ABI-safe type
+  surface, resolved by the system linker with no new library-linking
+  manifest. `NativeSlice<T>`/`NativeSliceMut<T>` delivered
+  (`fase-4e-native-slice`): validated bounded views constructed only via
+  `pointer.as_slice(length)`/`.as_slice_mut(length)` (both `unsafe`,
+  returning `Result<view, NativeError>`), checking nullability, alignment,
+  extent, and — for the syntactically direct `Pointer.from(place).as_slice(n)`
+  shape — known extent against the real underlying storage; using an
+  already-constructed view (indexing, `.length`, `.is_empty`) needs no
+  `unsafe`, with bounds checks active on every index. The generalized
+  `Pointer<T>` escape rule now also rejects a view returned, stored in a
+  field, or captured. **This change also discovered and delivered a real
+  grammar gap**: `expr[index]` did not exist anywhere in the compiler
+  before it (lexed tokens, no parser production, no AST node) — added as
+  a genuine new postfix expression (`Expr::Index`), usable as a read or,
+  through a receiver-type-keyed dispatch table (today: `NativeSlice<T>`
+  read-only, `NativeSliceMut<T>` read/write), as an assignment target,
+  deliberately left open for Phase 7's `Array<T>`/`List<T>` to register
+  their own support later without further grammar changes. **Not**
+  covered: `.read_volatile()`/`.write_volatile()`, untagged native-union
+  access (no union type exists), weak atomic ordering (`Atomic<T>` is
+  Phase 5), and general provenance tracking for a view's known extent
+  beyond the one syntactic shape recognized so far.
 - [x] Implement transactional write journals and rollback for managed/validated
   ranges, followed by explicit irreversible `commit` effects — **delivered**
   (`fase-4e-unsafe-journal`, D5/D6 of `fase-4e-unsafe-pointer-extern`'s own
