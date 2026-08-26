@@ -41,9 +41,16 @@ Current high-impact delivery limits include:
   element-type subset) supports construction/read/write/offset/cast with a
   conservative escape rule; `extern "C" fn` declares and calls a native
   function under a narrow ABI-safe signature. The transactional
-  journal/rollback contract itself is not implemented — `unsafe {}` does not
-  yet record writes and `commit {}` does not yet durably publish anything, so
-  nothing rolls back on failure yet. `NativeSlice<T>`/`NativeSliceMut<T>`,
+  journal/rollback contract is delivered: `unsafe {}` journals every managed
+  write to state declared outside the block, commits durably on normal
+  exit, and rolls back every recorded write in reverse order when an
+  exception becomes pending before that exit; `commit {}` durably publishes
+  the enclosing block's journal at its own entry, before running its own
+  body, and writes after that point are no longer journaled. A `try`/`catch`
+  nested inside `unsafe {}` that handles the exception locally does not
+  trigger a rollback. Known limitation: an early `return`/`break`/`continue`
+  out of `unsafe {}` leaks that block's journal handle (not a soundness
+  issue — just an unfreed allocation). `NativeSlice<T>`/`NativeSliceMut<T>`,
   volatile access, untagged native-union access (no union type exists), weak
   atomic ordering (`Atomic<T>` is Phase 5), and a native-library-linking
   manifest also remain.

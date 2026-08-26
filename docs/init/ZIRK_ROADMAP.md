@@ -219,9 +219,10 @@ deferred to a follow-up change.
 **Status: in progress. ADR-003 closed (non-moving mark-sweep); the real
 collector, `inmut::strict` projection-write checking
 (`fase-4e-inmut-strict-proyeccion`), the `unsafe`/`Pointer<T>`/`extern`
-core (`fase-4e-unsafe-pointer-extern`), `Weak<T>` (`fase-4e-weak`), and
-deep `clone()` for reference graphs (`fase-4e-clone`) shipped; the
-transactional journal and native slices remain.**
+core (`fase-4e-unsafe-pointer-extern`), `Weak<T>` (`fase-4e-weak`), deep
+`clone()` for reference graphs (`fase-4e-clone`), and the transactional
+unsafe journal/rollback (`fase-4e-unsafe-journal`) shipped; native slices
+remain.**
 
 - [x] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
   public ownership syntax — **delivered** (`fase-4e-colector-mark-sweep`):
@@ -297,14 +298,26 @@ transactional journal and native slices remain.**
   validated views, `.read_volatile()`/`.write_volatile()`, untagged
   native-union access (no union type exists), weak atomic ordering
   (`Atomic<T>` is Phase 5).
-- [ ] Implement transactional write journals and rollback for managed/validated
-  ranges, followed by explicit irreversible `commit` effects. **Not
-  implemented** — `unsafe {}`/`commit {}` parse and enforce context
-  correctly, but neither journals a write nor rolls anything back on
-  failure yet; `commit {}` does not yet durably publish anything either.
-  Design (D5/D6 of `fase-4e-unsafe-pointer-extern`'s own `design.md`) is
-  written and ready to implement against; cut from that change's own scope
-  when it did not fit in one pass, not abandoned.
+- [x] Implement transactional write journals and rollback for managed/validated
+  ranges, followed by explicit irreversible `commit` effects — **delivered**
+  (`fase-4e-unsafe-journal`, D5/D6 of `fase-4e-unsafe-pointer-extern`'s own
+  `design.md`, implemented as its own follow-up change once cut from that
+  one's original scope): `unsafe {}` journals every managed write to state
+  declared outside the block before executing it, commits durably on
+  normal exit, and rolls back every recorded write in reverse order when
+  an exception becomes pending before that exit; `commit {}` durably
+  publishes the enclosing block's journal at its own entry, before running
+  its own body, and further writes after that point are no longer
+  journaled (a commit boundary makes prior writes irreversible, matching
+  the spec). A `try`/`catch` nested inside an `unsafe {}` block that
+  handles the exception locally correctly does not trigger a rollback — the
+  rollback decision is made by walking `try`/`unsafe` frames in true
+  lexical nesting order, not just checking the innermost `unsafe` block in
+  isolation. **Known, accepted limitation**: an early `return`/`break`/
+  `continue` out of an `unsafe {}` block leaks that block's journal handle
+  (not a soundness issue, just an unfreed allocation) — extending the
+  existing `try`-only cleanup-on-early-exit mechanism to `unsafe` frames is
+  future work, not delivered here.
 - [ ] Finish resource transfer/dependency and throwable cleanup interactions that
   require the complete memory model. **Not started.**
 
