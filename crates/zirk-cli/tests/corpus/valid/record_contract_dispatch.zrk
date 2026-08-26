@@ -1,0 +1,32 @@
+// A `record` implementing an interface, held through an interface-typed
+// variable and passed as an interface-typed parameter
+// (`fase-3-value-type-contract-dispatch`, design D1, task 4.1/4.2): the
+// value's fields are boxed into a fresh, collector-tracked allocation whose
+// descriptor is built the same way a class's own is, so `CallContract`'s
+// existing dispatch (unchanged by this feature) reaches the record's own
+// `describe()` correctly through the interface-typed reference.
+//
+// (`value class` cannot exercise this: its compact one-line grammar has no
+// `implements` clause and no method body at all — only `record`'s own body
+// form can declare either, so it is the only value type this scenario can
+// use today.)
+interface Describable {
+    fn describe(): String;
+}
+
+record Point implements Describable {
+    x: Int32;
+    y: Int32;
+    fn describe(): String { return "a point"; }
+}
+
+fn announce(d: Describable): String {
+    return d.describe();
+}
+
+fn main(): Void {
+    mut p = Point(x: 1, y: 2);
+    mut d: Describable = p;
+    stdout.println(d.describe());
+    stdout.println(announce(p));
+}
