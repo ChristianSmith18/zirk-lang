@@ -1646,25 +1646,16 @@ impl<'a> Checker<'a> {
                 continue;
             };
 
-            // A record or value class has no descriptor to carry a contract's
-            // table (roadmap task 11.5, design.md's open question on virtual
-            // methods): its own methods dispatch statically and lower today
-            // (`Self::method_of` accepts `IrType::Value` the same way it does
-            // `IrType::Object`), but reaching one through the contract it
-            // implements — the only reason dynamic dispatch would matter for
-            // a type with no identity — needs a vtable no value carries.
-            // Conformance is still checked below, the same way it is for an
-            // abstract class's requirements: what is missing is only the
-            // path from a contract-typed reference back to the value.
-            if matches!(decl.kind, ClassKind::Record | ClassKind::ValueClass)
-                && !decl.implements.is_empty()
-            {
-                self.not_lowered(
-                    decl.name.span,
-                    &format!("a {} that implements a contract", decl.kind.as_str()),
-                    "call its methods directly on the concrete type for now, without naming the contract as its type",
-                );
-            }
+            // A record or value class implementing a contract dispatches
+            // through it by boxing (`fase-3-value-type-contract-dispatch`,
+            // design D1): the value's fields are copied into an ordinary,
+            // collector-tracked allocation carrying a real descriptor,
+            // built the same way a class's own is (`zirk-ir`'s
+            // `lower.rs` populates `module.objects[id]` for a record/value
+            // class exactly like it does for a class, sharing the id space
+            // with its own `IrType::Value` entry). Conformance is checked
+            // below the same way it is for a class; nothing here needs to
+            // gate the value type's own declaration.
 
             // A class satisfies what its base satisfies: that is what makes a
             // subclass usable wherever the base was.

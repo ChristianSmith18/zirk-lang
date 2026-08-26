@@ -67,7 +67,15 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // A record or value class lives in `values`, not `objects` — its
     // `ObjectLayout` entry here is an empty placeholder that is never read
     // (`IrType::Value`, not `Object`, is what a value-kind class resolves
-    // to; see `ir_type`), the same way a still-generic template's is.
+    // to; see `ir_type`) *unless* it implements at least one contract
+    // (`fase-3-value-type-contract-dispatch`, design D1): a value-to-contract
+    // conversion boxes the value into a real, collector-tracked allocation,
+    // and that allocation's descriptor is built by this exact same code
+    // path, parameterized over the value type's own `fields`/`methods`/
+    // `contracts` — sharing its id with the type's own `IrType::Value` entry
+    // (`Base::Class` doc comment: the two tables index the same id space).
+    // A value type that never implements a contract keeps the empty
+    // placeholder, the same way a still-generic template's is.
     let objects = checked
         .classes
         .iter()
@@ -84,12 +92,11 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             // `ir_type` has nothing to substitute here, and its methods'
             // bodies are never lowered (skipped in the loop below), so a
             // symbol in its table would name a function that does not exist.
-            if !class.type_params.is_empty()
-                || matches!(
-                    class.kind,
-                    ast::ClassKind::Record | ast::ClassKind::ValueClass
-                )
-            {
+            let is_unboxed_value = matches!(
+                class.kind,
+                ast::ClassKind::Record | ast::ClassKind::ValueClass
+            ) && class.contracts.is_empty();
+            if !class.type_params.is_empty() || is_unboxed_value {
                 return ObjectLayout {
                     name: class.name.clone(),
                     fields: Vec::new(),
@@ -173,7 +180,28 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 let supplied = class
                                     .method(&required.name)
                                     .expect("the checker verified conformance");
-                                body_symbol(checked, supplied)
+                                // A record/value class's own body takes
+                                // `this` by value (`Self::run_method`) — it
+                                // needs the box-unboxing wrapper
+                                // (`box_thunk_symbol`) rather than its own
+                                // symbol directly. A trait default body it
+                                // inherited instead (`from_contract`) is
+                                // already compiled against a generic
+                                // `this: Contract` pointer receiver
+                                // (`Self::run` for a contract body, further
+                                // below) — exactly what `CallContract`
+                                // already passes, value type or not — so
+                                // that one needs no wrapper at all, the same
+                                // as a class's.
+                                if matches!(
+                                    class.kind,
+                                    ast::ClassKind::Record | ast::ClassKind::ValueClass
+                                ) && supplied.from_contract.is_none()
+                                {
+                                    box_thunk_symbol(&class.name, &supplied.name)
+                                } else {
+                                    body_symbol(checked, supplied)
+                                }
                             })
                             .collect(),
                     })
@@ -479,6 +507,52 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             instance_base,
             enum_instance_base,
         );
+    }
+
+    // A boxed value's contract-table wrapper (`fase-3-value-type-contract-
+    // dispatch`, design D1/D2, `box_thunk_symbol`'s own doc comment): one
+    // per own-body method a record/value class supplies to satisfy a
+    // contract, unboxing `this` and forwarding into the real by-value body.
+    // Skipped for a still-generic template the same way its own methods
+    // are, and for a method inherited from a trait's default body
+    // (`from_contract`), which already takes a generic `this: Contract`
+    // pointer receiver and needs no wrapper.
+    for (id, class) in checked.classes.iter().enumerate() {
+        let id = id as u32;
+        if !class.type_params.is_empty()
+            || !matches!(
+                class.kind,
+                ast::ClassKind::Record | ast::ClassKind::ValueClass
+            )
+        {
+            continue;
+        }
+        // Two contracts the same class implements may share a method name
+        // (both requiring `describe()`, say) — deduplicated by the symbol
+        // the thunk would get, so the same one is never built twice.
+        let mut built = std::collections::HashSet::new();
+        for &contract in &class.contracts {
+            for required in &checked.contracts[contract as usize].methods {
+                let supplied = class
+                    .method(&required.name)
+                    .expect("the checker verified conformance");
+                if supplied.from_contract.is_some() {
+                    continue;
+                }
+                if !built.insert(supplied.name.clone()) {
+                    continue;
+                }
+                let thunk = FunctionLowering::new(
+                    &mut module,
+                    checked,
+                    &declarations,
+                    instance_base,
+                    enum_instance_base,
+                )
+                .build_box_thunk(id, supplied);
+                module.functions.push(thunk);
+            }
+        }
     }
 
     // A trait's default body belongs to the contract, not to any class that
@@ -909,6 +983,24 @@ pub fn method_symbol(class: &str, method: &str) -> String {
 /// however many classes reuse it.
 pub fn contract_method_symbol(contract: &str, method: &str) -> String {
     format!("{contract}$default${method}")
+}
+
+/// The name a boxed value's contract-table entry for one of its own methods
+/// is emitted under (`fase-3-value-type-contract-dispatch`, design D1/D2).
+///
+/// A `record`/`value class`'s own method (`Self::method_symbol`) receives
+/// `this` by value (roadmap task 11.5) — `CallContract`'s existing dispatch
+/// always passes the receiver as a pointer (design D2's own premise: it
+/// "cannot distinguish" a boxed value's descriptor from a class's), so a
+/// contract table cannot point straight at that symbol the way a class's own
+/// can. This name is a small wrapper instead: it takes the box's pointer,
+/// rebuilds the inline value from its fields (the box's own layout is
+/// identical to the value's, `Self::lower_box_value`'s own doc comment), and
+/// forwards into the real by-value method — the one, single place this
+/// representation gap is bridged, so `CallContract` itself still needs zero
+/// changes.
+pub fn box_thunk_symbol(class: &str, method: &str) -> String {
+    format!("{class}$boxed${method}")
 }
 
 /// The symbol whose body a method entry actually reaches.
@@ -1775,6 +1867,20 @@ impl<'a> FunctionLowering<'a> {
             // widening.
             let value = if actual == base.inner() {
                 value
+            } else if let IrType::Value(id) = actual
+                && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
+            {
+                // A `record`/`value class` widened directly into `T??`'s
+                // present half where `T` is a contract it implements
+                // (design D1): box first, exactly like the non-nullable
+                // path below, then retag if the box's own id is not
+                // already the destination's.
+                let boxed = self.lower_box_value(value, id, expr.span());
+                if base.inner() == IrType::Object(id) {
+                    boxed
+                } else {
+                    self.emit(InstKind::Retype(boxed), base.inner(), expr.span())
+                }
             } else if matches!(actual, IrType::Object(_) | IrType::Contract(_))
                 && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
             {
@@ -1791,8 +1897,28 @@ impl<'a> FunctionLowering<'a> {
         }
 
         let value = self.lower_expr(expr);
-        if self.type_of_operand(value) == expected {
+        let actual = self.type_of_operand(value);
+        if actual == expected {
             return value;
+        }
+
+        // The checker already proved this is a `record`/`value class`
+        // implementing the contract expected here (design D1,
+        // `fase-3-value-type-contract-dispatch`): unlike a class instance,
+        // whose address already *is* the shape a contract-typed reference
+        // needs, a value type is stored inline with no header — it has to
+        // be boxed into a fresh, collector-tracked allocation first, whose
+        // descriptor is built the same way a class's own is (this value
+        // type's own id doubles as its box's `IrType::Object` id).
+        if let IrType::Value(id) = actual
+            && matches!(expected, IrType::Object(_) | IrType::Contract(_))
+        {
+            let boxed = self.lower_box_value(value, id, expr.span());
+            return if expected == IrType::Object(id) {
+                boxed
+            } else {
+                self.emit(InstKind::Retype(boxed), expected, expr.span())
+            };
         }
 
         // The checker already proved this is a subclass, or a contract
@@ -1821,6 +1947,46 @@ impl<'a> FunctionLowering<'a> {
         }
 
         value
+    }
+
+    /// Boxes a `record`/`value class` value into a fresh, collector-tracked
+    /// allocation (`fase-3-value-type-contract-dispatch`, design D1) — the
+    /// one step that lets it be held through a contract-typed reference.
+    ///
+    /// `id` is the value type's own id, shared between its `IrType::Value`
+    /// entry (`module.values[id]`, its existing inline layout) and its
+    /// `IrType::Object` entry (`module.objects[id]`, built by the same
+    /// class-descriptor code path `zirk_ir::lower_class_body`'s caller
+    /// uses for an ordinary class, populated for a value type only when it
+    /// implements at least one contract). Building the box is nothing but
+    /// an `Alloc` of that same id, then reading each field back out of the
+    /// inline value (`LoadField` already supports an `IrType::Value`
+    /// operand) and writing it into the fresh allocation at the same index
+    /// — no new instruction kind, and no store ever targets the box again
+    /// after this (design D3: the box is read-only from here on).
+    fn lower_box_value(&mut self, value: Operand, id: u32, span: Span) -> Operand {
+        let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+        let field_count = self.module.values[id as usize].fields.len();
+        for index in 0..field_count {
+            let field_ty = self.module.values[id as usize].fields[index].ty;
+            let field_value = self.emit(
+                InstKind::LoadField {
+                    object: value,
+                    index: index as u32,
+                },
+                field_ty,
+                span,
+            );
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: index as u32,
+                    value: field_value,
+                },
+                span,
+            );
+        }
+        object
     }
 
     // --- Function ---------------------------------------------------------
@@ -2278,6 +2444,78 @@ impl<'a> FunctionLowering<'a> {
             name: method_symbol(&self.checked.classes[class_id as usize].name, "stack_trace"),
             params: vec![this],
             return_type: IrType::Object(stack_trace_id),
+            gc_roots: gc_roots_of(self.module, &self.slots),
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `box_thunk_symbol(class, method)`'s own body
+    /// (`fase-3-value-type-contract-dispatch`, design D1/D2): unbox `this`
+    /// (the box's pointer) back into the inline value `Self::run_method`'s
+    /// real body expects, then forward the call unchanged. This is the one
+    /// wrapper that bridges the box's pointer receiver to the value's own
+    /// by-value one — everywhere else (`CallContract`'s own dispatch,
+    /// `Self::lower_box_value`'s construction) reuses an existing path with
+    /// no change at all.
+    fn build_box_thunk(mut self, class_id: u32, method: &zirk_sema::MethodInfo) -> Function {
+        let span = method.span;
+        let entry = self.new_block();
+        self.current = entry;
+
+        let this_ty = IrType::Object(class_id);
+        let this = self.declare_slot("this", this_ty, span);
+        let object = self.emit(InstKind::Load(this), this_ty, span);
+
+        let field_count = self.module.values[class_id as usize].fields.len();
+        let mut fields = Vec::with_capacity(field_count);
+        for index in 0..field_count {
+            let field_ty = self.module.values[class_id as usize].fields[index].ty;
+            fields.push(self.emit(
+                InstKind::LoadField {
+                    object,
+                    index: index as u32,
+                },
+                field_ty,
+                span,
+            ));
+        }
+        let receiver = self.emit(
+            InstKind::BuildValue {
+                class: class_id,
+                fields,
+            },
+            IrType::Value(class_id),
+            span,
+        );
+
+        let mut params = vec![this];
+        let mut args = vec![receiver];
+        for (index, param) in method.params.iter().enumerate() {
+            let ty = self.ir_type(param.ty);
+            let slot = self.declare_slot(&format!("<box_arg{index}>"), ty, span);
+            params.push(slot);
+            args.push(self.emit(InstKind::Load(slot), ty, span));
+        }
+
+        let return_type = self.ir_type(method.returns);
+        self.return_type = return_type;
+        let callee = method_symbol(&self.checked.classes[class_id as usize].name, &method.name);
+
+        if return_type == IrType::Void {
+            self.emit_effect(InstKind::Call { callee, args }, span);
+            self.terminate(Terminator::Return(None));
+        } else {
+            let result = self.emit(InstKind::Call { callee, args }, return_type, span);
+            self.terminate(Terminator::Return(Some(result)));
+        }
+
+        Function {
+            name: box_thunk_symbol(&self.checked.classes[class_id as usize].name, &method.name),
+            params,
+            return_type,
             gc_roots: gc_roots_of(self.module, &self.slots),
             slots: self.slots,
             blocks: self.blocks,

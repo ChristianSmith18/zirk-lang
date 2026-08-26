@@ -6,14 +6,19 @@ Unlike `fase-3-abstract-dispatch` (a existing, proven mechanism generalized to a
 
 ## What Changes
 
-- Design (in `design.md`) a representation that lets a `record`/`value class` implementing a contract be held through a contract-typed reference and dispatch correctly, without giving the value type itself a per-instance descriptor (preserving its inline/compact representation everywhere it is *not* held through a contract-typed slot).
-- Deliver the chosen design: construction, conversion (value → contract-typed reference), and dispatch through the contract-typed reference for a `record`/`value class` implementing one or more contracts.
-- Remove the checker's blanket rejection (`checker.rs:1650-1658`) once the chosen mechanism is real.
+**Delivered, for `record`:**
+- The chosen design (see `design.md`): a `record`/`value class` value converted to a contract-typed reference is boxed into an ordinary, collector-tracked heap allocation carrying a real descriptor — built via the exact same object-layout construction a `class` already goes through, not a second, divergent builder. Conversion (value → contract-typed reference), construction, and dispatch through the contract-typed reference now work end to end for a `record` implementing one or more contracts.
+- Removed the checker's blanket rejection (`checker.rs:1650-1658`).
+- **Real bug found and fixed along the way, beyond what design anticipated**: a value type's own method is compiled expecting `this` by value, but `CallContract`'s dispatch always calls the receiver as a pointer — pointing a contract table straight at the value's own method body silently miscompiled (this was an implicit assumption in the original design, not something it got explicitly wrong, but real and worth naming). Fixed with a small per-method unboxing thunk synthesized only for a value type's own contract methods (a trait's inherited default body needs none, since it already expects a generic pointer receiver) — `CallContract` itself needed zero changes, preserving the design's own central point.
+
+**Found blocked for `value class` specifically — a pre-existing grammar gap, not something this change is scoped to fix:**
+- `value class`'s compact one-line declaration syntax has no `implements` clause and no method-body grammar at all today, independent of this feature — so a `value class` cannot actually satisfy a contract regardless of the dispatch mechanism now working. Only `record` benefits from this change today; extending `value class`'s own grammar to support `implements`/methods is separate, future work.
 
 ### Explicitly out of scope
 
+- **Extending `value class`'s grammar to support `implements`/methods** — the pre-existing gap found above; a real, separate piece of work.
 - **Generic contract dispatch** (`contract Foo<T>`) — a separate, larger problem (no dispatch-table-per-instantiation mechanism exists at all, per earlier investigation); this change is scoped to a *non-generic* contract held by a *value* type. Combining both is future work once each is independently real.
-- **Mutation through a contract-typed reference to a value type** — `record` is already immutable and `value class` has no observable identity; whatever this change's representation turns out to be, it must not introduce a way to mutate the original value's storage through the contract-typed view (matching the language's existing value-semantics guarantee — assignment/passing of a value type is already always a copy).
+- **Mutation through a contract-typed reference to a value type** — confirmed delivered as a natural consequence of the design (a contract declares no fields, so there is nothing to write through it), not as a separately-enforced rule.
 - **Changing anything about how a `record`/`value class` is represented when NOT held through a contract-typed reference** — its existing inline/compact representation (task 11.5) is unaffected; this change only adds a new representation for the specific case of a contract-typed view.
 
 ## Capabilities
