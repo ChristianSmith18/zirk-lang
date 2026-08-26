@@ -50,10 +50,24 @@ Current high-impact delivery limits include:
   nested inside `unsafe {}` that handles the exception locally does not
   trigger a rollback. Known limitation: an early `return`/`break`/`continue`
   out of `unsafe {}` leaks that block's journal handle (not a soundness
-  issue — just an unfreed allocation). `NativeSlice<T>`/`NativeSliceMut<T>`,
-  volatile access, untagged native-union access (no union type exists), weak
-  atomic ordering (`Atomic<T>` is Phase 5), and a native-library-linking
-  manifest also remain.
+  issue — just an unfreed allocation). `NativeSlice<T>`/`NativeSliceMut<T>`
+  are delivered: validated bounded views constructed only via
+  `pointer.as_slice(length)`/`.as_slice_mut(length)` (both `unsafe`,
+  returning `Result<view, NativeError>`), checking nullability, alignment,
+  extent, and (for the syntactically direct `Pointer.from(place).as_slice(n)`
+  shape only) known extent against the real underlying storage; using an
+  already-constructed view needs no `unsafe`, with bounds checks active on
+  every index; the `Pointer<T>` escape rule now also covers both view
+  types. Delivering this also meant adding `expr[index]` as a genuine new
+  postfix expression grammar (`Expr::Index`) — indexing did not exist
+  anywhere in the compiler before, and is now dispatched by receiver type
+  (today: `NativeSlice<T>`/`NativeSliceMut<T>`) so Phase 7's `Array<T>`/
+  `List<T>` can register their own support later without another grammar
+  change. Volatile access, untagged native-union access (no union type
+  exists), weak atomic ordering (`Atomic<T>` is Phase 5), a
+  native-library-linking manifest, and general provenance tracking for a
+  view's known extent beyond the one recognized syntactic shape also
+  remain.
 - Several Phase 3 constructs parse and type-check more broadly than they lower:
   user generic contracts/enums, abstract-class dynamic dispatch, value-type
   contract dispatch, and derived structural equality require remaining stages.
