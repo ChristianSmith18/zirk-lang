@@ -20,6 +20,4 @@ observation and checked casts SHALL remain separate operations.
 - **WHEN** a program declares `enum Bar<T> { ... }` and instantiates it as `Bar<Int32>`
 - **THEN** the instantiation lowers to its own concrete layout, the same mechanism already used for `Result<T,E>`
 
-#### Scenario: A recursive generic enum terminates
-- **WHEN** a generic enum's own variant payload references the enum's own generic type (for example `Tree<T>` with a `Node(T, Tree<T>, Tree<T>)` variant)
-- **THEN** specialization completes without infinite recursion, reusing one layout per distinct instantiation
+NOTE (not applied to the main spec): this change's own implementation found that a self-referencing enum declaration — recursive, generic or not — cannot be declared at all today, independent of genericity (`declare_enum` resolves every variant's field types before the enum's own name is registered). A "recursive generic enum terminates" scenario was originally planned here but is not delivered; it belongs to a future change that first gives enum declaration the same two-phase declare/resolve split classes already have.
