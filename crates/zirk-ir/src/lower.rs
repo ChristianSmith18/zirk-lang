@@ -1030,6 +1030,19 @@ struct FunctionLowering<'a> {
     /// (having run every enclosing `finally` it passes on the way) an early
     /// return from the current function.
     try_stack: Vec<TryFrame>,
+    /// Active `unsafe { ... }` frames, innermost last (roadmap Phase 4e,
+    /// `fase-4e-unsafe-journal`, design D1/D4) — what a write inside an
+    /// active block journals against, and what a propagating exception
+    /// rolls back, interleaved with `try_stack` by `pushed_at` (see
+    /// `Self::lower_pending_exception_dispatch`).
+    unsafe_stack: Vec<UnsafeFrame>,
+    /// Monotonic counter handed out to every `TryFrame`/`UnsafeFrame` when
+    /// it is pushed (design D2 of `fase-4e-unsafe-journal`) — the two
+    /// stacks are tracked independently, but a propagating exception must
+    /// process them in true lexical nesting order; comparing this sequence
+    /// number is what reconstructs that order without merging their
+    /// representations.
+    next_scope_seq: u64,
     /// Set only while lowering a *recursive* lambda's own lifted body
     /// (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d): the source
     /// name that refers to the lambda itself, this lifted function's own
@@ -1054,6 +1067,36 @@ struct FunctionLowering<'a> {
 struct TryFrame {
     catches: Vec<CatchFrame>,
     finally: Option<ast::Block>,
+    /// Push order relative to `unsafe_stack` frames (`FunctionLowering::next_scope_seq`,
+    /// `fase-4e-unsafe-journal` design D2) — see
+    /// `FunctionLowering::lower_pending_exception_dispatch`.
+    pushed_at: u64,
+}
+
+/// One active `unsafe { ... }` block's own journal, as
+/// [`FunctionLowering::unsafe_stack`] tracks it (roadmap Phase 4e,
+/// `fase-4e-unsafe-journal`, design D1/D4).
+#[derive(Clone)]
+struct UnsafeFrame {
+    /// The `<journal>` slot holding this block's own `*mut Journal` handle
+    /// — an ordinary local SSA pointer value (design D4), reloaded from this
+    /// slot wherever it is needed since a value does not cross blocks
+    /// (ADR-007) and journaling happens at scattered points inside the
+    /// block's own body.
+    journal_slot: SlotId,
+    /// Every slot id below this boundary (`FunctionLowering::slots.len()`
+    /// at this frame's own `JournalBegin`) was declared before the block —
+    /// a `Store` to one of them writes to storage declared outside the
+    /// block and must be journaled (design D1); a slot at or above the
+    /// boundary was declared inside the block itself and is exempt.
+    slot_boundary: u32,
+    /// Set once a `commit {}` nested directly inside this block has already
+    /// durably committed this journal (design D2): the handle is freed at
+    /// that point, so neither a further `JournalRecord` nor this block's
+    /// own fall-through/rollback exit may touch it again.
+    committed: bool,
+    /// Push order relative to `try_stack` frames — see `TryFrame::pushed_at`.
+    pushed_at: u64,
 }
 
 /// One `catch Type(name)` arm, pre-built before its `try`'s body is lowered
@@ -1105,8 +1148,17 @@ impl<'a> FunctionLowering<'a> {
             value_types: HashMap::new(),
             current_catch: None,
             try_stack: Vec::new(),
+            unsafe_stack: Vec::new(),
+            next_scope_seq: 0,
             recursive_call: None,
         }
+    }
+
+    /// Hands out the next push-order sequence number (design D2 of
+    /// `fase-4e-unsafe-journal`) — see `TryFrame::pushed_at`/`UnsafeFrame::pushed_at`.
+    fn new_scope_seq(&mut self) -> u64 {
+        self.next_scope_seq += 1;
+        self.next_scope_seq
     }
 
     /// [`ir_type`], with this lowering's own `instance_base`/`enum_instance_base` applied.
@@ -1891,7 +1943,12 @@ impl<'a> FunctionLowering<'a> {
             // A `Weak<T>` field has no default the same way an ordinary
             // class reference does not (roadmap Phase 4e, `fase-4e-weak`):
             // it is a reference, and there is no handle to default to.
-            | IrType::Weak(_) => {
+            | IrType::Weak(_)
+            // A journal handle is never a Zirk-visible field type — it only
+            // ever appears as the `<journal>` slot's own type, always
+            // explicitly stored right after `JournalBegin`
+            // (roadmap Phase 4e, `fase-4e-unsafe-journal`).
+            | IrType::JournalHandle => {
                 return None;
             }
         })
@@ -2108,15 +2165,12 @@ impl<'a> FunctionLowering<'a> {
             ast::Stmt::Block(b) => self.lower_block(b),
             ast::Stmt::Throw(s) => self.lower_throw(s),
             ast::Stmt::Try(s) => self.lower_try(s),
-            // `unsafe { }`/`commit { }` lower as an ordinary block (roadmap
-            // Phase 4e). The transactional journal (design D5/D6) is
-            // explicitly deferred — see `openspec/changes/fase-4e-unsafe-pointer-extern/tasks.md`
-            // section 8: this slice ships the pointer core and `extern`
-            // (D1-D4, D7-D8) without rollback-on-failure, which the checker
-            // still enforces at the *context* level (unsafe/commit depth)
-            // regardless of whether a write inside is journaled.
-            ast::Stmt::Unsafe(s) => self.lower_block(&s.body),
-            ast::Stmt::Commit(s) => self.lower_block(&s.body),
+            // `unsafe { }`/`commit { }` (roadmap Phase 4e,
+            // `fase-4e-unsafe-journal`, design D1/D2): the transactional
+            // journal/rollback contract `fase-4e-unsafe-pointer-extern`
+            // deferred as its own D5/D6.
+            ast::Stmt::Unsafe(s) => self.lower_unsafe_block(&s.body),
+            ast::Stmt::Commit(s) => self.lower_commit_block(&s.body),
         }
     }
 
@@ -2241,11 +2295,13 @@ impl<'a> FunctionLowering<'a> {
         match target {
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
+                self.journal_writes_to_slot(slot, span);
                 self.emit_effect(InstKind::Store(slot, value), span);
             }
             ast::AssignTarget::Field(field) => {
                 let object = self.lower_expr(&field.object);
                 let (index, _ty) = self.field_position(&field.object, &field.name.name);
+                self.journal_writes_to_field(object, index, span);
                 self.emit_effect(
                     InstKind::StoreField {
                         object,
@@ -2312,6 +2368,7 @@ impl<'a> FunctionLowering<'a> {
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
                 let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
+                self.journal_writes_to_slot(slot, stmt.span);
                 self.emit_effect(InstKind::Store(slot, value), stmt.span);
             }
             ast::AssignTarget::Field(field) => {
@@ -2334,6 +2391,7 @@ impl<'a> FunctionLowering<'a> {
                 };
                 let value = self.lower_expr_as(&stmt.value, ty);
                 let object = self.reload(held, field.span);
+                self.journal_writes_to_field(object, index, stmt.span);
                 self.emit_effect(
                     InstKind::StoreField {
                         object,
@@ -3272,12 +3330,12 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Interpolated(e) => self.lower_interpolated(e, span),
 
-            // `unsafe { }`/`commit { }` used as a value (roadmap Phase 4e) —
-            // same no-journal lowering as the statement form (`Self::lower_stmt`'s
-            // own comment on the D5/D6 cut), evaluated for its last
-            // expression instead of only its effects.
-            ast::Expr::Unsafe(u) => self.lower_block_value(&u.body),
-            ast::Expr::Commit(c) => self.lower_block_value(&c.body),
+            // `unsafe { }`/`commit { }` used as a value (roadmap Phase 4e,
+            // `fase-4e-unsafe-journal`), evaluated for its last expression
+            // instead of only its effects — same journaling as the
+            // statement form.
+            ast::Expr::Unsafe(u) => self.lower_unsafe_block_value(&u.body),
+            ast::Expr::Commit(c) => self.lower_commit_block_value(&c.body),
 
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
@@ -3804,9 +3862,11 @@ impl<'a> FunctionLowering<'a> {
                     .then(|| Self::resource_close_block(&binding.name, arm.span))
             });
             if let Some(finally) = &resource_finally {
+                let pushed_at = self.new_scope_seq();
                 self.try_stack.push(TryFrame {
                     catches: Vec::new(),
                     finally: Some(finally.clone()),
+                    pushed_at,
                 });
             }
 
@@ -4678,62 +4738,120 @@ impl<'a> FunctionLowering<'a> {
         let holder = self.declare_slot("<exception>", throwable_ty, span);
         self.emit_effect(InstKind::Store(holder, taken), span);
 
-        // A snapshot, walked from innermost to outermost — and, crucially,
-        // what `self.try_stack` itself is temporarily narrowed to while each
-        // frame's own `finally` is lowered below. Without the narrowing, a
-        // call inside that `finally` (D11, `fase-4d-runtimeerror`: *every*
-        // call now runs this same dispatch after it, not only a `throws`-
-        // declared one — a `Resource<E>`'s own `close()` call, synthesized
-        // by `Self::resource_close_block`, is exactly such a call and
-        // declares no `throws` of its own) would still see this same frame
-        // — not yet actually popped from the live `self.try_stack` at this
-        // point — as active, re-enter it, and lower its `finally` again,
-        // forever: found via `resources_match_with_closes_on_thrown_exception`
-        // recursing until the generated program's own stack overflowed.
-        // Real exception semantics agree with the narrowing regardless: a
-        // `finally` runs in the context of whatever is *outer* to its own
-        // `try`, never wrapped by that `try` itself.
-        let frames = self.try_stack.clone();
+        // A snapshot, walked from innermost to outermost by push order —
+        // interleaving `try_stack` and `unsafe_stack` (roadmap Phase 4e,
+        // `fase-4e-unsafe-journal`, design D2), since the two are tracked
+        // independently but a propagating exception must process them in
+        // their true lexical nesting order: a `try`/`catch` nested inside an
+        // `unsafe {}` block that covers the exception must be tested
+        // *before* that block's own journal is even considered, and must
+        // stop the walk from reaching it at all if it matches.
+        //
+        // Crucially, this combined snapshot is also what `self.try_stack`/
+        // `self.unsafe_stack` are temporarily narrowed to (to just the
+        // scopes still outer than whichever one's own action is currently
+        // lowering) below. Without the narrowing, a call inside a `finally`
+        // (D11, `fase-4d-runtimeerror`: *every* call now runs this same
+        // dispatch after it, not only a `throws`-declared one — a
+        // `Resource<E>`'s own `close()` call, synthesized by
+        // `Self::resource_close_block`, is exactly such a call and declares
+        // no `throws` of its own) would still see this same frame — not yet
+        // actually popped from the live stack at this point — as active,
+        // re-enter it, and lower its `finally` again, forever: found via
+        // `resources_match_with_closes_on_thrown_exception` recursing until
+        // the generated program's own stack overflowed. Real exception
+        // semantics agree with the narrowing regardless: a `finally` (or a
+        // rollback) runs in the context of whatever is *outer* to its own
+        // scope, never wrapped by that scope itself.
+        enum Scope {
+            Try(TryFrame),
+            Unsafe(UnsafeFrame),
+        }
+
+        let mut scopes: Vec<Scope> = self
+            .try_stack
+            .iter()
+            .cloned()
+            .map(Scope::Try)
+            .chain(self.unsafe_stack.iter().cloned().map(Scope::Unsafe))
+            .collect();
+        scopes.sort_by_key(|scope| match scope {
+            Scope::Try(frame) => frame.pushed_at,
+            Scope::Unsafe(frame) => frame.pushed_at,
+        });
+
         let full_try_stack = std::mem::take(&mut self.try_stack);
-        for (index, frame) in frames.iter().enumerate().rev() {
-            for catch in &frame.catches {
-                let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
-                let matches = self.emit(
-                    InstKind::IsInstance {
-                        object: exception,
-                        target_class: catch.class,
-                    },
-                    IrType::Boolean,
-                    span,
-                );
-                let matched_block = self.new_block();
-                let next_test_block = self.new_block();
-                self.terminate(Terminator::Branch {
-                    condition: matches,
-                    then_block: matched_block,
-                    else_block: next_test_block,
-                });
+        let full_unsafe_stack = std::mem::take(&mut self.unsafe_stack);
 
-                self.current = matched_block;
-                let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
-                let narrowed = self.emit(
-                    InstKind::Retype(exception),
-                    IrType::Object(catch.class),
-                    span,
-                );
-                self.emit_effect(InstKind::Store(catch.slot, narrowed), span);
-                self.terminate(Terminator::Jump(catch.handler));
-
-                self.current = next_test_block;
+        for index in (0..scopes.len()).rev() {
+            // Everything still outer than `scopes[index]` — restored before
+            // its own action runs (see above).
+            let mut outer_try = Vec::new();
+            let mut outer_unsafe = Vec::new();
+            for scope in &scopes[..index] {
+                match scope {
+                    Scope::Try(frame) => outer_try.push(frame.clone()),
+                    Scope::Unsafe(frame) => outer_unsafe.push(frame.clone()),
+                }
             }
-            // None of this frame's own catches covers it: its `finally`
-            // still runs before the search continues further out, exactly
-            // as it would on any other exit from this `try` — with only the
-            // frames outer to this one active for the duration (see above).
-            self.try_stack = full_try_stack[..index].to_vec();
-            self.lower_finally_block(&frame.finally);
+            self.try_stack = outer_try;
+            self.unsafe_stack = outer_unsafe;
+
+            match &scopes[index] {
+                Scope::Try(frame) => {
+                    for catch in &frame.catches {
+                        let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
+                        let matches = self.emit(
+                            InstKind::IsInstance {
+                                object: exception,
+                                target_class: catch.class,
+                            },
+                            IrType::Boolean,
+                            span,
+                        );
+                        let matched_block = self.new_block();
+                        let next_test_block = self.new_block();
+                        self.terminate(Terminator::Branch {
+                            condition: matches,
+                            then_block: matched_block,
+                            else_block: next_test_block,
+                        });
+
+                        self.current = matched_block;
+                        let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
+                        let narrowed = self.emit(
+                            InstKind::Retype(exception),
+                            IrType::Object(catch.class),
+                            span,
+                        );
+                        self.emit_effect(InstKind::Store(catch.slot, narrowed), span);
+                        self.terminate(Terminator::Jump(catch.handler));
+
+                        self.current = next_test_block;
+                    }
+                    // None of this frame's own catches covers it: its
+                    // `finally` still runs before the search continues
+                    // further out, exactly as it would on any other exit
+                    // from this `try`.
+                    self.lower_finally_block(&frame.finally);
+                }
+                Scope::Unsafe(frame) => {
+                    // A frame already durably committed by its own nested
+                    // `commit {}` (design D2) has no journal left to roll
+                    // back — its handle was already freed at that point.
+                    if !frame.committed {
+                        let journal = self.emit(
+                            InstKind::Load(frame.journal_slot),
+                            IrType::JournalHandle,
+                            span,
+                        );
+                        self.emit_effect(InstKind::JournalRollback(journal), span);
+                    }
+                }
+            }
         }
         self.try_stack = full_try_stack;
+        self.unsafe_stack = full_unsafe_stack;
 
         // Escaped every active `try`: put the exception back as pending and
         // re-propagate from the current function, the same early-return an
@@ -4805,6 +4923,141 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    // --- `unsafe { }`/`commit { }` transactional journal (roadmap Phase 4e,
+    // `fase-4e-unsafe-journal`, design D1/D2/D4) -------------------------
+
+    /// `JournalBegin` on entry to an `unsafe { ... }` block, and pushes its
+    /// own frame — shared by the statement and expression-value forms
+    /// (design D1). Returns the slot the journal handle lives in, so the
+    /// caller can reload it once `body` is done lowering.
+    fn begin_unsafe_frame(&mut self, span: Span) -> SlotId {
+        let boundary = self.slots.len() as u32;
+        let journal = self.emit(InstKind::JournalBegin, IrType::JournalHandle, span);
+        let journal_slot = self.declare_slot("<journal>", IrType::JournalHandle, span);
+        self.emit_effect(InstKind::Store(journal_slot, journal), span);
+
+        let pushed_at = self.new_scope_seq();
+        self.unsafe_stack.push(UnsafeFrame {
+            journal_slot,
+            slot_boundary: boundary,
+            committed: false,
+            pushed_at,
+        });
+        journal_slot
+    }
+
+    /// Pops the innermost `unsafe` frame and, on the block's own normal
+    /// fall-through path — and only if a nested `commit {}` has not already
+    /// durably committed (and freed) this same journal (design D2) —
+    /// durably commits it (design D1). The rollback-on-exception path never
+    /// reaches here: a pending exception already diverted control away
+    /// through `Self::lower_pending_exception_dispatch` before this point
+    /// (see that function's own handling of `UnsafeFrame`).
+    fn end_unsafe_frame(&mut self, journal_slot: SlotId, span: Span) {
+        let frame = self
+            .unsafe_stack
+            .pop()
+            .expect("begin_unsafe_frame pushed exactly one frame this call pairs with");
+        debug_assert_eq!(frame.journal_slot, journal_slot);
+        if !frame.committed && self.block_mut(self.current).terminator.is_none() {
+            let journal = self.emit(InstKind::Load(journal_slot), IrType::JournalHandle, span);
+            self.emit_effect(InstKind::JournalCommit(journal), span);
+        }
+    }
+
+    /// `unsafe { ... }` in statement position.
+    fn lower_unsafe_block(&mut self, block: &ast::Block) {
+        let journal_slot = self.begin_unsafe_frame(block.span);
+        self.lower_block(block);
+        self.end_unsafe_frame(journal_slot, block.span);
+    }
+
+    /// `unsafe { ... }` in expression-value position (`mut result = unsafe { ... };`).
+    fn lower_unsafe_block_value(&mut self, block: &ast::Block) -> Operand {
+        let journal_slot = self.begin_unsafe_frame(block.span);
+        let value = self.lower_block_value(block);
+        self.end_unsafe_frame(journal_slot, block.span);
+        value
+    }
+
+    /// `commit { ... }`'s own entry (design D2): durably commits the
+    /// *enclosing* `unsafe` block's journal so far, before `body` itself is
+    /// lowered — publishing every reversible write before the irreversible
+    /// effect the commit boundary exists to guard. A second `commit {}`
+    /// reaching the same already-committed frame (e.g. nested directly
+    /// inside the first) is a no-op: the handle is already freed, and
+    /// nothing more is left to publish.
+    fn commit_enclosing_unsafe(&mut self, span: Span) {
+        let frame = self
+            .unsafe_stack
+            .last_mut()
+            .expect("the checker requires `commit {}` only inside an enclosing `unsafe {}`");
+        if frame.committed {
+            return;
+        }
+        let slot = frame.journal_slot;
+        frame.committed = true;
+        let journal = self.emit(InstKind::Load(slot), IrType::JournalHandle, span);
+        self.emit_effect(InstKind::JournalCommit(journal), span);
+    }
+
+    /// `commit { ... }` in statement position.
+    fn lower_commit_block(&mut self, block: &ast::Block) {
+        self.commit_enclosing_unsafe(block.span);
+        self.lower_block(block);
+    }
+
+    /// `commit { ... }` in expression-value position.
+    fn lower_commit_block_value(&mut self, block: &ast::Block) -> Operand {
+        self.commit_enclosing_unsafe(block.span);
+        self.lower_block_value(block)
+    }
+
+    /// Before a `Store` to `slot` (design D1/D3): emits `JournalRecordSlot`
+    /// against every currently open, not-yet-committed `unsafe` frame whose
+    /// own boundary `slot` was declared before — a slot declared inside a
+    /// given frame is exempt from *that* frame (nothing outside it could
+    /// observe rolling back a write to storage the frame itself allocated),
+    /// but is still journaled by any further-outer frame it may also be
+    /// nested inside.
+    fn journal_writes_to_slot(&mut self, slot: SlotId, span: Span) {
+        let targets: Vec<SlotId> = self
+            .unsafe_stack
+            .iter()
+            .filter(|frame| !frame.committed && slot.0 < frame.slot_boundary)
+            .map(|frame| frame.journal_slot)
+            .collect();
+        for journal_slot in targets {
+            let journal = self.emit(InstKind::Load(journal_slot), IrType::JournalHandle, span);
+            self.emit_effect(InstKind::JournalRecordSlot { journal, slot }, span);
+        }
+    }
+
+    /// Before a `StoreField` (design D1/D3): emits `JournalRecordField`
+    /// against every currently open, not-yet-committed `unsafe` frame — a
+    /// field belongs to heap state, not to this function's own lexical
+    /// scoping, so (unlike a slot) there is no "declared inside the block"
+    /// exemption to apply to it.
+    fn journal_writes_to_field(&mut self, object: Operand, index: u32, span: Span) {
+        let targets: Vec<SlotId> = self
+            .unsafe_stack
+            .iter()
+            .filter(|frame| !frame.committed)
+            .map(|frame| frame.journal_slot)
+            .collect();
+        for journal_slot in targets {
+            let journal = self.emit(InstKind::Load(journal_slot), IrType::JournalHandle, span);
+            self.emit_effect(
+                InstKind::JournalRecordField {
+                    journal,
+                    object,
+                    index,
+                },
+                span,
+            );
+        }
+    }
+
     /// Lowers `try { } catch Type(name) { } ... finally { }` (roadmap Phase
     /// 4b). Each `catch`'s handler block and binding slot are built before
     /// the body is lowered, so a throwing call anywhere inside it — however
@@ -4835,9 +5088,11 @@ impl<'a> FunctionLowering<'a> {
             })
             .collect();
 
+        let pushed_at = self.new_scope_seq();
         self.try_stack.push(TryFrame {
             catches: catches.clone(),
             finally: stmt.finally.clone(),
+            pushed_at,
         });
         self.lower_block(&stmt.body);
         self.try_stack.pop();
@@ -6538,6 +6793,7 @@ impl<'a> FunctionLowering<'a> {
             ty,
             span,
         );
+        self.journal_writes_to_slot(slot, span);
         self.emit_effect(InstKind::Store(slot, updated), span);
 
         match expr.fix {
@@ -6565,8 +6821,8 @@ impl<'a> FunctionLowering<'a> {
             // Same reason as in the checker: an `if` is parsed as a statement
             // wherever it appears, and the position decides what it is.
             ast::Stmt::If(nested) => self.lower_if_expr(nested, nested.span),
-            ast::Stmt::Unsafe(nested) => self.lower_block_value(&nested.body),
-            ast::Stmt::Commit(nested) => self.lower_block_value(&nested.body),
+            ast::Stmt::Unsafe(nested) => self.lower_unsafe_block_value(&nested.body),
+            ast::Stmt::Commit(nested) => self.lower_commit_block_value(&nested.body),
             _ => unreachable!("a verified block used as a value ends in an expression"),
         };
 

@@ -133,6 +133,22 @@ pub mod symbols {
     /// the traversal lives here rather than being unrolled across several
     /// IR instructions.
     pub const CLONE: &str = "zirk_rt_clone";
+    /// Begins a new per-`unsafe`-block undo log (roadmap Phase 4e,
+    /// `fase-4e-unsafe-journal`, design D1) — `InstKind::JournalBegin`'s own
+    /// lowering.
+    pub const JOURNAL_BEGIN: &str = "zirk_rt_journal_begin";
+    /// Snapshots bytes at an address into a journal's undo log, before the
+    /// write it guards executes (design D1/D3) — both
+    /// `InstKind::JournalRecordSlot`/`JournalRecordField` lower to this same
+    /// symbol, address and length already resolved by codegen.
+    pub const JOURNAL_RECORD: &str = "zirk_rt_journal_record";
+    /// Durably commits a journal: discards the undo log without restoring
+    /// (design D1) — `InstKind::JournalCommit`'s own lowering.
+    pub const JOURNAL_COMMIT: &str = "zirk_rt_journal_commit";
+    /// Rolls a journal back: restores every recorded snapshot in reverse
+    /// order, then discards the log (design D1/D2) —
+    /// `InstKind::JournalRollback`'s own lowering.
+    pub const JOURNAL_ROLLBACK: &str = "zirk_rt_journal_rollback";
 }
 
 /// The runtime functions available to generated code.
@@ -180,6 +196,15 @@ pub struct Runtime<'ctx> {
     /// `zirk_rt_clone` (roadmap Phase 4e, `fase-4e-clone`, design D2) — the
     /// whole deep-clone-graph traversal, one call per `.clone()` site.
     pub clone: FunctionValue<'ctx>,
+    /// `zirk_rt_journal_begin` (roadmap Phase 4e, `fase-4e-unsafe-journal`,
+    /// design D1).
+    pub journal_begin: FunctionValue<'ctx>,
+    /// `zirk_rt_journal_record` (design D1/D3).
+    pub journal_record: FunctionValue<'ctx>,
+    /// `zirk_rt_journal_commit` (design D1).
+    pub journal_commit: FunctionValue<'ctx>,
+    /// `zirk_rt_journal_rollback` (design D1/D2).
+    pub journal_rollback: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -310,6 +335,24 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
 
     let clone = module.add_function(symbols::CLONE, ptr.fn_type(&[ptr.into()], false), external);
+
+    let journal_begin =
+        module.add_function(symbols::JOURNAL_BEGIN, ptr.fn_type(&[], false), external);
+    let journal_record = module.add_function(
+        symbols::JOURNAL_RECORD,
+        void.fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let journal_commit = module.add_function(
+        symbols::JOURNAL_COMMIT,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let journal_rollback = module.add_function(
+        symbols::JOURNAL_ROLLBACK,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
     // Declared so the allocator can reach it, and marked `noreturn` with the
     // rest: generated code never calls it directly, the runtime does.
     let allocation_failed = module.add_function(
@@ -461,5 +504,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         weak_cell_descriptor: weak_cell_descriptor.as_pointer_value(),
         weak_cell_ever_allocated: weak_cell_ever_allocated.as_pointer_value(),
         clone,
+        journal_begin,
+        journal_record,
+        journal_commit,
+        journal_rollback,
     }
 }

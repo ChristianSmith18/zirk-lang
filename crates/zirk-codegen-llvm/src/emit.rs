@@ -220,6 +220,7 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             values: HashMap::new(),
             value_types: HashMap::new(),
             slots: HashMap::new(),
+            slot_types: HashMap::new(),
             blocks: HashMap::new(),
         }
         .emit(function, functions[&function.name]);
@@ -318,6 +319,10 @@ fn llvm_type_in<'ctx>(
         // to a WeakCell — an ordinary collector-tracked allocation, opaque
         // at this level the same way `Object`/`Contract` are.
         ir::IrType::Weak(_) => context.ptr_type(AddressSpace::default()).into(),
+        // The `*mut Journal` handle of an `unsafe {}` block's own undo log
+        // (roadmap Phase 4e, `fase-4e-unsafe-journal`, design D1/D4): an
+        // ordinary opaque LLVM pointer, never collector-tracked.
+        ir::IrType::JournalHandle => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
@@ -732,6 +737,11 @@ struct FunctionEmitter<'ctx, 'a> {
     /// The IR type of each emitted value, which a pointer alone does not carry.
     value_types: HashMap<ir::ValueId, ir::IrType>,
     slots: HashMap<ir::SlotId, PointerValue<'ctx>>,
+    /// The IR type of each slot (roadmap Phase 4e, `fase-4e-unsafe-journal`)
+    /// — `JournalRecordSlot`'s own byte-size computation needs a slot's
+    /// static type, which its `alloca` alone (an opaque `ptr` under LLVM's
+    /// opaque-pointer model) does not carry.
+    slot_types: HashMap<ir::SlotId, ir::IrType>,
     blocks: HashMap<ir::BlockId, inkwell::basic_block::BasicBlock<'ctx>>,
 }
 
@@ -765,6 +775,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .build_alloca(ty, &slot.name)
                 .expect("slot allocation");
             self.slots.insert(ir::SlotId(index as u32), pointer);
+            self.slot_types.insert(ir::SlotId(index as u32), slot.ty);
         }
 
         // Design D5 (`fase-4e-colector-mark-sweep`): every reference-typed
@@ -889,6 +900,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             &self.module.values,
             &self.module.enums,
         )
+    }
+
+    /// The byte size `ty` occupies, as an LLVM `i64` constant expression
+    /// (roadmap Phase 4e, `fase-4e-unsafe-journal`, design D3) — `zirk_rt_journal_record`'s
+    /// own `len` argument, resolved from LLVM's own data layout the same way
+    /// `InstKind::Alloc`'s own size argument already is (`StructType::size_of`),
+    /// rather than a hand-written per-`IrType` table.
+    fn byte_size_of(&self, ty: ir::IrType) -> inkwell::values::IntValue<'ctx> {
+        self.llvm_type(ty)
+            .expect("a journaled write's target is not Void")
+            .size_of()
+            .expect("a journaled write's target is sized")
     }
 
     /// Walks a live GC reference path (`gc_reference_paths`) from a real base
@@ -2327,6 +2350,86 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
                     .expect("zirk_rt_clone returns a pointer");
                 Some(cloned)
+            }
+
+            // `unsafe { ... }`'s own entry (roadmap Phase 4e,
+            // `fase-4e-unsafe-journal`, design D1): one call into the
+            // runtime's own undo-log allocator. The handle is an ordinary
+            // opaque `ptr` value, never spilled to a GC root (it is a
+            // `zirk-runtime`-internal allocation outside the collector's
+            // own object model, the same category as `Weak<T>`'s WeakCell
+            // context).
+            ir::InstKind::JournalBegin => {
+                let journal = self
+                    .builder
+                    .build_call(self.runtime.journal_begin, &[], "journal")
+                    .expect("call zirk_rt_journal_begin")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_journal_begin returns a pointer");
+                Some(journal)
+            }
+
+            // Before a `Store` to a local slot inside an active `unsafe`
+            // block (design D1/D3): snapshots the slot's current bytes,
+            // sized from its own static type.
+            ir::InstKind::JournalRecordSlot { journal, slot } => {
+                let journal = self.operand(*journal);
+                let address = self.slots[slot];
+                let len = self.byte_size_of(self.slot_types[slot]);
+                self.builder
+                    .build_call(
+                        self.runtime.journal_record,
+                        &[journal.into(), address.into(), len.into()],
+                        "",
+                    )
+                    .expect("call zirk_rt_journal_record");
+                None
+            }
+
+            // Before a `StoreField` inside an active `unsafe` block (design
+            // D1/D3): snapshots the field's current bytes, sized from its
+            // own static type.
+            ir::InstKind::JournalRecordField {
+                journal,
+                object,
+                index,
+            } => {
+                let journal = self.operand(*journal);
+                let address = self.field_pointer(*object, *index);
+                let id = self.object_layout_of(*object);
+                let field_ty = self.module.objects[id as usize].fields[*index as usize].ty;
+                let len = self.byte_size_of(field_ty);
+                self.builder
+                    .build_call(
+                        self.runtime.journal_record,
+                        &[journal.into(), address.into(), len.into()],
+                        "",
+                    )
+                    .expect("call zirk_rt_journal_record");
+                None
+            }
+
+            // An `unsafe {}` block's own normal fall-through exit, or
+            // `commit {}`'s own entry against the enclosing block's journal
+            // (design D1/D2): discards the undo log without restoring.
+            ir::InstKind::JournalCommit(journal) => {
+                let journal = self.operand(*journal);
+                self.builder
+                    .build_call(self.runtime.journal_commit, &[journal.into()], "")
+                    .expect("call zirk_rt_journal_commit");
+                None
+            }
+
+            // An `unsafe {}` block's own exit check point when an exception
+            // is pending (design D1/D2): restores every recorded snapshot
+            // in reverse order, then discards the log.
+            ir::InstKind::JournalRollback(journal) => {
+                let journal = self.operand(*journal);
+                self.builder
+                    .build_call(self.runtime.journal_rollback, &[journal.into()], "")
+                    .expect("call zirk_rt_journal_rollback");
+                None
             }
         };
 

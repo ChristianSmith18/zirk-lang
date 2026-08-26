@@ -1043,6 +1043,75 @@ fn verify_instruction(
                 ));
             }
         }
+
+        InstKind::JournalBegin => {
+            expect(
+                inst.ty,
+                IrType::JournalHandle,
+                position,
+                "JournalBegin",
+                report,
+            );
+        }
+        InstKind::JournalRecordSlot { journal, slot } => {
+            expect(inst.ty, IrType::Void, position, "JournalRecordSlot", report);
+            if let Some(ty) = type_of(journal)
+                && ty != IrType::JournalHandle
+            {
+                report(format!(
+                    "{position}: JournalRecordSlot's journal is {}, expected JournalHandle",
+                    ty.as_str()
+                ));
+            }
+            if function.slot(*slot).is_none() {
+                report(format!(
+                    "{position}: JournalRecordSlot names slot {slot:?}, which does not exist"
+                ));
+            }
+        }
+        InstKind::JournalRecordField {
+            journal,
+            object,
+            index,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "JournalRecordField",
+                report,
+            );
+            if let Some(ty) = type_of(journal)
+                && ty != IrType::JournalHandle
+            {
+                report(format!(
+                    "{position}: JournalRecordField's journal is {}, expected JournalHandle",
+                    ty.as_str()
+                ));
+            }
+            if field_type(module, type_of(object), *index).is_none() {
+                report(format!(
+                    "{position}: JournalRecordField writes field {index} of something that is not an object with it"
+                ));
+            }
+        }
+        InstKind::JournalCommit(journal) | InstKind::JournalRollback(journal) => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "JournalCommit/Rollback",
+                report,
+            );
+            if let Some(ty) = type_of(journal)
+                && ty != IrType::JournalHandle
+            {
+                report(format!(
+                    "{position}: journal commit/rollback operates on {}, expected JournalHandle",
+                    ty.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -1221,5 +1290,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::WeakUpgrade(operand)
         | InstKind::WeakIsAlive(operand)
         | InstKind::Clone(operand) => vec![*operand],
+        InstKind::JournalBegin => Vec::new(),
+        InstKind::JournalRecordSlot { journal, .. } => vec![*journal],
+        InstKind::JournalRecordField {
+            journal, object, ..
+        } => vec![*journal, *object],
+        InstKind::JournalCommit(journal) | InstKind::JournalRollback(journal) => vec![*journal],
     }
 }
