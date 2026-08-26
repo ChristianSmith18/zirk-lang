@@ -16,11 +16,15 @@ Classes SHALL expose attributes and ordinary methods, SHALL NOT expose a propert
 - **THEN** `user.name` remains unchanged because extraction deep-cloned the String
 
 ### Requirement: Concrete inheritance and abstract implementation
-A concrete class MAY extend at most one concrete class. An `abstract class` SHALL be a nominal set of required attributes and `abstract fn` signatures with no constructor, body, state allocation, or layout contribution, and concrete classes SHALL adopt it through `implements`. Interfaces and traits SHALL also use `implements`.
+A concrete class MAY extend at most one concrete class. An `abstract class` SHALL be a nominal set of required attributes and `abstract fn` signatures with no constructor, body, state allocation, or layout contribution, and concrete classes SHALL adopt it through `implements`. Interfaces and traits SHALL also use `implements`. A value statically typed as an `abstract class`, holding a concrete adopter instance, SHALL dispatch every call to the adopter's own override.
 
 #### Scenario: Abstract class contract
 - **WHEN** `class Circle implements Shape` supplies every attribute and `override fn` required by abstract class `Shape`
 - **THEN** Circle is accepted where Shape is required without inheriting Shape storage
+
+#### Scenario: Dynamic dispatch through an abstract-class-typed value
+- **WHEN** a variable statically typed as abstract class `Shape` holds a `Circle` instance and a caller invokes a `Shape`-declared method on it
+- **THEN** the call dispatches to `Circle`'s own override, the same way dispatch through a concrete base class already works
 
 ### Requirement: Explicit overriding and super dispatch
 Only `override fn` SHALL replace a base, abstract, interface, or trait method. Public/protected instance methods SHALL dispatch virtually by default; private/static methods SHALL not. `super(...)` and `super.method()` SHALL address the concrete base, and `TraitName.super.method()` SHALL resolve a trait conflict.
