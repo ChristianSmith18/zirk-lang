@@ -117,15 +117,32 @@ type parameters through the generic-function-only `enter_type_params` path,
 unconditionally rejecting every user generic enum at declaration regardless
 of the instantiation gate). Two deeper gaps were found and reported rather
 than fixed, judged out of that change's own "verify an existing mechanism"
-scope: a variant payload naming another generic instantiation
-(`Bar<Baz<T>>`) fails in shared generic-inference substitution that does not
-yet recurse into a nested instantiation's own type arguments (a checker-wide
-gap, not enum-specific); and a self-referencing enum declaration — recursive,
-generic **or plain** — cannot be declared at all today, because enum
-declaration resolves every variant's field types in the same pass that
-registers the enum's own name, unlike a class's own two-phase
-declare/resolve split. Generic contracts and value-type contract dispatch
-remain.
+scope — both since closed. `fase-3-generic-substitution-recursion` (merged)
+fixed `infer_type_params`/`substitute` to recurse into a nested generic
+instantiation's own type arguments the same way `substitute_type` already
+did (`Bar<Baz<T>>` now resolves), a gap shared by every generic
+function/method call in the compiler, not enum-specific — the implementing
+agent also found and fixed the identical shallow-substitution bug in
+`specialize_enum`'s own local substitution closure, flagged as outside the
+proposal's stated impact but necessary to avoid turning a clean type error
+into an internal-compiler-error panic for the exact scenario the change
+targeted. `fase-3-recursive-enums` (merged) split `declare_enum` into
+`register_enum`/`declare_enum_variants`, mirroring classes' own
+`register_class`/`declare_class_members` split — an enum and a class (or two
+enums) can now reference each other regardless of declaration order. That
+change's own verification found its design's prediction wrong: a genuinely
+self-referential enum field is not a `specialize_enum` memoization question —
+every enum lowers to an inline-flattened struct with no indirection
+anywhere in the pipeline, so lifting the old rejection crashed the compiler
+with a real, confirmed stack overflow. Fixed with `reject_unindirected_enum_cycles`,
+a graph search over every declared enum's "variant field names enum" edges
+that rejects the specific unindirected shape with a clean diagnostic naming
+the cycle, before it can reach IR lowering. Actually constructing and using
+a self-referential enum (`enum IntList { Nil, Cons(head: Int32, tail:
+IntList) }`) still needs automatic heap indirection ("boxing") — a new
+`IrType` case, a runtime allocation kind, and GC integration — none of which
+exists yet; tracked as its own future change, not invented here. Generic
+contracts and value-type contract dispatch remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.

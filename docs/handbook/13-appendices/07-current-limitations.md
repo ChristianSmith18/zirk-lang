@@ -92,12 +92,24 @@ Current high-impact delivery limits include:
   `Result<T,E>`. Two real, deeper gaps were found and reported rather than
   fixed as part of that change (both judged out of its own "verify an
   existing mechanism" scope): a variant payload naming another generic
-  instantiation (`Bar<Baz<T>>`) fails in shared generic-inference
-  machinery that doesn't yet recurse into a nested instantiation's own
-  type arguments; and a self-referencing enum declaration — recursive,
-  generic **or plain** — cannot be declared at all today, because enum
-  declaration resolves variant field types before registering the enum's
-  own name (unlike a class, which registers its name first). Still
+  instantiation (`Bar<Baz<T>>`) — since fixed by `fase-3-generic-substitution-recursion`
+  (`infer_type_params`/`substitute` now recurse into a nested instantiation's
+  own type arguments the same way `substitute_type` already did, closing a
+  gap shared by every generic function/method call, not just enums); and a
+  self-referencing enum declaration could not be declared at all, because
+  enum declaration resolved variant field types before registering the
+  enum's own name. `fase-3-recursive-enums` closed the declaration-order
+  half of that: an enum and a class (or two enums) can now reference each
+  other regardless of order, the same way two classes already could. A
+  genuinely self-referential enum field (`enum IntList { Nil, Cons(head:
+  Int32, tail: IntList) }`) still cannot be constructed or used — every
+  enum lowers to an inline-flattened struct with no indirection anywhere
+  in the pipeline, so such a field asks for an infinitely-sized type. That
+  implementation attempt found this crashed the compiler with a real stack
+  overflow; it is now a clean compile-time diagnostic naming the cycle
+  instead. Delivering actual construction/pattern-matching needs automatic
+  heap indirection ("boxing") for such a field — a new `IrType` case plus
+  runtime/GC integration — tracked as its own future change. Still
   required: user generic contracts and value-type contract dispatch.
 - `Float128` arithmetic lacks complete Windows verification and `Float128`
   currently lacks `to_string()` support.
