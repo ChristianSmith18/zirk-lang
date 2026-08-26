@@ -2416,6 +2416,7 @@ impl<'a> Parser<'a> {
         let read = match &target {
             AssignTarget::Name(ident) => Expr::Path(ident.clone()),
             AssignTarget::Field(field) => Expr::Field(field.clone()),
+            AssignTarget::Index(index) => Expr::Index(index.clone()),
         };
         let combined = Expr::Binary(BinaryExpr {
             op,
@@ -3167,6 +3168,24 @@ impl<'a> Parser<'a> {
                         target,
                     });
                 }
+                // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,
+                // design D5): a new postfix expression, same precedence tier
+                // as `.field`/`(args)`, left-associative and chainable
+                // (`a[i][j]`, `a.field[i]`). The grammar accepts any
+                // receiver — only the checker restricts which receiver types
+                // actually support it.
+                TokenKind::LBracket => {
+                    self.pos += 1;
+                    let index = self.parse_expr()?;
+                    let end = self.peek_span();
+                    self.expect(&TokenKind::RBracket, "to close the index expression");
+
+                    object = Expr::Index(IndexExpr {
+                        span: object.span().to(end),
+                        receiver: Box::new(object),
+                        index: Box::new(index),
+                    });
+                }
                 _ => return Some(object),
             }
         }
@@ -3221,6 +3240,7 @@ fn as_assignable(expr: &Expr) -> Option<AssignTarget> {
     match expr {
         Expr::Path(ident) => Some(AssignTarget::Name(ident.clone())),
         Expr::Field(field) if !field.safe => Some(AssignTarget::Field(field.clone())),
+        Expr::Index(index) => Some(AssignTarget::Index(index.clone())),
         _ => None,
     }
 }

@@ -323,8 +323,34 @@ fn llvm_type_in<'ctx>(
         // (roadmap Phase 4e, `fase-4e-unsafe-journal`, design D1/D4): an
         // ordinary opaque LLVM pointer, never collector-tracked.
         ir::IrType::JournalHandle => context.ptr_type(AddressSpace::default()).into(),
+        // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
+        // `fase-4e-native-slice`, design D2): a plain two-word
+        // `(pointer, length)` struct — no allocation, no header, not a
+        // collector-tracked value. `length` is `UInt64` (`IrType::Int(U64)`
+        // maps to `i64` the same way every other integer width does).
+        ir::IrType::NativeSlice(_) | ir::IrType::NativeSliceMut(_) => {
+            native_slice_struct(context).into()
+        }
     })
 }
+
+/// The struct a `NativeSlice<T>`/`NativeSliceMut<T>` value occupies (design
+/// D2): `{ ptr, i64 }` — base address, then element count. Both view types
+/// share this one shape; only the checker's dispatch table (design D5)
+/// distinguishes what is permitted through each.
+fn native_slice_struct<'ctx>(context: &'ctx Context) -> inkwell::types::StructType<'ctx> {
+    context.struct_type(
+        &[
+            context.ptr_type(AddressSpace::default()).into(),
+            context.i64_type().into(),
+        ],
+        false,
+    )
+}
+
+/// Field indices inside [`native_slice_struct`].
+const NATIVE_SLICE_POINTER_FIELD: u32 = 0;
+const NATIVE_SLICE_LENGTH_FIELD: u32 = 1;
 
 /// The struct a record or value class occupies — its fields, in declaration
 /// order, with no header and no indirection (roadmap task 11.5).
@@ -2209,6 +2235,167 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("pointer null check")
                         .into(),
                 )
+            }
+
+            // `pointer.as_slice(length)`/`.as_slice_mut(length)`'s own
+            // runtime validation (roadmap Phase 4e, `fase-4e-native-slice`,
+            // design D3/D5): `element`'s size/alignment come from LLVM's
+            // own data layout via its LLVM type, the same way
+            // `InstKind::Alloc`/`WeakFrom` already derive an object's own
+            // size from its LLVM struct type rather than a hand-written
+            // table. `known_length` becomes `-1` (opaque provenance,
+            // trusted) when `None`.
+            ir::InstKind::NativeSliceValidate {
+                pointer,
+                length,
+                element,
+                known_length,
+            } => {
+                let elem_ty = self
+                    .llvm_type(*element)
+                    .expect("a NativeSlice/NativeSliceMut element is never Void");
+                let elem_size = elem_ty.size_of().expect("a sized element type");
+                let elem_align_bits = elem_ty.get_alignment();
+                let elem_align = self
+                    .builder
+                    .build_int_z_extend(elem_align_bits, self.context.i64_type(), "elem_align")
+                    .expect("widen the element's own alignment to i64");
+                let known_length_value = self
+                    .context
+                    .i64_type()
+                    .const_int(known_length.map(|n| n as i64).unwrap_or(-1) as u64, true);
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.native_slice_validate,
+                        &[
+                            self.operand(*pointer).into(),
+                            self.operand(*length).into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            known_length_value.into(),
+                        ],
+                        "native_slice_validate",
+                    )
+                    .expect("call the native slice validation runtime helper")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_native_slice_validate returns a bool");
+                Some(call)
+            }
+
+            // Packs an already-validated `(pointer, length)` pair (design
+            // D2) — a plain struct build, no allocation.
+            ir::InstKind::NativeSliceValue { pointer, length } => {
+                let struct_type = native_slice_struct(self.context);
+                let mut built = struct_type.get_undef();
+                built = self
+                    .builder
+                    .build_insert_value(
+                        built,
+                        self.operand(*pointer),
+                        NATIVE_SLICE_POINTER_FIELD,
+                        "native_slice_pointer",
+                    )
+                    .expect("insert the native slice's pointer")
+                    .into_struct_value();
+                built = self
+                    .builder
+                    .build_insert_value(
+                        built,
+                        self.operand(*length),
+                        NATIVE_SLICE_LENGTH_FIELD,
+                        "native_slice_length",
+                    )
+                    .expect("insert the native slice's length")
+                    .into_struct_value();
+                Some(built.into())
+            }
+
+            // `.length` (roadmap Phase 4e, `fase-4e-native-slice`): the
+            // length word out of the `(pointer, length)` representation.
+            ir::InstKind::NativeSliceLength(receiver) => {
+                let receiver = self.operand(*receiver).into_struct_value();
+                Some(
+                    self.builder
+                        .build_extract_value(
+                            receiver,
+                            NATIVE_SLICE_LENGTH_FIELD,
+                            "native_slice_length",
+                        )
+                        .expect("extract the native slice's length"),
+                )
+            }
+
+            // `view[i]` read (design D5): a plain load at `pointer + i *
+            // sizeof(T)` — the bounds check already ran in `zirk-ir`
+            // (`Self::lower_native_slice_bounds_check`), so this
+            // instruction performs none of its own.
+            ir::InstKind::NativeSliceLoad { receiver, index } => {
+                let element_ty = self
+                    .llvm_type(instruction.ty)
+                    .expect("a NativeSlice/NativeSliceMut element is never Void");
+                let receiver_struct = self.operand(*receiver).into_struct_value();
+                let base = self
+                    .builder
+                    .build_extract_value(
+                        receiver_struct,
+                        NATIVE_SLICE_POINTER_FIELD,
+                        "native_slice_ptr",
+                    )
+                    .expect("extract the native slice's pointer")
+                    .into_pointer_value();
+                let element = unsafe {
+                    self.builder
+                        .build_gep(
+                            element_ty,
+                            base,
+                            &[self.operand(*index).into_int_value()],
+                            "native_slice_index",
+                        )
+                        .expect("index a native slice")
+                };
+                Some(
+                    self.builder
+                        .build_load(element_ty, element, "native_slice_load")
+                        .expect("native slice load"),
+                )
+            }
+
+            // `view[i] = value` write (design D5): the write counterpart of
+            // the load just above — only ever emitted against a
+            // `NativeSliceMut<T>` receiver.
+            ir::InstKind::NativeSliceStore {
+                receiver,
+                index,
+                value,
+            } => {
+                let value_operand = self.operand(*value);
+                let element_ty = value_operand.get_type();
+                let receiver_struct = self.operand(*receiver).into_struct_value();
+                let base = self
+                    .builder
+                    .build_extract_value(
+                        receiver_struct,
+                        NATIVE_SLICE_POINTER_FIELD,
+                        "native_slice_ptr",
+                    )
+                    .expect("extract the native slice's pointer")
+                    .into_pointer_value();
+                let element = unsafe {
+                    self.builder
+                        .build_gep(
+                            element_ty,
+                            base,
+                            &[self.operand(*index).into_int_value()],
+                            "native_slice_index",
+                        )
+                        .expect("index a native slice")
+                };
+                self.builder
+                    .build_store(element, value_operand)
+                    .expect("native slice store");
+                None
             }
 
             // `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design

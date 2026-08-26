@@ -124,6 +124,7 @@ fn shape(e: &Expr) -> String {
             if f.safe { "?." } else { "." },
             f.name.name
         ),
+        Expr::Index(i) => format!("{}[{}]", shape(&i.receiver), shape(&i.index)),
         Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
@@ -468,6 +469,46 @@ fn valid_assignment_to_variable() {
 fn invalid_assignment_to_a_non_variable() {
     let output = errors("fn main(): Void { 1 = 5; }");
     assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()));
+}
+
+// --- Index expressions (roadmap Phase 4e, `fase-4e-native-slice`, design D5) -
+
+#[test]
+fn valid_index_expression_parses() {
+    let e = expression("view[0]");
+    assert!(matches!(e, Expr::Index(_)));
+    assert_eq!(shape(&e), "view[0]");
+}
+
+#[test]
+fn valid_index_expression_is_an_assignment_target() {
+    let Stmt::Assign(a) = statements("view[0] = 0x7f;").remove(0) else {
+        panic!("expected an assignment");
+    };
+    assert!(matches!(a.target, AssignTarget::Index(_)));
+}
+
+#[test]
+fn valid_chained_field_and_index_is_left_associative() {
+    let e = expression("a.field[i][j]");
+    assert_eq!(shape(&e), "a.field[i][j]");
+    let Expr::Index(outer) = &e else {
+        panic!("expected an index expression");
+    };
+    let Expr::Index(inner) = &*outer.receiver else {
+        panic!("expected a nested index expression");
+    };
+    assert!(matches!(&*inner.receiver, Expr::Field(_)));
+}
+
+#[test]
+fn invalid_index_receiver_type_still_parses() {
+    // The grammar accepts `expr[expr]` for any receiver — the checker is
+    // what restricts which receiver types actually support it (spec
+    // scenario "Indexing an unsupported receiver type is a checker error,
+    // not a parse error").
+    let e = expression("42[0]");
+    assert!(matches!(e, Expr::Index(_)));
 }
 
 // --- Simultaneous assignment (roadmap Phase 4d) -----------------------------
