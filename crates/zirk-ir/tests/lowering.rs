@@ -936,6 +936,125 @@ fn a_method_nobody_redefines_is_called_directly() {
     );
 }
 
+// --- `abstract class` dynamic dispatch (fase-3-abstract-dispatch) ----------
+
+const SHAPE_HIERARCHY: &str = "abstract class Shape {
+    abstract fn area(): Int32;
+}
+class Circle implements Shape {
+    radius: Int32;
+    construct(radius: Int32) { this.radius = radius; }
+    override fn area(): Int32 { return this.radius * this.radius * 3; }
+}
+class Square implements Shape {
+    side: Int32;
+    construct(side: Int32) { this.side = side; }
+    override fn area(): Int32 { return this.side * this.side; }
+}";
+
+/// A call through a value statically typed as a user `abstract class` lowers
+/// to `InstKind::CallVirtual`, exactly the way a call through the native
+/// `Throwable` already does (tasks.md 2.1).
+#[test]
+fn a_call_through_a_user_abstract_class_goes_through_the_table() {
+    let module = compile(&format!(
+        "{SHAPE_HIERARCHY}\n\
+         fn describe(s: Shape): Int32 {{ return s.area(); }}\n\
+         fn main(): Void {{ mut c = Circle(2); mut n = describe(c); }}"
+    ));
+    let describe = module.function("describe").expect("the function exists");
+
+    assert!(
+        instructions(describe)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallVirtual { .. })),
+        "seen as `Shape`, which body runs is not statically known"
+    );
+}
+
+/// Two distinct adopters of the same abstract class each resolve their own
+/// override at their own call site — the dispatch is receiver-type-driven at
+/// runtime, not resolved once to a single target at compile time (tasks.md
+/// 2.2).
+#[test]
+fn two_adopters_of_the_same_abstract_class_keep_their_own_override_at_the_same_slot() {
+    let module = compile(&format!("{SHAPE_HIERARCHY}\nfn main(): Void {{ }}"));
+    let circle = module.objects.iter().find(|o| o.name == "Circle").unwrap();
+    let square = module.objects.iter().find(|o| o.name == "Square").unwrap();
+
+    // `Shape`'s own table slot for `area` has no real body (it is never
+    // instantiated) — only its adopters' entries carry one — so the slot is
+    // found on an adopter, not on `Shape` itself.
+    let slot = circle
+        .methods
+        .iter()
+        .position(|m| m.contains("area"))
+        .expect("Circle's own override is at some slot");
+
+    // Same slot, different body: that is what makes an indirect call one
+    // load and one jump regardless of which adopter is behind it.
+    assert_eq!(
+        circle.methods[slot],
+        zirk_ir::method_symbol("Circle", "area")
+    );
+    assert_eq!(
+        square.methods[slot],
+        zirk_ir::method_symbol("Square", "area")
+    );
+}
+
+/// A concrete class implementing both a user abstract class and a plain
+/// interface dispatches correctly through each of their respective typed
+/// variables (tasks.md 1.3/3.2).
+#[test]
+fn a_class_implementing_an_abstract_class_and_an_interface_dispatches_both() {
+    let module = compile(
+        "abstract class Shape {
+             abstract fn area(): Int32;
+         }
+         interface Describable {
+             fn describe(): String;
+         }
+         class Circle implements Shape, Describable {
+             radius: Int32;
+             construct(radius: Int32) { this.radius = radius; }
+             override fn area(): Int32 { return this.radius * this.radius * 3; }
+             fn describe(): String { return \"circle\"; }
+         }
+         fn print_area(s: Shape): Int32 { return s.area(); }
+         fn print_description(d: Describable): String { return d.describe(); }
+         fn main(): Void {
+             mut c = Circle(2);
+             mut a = print_area(c);
+             mut d = print_description(c);
+         }",
+    );
+    let print_area = module.function("print_area").expect("the function exists");
+    let print_description = module
+        .function("print_description")
+        .expect("the function exists");
+
+    assert!(
+        instructions(print_area)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallVirtual { .. })),
+        "seen as `Shape`, which body runs is not statically known"
+    );
+    assert!(
+        instructions(print_description)
+            .iter()
+            .any(|k| matches!(k, InstKind::CallContract { .. })),
+        "seen as `Describable`, which body answers is not statically known"
+    );
+
+    let circle = module.objects.iter().find(|o| o.name == "Circle").unwrap();
+    assert!(
+        !circle.contracts.is_empty(),
+        "Circle's own contract table is missing, found {:?}",
+        circle.contracts
+    );
+}
+
 // --- Contratos (task 10.7) ---------------------------------------------------
 
 #[test]
