@@ -648,8 +648,17 @@ impl<'a> Checker<'a> {
 
         // Enums next: a class's own signature may name one below, and now a
         // class is nameable from an enum's associated data too.
+        //
+        // Only registered here (name, arity, type params, an empty
+        // `variants` placeholder) — the same split `register_class` uses
+        // for exactly the same reason: a variant's own associated field may
+        // name the enum currently being declared (`Cons(tail: IntList)`) or
+        // one declared later in the file, and resolving that needs every
+        // enum's (and every class's) name already known. Associated field
+        // types are resolved later, in `declare_members`, once every class
+        // and enum name in the file is registered.
         for e in &program.enums {
-            self.declare_enum(e);
+            self.register_enum(e);
         }
 
         // Classes' members last, in three passes, because a class may
@@ -2435,6 +2444,104 @@ impl<'a> Checker<'a> {
         for decl in self.in_hierarchy_order(program) {
             self.declare_class_members(decl);
         }
+
+        // Enums have no base/`implements` hierarchy to order against, so
+        // declaration order relative to `program.enums` (or relative to the
+        // class loop above) does not matter here — every class and every
+        // enum is already registered by this point (`register_class` and
+        // `register_enum` both ran ahead of this pass), which is exactly
+        // what lets a variant's associated field name any of them, in
+        // either declaration order, including the enum's own type.
+        for e in &program.enums {
+            self.declare_enum_variants(e);
+        }
+
+        // `fase-3-recursive-enums` lets a variant's associated field name
+        // the enclosing enum's own type (declaration order no longer
+        // matters), but every enum still lowers to an inline-flattened
+        // struct (`EnumLayout`) with no indirection anywhere in the
+        // pipeline — a variant field whose type embeds the enum's own
+        // type with nothing in between (no `Pointer<T>`, no class
+        // reference, nothing heap-allocated to break the cycle) asks for
+        // an infinitely-sized LLVM type and crashes the compiler with a
+        // stack overflow (confirmed, not assumed: `IntList`'s own `Cons`
+        // reproduces this). Boxing a genuinely self-referential field is
+        // its own future design (a new `IrType` case, a runtime
+        // allocation kind, GC root/tracing rules) — out of this pass's
+        // scope. Until that exists, reject the specific unindirected
+        // shape with a clear diagnostic instead of letting it reach IR
+        // lowering at all.
+        self.reject_unindirected_enum_cycles(program);
+    }
+
+    /// Rejects a variant field whose type embeds its own enclosing enum's
+    /// type with no indirection in between, directly or through another
+    /// enum's own inline embedding — see [`Self::declare_members`]'s own
+    /// comment for why this can never lower correctly today.
+    fn reject_unindirected_enum_cycles(&mut self, program: &Program) {
+        for decl in &program.enums {
+            let Some(id) = self.enums.iter().position(|e| e.name == decl.name.name) else {
+                continue;
+            };
+            let mut visiting = vec![id as u32];
+            if let Some(cycle_at) = self.enum_embeds_inline(id as u32, &mut visiting) {
+                let name = self.enums[id].name.clone();
+                let via = self.enums[cycle_at as usize].name.clone();
+                let path = if cycle_at == id as u32 {
+                    format!("`{name}` names itself")
+                } else {
+                    format!("`{name}` reaches itself back through `{via}`")
+                };
+                self.not_lowered(
+                    self.enums[id].span,
+                    &format!("a self-referential enum with no indirection ({path})"),
+                    "wrap the recursive field in `Pointer<T>` or a class reference for now — boxing a directly self-referential enum field is not implemented yet",
+                );
+            }
+        }
+    }
+
+    /// Depth-first search over "enum variant field names enum" edges,
+    /// starting from `start`, tracking the path in `visiting` (all inline,
+    /// non-indirected embeddings). Returns the id of the enum where a cycle
+    /// back to `start` was found, if any.
+    fn enum_embeds_inline(&self, start: u32, visiting: &mut Vec<u32>) -> Option<u32> {
+        let current = *visiting.last().unwrap();
+        let variants = self.enums[current as usize].variants.clone();
+        for variant in &variants {
+            for field in &variant.associated {
+                let embedded = match field.ty.base {
+                    Base::Enum(embedded_id) => Some(embedded_id),
+                    Base::EnumInstance(inst_id) => {
+                        Some(self.enum_instances[inst_id as usize].enum_id)
+                    }
+                    // Every other type either carries no enum at all, or
+                    // reaches one only through a heap pointer (`Object`,
+                    // `Contract`, `Pointer<T>`, `Weak<T>`) — a real
+                    // indirection that breaks the cycle, so it is not
+                    // followed here.
+                    _ => None,
+                };
+                let Some(embedded_id) = embedded else {
+                    continue;
+                };
+                if embedded_id == start {
+                    return Some(current);
+                }
+                if visiting.contains(&embedded_id) {
+                    // A cycle among other enums that never reaches `start`
+                    // — some other starting point in the outer loop will
+                    // catch and report it from its own perspective.
+                    continue;
+                }
+                visiting.push(embedded_id);
+                if let Some(found) = self.enum_embeds_inline(start, visiting) {
+                    return Some(found);
+                }
+                visiting.pop();
+            }
+        }
+        None
     }
 
     /// The declarations ordered so a class always follows its base, and
@@ -3258,7 +3365,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn declare_enum(&mut self, decl: &EnumDecl) {
+    /// Registers an enum's name, arity and type parameters immediately,
+    /// ahead of any variant's associated field type resolution — mirroring
+    /// [`Self::register_class`] for exactly the same reason: a variant's
+    /// associated field may name this enum itself (`Cons(tail: IntList)`)
+    /// or one declared later in the file, and resolving that needs the
+    /// enum's own arity known first. [`Self::declare_enum_variants`], run
+    /// later once every class and enum in the file is registered, resolves
+    /// the actual associated field types and populates this placeholder's
+    /// `variants`.
+    fn register_enum(&mut self, decl: &EnumDecl) {
         if matches!(decl.name.name.as_str(), "Iteration" | "Result") {
             self.error(
                 codes::DUPLICATE_DECLARATION,
@@ -3292,18 +3408,45 @@ impl<'a> Checker<'a> {
         // (see `Self::register_class`), so an enum does the same here rather
         // than going through `enter_type_params`.
         let type_params = self.mint_type_param_ids(&decl.type_params);
+
+        self.enums.push(EnumType {
+            name: decl.name.name.clone(),
+            variants: Vec::new(),
+            type_params,
+            shared: decl.shared,
+            span: decl.name.span,
+        });
+    }
+
+    /// Resolves an enum's variants' associated field types and its own type
+    /// parameters' constraints, and populates the placeholder
+    /// [`Self::register_enum`] already pushed into `self.enums`.
+    ///
+    /// Run once every class and enum in the file is registered
+    /// (`Self::declare_members`), so a field may name this enum's own type —
+    /// including a self-instantiation of its own generic parameters — or
+    /// any class or enum regardless of declaration order.
+    fn declare_enum_variants(&mut self, decl: &EnumDecl) {
+        let Some(id) = self.enums.iter().position(|e| e.name == decl.name.name) else {
+            // Registration itself failed (duplicate name, or a reserved
+            // native name) and already reported its own diagnostic there;
+            // nothing to populate.
+            return;
+        };
+        let type_params = self.enums[id].type_params.clone();
+
         self.type_param_scope.push(
             decl.type_params
                 .iter()
                 .zip(&type_params)
-                .map(|(p, &id)| (p.name.name.clone(), id))
+                .map(|(p, &tid)| (p.name.name.clone(), tid))
                 .collect(),
         );
         self.report_declared_variance(&decl.type_params);
-        for (p, &id) in decl.type_params.iter().zip(&type_params) {
+        for (p, &tid) in decl.type_params.iter().zip(&type_params) {
             let constraints: Vec<Type> =
                 p.constraints.iter().map(|c| self.resolve_type(c)).collect();
-            self.type_params[id as usize].constraints = constraints;
+            self.type_params[tid as usize].constraints = constraints;
         }
 
         let mut variants: Vec<EnumVariantInfo> = Vec::new();
@@ -3375,13 +3518,7 @@ impl<'a> Checker<'a> {
 
         self.leave_type_params();
 
-        self.enums.push(EnumType {
-            name: decl.name.name.clone(),
-            variants,
-            type_params,
-            shared: decl.shared,
-            span: decl.name.span,
-        });
+        self.enums[id].variants = variants;
     }
 
     fn declare_function(&mut self, f: &FnDecl) {

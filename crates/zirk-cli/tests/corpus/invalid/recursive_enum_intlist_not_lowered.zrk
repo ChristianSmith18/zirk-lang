@@ -1,0 +1,9 @@
+// A non-generic self-referential enum: its own variant field embeds its
+// own type with no indirection in between (no `Pointer<T>`/class field to
+// break the cycle). Every enum lowers to an inline-flattened struct with
+// no indirection anywhere in the pipeline, so this asks for an infinitely
+// sized type — rejected here (roadmap Phase 3, `fase-3-recursive-enums`)
+// rather than left to crash the compiler with a stack overflow.
+enum IntList { Nil, Cons(head: Int32, tail: IntList) }
+
+fn main(): Void { }
