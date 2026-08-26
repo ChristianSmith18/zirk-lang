@@ -200,6 +200,25 @@ pub enum IrType {
     /// collector-tracked WeakCell allocation (design D1/D2), unlike
     /// `Pointer<T>`'s own raw, unmanaged pointer.
     Weak(u32),
+    /// `NativeSlice<T>` (roadmap Phase 4e, `fase-4e-native-slice`, design
+    /// D1/D2), identified by the id of its element type in the module's own
+    /// `native_slice_types` table — kept as an id for the same reason
+    /// `Pointer`/`Weak` are.
+    ///
+    /// Runtime representation is a plain `(pointer, length)` two-word pair
+    /// (design D2) — not a collector-tracked allocation, not itself an
+    /// "object" with identity: a bounded view over memory the program
+    /// already owns. `IrType::is_managed_reference`'s own default `_ =>
+    /// false` arm already covers this correctly, the same way it does for
+    /// `Pointer`.
+    NativeSlice(u32),
+    /// `NativeSliceMut<T>` (roadmap Phase 4e, `fase-4e-native-slice`,
+    /// design D1/D2) — the read/write counterpart of
+    /// [`IrType::NativeSlice`], identified into the module's own
+    /// `native_slice_mut_types` table. Same `(pointer, length)`
+    /// representation; the distinction is purely in what the checker
+    /// permits at each use, not in runtime shape.
+    NativeSliceMut(u32),
 }
 
 /// The types that have a nullable form.
@@ -289,6 +308,8 @@ impl IrType {
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
+            IrType::NativeSlice(_) => "NativeSlice",
+            IrType::NativeSliceMut(_) => "NativeSliceMut",
         }
     }
 
@@ -398,6 +419,14 @@ pub struct Module {
     /// [`IrType::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design
     /// D1).
     pub weak_types: Vec<IrType>,
+    /// Interned `NativeSlice<T>` element types, indexed by the id
+    /// [`IrType::NativeSlice`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    pub native_slice_types: Vec<IrType>,
+    /// Interned `NativeSliceMut<T>` element types, indexed by the id
+    /// [`IrType::NativeSliceMut`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    pub native_slice_mut_types: Vec<IrType>,
     /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
     /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
     /// no Zirk-authored body.
@@ -580,6 +609,30 @@ impl Module {
         }
         self.weak_types.push(referent);
         (self.weak_types.len() - 1) as u32
+    }
+
+    /// Interns a `NativeSlice<T>` element type, returning the id
+    /// [`IrType::NativeSlice`] carries.
+    pub fn intern_native_slice_type(&mut self, element: IrType) -> u32 {
+        if let Some(index) = self.native_slice_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.native_slice_types.push(element);
+        (self.native_slice_types.len() - 1) as u32
+    }
+
+    /// Interns a `NativeSliceMut<T>` element type, returning the id
+    /// [`IrType::NativeSliceMut`] carries.
+    pub fn intern_native_slice_mut_type(&mut self, element: IrType) -> u32 {
+        if let Some(index) = self
+            .native_slice_mut_types
+            .iter()
+            .position(|&t| t == element)
+        {
+            return index as u32;
+        }
+        self.native_slice_mut_types.push(element);
+        (self.native_slice_mut_types.len() - 1) as u32
     }
 }
 
@@ -1032,6 +1085,65 @@ pub enum InstKind {
     /// reads from each object's header, instead of unrolled across several
     /// IR instructions) moved.
     Clone(Operand),
+
+    /// Runs `pointer.as_slice(length)`/`.as_slice_mut(length)`'s runtime
+    /// validation (roadmap Phase 4e, `fase-4e-native-slice`, design D3):
+    /// non-null, alignment against the element type, extent
+    /// representability, and — when `known_length` is `Some` — that
+    /// `length` does not exceed it. Produces `Boolean`: `true` when every
+    /// check passes.
+    ///
+    /// `known_length` is this pass's own scope decision on design D3's
+    /// "where the underlying allocation's own size is knowable": tracked
+    /// only for the syntactically direct case `Pointer.from(place).as_slice(n)`
+    /// (`place`'s own single-element storage, `Self::known_pointer_extent`),
+    /// not general provenance/dataflow tracking — `None` (opaque
+    /// provenance) for everything else, trusting the caller's `length`
+    /// beyond what is otherwise checkable, exactly the accepted risk
+    /// design's own "Risks/Trade-offs" section documents.
+    ///
+    /// `element` is the view's own element `IrType`, not a precomputed
+    /// byte size/alignment: those are backend layout facts (`ADR-003`
+    /// keeps the IR from naming how a type is laid out), so codegen derives
+    /// them from `element`'s own LLVM type at the point it lowers this
+    /// instruction, the same way `InstKind::WeakFrom`'s codegen already
+    /// derives a WeakCell's size from its own LLVM struct type rather than
+    /// a value carried on the instruction.
+    NativeSliceValidate {
+        pointer: Operand,
+        length: Operand,
+        element: IrType,
+        known_length: Option<u64>,
+    },
+    /// Packs an already-validated `(pointer, length)` pair into a
+    /// `NativeSlice<T>`/`NativeSliceMut<T>` value (design D2) — no
+    /// allocation, no header: a plain two-word struct value. Only ever
+    /// emitted on the branch `NativeSliceValidate` proved `true` for.
+    NativeSliceValue {
+        pointer: Operand,
+        length: Operand,
+    },
+    /// `view.length` (roadmap Phase 4e, `fase-4e-native-slice`): reads the
+    /// length word out of the `(pointer, length)` representation.
+    NativeSliceLength(Operand),
+    /// `view[i]` read (design D5): a bounds-checked load at `pointer + i *
+    /// sizeof(T)`. Only ever emitted on the branch a bounds check
+    /// (`Self::lower_native_slice_bounds_check`) already proved `i` safe
+    /// for — this instruction itself performs no check of its own.
+    NativeSliceLoad {
+        receiver: Operand,
+        index: Operand,
+    },
+    /// `view[i] = value` (design D5): a bounds-checked store, the write
+    /// counterpart of [`InstKind::NativeSliceLoad`] — only ever emitted
+    /// against a `NativeSliceMut<T>` receiver (the checker's own dispatch
+    /// table rejects a write through a read-only `NativeSlice<T>` before
+    /// lowering ever sees one).
+    NativeSliceStore {
+        receiver: Operand,
+        index: Operand,
+        value: Operand,
+    },
 }
 
 /// An input to an instruction.

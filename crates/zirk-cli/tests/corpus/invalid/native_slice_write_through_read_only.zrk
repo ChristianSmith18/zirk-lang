@@ -1,0 +1,11 @@
+// Writing through a read-only `NativeSlice<T>` (as opposed to a
+// `NativeSliceMut<T>`) fails to compile (roadmap Phase 4e,
+// `fase-4e-native-slice`, design D5's dispatch table).
+fn main(): Void {
+    mut x: Int32 = 1;
+    mut view: NativeSlice<Int32> = unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        p.as_slice(1).unwrap()
+    };
+    view[0] = 42;
+}

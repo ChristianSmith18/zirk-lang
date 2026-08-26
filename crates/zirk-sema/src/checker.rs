@@ -74,6 +74,14 @@ pub struct CheckedProgram {
     /// Interned `Weak<T>` referent types, indexed by the id their
     /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
     pub weak_types: Vec<Type>,
+    /// Interned `NativeSlice<T>` element types, indexed by the id their
+    /// [`Base::NativeSlice`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    pub native_slice_types: Vec<Type>,
+    /// Interned `NativeSliceMut<T>` element types, indexed by the id their
+    /// [`Base::NativeSliceMut`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    pub native_slice_mut_types: Vec<Type>,
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
@@ -141,6 +149,20 @@ pub struct NativeExceptions {
     pub invalid_shift: u32,
     pub invalid_repeat: u32,
     pub float_nan: u32,
+    /// `IndexOutOfBoundsError` (roadmap Phase 4e, `fase-4e-native-slice`,
+    /// design D3): thrown when a `NativeSlice<T>`/`NativeSliceMut<T>` index
+    /// is out of range — the "controlled bounds error" the spec's own "View
+    /// indexing stays bounds-checked" scenario requires. Registered the
+    /// same way the four failures above are.
+    pub index_out_of_bounds: u32,
+    /// `NativeError` (roadmap Phase 4e, `fase-4e-native-slice`, design's
+    /// task 1.2): the error type `pointer.as_slice(length)`/
+    /// `.as_slice_mut(length)` produce in `Result<..., NativeError>` when
+    /// construction fails — a `Result`-carried value, not thrown, but
+    /// registered through the exact same `register_native_failure` closure
+    /// as the five classes above since its shape (a `RuntimeError`
+    /// subclass with one `reason: String` field) is identical.
+    pub native_error: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -192,6 +214,8 @@ struct Names<'t> {
     unions: &'t [Vec<Base>],
     pointer_types: &'t [Type],
     weak_types: &'t [Type],
+    native_slice_types: &'t [Type],
+    native_slice_mut_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -278,6 +302,20 @@ impl TypeNames for Names<'_> {
 
     fn weak_element(&self, id: u32) -> Type {
         self.weak_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn native_slice_element(&self, id: u32) -> Type {
+        self.native_slice_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn native_slice_mut_element(&self, id: u32) -> Type {
+        self.native_slice_mut_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -432,6 +470,14 @@ struct Checker<'a> {
     /// Interned `Weak<T>` referent types, indexed by the id their
     /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
     weak_types: Vec<Type>,
+    /// Interned `NativeSlice<T>` element types, indexed by the id their
+    /// [`Base::NativeSlice`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    native_slice_types: Vec<Type>,
+    /// Interned `NativeSliceMut<T>` element types, indexed by the id their
+    /// [`Base::NativeSliceMut`] carries (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1).
+    native_slice_mut_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
     /// Id of the language's own `Clone` contract, minted by
@@ -521,6 +567,8 @@ impl<'a> Checker<'a> {
             variant_constructions: HashMap::new(),
             pointer_types: Vec::new(),
             weak_types: Vec::new(),
+            native_slice_types: Vec::new(),
+            native_slice_mut_types: Vec::new(),
             externs: HashMap::new(),
             native_clone: None,
             clone_cache: HashMap::new(),
@@ -563,6 +611,8 @@ impl<'a> Checker<'a> {
                 unions: &self.unions,
                 pointer_types: &self.pointer_types,
                 weak_types: &self.weak_types,
+                native_slice_types: &self.native_slice_types,
+                native_slice_mut_types: &self.native_slice_mut_types,
             },
         )
     }
@@ -652,6 +702,8 @@ impl<'a> Checker<'a> {
             native_exceptions: self.native_exceptions,
             pointer_types: self.pointer_types,
             weak_types: self.weak_types,
+            native_slice_types: self.native_slice_types,
+            native_slice_mut_types: self.native_slice_mut_types,
             externs: self.externs,
         }
     }
@@ -1391,6 +1443,14 @@ impl<'a> Checker<'a> {
         let invalid_shift = register_native_failure(&mut self.classes, "InvalidShiftError");
         let invalid_repeat = register_native_failure(&mut self.classes, "InvalidRepeatError");
         let float_nan = register_native_failure(&mut self.classes, "FloatNanError");
+        // Roadmap Phase 4e, `fase-4e-native-slice`: `IndexOutOfBoundsError`
+        // (thrown by a bounds-checked `view[i]`, design D3) and
+        // `NativeError` (returned in `Result<..., NativeError>` by
+        // `pointer.as_slice(length)`/`.as_slice_mut(length)`, task 1.2) —
+        // registered through the same closure as the four failures above.
+        let index_out_of_bounds =
+            register_native_failure(&mut self.classes, "IndexOutOfBoundsError");
+        let native_error = register_native_failure(&mut self.classes, "NativeError");
 
         self.native_exceptions = Some(NativeExceptions {
             error,
@@ -1401,6 +1461,8 @@ impl<'a> Checker<'a> {
             invalid_shift,
             invalid_repeat,
             float_nan,
+            index_out_of_bounds,
+            native_error,
         });
     }
 
@@ -3589,6 +3651,8 @@ impl<'a> Checker<'a> {
                 Base::Union(id) => (18, id),
                 Base::Pointer(id) => (19, id),
                 Base::Weak(id) => (20, id),
+                Base::NativeSlice(id) => (21, id),
+                Base::NativeSliceMut(id) => (22, id),
             }
         }
         bases.sort_by_key(key);
@@ -3728,6 +3792,82 @@ impl<'a> Checker<'a> {
         (self.weak_types.len() - 1) as u32
     }
 
+    /// `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, design D1): resolves `T` and rejects it when
+    /// it has no stable C-ABI layout (spec scenario "NativeSlice element
+    /// type is ABI-safe only") — the exact same predicate
+    /// `Self::resolve_pointer_type_ref` already applies to `Pointer<T>`
+    /// (task 1.1's own instruction: reuse the actual current list, not the
+    /// design's restated summary of it). `mutable` selects
+    /// `Base::NativeSliceMut`/`native_slice_mut_types` over
+    /// `Base::NativeSlice`/`native_slice_types`.
+    fn resolve_native_slice_type_ref(&mut self, reference: &TypeRef, mutable: bool) -> Type {
+        let type_name = if mutable {
+            "NativeSliceMut<T>"
+        } else {
+            "NativeSlice<T>"
+        };
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                format!("`{type_name}` takes exactly one type argument"),
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some(format!("write `{type_name}` naming the element type")),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let element = self.resolve_type(&reference.arguments[0]);
+        if !element.is_unknown() && !is_ffi_safe(element, &self.pointer_types) {
+            let name = self.name(element);
+            self.error(
+                codes::NOT_FFI_SAFE,
+                reference.arguments[0].span,
+                format!("`{name}` has no stable C-ABI layout"),
+                "NativeSlice<T>/NativeSliceMut<T> only allow Boolean, fixed-width integers, Float32/64, and Pointer<U>, the same element restriction Pointer<T> has",
+                Some("use an ABI-stable element type".into()),
+            );
+        }
+
+        let ty = if mutable {
+            let id = self.intern_native_slice_mut_type(element);
+            Type::of(Base::NativeSliceMut(id))
+        } else {
+            let id = self.intern_native_slice_type(element);
+            Type::of(Base::NativeSlice(id))
+        };
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    /// Interns a `NativeSlice<T>` element type, returning the id its
+    /// [`Base::NativeSlice`] carries.
+    fn intern_native_slice_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.native_slice_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.native_slice_types.push(element);
+        (self.native_slice_types.len() - 1) as u32
+    }
+
+    /// Interns a `NativeSliceMut<T>` element type, returning the id its
+    /// [`Base::NativeSliceMut`] carries.
+    fn intern_native_slice_mut_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self
+            .native_slice_mut_types
+            .iter()
+            .position(|&t| t == element)
+        {
+            return index as u32;
+        }
+        self.native_slice_mut_types.push(element);
+        (self.native_slice_mut_types.len() - 1) as u32
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
@@ -3739,6 +3879,12 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Weak" {
             return self.resolve_weak_type_ref(reference);
+        }
+        if reference.name == "NativeSlice" {
+            return self.resolve_native_slice_type_ref(reference, false);
+        }
+        if reference.name == "NativeSliceMut" {
+            return self.resolve_native_slice_type_ref(reference, true);
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -3974,6 +4120,25 @@ impl<'a> Checker<'a> {
         }
         self.contract_instances.push(instance);
         (self.contract_instances.len() - 1) as u32
+    }
+
+    /// `Result<value, NativeError>` (roadmap Phase 4e,
+    /// `fase-4e-native-slice`, task 1.2): the same compiler-known `Result`
+    /// enum `register_native_result_enum` mints, instantiated with the
+    /// caller's own success type and the compiler's `NativeError` class.
+    fn native_result_type(&mut self, value: Type) -> Type {
+        let native_result = self
+            .native_result
+            .expect("register_native_result_enum runs before any type is checked");
+        let native_error = self
+            .native_exceptions
+            .expect("register_native_exception_hierarchy runs before any type is checked")
+            .native_error;
+        let id = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: native_result,
+            args: vec![value, Type::of(Base::Class(native_error))],
+        });
+        Type::of(Base::EnumInstance(id))
     }
 
     /// Interns a generic enum instantiation, returning the id its
@@ -4997,13 +5162,39 @@ impl<'a> Checker<'a> {
     /// every destination.
     fn check_assign_target(&mut self, target: &AssignTarget, value: Type, value_span: Span) {
         let AssignTarget::Name(name) = target else {
-            let AssignTarget::Field(field) = target else {
-                unreachable!("an assignment target is a name or a field")
+            let target_ty = match target {
+                AssignTarget::Field(field) => {
+                    let target_ty = self.check_writable_field(field);
+                    if self.reject_pointer_escape(value, value_span, "assigned to a field") {
+                        return;
+                    }
+                    target_ty
+                }
+                // `view[0] = 0x7f;` (roadmap Phase 4e, `fase-4e-native-slice`,
+                // design D5): a write is accepted only through the receiver
+                // types `Self::indexable_element`'s dispatch table marks
+                // writable (today, `NativeSliceMut<T>`; `NativeSlice<T>` is
+                // read-only, spec scenario exercised by task 5.5).
+                AssignTarget::Index(index) => {
+                    let (receiver_ty, element, writable) = self.check_index(index);
+                    if element.is_unknown() {
+                        return;
+                    }
+                    if !writable {
+                        let name = self.name(receiver_ty);
+                        self.error(
+                            codes::INDEX_NOT_WRITABLE,
+                            index.span,
+                            format!("cannot write through `{name}`"),
+                            "this receiver's indexing entry is read-only",
+                            Some("use a NativeSliceMut<T> to write through an index".into()),
+                        );
+                        return;
+                    }
+                    element
+                }
+                AssignTarget::Name(_) => unreachable!("handled by the outer let-else"),
             };
-            let target_ty = self.check_writable_field(field);
-            if self.reject_pointer_escape(value, value_span, "assigned to a field") {
-                return;
-            }
             self.expect_assignable(target_ty, value, value_span, "the assigned value");
             return;
         };
@@ -5714,6 +5905,7 @@ impl<'a> Checker<'a> {
                 Type::UNKNOWN
             }
             Expr::Field(e) => self.check_field(e),
+            Expr::Index(e) => self.check_index(e).1,
             Expr::Ternary(e) => self.check_ternary(e),
             Expr::Increment(e) => self.check_increment(e),
             Expr::Match(e) => self.check_match(e, true),
@@ -6090,16 +6282,29 @@ impl<'a> Checker<'a> {
     /// per-value provenance tracking (see `design.md`'s D4 for why this
     /// slice does not build that instead). Returns whether it rejected.
     fn reject_pointer_escape(&mut self, ty: Type, span: Span, escape: &str) -> bool {
-        if !matches!(ty.base, Base::Pointer(_)) {
+        // Roadmap Phase 4e, `fase-4e-native-slice`, design D4: generalized
+        // to match any "dependent-reference" type — `Pointer<T>` OR
+        // `NativeSlice<T>` OR `NativeSliceMut<T>` — reusing this one pass
+        // rather than duplicating it, per the existing "Native view escapes
+        // its borrow" scenario now actually enforced.
+        if !matches!(
+            ty.base,
+            Base::Pointer(_) | Base::NativeSlice(_) | Base::NativeSliceMut(_)
+        ) {
             return false;
         }
         let name = self.name(ty);
+        let kind = if matches!(ty.base, Base::Pointer(_)) {
+            "A Pointer<T>"
+        } else {
+            "A native view"
+        };
         self.error(
             codes::POINTER_ESCAPES,
             span,
             format!("`{name}` cannot be {escape}"),
-            "a Pointer<T> value cannot outlive the frame it was obtained in — this rule is conservative and does not track individual provenance",
-            Some("copy what it points to instead, or restructure so the pointer stays local".into()),
+            format!("{kind} value cannot outlive the frame it was obtained in — this rule is conservative and does not track individual provenance"),
+            Some("copy what it points to instead, or restructure so the value stays local".into()),
         );
         true
     }
@@ -6555,8 +6760,8 @@ impl<'a> Checker<'a> {
         let AssignTarget::Name(name) = &expr.target else {
             self.not_checked(
                 expr.target.span(),
-                "incrementing a field",
-                "writing a member needs a type with members",
+                "incrementing a field or an indexed element",
+                "writing a member or an index needs its own increment rule, not implemented yet",
             );
             return Type::UNKNOWN;
         };
@@ -7188,6 +7393,82 @@ impl<'a> Checker<'a> {
         );
     }
 
+    /// The extensible receiver-type-keyed dispatch table `receiver[index]`
+    /// consults (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —
+    /// today exactly two entries: `NativeSlice<T>` (read-only element `T`)
+    /// and `NativeSliceMut<T>` (read/write element `T`). Returns the
+    /// element type and whether a write through it is permitted; `None`
+    /// means this receiver type has no indexing entry at all.
+    ///
+    /// Deliberately its own small function, not a hardcoded two-armed match
+    /// buried in `Self::check_index` — this is where Phase 7's `Array<T>`/
+    /// `List<T>` register their own entries later, without reworking the
+    /// parser, AST, or place-classification logic D5 adds.
+    fn indexable_element(&self, receiver: Type) -> Option<(Type, bool)> {
+        match receiver.base {
+            Base::NativeSlice(id) => Some((
+                self.native_slice_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN),
+                false,
+            )),
+            Base::NativeSliceMut(id) => Some((
+                self.native_slice_mut_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN),
+                true,
+            )),
+            _ => None,
+        }
+    }
+
+    /// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design
+    /// D5): the grammar accepts any receiver — this is where the checker
+    /// restricts it, through `Self::indexable_element`'s dispatch table.
+    /// Returns the receiver's own type, the element type, and whether the
+    /// place is writable, so both a read (`Self::check_expr`) and a write
+    /// (`Self::check_assign_target`) share this one lookup.
+    fn check_index(&mut self, expr: &IndexExpr) -> (Type, Type, bool) {
+        let receiver = self.check_expr(&expr.receiver);
+        let index = self.check_expr(&expr.index);
+
+        if receiver.is_unknown() {
+            return (receiver, Type::UNKNOWN, false);
+        }
+
+        if receiver.nullable {
+            self.reject_absent_receiver(receiver, expr.receiver.span());
+            return (receiver, Type::UNKNOWN, false);
+        }
+
+        if !index.is_unknown() && !matches!(index.base, Base::Int(_)) || index.nullable {
+            let found = self.name(index);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.index.span(),
+                "an index must be an integer",
+                format!("found {found}"),
+                None,
+            );
+        }
+
+        let Some((element, writable)) = self.indexable_element(receiver) else {
+            let name = self.name(receiver);
+            self.error(
+                codes::INDEXING_NOT_SUPPORTED,
+                expr.receiver.span(),
+                format!("`{name}` does not support indexing"),
+                "indexing is only defined for a type with an entry in the checker's own indexing dispatch table",
+                Some("index a NativeSlice<T>/NativeSliceMut<T> instead".into()),
+            );
+            return (receiver, Type::UNKNOWN, false);
+        };
+
+        (receiver, element, writable)
+    }
+
     /// `a.b`, which is an enum variant or a field of an object.
     ///
     /// The parser cannot tell them apart — `Direction.North` and `user.name`
@@ -7244,6 +7525,19 @@ impl<'a> Checker<'a> {
             && member.name == "is_alive"
         {
             return Type::BOOLEAN;
+        }
+
+        // `.length`/`.is_empty` (roadmap Phase 4e, `fase-4e-native-slice`,
+        // design's proposal): usable in ordinary safe code on an
+        // already-constructed `NativeSlice<T>`/`NativeSliceMut<T>` — no
+        // `unsafe` needed to read/write through a view, only to construct
+        // one (task 1.3).
+        if matches!(object.base, Base::NativeSlice(_) | Base::NativeSliceMut(_)) {
+            match member.name.as_str() {
+                "length" => return Type::of(Base::Int(IntWidth::U64)),
+                "is_empty" => return Type::BOOLEAN,
+                _ => {}
+            }
         }
 
         if object.nullable {
@@ -7752,15 +8046,29 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Assign(s) => {
-                if let AssignTarget::Field(f) = &s.target {
-                    self.check_recursive_reference(&f.object, name, nested);
+                match &s.target {
+                    AssignTarget::Field(f) => {
+                        self.check_recursive_reference(&f.object, name, nested)
+                    }
+                    AssignTarget::Index(i) => {
+                        self.check_recursive_reference(&i.receiver, name, nested);
+                        self.check_recursive_reference(&i.index, name, nested);
+                    }
+                    AssignTarget::Name(_) => {}
                 }
                 self.check_recursive_reference(&s.value, name, nested);
             }
             Stmt::MultiAssign(s) => {
                 for target in &s.targets {
-                    if let AssignTarget::Field(f) = target {
-                        self.check_recursive_reference(&f.object, name, nested);
+                    match target {
+                        AssignTarget::Field(f) => {
+                            self.check_recursive_reference(&f.object, name, nested)
+                        }
+                        AssignTarget::Index(i) => {
+                            self.check_recursive_reference(&i.receiver, name, nested);
+                            self.check_recursive_reference(&i.index, name, nested);
+                        }
+                        AssignTarget::Name(_) => {}
                     }
                 }
                 for value in &s.values {
@@ -7896,12 +8204,19 @@ impl<'a> Checker<'a> {
                 self.check_recursive_reference(&e.when_true, name, nested);
                 self.check_recursive_reference(&e.when_false, name, nested);
             }
-            Expr::Increment(e) => {
-                if let AssignTarget::Field(f) = &e.target {
-                    self.check_recursive_reference(&f.object, name, nested);
+            Expr::Increment(e) => match &e.target {
+                AssignTarget::Field(f) => self.check_recursive_reference(&f.object, name, nested),
+                AssignTarget::Index(i) => {
+                    self.check_recursive_reference(&i.receiver, name, nested);
+                    self.check_recursive_reference(&i.index, name, nested);
                 }
-            }
+                AssignTarget::Name(_) => {}
+            },
             Expr::Field(e) => self.check_recursive_reference(&e.object, name, nested),
+            Expr::Index(e) => {
+                self.check_recursive_reference(&e.receiver, name, nested);
+                self.check_recursive_reference(&e.index, name, nested);
+            }
             Expr::Match(e) => {
                 self.check_recursive_reference(&e.scrutinee, name, nested);
                 for arm in &e.arms {
@@ -8683,6 +8998,58 @@ impl<'a> Checker<'a> {
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN);
+
+        // `.as_slice(length)`/`.as_slice_mut(length)` (roadmap Phase 4e,
+        // `fase-4e-native-slice`, task 1.2): construct a validated
+        // `NativeSlice<T>`/`NativeSliceMut<T>` from this `Pointer<T>` — same
+        // `unsafe` treatment `Pointer<T>`'s other operations already have,
+        // returning `Result<..., NativeError>` (`register_native_failure`'s
+        // own shape, task 1.2's own instruction to reuse it rather than
+        // invent a different one).
+        if field.name.name == "as_slice" || field.name.name == "as_slice_mut" {
+            let mutable = field.name.name == "as_slice_mut";
+            let view = if mutable {
+                let slice_id = self.intern_native_slice_mut_type(t);
+                Type::of(Base::NativeSliceMut(slice_id))
+            } else {
+                let slice_id = self.intern_native_slice_type(t);
+                Type::of(Base::NativeSlice(slice_id))
+            };
+            let returns = self.native_result_type(view);
+
+            self.require_unsafe(expr.span, &format!("`.{}()`", field.name.name));
+
+            let signature = Signature {
+                name: field.name.name.clone(),
+                params: vec![ParamInfo {
+                    // `Int32`, matching `.offset(n: Int32)`'s own existing
+                    // choice on `Pointer<T>` (`check_pointer_method_call`)
+                    // rather than `UInt64` (what `.length` itself reads as):
+                    // an ordinary integer literal always types `Int32`
+                    // (`Self::check_int_literal`, no context-directed
+                    // literal inference exists yet), and `Type::accepts`
+                    // requires matching signedness for implicit widening —
+                    // `UInt64` here would make `p.as_slice(3)` reject a bare
+                    // literal, forcing an explicit `3 as UInt64` at every
+                    // call site for no safety benefit (a negative length is
+                    // still caught, now by the runtime validation instead
+                    // of by the type). `zirk-ir` widens to `UInt64`
+                    // internally for the runtime call and the view's own
+                    // representation either way.
+                    name: "length".to_string(),
+                    ty: Type::INT32,
+                    optional: false,
+                    has_default: false,
+                    variadic: false,
+                }],
+                returns,
+                shared: true,
+                span: field.name.span,
+                type_params: Vec::new(),
+                throws: Vec::new(),
+            };
+            return Some(self.check_direct_call(expr, &signature));
+        }
 
         let (params, returns): (Vec<(&str, Type)>, Type) = match field.name.name.as_str() {
             "read" => (Vec::new(), t),
@@ -9797,6 +10164,10 @@ fn assign_target_key(target: &AssignTarget) -> Option<String> {
             let base = expr_place_key(&field.object)?;
             Some(format!("{base}.{}", field.name.name))
         }
+        // Conservative, matching this function's own doc comment: an index
+        // expression is not a simple enough shape to prove two destinations
+        // the same or different, so it is never reported as a duplicate.
+        AssignTarget::Index(_) => None,
     }
 }
 

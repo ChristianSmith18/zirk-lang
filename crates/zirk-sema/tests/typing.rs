@@ -4377,3 +4377,158 @@ fn valid_manual_clone_implementation_is_dispatched_as_an_ordinary_method() {
          }",
     );
 }
+
+// --- Phase 4e: NativeSlice<T>/NativeSliceMut<T> (`fase-4e-native-slice`) ----
+
+#[test]
+fn invalid_as_slice_outside_unsafe() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         mut p: Pointer<Int32> = Pointer.from(x);
+         mut r: Result<NativeSlice<Int32>, NativeError> = p.as_slice(1);",
+    );
+    assert!(
+        output.contains(codes::POINTER_OP_OUTSIDE_UNSAFE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_as_slice_mut_outside_unsafe() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         mut p: Pointer<Int32> = Pointer.from(x);
+         mut r: Result<NativeSliceMut<Int32>, NativeError> = p.as_slice_mut(1);",
+    );
+    assert!(
+        output.contains(codes::POINTER_OP_OUTSIDE_UNSAFE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_native_slice_disallowed_element_type() {
+    let output = rejected("fn f(v: NativeSlice<String>): Void { }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_native_slice_mut_disallowed_element_type() {
+    let output = rejected("fn f(v: NativeSliceMut<String>): Void { }\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+}
+
+#[test]
+fn valid_as_slice_construction_and_indexing_read_outside_unsafe() {
+    // Construction requires `unsafe`; indexing and `.length`/`.is_empty` do
+    // not — the proposal's own "no `unsafe` needed to read/write through a
+    // view, only to construct one".
+    accepted_body(
+        "mut x: Int32 = 1;
+         mut view: NativeSlice<Int32> = unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             p.as_slice(1).unwrap()
+         };
+         mut v: Int32 = view[0];
+         mut n: UInt64 = view.length;
+         mut e: Boolean = view.is_empty;",
+    );
+}
+
+#[test]
+fn valid_native_slice_mut_indexing_read_and_write_outside_unsafe() {
+    accepted_body(
+        "mut x: Int32 = 1;
+         mut view: NativeSliceMut<Int32> = unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             p.as_slice_mut(1).unwrap()
+         };
+         view[0] = 42;
+         mut v: Int32 = view[0];",
+    );
+}
+
+#[test]
+fn invalid_write_through_read_only_native_slice() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         mut view: NativeSlice<Int32> = unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             p.as_slice(1).unwrap()
+         };
+         view[0] = 42;",
+    );
+    assert!(
+        output.contains(codes::INDEX_NOT_WRITABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_indexing_an_unsupported_receiver_type() {
+    let output = rejected_body("mut n: Int32 = 1;\nmut v: Int32 = n[0];");
+    assert!(
+        output.contains(codes::INDEXING_NOT_SUPPORTED.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("Int32"), "{output}");
+}
+
+#[test]
+fn invalid_native_slice_escapes_as_return_value() {
+    // The "Native view escapes its borrow" scenario, now actually enforced
+    // (roadmap Phase 4e, `fase-4e-native-slice`, design D4): the owner
+    // (`x`, a `Pointer<Int32>` local to the function) ends when the
+    // function returns, so the view built from it cannot escape either.
+    let output = rejected(
+        "fn make(): NativeSlice<Int32> {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut p: Pointer<Int32> = Pointer.from(x);
+                 return p.as_slice(1).unwrap();
+             }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_native_slice_mut_escapes_as_return_value() {
+    let output = rejected(
+        "fn make(): NativeSliceMut<Int32> {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut p: Pointer<Int32> = Pointer.from(x);
+                 return p.as_slice_mut(1).unwrap();
+             }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_native_slice_escapes_via_closure_capture() {
+    let output = rejected_body(
+        "mut x: Int32 = 1;
+         unsafe {
+             mut p: Pointer<Int32> = Pointer.from(x);
+             mut view: NativeSlice<Int32> = p.as_slice(1).unwrap();
+             mut f: Fn() => Void = (): Void => { mut w: NativeSlice<Int32> = view; };
+         }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_native_slice_escapes_into_a_declared_field() {
+    let output = rejected(
+        "class Holder {
+             value: NativeSlice<Int32>;
+             construct(v: NativeSlice<Int32>) { this.value = v; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}

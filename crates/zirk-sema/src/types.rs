@@ -248,6 +248,26 @@ pub enum Base {
     /// restricted to a reference type (checked against `is_reference_type`
     /// at resolution, not stored here).
     Weak(u32),
+    /// `NativeSlice<T>` (roadmap Phase 4e, `fase-4e-native-slice`, design
+    /// D1), identified by the index of its element type `T` in the
+    /// checker's `native_slice_types` table.
+    ///
+    /// Its own `Base` variant, parallel to [`Base::Pointer`]/[`Base::Weak`]
+    /// rather than routed through [`Base::Instance`] (design D1): a
+    /// compiler-built-in, closed operation set that needs no constructor
+    /// resolution or method-table dispatch. Read-only: indexing produces
+    /// `T`, never accepts a write (design D5). `T` is restricted to the
+    /// same ABI-safe subset [`Base::Pointer`] already accepts.
+    NativeSlice(u32),
+    /// `NativeSliceMut<T>` (roadmap Phase 4e, `fase-4e-native-slice`,
+    /// design D1), identified by the index of its element type `T` in the
+    /// checker's `native_slice_mut_types` table.
+    ///
+    /// The read/write counterpart of [`Base::NativeSlice`] — a distinct
+    /// variant rather than a mutability flag on one, so a value's static
+    /// type alone (not a hidden bit) decides whether `view[i] = x` is
+    /// accepted (design D5).
+    NativeSliceMut(u32),
     /// `A | B`, identified by its index in the checker's table.
     ///
     /// The table holds the normalized alternative list: order-independent,
@@ -536,6 +556,14 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Union(id) => names.union_name(id),
         Base::Pointer(id) => format!("Pointer<{}>", describe(names.pointer_element(id), names)),
         Base::Weak(id) => format!("Weak<{}>", describe(names.weak_element(id), names)),
+        Base::NativeSlice(id) => format!(
+            "NativeSlice<{}>",
+            describe(names.native_slice_element(id), names)
+        ),
+        Base::NativeSliceMut(id) => format!(
+            "NativeSliceMut<{}>",
+            describe(names.native_slice_mut_element(id), names)
+        ),
     };
 
     if ty.nullable {
@@ -558,6 +586,8 @@ pub trait TypeNames {
     fn union_name(&self, id: u32) -> String;
     fn pointer_element(&self, id: u32) -> Type;
     fn weak_element(&self, id: u32) -> Type;
+    fn native_slice_element(&self, id: u32) -> Type;
+    fn native_slice_mut_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.

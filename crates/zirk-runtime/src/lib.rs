@@ -38,6 +38,7 @@ mod exceptions;
 mod failure;
 mod io;
 mod memory;
+mod native_slice;
 mod string;
 
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
