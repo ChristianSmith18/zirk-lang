@@ -85,8 +85,20 @@ Current high-impact delivery limits include:
   otherwise `is`). A field whose type doesn't fit a scalar, nested-value,
   or object shape (for example `T?` or an algebraic enum payload) still
   reports `NOT_LOWERED`, now scoped to that specific field rather than
-  rejecting the whole comparison. Still required: user generic contracts
-  and value-type contract dispatch.
+  rejecting the whole comparison. A user-declared generic enum
+  (`fase-3-generic-enums`) also instantiates and lowers now, for a flat
+  single- or multi-type-parameter shape (`enum Either<L, R> { ... }`),
+  reusing the same specialization mechanism already proven by
+  `Result<T,E>`. Two real, deeper gaps were found and reported rather than
+  fixed as part of that change (both judged out of its own "verify an
+  existing mechanism" scope): a variant payload naming another generic
+  instantiation (`Bar<Baz<T>>`) fails in shared generic-inference
+  machinery that doesn't yet recurse into a nested instantiation's own
+  type arguments; and a self-referencing enum declaration — recursive,
+  generic **or plain** — cannot be declared at all today, because enum
+  declaration resolves variant field types before registering the enum's
+  own name (unlike a class, which registers its name first). Still
+  required: user generic contracts and value-type contract dispatch.
 - `Float128` arithmetic lacks complete Windows verification and `Float128`
   currently lacks `to_string()` support.
 - Standard-library, structured-concurrency, packaging, developer-tooling,

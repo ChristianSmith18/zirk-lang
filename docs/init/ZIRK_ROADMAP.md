@@ -108,7 +108,23 @@ declared, otherwise `is`) — reusing the same short-circuit block shape `&&`
 already builds, generalized from two operands to however many fields a type
 declares. A residual field type that fits none of these shapes (e.g. `T?`)
 keeps its own `NOT_LOWERED` diagnostic, now scoped to that field rather than
-the whole comparison. Generic contracts and value-type contract dispatch
+the whole comparison. `fase-3-generic-enums` (merged) delivered lowering for
+a flat single- or multi-type-parameter user generic enum (`enum Either<L,
+R> { ... }`), reusing `Result<T,E>`'s own already-generic specialization
+mechanism — removing both the checker's instantiation gate and a second,
+previously undocumented declaration-time gate (`declare_enum` minted its own
+type parameters through the generic-function-only `enter_type_params` path,
+unconditionally rejecting every user generic enum at declaration regardless
+of the instantiation gate). Two deeper gaps were found and reported rather
+than fixed, judged out of that change's own "verify an existing mechanism"
+scope: a variant payload naming another generic instantiation
+(`Bar<Baz<T>>`) fails in shared generic-inference substitution that does not
+yet recurse into a nested instantiation's own type arguments (a checker-wide
+gap, not enum-specific); and a self-referencing enum declaration — recursive,
+generic **or plain** — cannot be declared at all today, because enum
+declaration resolves every variant's field types in the same pass that
+registers the enum's own name, unlike a class's own two-phase
+declare/resolve split. Generic contracts and value-type contract dispatch
 remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single

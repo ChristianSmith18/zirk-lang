@@ -4,9 +4,13 @@
 
 ## What Changes
 
-- Remove the checker's blanket rejection of a generic enum instantiation for anything other than `Iteration<T>`/`Result<T,E>` (`checker.rs:4295-4305`'s `is_native` condition) — a user's `enum Bar<T>` instantiated as `Bar<Int32>`, `Bar<String>`, etc. is accepted the same way the two native cases already are.
-- Verify `specialize_enum`'s existing substitution logic against real user-declared generic enum shapes it was not exercised against before: multiple type parameters, a variant payload that itself nests another generic instantiation (`Bar<Baz<T>>`), and a recursive generic enum (a variant payload referencing the enum's own generic type, e.g. a user-defined `Tree<T>` with a `Node(T, Tree<T>, Tree<T>)` variant).
-- No grammar or checker-rule change beyond removing the gate: type-parameter constraint checking, exhaustiveness matching, and pattern binding for a generic enum already work identically to a native one, since the checker never treated `Iteration<T>`/`Result<T,E>` as special beyond this one gate.
+**Delivered:**
+- Removed the checker's blanket rejection of a generic enum instantiation for anything other than `Iteration<T>`/`Result<T,E>` (`checker.rs:4295-4305`'s `is_native` condition) — a user's `enum Bar<T>` instantiated as `Bar<Int32>`, `Bar<String>`, etc. is accepted the same way the two native cases already are, for a flat single- or multi-type-parameter shape.
+- A second, previously undocumented gate: `declare_enum` minted a generic enum's own type parameters through `enter_type_params`, which unconditionally reports `NOT_LOWERED` on first use (correct for a truly-unimplemented generic function/method, wrong for an enum) — fixed by minting ids the same way `register_class` does for classes. Without this, no user generic enum could even be declared, making the checker-gate removal alone a no-op.
+
+**Found blocked, reported rather than fixed (judged out of "verify, don't build" scope):**
+- A variant payload naming another generic instantiation (`Bar<Baz<T>>`) fails in shared generic-inference machinery (`infer_type_params`/`substitute`, which only handle a directly-`Base::Param` type, unlike `substitute_type` which already recurses correctly) — a checker-wide gap, not enum-specific.
+- A self-referencing enum declaration (recursive, generic **or plain**) cannot be declared at all today — `declare_enum` resolves variant field types before registering the enum's own name, so even a non-generic `enum IntList { Nil, Cons(head: Int32, tail: IntList) }` fails. This is a different, earlier root cause than this change's own design anticipated (a `specialize_enum` memoization risk that turned out not to be reachable at all) — needs the same two-phase declare/resolve split classes already have (`register_class`/`declare_class_members`), applied to enums.
 
 ### Explicitly out of scope
 
