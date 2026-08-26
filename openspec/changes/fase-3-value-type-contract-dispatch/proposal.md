@@ -27,8 +27,8 @@ Unlike `fase-3-abstract-dispatch` (a existing, proven mechanism generalized to a
 (none)
 
 ### Modified Capabilities
-- `zirk-contracts`: the existing "adopted through `implements`" requirement gets a new scenario confirming a `record`/`value class` adopter dispatches correctly through the contract type.
-- `zirk-type-system`: `record`/`value class`'s existing "no observable identity"/inline-storage requirement is reaffirmed, extended with an explicit statement that holding one through a contract-typed reference does not grant it observable identity or mutability through that reference.
+- `zirk-contracts`: the existing "adopted through `implements`" requirement gets a new scenario confirming a `record` adopter dispatches correctly through the contract type (`value class` cannot exercise this yet — its own grammar has no `implements`/method-body syntax at all, a pre-existing, separate gap).
+- `zirk-type-system`: `record`'s existing "no observable identity"/inline-storage requirement is reaffirmed, extended with an explicit statement that holding one through a contract-typed reference does not grant it observable identity or mutability through that reference.
 
 ## Impact
 
