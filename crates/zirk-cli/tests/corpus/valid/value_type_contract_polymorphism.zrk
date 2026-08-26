@@ -1,0 +1,49 @@
+// Two different concrete `record` adopters of the same interface, dispatched
+// correctly through the same interface-typed slot
+// (`fase-3-value-type-contract-dispatch`, design D1's own "Alternative
+// considered": a static per-call-site monomorphization cannot serve this —
+// `describe` is one ordinary, non-generic function, compiled once, called
+// twice with a *different* underlying concrete record boxed behind the same
+// `Describable`-typed parameter each time. Only a real per-instance
+// descriptor, read at the call the way `CallContract` already does for a
+// class, can make both calls resolve correctly.
+//
+// (No literal collection type — `List<T>`/array literals — exists in the
+// language yet to hold both at once; reassigning one interface-typed
+// variable across iterations is the closest equivalent available today, and
+// proves the same thing: the same static slot and the same call site
+// dispatch correctly no matter which concrete record is behind it.)
+interface Shape {
+    fn name(): String;
+    fn area(): Int32;
+}
+
+record Circle implements Shape {
+    radius: Int32;
+    fn name(): String { return "circle"; }
+    fn area(): Int32 { return this.radius * this.radius * 3; }
+}
+
+record Square implements Shape {
+    side: Int32;
+    fn name(): String { return "square"; }
+    fn area(): Int32 { return this.side * this.side; }
+}
+
+fn describe(shape: Shape): Void {
+    stdout.println(shape.name());
+    stdout.println(shape.area());
+}
+
+fn main(): Void {
+    mut circle = Circle(radius: 2);
+    mut square = Square(side: 3);
+
+    mut i = 0;
+    while i < 2 {
+        mut current: Shape = circle;
+        if i == 1 { current = square; }
+        describe(current);
+        i += 1;
+    }
+}

@@ -1,0 +1,23 @@
+// A boxed value type's identity is meaningless/unspecified
+// (`fase-3-value-type-contract-dispatch`, design D4/Risk, task 4.4): two
+// separate conversions of an equal `record` value each produce their own,
+// independent box (no interning or deduplication), so `is` between them
+// compares two distinct addresses and correctly returns `false` — without
+// any explicit rejection rule needed, purely because the two allocations
+// are not the same one.
+interface Describable {
+    fn describe(): String;
+}
+
+record Point implements Describable {
+    x: Int32;
+    fn describe(): String { return "a point"; }
+}
+
+fn main(): Void {
+    mut p = Point(x: 1);
+    mut a: Describable = p;
+    mut b: Describable = p;
+    stdout.println(a is b);
+    stdout.println(a is a);
+}

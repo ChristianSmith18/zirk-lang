@@ -2860,20 +2860,78 @@ fn valid_record_method_called_directly() {
 }
 
 #[test]
-fn invalid_record_implements_a_contract_is_not_lowered_yet() {
-    // Conformance is checked (a missing or mismatched `describe` would
-    // still be caught), but a record has no descriptor to carry the
-    // contract's own table, so reaching one through the contract type is
-    // not compilable yet — only the type declaration itself is gated.
+fn valid_record_implements_a_contract_and_dispatches_through_it() {
+    // `fase-3-value-type-contract-dispatch` (design D1): a record
+    // implementing a contract is assignable to it, and a call through the
+    // contract-typed reference type-checks like any other contract call —
+    // conformance was already checked the same way it is for a class; what
+    // this change adds is that the reference itself now compiles too.
+    accepted(
+        "interface Describable { fn describe(): String; }
+         record Point implements Describable {
+             x: Int32;
+             fn describe(): String { return \"point\"; }
+         }
+         fn announce(d: Describable): String { return d.describe(); }
+         fn main(): Void {
+             mut p = Point(x: 3);
+             mut d: Describable = p;
+             stdout.println(d.describe());
+             stdout.println(announce(p));
+         }",
+    );
+}
+
+#[test]
+fn invalid_record_missing_what_a_contract_requires() {
+    // A record's conformance is checked exactly the way a class's is
+    // (unaffected by this change): a missing method is still caught.
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         record Point implements Describable { x: Int32; }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("describe"), "{output}");
+}
+
+#[test]
+fn invalid_mutating_a_field_through_a_boxed_record_s_contract_type() {
+    // Design D3/task 4.4: no mutation path exists through a contract-typed
+    // reference to a boxed `record`, by construction — a contract declares
+    // methods only, never fields, so there is no member for an assignment
+    // to even name, whether the concrete adopter behind it is a class or a
+    // boxed value.
     let output = rejected(
         "interface Describable { fn describe(): String; }
          record Point implements Describable {
              x: Int32;
              fn describe(): String { return \"point\"; }
          }
-         fn main(): Void { }",
+         fn main(): Void {
+             mut p = Point(x: 3);
+             mut d: Describable = p;
+             d.x = 4;
+         }",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_record_not_implementing_the_named_interface() {
+    // A record that never says `implements Describable` is rejected the
+    // same way a class would be — this change only makes the *adopted*
+    // case compile, not any and every record.
+    let output = rejected(
+        "interface Describable { fn describe(): String; }
+         record Point { x: Int32; }
+         fn announce(d: Describable): String { return d.describe(); }
+         fn main(): Void { mut p = Point(x: 3); stdout.println(announce(p)); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
