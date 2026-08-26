@@ -986,6 +986,116 @@ fn verify_instruction(
             }
         }
 
+        InstKind::NativeSliceValidate {
+            pointer, length, ..
+        } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NativeSliceValidate",
+                report,
+            );
+            if let Some(ty) = type_of(pointer)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: NativeSliceValidate validates {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(length)
+                && ty != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NativeSliceValidate's length is {}, expected UInt64",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::NativeSliceValue { pointer, length } => {
+            if !matches!(inst.ty, IrType::NativeSlice(_) | IrType::NativeSliceMut(_)) {
+                report(format!(
+                    "{position}: NativeSliceValue declares {}, expected a NativeSlice/NativeSliceMut",
+                    inst.ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(pointer)
+                && !matches!(ty, IrType::Pointer(_))
+            {
+                report(format!(
+                    "{position}: NativeSliceValue's pointer is {}, which is not a Pointer",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(length)
+                && ty != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NativeSliceValue's length is {}, expected UInt64",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::NativeSliceLength(receiver) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "NativeSliceLength",
+                report,
+            );
+            if let Some(ty) = type_of(receiver)
+                && !matches!(ty, IrType::NativeSlice(_) | IrType::NativeSliceMut(_))
+            {
+                report(format!(
+                    "{position}: NativeSliceLength reads {}, which is not a NativeSlice/NativeSliceMut",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::NativeSliceLoad { receiver, index } => {
+            if let Some(ty) = type_of(receiver)
+                && !matches!(ty, IrType::NativeSlice(_) | IrType::NativeSliceMut(_))
+            {
+                report(format!(
+                    "{position}: NativeSliceLoad reads {}, which is not a NativeSlice/NativeSliceMut",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(index)
+                && ty != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NativeSliceLoad's index is {}, expected UInt64",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::NativeSliceStore {
+            receiver,
+            index,
+            value: _,
+        } => {
+            expect(inst.ty, IrType::Void, position, "NativeSliceStore", report);
+            if let Some(ty) = type_of(receiver)
+                && !matches!(ty, IrType::NativeSliceMut(_))
+            {
+                report(format!(
+                    "{position}: NativeSliceStore writes through {}, which is not a NativeSliceMut",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(index)
+                && ty != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NativeSliceStore's index is {}, expected UInt64",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::WeakFrom(value) => {
             if let Some(ty) = type_of(value)
                 && !matches!(inst.ty, IrType::Weak(id) if module.weak_types.get(id as usize) == Some(&ty))
@@ -1221,5 +1331,16 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::WeakUpgrade(operand)
         | InstKind::WeakIsAlive(operand)
         | InstKind::Clone(operand) => vec![*operand],
+        InstKind::NativeSliceValidate {
+            pointer, length, ..
+        } => vec![*pointer, *length],
+        InstKind::NativeSliceValue { pointer, length } => vec![*pointer, *length],
+        InstKind::NativeSliceLength(operand) => vec![*operand],
+        InstKind::NativeSliceLoad { receiver, index } => vec![*receiver, *index],
+        InstKind::NativeSliceStore {
+            receiver,
+            index,
+            value,
+        } => vec![*receiver, *index, *value],
     }
 }

@@ -773,6 +773,9 @@ pub enum AssignTarget {
     Name(Ident),
     /// `this.name = value` and `user.name = value`
     Field(FieldExpr),
+    /// `view[0] = value` (roadmap Phase 4e, `fase-4e-native-slice`, design
+    /// D5) — the same "place" classification `Field` already receives.
+    Index(IndexExpr),
 }
 
 impl AssignTarget {
@@ -780,14 +783,21 @@ impl AssignTarget {
         match self {
             AssignTarget::Name(i) => i.span,
             AssignTarget::Field(f) => f.span,
+            AssignTarget::Index(i) => i.span,
         }
     }
 
     /// The name being written, for a diagnostic that has to say one.
+    ///
+    /// An index target has no single name to report — callers that need one
+    /// (`i++`'s own diagnostic) never reach an index target: `check_increment`
+    /// rejects it before this would be called, the same way it already
+    /// rejects `Field`.
     pub fn name(&self) -> &str {
         match self {
             AssignTarget::Name(i) => &i.name,
             AssignTarget::Field(f) => &f.name.name,
+            AssignTarget::Index(_) => "<index>",
         }
     }
 }
@@ -871,6 +881,9 @@ pub enum Expr {
     /// Enum variants have their own node because `Direction.North` names a
     /// type rather than a value: there is no object to read a member from.
     Field(FieldExpr),
+    /// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design
+    /// D5) — see [`IndexExpr`].
+    Index(IndexExpr),
     /// `match x { p => v, ... }`, in either position.
     ///
     /// There is no separate statement node: in statement position the parser
@@ -926,6 +939,7 @@ impl Expr {
             Expr::This(e) => e.span,
             Expr::Super(e) => e.span,
             Expr::Field(e) => e.span,
+            Expr::Index(e) => e.span,
             Expr::Ternary(e) => e.span,
             Expr::Increment(e) => e.span,
             Expr::Match(e) => e.span,
@@ -991,6 +1005,19 @@ pub struct FieldExpr {
     /// Written `?.`: the whole access produces `null` when the object is
     /// absent, instead of reading through it.
     pub safe: bool,
+    pub span: Span,
+}
+
+/// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —
+/// a general postfix index expression. The grammar accepts any receiver;
+/// only the checker decides which receiver types actually support it
+/// (today, `NativeSlice<T>`/`NativeSliceMut<T>`), through an explicitly
+/// extensible dispatch table Phase 7's `Array<T>`/`List<T>` can register
+/// into later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexExpr {
+    pub receiver: Box<Expr>,
+    pub index: Box<Expr>,
     pub span: Span,
 }
 

@@ -296,6 +296,20 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|&referent| ir_type(referent, instance_base, enum_instance_base, checked))
         .collect();
 
+    // `checked.native_slice_types`/`checked.native_slice_mut_types` are
+    // pushed first, in the same order, for the same reason `pointer_types`
+    // is above (roadmap Phase 4e, `fase-4e-native-slice`, design D1).
+    module.native_slice_types = checked
+        .native_slice_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+    module.native_slice_mut_types = checked
+        .native_slice_mut_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+
     // `extern "C" fn` declarations (roadmap Phase 4e, design D7, `ADR-015`):
     // no body to lower, only a declaration codegen turns into an LLVM
     // `declare`.
@@ -511,15 +525,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     module
 }
 
-/// Builds the sixteen method bodies of the four native failure classes by
-/// hand (`fase-4d-runtimeerror`, design D8): `message`/`code`/`cause`/
+/// Builds the method bodies of every native failure class by hand
+/// (`fase-4d-runtimeerror`, design D8): `message`/`code`/`cause`/
 /// `stack_trace` for `DivisionByZeroError`, `InvalidShiftError`,
-/// `InvalidRepeatError` and `FloatNanError`. None of the four has a
-/// `program.classes` entry — `Checker::register_native_exception_hierarchy`
-/// injects them the same "table directly" way `Error`/`Throwable`/
-/// `RuntimeError`/`StackTrace` already are — so nothing in the ordinary
-/// per-class lowering loop below ever reaches them; this is their only
-/// source of a real body.
+/// `InvalidRepeatError`, `FloatNanError`, and (roadmap Phase 4e,
+/// `fase-4e-native-slice`) `IndexOutOfBoundsError`/`NativeError`. None of
+/// them has a `program.classes` entry —
+/// `Checker::register_native_exception_hierarchy` injects them the same
+/// "table directly" way `Error`/`Throwable`/`RuntimeError`/`StackTrace`
+/// already are — so nothing in the ordinary per-class lowering loop below
+/// ever reaches them; this is their only source of a real body.
 fn synthesize_native_failure_bodies<'a>(
     module: &mut Module,
     checked: &'a CheckedProgram,
@@ -536,6 +551,12 @@ fn synthesize_native_failure_bodies<'a>(
         (native.invalid_shift, "E_INVALID_SHIFT"),
         (native.invalid_repeat, "E_INVALID_REPEAT"),
         (native.float_nan, "E_FLOAT_NAN"),
+        // Roadmap Phase 4e, `fase-4e-native-slice`: two more native failure
+        // classes, built through the exact same
+        // `Checker::register_native_failure` closure and needing the same
+        // hand-built bodies as the original four above.
+        (native.index_out_of_bounds, "E_INDEX_OUT_OF_BOUNDS"),
+        (native.native_error, "E_NATIVE_ERROR"),
     ];
 
     for (class_id, code) in classes {
@@ -968,6 +989,13 @@ fn ir_type(
         // (roadmap Phase 4e, `fase-4e-weak`, design D1).
         Base::Weak(id) => IrType::Weak(id),
 
+        // `checked.native_slice_types`/`checked.native_slice_mut_types` and
+        // `module.native_slice_types`/`module.native_slice_mut_types` are
+        // populated the same way and for the same reason `pointer_types` is,
+        // just above (roadmap Phase 4e, `fase-4e-native-slice`, design D1).
+        Base::NativeSlice(id) => IrType::NativeSlice(id),
+        Base::NativeSliceMut(id) => IrType::NativeSliceMut(id),
+
         Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
@@ -1365,6 +1393,32 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Weak<T> it type-checked")
                 as u32;
             return Type::of(Base::Weak(id));
+        }
+
+        // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
+        // `fase-4e-native-slice`, design D1): same treatment as
+        // `Pointer<T>`/`Weak<T>` above.
+        if reference.name == "NativeSlice" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .native_slice_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every NativeSlice<T> it type-checked")
+                as u32;
+            return Type::of(Base::NativeSlice(id));
+        }
+        if reference.name == "NativeSliceMut" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .native_slice_mut_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every NativeSliceMut<T> it type-checked")
+                as u32;
+            return Type::of(Base::NativeSliceMut(id));
         }
 
         let declared = self.declaration_of(&reference.name, reference.span);
@@ -1891,7 +1945,14 @@ impl<'a> FunctionLowering<'a> {
             // A `Weak<T>` field has no default the same way an ordinary
             // class reference does not (roadmap Phase 4e, `fase-4e-weak`):
             // it is a reference, and there is no handle to default to.
-            | IrType::Weak(_) => {
+            | IrType::Weak(_)
+            // A `NativeSlice<T>`/`NativeSliceMut<T>` field is unreachable in
+            // a verified program for the same reason `Pointer<T>` is
+            // (roadmap Phase 4e, `fase-4e-native-slice`, design D4): the
+            // checker's generalized escape rule rejects every assignment of
+            // one into a field.
+            | IrType::NativeSlice(_)
+            | IrType::NativeSliceMut(_) => {
                 return None;
             }
         })
@@ -2228,6 +2289,14 @@ impl<'a> FunctionLowering<'a> {
             ast::AssignTarget::Field(field) => {
                 self.field_position(&field.object, &field.name.name).1
             }
+            // `view[i] = value` (roadmap Phase 4e, `fase-4e-native-slice`,
+            // design D5): the element type its `NativeSliceMut<T>` receiver
+            // carries — the checker already rejected a write through a
+            // read-only `NativeSlice<T>` before this ever lowers.
+            ast::AssignTarget::Index(index) => {
+                let receiver_ty = self.type_of(&index.receiver, index.receiver.span());
+                self.native_slice_element_type(receiver_ty)
+            }
         }
     }
 
@@ -2249,6 +2318,43 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_effect(
                     InstKind::StoreField {
                         object,
+                        index,
+                        value,
+                    },
+                    span,
+                );
+            }
+            // `view[i] = value` (design D5): `value` is already a plain
+            // operand by the time this runs (this function's own doc
+            // comment), computed by the caller in whatever block was
+            // current then — spilled *immediately*, before anything below
+            // (the receiver, the index, or the bounds check's own branch)
+            // gets a chance to open a new block and strand it (ADR-007 D7).
+            // The receiver is spilled right after it is lowered for the
+            // same reason, before the index expression gets that same
+            // chance.
+            ast::AssignTarget::Index(index_expr) => {
+                let value_ty = self.type_of_operand(value);
+                let value_slot = self.spill(value, value_ty, span);
+
+                let receiver = self.lower_expr(&index_expr.receiver);
+                let receiver_ty = self.type_of_operand(receiver);
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
+
+                let index_operand =
+                    self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::U64));
+                let index_slot = self.spill(index_operand, IrType::Int(IntWidth::U64), span);
+
+                let (receiver, index) = self.lower_native_slice_bounds_check(
+                    receiver_slot,
+                    receiver_ty,
+                    index_slot,
+                    span,
+                );
+                let value = self.emit(InstKind::Load(value_slot), value_ty, span);
+                self.emit_effect(
+                    InstKind::NativeSliceStore {
+                        receiver,
                         index,
                         value,
                     },
@@ -2337,6 +2443,45 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_effect(
                     InstKind::StoreField {
                         object,
+                        index,
+                        value,
+                    },
+                    stmt.span,
+                );
+            }
+            // `view[i] = value;` (roadmap Phase 4e, `fase-4e-native-slice`,
+            // design D5): the receiver is spilled right after it is
+            // lowered, and the index right after it, *before* `stmt.value`
+            // is lowered — `view[0] = view[0] + 1;` is exactly the shape
+            // that breaks otherwise: `stmt.value` here itself contains
+            // another index read, which opens its own `fail`/`cont` split
+            // (`Self::lower_native_slice_bounds_check`) and would strand an
+            // unspilled receiver/index computed before it (ADR-007 D7).
+            // `value` is spilled too, since the bounds check just below
+            // opens a split of its own regardless of what `stmt.value` did.
+            ast::AssignTarget::Index(index_expr) => {
+                let receiver = self.lower_expr(&index_expr.receiver);
+                let receiver_ty = self.type_of_operand(receiver);
+                let receiver_slot = self.spill(receiver, receiver_ty, stmt.span);
+
+                let index_operand =
+                    self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::U64));
+                let index_slot = self.spill(index_operand, IrType::Int(IntWidth::U64), stmt.span);
+
+                let element_ty = self.native_slice_element_type(receiver_ty);
+                let value = self.lower_expr_as(&stmt.value, element_ty);
+                let value_slot = self.spill(value, element_ty, stmt.span);
+
+                let (receiver, index) = self.lower_native_slice_bounds_check(
+                    receiver_slot,
+                    receiver_ty,
+                    index_slot,
+                    stmt.span,
+                );
+                let value = self.emit(InstKind::Load(value_slot), element_ty, stmt.span);
+                self.emit_effect(
+                    InstKind::NativeSliceStore {
+                        receiver,
                         index,
                         value,
                     },
@@ -3245,6 +3390,7 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::If(e) => self.lower_if_expr(e, span),
             ast::Expr::Field(e) => self.lower_field(e, span),
+            ast::Expr::Index(e) => self.lower_index_read(e, span),
             ast::Expr::This(_) | ast::Expr::Super(_) => {
                 // `super` names where to look, not what to look at: the value
                 // is the same instance.
@@ -4186,18 +4332,24 @@ impl<'a> FunctionLowering<'a> {
         id
     }
 
-    /// Whether `id` is one of the four native failure classes
+    /// Whether `id` is one of the native failure classes
     /// (`fase-4d-runtimeerror`, D9) — `DivisionByZeroError`,
-    /// `InvalidShiftError`, `InvalidRepeatError` or `FloatNanError`. Used by
-    /// [`Self::lower_construction`]'s own special case for a program's
-    /// explicit `Type("reason")` of one of these, the same way
-    /// [`Self::lower_construction`] already special-cases `StackTrace`.
+    /// `InvalidShiftError`, `InvalidRepeatError`, `FloatNanError`, and
+    /// (roadmap Phase 4e, `fase-4e-native-slice`) `IndexOutOfBoundsError`/
+    /// `NativeError`, all built through the checker's own
+    /// `register_native_failure` closure and sharing this same "hand-built
+    /// body" treatment. Used by [`Self::lower_construction`]'s own special
+    /// case for a program's explicit `Type("reason")` of one of these, the
+    /// same way [`Self::lower_construction`] already special-cases
+    /// `StackTrace`.
     fn is_native_failure_class(&self, id: u32) -> bool {
         self.checked.native_exceptions.is_some_and(|n| {
             id == n.division_by_zero
                 || id == n.invalid_shift
                 || id == n.invalid_repeat
                 || id == n.float_nan
+                || id == n.index_out_of_bounds
+                || id == n.native_error
         })
     }
 
@@ -5117,6 +5269,14 @@ impl<'a> FunctionLowering<'a> {
             // recursive traversal combining a call with a `?.` read of the
             // same discriminant in one arm).
             ast::Expr::Field(e) => e.safe || self.opens_blocks(&e.object),
+            // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,
+            // design D5) always opens a `fail`/`cont` split for its own
+            // bounds check (`Self::lower_native_slice_bounds_check`),
+            // regardless of the receiver or index shape — an earlier
+            // operand held across one (a call argument, the other side of
+            // a binary operator, …) must go through a slot the same way it
+            // would across an `if`/`match`/`?.`.
+            ast::Expr::Index(_) => true,
             ast::Expr::Call(_) => true,
             ast::Expr::Println(e) => self.opens_blocks(&e.arg),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
@@ -5871,6 +6031,51 @@ impl<'a> FunctionLowering<'a> {
             return self.emit(InstKind::WeakIsAlive(weak), IrType::Boolean, span);
         }
 
+        // `.length`/`.is_empty` (roadmap Phase 4e, `fase-4e-native-slice`) —
+        // usable in ordinary safe code on an already-constructed
+        // `NativeSlice<T>`/`NativeSliceMut<T>` (proposal, task 1.3). The
+        // member name is checked *first*, short-circuiting before
+        // `Self::type_of` ever runs on `expr.object` — the same order
+        // `.is_null`/`.is_alive` just above use, and for the same reason:
+        // `expr.object` may name an enum (`Direction.North`), which
+        // `Self::type_of` cannot resolve as a variable or function at all.
+        if matches!(expr.name.name.as_str(), "length" | "is_empty")
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::NativeSlice(_) | IrType::NativeSliceMut(_)
+            )
+        {
+            let receiver = self.lower_expr(&expr.object);
+            match expr.name.name.as_str() {
+                "length" => {
+                    return self.emit(
+                        InstKind::NativeSliceLength(receiver),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                }
+                "is_empty" => {
+                    let length = self.emit(
+                        InstKind::NativeSliceLength(receiver),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+                    let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), span);
+                    return self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: length,
+                            right: zero,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                }
+                _ => unreachable!("the checker only types `.length`/`.is_empty` on a native view"),
+            }
+        }
+
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -6192,6 +6397,21 @@ impl<'a> FunctionLowering<'a> {
         {
             return IrType::Boolean;
         }
+        // `.length`/`.is_empty` (roadmap Phase 4e, `fase-4e-native-slice`) —
+        // see `Self::lower_field`'s matching branch, member name checked
+        // first for the same reason.
+        if matches!(expr.name.name.as_str(), "length" | "is_empty")
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::NativeSlice(_) | IrType::NativeSliceMut(_)
+            )
+        {
+            match expr.name.name.as_str() {
+                "length" => return IrType::Int(IntWidth::U64),
+                "is_empty" => return IrType::Boolean,
+                _ => unreachable!("the checker only types `.length`/`.is_empty` on a native view"),
+            }
+        }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -6251,7 +6471,7 @@ impl<'a> FunctionLowering<'a> {
         };
         if !matches!(
             field.name.name.as_str(),
-            "read" | "write" | "offset" | "offset_bytes"
+            "read" | "write" | "offset" | "offset_bytes" | "as_slice" | "as_slice_mut"
         ) {
             return false;
         }
@@ -6327,8 +6547,321 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
+            // `.as_slice(length)`/`.as_slice_mut(length)` (roadmap Phase
+            // 4e, `fase-4e-native-slice`, design D1/D3/D5): validated
+            // construction, producing `Result<..., NativeError>`.
+            "as_slice" | "as_slice_mut" => {
+                let mutable = field.name.name == "as_slice_mut";
+                let element = self.module.pointer_types[id as usize];
+                // `pointer` was lowered before this `match` (shared by
+                // every arm) — spilled immediately, before the length
+                // argument below gets a chance to open a block of its own
+                // and strand it (ADR-007 D7).
+                let pointer_slot = self.spill(pointer, IrType::Pointer(id), span);
+                let length = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                let known_length = self.known_pointer_extent(&field.object);
+                self.lower_native_slice_construction(
+                    NativeSliceConstruction {
+                        pointer_slot,
+                        length,
+                        pointer_type_id: id,
+                        element,
+                        mutable,
+                        known_length,
+                    },
+                    span,
+                )
+            }
             _ => unreachable!("checked by `Self::is_pointer_method_call`"),
         }
+    }
+
+    /// This pass's own scope decision on design D3's "where the underlying
+    /// allocation's own size is knowable" (see `InstKind::NativeSliceValidate`'s
+    /// own doc comment): recognizes only the syntactically direct
+    /// `Pointer.from(place).as_slice(n)` shape, where `place`'s own storage
+    /// holds exactly one element — not general provenance/dataflow
+    /// tracking. `None` (opaque provenance) for everything else, including
+    /// a `Pointer<T>` read out of a variable.
+    fn known_pointer_extent(&self, receiver: &ast::Expr) -> Option<u64> {
+        let ast::Expr::Call(call) = receiver else {
+            return None;
+        };
+        if self.is_pointer_from_call(call) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// `pointer.as_slice(length)`/`.as_slice_mut(length)` (design D1/D3/D5):
+    /// validates via the runtime, then builds
+    /// `Result<NativeSlice<T>|NativeSliceMut<T>, NativeError>` — the same
+    /// branch/store/join shape `Self::checked_int_division` and
+    /// `Self::lower_if_expr` already use for a conditionally produced
+    /// value, since a single `InstKind` cannot itself branch (control flow
+    /// is expressed as IR blocks, never hidden inside one instruction's own
+    /// codegen — `ADR-007`).
+    ///
+    /// `pointer_slot` is already spilled by the caller (`Self::lower_pointer_method_call`'s
+    /// own `as_slice`/`as_slice_mut` arm), immediately after `pointer` was
+    /// lowered and before the length argument had a chance to open a block
+    /// of its own — `length` itself is spilled here, right on entry, before
+    /// anything else in this function gets that same chance.
+    fn lower_native_slice_construction(
+        &mut self,
+        construction: NativeSliceConstruction,
+        span: Span,
+    ) -> Operand {
+        let NativeSliceConstruction {
+            pointer_slot,
+            length,
+            pointer_type_id,
+            element,
+            mutable,
+            known_length,
+        } = construction;
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+
+        let view_ty = if mutable {
+            let id = self.module.intern_native_slice_mut_type(element);
+            IrType::NativeSliceMut(id)
+        } else {
+            let id = self.module.intern_native_slice_type(element);
+            IrType::NativeSlice(id)
+        };
+        let result_ty = self.native_slice_result_type(pointer_type_id, mutable);
+        let IrType::Enum(result_enum) = result_ty else {
+            unreachable!("Result<T,E> always lowers to IrType::Enum")
+        };
+
+        let result_slot = self.declare_slot("<native_slice_result>", result_ty, span);
+
+        let pointer_for_check = self.emit(
+            InstKind::Load(pointer_slot),
+            IrType::Pointer(pointer_type_id),
+            span,
+        );
+        let length_for_check = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let is_valid = self.emit(
+            InstKind::NativeSliceValidate {
+                pointer: pointer_for_check,
+                length: length_for_check,
+                element,
+                known_length,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let ok_block = self.new_block();
+        let error_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_valid,
+            then_block: ok_block,
+            else_block: error_block,
+        });
+
+        self.current = ok_block;
+        let pointer_ok = self.emit(
+            InstKind::Load(pointer_slot),
+            IrType::Pointer(pointer_type_id),
+            span,
+        );
+        let length_ok = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let view = self.emit(
+            InstKind::NativeSliceValue {
+                pointer: pointer_ok,
+                length: length_ok,
+            },
+            view_ty,
+            span,
+        );
+        let ok_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 0,
+                fields: vec![view],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, ok_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = error_block;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program calling as_slice/as_slice_mut registered the exception hierarchy");
+        let error_object = self.build_native_failure(
+            native.native_error,
+            "invalid NativeSlice/NativeSliceMut construction: null, misaligned, unrepresentable extent, or length exceeds the known allocation",
+            span,
+        );
+        let error_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 1,
+                fields: vec![error_object],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, error_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), result_ty, span)
+    }
+
+    /// The `Result<NativeSlice<T>|NativeSliceMut<T>, NativeError>` `IrType`
+    /// `.as_slice`/`.as_slice_mut` produce — re-finds the exact
+    /// `checked.enum_instances` entry `Checker::native_result_type` already
+    /// interned for this `(view, NativeError)` pair, the same
+    /// re-derivation `Self::type_of`'s `Pointer<T>`/`Weak<T>` arms already
+    /// do for their own tables.
+    fn native_slice_result_type(&self, pointer_type_id: u32, mutable: bool) -> IrType {
+        let pointee = self.checked.pointer_types[pointer_type_id as usize];
+        let view = if mutable {
+            let id = self
+                .checked
+                .native_slice_mut_types
+                .iter()
+                .position(|&t| t == pointee)
+                .expect("the checker interned this NativeSliceMut<T>") as u32;
+            Type::of(Base::NativeSliceMut(id))
+        } else {
+            let id = self
+                .checked
+                .native_slice_types
+                .iter()
+                .position(|&t| t == pointee)
+                .expect("the checker interned this NativeSlice<T>") as u32;
+            Type::of(Base::NativeSlice(id))
+        };
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program calling as_slice/as_slice_mut registered the exception hierarchy");
+        let native_result = self
+            .checked
+            .native_result
+            .expect("register_native_result_enum runs before any type is checked");
+        let args = vec![view, Type::of(Base::Class(native.native_error))];
+        let id = self
+            .checked
+            .enum_instances
+            .iter()
+            .position(|inst| inst.enum_id == native_result && inst.args == args)
+            .expect("the checker interned this Result<view, NativeError> instantiation")
+            as u32;
+        self.ir_type(Type::of(Base::EnumInstance(id)))
+    }
+
+    /// The element type a `NativeSlice<T>`/`NativeSliceMut<T>` receiver
+    /// carries (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —
+    /// used by indexing and assignment-target typing.
+    fn native_slice_element_type(&self, receiver_ty: IrType) -> IrType {
+        match receiver_ty {
+            IrType::NativeSlice(id) => self.module.native_slice_types[id as usize],
+            IrType::NativeSliceMut(id) => self.module.native_slice_mut_types[id as usize],
+            _ => unreachable!(
+                "the checker only accepts a NativeSlice/NativeSliceMut receiver for indexing"
+            ),
+        }
+    }
+
+    /// `receiver[index]` (design D5): bounds-checks `index` against the
+    /// receiver's own carried length, throwing `IndexOutOfBoundsError` on
+    /// failure (design D3's "controlled bounds error", spec scenario "View
+    /// indexing stays bounds-checked") — the same guard shape
+    /// `Self::checked_int_division` uses, reloading both operands on the
+    /// `cont` block for the caller to use in the actual load/store.
+    ///
+    /// `receiver_slot`/`index_slot` are already spilled by the caller
+    /// (`Self::lower_index_read`/`Self::lower_assign`'s own `Index` arm),
+    /// since this always opens a `fail`/`cont` split regardless of whether
+    /// anything the caller lowered before it does.
+    fn lower_native_slice_bounds_check(
+        &mut self,
+        receiver_slot: SlotId,
+        receiver_ty: IrType,
+        index_slot: SlotId,
+        span: Span,
+    ) -> (Operand, Operand) {
+        let receiver_check = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.emit(
+            InstKind::NativeSliceLength(receiver_check),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let index_check = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let out_of_bounds = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::GtEq,
+                left: index_check,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: out_of_bounds,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program indexing a native view registered the exception hierarchy");
+        self.throw_native_failure(
+            native.index_out_of_bounds,
+            "native view index out of bounds",
+            span,
+        );
+
+        self.current = cont;
+        let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        (receiver, index)
+    }
+
+    /// `receiver[index]` read (design D5).
+    ///
+    /// `receiver` is spilled immediately after it is lowered, before
+    /// `expr.index` gets a chance to open a block of its own and strand it
+    /// (ADR-007 D7) — `a[cond ? 0 : 1]` is exactly this shape.
+    fn lower_index_read(&mut self, expr: &ast::IndexExpr, span: Span) -> Operand {
+        let receiver = self.lower_expr(&expr.receiver);
+        let receiver_ty = self.type_of_operand(receiver);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+
+        let index_operand = self.lower_expr_as(&expr.index, IrType::Int(IntWidth::U64));
+        let index_slot = self.spill(index_operand, IrType::Int(IntWidth::U64), span);
+
+        let (receiver, index) =
+            self.lower_native_slice_bounds_check(receiver_slot, receiver_ty, index_slot, span);
+        let element_ty = self.native_slice_element_type(receiver_ty);
+        self.emit(
+            InstKind::NativeSliceLoad { receiver, index },
+            element_ty,
+            span,
+        )
     }
 
     /// Whether `e` is `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`,
@@ -7094,6 +7627,8 @@ impl<'a> FunctionLowering<'a> {
                     "read" => self.module.pointer_types[id as usize],
                     "write" => IrType::Void,
                     "offset" | "offset_bytes" => IrType::Pointer(id),
+                    "as_slice" => self.native_slice_result_type(id, false),
+                    "as_slice_mut" => self.native_slice_result_type(id, true),
                     _ => unreachable!("checked by `Self::is_pointer_method_call`"),
                 }
             }
@@ -7188,6 +7723,12 @@ impl<'a> FunctionLowering<'a> {
                 }
             }
             ast::Expr::Field(e) => self.field_type_of(e),
+            // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,
+            // design D5): the element type its indexing entry carries.
+            ast::Expr::Index(e) => {
+                let receiver_ty = self.type_of(&e.receiver, e.receiver.span());
+                self.native_slice_element_type(receiver_ty)
+            }
             ast::Expr::This(_) | ast::Expr::Super(_) => self.slot_type(self.lookup_slot("this")),
             ast::Expr::Ternary(e) => {
                 let true_ty = self.type_of(&e.when_true, e.when_true.span());
@@ -7296,6 +7837,22 @@ enum SafeDispatch {
     },
     /// Through a contract's table.
     Contract { contract: u32, index: u32 },
+}
+
+/// The arguments `FunctionLowering::lower_native_slice_construction` needs
+/// (roadmap Phase 4e, `fase-4e-native-slice`, design D1/D3/D5), bundled into
+/// one struct rather than passed positionally — clippy's own
+/// `too_many_arguments` threshold, and each field already has a name worth
+/// reading at the one call site that builds it.
+struct NativeSliceConstruction {
+    /// Already spilled by the caller, immediately after `pointer` was
+    /// lowered (see the function's own doc comment on why).
+    pointer_slot: SlotId,
+    length: Operand,
+    pointer_type_id: u32,
+    element: IrType,
+    mutable: bool,
+    known_length: Option<u64>,
 }
 
 /// Where a value waits while a later expression is lowered.

@@ -1,0 +1,17 @@
+// NativeSlice<T>/NativeSliceMut<T> (roadmap Phase 4e, `fase-4e-native-slice`):
+// construction requires `unsafe`, but indexing (`view[i]`/`view[i] = x`),
+// `.length` and `.is_empty` do not — this fixture confirms that end to end.
+fn main(): Void {
+    mut x: Int32 = 41;
+    mut view: NativeSliceMut<Int32> = unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        p.as_slice_mut(1).unwrap()
+    };
+
+    // Reading and writing through the view is safe code from here on: no
+    // `unsafe` boundary needed to use an already-constructed view.
+    view[0] = view[0] + 1;
+    stdout.println(view[0].to_string());
+    stdout.println(view.length.to_string());
+    stdout.println(view.is_empty.to_string());
+}

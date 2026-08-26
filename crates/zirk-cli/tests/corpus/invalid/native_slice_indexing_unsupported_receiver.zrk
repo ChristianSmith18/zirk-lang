@@ -1,0 +1,8 @@
+// `expr[index]` parses for any receiver (roadmap Phase 4e,
+// `fase-4e-native-slice`, design D5) — the checker is what restricts which
+// receiver types actually support it. `Int32` has no entry in the
+// checker's indexing dispatch table.
+fn main(): Void {
+    mut n: Int32 = 1;
+    mut v: Int32 = n[0];
+}

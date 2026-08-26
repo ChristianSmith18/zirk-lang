@@ -1,0 +1,20 @@
+// An out-of-range index on a constructed view fails with a controlled
+// bounds error (`IndexOutOfBoundsError`), not a crash or silent
+// out-of-bounds access (roadmap Phase 4e, `fase-4e-native-slice`, design D3,
+// spec scenario "View indexing stays bounds-checked").
+fn main(): Void {
+    mut x: Int32 = 41;
+    mut view: NativeSlice<Int32> = unsafe {
+        mut p: Pointer<Int32> = Pointer.from(x);
+        p.as_slice(1).unwrap()
+    };
+
+    try {
+        mut v: Int32 = view[5];
+        stdout.println(v.to_string());
+    } catch IndexOutOfBoundsError(e) {
+        stdout.println("bounds: " + e.message());
+    }
+
+    stdout.println("done");
+}
