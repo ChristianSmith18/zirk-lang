@@ -1592,3 +1592,187 @@ fn a_manually_implemented_clone_method_lowers_as_an_ordinary_method_call() {
         "a manually implemented clone() must lower as an ordinary call, found {kinds:?}"
     );
 }
+
+// --- `unsafe { }`/`commit { }` journal (`fase-4e-unsafe-journal`) -----------
+
+const JOURNAL_COUNTER: &str =
+    "class Counter { mut value: Int32; construct(value: Int32) { this.value = value; } }";
+
+const JOURNAL_BOOM: &str = "class Boom implements Throwable {
+    construct() { }
+    override fn message(): String { return \"boom\"; }
+    override fn code(): String { return \"BOOM\"; }
+    override fn cause(): Error? { return null; }
+    override fn stack_trace(): StackTrace { return StackTrace(); }
+}";
+
+/// An `unsafe {}` block with a managed write lowers to `JournalBegin` ->
+/// `JournalRecordField` -> the guarded `StoreField` -> `JournalCommit`, in
+/// that order, on the normal fall-through path (tasks.md 2.5).
+#[test]
+fn unsafe_block_with_a_managed_write_lowers_begin_record_store_commit_in_order() {
+    let source = format!(
+        "{JOURNAL_COUNTER}\nfn main(): Void {{
+             mut c: Counter = Counter(1);
+             unsafe {{
+                 c.value = 2;
+             }}
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    let begin = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::JournalBegin))
+        .unwrap_or_else(|| panic!("JournalBegin missing, found {kinds:?}"));
+    let record = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::JournalRecordField { .. }))
+        .unwrap_or_else(|| panic!("JournalRecordField missing, found {kinds:?}"));
+    let store = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::StoreField { .. }))
+        .unwrap_or_else(|| panic!("StoreField missing, found {kinds:?}"));
+    let commit = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::JournalCommit(_)))
+        .unwrap_or_else(|| panic!("JournalCommit missing, found {kinds:?}"));
+
+    assert!(
+        begin < record,
+        "JournalBegin must precede JournalRecordField, found {kinds:?}"
+    );
+    assert!(
+        record < store,
+        "JournalRecordField must precede the StoreField it guards, found {kinds:?}"
+    );
+    assert!(
+        store < commit,
+        "JournalCommit must follow the store on the normal fall-through path, found {kinds:?}"
+    );
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRollback(_))),
+        "a block that never throws must never roll back, found {kinds:?}"
+    );
+}
+
+/// `commit {}` inside `unsafe {}` emits `JournalCommit` at commit's own
+/// entry, against the outer journal — exactly once: the enclosing `unsafe`
+/// block's own fall-through commit is suppressed once its journal is
+/// already spent (design D2), so a second `JournalCommit` (which would
+/// double-free the same handle) must never appear.
+#[test]
+fn commit_block_emits_a_single_journal_commit_at_its_own_entry() {
+    let source = format!(
+        "{JOURNAL_COUNTER}\nfn main(): Void {{
+             mut c: Counter = Counter(1);
+             unsafe {{
+                 c.value = 2;
+                 commit {{
+                     c.value = 3;
+                 }}
+             }}
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    let commits: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| matches!(k, InstKind::JournalCommit(_)))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        commits.len(),
+        1,
+        "expected exactly one JournalCommit (commit{{}}'s own entry, not a \
+         second at the unsafe block's own fall-through), found {kinds:?}"
+    );
+
+    let stores: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| matches!(k, InstKind::StoreField { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        stores.len(),
+        2,
+        "expected both field writes, found {kinds:?}"
+    );
+    assert!(
+        commits[0] < stores[1],
+        "JournalCommit must run before commit{{}}'s own body, found {kinds:?}"
+    );
+
+    // The write inside `commit {}`'s own body runs after the journal is
+    // already spent, so it must not be journaled — only the one write made
+    // before `commit {}` is.
+    let records = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::JournalRecordField { .. }))
+        .count();
+    assert_eq!(
+        records, 1,
+        "only the write before commit{{}} must be journaled, found {kinds:?}"
+    );
+}
+
+/// A write to a slot declared *inside* the `unsafe` block itself does not
+/// get a `JournalRecordSlot` (design D1's own exemption, tasks.md 2.5).
+#[test]
+fn a_local_declared_inside_unsafe_is_not_journaled() {
+    let source = "fn main(): Void {
+        unsafe {
+            mut local: Int32 = 1;
+            local = 2;
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::JournalBegin)),
+        "found {kinds:?}"
+    );
+    assert!(
+        !kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRecordSlot { .. })),
+        "a slot declared inside the block must never be journaled, found {kinds:?}"
+    );
+}
+
+/// The exception-pending check point correctly branches to `JournalRollback`
+/// instead of `JournalCommit` when an exception escapes an `unsafe {}` block
+/// (tasks.md 2.5) — the IR-level counterpart of the end-to-end corpus
+/// fixture `unsafe_journal_rollback_on_error.zrk`.
+#[test]
+fn an_exception_escaping_unsafe_emits_journal_rollback() {
+    let source = format!(
+        "{JOURNAL_BOOM}\nfn main(): Void throws Boom {{
+             mut x: Int32 = 1;
+             unsafe {{
+                 x = 2;
+                 throw Boom();
+             }}
+         }}"
+    );
+    let module = compile(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRollback(_))),
+        "an exception escaping the block must roll back, found {kinds:?}"
+    );
+}
