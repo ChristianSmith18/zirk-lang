@@ -374,3 +374,12 @@ most of the current value.
 This order minimizes rewrites: it preserves the working batch compiler, closes
 the active pipeline gap, and creates the frontend boundary needed by later
 tooling before committing to cache or editor representations.
+
+## Additional follow-ups
+
+The `fix-docs-tooling-drift` change identified four specific follow-ups that are not part of the implementation-order sequence above. They are recorded in `docs/decisions/proximos-pasos-fase-4.md`:
+
+- `String`/`Char` lifetime strategy outside the mark-sweep collector — suggested change `fase-4e-memoria-de-strings`.
+- `static mut`/`thread_local!` audit in `zirk-runtime` before Phase 5 — suggested change `fase-4e-runtime-thread-safety`.
+- Modularizing `crates/zirk-ir/src/lower.rs` and `crates/zirk-codegen-llvm/src/emit.rs` — suggested change `refactor-lower-y-emit`.
+- `value class` versus `record` scope and `in`/`out` variance verification — suggested changes `fase-3-value-class-alcance` and `fase-3-verificacion-varianza`.

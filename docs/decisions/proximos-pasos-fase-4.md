@@ -263,3 +263,33 @@ process. Advancing a partial `Pointer<T>` implementation just to "have
 something to measure" without first deciding what memory guarantees it
 must satisfy would mean building on a decision not yet made — exactly the
 risk ADR-003 (phase 0) set out to avoid from the start.
+
+## 6. Follow-up work identified during `fix-docs-tooling-drift`
+
+These items were deliberately left unresolved while closing the documentation and tooling alignment change. Each one has a suggested change name for the next OpenSpec change that addresses it.
+
+### 6.1 `String`/`Char` lifetime strategy outside the mark-sweep collector
+
+- **Suggested change:** `fase-4e-memoria-de-strings`
+- **Why it matters:** The current design relies on a tracing/escape-analysis collector (ADR-003, accepted). `String` and `Char` may need a different lifetime story — constants, small-string optimization, reference counting for cross-ABI strings, or a pinned buffer contract — that the general memory strategy does not cover.
+- **What to decide before implementation:** Are `String`/`Char` purely managed by the same collector as objects? Can a `String` escape into native code? Is `Char` always a 21-bit Unicode scalar and, if so, does it get the same unboxed treatment as a small integer?
+
+### 6.2 Audit of `static mut` and `thread_local!` in `zirk-runtime` before Phase 5
+
+- **Suggested change:** `fase-4e-runtime-thread-safety`
+- **Why it matters:** Phase 5 (concurrency) assumes the runtime is free of data races in its global and thread-local state. Any `static mut` or unchecked `thread_local!` usage must be inventoried and converted to safe concurrency primitives before `task`/`parallel` are exposed.
+- **What to decide before implementation:** Which runtime globals are truly read-only after init? Which are mutable? Where does the exception stack live relative to a task? Does the current `thread_local` exception state compose with a future scheduler?
+
+### 6.3 Modularizing `crates/zirk-ir/src/lower.rs` and `crates/zirk-codegen-llvm/src/emit.rs`
+
+- **Suggested change:** `refactor-lower-y-emit`
+- **Why it matters:** Both files are large and monolithic. New language constructs keep adding branches to the same giant match, increasing the risk of cross-cutting bugs and making it hard to add new backends.
+- **What to decide before implementation:** What is the right unit of split — per construct, per backend stage, or per type? Should lowering become a trait or a pass pipeline? How do we preserve source maps and the independent IR verifier?
+
+### 6.4 `value class` versus `record` scope decision and `in`/`out` variance verification
+
+- **Suggested changes:** `fase-3-value-class-alcance` and `fase-3-verificacion-varianza`
+- **Why it matters:** The parser and tests already recognize `interface` and `trait`, but the semantic phase has not decided whether `value class` and `record` share the same scope rules or whether they are distinct kinds. Variance annotations `in`/`out` are parsed but not checked.
+- **What to decide before implementation:** Is a `value class` a kind of `record`? Do both participate in nominal or structural subtyping? Where are variance positions enforced in generic parameters? Which generic parameters may be declared `in`/`out`?
+
+These four follow-ups are also linked from the compiler improvement suggestions so they are not lost as loose comments in the original change.
