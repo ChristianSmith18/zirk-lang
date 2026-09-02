@@ -437,9 +437,8 @@ fn several_files_state_the_phase_they_arrive_in() {
 #[test]
 fn later_subcommands_name_their_phase() {
     for (subcommand, phase) in [
-        // The CLI surface belongs to Phase 6. `check` used to claim Phase 2,
-        // which shipped without it: a promise that had already expired.
-        ("check", "Phase 6"),
+        // The CLI surface belongs to Phase 6, except for `check` which is now
+        // implemented and no longer reports a future phase.
         ("test", "Phase 6"),
         ("format", "Phase 9"),
         ("new", "Phase 6"),

@@ -9,11 +9,19 @@ license.workspace = true
 name = "zirk"
 path = "src/main.rs"
 
+[[bin]]
+name = "zirk-check"
+path = "src/bin/zirk-check.rs"
+
+[features]
+default = ["backend"]
+backend = ["dep:zirk-ir", "dep:zirk-codegen-llvm"]
+
 [dependencies]
 zirk-diagnostics.workspace = true
-zirk-codegen-llvm.workspace = true
+zirk-codegen-llvm = { workspace = true, optional = true }
 zirk-lexer.workspace = true
 zirk-ast.workspace = true
 zirk-parser.workspace = true
 zirk-sema.workspace = true
-zirk-ir.workspace = true
+zirk-ir = { workspace = true, optional = true }

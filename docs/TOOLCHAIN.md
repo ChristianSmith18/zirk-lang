@@ -15,6 +15,16 @@ Requirements to **build the Zirk compiler** from source, on the three supported 
 
 The LLVM pin **is not negotiable for local convenience**: `llvm-sys` links against the C++ ABI of a specific major version. A different version will not compile. See [ADR-001](./decisions/ADR-001-pin-llvm.md).
 
+### Frontend-only validation without LLVM
+
+`zirk check` validates the frontend (lexing, parsing, name resolution, type and flow checking) and does not generate native code. It can be built without an LLVM installation:
+
+```sh
+cargo build -p zirk-cli --bin zirk-check --no-default-features
+```
+
+The `zirk check` subcommand of the full `zirk` binary is also available when `LLVM_SYS_201_PREFIX` is unset, because the frontend code does not depend on the LLVM backend. Only `zirk build`, `zirk run`, and `--list-targets` require the pinned LLVM toolchain.
+
 ## Required environment variable
 
 `llvm-sys` locates LLVM via `llvm-config` on the `PATH` or, preferably, via:
