@@ -96,7 +96,7 @@ Until such a change is accepted, the final Zirk 1.x specification remains the au
 
 Use the [Handbook Source Map](../_editorial/source-map.md) to locate the governing document. For an implementation claim, inspect the repository's milestone or compiler tests associated with the feature; the normative documents alone cannot prove that code is already supported.
 
-The future implementation-status reference will collect those checks into a single matrix. Until then, chapters must make local status statements conservatively and avoid unsupported “fully implemented” claims.
+The single implementation-status reference is [`docs/init/ZIRK_FEATURE_STATUS.md`](../../init/ZIRK_FEATURE_STATUS.md). Chapters should link to it, make local status statements conservatively, and avoid unsupported “fully implemented” claims.
 
 ## Normative sources
 

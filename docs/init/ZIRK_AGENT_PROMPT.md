@@ -319,15 +319,18 @@ not narrow final semantics such as grouped acquisition, surfaced close
 failures, suppressed errors, immutable throwable provenance, or complete
 stack traces.
 
-## Next phase: Zirk 0.4d — callable and binding completion
+## Phase status
 
-The next slice enables `Fn(P...) => R` annotations throughout type positions,
-escaping compiler-managed closures, multiple same-type declarations, and
-simultaneous exact-arity assignment. After that, Phase 4e owns managed-memory
-strategy delivery, dependent references, deep graph cloning, bounded native
-views, `inmut::strict` alias analysis, `unsafe`, transactional rollback, and
-explicit irreversible `commit` effects. See `docs/init/ZIRK_ROADMAP.md` for the
-acceptance outputs and remaining Phase 4 dependencies.
+Phase 4d — callable and binding completion — is **complete for its scoped
+delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` are
+archived and verified). The active implementation phase is now **4e — managed
+memory and unsafe boundaries**.
+
+The per-feature, per-pipeline-stage source of truth is
+`docs/init/ZIRK_FEATURE_STATUS.md`. Use it instead of this prompt's high-level
+phase summaries when you need to know whether a specific language construct is
+already implemented. The prompt keeps the phase narrative; the catalog keeps the
+authoritative feature matrix.
 
 ## Expected working style
 

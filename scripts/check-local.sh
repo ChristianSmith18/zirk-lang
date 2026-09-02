@@ -54,6 +54,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 green "  ok"
 echo
 
+blue "== build =="
+cargo build --workspace
+green "  ok"
+echo
+
 blue "== tests =="
 cargo test --workspace -- --test-threads=1
 echo

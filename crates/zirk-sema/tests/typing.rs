@@ -4225,6 +4225,33 @@ fn valid_class_implements_resource() {
 }
 
 #[test]
+fn valid_native_contract_type_annotations_are_not_pending() {
+    // `Iterable<T>`, `Iterator<T>` and `Resource<E>` are registered as native
+    // contracts in `checker.rs`; they must not be rejected with a pending-phase
+    // diagnostic just because `pending_type` used to name a later phase for them.
+    //
+    // `Iterator<T>` is already the one generic contract instantiation that lowers
+    // (it is the return type of `iterator()`), so it is accepted outright.
+    // `Iterable<T>` and `Resource<E>` as value types are still `NOT_LOWERED`
+    // (E0423), but the diagnostic must not be `PENDING_FEATURE` (E0424).
+    accepted("fn f(x: Iterator<Int32>): Void {}\nfn main(): Void {}");
+
+    let output = rejected("fn f(x: Iterable<Int32>): Void {}\nfn main(): Void {}");
+    assert!(
+        !output.contains(codes::PENDING_FEATURE.as_str()),
+        "expected no PENDING_FEATURE for Iterable<T>:\n{output}"
+    );
+
+    let output = rejected(&format!(
+        "{OPEN_ERROR}\nfn f(x: Resource<OpenError>): Void {{ }}\nfn main(): Void {{ }}"
+    ));
+    assert!(
+        !output.contains(codes::PENDING_FEATURE.as_str()),
+        "expected no PENDING_FEATURE for Resource<E>:\n{output}"
+    );
+}
+
+#[test]
 fn valid_match_with_closes_the_acquired_resource() {
     accepted(&format!(
         "{OPEN_ERROR}
