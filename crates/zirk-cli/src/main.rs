@@ -9,49 +9,21 @@
 //!
 //! # State
 //!
-//! Phase 1 implements `build` and `run` over a single file. The rest of the
-//! subcommands of `ZIRK_COMPILER_SPEC.md` section 9 — `check`, `test`, `bench`,
-//! `format`, `lint` — arrive in later phases, and each says so when invoked.
+//! Phase 1 implements `build` and `run` over a single file. `check` is now
+//! available as a frontend-only validation pass. The rest of the subcommands of
+//! `ZIRK_COMPILER_SPEC.md` section 9 — `test`, `bench`, `format`, `lint` —
+//! arrive in later phases, and each says so when invoked.
 
-mod driver;
-mod modules;
-
-use driver::Action;
 use std::path::{Path, PathBuf};
+use zirk_cli::{codes, frontend};
 use zirk_diagnostics::Phase;
 
-/// Diagnostic codes of the CLI.
-pub mod codes {
-    use zirk_diagnostics::Code;
-
-    /// The source file could not be read.
-    pub const UNREADABLE_FILE: Code = Code::new("E0501");
-    /// The output directory could not be prepared.
-    pub const OUTPUT_UNAVAILABLE: Code = Code::new("E0502");
-    /// The linker failed or could not be invoked.
-    pub const LINK_FAILED: Code = Code::new("E0503");
-    /// The runtime static library was not found.
-    pub const RUNTIME_NOT_FOUND: Code = Code::new("E0504");
-    /// The produced executable could not be run.
-    pub const EXECUTION_FAILED: Code = Code::new("E0505");
-    /// A subcommand that arrives in a later phase.
-    pub const NOT_IMPLEMENTED: Code = Code::new("E0506");
-    /// Wrong invocation of the CLI.
-    pub const INVALID_USAGE: Code = Code::new("E0507");
-    /// The compiler produced invalid IR: a compiler bug.
-    pub const INTERNAL_ERROR: Code = Code::new("E0508");
-    /// The imports of a crate form a cycle.
-    pub const IMPORT_CYCLE: Code = Code::new("E0509");
-}
+#[cfg(feature = "backend")]
+use zirk_cli::driver::{self, Action};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Directory the artifacts are written to.
-///
-/// This resolves an open question of the design: `zirk run` leaves the
-/// executable on disk instead of deleting it. Someone who ran their program
-/// will most likely want to distribute it, and a compiler that hides its output
-/// forces a second command to get it back.
 const OUTPUT_DIR: &str = "build";
 
 fn main() {
@@ -61,7 +33,11 @@ fn main() {
 
 fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
+        Some("check") => check(&args[1..]),
+
+        #[cfg(feature = "backend")]
         Some("build") => compile(&args[1..], Action::Build),
+        #[cfg(feature = "backend")]
         Some("run") => compile(&args[1..], Action::Run),
 
         Some("--version" | "-V") => {
@@ -69,25 +45,29 @@ fn dispatch(args: &[String]) -> i32 {
             0
         }
         Some("--list-targets") => {
-            list_targets();
-            0
+            #[cfg(feature = "backend")]
+            {
+                list_targets();
+                0
+            }
+            #[cfg(not(feature = "backend"))]
+            fail(
+                codes::NOT_IMPLEMENTED,
+                "`zirk --list-targets` is not available in this build",
+                "this build of the compiler was compiled without the backend",
+                Some("build with the `backend` feature enabled"),
+            )
         }
         Some("--help" | "-h") | None => {
             help();
             0
         }
 
-        // Subcommands of `COMPILER_SPEC` section 9 that arrive later. Naming
-        // them beats "unknown subcommand": the user wrote something the language
-        // does define.
-        Some(later @ ("check" | "test" | "bench" | "format" | "lint" | "new" | "init" | "doc")) => {
+        // Subcommands of `COMPILER_SPEC` section 9 that arrive later.
+        Some(later @ ("test" | "bench" | "format" | "lint" | "new" | "init" | "doc")) => {
             let phase = match later {
-                // The CLI surface belongs to Phase 6, with the project system.
-                // `check` used to claim Phase 2, which has since shipped
-                // without it: a promise that had already expired.
-                "check" | "test" | "new" | "init" => Phase::SIX,
+                "test" | "new" | "init" => Phase::SIX,
                 "format" | "lint" => Phase::NINE,
-                // `bench` and `doc` need the standard library behind them.
                 _ => Phase::SEVEN,
             };
             fail(
@@ -109,9 +89,44 @@ fn dispatch(args: &[String]) -> i32 {
     }
 }
 
+fn check(args: &[String]) -> i32 {
+    let json = args.iter().any(|a| a == "--json");
+    let color = frontend::resolve_color(color_choice(args).as_deref());
+    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+
+    if files.is_empty() {
+        return fail(
+            codes::INVALID_USAGE,
+            "no source file was given",
+            "`zirk check` needs a `.zrk` file",
+            Some("write `zirk check program.zrk`"),
+        );
+    }
+
+    if files.len() > 1 {
+        return fail(
+            codes::NOT_IMPLEMENTED,
+            "several source files were given",
+            "this version of the compiler checks a single file",
+            Some("multi-file projects with `init.zrk` arrive in Phase 6"),
+        );
+    }
+
+    let path = Path::new(files[0].as_str());
+    let mut sink = zirk_diagnostics::DiagnosticSink::new();
+    let _ = frontend::run_frontend(path, &mut sink);
+
+    if !sink.is_empty() {
+        eprint!("{}", frontend::render(&sink, json, color));
+    }
+
+    if sink.has_errors() { 1 } else { 0 }
+}
+
+#[cfg(feature = "backend")]
 fn compile(args: &[String], action: Action) -> i32 {
     let json = args.iter().any(|a| a == "--json");
-    let color = driver::resolve_color(color_choice(args).as_deref());
+    let color = frontend::resolve_color(color_choice(args).as_deref());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     if files.is_empty() {
@@ -136,10 +151,8 @@ fn compile(args: &[String], action: Action) -> i32 {
     let output_dir = PathBuf::from(OUTPUT_DIR);
     let compilation = driver::compile(path, &output_dir);
 
-    // Diagnostics go to standard error so they never mix with the output of the
-    // compiled program.
     if !compilation.sink.is_empty() {
-        eprint!("{}", driver::render(&compilation.sink, json, color));
+        eprint!("{}", frontend::render(&compilation.sink, json, color));
     }
 
     let Some(executable) = compilation.executable else {
@@ -161,6 +174,16 @@ fn compile(args: &[String], action: Action) -> i32 {
     }
 }
 
+#[cfg(not(feature = "backend"))]
+fn compile(_args: &[String], _action: &str) -> i32 {
+    fail(
+        codes::NOT_IMPLEMENTED,
+        "`zirk build` and `zirk run` are not available in this build",
+        "this build of the compiler was compiled without the backend",
+        Some("build with the `backend` feature enabled"),
+    )
+}
+
 /// Reads `--color=<choice>` from the arguments.
 fn color_choice(args: &[String]) -> Option<String> {
     args.iter()
@@ -173,9 +196,10 @@ fn fail(code: zirk_diagnostics::Code, message: &str, cause: &str, help: Option<&
     if let Some(help) = help {
         diagnostic = diagnostic.with_help(help);
     }
-    // The CLI's own diagnostics get the same treatment as the compiler's: the
-    // reader cannot tell which layer produced them, and should not have to.
-    eprint!("{}", diagnostic.render_colored(driver::resolve_color(None)));
+    eprint!(
+        "{}",
+        diagnostic.render_colored(frontend::resolve_color(None))
+    );
     1
 }
 
@@ -185,8 +209,12 @@ fn help() {
     println!("Usage: zirk <subcommand> [file]");
     println!();
     println!("Subcommands:");
-    println!("  build <file.zrk>   compile to a native executable");
-    println!("  run <file.zrk>     compile and run");
+    println!("  check <file.zrk>   validate the frontend only");
+    #[cfg(feature = "backend")]
+    {
+        println!("  build <file.zrk>   compile to a native executable");
+        println!("  run <file.zrk>     compile and run");
+    }
     println!();
     println!("Options:");
     println!("      --json         emit diagnostics in structured form");
@@ -198,6 +226,7 @@ fn help() {
     println!("Artifacts are written to `{OUTPUT_DIR}/`.");
 }
 
+#[cfg(feature = "backend")]
 fn list_targets() {
     println!("host: {}", zirk_codegen_llvm::host_triple());
     println!();

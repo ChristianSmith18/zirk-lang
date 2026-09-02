@@ -1,14 +1,15 @@
-//! The compilation driver: coordinates the pipeline stages.
+//! The compilation driver: coordinates the backend pipeline stages.
 //!
 //! The CLI implements no compilation logic of its own. Each stage lives in its
 //! crate; here they are coordinated, the linker is invoked and the result is
 //! turned into terminal output and exit codes.
+//!
+//! This module is only compiled when the `backend` feature is enabled.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use zirk_codegen_llvm::compile_to_object;
-use zirk_diagnostics::{Color, Diagnostic, DiagnosticSink, RenderStyle};
+use zirk_diagnostics::{Diagnostic, DiagnosticSink};
 
 use crate::codes;
 
@@ -40,21 +41,12 @@ impl Compilation {
 pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
     let mut sink = DiagnosticSink::new();
 
-    // The crate is the entry file plus everything it imports, walked from the
-    // entry rather than from a directory listing: a `.zrk` nobody imports is
-    // not part of the program.
-    let Some(loaded) = crate::modules::load(path, &mut sink) else {
+    let Some(crate::frontend::FrontendResult {
+        program, checked, ..
+    }) = crate::frontend::run_frontend(path, &mut sink)
+    else {
         return Compilation::failed(sink);
     };
-    if sink.has_errors() {
-        return Compilation::failed(sink);
-    }
-
-    let program = merge(&loaded);
-    let checked = zirk_sema::check(&loaded.sources, &program, &mut sink);
-    if sink.has_errors() {
-        return Compilation::failed(sink);
-    }
 
     let ir = zirk_ir::lower(&program, &checked);
 
@@ -111,51 +103,7 @@ pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
     }
 }
 
-/// Merges the files of a crate into the program the checker sees.
-///
-/// There is one namespace per crate in this phase: which file a declaration
-/// came from still matters for visibility, and that travels in its spans, but
-/// two declarations cannot share a name even in different files. Proper
-/// per-module namespacing belongs with the project system of Phase 6.
-fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
-    let mut program = zirk_ast::Program {
-        imports: Vec::new(),
-        uses: Vec::new(),
-        enums: Vec::new(),
-        classes: Vec::new(),
-        contracts: Vec::new(),
-        functions: Vec::new(),
-        type_aliases: Vec::new(),
-        externs: Vec::new(),
-        span: loaded.sources.entry().span(0, 0),
-    };
-
-    for unit in &loaded.units {
-        program.imports.extend(unit.program.imports.iter().cloned());
-        program.uses.extend(unit.program.uses.iter().cloned());
-        program.enums.extend(unit.program.enums.iter().cloned());
-        program.classes.extend(unit.program.classes.iter().cloned());
-        program
-            .contracts
-            .extend(unit.program.contracts.iter().cloned());
-        program
-            .functions
-            .extend(unit.program.functions.iter().cloned());
-        program
-            .type_aliases
-            .extend(unit.program.type_aliases.iter().cloned());
-        program.externs.extend(unit.program.externs.iter().cloned());
-    }
-
-    program
-}
-
 /// Links the object with the Zirk runtime.
-///
-/// The link driver is the `clang` of the pinned LLVM installation rather than
-/// whatever C compiler the host has (design D7): the project already requires
-/// that installation, and relying on the host compiler reintroduces the
-/// variability ADR-004 set out to remove.
 fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
     let runtime = locate_runtime()?;
     let driver = link_driver();
@@ -196,18 +144,6 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
 }
 
 /// Requests dead-code elimination at link time, per container format.
-///
-/// `zirk-runtime` exposes nine `extern "C"` symbols (`zirk_rt_init`,
-/// `zirk_str_from_i32`, `zirk_str_eq`, ...). A static archive is linked at
-/// whole-object-file granularity: if any symbol in an object file is
-/// referenced, the linker keeps the entire file. With nine separate entry
-/// points, that retains far more of Rust's `std` than any single Zirk program
-/// actually calls.
-///
-/// Without this flag, `fn main(): Void { stdout.println("..."); }` links to
-/// roughly 1.4 MB; with it, to roughly 400 KB — in line with a plain Rust
-/// `println!("...")` binary. Measured locally on `aarch64-macos`; Linux and
-/// Windows are confirmed in CI.
 fn dead_strip_flag() -> &'static str {
     if cfg!(target_os = "macos") {
         "-Wl,-dead_strip"
@@ -220,15 +156,6 @@ fn dead_strip_flag() -> &'static str {
 }
 
 /// System libraries the runtime needs, per platform.
-///
-/// The Zirk runtime uses Rust's `std`, which on Windows depends on system
-/// libraries the linker does not add on its own — on Unix, libc arrives by
-/// default. The list is the one `rustc --print native-static-libs` reports for
-/// the `windows-msvc` target.
-///
-/// Hardcoding it is Phase 1 pragmatism, the same as locating the runtime next
-/// to the executable. Deriving it from the toolchain belongs with proper
-/// distribution in Phase 8.
 fn system_libraries() -> Vec<String> {
     if !cfg!(windows) {
         return Vec::new();
@@ -255,10 +182,6 @@ fn system_libraries() -> Vec<String> {
 }
 
 /// Finds the runtime static library.
-///
-/// It is looked up next to the compiler executable, which is where Cargo leaves
-/// it. This is Phase 1 pragmatism: proper toolchain distribution is Phase 8,
-/// and inventing a layout now would be a decision with no information behind it.
 fn locate_runtime() -> Result<PathBuf, Box<Diagnostic>> {
     let name = if cfg!(windows) {
         "zirk_runtime.lib"
@@ -322,45 +245,4 @@ pub fn run(executable: &Path) -> Result<i32, Box<Diagnostic>> {
     // A process killed by a signal has no code. 130 is the convention for
     // SIGINT and keeps the caller from reading it as success.
     Ok(status.code().unwrap_or(130))
-}
-
-/// Renders the accumulated diagnostics.
-pub fn render(sink: &DiagnosticSink, json: bool, color: Color) -> String {
-    let style = if json {
-        RenderStyle::Json
-    } else {
-        RenderStyle::Human
-    };
-    sink.render_colored(style, color)
-}
-
-/// Decides whether the diagnostics carry colour.
-///
-/// `ZIRK_COMPILER_SPEC.md` section 9 requires deterministic output, so colour
-/// only appears when the destination is a terminal a person is reading. Piping
-/// the output must yield exactly the same bytes as an uncoloured run.
-///
-/// The precedence is the usual one in the ecosystem, from strongest to weakest:
-///
-/// 1. an explicit `--color` on the command line;
-/// 2. `NO_COLOR`, which by convention disables colour whatever its value
-///    (<https://no-color.org>);
-/// 3. whether standard error is a terminal.
-pub fn resolve_color(requested: Option<&str>) -> Color {
-    match requested {
-        Some("always") => return Color::Ansi,
-        Some("never") => return Color::Never,
-        _ => {}
-    }
-
-    if std::env::var_os("NO_COLOR").is_some() {
-        return Color::Never;
-    }
-
-    // Standard error and not output: that is where diagnostics go.
-    if std::io::stderr().is_terminal() {
-        Color::Ansi
-    } else {
-        Color::Never
-    }
 }

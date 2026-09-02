@@ -54,6 +54,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 green "  ok"
 echo
 
+blue "== frontend-only build =="
+cargo build -p zirk-cli --bin zirk-check --no-default-features
+green "  ok"
+echo
+
 blue "== build =="
 cargo build --workspace
 green "  ok"
