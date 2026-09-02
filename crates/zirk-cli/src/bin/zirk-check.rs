@@ -4,7 +4,6 @@
 //! on the backend and can be built without LLVM. It reuses the same frontend
 //! driver so `zirk-check` and `zirk check` cannot drift.
 
-use std::path::Path;
 use zirk_cli::{codes, frontend};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,16 +32,16 @@ fn check(path: &str, args: &[String]) -> i32 {
         return fail(
             codes::INVALID_USAGE,
             "no source file was given",
-            "`zirk-check` needs a `.zrk` file",
-            Some("write `zirk-check program.zrk`"),
+            "`zirk-check` needs a source file",
+            Some("write `zirk-check program` or `zirk-check program.zrk`"),
         );
     }
 
     let json = args.iter().any(|a| a == "--json");
     let color = frontend::resolve_color(color_choice(args).as_deref());
-    let file = Path::new(path);
+    let file = frontend::resolve_source_path(path);
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
-    let _ = frontend::run_frontend(file, &mut sink);
+    let _ = frontend::run_frontend(&file, &mut sink);
 
     if !sink.is_empty() {
         eprint!("{}", frontend::render(&sink, json, color));
@@ -71,9 +70,11 @@ fn fail(code: zirk_diagnostics::Code, message: &str, cause: &str, help: Option<&
 fn help() {
     println!("zirk-check {VERSION}");
     println!();
-    println!("Usage: zirk-check <file.zrk>");
+    println!("Usage: zirk-check <file>");
     println!();
     println!("Validate a `.zrk` file using only the frontend (no LLVM).");
+    println!();
+    println!("The `.zrk` extension is optional: `main` and `main.zrk` are equivalent.");
     println!();
     println!("Options:");
     println!("      --json         emit diagnostics in structured form");

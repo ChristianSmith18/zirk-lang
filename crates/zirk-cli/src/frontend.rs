@@ -4,7 +4,7 @@
 //! and the runtime. It is the shared half of both `zirk` and `zirk-check`.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zirk_diagnostics::{Color, DiagnosticSink, RenderStyle, SourceMap};
 
 /// Result of a successful frontend run.
@@ -82,6 +82,19 @@ pub fn render(sink: &DiagnosticSink, json: bool, color: Color) -> String {
         RenderStyle::Human
     };
     sink.render_colored(style, color)
+}
+
+/// Resolves a source argument to the path the compiler reads.
+///
+/// If the argument already ends with `.zrk`, it is used verbatim. Otherwise,
+/// `.zrk` is appended. This lets `zirk run main` resolve to `main.zrk` without
+/// any ambiguity.
+pub fn resolve_source_path(arg: &str) -> PathBuf {
+    if arg.ends_with(".zrk") {
+        PathBuf::from(arg)
+    } else {
+        PathBuf::from(format!("{arg}.zrk"))
+    }
 }
 
 /// Decides whether the diagnostics carry colour.
