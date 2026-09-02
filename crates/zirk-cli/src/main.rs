@@ -14,7 +14,7 @@
 //! `ZIRK_COMPILER_SPEC.md` section 9 — `test`, `bench`, `format`, `lint` —
 //! arrive in later phases, and each says so when invoked.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use zirk_cli::{codes, frontend};
 use zirk_diagnostics::Phase;
 
@@ -98,8 +98,8 @@ fn check(args: &[String]) -> i32 {
         return fail(
             codes::INVALID_USAGE,
             "no source file was given",
-            "`zirk check` needs a `.zrk` file",
-            Some("write `zirk check program.zrk`"),
+            "`zirk check` needs a source file",
+            Some("write `zirk check program` or `zirk check program.zrk`"),
         );
     }
 
@@ -112,9 +112,9 @@ fn check(args: &[String]) -> i32 {
         );
     }
 
-    let path = Path::new(files[0].as_str());
+    let path = frontend::resolve_source_path(files[0].as_str());
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
-    let _ = frontend::run_frontend(path, &mut sink);
+    let _ = frontend::run_frontend(&path, &mut sink);
 
     if !sink.is_empty() {
         eprint!("{}", frontend::render(&sink, json, color));
@@ -133,8 +133,8 @@ fn compile(args: &[String], action: Action) -> i32 {
         return fail(
             codes::INVALID_USAGE,
             "no source file was given",
-            "the subcommand needs a `.zrk` file",
-            Some("write `zirk run program.zrk`"),
+            "the subcommand needs a source file",
+            Some("write `zirk run program` or `zirk run program.zrk`"),
         );
     }
 
@@ -147,9 +147,9 @@ fn compile(args: &[String], action: Action) -> i32 {
         );
     }
 
-    let path = Path::new(files[0].as_str());
+    let path = frontend::resolve_source_path(files[0].as_str());
     let output_dir = PathBuf::from(OUTPUT_DIR);
-    let compilation = driver::compile(path, &output_dir);
+    let compilation = driver::compile(&path, &output_dir);
 
     if !compilation.sink.is_empty() {
         eprint!("{}", frontend::render(&compilation.sink, json, color));
@@ -209,11 +209,11 @@ fn help() {
     println!("Usage: zirk <subcommand> [file]");
     println!();
     println!("Subcommands:");
-    println!("  check <file.zrk>   validate the frontend only");
+    println!("  check <file>       validate the frontend only");
     #[cfg(feature = "backend")]
     {
-        println!("  build <file.zrk>   compile to a native executable");
-        println!("  run <file.zrk>     compile and run");
+        println!("  build <file>       compile to a native executable");
+        println!("  run <file>         compile and run");
     }
     println!();
     println!("Options:");
@@ -222,6 +222,8 @@ fn help() {
     println!("  -V, --version      show the version");
     println!("      --list-targets list the supported targets");
     println!("  -h, --help         show this help");
+    println!();
+    println!("The `.zrk` extension is optional: `main` and `main.zrk` are equivalent.");
     println!();
     println!("Artifacts are written to `{OUTPUT_DIR}/`.");
 }

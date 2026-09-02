@@ -37,13 +37,22 @@ fn workspace(name: &str) -> PathBuf {
 
 /// Runs `zirk check` over a source file, from its own working directory.
 fn zirk_check(source: &Path, name: &str) -> (bool, String, String) {
+    zirk_check_with_arg(
+        source,
+        name,
+        source.file_name().expect("file name").to_str().unwrap(),
+    )
+}
+
+/// Runs `zirk check` with an explicit command-line argument.
+fn zirk_check_with_arg(source: &Path, name: &str, arg: &str) -> (bool, String, String) {
     let dir = workspace(name);
     let copied = dir.join(source.file_name().expect("file name"));
     std::fs::copy(source, &copied).expect("copy the source");
 
     let output = Command::new(compiler())
         .arg("check")
-        .arg(copied.file_name().expect("file name"))
+        .arg(arg)
         .current_dir(&dir)
         .output()
         .expect("run the compiler");
@@ -128,5 +137,59 @@ fn check_and_build_agree_on_invalid_programs() {
     assert!(
         !check_stderr.is_empty() && !build_stderr.is_empty(),
         "both `check` and `build` must emit diagnostics"
+    );
+}
+
+#[test]
+fn a_valid_program_passes_check_without_extension() {
+    let path = corpus("valid").join("hello.zrk");
+    let (success, stdout, stderr) = zirk_check_with_arg(&path, "valid_hello_bare", "hello");
+
+    assert!(
+        success,
+        "`zirk check hello` must exit 0 for a valid program"
+    );
+    assert!(
+        stdout.is_empty(),
+        "`zirk check hello` must not write to stdout"
+    );
+    assert!(
+        stderr.is_empty(),
+        "`zirk check hello` must not produce diagnostics, got: {stderr}"
+    );
+}
+
+#[test]
+fn an_invalid_program_is_rejected_without_extension() {
+    let path = corpus("invalid").join("type_mismatch.zrk");
+    let (success, stdout, stderr) = zirk_check_with_arg(&path, "invalid_bare", "type_mismatch");
+
+    assert!(
+        !success,
+        "`zirk check type_mismatch` must exit non-zero for an invalid program"
+    );
+    assert!(
+        stdout.is_empty(),
+        "`zirk check type_mismatch` must not write to stdout"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "`zirk check type_mismatch` must emit a diagnostic on stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn a_program_with_zrk_extension_still_works() {
+    let path = corpus("valid").join("hello.zrk");
+    let (success, stdout, stderr) = zirk_check_with_arg(&path, "valid_hello_ext", "hello.zrk");
+
+    assert!(success, "`zirk check hello.zrk` must still exit 0");
+    assert!(
+        stdout.is_empty(),
+        "`zirk check hello.zrk` must not write to stdout"
+    );
+    assert!(
+        stderr.is_empty(),
+        "`zirk check hello.zrk` must not produce diagnostics, got: {stderr}"
     );
 }

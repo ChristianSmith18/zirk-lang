@@ -65,13 +65,19 @@ fn normalize(text: &str) -> String {
 
 /// Runs the compiler over a source file, from its own working directory.
 fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
+    let file_name = source.file_name().expect("file name").to_string_lossy();
+    zirk_with_arg(subcommand, source, name, &file_name, extra)
+}
+
+/// Runs the compiler over a source file using an explicit command-line argument.
+fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: &[&str]) -> Output {
     let dir = workspace(name);
     let copied = dir.join(source.file_name().expect("file name"));
     std::fs::copy(source, &copied).expect("copy the source");
 
     let output = Command::new(compiler())
         .arg(subcommand)
-        .arg(copied.file_name().expect("file name"))
+        .arg(arg)
         .args(extra)
         .current_dir(&dir)
         .output()
@@ -133,6 +139,15 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
 fn the_reference_program_of_the_roadmap_runs() {
     let source = corpus("valid").join("hello.zrk");
     let output = zirk("run", &source, "reference", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "Hola desde Zirk\n");
+}
+
+#[test]
+fn the_reference_program_runs_without_the_zrk_extension() {
+    let source = corpus("valid").join("hello.zrk");
+    let output = zirk_with_arg("run", &source, "reference_bare", "hello", &[]);
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "Hola desde Zirk\n");
