@@ -6,284 +6,285 @@ Defines the lexicon of Zirk: tokens, literals, comments, locations and lexical e
 
 The keywords of the whole language are recognized, not only those of the implemented subset, so a construct from a later phase can be told apart from a syntax error.
 ## Requirements
-### Requirement: Tokenización del subset
+### Requirement: Tokenization of the subset
 
-El lexer SHALL convertir texto fuente `.zrk` en una secuencia de tokens, cada uno con su ubicación en el source.
+The lexer SHALL convert `.zrk` source text into a sequence of tokens, each with its location in the source.
 
-Los tokens del subset son: identificadores, palabras clave, literales enteros, literales de cadena, literales booleanos, operadores, delimitadores y fin de archivo.
+The subset's tokens are: identifiers, keywords, integer literals, string literals, Boolean literals, operators, delimiters, and end of file.
 
-#### Scenario: Programa mínimo
-- **WHEN** se tokeniza `fn main(): Void { }`
-- **THEN** se produce la secuencia: palabra clave `fn`, identificador `main`, `(`, `)`, `:`, identificador de tipo `Void`, `{`, `}`, fin de archivo
+#### Scenario: Minimal program
+- **WHEN** `fn main(): Void { }` is tokenized
+- **THEN** the sequence produced is: keyword `fn`, identifier `main`, `(`, `)`, `:`, type identifier `Void`, `{`, `}`, end of file
 
-#### Scenario: Ubicación de cada token
-- **WHEN** se tokeniza cualquier entrada
-- **THEN** cada token expone archivo, línea y columna de inicio, 1-based
-- **AND** la columna cuenta caracteres Unicode, no bytes
+#### Scenario: Location of each token
+- **WHEN** any input is tokenized
+- **THEN** each token exposes its starting file, line, and column, 1-based
+- **AND** the column counts Unicode characters, not bytes
 
-### Requirement: Literales enteros
+### Requirement: Integer literals
 
-El lexer SHALL reconocer literales enteros en base decimal, hexadecimal (`0x`) y
-binaria (`0b`), admitiendo `_` como separador entre dígitos, según
-`ZIRK_LANGUAGE_SPEC.md` sección 3 y `docs/handbook/11-reference/04-literals.md`.
+The lexer SHALL recognize integer literals in decimal, hexadecimal (`0x`), and
+binary (`0b`) base, allowing `_` as a separator between digits, per
+`ZIRK_LANGUAGE_SPEC.md` section 3 and `docs/handbook/11-reference/04-literals.md`.
 
-#### Scenario: Entero simple
-- **WHEN** se tokeniza `42`
-- **THEN** se produce un literal entero de valor 42
+#### Scenario: Simple integer
+- **WHEN** `42` is tokenized
+- **THEN** an integer literal with value 42 is produced
 
-#### Scenario: Separador de millares
-- **WHEN** se tokeniza `1_000_000`
-- **THEN** se produce un literal entero de valor 1000000
+#### Scenario: Thousands separator
+- **WHEN** `1_000_000` is tokenized
+- **THEN** an integer literal with value 1000000 is produced
 
-#### Scenario: Separador en posición inválida
-- **WHEN** se tokeniza `_1000` o `1000_`
-- **THEN** se emite un diagnóstico de error con código estable, causa y ayuda
+#### Scenario: Separator in an invalid position
+- **WHEN** `_1000` or `1000_` is tokenized
+- **THEN** an error diagnostic with a stable code, cause, and help is emitted
 
-#### Scenario: Base hexadecimal y binaria
-- **WHEN** se tokeniza `0xff` o `0b1010`
-- **THEN** se produce un literal entero de valor 255 y 10 respectivamente
-- **AND** NO se emite un diagnóstico de sufijo inválido
+#### Scenario: Hexadecimal and binary base
+- **WHEN** `0xff` or `0b1010` is tokenized
+- **THEN** an integer literal with value 255 and 10 respectively is produced
+- **AND** no invalid-suffix diagnostic is emitted
 
-### Requirement: Literales de cadena
+### Requirement: String literals
 
-El lexer SHALL reconocer literales de cadena delimitados por comillas dobles, con secuencias de escape.
+The lexer SHALL recognize string literals delimited by double quotes, with escape sequences.
 
-#### Scenario: Cadena simple
-- **WHEN** se tokeniza `"Hola"`
-- **THEN** se produce un literal de cadena con contenido `Hola`
+#### Scenario: Simple string
+- **WHEN** `"Hello"` is tokenized
+- **THEN** a string literal with content `Hola` is produced
 
-#### Scenario: Secuencias de escape
-- **WHEN** una cadena contiene `\n`, `\t`, `\"` o `\\`
-- **THEN** el literal las representa como salto de línea, tabulación, comilla y barra invertida
+#### Scenario: Escape sequences
+- **WHEN** a string contains `\n`, `\t`, `\"`, or `\\`
+- **THEN** the literal represents them as a newline, tab, quote, and backslash
 
-#### Scenario: Cadena sin cerrar
-- **WHEN** una cadena no se cierra antes del fin de línea o de archivo
-- **THEN** se emite un diagnóstico que señala la apertura de la cadena
-- **AND** la ayuda indica que falta la comilla de cierre
+#### Scenario: Unclosed string
+- **WHEN** a string is not closed before the end of the line or the file
+- **THEN** a diagnostic pointing to the string's opening is emitted
+- **AND** the help indicates that the closing quote is missing
 
-#### Scenario: Escape desconocido
-- **WHEN** una cadena contiene una secuencia de escape no reconocida
-- **THEN** se emite un diagnóstico que señala la secuencia
+#### Scenario: Unknown escape
+- **WHEN** a string contains an unrecognized escape sequence
+- **THEN** a diagnostic pointing to the sequence is emitted
 
-### Requirement: Literales booleanos
+### Requirement: Boolean literals
 
-El lexer SHALL reconocer `true` y `false` como literales booleanos, no como identificadores.
+The lexer SHALL recognize `true` and `false` as Boolean literals, not as identifiers.
 
-#### Scenario: Valores booleanos
-- **WHEN** se tokeniza `true` o `false`
-- **THEN** se produce un literal booleano
+#### Scenario: Boolean values
+- **WHEN** `true` or `false` is tokenized
+- **THEN** a Boolean literal is produced
 
-### Requirement: Comentarios
+### Requirement: Comments
 
-El lexer SHALL reconocer comentarios de línea `//` y de bloque `/* ... */`, descartándolos de la secuencia de tokens.
+The lexer SHALL recognize line comments `//` and block comments `/* ... */`, discarding them from the token sequence.
 
-#### Scenario: Comentario de línea
-- **WHEN** una línea contiene `// texto`
-- **THEN** el contenido desde `//` hasta el fin de línea no produce tokens
+#### Scenario: Line comment
+- **WHEN** a line contains `// text`
+- **THEN** the content from `//` to the end of the line produces no tokens
 
-#### Scenario: Comentario de bloque
-- **WHEN** el source contiene `/* texto */`
-- **THEN** el contenido delimitado no produce tokens
+#### Scenario: Block comment
+- **WHEN** the source contains `/* text */`
+- **THEN** the delimited content produces no tokens
 
-#### Scenario: Comentario de bloque sin cerrar
-- **WHEN** un comentario de bloque no se cierra antes del fin de archivo
-- **THEN** se emite un diagnóstico que señala la apertura
+#### Scenario: Unclosed block comment
+- **WHEN** a block comment is not closed before the end of the file
+- **THEN** a diagnostic pointing to its opening is emitted
 
-### Requirement: Palabras reservadas del lenguaje completo
+### Requirement: Reserved words of the whole language
 
-El lexer SHALL reconocer como palabras clave las del lenguaje completo, no solo las del subset implementado.
+The lexer SHALL recognize as keywords those of the whole language, not only those of the implemented subset.
 
-Reconocerlas permite que el parser distinga una construcción no implementada de un error de sintaxis, y que el diagnóstico sea comprensible.
+Recognizing them allows the parser to distinguish an unimplemented construct from a syntax error, and makes the diagnostic understandable.
 
-#### Scenario: Palabra clave fuera del subset
-- **WHEN** se tokeniza `class`, `for`, `match`, `task` u otra palabra clave del lenguaje completo
-- **THEN** se produce el token de palabra clave correspondiente
-- **AND** NO se produce un identificador
+#### Scenario: Keyword outside the subset
+- **WHEN** `class`, `for`, `match`, `task`, or another keyword of the whole language is tokenized
+- **THEN** the corresponding keyword token is produced
+- **AND** no identifier is produced
 
-### Requirement: Sensibilidad a mayúsculas
+### Requirement: Case sensitivity
 
-El lexer SHALL distinguir mayúsculas de minúsculas, según `ZIRK_LANGUAGE_SPEC.md` sección 1.
+The lexer SHALL distinguish uppercase from lowercase, per `ZIRK_LANGUAGE_SPEC.md` section 1.
 
-#### Scenario: Identificador que difiere solo en capitalización
-- **WHEN** se tokenizan `total` y `Total`
-- **THEN** se producen dos identificadores distintos
+#### Scenario: Identifier that differs only in capitalization
+- **WHEN** `total` and `Total` are tokenized
+- **THEN** two distinct identifiers are produced
 
-### Requirement: Carácter no reconocido
+### Requirement: Unrecognized character
 
-El lexer SHALL emitir un diagnóstico ante cualquier carácter que no pertenezca al léxico, en vez de descartarlo silenciosamente.
+The lexer SHALL emit a diagnostic for any character that does not belong to the lexicon, instead of silently discarding it.
 
-#### Scenario: Carácter inválido
-- **WHEN** el source contiene un carácter que no inicia ningún token válido
-- **THEN** se emite un diagnóstico con la ubicación exacta del carácter
+#### Scenario: Invalid character
+- **WHEN** the source contains a character that does not start any valid token
+- **THEN** a diagnostic with the character's exact location is emitted
 
-### Requirement: Literales fraccionarios y notación científica
+### Requirement: Fractional literals and scientific notation
 
-El lexer SHALL reconocer literales fraccionarios y en notación científica como
-literales `Float`, distintos de un entero seguido de un acceso a miembro.
+The lexer SHALL recognize fractional and scientific-notation literals as
+`Float` literals, distinct from an integer followed by a member access.
 
-Sin esta regla, `1.5` se tokeniza como `1`, `.` y `5`, que es la peor forma de
-fallar: el lenguaje no puede decir "todavía no" sobre algo que ni siquiera ve.
+Without this rule, `1.5` tokenizes as `1`, `.`, and `5`, which is the worst way
+to fail: the language cannot say "not yet" about something it does not even
+see.
 
-#### Scenario: Literal fraccionario
-- **WHEN** se tokeniza `1.5`
-- **THEN** se produce un único literal Float
-- **AND** NO se produce la secuencia entero, punto, entero
+#### Scenario: Fractional literal
+- **WHEN** `1.5` is tokenized
+- **THEN** a single Float literal is produced
+- **AND** the sequence integer, dot, integer is NOT produced
 
-#### Scenario: Notación científica
-- **WHEN** se tokeniza `6.02e23` o `1e2`
-- **THEN** se produce un único literal Float con su exponente
+#### Scenario: Scientific notation
+- **WHEN** `6.02e23` or `1e2` is tokenized
+- **THEN** a single Float literal with its exponent is produced
 
-#### Scenario: Sufijo de ancho
-- **WHEN** se tokeniza `1.5f32`
-- **THEN** el literal conserva el ancho solicitado para el chequeo semántico
+#### Scenario: Width suffix
+- **WHEN** `1.5f32` is tokenized
+- **THEN** the literal retains the requested width for the semantic check
 
-#### Scenario: Float diferido a su fase
-- **WHEN** un literal Float aparece en un programa de una fase que no implementa la familia `Float`
-- **THEN** el diagnóstico nombra el literal e indica la fase en que llega
+#### Scenario: Float deferred to its phase
+- **WHEN** a Float literal appears in a program of a phase that does not implement the `Float` family
+- **THEN** the diagnostic names the literal and indicates the phase in which it arrives
 
-### Requirement: Token de rango inclusivo
+### Requirement: Inclusive range token
 
-El lexer SHALL reconocer `..=` como token propio, distinto de `..` y de `.`, aplicando coincidencia más larga.
+The lexer SHALL recognize `..=` as its own token, distinct from `..` and from `.`, applying longest-match.
 
-#### Scenario: Rango inclusivo
-- **WHEN** se tokeniza `0..=10`
-- **THEN** se producen los tokens de rango inclusivo, no `..` seguido de `=`
+#### Scenario: Inclusive range
+- **WHEN** `0..=10` is tokenized
+- **THEN** the inclusive-range tokens are produced, not `..` followed by `=`
 
-### Requirement: Tokens de potencia
+### Requirement: Power tokens
 
-El lexer SHALL reconocer `**` y `**=` como tokens propios, aplicando la regla de
-coincidencia más larga antes que la multiplicación.
+The lexer SHALL recognize `**` and `**=` as their own tokens, applying the
+longest-match rule before multiplication.
 
-#### Scenario: Potencia
-- **WHEN** se tokeniza `value ** 2` o `value **= 2`
-- **THEN** se producen los tokens de potencia y de potencia compuesta
-- **AND** NO se producen dos tokens de multiplicación consecutivos
+#### Scenario: Power
+- **WHEN** `value ** 2` or `value **= 2` is tokenized
+- **THEN** the power and compound-power tokens are produced
+- **AND** two consecutive multiplication tokens are NOT produced
 
-### Requirement: Operadores bit a bit y de desplazamiento
+### Requirement: Bitwise and shift operators
 
-El lexer SHALL reconocer `&`, `|`, `^`, `~`, `<<`, `>>` y sus formas compuestas
-de asignación, presentes en los niveles 7 a 10 y 18 de
+The lexer SHALL recognize `&`, `|`, `^`, `~`, `<<`, `>>` and their compound
+assignment forms, present at levels 7 through 10 and 18 of
 `docs/handbook/11-reference/02-operators-and-precedence.md`.
 
-#### Scenario: Operador bit a bit
-- **WHEN** se tokeniza `flags & mask` o `value << 2`
-- **THEN** se produce el token del operador correspondiente
-- **AND** NO se emite un diagnóstico de carácter no reconocido
+#### Scenario: Bitwise operator
+- **WHEN** `flags & mask` or `value << 2` is tokenized
+- **THEN** the corresponding operator token is produced
+- **AND** no unrecognized-character diagnostic is emitted
 
-#### Scenario: Conjunción lógica frente a bit a bit
-- **WHEN** se tokeniza `a && b` y `a & b`
-- **THEN** se producen dos tokens distintos, por coincidencia más larga
+#### Scenario: Logical conjunction versus bitwise
+- **WHEN** `a && b` and `a & b` are tokenized
+- **THEN** two distinct tokens are produced, by longest-match
 
-### Requirement: Literales de carácter
+### Requirement: Character literals
 
-El lexer SHALL reconocer literales de carácter delimitados por comillas simples,
-preservando íntegro su contenido Unicode para la validación de grafema que hace
-el análisis semántico.
+The lexer SHALL recognize character literals delimited by single quotes,
+preserving their Unicode content intact for the grapheme validation performed
+by semantic analysis.
 
-El lexer NO SHALL decidir si el contenido es exactamente un grafema: esa
-comprobación pertenece a la semántica de `Char`.
+The lexer SHALL NOT decide whether the content is exactly one grapheme: that
+check belongs to `Char`'s semantics.
 
-#### Scenario: Carácter ASCII
-- **WHEN** se tokeniza `'a'`
-- **THEN** se produce un literal de carácter con ese contenido
+#### Scenario: ASCII character
+- **WHEN** `'a'` is tokenized
+- **THEN** a character literal with that content is produced
 
-#### Scenario: Grafema compuesto
-- **WHEN** un literal de carácter contiene un emoji de familia formado por varios code points
-- **THEN** se produce un único literal de carácter que conserva todos sus code points
+#### Scenario: Composite grapheme
+- **WHEN** a character literal contains a family emoji formed by several code points
+- **THEN** a single character literal that retains all its code points is produced
 
-#### Scenario: Literal de carácter sin cerrar
-- **WHEN** un literal de carácter alcanza el fin de línea o de archivo sin su comilla de cierre
-- **THEN** se emite un diagnóstico que señala su apertura
+#### Scenario: Unclosed character literal
+- **WHEN** a character literal reaches the end of the line or the file without its closing quote
+- **THEN** a diagnostic pointing to its opening is emitted
 
-### Requirement: Literales regex
+### Requirement: Regex literals
 
-El lexer SHALL reconocer literales regex delimitados como `re'pattern'`,
-preservando los escapes para el parser de expresiones regulares.
+The lexer SHALL recognize regex literals delimited as `re'pattern'`,
+preserving escapes for the regular-expression parser.
 
-#### Scenario: Literal regex
-- **WHEN** el source contiene `re'^[0-9]+$'`
-- **THEN** se produce un único literal regex con el texto del patrón
+#### Scenario: Regex literal
+- **WHEN** the source contains `re'^[0-9]+$'`
+- **THEN** a single regex literal with the pattern text is produced
 
-#### Scenario: Regex sin cerrar
-- **WHEN** un literal regex alcanza el fin de línea o de archivo sin su comilla de cierre
-- **THEN** se emite un diagnóstico que señala la apertura `re'`
+#### Scenario: Unclosed regex
+- **WHEN** a regex literal reaches the end of the line or the file without its closing quote
+- **THEN** a diagnostic pointing to the `re'` opening is emitted
 
-### Requirement: Interpolación en literales de cadena
+### Requirement: Interpolation in string literals
 
-El lexer SHALL reconocer la interpolación `{ expression }` dentro de un literal
-de cadena, con llaves balanceadas, produciendo las partes literales y las
-expresiones incrustadas como elementos distintos del literal.
+The lexer SHALL recognize `{ expression }` interpolation within a string
+literal, with balanced braces, producing the literal parts and the embedded
+expressions as distinct elements of the literal.
 
-Las mismas reglas de balanceo SHALL aplicarse a un límite de rango interpolado
-como `0..{number}`.
+The same balancing rules SHALL apply to an interpolated range bound such as
+`0..{number}`.
 
-#### Scenario: Cadena interpolada
-- **WHEN** se tokeniza `"value={value}"`
-- **THEN** el literal conserva la parte textual y la expresión incrustada por separado
-- **AND** las llaves NO forman parte del texto
+#### Scenario: Interpolated string
+- **WHEN** `"value={value}"` is tokenized
+- **THEN** the literal keeps the textual part and the embedded expression separately
+- **AND** the braces are NOT part of the text
 
-#### Scenario: Llaves anidadas
-- **WHEN** una interpolación contiene a su vez llaves balanceadas
-- **THEN** la interpolación se cierra en su llave correspondiente y no en la primera
+#### Scenario: Nested braces
+- **WHEN** an interpolation itself contains balanced braces
+- **THEN** the interpolation closes at its matching brace, not at the first one
 
-#### Scenario: Interpolación sin cerrar
-- **WHEN** una interpolación no se cierra antes del fin del literal
-- **THEN** se emite un diagnóstico que señala su apertura
+#### Scenario: Unclosed interpolation
+- **WHEN** an interpolation does not close before the end of the literal
+- **THEN** a diagnostic pointing to its opening is emitted
 
-#### Scenario: Límite de rango interpolado
-- **WHEN** el source contiene `0..{number}.step(1)`
-- **THEN** el flujo de tokens conserva el límite interpolado como expresión dentro del rango
+#### Scenario: Interpolated range bound
+- **WHEN** the source contains `0..{number}.step(1)`
+- **THEN** the token stream retains the interpolated bound as an expression within the range
 
-### Requirement: Literales de duración
+### Requirement: Duration literals
 
-El lexer SHALL reconocer literales de duración formados por un número y uno de
-los sufijos `ns`, `us`, `ms`, `s`, `m`, `h`, `d` o `w`, admitiendo signo
-negativo, sin tratar `m` como mes calendario.
+The lexer SHALL recognize duration literals formed by a number and one of the
+suffixes `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, or `w`, allowing a negative
+sign, without treating `m` as a calendar month.
 
-#### Scenario: Sufijos de duración
-- **WHEN** el source contiene `10ns`, `500ms`, `2h`, `3d` o `-3s`
-- **THEN** cada uno se emite como literal de duración con su unidad
+#### Scenario: Duration suffixes
+- **WHEN** the source contains `10ns`, `500ms`, `2h`, `3d`, or `-3s`
+- **THEN** each is emitted as a duration literal with its unit
 
-#### Scenario: El mes calendario no es una duración
-- **WHEN** un desarrollador necesita un mes de calendario
-- **THEN** la forma documentada es un constructor de `Period`, no un sufijo de duración
+#### Scenario: A calendar month is not a duration
+- **WHEN** a developer needs a calendar month
+- **THEN** the documented form is a `Period` constructor, not a duration suffix
 
-### Requirement: Palabras clave restantes del lenguaje completo
+### Requirement: Remaining keywords of the whole language
 
-El lexer SHALL reconocer también `do`, `yield`, `interface` y `trait` como
-palabras clave del lenguaje completo.
+The lexer SHALL also recognize `do`, `yield`, `interface`, and `trait` as
+keywords of the whole language.
 
-Reconocerlas es lo que permite que `interface Usuario { }` produzca "no
-implementado todavía" en vez de un error de sintaxis sobre un identificador.
+Recognizing them is what allows `interface User { }` to produce "not
+implemented yet" instead of a syntax error on an identifier.
 
-`strict` y `value` NO SHALL ser palabras reservadas. Ambas aparecen en el
-lenguaje únicamente en una posición fija —`inmut::strict` y `value class`— y
-reservarlas invalidaría `mut value = 1;` y `match r { Ok(value) => ... }`, que
-son Zirk corriente y aparecen en los propios ejemplos del spec. Se reconocen por
-posición.
+`strict` and `value` SHALL NOT be reserved words. Both appear in the language
+only in a fixed position — `inmut::strict` and `value class` — and reserving
+them would invalidate `mut value = 1;` and `match r { Ok(value) => ... }`,
+which are ordinary Zirk and appear in the spec's own examples. They are
+recognized by position.
 
-#### Scenario: Contrato de una fase posterior
-- **WHEN** se tokeniza `interface` o `trait`
-- **THEN** se produce el token de palabra clave correspondiente
-- **AND** NO se produce un identificador
+#### Scenario: Contract from a later phase
+- **WHEN** `interface` or `trait` is tokenized
+- **THEN** the corresponding keyword token is produced
+- **AND** no identifier is produced
 
-#### Scenario: Bucle de post-condición
-- **WHEN** se tokeniza `do { } while pending;`
-- **THEN** `do` y `while` se producen como palabras clave
+#### Scenario: Post-condition loop
+- **WHEN** `do { } while pending;` is tokenized
+- **THEN** `do` and `while` are produced as keywords
 
-#### Scenario: Palabra contextual como identificador
-- **WHEN** se tokeniza `mut value = 1;` o `mut strict = true;`
-- **THEN** `value` y `strict` se producen como identificadores
+#### Scenario: Contextual word as an identifier
+- **WHEN** `mut value = 1;` or `mut strict = true;` is tokenized
+- **THEN** `value` and `strict` are produced as identifiers
 
-### Requirement: Atribución de fase correcta por token
+### Requirement: Correct phase attribution per token
 
-Cada palabra clave y cada operador fuera del subset implementado SHALL declarar
-la fase que el roadmap le asigna.
+Every keyword and every operator outside the implemented subset SHALL declare
+the phase the roadmap assigns to it.
 
-#### Scenario: Palabra clave de manejo de errores
-- **WHEN** se consulta la fase de `default`
-- **THEN** declara la fase de `try`/`catch`, no la de los decoradores
+#### Scenario: Error-handling keyword
+- **WHEN** the phase of `default` is queried
+- **THEN** it declares the phase of `try`/`catch`, not that of decorators
 
-#### Scenario: Operador de tubería
-- **WHEN** se consulta la fase de `|>`
-- **THEN** declara la fase del estilo funcional, no la de objetos
+#### Scenario: Pipe operator
+- **WHEN** the phase of `|>` is queried
+- **THEN** it declares the phase of the functional style, not that of objects

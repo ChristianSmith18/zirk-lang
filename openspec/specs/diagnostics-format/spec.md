@@ -2,57 +2,57 @@
 
 ## Purpose
 
-Define el contrato de los diagnósticos del compilador: severidad, código estable, ubicación, causa y ayuda, según `ZIRK_COMPILER_SPEC.md` sección 8.
+Define the contract for compiler diagnostics: severity, stable code, location, cause, and help, per `ZIRK_COMPILER_SPEC.md` section 8.
 
-El formato se fija desde el día uno a propósito: migrarlo después de que varias capas ya lo usen es mucho más caro que empezar bien.
+The format is fixed from day one on purpose: migrating it after several layers already use it is much more expensive than starting off right.
 
 ## Requirements
 
-### Requirement: Estructura mínima de un diagnóstico
+### Requirement: Minimum structure of a diagnostic
 
-Todo diagnóstico SHALL incluir severidad, código estable, ubicación en el source, causa y, cuando exista una reparación clara, una ayuda accionable. Corresponde a `ZIRK_COMPILER_SPEC.md` sección 8.
+Every diagnostic SHALL include severity, a stable code, a location in the source, a cause and, when a clear fix exists, actionable help. This corresponds to `ZIRK_COMPILER_SPEC.md` section 8.
 
-#### Scenario: Diagnóstico completo
-- **WHEN** se construye un diagnóstico de error con ubicación conocida
-- **THEN** expone severidad, código, archivo, línea, columna, causa y ayuda
+#### Scenario: Complete diagnostic
+- **WHEN** an error diagnostic with a known location is constructed
+- **THEN** it exposes severity, code, file, line, column, cause, and help
 
-#### Scenario: Ayuda ausente
-- **WHEN** no existe una reparación clara para el error
-- **THEN** el diagnóstico SHALL emitirse sin ayuda
-- **AND** NO SHALL emitirse una ayuda genérica sin valor accionable
+#### Scenario: Missing help
+- **WHEN** no clear fix exists for the error
+- **THEN** the diagnostic SHALL be emitted without help
+- **AND** it SHALL NOT emit generic help with no actionable value
 
-### Requirement: Formato de presentación
+### Requirement: Presentation format
 
-Un diagnóstico renderizado SHALL seguir el formato de `ZIRK_COMPILER_SPEC.md` sección 8: encabezado con severidad y código, ubicación, fragmento de source con marcador de la posición, y líneas de causa y ayuda.
+A rendered diagnostic SHALL follow the format of `ZIRK_COMPILER_SPEC.md` section 8: a header with severity and code, location, a source snippet with a marker at the position, and cause and help lines.
 
-#### Scenario: Renderizado con fragmento de source
-- **WHEN** se renderiza un diagnóstico cuya ubicación tiene source disponible
-- **THEN** la salida incluye la línea de source y un marcador bajo la columna señalada
+#### Scenario: Rendering with a source snippet
+- **WHEN** a diagnostic whose location has source available is rendered
+- **THEN** the output includes the source line and a marker under the indicated column
 
-#### Scenario: Renderizado sin source disponible
-- **WHEN** el source no está disponible
-- **THEN** la salida conserva encabezado, ubicación, causa y ayuda, omitiendo el fragmento
+#### Scenario: Rendering without source available
+- **WHEN** the source is not available
+- **THEN** the output retains the header, location, cause, and help, omitting the snippet
 
-### Requirement: Estabilidad de los códigos de diagnóstico
+### Requirement: Stability of diagnostic codes
 
-Cada diagnóstico SHALL tener un código estable. Un código publicado NO SHALL reutilizarse para un error semánticamente distinto.
+Each diagnostic SHALL have a stable code. A published code SHALL NOT be reused for a semantically different error.
 
-#### Scenario: Código único por clase de error
-- **WHEN** se define un nuevo diagnóstico
-- **THEN** recibe un código no usado previamente
+#### Scenario: Unique code per error class
+- **WHEN** a new diagnostic is defined
+- **THEN** it receives a code not previously used
 
-### Requirement: Severidades diferenciadas
+### Requirement: Differentiated severities
 
-El sistema SHALL distinguir al menos error y warning. Los warnings NO SHALL alterar la semántica del programa.
+The system SHALL distinguish at least error and warning. Warnings SHALL NOT alter the semantics of the program.
 
-#### Scenario: Warnings como errores
-- **WHEN** se activa el modo `--warnings-as-errors`
-- **THEN** los warnings se elevan a errores y la compilación falla
+#### Scenario: Warnings as errors
+- **WHEN** `--warnings-as-errors` mode is enabled
+- **THEN** warnings are escalated to errors and compilation fails
 
-### Requirement: Salida estructurada
+### Requirement: Structured output
 
-El sistema de diagnósticos SHALL poder emitir en formato legible por humanos y en formato estructurado para herramientas.
+The diagnostics system SHALL be able to emit output in human-readable format and in structured format for tools.
 
-#### Scenario: Modo JSON
-- **WHEN** se solicita salida estructurada
-- **THEN** cada diagnóstico se serializa conservando severidad, código, ubicación, causa y ayuda
+#### Scenario: JSON mode
+- **WHEN** structured output is requested
+- **THEN** each diagnostic is serialized preserving severity, code, location, cause, and help

@@ -1,32 +1,32 @@
-# ADR-004 — Estrategia de portabilidad
+# ADR-004 — Portability strategy
 
-- **Estado:** aceptada
-- **Fecha:** 12 de agosto de 2026
-- **Fase:** 0
+- **Status:** accepted
+- **Date:** August 12, 2026
+- **Phase:** 0
 
-## Contexto
+## Context
 
-El requisito es que Zirk sirva en cualquier máquina, no solo en la del autor: Windows, Linux y macOS sobre las arquitecturas base del spec (`ZIRK_COMPILER_SPEC.md` sección 6).
+The requirement is that Zirk work on any machine, not only the author's: Windows, Linux and macOS on the base architectures from the spec (`ZIRK_COMPILER_SPEC.md` section 6).
 
-Ese requisito esconde **dos portabilidades distintas** que no cuestan lo mismo y no se resuelven igual. Confundirlas es la trampa principal.
+That requirement hides **two distinct portabilities** that don't cost the same and aren't solved the same way. Conflating them is the main trap.
 
 ```
-PORTABILIDAD A — el compilador se CONSTRUYE en las 3 plataformas
-    ¿quién puede compilar zirkc desde fuente?
-    ← acá duele llvm-sys en Windows
+PORTABILITY A — the compiler is BUILT on all 3 platforms
+    who can compile zirkc from source?
+    ← this is where llvm-sys hurts on Windows
 
-PORTABILIDAD B — el compilador PRODUCE binarios para las 3 plataformas
-    ¿para qué targets emite Zirk? (COMPILER_SPEC seccion 6)
-    ← NO requiere que el compilador corra en Windows
+PORTABILITY B — the compiler PRODUCES binaries for all 3 platforms
+    which targets does Zirk emit for? (COMPILER_SPEC section 6)
+    ← does NOT require the compiler to run on Windows
 ```
 
-**B es la que le importa al usuario de Zirk. A solo le importa a quien desarrolla el compilador.**
+**B is the one that matters to the Zirk user. A only matters to whoever develops the compiler.**
 
-## Hallazgo que motiva la decisión
+## Finding that motivates the decision
 
-Se verificó empíricamente que **una sola instalación de LLVM 20.1 sobre `aarch64-macos` emite objetos nativos válidos para los nueve targets del spec**:
+It was empirically verified that **a single LLVM 20.1 installation on `aarch64-macos` emits valid native objects for all nine targets in the spec**:
 
-| Target Zirk | Objeto producido |
+| Zirk Target | Produced object |
 |---|---|
 | `aarch64-macos` | Mach-O 64-bit object arm64 |
 | `x86_64-macos` | Mach-O 64-bit object x86_64 |
@@ -38,31 +38,31 @@ Se verificó empíricamente que **una sola instalación de LLVM 20.1 sobre `aarc
 | `x86-windows` | Intel 80386 COFF object file |
 | `aarch64-windows` | Aarch64 COFF object file |
 
-Es decir: **la portabilidad B está estructuralmente resuelta desde el día uno** por LLVM + lld, sin trabajo adicional del compilador.
+In other words: **portability B is structurally solved from day one** by LLVM + lld, with no additional compiler work.
 
-## Decisión
+## Decision
 
-1. **La portabilidad B es un requisito verificado continuamente.** La emisión de objetos para los nueve targets se cubre con tests desde Fase 1, no se pospone a Fase 6.
+1. **Portability B is a continuously verified requirement.** Emitting objects for the nine targets is covered by tests starting in Phase 1, not deferred to Phase 6.
 
-2. **La portabilidad A se resuelve vía CI en las tres plataformas + binarios preconstruidos.** El usuario de Zirk nunca compila el compilador: descarga un `zirkc` ya construido. Solo quien contribuye al compilador necesita el toolchain completo de [TOOLCHAIN.md](../TOOLCHAIN.md).
+2. **Portability A is solved via CI on the three platforms + prebuilt binaries.** The Zirk user never compiles the compiler: they download an already-built `zirkc`. Only whoever contributes to the compiler needs the full toolchain from [TOOLCHAIN.md](../TOOLCHAIN.md).
 
-3. **`lld` es el linker por defecto**, no el `cc` que haya en el host. Provee `ld.lld` (ELF), `ld64.lld` (Mach-O) y `lld-link` (COFF) desde un mismo binario y una misma versión, lo que hace el enlace reproducible entre plataformas. Depender del `cc` de cada host reintroduce por la puerta de atrás la variabilidad que este ADR busca eliminar.
+3. **`lld` is the default linker**, not whatever `cc` happens to be on the host. It provides `ld.lld` (ELF), `ld64.lld` (Mach-O) and `lld-link` (COFF) from the same binary and the same version, which makes linking reproducible across platforms. Depending on each host's `cc` reintroduces, through the back door, exactly the variability this ADR seeks to eliminate.
 
-## Riesgo abierto: sysroots para cross-linking
+## Open risk: sysroots for cross-linking
 
-Emitir el objeto está resuelto; **enlazar** un ejecutable para otra plataforma requiere además el sysroot de destino (libc y bibliotecas del sistema). Esto no está resuelto y es trabajo real de Fase 6.
+Emitting the object is solved; **linking** an executable for another platform additionally requires the destination sysroot (libc and system libraries). This is not solved and is real Phase 6 work.
 
-No bloquea Fase 1, que solo compila para el host. Se registra acá para que no se descubra tarde.
+It does not block Phase 1, which only compiles for the host. It is recorded here so it isn't discovered late.
 
-## Consecuencias
+## Consequences
 
-- La verificación debe cubrir `{windows, linux, macos}` desde Fase 0, repartida entre CI y la máquina de desarrollo (ver "Reparto de la verificación").
-- Ningún desarrollo puede depender de una ruta absoluta específica de una máquina. En particular, `LLVM_SYS_201_PREFIX` se resuelve por entorno y **no** se versiona en `.cargo/config.toml`.
-- Windows es la plataforma de mayor fricción para la portabilidad A; ver [ADR-001](./ADR-001-pin-llvm.md) para la fuente de LLVM que sí funciona ahí.
+- Verification must cover `{windows, linux, macos}` starting in Phase 0, split between CI and the development machine (see "Verification split").
+- No development can depend on a machine-specific absolute path. In particular, `LLVM_SYS_201_PREFIX` is resolved from the environment and is **not** versioned in `.cargo/config.toml`.
+- Windows is the highest-friction platform for portability A; see [ADR-001](./ADR-001-pin-llvm.md) for the LLVM source that actually works there.
 
-## Reparto de la verificación
+## Verification split
 
-Las cuatro plataformas se verifican en CI:
+The four platforms are verified in CI:
 
 ```
    Linux x86_64   ──┐
@@ -71,20 +71,20 @@ Las cuatro plataformas se verifican en CI:
    Windows x86_64 ──┘
 ```
 
-macOS estuvo fuera de la matriz mientras el repositorio fue privado, porque sus runners consumen minutos a 10x y `macos-13` (Intel) rara vez conseguía runner. Al hacerse público, Actions pasó a ser gratis e ilimitado y esa restricción desapareció.
+macOS was outside the matrix while the repository was private, because its runners consume minutes at a 10x rate and `macos-13` (Intel) rarely managed to get a runner. Once the repository went public, Actions became free and unlimited and that restriction disappeared.
 
-`./scripts/check-local.sh` ejecuta lo mismo que CI y sigue siendo la forma de verificar antes de abrir una PR, pero ya no es la única cobertura de macOS.
+`./scripts/check-local.sh` runs the same thing as CI and remains the way to verify before opening a PR, but it is no longer the only macOS coverage.
 
-## Estado de la verificación
+## Verification status
 
-| Portabilidad | Estado | Evidencia |
+| Portability | Status | Evidence |
 |---|---|---|
-| **B** — emisión para los 9 targets | ✅ verificada | Test `target_matrix`: emite y valida contenedor y arquitectura de los nueve targets, en las cuatro plataformas de la matriz. |
-| **A** — Linux x86_64 | ✅ verificada | CI en verde. |
-| **A** — Linux aarch64 | ✅ verificada | CI en verde. |
-| **A** — macOS aarch64 | ✅ verificada | CI en verde (volvió a la matriz al hacerse público el repositorio). |
-| **A** — Windows x86_64 | ✅ verificada | CI en verde. Requirió cambiar la fuente de LLVM; ver [ADR-001](./ADR-001-pin-llvm.md) y el issue #2. |
-| **A** — macOS x86_64 | 🚫 fuera de alcance | Intel es plataforma en retirada y sus runners son escasos. |
-| **A** — Windows aarch64 | 🚫 fuera de la matriz inicial | Se incorpora cuando haya demanda real. |
+| **B** — emission for the 9 targets | ✅ verified | `target_matrix` test: emits and validates container and architecture for the nine targets, on the four platforms in the matrix. |
+| **A** — Linux x86_64 | ✅ verified | CI green. |
+| **A** — Linux aarch64 | ✅ verified | CI green. |
+| **A** — macOS aarch64 | ✅ verified | CI green (returned to the matrix once the repository went public). |
+| **A** — Windows x86_64 | ✅ verified | CI green. Required changing the LLVM source; see [ADR-001](./ADR-001-pin-llvm.md) and issue #2. |
+| **A** — macOS x86_64 | 🚫 out of scope | Intel is a retiring platform and its runners are scarce. |
+| **A** — Windows aarch64 | 🚫 outside the initial matrix | Added when there is real demand. |
 
-**La portabilidad quedó verificada.** Fue el punto más caro de la Fase 0 y el que justificó construir los cimientos antes que el lenguaje: Windows requirió diez iteraciones y descubrió tres defectos reales del propio código, que Linux y macOS toleraban por casualidad.
+**Portability is now verified.** It was the most expensive point of Phase 0 and the one that justified building the foundations before the language: Windows required ten iterations and uncovered three real defects in the code itself, which Linux and macOS tolerated by accident.

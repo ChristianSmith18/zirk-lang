@@ -6,166 +6,166 @@ Defines the translation from the IR into LLVM and the production of the linked e
 
 It includes the runtime safety guarantees the spec requires: ordinary overflow is a controlled error, and a division by zero never becomes undefined behaviour.
 ## Requirements
-### Requirement: Traducción de IR a LLVM
+### Requirement: Translation from IR to LLVM
 
-El backend SHALL traducir la IR tipada a LLVM IR, preservando la semántica de tipos y el flujo de control, incluyendo grafos de bloques con ciclos.
+The backend SHALL translate the typed IR to LLVM IR, preserving type semantics and control flow, including block graphs with cycles.
 
-#### Scenario: Módulo verificable
-- **WHEN** se traduce una IR bien formada
-- **THEN** el módulo LLVM resultante pasa la verificación de LLVM
+#### Scenario: Verifiable module
+- **WHEN** a well-formed IR is translated
+- **THEN** the resulting LLVM module passes LLVM verification
 
-#### Scenario: Correspondencia de bloques
-- **WHEN** se traduce una función con condicional
-- **THEN** los bloques básicos de la IR corresponden a bloques básicos de LLVM
+#### Scenario: Block correspondence
+- **WHEN** a function with a conditional is translated
+- **THEN** the IR's basic blocks correspond to LLVM basic blocks
 
-#### Scenario: Correspondencia de un ciclo
-- **WHEN** se traduce una función con un bucle
-- **THEN** el bloque LLVM del cuerpo del bucle salta de vuelta al bloque de condición
-- **AND** el módulo resultante pasa la verificación de LLVM
+#### Scenario: Correspondence of a cycle
+- **WHEN** a function with a loop is translated
+- **THEN** the LLVM block for the loop body jumps back to the condition block
+- **AND** the resulting module passes LLVM verification
 
-### Requirement: Overflow aritmético controlado
+### Requirement: Controlled arithmetic overflow
 
-Las operaciones aritméticas sobre enteros SHALL detectar el overflow y producir un error controlado en tiempo de ejecución, no envolvimiento silencioso.
+Arithmetic operations on integers SHALL detect overflow and produce a controlled runtime error, not silent wrapping.
 
-Lo exige `ZIRK_LANGUAGE_SPEC.md` sección 3: las variantes wrapping, saturating o checked deben ser operaciones explícitas, que no existen en este subset.
+This is required by `ZIRK_LANGUAGE_SPEC.md` section 3: the wrapping, saturating, or checked variants must be explicit operations, which do not exist in this subset.
 
-#### Scenario: Suma que desborda
-- **WHEN** una suma de `Int32` excede el rango del tipo en tiempo de ejecución
-- **THEN** el programa termina con un error de runtime diagnosticado
-- **AND** NO produce un resultado envuelto
+#### Scenario: Addition that overflows
+- **WHEN** an `Int32` addition exceeds the type's range at runtime
+- **THEN** the program terminates with a diagnosed runtime error
+- **AND** it does NOT produce a wrapped result
 
-#### Scenario: División por cero
-- **WHEN** se divide por cero en tiempo de ejecución
-- **THEN** el programa termina con un error de runtime diagnosticado
-- **AND** NO incurre en comportamiento indefinido
+#### Scenario: Division by zero
+- **WHEN** a division by zero occurs at runtime
+- **THEN** the program terminates with a diagnosed runtime error
+- **AND** it does NOT incur undefined behavior
 
-### Requirement: Enlace del ejecutable
+### Requirement: Linking the executable
 
-El pipeline SHALL producir un ejecutable nativo enlazando el objeto generado con el runtime de Zirk.
+The pipeline SHALL produce a native executable by linking the generated object with the Zirk runtime.
 
-#### Scenario: Ejecutable producido
-- **WHEN** se compila un programa válido del subset
-- **THEN** se produce un ejecutable para la plataforma del host
-- **AND** el ejecutable enlaza la biblioteca estática del runtime
+#### Scenario: Executable produced
+- **WHEN** a valid program of the subset is compiled
+- **THEN** an executable for the host platform is produced
+- **AND** the executable links the runtime's static library
 
-#### Scenario: Fallo del enlace
-- **WHEN** el linker falla
-- **THEN** se emite un diagnóstico que incluye la salida del linker
-- **AND** la ayuda indica cómo verificar el toolchain
+#### Scenario: Link failure
+- **WHEN** the linker fails
+- **THEN** a diagnostic that includes the linker output is emitted
+- **AND** the help indicates how to verify the toolchain
 
-### Requirement: Ciclo de vida del programa generado
+### Requirement: Lifecycle of the generated program
 
-El código generado SHALL invocar la inicialización del runtime antes del cuerpo de `main` y su cierre después, según `ZIRK_RUNTIME_SPEC.md` sección 2.
+The generated code SHALL invoke runtime initialization before the body of `main` and its shutdown afterward, per `ZIRK_RUNTIME_SPEC.md` section 2.
 
-#### Scenario: Orden de invocación
-- **WHEN** se inspecciona el entrypoint generado
-- **THEN** invoca `zirk_rt_init` antes del cuerpo de `main`
-- **AND** invoca `zirk_rt_shutdown` después de que `main` retorna
+#### Scenario: Invocation order
+- **WHEN** the generated entrypoint is inspected
+- **THEN** it invokes `zirk_rt_init` before the body of `main`
+- **AND** it invokes `zirk_rt_shutdown` after `main` returns
 
-#### Scenario: Código de salida
-- **WHEN** un programa del subset termina normalmente
-- **THEN** el proceso termina con código de salida 0
+#### Scenario: Exit code
+- **WHEN** a program of the subset terminates normally
+- **THEN** the process terminates with exit code 0
 
-### Requirement: Codegen de closures
+### Requirement: Codegen for closures
 
-El backend SHALL traducir una closure a una función LLVM independiente que recibe el entorno como primer argumento implícito, más un valor agregado (puntero a función, puntero a entorno) para su uso como valor de primera clase.
+The backend SHALL translate a closure into an independent LLVM function that receives the environment as the first implicit argument, plus an aggregate value (function pointer, environment pointer) for use as a first-class value.
 
-#### Scenario: Llamada directa a una closure
-- **WHEN** se traduce una llamada a un valor de closure
-- **THEN** el código generado extrae el puntero a función y el puntero a entorno del valor agregado
-- **AND** invoca la función con el entorno como primer argumento
+#### Scenario: Direct call to a closure
+- **WHEN** a call to a closure value is translated
+- **THEN** the generated code extracts the function pointer and the environment pointer from the aggregate value
+- **AND** it invokes the function with the environment as the first argument
 
-#### Scenario: Closure sin capturas
-- **WHEN** se traduce una lambda que no captura ninguna variable
-- **THEN** el entorno generado no ocupa espacio observable para el programa
+#### Scenario: Closure without captures
+- **WHEN** a lambda that captures no variable is translated
+- **THEN** the generated environment occupies no space observable by the program
 
-### Requirement: Codegen de `match`
+### Requirement: Codegen for `match`
 
-El backend SHALL traducir el `match` bajado por la IR a una secuencia de comparaciones y saltos condicionales sobre el discriminante, o a una instrucción de `switch` de LLVM cuando el `match` es exhaustivo sobre un `enum`.
+The backend SHALL translate the `match` lowered by the IR into a sequence of comparisons and conditional jumps on the discriminant, or into an LLVM `switch` instruction when the `match` is exhaustive over an `enum`.
 
-#### Scenario: `match` sobre `enum` exhaustivo
-- **WHEN** se traduce un `match` que cubre todos los constructores de un `enum`
-- **THEN** el código generado usa `switch` de LLVM sobre el discriminante
-- **AND** no incluye una rama por defecto observable en tiempo de ejecución cuando no hay `_`
+#### Scenario: `match` over an exhaustive `enum`
+- **WHEN** a `match` that covers all constructors of an `enum` is translated
+- **THEN** the generated code uses LLVM `switch` on the discriminant
+- **AND** it includes no default branch observable at runtime when there is no `_`
 
-### Requirement: Comprobación de nulidad
+### Requirement: Nullity check
 
-El backend SHALL traducir la comprobación explícita de nulidad producida por el lowering de `??` a una comparación contra el valor nulo de la representación del tipo, sin costo adicional para valores que el chequeo de tipos ya probó no nulos.
+The backend SHALL translate the explicit nullity check produced by the lowering of `??` into a comparison against the type representation's null value, with no additional cost for values the type check already proved non-null.
 
-#### Scenario: Coalescencia traducida
-- **WHEN** se traduce `nombre ?? "anónimo"`
-- **THEN** el código generado compara el valor de `nombre` contra nulo antes de elegir la rama
+#### Scenario: Coalescing translated
+- **WHEN** `name ?? "anonymous"` is translated
+- **THEN** the generated code compares the value of `name` against null before choosing the branch
 
-#### Scenario: Sin comprobación cuando el tipo no es nulable
-- **WHEN** se traduce una operación sobre un valor de tipo no nulable
-- **THEN** el código generado no incluye ninguna comparación de nulidad
+#### Scenario: No check when the type is not nullable
+- **WHEN** an operation on a value of a non-nullable type is translated
+- **THEN** the generated code includes no nullity comparison
 
-### Requirement: Layout de objetos
+### Requirement: Object layout
 
-El backend SHALL traducir un tipo con identidad a una estructura cuya cabecera precede a sus campos, y cuyos campos heredados preceden a los propios.
+The backend SHALL translate a type with identity into a structure whose header precedes its fields, and whose inherited fields precede its own.
 
-#### Scenario: Prefijo compartido
-- **WHEN** se traducen una clase base y una subclase
-- **THEN** el prefijo de la estructura de la subclase coincide con la de la base
+#### Scenario: Shared prefix
+- **WHEN** a base class and a subclass are translated
+- **THEN** the prefix of the subclass's structure matches that of the base
 
-#### Scenario: Value class inline
-- **WHEN** una value class es campo de otra declaración
-- **THEN** se traduce sin puntero intermedio
+#### Scenario: Inline value class
+- **WHEN** a value class is a field of another declaration
+- **THEN** it is translated without an intermediate pointer
 
-### Requirement: Tablas de métodos
+### Requirement: Method tables
 
-El backend SHALL emitir una tabla de métodos por tipo con métodos virtuales, y una por interfaz implementada.
+The backend SHALL emit one method table per type with virtual methods, and one per implemented interface.
 
-#### Scenario: Índice estable al heredar
-- **WHEN** una subclase hereda un método virtual
-- **THEN** ocupa el mismo índice que en la tabla de su base
+#### Scenario: Stable index on inheritance
+- **WHEN** a subclass inherits a virtual method
+- **THEN** it occupies the same index as in its base's table
 
-#### Scenario: Despacho por interfaz
-- **WHEN** se llama a un método a través de una interfaz
-- **THEN** el código generado busca la tabla de esa interfaz en el descriptor y despacha por ella
+#### Scenario: Dispatch through an interface
+- **WHEN** a method is called through an interface
+- **THEN** the generated code looks up that interface's table in the descriptor and dispatches through it
 
-### Requirement: Cast comprobado
+### Requirement: Checked cast
 
-El backend SHALL traducir un cast comprobable a una comparación del descriptor de tipo del valor contra el esperado, transfiriendo al runtime cuando no coincide.
+The backend SHALL translate a checkable cast into a comparison of the value's type descriptor against the expected one, deferring to the runtime when it does not match.
 
-#### Scenario: Cast que falla
-- **WHEN** el descriptor no corresponde al tipo pedido
-- **THEN** el programa termina con un error de runtime diagnosticado
-- **AND** NO incurre en comportamiento indefinido
+#### Scenario: Cast that fails
+- **WHEN** the descriptor does not correspond to the requested type
+- **THEN** the program terminates with a diagnosed runtime error
+- **AND** it does NOT incur undefined behavior
 
-#### Scenario: Cast que no necesita comprobación
-- **WHEN** el cast asciende en la jerarquía, donde el chequeador ya lo probó
-- **THEN** el código generado no incluye comparación alguna
+#### Scenario: Cast that needs no check
+- **WHEN** the cast goes up the hierarchy, where the checker already proved it
+- **THEN** the generated code includes no comparison at all
 
-### Requirement: Codegen de cada ancho entero sobre el tipo nativo de LLVM
+### Requirement: Codegen for each integer width over LLVM's native type
 
-El backend SHALL emitir cada tipo entero de la IR como el `IntType` de LLVM del ancho correspondiente, con las operaciones aritméticas y los intrínsecos de overflow (`*.with.overflow`) que correspondan a su señal.
+The backend SHALL emit each IR integer type as the LLVM `IntType` of the corresponding width, with the arithmetic operations and overflow intrinsics (`*.with.overflow`) matching its signedness.
 
-#### Scenario: Suma comprobada con signo
-- **WHEN** se emite código para una suma sobre `Int64`
-- **THEN** se usa el intrínseco de overflow con signo de ese ancho
+#### Scenario: Signed checked addition
+- **WHEN** code is emitted for an addition on `Int64`
+- **THEN** the signed overflow intrinsic for that width is used
 
-#### Scenario: Suma comprobada sin signo
-- **WHEN** se emite código para una suma sobre `UInt64`
-- **THEN** se usa el intrínseco de overflow sin signo de ese ancho
+#### Scenario: Unsigned checked addition
+- **WHEN** code is emitted for an addition on `UInt64`
+- **THEN** the unsigned overflow intrinsic for that width is used
 
-### Requirement: Codegen de `Float` sobre el tipo nativo de LLVM
+### Requirement: Codegen for `Float` over LLVM's native type
 
-El backend SHALL emitir cada tipo `Float` de la IR como el `FloatType` de LLVM del ancho correspondiente, con la comprobación de `NaN`/dominio inválido emitida explícitamente alrededor de la operación nativa, no delegada a la semántica de punto flotante del backend.
+The backend SHALL emit each IR `Float` type as the LLVM `FloatType` of the corresponding width, with the `NaN`/invalid-domain check emitted explicitly around the native operation, not delegated to the backend's floating-point semantics.
 
-#### Scenario: Comprobación explícita antes del resultado
-- **WHEN** se emite código para una operación de `Float` que la IR marcó como potencialmente indeterminada
-- **THEN** el código generado comprueba la condición antes de que el resultado se use, y llama al runtime para el fallo controlado si se cumple
+#### Scenario: Explicit check before the result
+- **WHEN** code is emitted for a `Float` operation the IR marked as potentially indeterminate
+- **THEN** the generated code checks the condition before the result is used, and calls the runtime for the controlled failure if it holds
 
-### Requirement: Codegen del despacho a `to_string()`
+### Requirement: Codegen for dispatch to `to_string()`
 
-El backend SHALL emitir, para cada sitio donde `println`/`print`/una interpolación necesita convertir un valor a texto, una llamada al método `to_string()` resuelto para el tipo estático de ese valor — directa si no es redefinible, por la tabla del objeto o del contrato si lo es, con el mismo mecanismo que cualquier otra llamada a método (ADR-013).
+The backend SHALL emit, for every site where `println`/`print`/an interpolation needs to convert a value to text, a call to the `to_string()` method resolved for that value's static type — direct if it is not overridable, through the object's or the contract's table if it is, with the same mechanism as any other method call (ADR-013).
 
-#### Scenario: Conversión de un tipo nativo
-- **WHEN** se emite código para imprimir un `Int32`
-- **THEN** la llamada a `to_string()` resuelve al `to_string()` nativo de `Int32`, sin indirección
+#### Scenario: Conversion of a native type
+- **WHEN** code is emitted to print an `Int32`
+- **THEN** the call to `to_string()` resolves to `Int32`'s native `to_string()`, with no indirection
 
-#### Scenario: Conversión de un tipo del usuario redefinible
-- **WHEN** se emite código para imprimir un valor de un tipo cuyo `to_string()` puede ser redefinido por una subclase
-- **THEN** la llamada pasa por la misma tabla que cualquier otro método virtual del objeto
+#### Scenario: Conversion of an overridable user type
+- **WHEN** code is emitted to print a value of a type whose `to_string()` can be overridden by a subclass
+- **THEN** the call goes through the same table as any other virtual method of the object
 

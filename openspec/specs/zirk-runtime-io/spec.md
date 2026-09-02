@@ -6,114 +6,113 @@ Defines the C ABI contract of the runtime for standard output and for the repres
 
 The layout of a `String` is private to the runtime, which is what allows adding grapheme indexing later without touching the compiler.
 ## Requirements
-### Requirement: Representación opaca de String
+### Requirement: Opaque representation of String
 
-El runtime SHALL exponer `String` como un handle opaco cuyo layout es privado,
-según `docs/decisions/ADR-005-representacion-string.md`.
+The runtime SHALL expose `String` as an opaque handle whose layout is private,
+per `docs/decisions/ADR-005-representacion-string.md`.
 
-El handle SHALL ser además la identidad observable del `String`: es lo que `is`
-compara. Esto es lo que permite que la indexación por grafemas, la normalización
-y cualquier caché interna vivan enteras dentro del runtime, sin que el
-compilador tenga que conocerlas.
+The handle SHALL also be the observable identity of the `String`: it is what
+`is` compares. This is what allows grapheme indexing, normalization, and any
+internal cache to live entirely within the runtime, without the compiler
+having to know about them.
 
-#### Scenario: Opacidad para el compilador
-- **WHEN** el codegen manipula un valor `String`
-- **THEN** lo trata como handle opaco
-- **AND** NO inspecciona ni asume su representación interna
+#### Scenario: Opacity for the compiler
+- **WHEN** codegen manipulates a `String` value
+- **THEN** it treats it as an opaque handle
+- **AND** it does NOT inspect or assume its internal representation
 
-#### Scenario: Construcción desde un literal
-- **WHEN** el código generado materializa un literal de cadena
-- **THEN** invoca la función del runtime que construye un `String` a partir de bytes UTF-8 y su longitud
+#### Scenario: Construction from a literal
+- **WHEN** the generated code materializes a string literal
+- **THEN** it invokes the runtime function that constructs a `String` from UTF-8 bytes and their length
 
-#### Scenario: El handle es la identidad
-- **WHEN** dos valores `String` provienen del mismo handle
-- **THEN** son idénticos para el operador `is`
-- **AND** dos handles distintos NO son idénticos aunque su contenido coincida
+#### Scenario: The handle is the identity
+- **WHEN** two `String` values come from the same handle
+- **THEN** they are identical for the `is` operator
+- **AND** two distinct handles are NOT identical even if their content matches
 
-### Requirement: Salida estándar
+### Requirement: Standard output
 
-El runtime SHALL exponer una función `extern "C"` que escriba un `String` en la salida estándar seguido de un salto de línea.
+The runtime SHALL expose an `extern "C"` function that writes a `String` to standard output followed by a newline.
 
-#### Scenario: Impresión de una cadena
-- **WHEN** un programa invoca la función de impresión con un `String`
-- **THEN** el contenido aparece en la salida estándar seguido de un salto de línea
+#### Scenario: Printing a string
+- **WHEN** a program invokes the print function with a `String`
+- **THEN** the content appears on standard output followed by a newline
 
-#### Scenario: Contenido no ASCII
-- **WHEN** la cadena contiene caracteres Unicode fuera de ASCII
-- **THEN** se escriben correctamente codificados en UTF-8
+#### Scenario: Non-ASCII content
+- **WHEN** the string contains Unicode characters outside ASCII
+- **THEN** they are written correctly encoded in UTF-8
 
-#### Scenario: Vaciado antes de terminar
-- **WHEN** el programa termina
-- **THEN** la salida estándar se vacía antes de que el proceso finalice
+#### Scenario: Flushed before terminating
+- **WHEN** the program terminates
+- **THEN** standard output is flushed before the process ends
 
-### Requirement: Estabilidad de los símbolos del runtime
+### Requirement: Stability of runtime symbols
 
-Todo símbolo del runtime destinado al código generado SHALL declararse `extern "C"` sin mangling y con nombre estable.
+Every runtime symbol intended for generated code SHALL be declared `extern "C"` with no mangling and a stable name.
 
-Son superficie de compatibilidad: cambiarlos rompe binarios ya compilados.
+They are compatibility surface: changing them breaks already-compiled binaries.
 
-#### Scenario: Símbolos sin mangling
-- **WHEN** se inspecciona la biblioteca estática producida
-- **THEN** los símbolos destinados al código generado aparecen con su nombre literal
+#### Scenario: Symbols without mangling
+- **WHEN** the produced static library is inspected
+- **THEN** the symbols intended for generated code appear under their literal name
 
-### Requirement: Ausencia de dependencia con la stdlib de Zirk
+### Requirement: No dependency on the Zirk stdlib
 
-El runtime de esta fase NO SHALL requerir que exista `std.io` como módulo de Zirk.
+This phase's runtime SHALL NOT require that `std.io` exist as a Zirk module.
 
-`stdout.println` se resuelve como intrínseco del compilador. Es deuda deliberada que se retira en Fase 7.
+`stdout.println` is resolved as a compiler intrinsic. This is deliberate debt that is retired in Phase 7.
 
-#### Scenario: Programa sin importaciones
-- **WHEN** un programa usa `stdout.println` sin ninguna sentencia `import`
-- **THEN** compila y ejecuta correctamente
+#### Scenario: Program without imports
+- **WHEN** a program uses `stdout.println` without any `import` statement
+- **THEN** it compiles and executes correctly
 
-### Requirement: Igualdad de contenido indiferente a la normalización
+### Requirement: Content equality indifferent to normalization
 
-La función de igualdad del runtime SHALL comparar el contenido de dos `String`
-tratando como iguales dos secuencias canónicamente equivalentes, aunque sus
-bytes difieran.
+The runtime's equality function SHALL compare the content of two `String`
+values treating two canonically equivalent sequences as equal, even if their
+bytes differ.
 
-La comparación SHALL resolverse sin asignar memoria en el caso frecuente: mismo
-handle, o bytes idénticos, deciden el resultado de inmediato.
+The comparison SHALL resolve without allocating memory in the common case:
+the same handle, or identical bytes, decide the result immediately.
 
-#### Scenario: Formas de normalización distintas
-- **WHEN** se comparan una cadena en NFC y otra en NFD con el mismo contenido percibido
-- **THEN** la igualdad devuelve verdadero
+#### Scenario: Different normalization forms
+- **WHEN** a string in NFC and another in NFD with the same perceived content are compared
+- **THEN** equality returns true
 
-#### Scenario: Contenido distinto
-- **WHEN** se comparan dos cadenas cuyo contenido percibido difiere
-- **THEN** la igualdad devuelve falso
+#### Scenario: Different content
+- **WHEN** two strings whose perceived content differs are compared
+- **THEN** equality returns false
 
-#### Scenario: Camino rápido
-- **WHEN** dos handles coinciden, o sus bytes son idénticos
-- **THEN** el resultado se decide sin normalizar ni asignar memoria
+#### Scenario: Fast path
+- **WHEN** two handles match, or their bytes are identical
+- **THEN** the result is decided without normalizing or allocating memory
 
-### Requirement: Literales normalizados en compilación
+### Requirement: Literals normalized at compile time
 
-El compilador SHALL emitir los literales de cadena en forma canónica, de modo
-que la comparación entre literales se resuelva por comparación de bytes.
+The compiler SHALL emit string literals in canonical form, so that comparison
+between literals resolves by byte comparison.
 
-Normalizar una vez en compilación es lo que mantiene barata la regla de igualdad
-en ejecución.
+Normalizing once at compile time is what keeps the runtime equality rule cheap.
 
-#### Scenario: Literal en forma descompuesta en el source
-- **WHEN** un literal de cadena aparece en el source en forma descompuesta
-- **THEN** el runtime lo recibe ya en forma canónica
+#### Scenario: Literal in decomposed form in the source
+- **WHEN** a string literal appears in the source in decomposed form
+- **THEN** the runtime receives it already in canonical form
 
-#### Scenario: Comparación entre literales
-- **WHEN** se comparan dos literales de igual contenido percibido
-- **THEN** la comparación se resuelve por bytes, sin normalizar en ejecución
+#### Scenario: Comparison between literals
+- **WHEN** two literals with the same perceived content are compared
+- **THEN** the comparison resolves by bytes, without normalizing at runtime
 
-### Requirement: Hash coherente con la igualdad
+### Requirement: Hash coherent with equality
 
-Cuando el runtime exponga el hash de un `String`, este SHALL derivarse de su
-forma canónica.
+When the runtime exposes the hash of a `String`, it SHALL be derived from its
+canonical form.
 
-Dos cadenas iguales según la función de igualdad SHALL producir siempre el mismo
-hash.
+Two strings equal according to the equality function SHALL always produce the
+same hash.
 
-#### Scenario: Hash de formas equivalentes
-- **WHEN** se calcula el hash de una cadena en NFC y el de su equivalente en NFD
-- **THEN** ambos hashes coinciden
+#### Scenario: Hash of equivalent forms
+- **WHEN** the hash of a string in NFC and that of its equivalent in NFD are computed
+- **THEN** both hashes match
 
 ### Requirement: Runtime preserves typed failure and cleanup
 The runtime SHALL represent implicit safety failures as typed `RuntimeError` exceptions, preserve exact rethrows, lazily materialize structured traces, redact secrets, attach suppressed cleanup failures, and execute managed resource close exactly once on every exit path.

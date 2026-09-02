@@ -1,80 +1,80 @@
-# ADR-003 — Estrategia de memoria: restricciones ahora, implementación en Fase 4
+# ADR-003 — Memory strategy: constraints now, implementation in Phase 4
 
-- **Estado:** aceptada (restricciones y elección de estrategia; ver "Cierre de la decisión" — la implementación del colector es trabajo de Fase 4e en curso, no bloquea el estado de este ADR)
-- **Fecha:** 12 de agosto de 2026 (restricciones) — cerrada el 24 de agosto de 2026
-- **Fase:** 0 (restricciones) → 4e (cierre e implementación)
+- **Status:** accepted (constraints and choice of strategy; see "Closing the decision" — the collector's implementation is ongoing Phase 4e work, it does not block the status of this ADR)
+- **Date:** August 12, 2026 (constraints) — closed August 24, 2026
+- **Phase:** 0 (constraints) → 4e (closing and implementation)
 
-## Contexto
+## Context
 
-`ZIRK_ROADMAP.md` llama a esta *la decisión de mayor apalancamiento del proyecto* y la ubica antes de escribir código. Pero el subset de Fase 1 (`main`, `println`, `Int32`, literales, `if`/`else`) no aloca prácticamente nada: elegir hoy "GC generacional" sería una decisión indefendible con datos, tomada sobre un lenguaje que todavía no existe.
+`ZIRK_ROADMAP.md` calls this *the project's highest-leverage decision* and places it before any code is written. But the Phase 1 subset (`main`, `println`, `Int32`, literals, `if`/`else`) allocates practically nothing: choosing "generational GC" today would be an indefensible decision with no data, made about a language that does not yet exist.
 
-El riesgo simétrico es real: si no se escribe nada, la IR de Fase 1 nace con asunciones tácitas sobre memoria que después no se pueden sacar.
+The symmetric risk is real: if nothing is written down, Phase 1's IR is born with tacit assumptions about memory that later cannot be removed.
 
-## Decisión
+## Decision
 
-Se **cierran las restricciones** ahora y se **ancla la elección concreta a Fase 4**.
+The **constraints are closed** now and the **concrete choice is anchored to Phase 4**.
 
-### Restricciones derivadas del spec (no negociables)
+### Constraints derived from the spec (non-negotiable)
 
-Estas no son preferencias: se deducen de los documentos normativos y acotan el espacio de diseño mucho más de lo que sugiere la pregunta abierta "¿GC, RC, regiones o híbrido?".
+These are not preferences: they are deduced from the normative documents and narrow the design space far more than the open question "GC, RC, regions or hybrid?" suggests.
 
-| Restricción | Fuente | Implicación |
+| Constraint | Source | Implication |
 |---|---|---|
-| Ownership y RC **no** son semántica pública | `SPEC_FINAL` §3 | nada al estilo de Rust en la superficie del lenguaje |
-| Los ciclos deben liberarse correctamente | `RUNTIME_SPEC` §9 | **RC puro queda descartado**: hace falta trazado o un cycle collector |
-| Identidad estable aunque el objeto se mueva físicamente | `RUNTIME_SPEC` §9 | un GC movible exige handles o pinning; choca con la frontera ABI C (`LANGUAGE_SPEC` §13) |
-| No hay destructores de propósito general con momento observable | `RUNTIME_SPEC` §9 | **el GC no necesita finalizadores** — simplificador mayor |
-| Los recursos externos se cierran vía `Resource<E>` + `match with`, no vía liberación de memoria | `RUNTIME_SPEC` §10 | la vida de archivos, sockets y locks es independiente del GC |
-| Pausas y consumo deben medirse | `RUNTIME_SPEC` §9 | se admite GC, pero con presupuesto explícito y observable |
-| `parallel` y `thread` son reales y multinúcleo | `RUNTIME_SPEC` §6, §7 | lo que se elija debe ser thread-safe por diseño, no adaptado después |
-| Los tipos de valor pueden almacenarse inline | `RUNTIME_SPEC` §9 | value classes y records no pagan indirección |
+| Ownership and RC are **not** public semantics | `SPEC_FINAL` §3 | nothing Rust-style at the language surface |
+| Cycles must be freed correctly | `RUNTIME_SPEC` §9 | **pure RC is ruled out**: tracing or a cycle collector is needed |
+| Stable identity even if the object physically moves | `RUNTIME_SPEC` §9 | a moving GC requires handles or pinning; this clashes with the C ABI boundary (`LANGUAGE_SPEC` §13) |
+| No general-purpose destructors with an observable moment | `RUNTIME_SPEC` §9 | **the GC needs no finalizers** — a major simplification |
+| External resources are closed via `Resource<E>` + `match with`, not via memory release | `RUNTIME_SPEC` §10 | the lifetime of files, sockets and locks is independent of the GC |
+| Pauses and consumption must be measurable | `RUNTIME_SPEC` §9 | GC is allowed, but with an explicit and observable budget |
+| `parallel` and `thread` are real and multi-core | `RUNTIME_SPEC` §6, §7 | whatever is chosen must be thread-safe by design, not adapted afterward |
+| Value types can be stored inline | `RUNTIME_SPEC` §9 | value classes and records do not pay for indirection |
 
-### Dirección probable (no vinculante)
+### Likely direction (non-binding)
 
-El espacio restante apunta a **trazado no movible (o movible con handles) + escape analysis para promover a stack + value types inline**. Se registra como hipótesis de trabajo, no como decisión: la elección definitiva requiere un lenguaje con closures y objetos reales que medir.
+The remaining space points toward **non-moving tracing (or moving with handles) + escape analysis to promote to the stack + inline value types**. This is recorded as a working hypothesis, not a decision: the final choice requires a language with closures and real objects to measure against.
 
-### Criterio de decisión para Fase 4
+### Decision criteria for Phase 4
 
-La elección se cerrará evaluando, sobre programas Zirk reales:
+The choice will be closed by evaluating, on real Zirk programs:
 
-1. comportamiento con ciclos entre objetos y con closures que capturan;
-2. costo de la barrera (si la hay) en `parallel for`;
-3. interacción con `Resource<E>` y con la frontera ABI C;
-4. pausas medidas contra un presupuesto declarado.
+1. behavior with cycles between objects and with capturing closures;
+2. barrier cost (if any) in `parallel for`;
+3. interaction with `Resource<E>` and with the C ABI boundary;
+4. pauses measured against a declared budget.
 
-## Consecuencias
+## Consequences
 
-- La IR de Fase 1 **no** debe asumir un modelo de memoria concreto: toda alocación pasa por una operación de IR abstracta, resuelta por el runtime.
-- `zirk-runtime` ([ADR-002](./ADR-002-runtime-staticlib.md)) es el punto único donde esta decisión se materializa.
-- Este ADR se revisa y reemplaza al inicio de Fase 4. No se considera cerrado hasta entonces.
+- Phase 1's IR must **not** assume a concrete memory model: every allocation goes through an abstract IR operation, resolved by the runtime.
+- `zirk-runtime` ([ADR-002](./ADR-002-runtime-staticlib.md)) is the single point where this decision materializes.
+- This ADR is reviewed and replaced at the start of Phase 4. It is not considered closed until then.
 
-## Cierre de la decisión (24 de agosto de 2026)
+## Closing the decision (August 24, 2026)
 
-`docs/decisions/ADR-003-investigacion-fase-4.md` reunió evidencia de ejecución real sobre `develop` a lo largo de varias sesiones de Fase 4 — no programas de juguete, el propio criterio que este ADR puso como condición para cerrar. De los cuatro criterios que la sección "Criterio de decisión para Fase 4" fijó:
+`docs/decisions/ADR-003-investigacion-fase-4.md` gathered evidence from real execution on `develop` across several Phase 4 sessions — not toy programs, the very criterion this ADR set as a condition for closing. Of the four criteria the "Decision criteria for Phase 4" section set:
 
-1. **Comportamiento con ciclos y con closures que capturan** — medido (probes 1, 8-11): los ciclos son el resultado natural de dos clases que se referencian mutuamente, no un caso de laboratorio; una closure que captura un objeto compartido y escapa de su marco creador (una vez que `fase-4d-callables` hizo el caso construible) sobrevive correcta, con identidad y aliasing intactos, incluso bajo presión de alocación sostenida.
-2. **Costo de la barrera en `parallel for`** — no medible todavía: `parallel`/`thread` son Fase 5 y no existen. Este criterio no puede cerrarse antes de esa fase por construcción, no por falta de esfuerzo — se deja como validación posterior a la implementación, no como precondición para elegirla.
-3. **Interacción con la frontera ABI C** — parcialmente medible desde `fase-4e-unsafe-pointer-extern` (esta sesión): `unsafe`/`Pointer<T>`/`extern` existen ahora; queda como validación de seguimiento una vez el colector exista, para confirmar que un objeto pineado y expuesto a través de la frontera FFI sigue siendo correcto durante y después de la llamada nativa.
-4. **Pausas medidas contra un presupuesto** — no medible sin colector; se convierte en criterio de aceptación de la implementación, no de la elección de estrategia.
+1. **Behavior with cycles and with capturing closures** — measured (probes 1, 8-11): cycles are the natural result of two classes that reference each other, not a lab-only case; a closure that captures a shared object and escapes its creating frame (once `fase-4d-callables` made the case constructible) survives correctly, with identity and aliasing intact, even under sustained allocation pressure.
+2. **Barrier cost in `parallel for`** — not yet measurable: `parallel`/`thread` are Phase 5 and do not exist. This criterion cannot be closed before that phase by construction, not for lack of effort — it is left as post-implementation validation, not as a precondition for choosing the strategy.
+3. **Interaction with the C ABI boundary** — partially measurable since `fase-4e-unsafe-pointer-extern` (this session): `unsafe`/`Pointer<T>`/`extern` now exist; it remains as follow-up validation once the collector exists, to confirm that a pinned object exposed across the FFI boundary remains correct during and after the native call.
+4. **Pauses measured against a budget** — not measurable without a collector; it becomes an acceptance criterion for the implementation, not for the choice of strategy.
 
-**Decisión final: trazado no movible (mark-sweep), con enumeración de raíces vía shadow stack a granularidad de función, disparo cooperativo en el propio punto de alocación.**
+**Final decision: non-moving tracing (mark-sweep), with root enumeration via a shadow stack at function granularity, cooperative triggering at the allocation site itself.**
 
-- **No movible.** Preserva identidad y dirección estable sin handles ni indirección adicional — coherente con que `Pointer.from`/`is` ya asumen, desde `fase-4e-unsafe-pointer-extern`, que un objeto no cambia de dirección. Cierra también, por descarte, la pregunta que la "dirección probable" original dejaba abierta (movible-con-handles vs. no movible): no movible es estrictamente más simple y nada de lo construido hasta ahora paga el costo de moverlo.
-- **Trazado (mark-sweep), no conteo de referencias.** Confirmado por el probe 1: los ciclos son un patrón de diseño ordinario, no un caso extremo, así que RC puro queda descartado exactamente como la restricción original ya anticipaba. Un mark-sweep no necesita un colector de ciclos separado: los libera igual que cualquier otra basura.
-- **Enumeración de raíces: shadow stack manual a granularidad de función, no LLVM statepoints ni escaneo conservador.** Investigado en esta sesión contra el binding de LLVM real (`inkwell` 0.10 expone el atributo `gc` de una función pero ningún wrapper de los intrínsecos de statepoint — habría que emitirlos a mano, con acoplamiento fino a cada punto de optimización). El shadow stack es viable barato aquí porque cada función ya `alloca` todos sus `Slot` de una vez en el bloque de entrada (`emit.rs`, confirmado en esta sesión) y las excepciones de Zirk no usan unwind de LLVM — solo hay un tipo de salida de función (`Terminator::Return`) que instrumentar, no rutas de excepción especiales.
-- **Corrección crítica encontrada en esta sesión, antes de cualquier implementación:** un valor de tipo referencia gestionada que vive solo como resultado SSA (`ValueId`), nunca escrito a un `Slot`, es invisible para un shadow stack que solo mira slots con nombre — ejemplo concreto, `f(SomeClass(a), SomeClass(b))` puede recolectar `SomeClass(a)` mientras evalúa el segundo argumento, si el segundo dispara el colector. La resolución: todo valor de tipo referencia gestionada se vierte a un slot sintético propio apenas se produce, antes de participar en cualquier expresión que pueda alocar — la misma técnica que `lower_throws_check` (`fase-4b`) ya usa por una razón de validez de bloque distinta, aplicada aquí por razón de solidez del colector.
-- **Cabecera de objeto crece de una palabra a tres** (`ADR-012` ya reservó esto a propósito): descriptor de despacho (sin cambio), un puntero `next` nuevo que enhebra la lista intrusiva de todo lo alocado para el barrido, y el tamaño de la alocación (para poder liberar con `dealloc` correctamente). El bit de marca se esconde en el bit bajo del puntero `next` — un campo enteramente nuevo que solo el propio colector lee, así que ningún sitio existente que ya lee el descriptor sin máscara (`zirk_rt_contract_table`, `zirk_rt_check_cast`, `zirk_rt_is_instance`, y los sitios de codegen que despachan por él) necesita tocarse.
-- **Disparo cooperativo dentro de `zirk_rt_alloc`**, sin hilos: si el umbral configurado se supera, colecta antes de servir la alocación. Correcto por construcción hasta que la Fase 5 introduzca concurrencia real — en ese punto, el disparo y el "stop the world" necesitan revisarse, y queda anotado como trabajo de esa fase, no de esta decisión.
+- **Non-moving.** Preserves identity and stable address with no handles or extra indirection needed — consistent with the fact that `Pointer.from`/`is` already assume, since `fase-4e-unsafe-pointer-extern`, that an object does not change address. This also closes, by elimination, the question the original "likely direction" left open (moving-with-handles vs. non-moving): non-moving is strictly simpler and nothing built so far pays the cost of moving it.
+- **Tracing (mark-sweep), not reference counting.** Confirmed by probe 1: cycles are an ordinary design pattern, not an edge case, so pure RC is ruled out exactly as the original constraint already anticipated. A mark-sweep collector needs no separate cycle collector: it frees cycles just like any other garbage.
+- **Root enumeration: manual shadow stack at function granularity, not LLVM statepoints nor conservative scanning.** Investigated in this session against the actual LLVM binding (`inkwell` 0.10 exposes a function's `gc` attribute but no wrapper around the statepoint intrinsics — they would have to be emitted by hand, with tight coupling to every optimization pass). The shadow stack is cheaply viable here because every function already `alloca`s all of its `Slot`s at once in the entry block (`emit.rs`, confirmed in this session) and Zirk exceptions do not use LLVM unwind — there is only one kind of function exit (`Terminator::Return`) to instrument, no special exception paths.
+- **Critical correctness issue found in this session, before any implementation:** a managed reference-type value that lives only as an SSA result (`ValueId`), never written to a `Slot`, is invisible to a shadow stack that only looks at named slots — a concrete example, `f(SomeClass(a), SomeClass(b))` could collect `SomeClass(a)` while evaluating the second argument, if the second one triggers the collector. The resolution: every managed reference-type value is spilled to its own synthetic slot as soon as it is produced, before taking part in any expression that could allocate — the same technique `lower_throws_check` (`fase-4b`) already uses for an unrelated block-validity reason, applied here for collector soundness.
+- **Object header grows from one word to three** (`ADR-012` already reserved this on purpose): dispatch descriptor (unchanged), a new `next` pointer threading the intrusive list of everything allocated for sweeping, and the size of the allocation (so it can be freed correctly with `dealloc`). The mark bit hides in the low bit of the `next` pointer — an entirely new field that only the collector itself reads, so no existing site that already reads the descriptor unmasked (`zirk_rt_contract_table`, `zirk_rt_check_cast`, `zirk_rt_is_instance`, and the codegen sites that dispatch through it) needs to change.
+- **Cooperative triggering inside `zirk_rt_alloc`**, without threads: if the configured threshold is exceeded, it collects before serving the allocation. Correct by construction until Phase 5 introduces real concurrency — at that point, triggering and "stop the world" need to be revisited, and this is noted as work for that phase, not for this decision.
 
-### Alternativas descartadas
+### Discarded alternatives
 
-- **LLVM statepoints (raíces precisas vía intrínsecos del propio LLVM).** Más "correcto" en el sentido de que LLVM ya sabe optimizar alrededor suyo, pero sin wrapper en el binding que este compilador usa, poco documentado fuera de compiladores JIT como el de la JVM o Julia, e interactúa de forma no trivial con inlining y otras pasadas de optimización. Se descarta para esta primera implementación real; queda como mejora futura si el shadow stack manual resulta costoso en la práctica.
-- **Escaneo conservador de pila (estilo Boehm-Demers-Weiser).** Cero cambios de codegen para enumerar raíces, pero introduce falsos positivos (un entero que por casualidad parece una dirección válida retiene basura) exactamente donde este ADR ya es estricto sobre identidad y comportamiento indefinido. Descartado por ahora porque el shadow stack manual, dado que este compilador ya trackea slots con nombre, no cuesta sustancialmente más y no paga esa incertidumbre.
-- **Movible con handles.** Añade una capa de indirección permanente (todo acceso a un objeto pasa por un handle, no por su dirección) que nada de lo construido hasta ahora necesita — ni `Pointer.from`, ni el despacho por descriptor, asumen indirección. Se descarta hasta que exista una razón concreta (por ejemplo, compactación real bajo presión de fragmentación) que la justifique.
+- **LLVM statepoints (precise roots via LLVM's own intrinsics).** More "correct" in the sense that LLVM already knows how to optimize around them, but with no wrapper in the binding this compiler uses, poorly documented outside JIT compilers such as the JVM's or Julia's, and it interacts non-trivially with inlining and other optimization passes. Discarded for this first real implementation; left as a future improvement if the manual shadow stack turns out to be costly in practice.
+- **Conservative stack scanning (Boehm-Demers-Weiser style).** Zero codegen changes to enumerate roots, but it introduces false positives (an integer that happens to look like a valid address retains garbage) exactly where this ADR is already strict about identity and undefined behavior. Discarded for now because the manual shadow stack, given that this compiler already tracks named slots, does not cost substantially more and does not pay that uncertainty.
+- **Moving with handles.** Adds a permanent layer of indirection (every access to an object goes through a handle, not its address) that nothing built so far needs — neither `Pointer.from` nor descriptor-based dispatch assume indirection. Discarded until a concrete reason exists (for example, real compaction under fragmentation pressure) that justifies it.
 
-## Consecuencias del cierre
+## Consequences of closing
 
-- `crates/zirk-runtime/src/memory.rs`'s "no libera, deliberadamente" deja de ser el estado final: la implementación del colector (Fase 4e, en curso) reemplaza `zirk_rt_alloc`'s cuerpo actual por una versión con umbral, y añade el módulo de mark-sweep, el shadow stack, y el crecimiento de cabecera descritos arriba.
-- `ADR-012` (layout de objetos) queda ejercido exactamente como anticipó: la cabecera crece sin desplazar los índices de los campos reales.
-- `Weak<T>` y el contrato `Clone` (`MEMORY_AND_UNSAFE_SEMANTICS.md` §4 y §6) pasan de "sin estrategia sobre la cual construirse" a implementables — son la extensión natural una vez que el colector real distingue vivo de muerto.
-- El criterio 2 (barrera en `parallel for`) y el 4 (pausas contra presupuesto) quedan como validación de seguimiento post-implementación, no como condición de cierre — este ADR documenta por qué pedirlos como precondición era circular (dependían de fases posteriores a la que este ADR gatea).
+- `crates/zirk-runtime/src/memory.rs`'s "does not free, deliberately" stops being the final state: the collector's implementation (Phase 4e, in progress) replaces `zirk_rt_alloc`'s current body with a threshold-based version, and adds the mark-sweep module, the shadow stack, and the header growth described above.
+- `ADR-012` (object layout) ends up exercised exactly as anticipated: the header grows without displacing the indices of the real fields.
+- `Weak<T>` and the `Clone` contract (`MEMORY_AND_UNSAFE_SEMANTICS.md` §4 and §6) go from "no strategy to build on" to implementable — they are the natural extension once a real collector distinguishes alive from dead.
+- Criterion 2 (barrier in `parallel for`) and criterion 4 (pauses against a budget) remain as post-implementation follow-up validation, not as a closing condition — this ADR documents why requiring them as a precondition would have been circular (they depended on phases later than the one this ADR gates).

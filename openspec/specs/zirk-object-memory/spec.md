@@ -4,48 +4,48 @@
 Defines strategy-neutral object allocation, runtime type headers, inherited
 layout, value layouts, and object-memory ABI boundaries.
 ## Requirements
-### Requirement: La IR aloca por una operación abstracta
+### Requirement: The IR allocates through an abstract operation
 
-La IR SHALL expresar la creación de un objeto sin nombrar estrategia de memoria, y el runtime SHALL materializarla tras la frontera ABI C.
+The IR SHALL express the creation of an object without naming a memory strategy, and the runtime SHALL materialize it beyond the C ABI boundary.
 
-Es la aplicación directa de `docs/decisions/ADR-003-memoria.md` y de `docs/decisions/ADR-002-runtime-staticlib.md`: la estrategia se elige en la Fase 4, y el runtime es el punto único donde se materializa.
+This is the direct application of `docs/decisions/ADR-003-memoria.md` and `docs/decisions/ADR-002-runtime-staticlib.md`: the strategy is chosen in Phase 4, and the runtime is the single point where it is materialized.
 
-#### Scenario: Construcción de un objeto
-- **WHEN** se baja la construcción de una instancia
-- **THEN** la IR usa la operación abstracta de alocación nombrando el tipo
-- **AND** NO nombra `malloc`, recuento de referencias ni recolección de basura
+#### Scenario: Construction of an object
+- **WHEN** the construction of an instance is lowered
+- **THEN** the IR uses the abstract allocation operation naming the type
+- **AND** it does NOT name `malloc`, reference counting, or garbage collection
 
-#### Scenario: El runtime expone la alocación sin mangling
-- **WHEN** se inspeccionan los símbolos de la biblioteca estática
-- **THEN** la función de alocación aparece con su nombre `extern "C"`
+#### Scenario: The runtime exposes allocation without mangling
+- **WHEN** the symbols of the static library are inspected
+- **THEN** the allocation function appears with its `extern "C"` name
 
-### Requirement: Cabecera de objeto
+### Requirement: Object header
 
-Todo objeto con identidad SHALL llevar una cabecera que identifique su tipo en tiempo de ejecución, antes de sus campos.
+Every object with identity SHALL carry a header identifying its type at runtime, before its fields.
 
-La necesitan el despacho dinámico, los casts comprobables y la identidad básica de tipo que `ZIRK_LANGUAGE_SPEC.md` sección 12 garantiza siempre.
+Dynamic dispatch, checkable casts, and the basic type identity that `ZIRK_LANGUAGE_SPEC.md` section 12 always guarantees all need it.
 
-#### Scenario: Identidad de tipo disponible
-- **WHEN** se inspecciona un objeto en tiempo de ejecución
-- **THEN** su cabecera identifica su tipo
+#### Scenario: Type identity available
+- **WHEN** an object is inspected at runtime
+- **THEN** its header identifies its type
 
-#### Scenario: La cabecera precede a los campos
-- **WHEN** se calcula el desplazamiento de un campo
-- **THEN** se cuenta desde después de la cabecera
+#### Scenario: The header precedes the fields
+- **WHEN** the offset of a field is computed
+- **THEN** it is counted starting after the header
 
-### Requirement: Los campos heredados preceden a los propios
+### Requirement: Inherited fields precede the class's own fields
 
-El layout de una clase SHALL colocar los campos heredados antes que los suyos, en el orden en que la jerarquía los declara.
+A class's layout SHALL place inherited fields before its own, in the order in which the hierarchy declares them.
 
-Así el prefijo del layout de una subclase coincide con el de su superclase, y el desplazamiento de un campo heredado no depende del tipo desde el que se mire.
+This way the prefix of a subclass's layout matches that of its superclass, and the offset of an inherited field does not depend on the type through which it is viewed.
 
-#### Scenario: Mismo desplazamiento en base y subclase
-- **WHEN** una subclase añade campos a los de su base
-- **THEN** un campo de la base ocupa el mismo desplazamiento en ambas
+#### Scenario: Same offset in base and subclass
+- **WHEN** a subclass adds fields to those of its base
+- **THEN** a field of the base occupies the same offset in both
 
-#### Scenario: Acceso a través del tipo base
-- **WHEN** una variable del tipo base sostiene una instancia de la subclase y se lee un campo heredado
-- **THEN** se lee el valor correcto sin comprobación en tiempo de ejecución
+#### Scenario: Access through the base type
+- **WHEN** a variable of the base type holds an instance of the subclass and an inherited field is read
+- **THEN** the correct value is read without a runtime check
 
 ### Requirement: Deep-clone traversal state is collector-safe for its whole duration
 

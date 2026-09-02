@@ -1,47 +1,47 @@
-# ADR-015 — Sintaxis y alcance de `extern`: cómo se declara una función nativa
+# ADR-015 — `extern` syntax and scope: how a native function is declared
 
-- **Estado:** aceptada
-- **Fecha:** 24 de agosto de 2026
-- **Fase:** 4e
+- **Status:** accepted
+- **Date:** August 24, 2026
+- **Phase:** 4e
 
-## Contexto
+## Context
 
-`MEMORY_AND_UNSAFE_SEMANTICS.md` §9 incluye, en el conjunto cerrado de operaciones unsafe, "calling an `unsafe fn` or unsafe native declaration". `ZIRK_LANGUAGE_SPEC.md` línea 581-582 dice, como única frase sobre interoperabilidad: "Native interoperability uses the C ABI as its stable boundary; C++ and Rust expose `extern "C"` wrappers." Ninguna de las specs normativas dice cómo se escribe, del lado de Zirk, la declaración de una función nativa — no hay palabra clave `extern`, ni siquiera reservada en el léxico. Es un hueco real, no una omisión de implementación: nadie decidió la sintaxis todavía.
+`MEMORY_AND_UNSAFE_SEMANTICS.md` §9 includes, in the closed set of unsafe operations, "calling an `unsafe fn` or unsafe native declaration". `ZIRK_LANGUAGE_SPEC.md` line 581-582 says, as its only sentence about interoperability: "Native interoperability uses the C ABI as its stable boundary; C++ and Rust expose `extern "C"` wrappers." None of the normative specs say how, on the Zirk side, a native function declaration is written — there is no `extern` keyword, not even reserved in the lexer. This is a real gap, not an implementation omission: nobody has decided the syntax yet.
 
-Este ADR cierra esa decisión para lo mínimo que hace falta que `unsafe {}`/`Pointer<T>` sean útiles de verdad, sin construir el sistema completo de enlace de bibliotecas nativas (que pertenece a la Fase 6, junto con el manifiesto de permisos `requires`/`during: build`).
+This ADR settles that decision for the minimum needed to make `unsafe {}`/`Pointer<T>` genuinely useful, without building the full native-library linking system (which belongs to Phase 6, together with the `requires`/`during: build` permission manifest).
 
-## Decisión
+## Decision
 
-### Sintaxis: declaración de un solo ítem, sin bloque agrupador
+### Syntax: single-item declaration, no grouping block
 
 ```zirk
 extern "C" fn strlen(s: Pointer<Byte>): UInt64;
 extern "C" fn memcpy(dst: Pointer<Byte>, src: Pointer<Byte>, n: UInt64): Pointer<Byte>;
 ```
 
-Un `extern "C" fn` es un ítem de nivel superior, sin cuerpo, terminado en `;` — la misma forma que un `fn` declarado, salvo que no tiene bloque. El literal de string en la posición de la convención de llamada (`"C"`) es la única soportada hoy; se reserva la posición para no romper la sintaxis si en el futuro hiciera falta otra (`"system"`, etc., como hace Rust), pero el compilador rechaza cualquier valor que no sea `"C"`.
+An `extern "C" fn` is a top-level item, with no body, terminated by `;` — the same shape as a declared `fn`, except it has no block. The string literal in the calling-convention position (`"C"`) is the only one supported today; the position is reserved so the syntax doesn't need to change if another one is needed later (`"system"`, etc., as Rust does), but the compiler rejects any value other than `"C"`.
 
-**Alternativa considerada — bloque agrupador `extern "C" { fn a(...); fn b(...); }`** (estilo Rust). Rechazada por ahora: agrega una forma de agrupamiento nueva al lenguaje (Zirk no tiene bloques de ítems en ningún otro lugar de la gramática) para ahorrar repetir `extern "C"` unas pocas veces por archivo. Si el volumen de declaraciones nativas crece, se puede añadir después sin romper la forma de un solo ítem.
+**Alternative considered — a grouping block `extern "C" { fn a(...); fn b(...); }`** (Rust-style). Rejected for now: it adds a new grouping form to the language (Zirk has no item blocks anywhere else in the grammar) just to save repeating `extern "C"` a few times per file. If the volume of native declarations grows, this can be added later without breaking the single-item shape.
 
-### Llamar una declaración `extern` exige `unsafe` y `commit`
+### Calling an `extern` declaration requires `unsafe` and `commit`
 
-Toda llamada a una función `extern` — sin excepción, sin importar si el programador sabe que es pura — exige estar dentro de un bloque `unsafe {}` (es la operación 2 del conjunto cerrado) y, además, dentro de un `commit {}` anidado (`MEMORY_AND_UNSAFE_SEMANTICS.md` §12 ya lista "unknown-effect native library calls" entre lo que exige `commit`). El compilador no intenta distinguir una llamada nativa "pura" de una con efectos: **toda** llamada `extern` se trata como potencialmente irreversible. Es la lectura más simple y más segura del texto normativo, y evita inventar una taxonomía de efectos nativos que ninguna spec pide todavía.
+Every call to an `extern` function — no exceptions, regardless of whether the programmer knows it's pure — requires being inside an `unsafe {}` block (it's operation 2 of the closed set) and, additionally, inside a nested `commit {}` (`MEMORY_AND_UNSAFE_SEMANTICS.md` §12 already lists "unknown-effect native library calls" among what requires `commit`). The compiler does not attempt to distinguish a "pure" native call from one with effects: **every** `extern` call is treated as potentially irreversible. This is the simplest and safest reading of the normative text, and it avoids inventing a taxonomy of native effects that no spec asks for yet.
 
-### Superficie de tipos: solo lo que tiene layout ABI-C estable
+### Type surface: only what has a stable C-ABI layout
 
-Los tipos permitidos en la firma de un `extern "C" fn` (parámetros y retorno) son: `Void` (solo retorno), `Boolean`, `Int8`/`Int16`/`Int32`/`Int64`, `UInt8`/`UInt16`/`UInt32`/`UInt64`, `Float32`/`Float64`, y `Pointer<T>` donde `T` es, recursivamente, uno de estos mismos tipos u otro `Pointer<U>`. **`String`, clases, records, enums, y cualquier tipo gestionado quedan fuera** — ninguno tiene layout binario estable del lado C sin una capa de marshaling que este ADR no construye. Un programa que necesita pasarle texto a una función nativa lo hace explícitamente, vía `Pointer<Byte>` y las operaciones de `NativeSlice<Byte>` que `unsafe` ya expone — la conversión es responsabilidad del programa, no un `String` implícitamente compatible con C.
+The types allowed in an `extern "C" fn` signature (parameters and return) are: `Void` (return only), `Boolean`, `Int8`/`Int16`/`Int32`/`Int64`, `UInt8`/`UInt16`/`UInt32`/`UInt64`, `Float32`/`Float64`, and `Pointer<T>` where `T` is, recursively, one of these same types or another `Pointer<U>`. **`String`, classes, records, enums, and any managed type are excluded** — none of them has a stable binary layout on the C side without a marshaling layer that this ADR does not build. A program that needs to pass text to a native function does so explicitly, via `Pointer<Byte>` and the `NativeSlice<Byte>` operations that `unsafe` already exposes — the conversion is the program's responsibility, not an implicitly C-compatible `String`.
 
-### Resolución de símbolos: el enlazador del sistema, sin manifiesto nuevo
+### Symbol resolution: the system linker, no new manifest
 
-Una declaración `extern "C" fn` no trae consigo ninguna forma de decirle al compilador "enlaza también esta biblioteca". Se apoya enteramente en lo que el enlazador ya resuelve por default en la plataforma — típicamente libc y lo que el propio `zirk-runtime` ya enlaza transitivamente. Declarar una función que no resuelve en el enlace produce el mismo fallo que hoy ya diagnostica `zirk-native-codegen`'s "Fallo del enlace" (símbolo no encontrado, salida del linker incluida). **Enlazar una biblioteca nativa adicional queda explícitamente fuera de este ADR** — es la extensión natural del `requires`/`during: build` que `zirk-permissions` ya reserva para dependencias externas, pero construir esa integración es trabajo de Fase 6, no de esta pieza de Fase 4e.
+An `extern "C" fn` declaration carries no way to tell the compiler "also link this library". It relies entirely on what the linker already resolves by default on the platform — typically libc and whatever `zirk-runtime` itself already links transitively. Declaring a function that fails to resolve at link time produces the same failure that `zirk-native-codegen`'s "Link failure" already diagnoses today (symbol not found, linker output included). **Linking an additional native library is explicitly out of scope for this ADR** — it's the natural extension of the `requires`/`during: build` that `zirk-permissions` already reserves for external dependencies, but building that integration is Phase 6 work, not part of this Phase 4e piece.
 
-### Sin integración con el sistema de permisos todavía
+### No integration with the permission system yet
 
-`MEMORY_AND_UNSAFE_SEMANTICS.md` §12 dice "Permissions are still checked before the effect" para lo que entra a `commit {}`. Los permisos no existen como concepto en tiempo de ejecución todavía (confirmado ya en `fase-4d-callables`: "permissions do not exist as a runtime concept yet"), así que no hay nada que comprobar hoy. Este ADR no inventa un scope de permiso nuevo para "llamar función nativa X" — cuando la Fase 6 construya el sistema de permisos real, `extern`/`commit` es donde se conectará, pero eso es trabajo de esa fase, no de esta.
+`MEMORY_AND_UNSAFE_SEMANTICS.md` §12 says "Permissions are still checked before the effect" for what enters `commit {}`. Permissions do not exist as a runtime concept yet (already confirmed in `fase-4d-callables`: "permissions do not exist as a runtime concept yet"), so there is nothing to check today. This ADR does not invent a new permission scope for "call native function X" — when Phase 6 builds the real permission system, `extern`/`commit` is where it will hook in, but that is that phase's work, not this one's.
 
-## Consecuencias
+## Consequences
 
-- `unsafe {}`/`Pointer<T>` dejan de depender de una decisión de sintaxis sin tomar: se puede escribir, compilar y enlazar una llamada a una función de libc real (`strlen`, `memcpy`, `malloc`/`free` crudos, etc.) hoy, sin esperar a la Fase 6.
-- Un programa Zirk que declara `extern "C" fn algo_que_no_existe(): Void;` y lo llama falla en el enlace, con el mismo mecanismo de diagnóstico que cualquier otro fallo de enlace hoy — comportamiento honesto, no un `unsafe` que finge funcionar.
-- La superficie de tipos deliberadamente estrecha (sin `String`, sin objetos) es una limitación real y conocida: interoperar con una API de C que espera `char*`/structs necesita, hoy, escribirse a mano con `Pointer<Byte>` y aritmética explícita. Es el punto de partida correcto para no comprometerse a un marshaling automático que ninguna spec ha diseñado.
-- Cuando la Fase 6 construya el manifiesto de bibliotecas nativas, este ADR es el punto de extensión: se añade *dónde* enlazar, no *cómo* se declara una función nativa — esa forma no debería necesitar cambiar.
+- `unsafe {}`/`Pointer<T>` no longer depend on an undecided syntax question: a call to a real libc function (`strlen`, `memcpy`, raw `malloc`/`free`, etc.) can be written, compiled, and linked today, without waiting for Phase 6.
+- A Zirk program that declares `extern "C" fn something_that_does_not_exist(): Void;` and calls it fails at link time, with the same diagnostic mechanism as any other link failure today — honest behavior, not an `unsafe` that pretends to work.
+- The deliberately narrow type surface (no `String`, no objects) is a real, known limitation: interoperating with a C API that expects `char*`/structs today requires hand-writing it with `Pointer<Byte>` and explicit arithmetic. This is the correct starting point to avoid committing to automatic marshaling that no spec has designed.
+- When Phase 6 builds the native-library manifest, this ADR is the extension point: it adds *where* to link, not *how* a native function is declared — that shape should not need to change.

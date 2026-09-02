@@ -1,59 +1,59 @@
-# ADR-012 — Layout de objetos
+# ADR-012 — Object layout
 
-- **Estado:** aceptada
-- **Fecha:** 19 de agosto de 2026
-- **Fase:** 3
+- **Status:** accepted
+- **Date:** August 19, 2026
+- **Phase:** 3
 
-## Contexto
+## Context
 
-`ZIRK_LANGUAGE_SPEC.md` sección 12 exige que "la identidad básica de tipo siempre existe" en tiempo de ejecución, y la Fase 3 es la primera que tiene algo con identidad: un objeto sobrevive al marco que lo creó, a diferencia de todo lo que las Fases 1 y 2 alocaron (D1 de `fase-3-objects-and-type-system/design.md`).
+`ZIRK_LANGUAGE_SPEC.md` section 12 requires that "basic type identity always exists" at runtime, and Phase 3 is the first one that has something with identity: an object outlives the frame that created it, unlike everything Phases 1 and 2 allocated (D1 of `fase-3-objects-and-type-system/design.md`).
 
-El layout de un objeto es, además, un contrato con el `.zpkg` de la Fase 8 (`ZIRK_COMPILER_SPEC.md` sección 4): lo que se fija aquí es lo que no se puede cambiar después sin rehacer paquetes ya construidos.
+An object's layout is also a contract with Phase 8's `.zpkg` (`ZIRK_COMPILER_SPEC.md` section 4): whatever gets fixed here is what cannot be changed later without rebuilding packages that already exist.
 
-Esta decisión también fija dónde traza la línea entre "tiene identidad" y "no la tiene", porque el spec (sección 7) exige que un record o una value class **no** tengan una observable, y guarden solo lo estrictamente necesario ("compacto").
+This decision also fixes where the line is drawn between "has identity" and "does not have it", because the spec (section 7) requires that a record or a value class **not** have an observable identity, and store only what is strictly necessary ("compact").
 
-## Decisión
+## Decision
 
-**Un objeto ordinario es una cabecera más sus campos; un record o value class es sus campos, sin cabecera, pasado por valor.**
-
-```
-   objeto (class)        =  [ descriptor de tipo | campo₁ | campo₂ | … ]
-   valor (record/value class)  =  [ campo₁ | campo₂ | … ]
-```
-
-Dos representaciones en la IR (`IrType::Object(u32)` e `IrType::Value(u32)`), cada una con su propia tabla de layouts en el módulo (`ObjectLayout`/`ValueLayout`) pero compartiendo el mismo espacio de ids que `checked.classes` — `ClassType.kind` decide cuál mirar. En LLVM, `llvm_type_in` devuelve un puntero para `Object` y el struct mismo para `Value`: un valor viaja por valor en slots, parámetros, retorno y como campo de otro objeto o valor, sin convención de llamada especial — LLVM ya soporta agregados por valor.
-
-**Campos heredados van antes que los propios**, en el orden en que la jerarquía los declara. El prefijo del layout de una subclase coincide siempre con el de su superclase, así que acceder a un campo heredado es el mismo desplazamiento mire quien mire — la herencia simple no cuesta nada en el acceso. Un record o value class no admite `extends`, así que esta regla no le aplica.
-
-**El descriptor de un objeto lleva, en orden:**
+**An ordinary object is a header plus its fields; a record or value class is just its fields, with no header, passed by value.**
 
 ```
-[ tabla de métodos | cantidad de ancestros | ancestro₁ … | cantidad de contratos | (contrato, tabla)… ]
+   object (class)        =  [ type descriptor | field₁ | field₂ | … ]
+   value (record/value class)  =  [ field₁ | field₂ | … ]
 ```
 
-- La **tabla de métodos** es la de la clase concreta, con las entradas heredadas en el mismo índice que en la base (ver ADR-013).
-- Los **ancestros** son la propia clase más cada base transitiva, en ese orden — lo que un cast comprobado (`as`) recorre para decidir si es válido en tiempo de ejecución.
-- Cada **contrato satisfecho** aporta su propia tabla, en el orden de métodos del contrato — necesario porque una clase implementa varios y cada uno querría índices propios (ver ADR-013).
+Two representations in the IR (`IrType::Object(u32)` and `IrType::Value(u32)`), each with its own layout table in the module (`ObjectLayout`/`ValueLayout`) but sharing the same id space as `checked.classes` — `ClassType.kind` decides which one to look at. In LLVM, `llvm_type_in` returns a pointer for `Object` and the struct itself for `Value`: a value travels by value in slots, parameters, return, and as a field of another object or value, with no special calling convention — LLVM already supports aggregates passed by value.
 
-**Un record o value class no tiene descriptor**, ni siquiera vacío: no hay tabla de métodos que guardar (sus métodos se resuelven en tiempo de compilación, nunca por índice — ver ADR-013), no hay `extends` que dé ancestros, y `implements` está bloqueado por `NOT_LOWERED` precisamente porque no hay dónde guardar la tabla de un contrato.
+**Inherited fields come before a class's own fields**, in the order the hierarchy declares them. A subclass's layout prefix always matches its superclass's, so accessing an inherited field is the same offset regardless of who's looking at it — single inheritance costs nothing at access time. A record or value class does not support `extends`, so this rule does not apply to it.
 
-**Un genérico se especializa, no se borra.** `Box<Int32>` y `Box<String>` son dos `ObjectLayout`/`ValueLayout` distintos, uno por cada combinación de argumentos de tipo que el programa usa realmente (roadmap task 11.1) — deduplicados por el propio internamiento del checker. Es la única forma compatible con que una value class genérica siga siendo inline: borrar tipos obligaría a pasar todo por puntero.
+**An object's descriptor carries, in order:**
 
-**Un enum algebraico con datos asociados** (`IrType::Enum(u32)`) es también inline, con su propia tabla (`EnumLayout`): discriminante más la carga útil de **todas** las variantes concatenada, no superpuesta como un union real — cada variante ocupa su propio tramo de campos. Un enum tradicional, ninguna de cuyas variantes carga datos, sigue siendo un `Int32` liso, sin cambio de representación.
+```
+[ method table | ancestor count | ancestor₁ … | contract count | (contract, table)… ]
+```
 
-## Motivo
+- The **method table** is the concrete class's own table, with inherited entries at the same index as in the base (see ADR-013).
+- The **ancestors** are the class itself plus each transitive base, in that order — what a checked cast (`as`) walks to decide whether it's valid at runtime.
+- Each **satisfied contract** contributes its own table, in the contract's method order — needed because a class implements several contracts and each would want its own indices (see ADR-013).
 
-**Cabecera separada de los campos, no un campo más.** Lo que la Fase 4 necesite para la memoria —marcas, contadores, lo que la estrategia elegida pida— se añade a la cabecera, que existe desde el principio como concepto propio para eso. Si el descriptor fuera "el primer campo" en vez de algo aparte, cualquier extensión futura desplazaría los índices de todos los campos reales.
+**A record or value class has no descriptor**, not even an empty one: there is no method table to store (its methods resolve at compile time, never by index — see ADR-013), there is no `extends` that would give it ancestors, and `implements` is blocked with `NOT_LOWERED` precisely because there is nowhere to store a contract's table.
 
-**Ancestros aplanados en la cabecera, no recorrido de la jerarquía en tiempo de ejecución.** Un cast comprobado necesita responder "¿es esta clase, o alguna de sus bases?" en tiempo de ejecución sin tener el árbol de clases completo disponible fuera del compilador. Guardar la lista ya aplanada convierte esa pregunta en una búsqueda lineal sobre un arreglo, sin punteros al padre que seguir.
+**A generic is specialized, not erased.** `Box<Int32>` and `Box<String>` are two distinct `ObjectLayout`/`ValueLayout` instances, one for each combination of type arguments the program actually uses (roadmap task 11.1) — deduplicated by the checker's own interning. It is the only approach compatible with a generic value class staying inline: erasing types would force everything to go through a pointer.
 
-**Variantes concatenadas, no superpuestas, en un enum.** Un union real a nivel de bytes sería más pequeño, pero reinterpretar los bytes de la variante equivocada es exactamente el tipo de comportamiento indefinido que `ZIRK_RUNTIME_SPEC.md` promete que el lenguaje seguro no tiene. Con el número de variantes típico de esta fase el costo de espacio no aprieta; se revisa si un tipo con muchas variantes de payloads grandes lo vuelve un problema real.
+**An algebraic enum with associated data** (`IrType::Enum(u32)`) is also inline, with its own table (`EnumLayout`): a discriminant plus the payload of **all** variants concatenated, not overlapping like a real union — each variant occupies its own field span. A traditional enum, none of whose variants carries data, remains a plain `Int32`, with no change in representation.
 
-**Un record/value class sin cabecera, ni siquiera vacía.** Pagar el tamaño de una cabecera en algo que el spec exige "compacto" — y que además viaja por valor, así que su tamaño se multiplica en cada copia — sería exactamente lo que la sección 7 prohíbe. La consecuencia de no tenerla es real y aceptada: no hay despacho dinámico posible sobre uno (ver ADR-013), lo que resuelve directamente la pregunta abierta del `design.md` sobre métodos virtuales en una value class.
+## Rationale
 
-## Consecuencias
+**Header kept separate from the fields, not just one more field.** Whatever Phase 4 needs for memory — marks, counters, whatever the chosen strategy requires — gets added to the header, which exists from the start as its own concept for exactly that purpose. If the descriptor were "the first field" instead of something separate, any future extension would shift the indices of all real fields.
 
-- **`implements` en un record o value class type-checkea pero no baja.** La conformidad se verifica igual que para una clase ordinaria, pero alcanzar el método a través del tipo del contrato queda bloqueado con `NOT_LOWERED`: no hay descriptor donde guardar su tabla. Sus propios métodos, llamados directamente sobre el tipo concreto, sí despachan (siempre de forma estática, nunca por índice).
-- **Un genérico especializado multiplica el código y los layouts generados.** Trade-off aceptado desde D5 del `design.md`: es la única forma de cumplir la restricción de inline para las value classes genéricas. El costo en tamaño de binario se mide cuando la Fase 8 se ocupe de eso.
-- **El layout de un objeto y de un valor son contratos con el `.zpkg` de la Fase 8.** Lo que se fija aquí —orden de campos heredados, forma de la cabecera, ancestros aplanados, variantes concatenadas— no se puede cambiar después sin invalidar paquetes ya construidos. Lo que la Fase 4 necesite para memoria se añade a la cabecera existente; no debería requerir rediseñar esta forma.
-- **Un value class nunca alcanza un cast comprobado ni una identidad `is`.** Ninguno de los dos tiene sentido sin cabecera: no hay descriptor que comparar ni dirección que identifique.
+**Ancestors flattened in the header, not a hierarchy walk at runtime.** A checked cast needs to answer "is this the class, or one of its bases?" at runtime without having the full class tree available outside the compiler. Storing the already-flattened list turns that question into a linear search over an array, with no parent pointers to follow.
+
+**Concatenated, not overlapping, variants in an enum.** A real byte-level union would be smaller, but reinterpreting the bytes of the wrong variant is exactly the kind of undefined behavior that `ZIRK_RUNTIME_SPEC.md` promises the safe language does not have. With the typical number of variants at this phase, the space cost isn't tight; this gets revisited if a type with many large-payload variants makes it a real problem.
+
+**A record/value class with no header, not even an empty one.** Paying the size of a header on something the spec requires to be "compact" — and that also travels by value, so its size multiplies on every copy — would be exactly what section 7 prohibits. The consequence of not having one is real and accepted: there is no possible dynamic dispatch on one (see ADR-013), which directly settles the `design.md`'s open question about virtual methods on a value class.
+
+## Consequences
+
+- **`implements` on a record or value class type-checks but does not lower.** Conformance is verified the same way as for an ordinary class, but reaching the method through the contract's type is blocked with `NOT_LOWERED`: there is no descriptor to store its table in. Its own methods, called directly on the concrete type, do dispatch (always statically, never by index).
+- **A specialized generic multiplies the generated code and layouts.** Trade-off accepted since D5 of `design.md`: it is the only way to satisfy the inline constraint for generic value classes. The binary-size cost gets measured when Phase 8 addresses that.
+- **An object's and a value's layout are contracts with Phase 8's `.zpkg`.** What gets fixed here — inherited field order, header shape, flattened ancestors, concatenated variants — cannot be changed later without invalidating packages that already exist. Whatever Phase 4 needs for memory gets added to the existing header; it should not require redesigning this shape.
+- **A value class never reaches a checked cast or an `is` identity check.** Neither makes sense without a header: there is no descriptor to compare and no address that identifies it.

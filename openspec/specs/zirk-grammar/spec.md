@@ -6,304 +6,304 @@ Defines the grammar of the language and the construction of the syntax tree, tog
 
 The parser decides whether a program is well *formed*, not whether it makes *sense*: that belongs to the type system.
 ## Requirements
-### Requirement: Declaración de funciones
+### Requirement: Function declaration
 
-El parser SHALL reconocer declaraciones de función con la forma de `ZIRK_LANGUAGE_SPEC.md` sección 6: `fn` nombre, lista de parámetros tipados, tipo de retorno tras `:`, y cuerpo entre llaves.
+The parser SHALL recognize function declarations with the form from `ZIRK_LANGUAGE_SPEC.md` section 6: `fn`, name, list of typed parameters, return type after `:`, and a body between braces.
 
-#### Scenario: Función sin parámetros
-- **WHEN** se parsea `fn main(): Void { }`
-- **THEN** se produce una declaración de función llamada `main`, sin parámetros y con retorno `Void`
+#### Scenario: Function without parameters
+- **WHEN** `fn main(): Void { }` is parsed
+- **THEN** a function declaration named `main`, with no parameters and return type `Void`, is produced
 
-#### Scenario: Función con parámetros
-- **WHEN** se parsea `fn add(a: Int32, b: Int32): Int32 { return a + b; }`
-- **THEN** se produce una función con dos parámetros tipados y retorno `Int32`
+#### Scenario: Function with parameters
+- **WHEN** `fn add(a: Int32, b: Int32): Int32 { return a + b; }` is parsed
+- **THEN** a function with two typed parameters and return type `Int32` is produced
 
-#### Scenario: Tipo de retorno ausente
-- **WHEN** una función se declara sin tipo de retorno
-- **THEN** se emite un diagnóstico que señala dónde se esperaba el tipo
-- **AND** la ayuda indica que el tipo de retorno es obligatorio en esta fase
+#### Scenario: Missing return type
+- **WHEN** a function is declared without a return type
+- **THEN** a diagnostic pointing to where the type was expected is emitted
+- **AND** the help indicates that the return type is mandatory at this phase
 
-### Requirement: Declaración de variables
+### Requirement: Variable declaration
 
-El parser SHALL reconocer declaraciones con `mut` e `inmut`, con anotación de tipo opcional cuando haya inicializador.
+The parser SHALL recognize declarations with `mut` and `inmut`, with an optional type annotation when there is an initializer.
 
-#### Scenario: Variable con tipo explícito
-- **WHEN** se parsea `mut count: Int32 = 0;`
-- **THEN** se produce una declaración mutable con tipo `Int32` e inicializador
+#### Scenario: Variable with an explicit type
+- **WHEN** `mut count: Int32 = 0;` is parsed
+- **THEN** a mutable declaration with type `Int32` and an initializer is produced
 
-#### Scenario: Variable con tipo inferido
-- **WHEN** se parsea `mut count = 0;`
-- **THEN** se produce una declaración mutable sin anotación de tipo
+#### Scenario: Variable with an inferred type
+- **WHEN** `mut count = 0;` is parsed
+- **THEN** a mutable declaration without a type annotation is produced
 
-#### Scenario: Declaración sin inicializador ni tipo
-- **WHEN** se parsea `mut count;`
-- **THEN** se emite un diagnóstico indicando que falta el tipo o el inicializador
+#### Scenario: Declaration without an initializer or a type
+- **WHEN** `mut count;` is parsed
+- **THEN** a diagnostic indicating that the type or the initializer is missing is emitted
 
-### Requirement: Expresiones y precedencia
+### Requirement: Expressions and precedence
 
-El parser SHALL construir expresiones respetando la precedencia y asociatividad convencionales de los operadores de `ZIRK_LANGUAGE_SPEC.md` sección 4.
+The parser SHALL build expressions respecting the conventional precedence and associativity of the operators from `ZIRK_LANGUAGE_SPEC.md` section 4.
 
-De mayor a menor precedencia: exponenciación (`**`, asociativa a la derecha); unarios (`!`, `-`); multiplicativos (`*`, `/`, `%`); aditivos (`+`, `-`); comparación (`<`, `<=`, `>`, `>=`); igualdad (`==`, `!=`); conjunción (`&&`); disyunción (`||`).
+From highest to lowest precedence: exponentiation (`**`, right-associative); unary (`!`, `-`); multiplicative (`*`, `/`, `%`); additive (`+`, `-`); comparison (`<`, `<=`, `>`, `>=`); equality (`==`, `!=`); conjunction (`&&`); disjunction (`||`).
 
-#### Scenario: Precedencia multiplicativa sobre aditiva
-- **WHEN** se parsea `1 + 2 * 3`
-- **THEN** el árbol representa `1 + (2 * 3)`
+#### Scenario: Multiplicative precedence over additive
+- **WHEN** `1 + 2 * 3` is parsed
+- **THEN** the tree represents `1 + (2 * 3)`
 
-#### Scenario: Asociatividad izquierda
-- **WHEN** se parsea `10 - 4 - 3`
-- **THEN** el árbol representa `(10 - 4) - 3`
+#### Scenario: Left associativity
+- **WHEN** `10 - 4 - 3` is parsed
+- **THEN** the tree represents `(10 - 4) - 3`
 
-#### Scenario: Paréntesis alteran la precedencia
-- **WHEN** se parsea `(1 + 2) * 3`
-- **THEN** el árbol representa la suma como operando izquierdo del producto
+#### Scenario: Parentheses alter precedence
+- **WHEN** `(1 + 2) * 3` is parsed
+- **THEN** the tree represents the sum as the left operand of the product
 
-#### Scenario: Conjunción sobre disyunción
-- **WHEN** se parsea `a || b && c`
-- **THEN** el árbol representa `a || (b && c)`
+#### Scenario: Conjunction over disjunction
+- **WHEN** `a || b && c` is parsed
+- **THEN** the tree represents `a || (b && c)`
 
-### Requirement: Sentencia condicional
+### Requirement: Conditional statement
 
-El parser SHALL reconocer `if` y `else` como sentencia, con cuerpos entre llaves salvo en la forma de efecto que gobierna una sola sentencia. Cuando ambas ramas están presentes, `if`/`else` SHALL admitirse también como expresión, según `ZIRK_LANGUAGE_SPEC.md` sección 5.
+The parser SHALL recognize `if` and `else` as a statement, with bodies between braces except in the effect form that governs a single statement. When both branches are present, `if`/`else` SHALL also be accepted as an expression, per `ZIRK_LANGUAGE_SPEC.md` section 5.
 
-Que sea sentencia o expresión no lo decide el parser: lo decide el chequeo de tipos, según si el uso exige un valor y ambas ramas son type-compatible.
+Whether it is a statement or an expression is not decided by the parser: it is decided by type checking, based on whether the use requires a value and both branches are type-compatible.
 
-Los paréntesis alrededor de la condición SHALL ser opcionales.
+Parentheses around the condition SHALL be optional.
 
-#### Scenario: Condicional simple
-- **WHEN** se parsea `if x > 0 { }`
-- **THEN** se produce una sentencia condicional sin rama alternativa
+#### Scenario: Simple conditional
+- **WHEN** `if x > 0 { }` is parsed
+- **THEN** a conditional statement without an alternative branch is produced
 
-#### Scenario: Condicional con alternativa
-- **WHEN** se parsea `if x > 0 { } else { }`
-- **THEN** se produce una sentencia condicional con ambas ramas
+#### Scenario: Conditional with an alternative
+- **WHEN** `if x > 0 { } else { }` is parsed
+- **THEN** a conditional statement with both branches is produced
 
-#### Scenario: Encadenamiento
-- **WHEN** se parsea `if a { } else if b { } else { }`
-- **THEN** se produce un condicional cuya rama alternativa es otro condicional
+#### Scenario: Chaining
+- **WHEN** `if a { } else if b { } else { }` is parsed
+- **THEN** a conditional whose alternative branch is another conditional is produced
 
-#### Scenario: Cuerpo sin llaves
-- **WHEN** se parsea `if closed return;`
-- **THEN** se produce un condicional cuya rama única es esa sentencia
+#### Scenario: Body without braces
+- **WHEN** `if closed return;` is parsed
+- **THEN** a conditional whose single branch is that statement is produced
 
-#### Scenario: Rama alternativa sobre un cuerpo sin llaves
-- **WHEN** un `if` sin llaves va seguido de `else`
-- **THEN** se emite un diagnóstico indicando que la forma sin llaves gobierna una sola sentencia
+#### Scenario: Alternative branch on a body without braces
+- **WHEN** an `if` without braces is followed by `else`
+- **THEN** a diagnostic indicating that the braceless form governs a single statement is emitted
 
-#### Scenario: Condición entre paréntesis
-- **WHEN** se parsea `if (x > 0) { }`
-- **THEN** se produce el mismo árbol que sin paréntesis
+#### Scenario: Condition in parentheses
+- **WHEN** `if (x > 0) { }` is parsed
+- **THEN** the same tree as without parentheses is produced
 
-#### Scenario: Uso como expresión
-- **WHEN** se parsea `mut resultado = if x > 0 { "positivo" } else { "no positivo" };`
-- **THEN** se produce una declaración cuyo inicializador es el condicional
+#### Scenario: Use as an expression
+- **WHEN** `mut result = if x > 0 { "positive" } else { "not positive" };` is parsed
+- **THEN** a declaration whose initializer is the conditional is produced
 
-### Requirement: Llamadas a función y retorno
+### Requirement: Function calls and return
 
-El parser SHALL reconocer llamadas con argumentos posicionales y la sentencia `return`.
+The parser SHALL recognize calls with positional arguments and the `return` statement.
 
-#### Scenario: Llamada con argumentos
-- **WHEN** se parsea `add(1, 2)`
-- **THEN** se produce una llamada con dos argumentos
+#### Scenario: Call with arguments
+- **WHEN** `add(1, 2)` is parsed
+- **THEN** a call with two arguments is produced
 
-#### Scenario: Retorno con valor
-- **WHEN** se parsea `return a + b;`
-- **THEN** se produce un retorno cuya expresión es la suma
+#### Scenario: Return with a value
+- **WHEN** `return a + b;` is parsed
+- **THEN** a return whose expression is the sum is produced
 
-#### Scenario: Retorno sin valor
-- **WHEN** se parsea `return;`
-- **THEN** se produce un retorno sin expresión
+#### Scenario: Return without a value
+- **WHEN** `return;` is parsed
+- **THEN** a return without an expression is produced
 
-### Requirement: Punto y coma opcional
+### Requirement: Optional semicolon
 
-El parser SHALL admitir la omisión del punto y coma cuando no haya ambigüedad, según `ZIRK_LANGUAGE_SPEC.md` sección 1.
+The parser SHALL allow omitting the semicolon when there is no ambiguity, per `ZIRK_LANGUAGE_SPEC.md` section 1.
 
-#### Scenario: Sentencias sin punto y coma
-- **WHEN** se parsean sentencias separadas por saltos de línea y sin `;`
-- **THEN** el árbol resultante es equivalente al de las mismas sentencias con `;`
+#### Scenario: Statements without a semicolon
+- **WHEN** statements separated by newlines and without `;` are parsed
+- **THEN** the resulting tree is equivalent to that of the same statements with `;`
 
-### Requirement: Construcciones fuera del subset
+### Requirement: Constructs outside the subset
 
-El parser SHALL emitir un diagnóstico específico ante construcciones que existen en el lenguaje pero no están implementadas todavía, distinguiéndolas de errores de sintaxis.
+The parser SHALL emit a specific diagnostic for constructs that exist in the language but are not yet implemented, distinguishing them from syntax errors.
 
-Esta fase retira de esa lista `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as` e `is`.
+This phase removes from that list `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as`, and `is`.
 
-#### Scenario: Construcción de fase posterior
-- **WHEN** se parsea `try`, `task`, `parallel` o `thread`
-- **THEN** el diagnóstico SHALL nombrar la construcción
-- **AND** SHALL indicar que no está implementada todavía
-- **AND** NO SHALL reportarse como token inesperado
+#### Scenario: Construct from a later phase
+- **WHEN** `try`, `task`, `parallel`, or `thread` is parsed
+- **THEN** the diagnostic SHALL name the construct
+- **AND** SHALL indicate that it is not implemented yet
+- **AND** SHALL NOT be reported as an unexpected token
 
-#### Scenario: `init.zrk` fuera de alcance
-- **WHEN** se encuentra un archivo `init.zrk`
-- **THEN** el diagnóstico indica que la configuración declarativa de proyecto llega en una fase posterior
+#### Scenario: `init.zrk` out of scope
+- **WHEN** an `init.zrk` file is found
+- **THEN** the diagnostic indicates that declarative project configuration arrives in a later phase
 
-### Requirement: Ubicación en todo nodo
+### Requirement: Location on every node
 
-Todo nodo del árbol SHALL exponer el span del source que lo originó.
+Every node of the tree SHALL expose the source span that originated it.
 
-Un nodo sin ubicación no puede producir el diagnóstico que exige `ZIRK_COMPILER_SPEC.md` sección 8.
+A node without a location cannot produce the diagnostic that `ZIRK_COMPILER_SPEC.md` section 8 requires.
 
-#### Scenario: Span de un nodo cualquiera
-- **WHEN** se inspecciona cualquier nodo del árbol producido
-- **THEN** expone la ubicación de inicio y fin en el source
+#### Scenario: Span of any node
+- **WHEN** any node of the produced tree is inspected
+- **THEN** it exposes its start and end location in the source
 
-### Requirement: Bucles
+### Requirement: Loops
 
-El parser SHALL reconocer `for` con inicialización/condición/incremento, `for ... in` sobre una expresión iterable, `while`, `do ... while` y `loop`, junto con `break` y `continue`, según `ZIRK_LANGUAGE_SPEC.md` sección 5.
+The parser SHALL recognize `for` with initialization/condition/increment, `for ... in` over an iterable expression, `while`, `do ... while`, and `loop`, together with `break` and `continue`, per `ZIRK_LANGUAGE_SPEC.md` section 5.
 
-Los paréntesis alrededor del header SHALL ser opcionales en todas estas formas. La forma canónica los omite y ambas SHALL producir el mismo árbol.
+Parentheses around the header SHALL be optional in all these forms. The canonical form omits them, and both SHALL produce the same tree.
 
-#### Scenario: `for` con las tres cláusulas
-- **WHEN** se parsea `for mut i = 0; i < 10; i++ { }`
-- **THEN** se produce un bucle con inicialización, condición e incremento
+#### Scenario: `for` with all three clauses
+- **WHEN** `for mut i = 0; i < 10; i++ { }` is parsed
+- **THEN** a loop with initialization, condition, and increment is produced
 
-#### Scenario: `for` con paréntesis
-- **WHEN** se parsea `for (mut i = 0; i < 10; i++) { }`
-- **THEN** se produce el mismo árbol que sin paréntesis
+#### Scenario: `for` with parentheses
+- **WHEN** `for (mut i = 0; i < 10; i++) { }` is parsed
+- **THEN** the same tree as without parentheses is produced
 
 #### Scenario: `for ... in`
-- **WHEN** se parsea `for x in 0..10 { }`
-- **THEN** se produce un bucle que itera la variable `x` sobre el rango
+- **WHEN** `for x in 0..10 { }` is parsed
+- **THEN** a loop that iterates the variable `x` over the range is produced
 
 #### Scenario: `while`
-- **WHEN** se parsea `while x > 0 { }` o `while (x > 0) { }`
-- **THEN** se produce un bucle condicional en ambos casos
+- **WHEN** `while x > 0 { }` or `while (x > 0) { }` is parsed
+- **THEN** a conditional loop is produced in both cases
 
 #### Scenario: `do ... while`
-- **WHEN** se parsea `do { poll(); } while pending;`
-- **THEN** se produce un bucle de post-condición cuyo cuerpo precede a su condición
+- **WHEN** `do { poll(); } while pending;` is parsed
+- **THEN** a post-condition loop whose body precedes its condition is produced
 
 #### Scenario: `loop`
-- **WHEN** se parsea `loop { break; }`
-- **THEN** se produce un bucle incondicional cuyo cuerpo contiene `break`
+- **WHEN** `loop { break; }` is parsed
+- **THEN** an unconditional loop whose body contains `break` is produced
 
-#### Scenario: `break` y `continue` fuera de un bucle
-- **WHEN** se parsea `break;` o `continue;` fuera de cualquier bucle
-- **THEN** se emite un diagnóstico indicando que solo son válidos dentro de un bucle
+#### Scenario: `break` and `continue` outside a loop
+- **WHEN** `break;` or `continue;` is parsed outside any loop
+- **THEN** a diagnostic indicating that they are only valid inside a loop is emitted
 
-### Requirement: Parámetros opcionales, nombrados, variadic y valores por defecto
+### Requirement: Optional, named, variadic parameters and default values
 
-El parser SHALL reconocer parámetros con signo `?` para opcionales, valores por defecto tras `=`, y un parámetro variadic prefijado con `...`, según `ZIRK_LANGUAGE_SPEC.md` sección 6.
+The parser SHALL recognize parameters with a `?` sign for optional ones, default values after `=`, and a variadic parameter prefixed with `...`, per `ZIRK_LANGUAGE_SPEC.md` section 6.
 
-#### Scenario: Parámetro opcional
-- **WHEN** se parsea `fn saludo(nombre?: String): Void { }`
-- **THEN** se produce un parámetro marcado como opcional
+#### Scenario: Optional parameter
+- **WHEN** `fn greet(name?: String): Void { }` is parsed
+- **THEN** a parameter marked as optional is produced
 
-#### Scenario: Valor por defecto
-- **WHEN** se parsea `fn saludo(nombre: String = "mundo"): Void { }`
-- **THEN** se produce un parámetro con expresión de valor por defecto
+#### Scenario: Default value
+- **WHEN** `fn greet(name: String = "world"): Void { }` is parsed
+- **THEN** a parameter with a default-value expression is produced
 
-#### Scenario: Parámetro variadic
-- **WHEN** se parsea `fn suma(...valores: Int32): Int32 { }`
-- **THEN** se produce un parámetro variadic
-- **AND** un variadic que no es el último parámetro produce un diagnóstico
+#### Scenario: Variadic parameter
+- **WHEN** `fn sum(...values: Int32): Int32 { }` is parsed
+- **THEN** a variadic parameter is produced
+- **AND** a variadic parameter that is not the last one produces a diagnostic
 
-#### Scenario: Argumentos nombrados en la llamada
-- **WHEN** se parsea `saludo(nombre: "Ana")`
-- **THEN** se produce una llamada con un argumento nombrado
+#### Scenario: Named arguments in the call
+- **WHEN** `greet(name: "Ana")` is parsed
+- **THEN** a call with one named argument is produced
 
-### Requirement: Closures y lambdas
+### Requirement: Closures and lambdas
 
-El parser SHALL reconocer expresiones lambda con la forma `(parámetros): TipoRetorno => expresión` o `(parámetros): TipoRetorno => { ... }`, según `ZIRK_LANGUAGE_SPEC.md` sección 6.
+The parser SHALL recognize lambda expressions with the form `(parameters): ReturnType => expression` or `(parameters): ReturnType => { ... }`, per `ZIRK_LANGUAGE_SPEC.md` section 6.
 
-#### Scenario: Lambda de expresión
-- **WHEN** se parsea `(a: Int32, b: Int32): Int32 => a + b`
-- **THEN** se produce una lambda cuyo cuerpo es la expresión de suma
+#### Scenario: Expression lambda
+- **WHEN** `(a: Int32, b: Int32): Int32 => a + b` is parsed
+- **THEN** a lambda whose body is the sum expression is produced
 
-#### Scenario: Lambda de bloque
-- **WHEN** se parsea `(): Void => { stdout.println("ok"); }`
-- **THEN** se produce una lambda cuyo cuerpo es un bloque de sentencias
+#### Scenario: Block lambda
+- **WHEN** `(): Void => { stdout.println("ok"); }` is parsed
+- **THEN** a lambda whose body is a block of statements is produced
 
 ### Requirement: `match`
 
-El parser SHALL reconocer `match` tanto en posición de expresión como de sentencia, con brazos de la forma `patrón => cuerpo`, según `ZIRK_LANGUAGE_SPEC.md` sección 5.
+The parser SHALL recognize `match` both in expression and statement position, with arms of the form `pattern => body`, per `ZIRK_LANGUAGE_SPEC.md` section 5.
 
-Los patrones admitidos esta fase son: literales, constructores de un `enum` sin datos asociados, variables de binding y el comodín `_`.
+The patterns accepted at this phase are: literals, `enum` constructors without associated data, binding variables, and the `_` wildcard.
 
-#### Scenario: `match` como sentencia
-- **WHEN** se parsea `match direccion { Direction.North => stdout.println("norte"); _ => {} }`
-- **THEN** se produce una sentencia `match` con sus brazos
+#### Scenario: `match` as a statement
+- **WHEN** `match direction { Direction.North => stdout.println("North"); _ => {} }` is parsed
+- **THEN** a `match` statement with its arms is produced
 
-#### Scenario: `match` como expresión
-- **WHEN** se parsea `mut texto = match direccion { Direction.North => "norte"; _ => "otra" };`
-- **THEN** se produce una declaración cuyo inicializador es el `match`
+#### Scenario: `match` as an expression
+- **WHEN** `mut text = match direction { Direction.North => "North"; _ => "other" };` is parsed
+- **THEN** a declaration whose initializer is the `match` is produced
 
-#### Scenario: Declaración de `enum` mínimo
-- **WHEN** se parsea `enum Direction { North, South, East, West }`
-- **THEN** se produce una declaración de enum con cuatro constructores sin datos asociados
+#### Scenario: Minimal `enum` declaration
+- **WHEN** `enum Direction { North, South, East, West }` is parsed
+- **THEN** an enum declaration with four constructors without associated data is produced
 
-#### Scenario: `match with` fuera de alcance
-- **WHEN** se parsea `match with`
-- **THEN** el diagnóstico indica que `Resource<E>` y `match with` llegan en una fase posterior
+#### Scenario: `match with` out of scope
+- **WHEN** `match with` is parsed
+- **THEN** the diagnostic indicates that `Resource<E>` and `match with` arrive in a later phase
 
-### Requirement: Nulabilidad
+### Requirement: Nullability
 
-El parser SHALL reconocer `T?` como anotación de tipo, `null` como literal, `??` como coalescencia nula y `?.` como acceso seguro, según `ZIRK_LANGUAGE_SPEC.md` sección 4.
+The parser SHALL recognize `T?` as a type annotation, `null` as a literal, `??` as null coalescing, and `?.` as safe access, per `ZIRK_LANGUAGE_SPEC.md` section 4.
 
-`?.` deja de diferirse: la fase anterior lo pospuso porque ningún tipo tenía miembros, y las clases los traen.
+`?.` is no longer deferred: the previous phase postponed it because no type had members, and classes bring them.
 
-#### Scenario: Tipo nulable
-- **WHEN** se parsea `mut name: String? = null;`
-- **THEN** se produce una declaración con tipo `String?` e inicializador nulo
+#### Scenario: Nullable type
+- **WHEN** `mut name: String? = null;` is parsed
+- **THEN** a declaration with type `String?` and a null initializer is produced
 
-#### Scenario: Coalescencia nula
-- **WHEN** se parsea `name ?? "anónimo"`
-- **THEN** se produce una expresión con fallback
+#### Scenario: Null coalescing
+- **WHEN** `name ?? "anonymous"` is parsed
+- **THEN** an expression with a fallback is produced
 
-#### Scenario: Precedencia de `??`
-- **WHEN** se parsea `a ?? b || c`
-- **THEN** el árbol representa `(a ?? b) || c`
+#### Scenario: Precedence of `??`
+- **WHEN** `a ?? b || c` is parsed
+- **THEN** the tree represents `(a ?? b) || c`
 
-#### Scenario: Acceso seguro
-- **WHEN** se parsea `usuario?.nombre`
-- **THEN** se produce una expresión de acceso seguro sobre el miembro
+#### Scenario: Safe access
+- **WHEN** `user?.name` is parsed
+- **THEN** a safe-access expression on the member is produced
 
-### Requirement: Asignación compuesta e incremento
+### Requirement: Compound assignment and increment
 
-El parser SHALL reconocer `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `++` y `--` en posición de sentencia, expandiéndolos al árbol de la asignación equivalente.
+The parser SHALL recognize `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `++`, and `--` in statement position, expanding them to the tree of the equivalent assignment.
 
-`++` y `--` SHALL admitirse además en posición de expresión, preservando la semántica convencional de prefijo y postfijo de `ZIRK_LANGUAGE_SPEC.md` sección 4: la forma postfija evalúa al valor previo y la prefija al valor ya incrementado. Ambas SHALL exigir un lugar asignable y mutable.
+`++` and `--` SHALL also be accepted in expression position, preserving the conventional prefix/postfix semantics from `ZIRK_LANGUAGE_SPEC.md` section 4: the postfix form evaluates to the previous value and the prefix form to the already-incremented value. Both SHALL require an assignable, mutable place.
 
-#### Scenario: Asignación compuesta
-- **WHEN** se parsea `total += 5;`
-- **THEN** el árbol producido es equivalente al de `total = total + 5;`
+#### Scenario: Compound assignment
+- **WHEN** `total += 5;` is parsed
+- **THEN** the produced tree is equivalent to that of `total = total + 5;`
 
-#### Scenario: Incremento
-- **WHEN** se parsea `i++;` o `++i;`
-- **THEN** el árbol producido es equivalente al de `i = i + 1;`
+#### Scenario: Increment
+- **WHEN** `i++;` or `++i;` is parsed
+- **THEN** the produced tree is equivalent to that of `i = i + 1;`
 
-#### Scenario: Incremento postfijo en posición de expresión
-- **WHEN** se parsea `mut x = i++;`
-- **THEN** `x` recibe el valor de `i` previo al incremento
+#### Scenario: Postfix increment in expression position
+- **WHEN** `mut x = i++;` is parsed
+- **THEN** `x` receives the value of `i` prior to the increment
 
-#### Scenario: Incremento prefijo en posición de expresión
-- **WHEN** se parsea `mut x = ++i;`
-- **THEN** `x` recibe el valor de `i` ya incrementado
+#### Scenario: Prefix increment in expression position
+- **WHEN** `mut x = ++i;` is parsed
+- **THEN** `x` receives the already-incremented value of `i`
 
-#### Scenario: Incremento sobre un lugar no asignable
-- **WHEN** el operando de `++` no es un lugar asignable y mutable
-- **THEN** se emite un diagnóstico que señala el operando
+#### Scenario: Increment on a non-assignable place
+- **WHEN** the operand of `++` is not an assignable, mutable place
+- **THEN** a diagnostic pointing to the operand is emitted
 
-### Requirement: Módulos dentro de un crate
+### Requirement: Modules within a crate
 
-El parser SHALL reconocer `share` como modificador de declaración, `import { nombres } from "ruta"` con rutas locales entre comillas y módulos estándar sin comillas, y `use` para habilitar globals, según `ZIRK_LANGUAGE_SPEC.md` sección 10.
+The parser SHALL recognize `share` as a declaration modifier, `import { names } from "path"` with quoted local paths and unquoted standard modules, and `use` to enable globals, per `ZIRK_LANGUAGE_SPEC.md` section 10.
 
-#### Scenario: Declaración compartida
-- **WHEN** se parsea `share class Usuario {}`
-- **THEN** se emite el diagnóstico correspondiente a `class`, que sigue fuera de alcance esta fase
-- **AND** `share fn saludo(): Void {}` sí se acepta, marcando la función como compartida
+#### Scenario: Shared declaration
+- **WHEN** `share class User {}` is parsed
+- **THEN** the diagnostic corresponding to `class`, which remains out of scope at this phase, is emitted
+- **AND** `share fn greet(): Void {}` is indeed accepted, marking the function as shared
 
-#### Scenario: Importación local
-- **WHEN** se parsea `import { Usuario, Rol } from "./dominio/usuario";`
-- **THEN** se produce una importación con ruta local y dos nombres
+#### Scenario: Local import
+- **WHEN** `import { User, Role } from "./domain/user";` is parsed
+- **THEN** an import with a local path and two names is produced
 
-#### Scenario: Importación con alias
-- **WHEN** se parsea `import { Rol -> RolDeDominio } from "./dominio/usuario";`
-- **THEN** el nombre importado se expone bajo el alias
+#### Scenario: Import with alias
+- **WHEN** `import { Role -> DomainRole } from "./domain/user";` is parsed
+- **THEN** the imported name is exposed under the alias
 
-#### Scenario: `init.zrk` no se importa desde código
-- **WHEN** se encuentra un `import` de configuración de proyecto
-- **THEN** se emite el diagnóstico de `init.zrk` fuera de alcance
+#### Scenario: `init.zrk` is not imported from code
+- **WHEN** an `import` of project configuration is found
+- **THEN** the `init.zrk` out-of-scope diagnostic is emitted
 
 ### Requirement: Complete range and slice forms
 The parser SHALL accept `start..end`, `start..=end`, descending bounds, `.step(distance)`, `.reverse()`, interpolated bounds such as `0..{number}`, and slices `[start:end:step]` with omitted or negative components.
@@ -374,47 +374,47 @@ The grammar SHALL accept ordinary typed constructors, named components, method c
 - **WHEN** `date + time` is parsed
 - **THEN** it remains a binary operation for type-directed `DateTime` composition
 
-### Requirement: Paréntesis opcionales en headers de control
+### Requirement: Optional parentheses in control headers
 
-El parser SHALL admitir paréntesis opcionales alrededor del header de toda estructura de control —`if`, `while`, `for`, `for ... in`, `do ... while` y `match`— produciendo el mismo árbol con y sin ellos.
+The parser SHALL allow optional parentheses around the header of every control structure — `if`, `while`, `for`, `for ... in`, `do ... while`, and `match` — producing the same tree with and without them.
 
-La forma sin paréntesis es la canónica. Ninguna estructura SHALL exigirlos.
+The form without parentheses is canonical. No structure SHALL require them.
 
-Esta regla no estaba escrita en ninguna fuente normativa, y esa ausencia es lo que llevó a exigirlos en el `for` tradicional.
+This rule was not written in any normative source, and that absence is what led to requiring them in the traditional `for`.
 
-#### Scenario: Header sin paréntesis
-- **WHEN** se parsea `while pending { }`
-- **THEN** el parseo tiene éxito
+#### Scenario: Header without parentheses
+- **WHEN** `while pending { }` is parsed
+- **THEN** parsing succeeds
 
-#### Scenario: Header con paréntesis
-- **WHEN** se parsea `while (pending) { }`
-- **THEN** el parseo tiene éxito y produce el mismo árbol
+#### Scenario: Header with parentheses
+- **WHEN** `while (pending) { }` is parsed
+- **THEN** parsing succeeds and produces the same tree
 
-#### Scenario: `for ... in` con paréntesis
-- **WHEN** se parsea `for (x in 0..10) { }`
-- **THEN** se produce el mismo árbol que `for x in 0..10 { }`
+#### Scenario: `for ... in` with parentheses
+- **WHEN** `for (x in 0..10) { }` is parsed
+- **THEN** the same tree as `for x in 0..10 { }` is produced
 
-#### Scenario: `match` con paréntesis
-- **WHEN** se parsea `match (valor) { }`
-- **THEN** se produce el mismo árbol que `match valor { }`
+#### Scenario: `match` with parentheses
+- **WHEN** `match (value) { }` is parsed
+- **THEN** the same tree as `match value { }` is produced
 
-### Requirement: Expresión ternaria
+### Requirement: Ternary expression
 
-El parser SHALL reconocer la expresión ternaria `condición ? cuando_true : cuando_false`, asociativa a la derecha, según el nivel 16 de la tabla de precedencia.
+The parser SHALL recognize the ternary expression `condition ? when_true : when_false`, right-associative, per level 16 of the precedence table.
 
-El ternario es la forma compacta preferida para elegir un valor corto, y NO SHALL reemplazar al `if` en posición de expresión: ambos coexisten.
+The ternary is the preferred compact form for choosing a short value, and SHALL NOT replace `if` in expression position: both coexist.
 
-#### Scenario: Ternario simple
-- **WHEN** se parsea `mut label = activo ? "sí" : "no";`
-- **THEN** el inicializador es una expresión ternaria con sus tres partes
+#### Scenario: Simple ternary
+- **WHEN** `mut label = active ? "yes" : "no";` is parsed
+- **THEN** the initializer is a ternary expression with its three parts
 
-#### Scenario: Ternario anidado
-- **WHEN** se parsea `a ? b : c ? d : e`
-- **THEN** el anidamiento se agrupa por la derecha
+#### Scenario: Nested ternary
+- **WHEN** `a ? b : c ? d : e` is parsed
+- **THEN** the nesting groups to the right
 
-#### Scenario: Ternario sin rama alternativa
-- **WHEN** falta `:` y su expresión
-- **THEN** se emite un diagnóstico que señala el ternario incompleto
+#### Scenario: Ternary without an alternative branch
+- **WHEN** `:` and its expression are missing
+- **THEN** a diagnostic pointing to the incomplete ternary is emitted
 
 ### Requirement: Refined core syntax surface
 The parser SHALL recognize `Fn(P...) => R` and `Function(P...) => R`, `override fn`, abstract classes adopted with `implements`, combined `from A & B` constraints, `in/out` generic variance, Tuple type/index syntax, collection literals, `as?`, and the accepted guard-free pattern forms. It SHALL reject property declarations, standalone override, enum user methods, match guards, and enum destructuring bindings.
@@ -540,157 +540,158 @@ The grammar SHALL parse `Inspect`, `Augment`, and `Wrap` variants inside `match 
 - **WHEN** `After(result, _) => { ... }` is parsed
 - **THEN** the arm binds `result` and records one wildcard payload position
 
-### Requirement: Sintaxis de clases
+### Requirement: Class syntax
 
-El parser SHALL reconocer `class`, sus campos y métodos, `construct`, `this`, los modificadores de visibilidad, `abstract`, `extends` e `implements`, según `ZIRK_LANGUAGE_SPEC.md` sección 7.
+The parser SHALL recognize `class`, its fields and methods, `construct`, `this`, the visibility modifiers, `abstract`, `extends`, and `implements`, per `ZIRK_LANGUAGE_SPEC.md` section 7.
 
-#### Scenario: Clase completa
-- **WHEN** se parsea `class User implements Serializable { public inmut id: Int32; construct(id: Int32) { this.id = id; } }`
-- **THEN** se produce una declaración con un contrato implementado, un campo y un constructor
+#### Scenario: Complete class
+- **WHEN** `class User implements Serializable { public inmut id: Int32; construct(id: Int32) { this.id = id; } }` is parsed
+- **THEN** a declaration with one implemented contract, one field, and one constructor is produced
 
-#### Scenario: Herencia y contratos combinados
-- **WHEN** se parsea `class Admin extends User implements Auditable, Clone { }`
-- **THEN** se produce una declaración con una superclase y dos contratos
+#### Scenario: Combined inheritance and contracts
+- **WHEN** `class Admin extends User implements Auditable, Clone { }` is parsed
+- **THEN** a declaration with one superclass and two contracts is produced
 
-#### Scenario: `construct` fuera de una clase
-- **WHEN** `construct` aparece en el nivel superior del archivo
-- **THEN** se emite un diagnóstico indicando que un constructor pertenece a una clase
+#### Scenario: `construct` outside a class
+- **WHEN** `construct` appears at the top level of the file
+- **THEN** a diagnostic indicating that a constructor belongs to a class is emitted
 
-#### Scenario: Varios constructores y argumentos nombrados
-- **WHEN** una clase declara varios `construct` y se construye con argumentos nombrados reordenados
-- **THEN** el árbol conserva todas las firmas y las etiquetas de cada argumento para la resolución semántica
+#### Scenario: Multiple constructors and named arguments
+- **WHEN** a class declares several `construct` and is constructed with reordered named arguments
+- **THEN** the tree retains all signatures and each argument's labels for semantic resolution
 
-### Requirement: Sintaxis de contratos
+### Requirement: Contract syntax
 
-El parser SHALL reconocer `interface` y `trait` con sus métodos, y admitir cuerpo únicamente en los de un `trait`.
+The parser SHALL recognize `interface` and `trait` with their methods, and allow a body only in those of a `trait`.
 
-#### Scenario: Interfaz
-- **WHEN** se parsea `interface Serializable { fn serialize(): String; }`
-- **THEN** se produce una declaración con una firma sin cuerpo
+#### Scenario: Interface
+- **WHEN** `interface Serializable { fn serialize(): String; }` is parsed
+- **THEN** a declaration with a signature without a body is produced
 
-#### Scenario: Trait con implementación
-- **WHEN** se parsea `trait Greet { fn hello(): String { return "hola"; } }`
-- **THEN** se produce una declaración cuyo método tiene cuerpo
+#### Scenario: Trait with implementation
+- **WHEN** `trait Greet { fn hello(): String { return "hello"; } }` is parsed
+- **THEN** a declaration whose method has a body is produced
 
-### Requirement: Sintaxis de genéricos
+### Requirement: Generics syntax
 
-El parser SHALL reconocer parámetros de tipo `<T>` en declaraciones, argumentos de tipo en los usos, y restricciones con `from`.
+The parser SHALL recognize type parameters `<T>` in declarations, type arguments at use sites, and constraints with `from`.
 
-#### Scenario: Función genérica con restricción
-- **WHEN** se parsea `fn serialize<T from Serializable>(value: T): String { }`
-- **THEN** se produce un parámetro de tipo con una restricción
+#### Scenario: Generic function with a constraint
+- **WHEN** `fn serialize<T from Serializable>(value: T): String { }` is parsed
+- **THEN** a type parameter with a constraint is produced
 
-#### Scenario: Varios parámetros de tipo
-- **WHEN** se parsea `class Map<K, V> { }`
-- **THEN** se producen dos parámetros de tipo
+#### Scenario: Multiple type parameters
+- **WHEN** `class Map<K, V> { }` is parsed
+- **THEN** two type parameters are produced
 
-#### Scenario: Argumento de tipo en el uso
-- **WHEN** se parsea `mut b: Box<Int32>;`
-- **THEN** el tipo lleva un argumento
+#### Scenario: Type argument at the use site
+- **WHEN** `mut b: Box<Int32>;` is parsed
+- **THEN** the type carries an argument
 
-#### Scenario: `<` que no abre genéricos
-- **WHEN** se parsea `a < b`
-- **THEN** se produce una comparación, no un argumento de tipo
+#### Scenario: `<` that does not open generics
+- **WHEN** `a < b` is parsed
+- **THEN** a comparison, not a type argument, is produced
 
-### Requirement: Sintaxis de tipos de datos
+### Requirement: Data type syntax
 
-El parser SHALL reconocer `record`, value classes, variantes de enum con datos asociados, uniones `A | B` y alias con `type`.
+The parser SHALL recognize `record`, value classes, enum variants with associated data, unions `A | B`, and aliases with `type`.
 
-#### Scenario: Enum con datos asociados
-- **WHEN** se parsea `enum Shape { Circle(Int32), Rect(Int32, Int32) }`
-- **THEN** se producen dos variantes con uno y dos tipos asociados
+#### Scenario: Enum with associated data
+- **WHEN** `enum Shape { Circle(Int32), Rect(Int32, Int32) }` is parsed
+- **THEN** two variants with one and two associated types are produced
 
-#### Scenario: Mapping de enum tradicional
-- **WHEN** se parsea `enum Direction { North -> "N", South }`
-- **THEN** `North` conserva su mapping explícito y `South` queda sin mapping explícito
+#### Scenario: Traditional enum mapping
+- **WHEN** `enum Direction { North -> "N", South }` is parsed
+- **THEN** `North` retains its explicit mapping and `South` remains without an explicit mapping
 
-#### Scenario: Patrón con destructuring
-- **WHEN** se parsea `match s { Shape.Circle(r) => r, _ => 0 }`
-- **THEN** el patrón liga un nombre al valor asociado
+#### Scenario: Pattern with destructuring
+- **WHEN** `match s { Shape.Circle(r) => r, _ => 0 }` is parsed
+- **THEN** the pattern binds a name to the associated value
 
-#### Scenario: Unión
-- **WHEN** se parsea `mut x: Int32 | String;`
-- **THEN** se produce un tipo con dos miembros
+#### Scenario: Union
+- **WHEN** `mut x: Int32 | String;` is parsed
+- **THEN** a type with two members is produced
 
 #### Scenario: Alias
-- **WHEN** se parsea `type Id = Int32;`
-- **THEN** se produce una declaración de alias
+- **WHEN** `type Id = Int32;` is parsed
+- **THEN** an alias declaration is produced
 
-### Requirement: Fase 3 todavía no parsea el tipo función final
+### Requirement: Phase 3 does not yet parse the final function type
 
-El parser de Fase 3 NO SHALL aceptar todavía la sintaxis final
-`Function(Int32, Int32) => Int32` ni su alias `Fn(Int32, Int32) => Int32`.
+Phase 3's parser SHALL NOT yet accept the final syntax
+`Function(Int32, Int32) => Int32` nor its alias `Fn(Int32, Int32) => Int32`.
 
-Es una restricción temporal del compilador de Fase 3. La sintaxis, compatibilidad
-por firma y escape final ya están decididos en el checkpoint canónico.
+This is a temporary restriction of the Phase 3 compiler. The syntax, signature
+compatibility, and final escape are already decided in the canonical
+checkpoint.
 
-#### Scenario: Tipo función en una anotación
-- **WHEN** se parsea una anotación de tipo con la forma de una firma de función
-- **THEN** se emite un diagnóstico indicando que los tipos función llegan en una fase posterior
+#### Scenario: Function type in an annotation
+- **WHEN** a type annotation with the shape of a function signature is parsed
+- **THEN** a diagnostic indicating that function types arrive in a later phase is emitted
 
-#### Scenario: El lambda como expresión no cambia
-- **WHEN** se parsea `(a: Int32): Int32 => a + 1` en posición de valor
-- **THEN** se produce un lambda, igual que en la fase anterior
+#### Scenario: The lambda as an expression does not change
+- **WHEN** `(a: Int32): Int32 => a + 1` is parsed in value position
+- **THEN** a lambda is produced, the same as in the previous phase
 
-### Requirement: Sintaxis de casts
+### Requirement: Cast syntax
 
-El parser SHALL reconocer la forma postfija `expr as T` y la prefija `<T>expr`, según `ZIRK_LANGUAGE_SPEC.md` sección 11.
+The parser SHALL recognize the postfix form `expr as T` and the prefix form `<T>expr`, per `ZIRK_LANGUAGE_SPEC.md` section 11.
 
-#### Scenario: Cast postfijo
-- **WHEN** se parsea `mut v = source as String;`
-- **THEN** se produce una conversión al tipo nombrado
+#### Scenario: Postfix cast
+- **WHEN** `mut v = source as String;` is parsed
+- **THEN** a conversion to the named type is produced
 
-#### Scenario: Cast prefijo
-- **WHEN** se parsea `mut v = <String>source;`
-- **THEN** se produce la misma conversión que la forma postfija
+#### Scenario: Prefix cast
+- **WHEN** `mut v = <String>source;` is parsed
+- **THEN** the same conversion as the postfix form is produced
 
-#### Scenario: Cast que reinterpreta memoria
-- **WHEN** se parsea un cast que exige `unsafe`
-- **THEN** se emite un diagnóstico indicando que el nivel bajo llega en una fase posterior
+#### Scenario: Cast that reinterprets memory
+- **WHEN** a cast that requires `unsafe` is parsed
+- **THEN** a diagnostic indicating that the low-level tier arrives in a later phase is emitted
 
-### Requirement: Literales de anchos enteros y `Float`
+### Requirement: Integer-width and `Float` literals
 
-La gramática SHALL reconocer un literal entero como cualquiera de los anchos con o sin signo cuando el contexto lo determina, y un literal fraccionario (con notación científica opcional) como `Float`, ambos con `_` como separador visual.
+The grammar SHALL recognize an integer literal as any of the signed or unsigned widths when the context determines it, and a fractional literal (with optional scientific notation) as `Float`, both with `_` as a visual separator.
 
-#### Scenario: Separador visual en un literal ancho
-- **WHEN** se escribe `1_000_000`
-- **THEN** se lexea como el entero `1000000`
+#### Scenario: Visual separator in a wide literal
+- **WHEN** `1_000_000` is written
+- **THEN** it is lexed as the integer `1000000`
 
-#### Scenario: Notación científica
-- **WHEN** se escribe `1e2`
-- **THEN** se lexea como un literal `Float` de valor `100.0`
+#### Scenario: Scientific notation
+- **WHEN** `1e2` is written
+- **THEN** it is lexed as a `Float` literal with value `100.0`
 
-### Requirement: Literal `Char`
+### Requirement: `Char` literal
 
-La gramática SHALL reconocer un literal `Char` delimitado por comillas simples, capaz de contener un grapheme Unicode extendido de más de un code point.
+The grammar SHALL recognize a `Char` literal delimited by single quotes, capable of containing an extended Unicode grapheme of more than one code point.
 
-#### Scenario: Literal de un carácter ASCII
-- **WHEN** se escribe `'a'`
-- **THEN** se lexea como un literal `Char`
+#### Scenario: Literal of an ASCII character
+- **WHEN** `'a'` is written
+- **THEN** it is lexed as a `Char` literal
 
-#### Scenario: Delimitador sin cerrar
-- **WHEN** un literal `Char` no tiene su comilla de cierre antes del fin de línea
-- **THEN** se emite un diagnóstico léxico
+#### Scenario: Unclosed delimiter
+- **WHEN** a `Char` literal does not have its closing quote before the end of the line
+- **THEN** a lexical diagnostic is emitted
 
-### Requirement: Operadores bitwise y de shift
+### Requirement: Bitwise and shift operators
 
-La gramática SHALL reconocer `&`, `|`, `^`, `~`, `<<`, `>>` como operadores binarios (`~` unario), en los niveles de precedencia que `ZIRK_LANGUAGE_SPEC.md` fija para ellos, distintos de los lógicos `&&`/`||`.
+The grammar SHALL recognize `&`, `|`, `^`, `~`, `<<`, `>>` as binary operators (`~` unary), at the precedence levels `ZIRK_LANGUAGE_SPEC.md` fixes for them, distinct from the logical `&&`/`||`.
 
-#### Scenario: Precedencia distinta de la lógica
-- **WHEN** se escribe una expresión que combina `&` con `&&`
-- **THEN** se parsea según la precedencia de cada operador, no como si fueran el mismo
+#### Scenario: Precedence distinct from the logical one
+- **WHEN** an expression combining `&` with `&&` is written
+- **THEN** it is parsed according to the precedence of each operator, not as if they were the same
 
-### Requirement: Interpolación en literales de `String`
+### Requirement: Interpolation in `String` literals
 
-La gramática SHALL reconocer `{expr}` dentro de un literal de `String` como una expresión interpolada, con `\{` como escape para una llave literal.
+The grammar SHALL recognize `{expr}` within a `String` literal as an interpolated expression, with `\{` as the escape for a literal brace.
 
-#### Scenario: Interpolación simple
-- **WHEN** se escribe `"Hola, {nombre}"`
-- **THEN** se parsea como texto literal más una expresión interpolada `nombre`
+#### Scenario: Simple interpolation
+- **WHEN** `"Hello, {name}"` is written
+- **THEN** it is parsed as literal text plus an interpolated expression `name`
 
-#### Scenario: Llave escapada
-- **WHEN** se escribe `"\{no interpolado\}"`
-- **THEN** se parsea como texto literal con llaves, sin expresión interpolada
+#### Scenario: Escaped brace
+- **WHEN** `"\{not interpolated\}"` is written
+- **THEN** it is parsed as literal text with braces, with no interpolated expression
 
 ### Requirement: Index expression grammar
 

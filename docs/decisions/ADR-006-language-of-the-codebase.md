@@ -1,18 +1,18 @@
-# ADR-006 — El proyecto se escribe en inglés
+# ADR-006 — The project is written in English
 
-- **Estado:** aceptada
-- **Fecha:** 13 de agosto de 2026
-- **Fase:** 1
+- **Status:** accepted
+- **Date:** August 13, 2026
+- **Phase:** 1
 
-## Contexto
+## Context
 
-Ninguno de los cinco documentos normativos define **en qué idioma** se emiten los mensajes del compilador. La ambigüedad pasó desapercibida hasta que la Fase 1 empezó a producir diagnósticos reales.
+None of the five normative documents defines **what language** the compiler's messages are emitted in. The ambiguity went unnoticed until Phase 1 started producing real diagnostics.
 
-El proyecto está documentado en español, y los primeros diagnósticos se escribieron en español por continuidad. Pero el idioma de la documentación interna y el de la salida del compilador son decisiones distintas: la primera afecta a quien desarrolla Zirk, la segunda a quien lo usa.
+The project was documented in Spanish, and the first diagnostics were written in Spanish for continuity. But the language of the internal documentation and the language of the compiler's output are different decisions: the first affects whoever develops Zirk, the second affects whoever uses it.
 
-### La complicación
+### The complication
 
-`ZIRK_COMPILER_SPEC.md` sección 8 fija el formato mínimo con este ejemplo:
+`ZIRK_COMPILER_SPEC.md` section 8 fixes the minimal format with this example:
 
 ```text
 error[E1234]: descripción precisa
@@ -25,25 +25,28 @@ error[E1234]: descripción precisa
    = ayuda: acción concreta
 ```
 
-Las etiquetas aparecen en español. Caben dos lecturas:
+The labels appear in Spanish. Two readings are possible:
 
-1. **`causa:` y `ayuda:` son cadenas normativas** que la implementación debe emitir literalmente.
-2. **El ejemplo es prosa ilustrativa** que describe la *estructura* —severidad, código, ubicación, causa, ayuda— usando el mismo idioma que el resto del documento.
+1. **`causa:` and `ayuda:` are normative strings** that the implementation must emit literally.
+2. **The example is illustrative prose** describing the *structure* — severity, code, location, cause, help — using the same language as the rest of the document.
 
-## Decisión
+## Decision
 
-**El proyecto se escribe en inglés.** Esto cubre:
+**The project is written in English.** This covers:
 
-- las **cinco specs normativas** de `docs/`;
-- el **roadmap** y el **prompt de arranque** de `docs/init/`;
-- **identificadores de código**: funciones, variables, tipos, constantes y nombres de test;
-- **comentarios y documentación de código** (`//`, `///`, `//!`);
-- mensajes, causas, ayudas, las etiquetas del formato y la salida de la CLI;
-- los scripts del repositorio.
+- the **five normative specs** in `docs/`;
+- the **roadmap** and the **agent-startup prompt** in `docs/init/`;
+- **code identifiers**: functions, variables, types, constants, and test names;
+- **comments and code documentation** (`//`, `///`, `//!`);
+- messages, causes, help text, format labels, and CLI output;
+- the repository's scripts;
+- **every OpenSpec change artifact** (`proposal.md`, `design.md`, `specs/**/*.md`, `tasks.md`), regardless of the language the change was requested in: they become `openspec/specs/`, which is normative;
+- **`README.md` and `CONTRIBUTING.md`**: they are the project's first public surface, the one anyone reads before deciding whether to contribute, and they follow the same logic that already motivated the rest of this decision — see "Rationale" below;
+- **every ADR under `docs/decisions/`, including this one, and `docs/TOOLCHAIN.md`**: once `README.md`, `CONTRIBUTING.md`, and the OpenSpec artifacts moved to English, keeping the decision record itself in Spanish was the last piece of the boundary still drawn in the wrong place — see the fourth correction under "How we got here."
 
-Se adopta la **segunda lectura** del spec: el ejemplo es ilustrativo. Lo normativo es que existan una causa y una ayuda, no las palabras con las que se rotulan. El resto del documento está en español porque el documento está en español, no porque el compilador deba hablar español.
+The **second reading** of the spec is adopted: the example is illustrative. What is normative is that a cause and a help exist, not the words used to label them. The rest of that document is in Spanish because the document itself is in Spanish, not because the compiler must speak Spanish.
 
-Las etiquetas quedan:
+The labels become:
 
 ```text
 error[E0308]: incompatible types
@@ -56,44 +59,49 @@ error[E0308]: incompatible types
   = help: use Int32.parse("cuarenta") to convert at runtime
 ```
 
-### Qué **no** cambia
+### What does **not** change
 
-Sigue en español la documentación de trabajo *alrededor* del proyecto, la que registra cómo se construye y por qué, y no lo que Zirk es:
+Only the record of *what actually happened, in the order it happened* stays in Spanish: git commit messages. Rewriting past commit messages would mean rewriting git history, which this ADR does not do and does not ask for; new commits keep following the Spanish convention in `CONTRIBUTING.md` unless a future decision says otherwise.
 
-- los ADRs, incluido este;
-- `README.md`, `CONTRIBUTING.md` y `docs/TOOLCHAIN.md`;
-- los artefactos de OpenSpec y los mensajes de commit.
+The boundary is now as simple as it can be: **everything that is a document, a spec, a decision record, or an artifact of this repository is written in English. Only the historical, unchangeable record of past commits stays in Spanish.**
 
-La frontera: **lo que define Zirk va en inglés; lo que registra cómo lo estamos construyendo va en español.**
+### How we got here
 
-### Cómo llegamos acá
+This ADR has been corrected four times, and it's worth keeping all four corrections written down because they show where the boundary was misplaced:
 
-Este ADR se corrigió dos veces, y las dos correcciones vale dejarlas escritas porque muestran dónde estaba mal puesta la frontera:
+1. **First version:** only the diagnostics in English, with the boundary drawn at "what a Zirk user sees versus what a Zirk builder sees." It failed because an external contributor reads the code before any document: `sincronizar()` is as real an entry barrier as a translated error message.
 
-1. **Primera versión:** solo los diagnósticos en inglés, con la frontera en "lo que ve quien usa Zirk contra lo que ve quien lo construye". Falló porque un contribuyente externo lee el código antes que cualquier documento: `sincronizar()` es una barrera de entrada tan real como un mensaje de error traducido.
+2. **Second version:** the code too, with the boundary at "code versus document." It failed because the normative specs **are not documentation of the project: they are the definition of the language**. Anyone who wants to understand Zirk reads them before the code, and they are the most public artifact the project has.
 
-2. **Segunda versión:** además el código, con la frontera en "código contra documento". Falló porque las specs normativas **no son documentación del proyecto: son la definición del lenguaje**. Alguien que quiera entender Zirk las lee antes que el código, y son el artefacto más público que el proyecto tiene.
+3. **Third version:** `README.md`, `CONTRIBUTING.md`, and the OpenSpec artifacts too. It failed for the same reason as the first two: it still treated as "internal Spanish documentation" the two documents an external contributor reads **first**, before any spec, and the artifacts that become specs (`openspec/specs/`) the moment a change is archived. Keeping them in Spanish protected nothing Phase 1 cared about protecting — it just repeated, at the project's own front door, the same mistake the translated diagnostic had already made.
 
-## Motivo
+4. **Fourth version (this one):** the ADRs themselves, `docs/decisions/README.md`, and `docs/TOOLCHAIN.md`. Keeping the decision record in Spanish while everything it decides on is in English produced the same asymmetry one level up: a contributor who reads a translated spec, a translated README, and a translated OpenSpec proposal, and then opens the ADR that explains *why*, hit a language switch at exactly the document meant to be the most durable and most referenced of all. There is no longer a "documentation about the project" category that is exempt: the only thing that stays in Spanish is what cannot be rewritten without rewriting history itself.
 
-Es el estándar de facto del ecosistema. Rust, Go, Zig, Swift, TypeScript y Clang emiten diagnósticos en inglés, y sus usuarios —incluidos los hispanohablantes— buscan esos mensajes en inglés cuando algo falla. Un diagnóstico en español no tiene resultados en Stack Overflow ni en la documentación de nadie.
+## Rationale
 
-También afecta al futuro del proyecto:
+It is the ecosystem's de facto standard. Rust, Go, Zig, Swift, TypeScript, and Clang emit diagnostics in English, and their users — including Spanish speakers — look those messages up in English when something fails. A diagnostic in Spanish has no results on Stack Overflow or in anyone's documentation.
 
-- `ZIRK_COMPILER_SPEC.md` sección 9 exige salida estructurada (`--json`) para herramientas. Un LSP, un linter o un CI que consuman esos mensajes esperan inglés.
-- Un compilador que habla español acota su base de contribuyentes y de usuarios sin ganar nada a cambio.
+It also affects the project's future:
 
-## Alternativas descartadas
+- `ZIRK_COMPILER_SPEC.md` section 9 requires structured output (`--json`) for tooling. An LSP, a linter, or a CI that consumes those messages expects English.
+- A compiler that speaks Spanish narrows its base of contributors and users without gaining anything in return.
 
-**Español, por coherencia con la documentación.** Coherente hacia adentro, hostil hacia afuera. Confunde dos audiencias que no son la misma.
+## Alternatives considered
 
-**Diagnósticos traducibles con selección de idioma.** Es lo que hace `rustc` con `--error-format` y traducciones parciales, y es trabajo real: catálogo de mensajes, parametrización, y el riesgo de que las traducciones queden desfasadas de los códigos. No corresponde a la Fase 1, y este ADR no lo impide: los códigos estables son justamente el gancho que lo haría posible más adelante.
+**Spanish, for consistency with the documentation.** Internally consistent, externally hostile. It confuses two audiences that are not the same.
 
-## Consecuencias
+**Translatable diagnostics with language selection.** This is what `rustc` does with `--error-format` and partial translations, and it is real work: a message catalog, parametrization, and the risk that translations drift out of sync with the codes. It does not belong in Phase 1, and this ADR does not block it: the stable codes are exactly the hook that would make it possible later.
 
-- Todos los mensajes, identificadores, comentarios y nombres de test del workspace se traducen.
-- Las etiquetas de `zirk-diagnostics` pasan a `cause:` y `help:`.
-- Los códigos de diagnóstico se renombran a inglés: `TOKEN_INESPERADO` → `UNEXPECTED_TOKEN`, `CADENA_SIN_CERRAR` → `UNTERMINATED_STRING`, etc. Los **códigos estables** (`E0301`, `E0202`) no cambian: son el contrato con herramientas y documentación.
-- Los archivos de test se renombran: `lexico.rs` → `lexical.rs`, `gramatica.rs` → `grammar.rs`.
-- `ZIRK_COMPILER_SPEC.md` sección 8 ya usa las etiquetas reales `cause:` y `help:`, así que la ambigüedad que originó este ADR desapareció.
-- `docs/init/ZIRK_AGENT_PROMPT.md` abre declarando esta regla, para que cualquier agente que retome el proyecto la lea antes que cualquier otra cosa.
+## Consequences
+
+- Every message, identifier, comment, and test name in the workspace is translated.
+- `zirk-diagnostics`'s labels become `cause:` and `help:`.
+- Diagnostic codes are renamed to English: `TOKEN_INESPERADO` → `UNEXPECTED_TOKEN`, `CADENA_SIN_CERRAR` → `UNTERMINATED_STRING`, etc. The **stable codes** (`E0301`, `E0202`) do not change: they are the contract with tools and documentation.
+- Test files are renamed: `lexico.rs` → `lexical.rs`, `gramatica.rs` → `grammar.rs`.
+- `ZIRK_COMPILER_SPEC.md` section 8 already uses the real `cause:` and `help:` labels, so the ambiguity that originated this ADR is gone.
+- `docs/init/ZIRK_AGENT_PROMPT.md` opens by stating this rule, so any agent picking up the project reads it before anything else.
+- `README.md` and `CONTRIBUTING.md` were fully translated into English; `docs/init/ZIRK_AGENT_PROMPT.md` and the "Language" section of `CONTRIBUTING.md` were updated to no longer list them as a Spanish exception.
+- Every OpenSpec change's artifacts (`proposal.md`, `design.md`, `specs/**/*.md`, `tasks.md`) are written in English from creation; `openspec/config.yaml` codifies this rule so it applies even when the change was requested in Spanish.
+- Every ADR under `docs/decisions/` (including this one), `docs/decisions/README.md`, `docs/decisions/proximos-pasos-fase-4.md`, `docs/decisions/2026-08-20-auditoria-documentacion-y-specs.md`, and `docs/TOOLCHAIN.md` are translated into English.
+- Every archived OpenSpec change under `openspec/changes/archive/` is translated into English, and every archived change folder whose name was in Spanish is renamed to its English equivalent (e.g. `2026-08-19-fase-3-objects-and-type-system` → `2026-08-19-phase-3-objects-and-type-system`), with every in-repo cross-reference to the old name updated in the same pass.
+- Commit messages remain the only Spanish-language artifact in the repository going forward, by convention in `CONTRIBUTING.md`; past commit messages are not and cannot be rewritten.

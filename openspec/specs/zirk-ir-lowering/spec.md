@@ -6,245 +6,245 @@ Defines the typed intermediate representation and its generation from the verifi
 
 The IR is the boundary that gets distributed inside a `.zpkg`, so its form is a contract. See `docs/decisions/ADR-007-forma-de-la-ir.md`.
 ## Requirements
-### Requirement: IR tipada
+### Requirement: Typed IR
 
-La representación intermedia SHALL ser tipada: toda operación y todo valor conocen su tipo, según `ZIRK_COMPILER_SPEC.md` sección 4.
+The intermediate representation SHALL be typed: every operation and every value know their type, per `ZIRK_COMPILER_SPEC.md` section 4.
 
-#### Scenario: Tipo de todo valor
-- **WHEN** se inspecciona cualquier valor de la IR
-- **THEN** expone su tipo
+#### Scenario: Type of every value
+- **WHEN** any IR value is inspected
+- **THEN** it exposes its type
 
-#### Scenario: Operación con operandos incompatibles
-- **WHEN** se construye una operación cuyos operandos no coinciden con su firma
-- **THEN** la construcción falla y NO produce IR inválida
+#### Scenario: Operation with incompatible operands
+- **WHEN** an operation whose operands do not match its signature is constructed
+- **THEN** the construction fails and does NOT produce invalid IR
 
-### Requirement: Forma de bloques básicos
+### Requirement: Basic-block form
 
-La IR SHALL representar el cuerpo de cada función como un grafo de bloques básicos, cada uno terminado por exactamente una instrucción de terminación. El grafo SHALL admitir ciclos, producidos por el lowering de bucles.
+The IR SHALL represent the body of each function as a graph of basic blocks, each terminated by exactly one terminator instruction. The graph SHALL support cycles, produced by the lowering of loops.
 
-Es lo que permite el análisis de flujo que `ZIRK_COMPILER_SPEC.md` sección 4 exige, y la forma que Fase 1 (ADR-007) ya anticipó pensando en los bucles de esta fase.
+This is what enables the flow analysis that `ZIRK_COMPILER_SPEC.md` section 4 requires, and the form that Phase 1 (ADR-007) already anticipated with this phase's loops in mind.
 
-#### Scenario: Bloque con terminador único
-- **WHEN** se inspecciona cualquier bloque básico
-- **THEN** termina en salto, salto condicional o retorno
-- **AND** no contiene instrucciones de terminación en posición intermedia
+#### Scenario: Block with a single terminator
+- **WHEN** any basic block is inspected
+- **THEN** it ends in a jump, conditional jump, or return
+- **AND** it contains no terminator instructions in an intermediate position
 
-#### Scenario: Condicional
-- **WHEN** se baja una sentencia `if` con ambas ramas
-- **THEN** se producen bloques para la condición, cada rama y la continuación
-- **AND** el bloque de la condición termina en salto condicional
+#### Scenario: Conditional
+- **WHEN** an `if` statement with both branches is lowered
+- **THEN** blocks are produced for the condition, each branch, and the continuation
+- **AND** the condition block ends in a conditional jump
 
-#### Scenario: Bucle
-- **WHEN** se baja un `while`, `loop` o `for`
-- **THEN** se produce un bloque de condición o cuerpo que salta de vuelta a sí mismo o a un bloque anterior
-- **AND** el grafo de bloques resultante contiene un ciclo
+#### Scenario: Loop
+- **WHEN** a `while`, `loop`, or `for` is lowered
+- **THEN** a condition or body block is produced that jumps back to itself or to an earlier block
+- **AND** the resulting block graph contains a cycle
 
-### Requirement: Independencia del modelo de memoria
+### Requirement: Independence from the memory model
 
-La IR NO SHALL expresar operaciones ligadas a una estrategia de memoria concreta. La alocación se expresa de forma abstracta y la resuelve el runtime. Esto incluye la alocación del entorno de captura de una closure.
+The IR SHALL NOT express operations tied to a concrete memory strategy. Allocation is expressed abstractly and resolved by the runtime. This includes the allocation of a closure's capture environment.
 
-Es requisito directo de `docs/decisions/ADR-003-memoria.md`.
+This is a direct requirement of `docs/decisions/ADR-003-memoria.md`.
 
-#### Scenario: Operación de alocación
-- **WHEN** la IR necesita expresar que un valor se aloca
-- **THEN** usa una operación abstracta que nombra el tipo
-- **AND** NO nombra `malloc`, recuento de referencias ni recolección de basura
+#### Scenario: Allocation operation
+- **WHEN** the IR needs to express that a value is allocated
+- **THEN** it uses an abstract operation that names the type
+- **AND** it does NOT name `malloc`, reference counting, or garbage collection
 
-#### Scenario: Alocación del entorno de una closure
-- **WHEN** se baja una lambda que captura variables del scope envolvente
-- **THEN** el entorno de captura se aloca con la misma operación abstracta que cualquier otro tipo
-- **AND** la IR no nombra dónde vive ese entorno en memoria
+#### Scenario: Allocation of a closure's environment
+- **WHEN** a lambda that captures variables from the enclosing scope is lowered
+- **THEN** the capture environment is allocated with the same abstract operation as any other type
+- **AND** the IR does not name where that environment lives in memory
 
-### Requirement: Variables locales como slots
+### Requirement: Local variables as slots
 
-Las variables locales SHALL representarse como slots con operaciones de carga y almacenamiento, sin forma SSA propia.
+Local variables SHALL be represented as slots with load and store operations, without their own SSA form.
 
-La promoción a registros se delega al backend. SSA propia no paga hasta que existan optimizaciones propias.
+Promotion to registers is delegated to the backend. A dedicated SSA form does not pay off until dedicated optimizations exist.
 
-#### Scenario: Lectura y escritura de una local
-- **WHEN** se baja el uso de una variable local
-- **THEN** se produce una carga desde su slot
-- **AND** una asignación produce un almacenamiento en ese slot
+#### Scenario: Reading and writing a local
+- **WHEN** the use of a local variable is lowered
+- **THEN** a load from its slot is produced
+- **AND** an assignment produces a store to that slot
 
-### Requirement: Trazabilidad al source
+### Requirement: Traceability to the source
 
-Toda instrucción de la IR SHALL conservar la ubicación del source que la originó.
+Every IR instruction SHALL retain the source location that originated it.
 
-Sin ella no es posible el mapeo fiel a `.zrk` que `ZIRK_COMPILER_SPEC.md` sección 11 exige del debugger.
+Without it, the faithful mapping to `.zrk` that `ZIRK_COMPILER_SPEC.md` section 11 requires of the debugger is not possible.
 
-#### Scenario: Ubicación de una instrucción
-- **WHEN** se inspecciona cualquier instrucción de la IR
-- **THEN** expone la ubicación del source correspondiente
+#### Scenario: Location of an instruction
+- **WHEN** any IR instruction is inspected
+- **THEN** it exposes the corresponding source location
 
-### Requirement: Lowering desde el árbol verificado
+### Requirement: Lowering from the verified tree
 
-La generación de IR SHALL partir del árbol ya resuelto y verificado, no del árbol crudo del parser.
+IR generation SHALL start from the already-resolved and verified tree, not from the parser's raw tree.
 
-#### Scenario: Entrada al lowering
-- **WHEN** se genera IR
-- **THEN** la entrada tiene los nombres resueltos y los tipos verificados
-- **AND** el lowering NO vuelve a chequear tipos
+#### Scenario: Input to lowering
+- **WHEN** IR is generated
+- **THEN** the input has resolved names and verified types
+- **AND** lowering does NOT re-check types
 
-### Requirement: Lowering de bucles y de `break`/`continue`
+### Requirement: Lowering of loops and of `break`/`continue`
 
-El lowering SHALL traducir `for`, `for ... in`, `while` y `loop` a bloques básicos con la condición evaluada en su propio bloque, y SHALL traducir `break`/`continue` a un salto directo al bloque de continuación o al bloque de condición del bucle que los contiene.
+Lowering SHALL translate `for`, `for ... in`, `while`, and `loop` into basic blocks with the condition evaluated in its own block, and SHALL translate `break`/`continue` into a direct jump to the continuation block or to the condition block of the loop that contains them.
 
 #### Scenario: `while`
-- **WHEN** se baja `while cond { cuerpo }`
-- **THEN** se produce un bloque de condición, un bloque de cuerpo y un bloque de continuación
-- **AND** el bloque de cuerpo termina saltando de vuelta al bloque de condición
+- **WHEN** `while cond { body }` is lowered
+- **THEN** a condition block, a body block, and a continuation block are produced
+- **AND** the body block ends by jumping back to the condition block
 
 #### Scenario: `break`
-- **WHEN** se baja un `break` dentro de un bucle
-- **THEN** se produce un salto directo al bloque de continuación de ese bucle
+- **WHEN** a `break` inside a loop is lowered
+- **THEN** a direct jump to that loop's continuation block is produced
 
 #### Scenario: `continue`
-- **WHEN** se baja un `continue` dentro de un `for`
-- **THEN** se produce un salto directo al bloque de incremento del `for`, no al de condición
+- **WHEN** a `continue` inside a `for` is lowered
+- **THEN** a direct jump to the `for`'s increment block is produced, not to the condition block
 
-#### Scenario: Bucles anidados
-- **WHEN** un `break` está dentro de un bucle interno, anidado en uno externo
-- **THEN** el salto producido apunta a la continuación del bucle interno, no del externo
+#### Scenario: Nested loops
+- **WHEN** a `break` is inside an inner loop, nested within an outer one
+- **THEN** the resulting jump targets the continuation of the inner loop, not the outer one
 
-### Requirement: Lowering de `if` como expresión
+### Requirement: Lowering of `if` as an expression
 
-El lowering SHALL traducir un `if`/`else` en posición de expresión a bloques cuyo bloque de continuación recibe el valor de la rama tomada, sin introducir una forma de instrucción distinta de la que ya usa el `if` como sentencia.
+Lowering SHALL translate an `if`/`else` in expression position into blocks whose continuation block receives the value of the branch taken, without introducing an instruction form different from the one already used by `if` as a statement.
 
-#### Scenario: Valor de la rama seleccionada
-- **WHEN** se baja `mut r = if x > 0 { a } else { b };`
-- **THEN** el bloque de continuación produce un valor que proviene del bloque de la rama ejecutada
+#### Scenario: Value of the selected branch
+- **WHEN** `mut r = if x > 0 { a } else { b };` is lowered
+- **THEN** the continuation block produces a value that comes from the block of the executed branch
 
-### Requirement: Lowering de closures
+### Requirement: Lowering of closures
 
-El lowering SHALL traducir una lambda a una función independiente más un valor de entorno con los valores capturados copiados en el punto de creación, y SHALL traducir una llamada a una closure como una llamada indirecta que recibe el entorno como argumento implícito.
+Lowering SHALL translate a lambda into an independent function plus an environment value with the captured values copied at the point of creation, and SHALL translate a call to a closure as an indirect call that receives the environment as an implicit argument.
 
-#### Scenario: Creación de una closure
-- **WHEN** se baja `inmut ADD = (a: Int32, b: Int32): Int32 => a + b;` sin capturas
-- **THEN** se produce una función independiente y un valor de closure sin entorno o con entorno vacío
+#### Scenario: Creation of a closure
+- **WHEN** `inmut ADD = (a: Int32, b: Int32): Int32 => a + b;` is lowered with no captures
+- **THEN** an independent function and a closure value with no environment or with an empty environment are produced
 
-#### Scenario: Closure con captura
-- **WHEN** una lambda referencia una variable del scope envolvente
-- **THEN** el entorno alocado contiene una copia de esa variable en el momento de la creación
-- **AND** el cuerpo de la función bajada lee la variable desde el entorno, no desde el slot original
+#### Scenario: Closure with capture
+- **WHEN** a lambda references a variable from the enclosing scope
+- **THEN** the allocated environment contains a copy of that variable at the time of creation
+- **AND** the body of the lowered function reads the variable from the environment, not from the original slot
 
-### Requirement: Lowering de `match`
+### Requirement: Lowering of `match`
 
-El lowering SHALL traducir un `match` a una secuencia de comparaciones sobre el discriminante del `enum` (o sobre el valor, para literales), cada una con salto condicional a su bloque de brazo, terminando en el bloque del comodín `_` si existe.
+Lowering SHALL translate a `match` into a sequence of comparisons on the `enum`'s discriminant (or on the value, for literals), each with a conditional jump to its arm block, ending in the `_` wildcard block if one exists.
 
-#### Scenario: `match` sobre `enum`
-- **WHEN** se baja un `match` con un brazo por cada constructor
-- **THEN** se produce un bloque de comparación por constructor y un bloque por cada cuerpo de brazo
+#### Scenario: `match` on an `enum`
+- **WHEN** a `match` with one arm per constructor is lowered
+- **THEN** one comparison block per constructor and one block per arm body are produced
 
-#### Scenario: `match` como expresión
-- **WHEN** se baja un `match` usado como expresión
-- **THEN** cada bloque de brazo termina saltando a un bloque de continuación común que recibe el valor de ese brazo
+#### Scenario: `match` as an expression
+- **WHEN** a `match` used as an expression is lowered
+- **THEN** each arm block ends by jumping to a common continuation block that receives the value of that arm
 
-### Requirement: Lowering de coalescencia nula
+### Requirement: Lowering of null coalescing
 
-El lowering SHALL traducir `a ?? b` a una comprobación explícita de nulidad con dos bloques, que produce `a` cuando no es nulo y evalúa `b` en el otro bloque.
+Lowering SHALL translate `a ?? b` into an explicit nullity check with two blocks, which produces `a` when it is not null and evaluates `b` in the other block.
 
-#### Scenario: Comprobación con dos bloques
-- **WHEN** se baja `a ?? b`
-- **THEN** se produce una comprobación de nulidad sobre `a` con un bloque por cada resultado
+#### Scenario: Check with two blocks
+- **WHEN** `a ?? b` is lowered
+- **THEN** a nullity check on `a` is produced, with one block per outcome
 
-#### Scenario: Coalescencia nula evalúa el fallback perezosamente
-- **WHEN** se baja `a ?? costoso()`
-- **THEN** `costoso()` solo se baja dentro del bloque que se ejecuta cuando `a` es nulo
+#### Scenario: Null coalescing evaluates the fallback lazily
+- **WHEN** `a ?? costly()` is lowered
+- **THEN** `costly()` is only lowered inside the block that executes when `a` is null
 
-### Requirement: Lowering de objetos
+### Requirement: Lowering of objects
 
-El lowering SHALL traducir la construcción de un objeto a la operación abstracta de alocación seguida de la inicialización de sus campos, y el acceso a un campo a una lectura por desplazamiento.
+Lowering SHALL translate the construction of an object into the abstract allocation operation followed by the initialization of its fields, and access to a field into a read by offset.
 
-#### Scenario: Construcción
-- **WHEN** se baja `User(1)`
-- **THEN** se emite la alocación abstracta del tipo
-- **AND** el cuerpo del constructor inicializa los campos
+#### Scenario: Construction
+- **WHEN** `User(1)` is lowered
+- **THEN** the abstract allocation of the type is emitted
+- **AND** the constructor's body initializes the fields
 
-#### Scenario: Acceso a un campo
-- **WHEN** se baja `u.id`
-- **THEN** se emite una lectura en el desplazamiento del campo, sin búsqueda por nombre
+#### Scenario: Field access
+- **WHEN** `u.id` is lowered
+- **THEN** a read at the field's offset is emitted, with no lookup by name
 
-### Requirement: Lowering de llamadas a métodos
+### Requirement: Lowering of method calls
 
-El lowering SHALL emitir una llamada directa cuando el método no es redefinible, y una llamada indirecta a través de la tabla del tipo cuando lo es.
+Lowering SHALL emit a direct call when the method is not overridable, and an indirect call through the type's table when it is.
 
-La mayoría de las llamadas son del primer caso, y pagar una indirección por todas ellas sería pagar por una generalidad que el programa no usa.
+Most calls fall into the first case, and paying for an indirection on all of them would mean paying for a generality the program does not use.
 
-#### Scenario: Método no redefinido
-- **WHEN** ninguna subclase redefine el método llamado
-- **THEN** se emite una llamada directa
+#### Scenario: Non-overridden method
+- **WHEN** no subclass overrides the called method
+- **THEN** a direct call is emitted
 
-#### Scenario: Método redefinido
-- **WHEN** alguna subclase lo redefine
-- **THEN** se emite una llamada indirecta a través de la tabla del tipo
+#### Scenario: Overridden method
+- **WHEN** some subclass overrides it
+- **THEN** an indirect call through the type's table is emitted
 
-#### Scenario: Llamada a través de un contrato
-- **WHEN** el receptor tiene el tipo de una interfaz
-- **THEN** se despacha por la tabla de esa interfaz
+#### Scenario: Call through a contract
+- **WHEN** the receiver has the type of an interface
+- **THEN** dispatch happens through that interface's table
 
-### Requirement: Lowering de acceso seguro
+### Requirement: Lowering of safe access
 
-El lowering SHALL traducir `expr?.miembro` a una comprobación explícita de nulidad con dos bloques: el presente accede al miembro y el ausente produce el valor nulo.
+Lowering SHALL translate `expr?.member` into an explicit nullity check with two blocks: the present case accesses the member and the absent case produces the null value.
 
-Reutiliza el mecanismo que `??` introdujo en la fase anterior; lo que llega es el operador, no la maquinaria.
+It reuses the mechanism `??` introduced in the previous phase; what arrives here is the operator, not the machinery.
 
-#### Scenario: Acceso seguro
-- **WHEN** se baja `usuario?.nombre`
-- **THEN** se produce una comprobación de nulidad con un bloque por cada resultado
+#### Scenario: Safe access
+- **WHEN** `user?.name` is lowered
+- **THEN** a nullity check is produced, with one block per outcome
 
-#### Scenario: Encadenado
-- **WHEN** se baja `a?.b?.c`
-- **THEN** cada eslabón comprueba antes de acceder
+#### Scenario: Chained
+- **WHEN** `a?.b?.c` is lowered
+- **THEN** each link checks before accessing
 
-### Requirement: Especialización de genéricos
+### Requirement: Generic specialization
 
-El lowering SHALL producir una función por combinación de argumentos de tipo usada, y reutilizarla cuando la combinación se repite.
+Lowering SHALL produce one function per combination of type arguments used, and reuse it when the combination repeats.
 
-#### Scenario: Una copia por combinación
-- **WHEN** una función genérica se usa con dos combinaciones distintas
-- **THEN** la IR contiene dos funciones
+#### Scenario: One copy per combination
+- **WHEN** a generic function is used with two distinct combinations
+- **THEN** the IR contains two functions
 
-#### Scenario: Sin duplicados
-- **WHEN** la misma combinación se usa varias veces
-- **THEN** la IR contiene una sola función para ella
+#### Scenario: No duplicates
+- **WHEN** the same combination is used multiple times
+- **THEN** the IR contains a single function for it
 
-### Requirement: Tipo entero parametrizado por ancho y señal en la IR
+### Requirement: Integer type parameterized by width and signedness in the IR
 
-La IR SHALL representar cada tipo entero con un único tipo parametrizado por ancho y señal, no con una variante distinta por ancho, de forma que una instrucción aritmética o de conversión existente siga siendo válida para cualquier ancho sin duplicarse.
+The IR SHALL represent each integer type with a single type parameterized by width and signedness, not with a distinct variant per width, so that an existing arithmetic or conversion instruction remains valid for any width without being duplicated.
 
-#### Scenario: Instrucción aritmética independiente del ancho
-- **WHEN** se baja una suma entre dos operandos `Int8`
-- **THEN** se emite la misma forma de instrucción que para `Int32`, con el ancho como dato del tipo, no una instrucción distinta
+#### Scenario: Arithmetic instruction independent of width
+- **WHEN** an addition between two `Int8` operands is lowered
+- **THEN** the same instruction form as for `Int32` is emitted, with the width as data of the type, not a distinct instruction
 
-### Requirement: Comprobación de overflow por ancho y señal
+### Requirement: Overflow check per width and signedness
 
-El lowering SHALL emitir la comprobación de overflow correspondiente al ancho y la señal del tipo entero de la operación, reutilizando el mecanismo que la Fase 1 estableció para `Int32`.
+Lowering SHALL emit the overflow check corresponding to the width and signedness of the operation's integer type, reusing the mechanism Phase 1 established for `Int32`.
 
-#### Scenario: Overflow comprobado en un ancho angosto
-- **WHEN** se baja una operación aritmética sobre `Int8`
-- **THEN** la IR incluye la comprobación de overflow para ese ancho, no la de `Int32`
+#### Scenario: Overflow checked at a narrow width
+- **WHEN** an arithmetic operation on `Int8` is lowered
+- **THEN** the IR includes the overflow check for that width, not the one for `Int32`
 
-### Requirement: `NaN` como fallo controlado, no como valor propagado
+### Requirement: `NaN` as a controlled failure, not as a propagated value
 
-El lowering de una operación de `Float` que puede producir `NaN` bajo la semántica del backend SHALL incluir la comprobación que la convierte en un fallo controlado antes de que el valor se use.
+Lowering of a `Float` operation that can produce `NaN` under the backend's semantics SHALL include the check that turns it into a controlled failure before the value is used.
 
-#### Scenario: División de punto flotante potencialmente indeterminada
-- **WHEN** se baja `a / b` sobre `Float64` sin que el checker pueda descartar `a == 0.0 && b == 0.0`
-- **THEN** la IR incluye la comprobación correspondiente antes de producir el resultado
+#### Scenario: Potentially indeterminate floating-point division
+- **WHEN** `a / b` on `Float64` is lowered without the checker being able to rule out `a == 0.0 && b == 0.0`
+- **THEN** the IR includes the corresponding check before producing the result
 
-### Requirement: Desazúcar de la conversión contextual profunda
+### Requirement: Desugaring of deep contextual conversion
 
-El lowering SHALL insertar la conversión de cada operando de un árbol de operadores contextual antes de bajar la operación misma, en vez de bajar la operación con su tipo original y convertir el resultado después.
+Lowering SHALL insert the conversion of each operand of a contextual operator tree before lowering the operation itself, instead of lowering the operation with its original type and converting the result afterward.
 
-#### Scenario: División bajada con el contexto ya aplicado
-- **WHEN** se baja `Float(3 / 4)`
-- **THEN** los operandos de la división ya son `Float64` en la IR resultante, no `Int32` convertidos después
+#### Scenario: Division lowered with the context already applied
+- **WHEN** `Float(3 / 4)` is lowered
+- **THEN** the operands of the division are already `Float64` in the resulting IR, not `Int32` converted afterward
 
-### Requirement: Desazúcar de la interpolación de strings
+### Requirement: Desugaring of string interpolation
 
-El lowering SHALL desazucarar un literal con expresiones interpoladas en una secuencia de llamadas a `to_string()` concatenadas con el texto literal, en el orden de aparición.
+Lowering SHALL desugar a literal with interpolated expressions into a sequence of calls to `to_string()` concatenated with the literal text, in order of appearance.
 
-#### Scenario: Interpolación con una expresión
-- **WHEN** se baja `"Hola, {nombre}"`
-- **THEN** la IR resultante llama a `to_string()` sobre `nombre` y concatena con el texto literal
+#### Scenario: Interpolation with one expression
+- **WHEN** `"Hello, {name}"` is lowered
+- **THEN** the resulting IR calls `to_string()` on `name` and concatenates it with the literal text
 

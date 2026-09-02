@@ -1,39 +1,39 @@
-# ADR-002 — `zirk-runtime` como staticlib de Rust con frontera ABI C
+# ADR-002 — `zirk-runtime` as a Rust staticlib with a C ABI boundary
 
-- **Estado:** aceptada
-- **Fecha:** 12 de agosto de 2026
-- **Fase:** 0
+- **Status:** accepted
+- **Date:** August 12, 2026
+- **Phase:** 0
 
-## Contexto
+## Context
 
-`ZIRK_ROADMAP.md` Fase 1 exige que `stdout.println("...")` llegue a una syscall real, pero no define **dónde vive ese código**. El roadmap tampoco incluye un crate de runtime en el layout propuesto del workspace.
+`ZIRK_ROADMAP.md` Phase 1 requires that `stdout.println("...")` reach a real syscall, but does not define **where that code lives**. The roadmap also does not include a runtime crate in the proposed workspace layout.
 
-Opciones consideradas:
+Options considered:
 
-| Opción | A favor | En contra |
+| Option | For | Against |
 |---|---|---|
-| **(a)** codegen emite `call @puts` / `@printf` de libc | camino más corto al primer binario | deuda que hay que desarmar entera después; el ciclo de vida de la aplicación no tiene dónde vivir |
-| **(b)** crate `zirk-runtime` en Rust compilado a staticlib | fija la frontera ABI C desde el inicio; es el lugar donde después viven scheduler, GC y channels | más trabajo en Fase 1 |
-| **(c)** runtime en C | ABI trivial | pierde todo lo que motivó elegir Rust para el compilador |
+| **(a)** codegen emits libc `call @puts` / `@printf` | shortest path to the first binary | debt that must be entirely dismantled later; there is nowhere for the application lifecycle to live |
+| **(b)** `zirk-runtime` crate in Rust compiled to a staticlib | fixes the C ABI boundary from the start; is the place where scheduler, GC and channels will later live | more work in Phase 1 |
+| **(c)** runtime in C | trivial ABI | loses everything that motivated choosing Rust for the compiler |
 
-## Decisión
+## Decision
 
-Se adopta **(b)**: un crate `zirk-runtime` compilado a `staticlib` (`.a` / `.lib`), enlazado en cada binario que Zirk produce. El codegen emite llamadas a símbolos `extern "C"` estables, por ejemplo `zirk_io_println(ptr, len)`.
+**(b)** is adopted: a `zirk-runtime` crate compiled to `staticlib` (`.a` / `.lib`), linked into every binary Zirk produces. Codegen emits calls to stable `extern "C"` symbols, e.g. `zirk_io_println(ptr, len)`.
 
-`zirk-runtime` es el **noveno crate** del workspace, adicional a los ocho que propone el roadmap.
+`zirk-runtime` is the **ninth crate** of the workspace, in addition to the eight the roadmap proposes.
 
-## Motivo
+## Rationale
 
-El objetivo declarado de Fase 1 es *validar que la arquitectura completa funciona de punta a punta*. Con la opción (a) se valida el pipeline pero **no la arquitectura**: el ciclo de vida normativo de `ZIRK_RUNTIME_SPEC.md` sección 2 (validar permisos → cargar runtime → inicializar globals → `main` → cierre ordenado → flush → exit code) queda sin lugar donde existir, y habría que reintroducirlo desmontando el codegen.
+The stated goal of Phase 1 is *to validate that the whole architecture works end to end*. With option (a) the pipeline is validated but **not the architecture**: the normative lifecycle from `ZIRK_RUNTIME_SPEC.md` section 2 (validate permissions → load runtime → initialize globals → `main` → orderly shutdown → flush → exit code) has nowhere to exist, and it would have to be reintroduced by taking codegen apart.
 
-Con (b), Fase 1 ya produce un `main` de LLVM que llama a `zirk_rt_init()` y `zirk_rt_shutdown()`, aunque hoy ambos no hagan nada. Esa forma vacía es exactamente el gancho donde Fase 4 (memoria) y Fase 5 (concurrencia) se cuelgan sin refactor.
+With (b), Phase 1 already produces an LLVM `main` that calls `zirk_rt_init()` and `zirk_rt_shutdown()`, even though today both do nothing. That empty shape is exactly the hook where Phase 4 (memory) and Phase 5 (concurrency) attach without a refactor.
 
-Además satisface directamente `ZIRK_RUNTIME_SPEC.md` sección 1: runtime *pequeño, portable y enlazable en binarios standalone*.
+It also directly satisfies `ZIRK_RUNTIME_SPEC.md` section 1: a runtime that is *small, portable and linkable into standalone binaries*.
 
-La frontera ABI C es la misma que `ZIRK_LANGUAGE_SPEC.md` sección 13 exige para interoperabilidad nativa, así que no es infraestructura desechable: es la frontera definitiva, estrenada temprano.
+The C ABI boundary is the same one `ZIRK_LANGUAGE_SPEC.md` section 13 requires for native interoperability, so this is not disposable infrastructure: it is the definitive boundary, introduced early.
 
-## Consecuencias
+## Consequences
 
-- Cada target soportado necesita su `zirk-runtime` compilado para ese target. Se relaciona con el riesgo de sysroots de [ADR-004](./ADR-004-portabilidad.md).
-- Los símbolos `zirk_rt_*` y `zirk_io_*` son una superficie de compatibilidad: cambiarlos rompe binarios ya compilados. Deben versionarse cuando el lenguaje se estabilice.
-- El runtime no puede usar la stdlib de Rust libremente si más adelante se quiere reducir el tamaño del binario; se acepta usarla por ahora y revisar en Fase 11.
+- Every supported target needs its own `zirk-runtime` compiled for that target. This relates to the sysroot risk from [ADR-004](./ADR-004-portabilidad.md).
+- The `zirk_rt_*` and `zirk_io_*` symbols are a compatibility surface: changing them breaks already-compiled binaries. They must be versioned once the language stabilizes.
+- The runtime cannot freely use Rust's stdlib if binary size is to be reduced later; using it for now is accepted, to be revisited in Phase 11.

@@ -1,59 +1,59 @@
-# ADR-007 — Forma de la representación intermedia
+# ADR-007 — Shape of the intermediate representation
 
-- **Estado:** aceptada
-- **Fecha:** 13 de agosto de 2026
-- **Fase:** 1
+- **Status:** accepted
+- **Date:** August 13, 2026
+- **Phase:** 1
 
-## Contexto
+## Context
 
-`ZIRK_COMPILER_SPEC.md` sección 4 exige que la IR sea tipada, independiente del target y versionada, y que conserve información suficiente para especialización de genéricos, devirtualización, escape analysis, comprobaciones de seguridad, vectorización y debug info.
+`ZIRK_COMPILER_SPEC.md` section 4 requires the IR to be typed, target-independent and versioned, and to retain enough information for generic specialization, devirtualization, escape analysis, safety checks, vectorization and debug info.
 
-Además es lo que se distribuye dentro de un `.zpkg` como `portable.ir` (sección 4), así que su forma es un contrato con el futuro, no un detalle interno del compilador.
+It is also what gets distributed inside a `.zpkg` as `portable.ir` (section 4), so its shape is a contract with the future, not an internal detail of the compiler.
 
-Esta decisión se toma en la Fase 1, cuando el subset del lenguaje es trivial. Ese es exactamente el riesgo: lo que alcanza para `if`/`else` y aritmética puede no alcanzar para clases, genéricos y concurrencia.
+This decision is made in Phase 1, when the language subset is trivial. That is exactly the risk: what suffices for `if`/`else` and arithmetic may not suffice for classes, generics and concurrency.
 
-## Decisión
+## Decision
 
-**Código de tres direcciones, tipado, sobre bloques básicos, con las variables locales como slots y sin SSA propia.**
+**Typed three-address code, over basic blocks, with local variables as slots and no own SSA.**
 
 ```
-   Función
-     ├── slots        (parámetros y locales; se leen y escriben con Load/Store)
-     └── bloques      (cada uno termina en exactamente un terminador)
-           ├── instrucciones
+   Function
+     ├── slots        (parameters and locals; read and written via Load/Store)
+     └── blocks        (each ends in exactly one terminator)
+           ├── instructions
            └── Return | Jump | Branch
 ```
 
-Invariantes que el verificador hace cumplir:
+Invariants enforced by the verifier:
 
-- todo bloque tiene exactamente un terminador;
-- los valores **no cruzan bloques**: lo que necesita sobrevivir a un salto viaja por un slot;
-- toda instrucción conserva la ubicación del source que la originó;
-- las operaciones de alocación no nombran estrategia de memoria.
+- every block has exactly one terminator;
+- values **do not cross blocks**: whatever needs to survive a jump travels through a slot;
+- every instruction retains the source location that originated it;
+- allocation operations do not name a memory strategy.
 
-## Motivo
+## Rationale
 
-**Bloques básicos y no un árbol.** Para el subset de la Fase 1 un árbol habría alcanzado. Se descarta porque:
+**Basic blocks and not a tree.** For the Phase 1 subset, a tree would have sufficed. It is discarded because:
 
-- los análisis que el spec exige conservar —escape analysis, vectorización— son análisis de flujo, incómodos sobre un árbol;
-- la Fase 2 introduce bucles, `break` y `continue`, que sobre un árbol obligan a rehacer la representación;
-- el mapeo a LLVM es directo, porque LLVM ya es exactamente eso.
+- the analyses the spec requires to be preserved — escape analysis, vectorization — are flow analyses, awkward over a tree;
+- Phase 2 introduces loops, `break` and `continue`, which over a tree would force a rework of the representation;
+- the mapping to LLVM is direct, because LLVM is already exactly that.
 
-**Sin SSA propia.** Las locales son slots con carga y almacenamiento, y la promoción a registros se delega al backend. SSA propia —con funciones phi y su mantenimiento— es trabajo real que no paga hasta que existan optimizaciones propias. Cuando existan, se introduce como una pasada sobre esta forma, no en su lugar.
+**No own SSA.** Locals are slots with load and store, and promotion to registers is delegated to the backend. Own SSA — with phi functions and their upkeep — is real work that doesn't pay off until there are own optimizations. When those exist, it is introduced as a pass over this shape, not in its place.
 
-Que los valores no crucen bloques es la contrapartida de esa decisión, y por eso el verificador lo comprueba: es el invariante que hace innecesarias las funciones phi.
+That values do not cross blocks is the counterpart of that decision, and that's why the verifier checks it: it's the invariant that makes phi functions unnecessary.
 
-**Tipada de forma independiente del frontend.** `zirk-ir` define sus propios tipos en vez de reutilizar los de `zirk-sema`. La IR es la frontera que se distribuye en un `.zpkg`; no debe moverse cada vez que cambia la representación interna de tipos del frontend.
+**Typed independently of the frontend.** `zirk-ir` defines its own types instead of reusing those of `zirk-sema`. The IR is the boundary that gets distributed in a `.zpkg`; it must not move every time the frontend's internal type representation changes.
 
-## Relación con la estrategia de memoria
+## Relationship with the memory strategy
 
-La IR expresa **que** un valor necesita almacenamiento, nunca **cómo** se obtiene ni se libera. Ninguna instrucción nombra malloc, recuento de referencias ni recolección de basura.
+The IR expresses **that** a value needs storage, never **how** it is obtained or released. No instruction names malloc, reference counting or garbage collection.
 
-Es requisito directo de [ADR-003](./ADR-003-memoria.md): la estrategia se decide en la Fase 4, y una IR que la adelante haría esa decisión mucho más cara. Hay un test que fija la restricción, porque es del tipo que se erosiona sin querer.
+This is a direct requirement of [ADR-003](./ADR-003-memoria.md): the strategy is decided in Phase 4, and an IR that anticipates it would make that decision much more expensive. There is a test that pins down the restriction, because it's the kind of thing that erodes unintentionally.
 
-## Consecuencias
+## Consequences
 
-- **Añadir una construcción del lenguaje es añadir instrucciones, no cambiar la forma.** Bucles, `match` y closures encajan en bloques básicos sin rediseño.
-- **El verificador es parte del contrato**, no una herramienta de depuración. Un bug de lowering aparece como mensaje preciso en vez de como un fallo ilegible de LLVM o, peor, un binario que miscompila en silencio.
-- **La IR todavía no está versionada.** El spec lo exige para `.zpkg`; corresponde a la Fase 8, cuando exista algo que distribuir. Anotado para que no se descubra tarde.
-- Si en la Fase 3 los genéricos exigen información que esta forma no conserva, se revisa este ADR antes de deformar la IR con parches.
+- **Adding a language construct means adding instructions, not changing the shape.** Loops, `match` and closures fit into basic blocks without a redesign.
+- **The verifier is part of the contract**, not a debugging tool. A lowering bug shows up as a precise message instead of an unreadable LLVM failure or, worse, a binary that silently miscompiles.
+- **The IR is not yet versioned.** The spec requires it for `.zpkg`; that belongs to Phase 8, when there is something to distribute. Noted so it isn't discovered late.
+- If in Phase 3 generics require information this shape doesn't retain, this ADR is revisited before deforming the IR with patches.

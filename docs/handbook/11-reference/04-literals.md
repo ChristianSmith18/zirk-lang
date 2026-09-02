@@ -5,7 +5,7 @@
 | integer | `0`, `42`, `0xff`, `0b1010`, `1_000` | `Int` when representable unless context or suffix selects a width |
 | Float | `1.0`, `6.02e23`, `1.5f32` | `Float` (`Float64`) unless context or suffix selects a width |
 | Boolean | `true`, `false` | strict `Boolean` |
-| Char | `'a'`, `'é'`, `'👨‍👩‍👧‍👦'` | exactly one Unicode grapheme or compile error |
+| Char | `'a'`, `'π'`, `'👨‍👩‍👧‍👦'` | exactly one Unicode grapheme or compile error |
 | String | `"hello"`, `"value={value}"` | `String`; escapes and interpolation are validated |
 | Null | `null` | only compatible with nullable context |
 | collection | `[1, 2, 3]` and type-specific forms | elements require a compatible inferred type |

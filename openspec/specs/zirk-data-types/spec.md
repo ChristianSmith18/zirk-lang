@@ -121,77 +121,77 @@ Union order and duplicates SHALL not affect identity; `T | Never` and `T | T` SH
 - **WHEN** Dog extends Animal and `Animal | Dog` is formed
 - **THEN** the type normalizes to Animal
 
-### Requirement: Enums algebraicos
+### Requirement: Algebraic enums
 
-Un `enum` SHALL admitir variantes con valores asociados, extendiendo el enum sin datos de la fase anterior.
+An `enum` SHALL support variants with associated values, extending the dataless enum from the previous phase.
 
-Un caso tradicional sin mapping SHALL exponer como valor observable su nombre exacto y NO SHALL recibir un índice numérico implícito. Un caso MAY declarar un mapping de cadena o numérico compatible mediante `->`.
+A traditional case without a mapping SHALL expose its exact name as its observable value and SHALL NOT receive an implicit numeric index. A case MAY declare a compatible string or numeric mapping via `->`.
 
-#### Scenario: Variante con datos
-- **WHEN** se declara `enum Shape { Circle(Int32), Rect(Int32, Int32) }`
-- **THEN** `Shape.Circle(3)` construye un valor
+#### Scenario: Variant with data
+- **WHEN** `enum Shape { Circle(Int32), Rect(Int32, Int32) }` is declared
+- **THEN** `Shape.Circle(3)` constructs a value
 
-#### Scenario: Enum sin datos sigue funcionando
-- **WHEN** se declara `enum Direction { North, South }`
-- **THEN** compila igual que en la fase anterior
+#### Scenario: Dataless enum still works
+- **WHEN** `enum Direction { North, South }` is declared
+- **THEN** it compiles the same as in the previous phase
 
-#### Scenario: Constructor con aridad incorrecta
-- **WHEN** se construye una variante con más o menos valores de los declarados
-- **THEN** se emite un diagnóstico que indica la aridad esperada
+#### Scenario: Constructor with incorrect arity
+- **WHEN** a variant is constructed with more or fewer values than declared
+- **THEN** a diagnostic is emitted indicating the expected arity
 
-### Requirement: Destructuring en `match`
+### Requirement: Destructuring in `match`
 
-Un patrón SHALL poder extraer los valores asociados de una variante, ligándolos a nombres dentro del brazo.
+A pattern SHALL be able to extract the associated values of a variant, binding them to names within the arm.
 
-#### Scenario: Extraer los datos de una variante
-- **WHEN** se escribe `match s { Shape.Circle(r) => r, Shape.Rect(w, h) => w * h }`
-- **THEN** `r`, `w` y `h` están ligados en su brazo con el tipo declarado
+#### Scenario: Extracting a variant's data
+- **WHEN** `match s { Shape.Circle(r) => r, Shape.Rect(w, h) => w * h }` is written
+- **THEN** `r`, `w`, and `h` are bound in their arm with the declared type
 
-#### Scenario: Patrón con aridad incorrecta
-- **WHEN** un patrón de variante liga menos nombres de los que la variante declara
-- **THEN** se emite un diagnóstico que indica la aridad
+#### Scenario: Pattern with incorrect arity
+- **WHEN** a variant pattern binds fewer names than the variant declares
+- **THEN** a diagnostic is emitted indicating the arity
 
-#### Scenario: Exhaustividad con datos asociados
-- **WHEN** un `match` sobre un enum algebraico omite una variante y no tiene `_`
-- **THEN** se emite el diagnóstico de exhaustividad nombrando la variante faltante
+#### Scenario: Exhaustiveness with associated data
+- **WHEN** a `match` over an algebraic enum omits a variant and has no `_`
+- **THEN** the exhaustiveness diagnostic is emitted naming the missing variant
 
 ### Requirement: Records
 
-Un `record` SHALL ser inmutable y tener semántica estructural, según `ZIRK_LANGUAGE_SPEC.md` sección 7.
+A `record` SHALL be immutable and have structural semantics, per `ZIRK_LANGUAGE_SPEC.md` section 7.
 
-#### Scenario: Igualdad estructural
-- **WHEN** se comparan dos records con los mismos valores en sus campos
-- **THEN** `==` produce `true` aunque sean instancias distintas
+#### Scenario: Structural equality
+- **WHEN** two records with the same values in their fields are compared
+- **THEN** `==` produces `true` even though they are distinct instances
 
-#### Scenario: Inmutabilidad
-- **WHEN** se asigna a un campo de un record
-- **THEN** se emite un diagnóstico indicando que un record no se modifica
+#### Scenario: Immutability
+- **WHEN** a record's field is assigned to
+- **THEN** a diagnostic is emitted indicating that a record cannot be modified
 
 ### Requirement: Value classes
 
-Una value class NO SHALL tener identidad observable y SHALL poder almacenarse inline.
+A value class SHALL NOT have observable identity and SHALL be storable inline.
 
-#### Scenario: Sin identidad
-- **WHEN** se aplica el operador de identidad a dos value classes con el mismo contenido
-- **THEN** se emite un diagnóstico indicando que no tienen identidad observable
+#### Scenario: No identity
+- **WHEN** the identity operator is applied to two value classes with the same content
+- **THEN** a diagnostic is emitted indicating that they have no observable identity
 
-#### Scenario: Almacenada sin indirección
-- **WHEN** una value class es campo de otra declaración
-- **THEN** ocupa su espacio dentro de ella, sin puntero intermedio
+#### Scenario: Stored without indirection
+- **WHEN** a value class is a field of another declaration
+- **THEN** it occupies its space within it, with no intermediate pointer
 
-### Requirement: Uniones y alias
+### Requirement: Unions and aliases
 
-`A | B` SHALL declarar una unión, y `type` SHALL declarar un alias.
+`A | B` SHALL declare a union, and `type` SHALL declare an alias.
 
-#### Scenario: Valor de una unión
-- **WHEN** una variable se declara `Int32 | String`
-- **THEN** admite valores de cualquiera de los dos
+#### Scenario: Value of a union
+- **WHEN** a variable is declared `Int32 | String`
+- **THEN** it accepts values of either type
 
-#### Scenario: Uso sin discriminar
-- **WHEN** se usa un valor de unión donde se espera uno de sus miembros
-- **THEN** se emite un diagnóstico
-- **AND** la ayuda indica discriminarlo con `match`
+#### Scenario: Use without discrimination
+- **WHEN** a union value is used where one of its members is expected
+- **THEN** a diagnostic is emitted
+- **AND** the help indicates discriminating it with `match`
 
 #### Scenario: Alias
-- **WHEN** se declara `type Id = Int32;`
-- **THEN** `Id` e `Int32` son intercambiables
+- **WHEN** `type Id = Int32;` is declared
+- **THEN** `Id` and `Int32` are interchangeable

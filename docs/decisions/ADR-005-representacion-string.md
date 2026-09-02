@@ -1,61 +1,61 @@
-# ADR-005 — `String` opaco tras la frontera del runtime
+# ADR-005 — `String` opaque past the runtime boundary
 
-- **Estado:** aceptada
-- **Fecha:** 12 de agosto de 2026
-- **Fase:** 0
+- **Status:** accepted
+- **Date:** August 12, 2026
+- **Phase:** 0
 
-## Contexto
+## Context
 
-`ZIRK_LANGUAGE_SPEC.md` sección 3 define `String` como una secuencia Unicode *indexada semánticamente por graphemes y con índice/caché interno adaptativo*. Eso es trabajo considerable y corresponde a Fase 7.
+`ZIRK_LANGUAGE_SPEC.md` section 3 defines `String` as a Unicode sequence *semantically indexed by graphemes and with an adaptive internal index/cache*. That is considerable work and belongs to Phase 7.
 
-Pero Fase 1 ya necesita un `String`: el literal de `stdout.println("Hola desde Zirk")`.
+But Phase 1 already needs a `String`: the literal in `stdout.println("Hello from Zirk")`.
 
-La trampa: si Fase 1 representa `String` como "puntero a bytes UTF-8" **dentro de la IR y del codegen**, esa asunción se filtra a cada sitio que toque strings y desandarla en Fase 7 es un refactor transversal.
+The trap: if Phase 1 represents `String` as "pointer to UTF-8 bytes" **inside the IR and codegen**, that assumption leaks into every site that touches strings, and undoing it in Phase 7 becomes a cross-cutting refactor.
 
-## Decisión
+## Decision
 
-`String` es un **tipo opaco** para el compilador. Su layout es un detalle privado de `zirk-runtime` ([ADR-002](./ADR-002-runtime-staticlib.md)).
+`String` is an **opaque type** to the compiler. Its layout is a private detail of `zirk-runtime` ([ADR-002](./ADR-002-runtime-staticlib.md)).
 
 ```
-IR de Zirk        ──▶  ZirkStr  (handle opaco, layout desconocido para la IR)
-codegen LLVM      ──▶  { ptr, len }   ← representación de HOY, no contrato
-zirk-runtime      ──▶  hoy:    UTF-8 plano
-                       Fase 7: + índice de graphemes adaptativo
+Zirk IR           ──▶  ZirkStr  (opaque handle, layout unknown to the IR)
+LLVM codegen      ──▶  { ptr, len }   ← TODAY's representation, not a contract
+zirk-runtime      ──▶  today:  plain UTF-8
+                       Phase 7: + adaptive grapheme index
 ```
 
-Toda operación sobre strings pasa por símbolos `extern "C"` del runtime. Ni la IR ni el codegen inspeccionan el contenido.
+Every operation on strings goes through `extern "C"` runtime symbols. Neither the IR nor codegen inspect the content.
 
-## Motivo
+## Rationale
 
-Añadir la indexación por graphemes en Fase 7 no debe requerir tocar el lexer, el parser, la IR ni el codegen. Con esta frontera, el cambio queda contenido en `zirk-runtime`.
+Adding grapheme indexing in Phase 7 must not require touching the lexer, the parser, the IR or codegen. With this boundary, the change stays contained within `zirk-runtime`.
 
-El costo es una llamada indirecta donde podría haber acceso directo. Es aceptable: `ZIRK_COMPILER_SPEC.md` sección 5 asigna la optimización a LLVM, e inlinear llamadas triviales a través de una staticlib es exactamente lo que LTO resuelve en release.
+The cost is an indirect call where direct access could otherwise exist. That is acceptable: `ZIRK_COMPILER_SPEC.md` section 5 assigns optimization to LLVM, and inlining trivial calls through a staticlib is exactly what LTO resolves in release builds.
 
-## Consecuencias
+## Consequences
 
-- Los literales de string se materializan como constantes globales de LLVM más una llamada de construcción del runtime, no como punteros crudos entregados al usuario.
-- La misma disciplina aplica a las futuras colecciones (`List<T>`, `Map<K,V>`, `Set<T>`): layout privado del runtime.
-- Si en Fase 11 se mide que la indirección es un costo real en un caso concreto, se optimiza ahí con evidencia — no se rompe la frontera preventivamente.
+- String literals materialize as LLVM global constants plus a runtime construction call, not as raw pointers handed to the user.
+- The same discipline applies to future collections (`List<T>`, `Map<K,V>`, `Set<T>`): layout private to the runtime.
+- If in Phase 11 it is measured that the indirection is a real cost in a specific case, it is optimized there with evidence — the boundary is not broken preemptively.
 
-## Enmienda — el handle es la identidad observable
+## Amendment — the handle is the observable identity
 
-- **Fecha:** 15 de agosto de 2026
-- **Motivo:** el refinamiento normativo definió `String` como referencia mutable compartida con identidad observable mediante `is`.
+- **Date:** August 15, 2026
+- **Reason:** the normative refinement defined `String` as a shared mutable reference with observable identity via `is`.
 
-La norma posterior no contradice esta decisión: la refuerza.
+The later norm does not contradict this decision: it reinforces it.
 
-El handle opaco **es** la identidad que `is` compara. Dos bindings que aliasan la misma `String` comparten handle y son idénticos; dos handles distintos no lo son aunque su contenido coincida. Esto no añade nada al compilador —comparar dos handles es comparar dos punteros— y no rompe la opacidad, porque comparar identidades no es inspeccionar contenido.
+The opaque handle **is** the identity that `is` compares. Two bindings that alias the same `String` share a handle and are identical; two distinct handles are not, even if their content matches. This adds nothing to the compiler — comparing two handles is comparing two pointers — and does not break opacity, because comparing identities is not inspecting content.
 
-De ahí se sigue el reparto de responsabilidades:
+From this follows the division of responsibilities:
 
-| Operación | Quién la resuelve | Por qué |
+| Operation | Who resolves it | Why |
 |---|---|---|
-| `is` | comparación de handles | la identidad **es** el handle |
-| `==` | runtime | depende del contenido y de la equivalencia canónica Unicode |
-| hash | runtime | debe derivarse de la misma forma canónica que `==` |
-| indexación por grafemas | runtime | exige el índice adaptativo que esta frontera protege |
-| normalización | runtime, con literales precanonizados por el compilador | ver [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) |
+| `is` | handle comparison | identity **is** the handle |
+| `==` | runtime | depends on content and canonical Unicode equivalence |
+| hash | runtime | must be derived from the same canonical form as `==` |
+| grapheme indexing | runtime | requires the adaptive index this boundary protects |
+| normalization | runtime, with literals pre-canonicalized by the compiler | see [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) |
 
-El compilador conserva una sola responsabilidad nueva: emitir los literales ya en forma canónica. Es una transformación sobre el texto del literal, no sobre la representación del `String`, así que la frontera sigue intacta.
+The compiler retains a single new responsibility: emitting literals already in canonical form. This is a transformation over the literal's text, not over the `String`'s representation, so the boundary remains intact.
 
-**La opacidad, lejos de estorbar, es lo que hace barato todo esto:** el runtime puede guardar junto a los bytes las banderas y los campos cacheados que necesite —`is_ascii`, `normalization`, `grapheme_count`, `hash`— sin que ninguna otra capa se entere ni tenga que cambiar cuando aparezcan.
+**Opacity, far from getting in the way, is what makes all of this cheap:** the runtime can store, alongside the bytes, whatever flags and cached fields it needs —`is_ascii`, `normalization`, `grapheme_count`, `hash`— without any other layer knowing or having to change when they appear.

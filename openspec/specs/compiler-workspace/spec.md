@@ -2,74 +2,74 @@
 
 ## Purpose
 
-Define la estructura de crates del compilador, el límite de responsabilidad de cada uno y la regla de dependencias entre etapas del pipeline.
+Define the crate structure of the compiler, the responsibility boundary of each one, and the dependency rule between pipeline stages.
 
-La estructura refleja directamente el pipeline de `ZIRK_COMPILER_SPEC.md` sección 2, de modo que cada etapa se pueda testear de forma aislada y el backend quede contenido en un solo crate.
+The structure directly mirrors the pipeline of `ZIRK_COMPILER_SPEC.md` section 2, so that each stage can be tested in isolation and the backend stays contained within a single crate.
 
 ## Requirements
 
-### Requirement: Estructura de crates por etapa del pipeline
+### Requirement: Crate structure per pipeline stage
 
-El compilador SHALL organizarse como un workspace de Cargo con un crate por etapa del pipeline de `ZIRK_COMPILER_SPEC.md` sección 2, más un crate de diagnósticos y un crate de runtime.
+The compiler SHALL be organized as a Cargo workspace with one crate per stage of the pipeline defined in `ZIRK_COMPILER_SPEC.md` section 2, plus a diagnostics crate and a runtime crate.
 
-Los crates son: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema`, `zirk-ir`, `zirk-codegen-llvm`, `zirk-diagnostics`, `zirk-cli` y `zirk-runtime`.
+The crates are: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema`, `zirk-ir`, `zirk-codegen-llvm`, `zirk-diagnostics`, `zirk-cli`, and `zirk-runtime`.
 
-#### Scenario: Workspace compila
-- **WHEN** se ejecuta `cargo build` en la raíz del repositorio
-- **THEN** los nueve crates compilan sin errores
-- **AND** `cargo clippy` no reporta advertencias
+#### Scenario: Workspace builds
+- **WHEN** `cargo build` is run at the repository root
+- **THEN** the nine crates build without errors
+- **AND** `cargo clippy` reports no warnings
 
-#### Scenario: Responsabilidad declarada
-- **WHEN** se inspecciona el `lib.rs` de cualquier crate del workspace
-- **THEN** contiene documentación de módulo que declara su responsabilidad y su límite
+#### Scenario: Declared responsibility
+- **WHEN** the `lib.rs` of any crate in the workspace is inspected
+- **THEN** it contains module documentation that declares its responsibility and its boundary
 
-### Requirement: Dirección única de dependencias
+### Requirement: Single direction of dependencies
 
-Las dependencias entre crates SHALL fluir en un solo sentido a lo largo del pipeline. `zirk-diagnostics` es la única dependencia transversal permitida.
+Dependencies between crates SHALL flow in a single direction along the pipeline. `zirk-diagnostics` is the only allowed cross-cutting dependency.
 
-#### Scenario: Dependencia hacia atrás
-- **WHEN** un crate de una etapa temprana declara dependencia sobre un crate de una etapa posterior
-- **THEN** se considera una violación de esta especificación
+#### Scenario: Backward dependency
+- **WHEN** a crate from an early stage declares a dependency on a crate from a later stage
+- **THEN** it is considered a violation of this specification
 
-#### Scenario: Dependencia sobre diagnósticos
-- **WHEN** cualquier crate del pipeline declara dependencia sobre `zirk-diagnostics`
-- **THEN** es válido, independientemente de su posición en el pipeline
+#### Scenario: Dependency on diagnostics
+- **WHEN** any crate in the pipeline declares a dependency on `zirk-diagnostics`
+- **THEN** it is valid, regardless of its position in the pipeline
 
-### Requirement: Independencia del runtime respecto del compilador
+### Requirement: Runtime independence from the compiler
 
-`zirk-runtime` SHALL compilarse como `staticlib` y NO SHALL ser dependencia de ningún crate del compilador. Se enlaza en los binarios que Zirk produce, no en el compilador mismo.
+`zirk-runtime` SHALL be built as a `staticlib` and SHALL NOT be a dependency of any compiler crate. It is linked into the binaries that Zirk produces, not into the compiler itself.
 
-#### Scenario: Artefacto producido
-- **WHEN** se construye `zirk-runtime`
-- **THEN** produce una biblioteca estática enlazable (`.a` en Unix, `.lib` en Windows)
+#### Scenario: Produced artifact
+- **WHEN** `zirk-runtime` is built
+- **THEN** it produces a linkable static library (`.a` on Unix, `.lib` on Windows)
 
-#### Scenario: Frontera ABI C
-- **WHEN** `zirk-runtime` expone un símbolo destinado al código generado
-- **THEN** el símbolo SHALL declararse `extern "C"` con nombre estable y sin mangling
+#### Scenario: C ABI boundary
+- **WHEN** `zirk-runtime` exposes a symbol intended for generated code
+- **THEN** the symbol SHALL be declared `extern "C"` with a stable, unmangled name
 
-#### Scenario: Ciclo de vida de la aplicación
-- **WHEN** se inspecciona la superficie pública de `zirk-runtime`
-- **THEN** expone `zirk_rt_init` y `zirk_rt_shutdown`, correspondientes al ciclo de vida de `ZIRK_RUNTIME_SPEC.md` sección 2
+#### Scenario: Application lifecycle
+- **WHEN** the public surface of `zirk-runtime` is inspected
+- **THEN** it exposes `zirk_rt_init` and `zirk_rt_shutdown`, corresponding to the lifecycle defined in `ZIRK_RUNTIME_SPEC.md` section 2
 
-### Requirement: Cobertura del pipeline por crate
+### Requirement: Pipeline coverage per crate
 
-Cada etapa del pipeline de `ZIRK_COMPILER_SPEC.md` sección 2 SHALL implementarse en el crate que le corresponde, sin que una etapa asuma responsabilidades de otra.
+Each stage of the pipeline in `ZIRK_COMPILER_SPEC.md` section 2 SHALL be implemented in its corresponding crate, without one stage taking on the responsibilities of another.
 
-#### Scenario: El lexer no conoce la gramática
-- **WHEN** se inspecciona `zirk-lexer`
-- **THEN** produce tokens
-- **AND** NO decide si una secuencia de tokens es válida
+#### Scenario: The lexer does not know the grammar
+- **WHEN** `zirk-lexer` is inspected
+- **THEN** it produces tokens
+- **AND** it does NOT decide whether a sequence of tokens is valid
 
-#### Scenario: El parser no chequea tipos
-- **WHEN** se parsea una expresión con tipos incompatibles pero sintaxis correcta
-- **THEN** el parser produce el árbol sin error
-- **AND** el error de tipos lo emite el chequeador
+#### Scenario: The parser does not check types
+- **WHEN** an expression with incompatible types but correct syntax is parsed
+- **THEN** the parser produces the tree without error
+- **AND** the type error is emitted by the type checker
 
-#### Scenario: El backend es el único que conoce LLVM
-- **WHEN** se inspeccionan los crates del workspace
-- **THEN** solo `zirk-codegen-llvm` depende de `inkwell`
+#### Scenario: The backend is the only crate that knows about LLVM
+- **WHEN** the crates in the workspace are inspected
+- **THEN** only `zirk-codegen-llvm` depends on `inkwell`
 
-#### Scenario: El enlace no ocurre en el backend
-- **WHEN** se produce un ejecutable
-- **THEN** el backend emite el objeto
-- **AND** la invocación del linker ocurre en la CLI
+#### Scenario: Linking does not happen in the backend
+- **WHEN** an executable is produced
+- **THEN** the backend emits the object
+- **AND** the linker invocation happens in the CLI

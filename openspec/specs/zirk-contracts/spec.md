@@ -27,89 +27,89 @@ Classes SHALL NOT derive equality, hashing, or cloning silently. Records, value 
 
 ### Requirement: Interfaces
 
-Una `interface` SHALL declarar firmas sin implementación, y una clase SHALL poder combinar varias, según `ZIRK_LANGUAGE_SPEC.md` sección 7. Un `record` que implementa una interfaz SHALL despachar correctamente a través de una referencia tipada por esa interfaz, sin exponer identidad observable ni mutación a través de esa referencia.
+An `interface` SHALL declare signatures without implementation, and a class SHALL be able to combine several, per `ZIRK_LANGUAGE_SPEC.md` section 7. A `record` that implements an interface SHALL dispatch correctly through a reference typed by that interface, without exposing observable identity or mutation through that reference.
 
-#### Scenario: Clase que implementa una interfaz
-- **WHEN** `class User implements Serializable` define todos los métodos de la interfaz
-- **THEN** el chequeo tiene éxito
-- **AND** `User` es aceptable donde se espera `Serializable`
+#### Scenario: Class implementing an interface
+- **WHEN** `class User implements Serializable` defines every method of the interface
+- **THEN** the check succeeds
+- **AND** `User` is acceptable wherever `Serializable` is expected
 
-#### Scenario: Método de la interfaz sin implementar
-- **WHEN** una clase declara implementar una interfaz y omite un método
-- **THEN** se emite un diagnóstico que nombra el método faltante y su firma
+#### Scenario: Unimplemented interface method
+- **WHEN** a class declares that it implements an interface and omits a method
+- **THEN** a diagnostic is emitted naming the missing method and its signature
 
 #### Scenario: Record dispatches through an implemented interface
 - **WHEN** a `record` implements an interface and is held through a variable typed as that interface
 - **THEN** a call through the interface-typed reference dispatches to the record's own method, without granting the value observable identity or mutability through that reference
 
-#### Scenario: Interfaz con cuerpo
-- **WHEN** un método de una `interface` declara un cuerpo
-- **THEN** se emite un diagnóstico indicando que la implementación reutilizable corresponde a un `trait`
+#### Scenario: Interface with a body
+- **WHEN** a method of an `interface` declares a body
+- **THEN** a diagnostic is emitted indicating that reusable implementation belongs in a `trait`
 
-### Requirement: Traits con implementación
+### Requirement: Traits with implementation
 
-Un `trait` SHALL poder incluir métodos con cuerpo, que la clase que lo adopta recibe salvo que los redefina.
+A `trait` SHALL be able to include methods with a body, which the class that adopts it receives unless it overrides them.
 
-#### Scenario: Método heredado del trait
-- **WHEN** una clase adopta un trait con un método implementado y no lo redefine
-- **THEN** llamar a ese método sobre la clase ejecuta el cuerpo del trait
+#### Scenario: Method inherited from the trait
+- **WHEN** a class adopts a trait with an implemented method and does not override it
+- **THEN** calling that method on the class executes the trait's body
 
-#### Scenario: La clase redefine el método del trait
-- **WHEN** la clase define su propia versión
-- **THEN** se ejecuta la de la clase
+#### Scenario: The class overrides the trait method
+- **WHEN** the class defines its own version
+- **THEN** the class's version is executed
 
-#### Scenario: Dos traits aportan el mismo método
-- **WHEN** una clase adopta dos traits que implementan un método con el mismo nombre y no lo redefine
-- **THEN** se emite un diagnóstico que nombra ambos traits
-- **AND** la ayuda indica que redefinirlo en la clase resuelve el conflicto
+#### Scenario: Two traits provide the same method
+- **WHEN** a class adopts two traits that implement a method with the same name and does not override it
+- **THEN** a diagnostic is emitted naming both traits
+- **AND** the help indicates that overriding it in the class resolves the conflict
 
-### Requirement: Contratos de operador
+### Requirement: Operator contracts
 
-La sobrecarga de un operador SHALL ocurrir únicamente implementando el contrato que el lenguaje define para él, y NO SHALL alterar su precedencia ni su aridad, según `ZIRK_LANGUAGE_SPEC.md` sección 4.
+Operator overloading SHALL occur only by implementing the contract the language defines for it, and SHALL NOT alter its precedence or arity, per `ZIRK_LANGUAGE_SPEC.md` section 4.
 
-Los contratos usan métodos reservados como `_add` y `_subtract`. Los tipos definidos por el usuario MAY implementarlos en código seguro; los tipos nativos NO SHALL poder reabrirse desde código de aplicación.
+Contracts use reserved methods such as `_add` and `_subtract`. User-defined types MAY implement them in safe code; native types SHALL NOT be reopenable from application code.
 
 `String` SHALL implement native concatenation and checked repetition contracts:
 `String * Integer` and `Integer * String` return a new String, reject negative
 counts, and diagnose unrepresentable allocation sizes.
 
-#### Scenario: Concatenación de cadenas
-- **WHEN** se evalúa `"a" + "b"`
-- **THEN** el resultado es `"ab"`
-- **AND** resuelve por el contrato que `String` implementa, no por un caso especial del operador
+#### Scenario: String concatenation
+- **WHEN** `"a" + "b"` is evaluated
+- **THEN** the result is `"ab"`
+- **AND** it resolves via the contract that `String` implements, not via a special-cased operator
 
-#### Scenario: Operador sobre un tipo que no lo implementa
-- **WHEN** se aplica `+` a un tipo que no implementa el contrato
-- **THEN** se emite un diagnóstico que nombra el contrato que falta
+#### Scenario: Operator on a type that does not implement it
+- **WHEN** `+` is applied to a type that does not implement the contract
+- **THEN** a diagnostic is emitted naming the missing contract
 
-#### Scenario: Tipo propio que implementa el contrato
-- **WHEN** una clase implementa el contrato de suma y se escriben dos de sus instancias con `+`
-- **THEN** se invoca su implementación
+#### Scenario: Custom type implementing the contract
+- **WHEN** a class implements the addition contract and two of its instances are written with `+`
+- **THEN** its implementation is invoked
 
-### Requirement: Iteración por contrato
+### Requirement: Iteration via contract
 
-`for ... in` SHALL exigir que la expresión iterada implemente `Iterable<T>`, y el elemento SHALL tener el tipo `T` que el contrato declara.
+`for ... in` SHALL require that the iterated expression implement `Iterable<T>`, and the element SHALL have the type `T` that the contract declares.
 
-Esto retira el protocolo cerrado de la fase anterior: los rangos y `String` pasan a implementar el contrato en vez de ser casos que el compilador reconoce.
+This removes the closed protocol from the previous phase: ranges and `String` now implement the contract instead of being cases the compiler recognizes specially.
 
-#### Scenario: Iterar un tipo propio
-- **WHEN** una clase implementa `Iterable<Int32>` y se escribe `for x in instancia { }`
-- **THEN** `x` tiene tipo `Int32`
-- **AND** el bucle recorre lo que el iterador produce
+#### Scenario: Iterating a custom type
+- **WHEN** a class implements `Iterable<Int32>` and `for x in instance { }` is written
+- **THEN** `x` has type `Int32`
+- **AND** the loop iterates over what the iterator produces
 
-#### Scenario: Los rangos siguen funcionando
-- **WHEN** se escribe `for i in 0..10 { }`
-- **THEN** compila y recorre igual que antes
-- **AND** lo hace porque el rango implementa `Iterable<Int32>`
+#### Scenario: Ranges keep working
+- **WHEN** `for i in 0..10 { }` is written
+- **THEN** it compiles and iterates the same as before
+- **AND** it does so because the range implements `Iterable<Int32>`
 
-#### Scenario: Tipo que no implementa el contrato
-- **WHEN** se itera un tipo que no implementa `Iterable<T>`
-- **THEN** se emite un diagnóstico que nombra el contrato que falta
+#### Scenario: Type that does not implement the contract
+- **WHEN** a type that does not implement `Iterable<T>` is iterated
+- **THEN** a diagnostic is emitted naming the missing contract
 
-### Requirement: Un contrato no se satisface a medias
+### Requirement: A contract cannot be partially satisfied
 
-Una declaración que dice implementar un contrato SHALL implementarlo por completo antes de ser aceptada.
+A declaration that claims to implement a contract SHALL implement it completely before being accepted.
 
-#### Scenario: Implementación parcial
-- **WHEN** una clase implementa dos de los tres métodos de un contrato
-- **THEN** se emite un diagnóstico por cada método faltante
+#### Scenario: Partial implementation
+- **WHEN** a class implements two of the three methods of a contract
+- **THEN** a diagnostic is emitted for each missing method

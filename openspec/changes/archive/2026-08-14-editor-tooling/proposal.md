@@ -1,31 +1,31 @@
 ## Why
 
-El soporte de editor se desarrolló en una rama aparte y se trajo a `develop` como código, sin pasar por OpenSpec. Este change lo registra retroactivamente para que la capacidad quede en `openspec/specs/` con requisitos verificables, en vez de existir solo como archivos en `editors/`.
+Editor support was developed in a separate branch and brought into `develop` as code, without going through OpenSpec. This change registers it retroactively so the capability is recorded in `openspec/specs/` with verifiable requirements, instead of existing only as files in `editors/`.
 
-Lo que motiva registrarlo no es la ceremonia: **el resaltado tiene una propiedad que se degrada en silencio**. Cada palabra clave que se agregue al lexer en las Fases 2 a 5 —y son muchas— puede quedar sin resaltar sin que nada avise. Convertir "el resaltador cubre todas las palabras clave" en un requisito hace que esa deuda sea visible.
+What motivates registering it is not ceremony: **highlighting has a property that silently degrades**. Every keyword added to the lexer in Phases 2 through 5 —and there are many— can end up unhighlighted with no warning. Turning "the highlighter covers all keywords" into a requirement makes that debt visible.
 
 ## What Changes
 
-- **Extensión de VS Code** en `editors/vscode/`, con resaltado de sintaxis, configuración de lenguaje —comentarios, pares de cierre, plegado— y un formateador provisional.
-- **Cobertura completa del léxico**: las 46 palabras clave que reconoce `zirk-lexer`, verificado por comparación cruzada.
-- El resaltador cubre el **lenguaje completo** de las specs, no solo el subset implementado.
+- **VS Code extension** in `editors/vscode/`, with syntax highlighting, language configuration —comments, closing pairs, folding— and a provisional formatter.
+- **Complete lexicon coverage**: the 46 keywords recognized by `zirk-lexer`, verified by cross-comparison.
+- The highlighter covers the **whole language** of the specs, not only the implemented subset.
 
-Explícitamente **fuera de alcance**: LSP, diagnósticos dentro del editor, autocompletado y navegación. Todo eso es Fase 9 y requiere que el compilador exponga un frontend incremental.
+Explicitly **out of scope**: LSP, diagnostics inside the editor, autocomplete and navigation. All of that is Phase 9 and requires the compiler to expose an incremental frontend.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `editor-tooling`: el soporte de editor para escribir Zirk — resaltado de sintaxis, configuración del lenguaje y su relación con el formateador canónico que llega en la Fase 9.
+- `editor-tooling`: editor support for writing Zirk — syntax highlighting, language configuration and its relationship with the canonical formatter that arrives in Phase 9.
 
 ### Modified Capabilities
 
-Ninguna.
+None.
 
 ## Impact
 
-**Nuevo:** `editors/vscode/` y una entrada en `.gitignore` para `*.vsix`.
+**New:** `editors/vscode/` and an entry in `.gitignore` for `*.vsix`.
 
-**Sin efecto sobre el compilador:** no se toca ningún crate. La suite de tests y CI no cambian.
+**No effect on the compiler:** no crate is touched. The test suite and CI do not change.
 
-**Tensión conocida:** el formateador de la extensión respeta la configuración del editor, y `ZIRK_COMPILER_SPEC.md` sección 10 exige que el formateador oficial sea canónico y sin configuración que fragmente el estilo. Se conserva como comodidad provisional mientras `zirk format` no exista, documentado en el README de la extensión.
+**Known tension:** the extension formatter respects editor configuration, and `ZIRK_COMPILER_SPEC.md` section 10 requires the official formatter to be canonical and without configuration that fragments style. It is kept as a provisional convenience while `zirk format` does not exist, documented in the extension README.

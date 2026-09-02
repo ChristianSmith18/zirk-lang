@@ -48,7 +48,7 @@ For reference types, `mut` SHALL permit binding reassignment and referent mutati
 - **THEN** it is a valid single `Char` even though it contains multiple code points
 
 #### Scenario: Non-ASCII code
-- **WHEN** `ascii_code()` is invoked on `'é'`
+- **WHEN** `ascii_code()` is invoked on `'π'`
 - **THEN** it returns `-1`
 
 ### Requirement: Native String reference semantics and operators

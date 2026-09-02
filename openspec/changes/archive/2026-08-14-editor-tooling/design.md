@@ -1,51 +1,51 @@
 ## Context
 
-El soporte de editor se desarrolló en la rama `feature/syntax-highlighting` y se trajo a `develop` como código. Este change lo registra retroactivamente.
+Editor support was developed on the `feature/syntax-highlighting` branch and brought into `develop` as code. This change registers it retroactively.
 
-No toca ningún crate del compilador: son archivos de configuración de VS Code más un script de formateo. El riesgo técnico es nulo; lo que sí hay son dos decisiones que conviene dejar escritas.
+It does not touch any compiler crate: it is VS Code configuration files plus a formatting script. The technical risk is zero; what does exist are two decisions worth writing down.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Escribir Zirk con resaltado que refleje el lenguaje tal como lo definen las specs.
-- Que la cobertura del léxico sea un requisito verificable y no algo que se comprobó una vez.
+- Write Zirk with highlighting that reflects the language as the specs define it.
+- Make lexicon coverage a verifiable requirement rather than something checked once.
 
 **Non-Goals:**
 
-- LSP, diagnósticos en el editor, autocompletado, navegación, renombrado. Requieren el frontend incremental de `ZIRK_COMPILER_SPEC.md` sección 10 y son Fase 9.
-- Definir el estilo canónico de Zirk. Eso es `zirk format`.
+- LSP, editor diagnostics, autocomplete, navigation, renaming. They require the incremental frontend from `ZIRK_COMPILER_SPEC.md` section 10 and are Phase 9.
+- Define Zirk's canonical style. That is `zirk format`.
 
 ## Decisions
 
-### D1 — El resaltador cubre el lenguaje completo, no el subset implementado
+### D1 — The highlighter covers the whole language, not the implemented subset
 
-Un editor que solo resaltara `fn`, `mut` e `if` daría a entender que `class` o `task` no son parte de Zirk, cuando el spec los define y el compilador ya los reconoce para decir en qué fase llegan.
+An editor that only highlighted `fn`, `mut` and `if` would imply that `class` or `task` are not part of Zirk, when the spec defines them and the compiler already recognizes them to say in which phase they arrive.
 
-La división del trabajo queda así: **el editor muestra el lenguaje; el compilador dice qué está disponible.**
+The division of labor is: **the editor shows the language; the compiler says what is available.**
 
-**Consecuencia:** cada palabra clave que se agregue al lexer en las Fases 2 a 5 debe agregarse también al resaltador. Es una deuda que se degrada en silencio, y por eso la correspondencia con el lexer quedó como requisito verificable en vez de como comentario.
+**Consequence:** every keyword added to the lexer in Phases 2 through 5 must also be added to the highlighter. It is debt that silently degrades, so correspondence with the lexer was made a verifiable requirement rather than a comment.
 
-### D2 — El formateador de la extensión se conserva, marcado como provisional
+### D2 — The extension formatter is kept, marked as provisional
 
-`ZIRK_COMPILER_SPEC.md` sección 10 exige que el formateador oficial sea **canónico, idempotente y sin configuración que fragmente el estilo**. El de la extensión respeta `tabSize` e `insertSpaces` del editor, que es exactamente lo que ese requisito descarta. Tampoco conoce cadenas ni comentarios: una línea que termine en `{` dentro de un comentario desplaza la indentación siguiente.
+`ZIRK_COMPILER_SPEC.md` section 10 requires the official formatter to be **canonical, idempotent and without configuration that fragments style**. The extension formatter respects the editor's `tabSize` and `insertSpaces`, which is exactly what that requirement rules out. It also does not understand strings or comments: a line ending in `{` inside a comment shifts the next indentation.
 
-**Alternativa descartada:** quitarlo hasta que exista `zirk format`. Se descarta porque dejaría a quien escribe Zirk hoy sin ninguna ayuda de indentación durante ocho fases, a cambio de una pureza que nadie observa: un formateador de editor no es el formateador del lenguaje, y nadie va a confundirlos si está dicho.
+**Discarded alternative:** remove it until `zirk format` exists. Discarded because it would leave anyone writing Zirk today without any indentation help for eight phases, in exchange for a purity nobody observes: an editor formatter is not the language formatter, and no one will confuse them if it is stated.
 
-**Lo que sí se hizo** es dejarlo escrito donde se lee: el README de la extensión explica en qué se aparta del spec y que debe retirarse cuando `zirk format` exista.
+**What was done** is to write it where it is read: the extension README explains where it diverges from the spec and that it must be removed when `zirk format` exists.
 
 ## Risks / Trade-offs
 
-- **El resaltado se desactualiza al crecer el lenguaje** → Mitigación: la correspondencia con el lexer es un requisito de la spec, no una nota. Conviene automatizarla como test cuando haya más de un editor soportado.
+- **Highlighting falls behind as the language grows** → Mitigation: correspondence with the lexer is a spec requirement, not a note. It should be automated as a test once more than one editor is supported.
 
-- **El formateador provisional se queda para siempre** → Mitigación: el requisito dice explícitamente que debe delegar en `zirk format` cuando exista, así que la deuda tiene condición de salida escrita.
+- **The provisional formatter stays forever** → Mitigation: the requirement explicitly says it must delegate to `zirk format` when it exists, so the debt has a written exit condition.
 
-- **Solo se soporta VS Code** → Aceptado. La gramática TextMate es reutilizable por otros editores; la configuración y el formateador no. Se resuelve cuando alguien lo necesite.
+- **Only VS Code is supported** → Accepted. The TextMate grammar is reusable by other editors; the configuration and formatter are not. It is resolved when someone needs it.
 
 ## Migration Plan
 
-No aplica: es puramente aditivo y no toca el compilador.
+Does not apply: it is purely additive and does not touch the compiler.
 
 ## Open Questions
 
-Ninguna.
+None.

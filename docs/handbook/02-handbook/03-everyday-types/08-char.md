@@ -5,7 +5,7 @@ grapheme: one user-perceived character, not necessarily one code point or byte.
 
 ```zirk
 inmut latin: Char = 'A';
-inmut accent: Char = 'é';
+inmut pi: Char = 'π';
 inmut family: Char = '👨‍👩‍👧‍👦';
 ```
 
@@ -26,7 +26,7 @@ exactly one scalar in the ASCII range; otherwise it returns `-1`:
 ```zirk
 'A'.ascii_code();          // 65
 '0'.ascii_code();          // 48
-'é'.ascii_code();          // -1
+'π'.ascii_code();          // -1
 '👨‍👩‍👧‍👦'.ascii_code(); // -1
 ```
 
