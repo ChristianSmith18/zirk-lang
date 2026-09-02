@@ -845,13 +845,10 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // never names it as an alias the way `Int`/`Integer` name `Int32`, so it
     // resolves to nothing even once every explicit width does.
     const PHASE_3B: &[&str] = &["UInt"];
-    // Phase 4 brings errors and resources. `Result<T,E>` is implemented now
-    // (roadmap Phase 4a — registered as a real enum, resolved by
-    // `resolve_type_atom`'s enum lookup ahead of this list, the same way
-    // any other declared enum is); `Pointer<T>` is implemented now too
-    // (roadmap Phase 4e, `fase-4e-unsafe-pointer-extern` — resolved as
-    // `Base::Pointer` ahead of this list); `Resource` is still pending.
-    const PHASE_4: &[&str] = &["Resource"];
+    // Phase 4 brings errors and resources. `Result<T,E>` and `Pointer<T>` are
+    // resolved by name; `Resource<E>` is registered as a native contract in
+    // `checker.rs` and is no longer pending here.
+    const PHASE_4: &[&str] = &[];
     // Phase 5 brings concurrency.
     const PHASE_5: &[&str] = &["Task", "Channel", "Thread", "Atomic"];
     // Phase 7 brings the stdlib, and with it the collection and temporal
@@ -872,8 +869,10 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
         "Period",
         "Regex",
     ];
-    // Phase 7b brings the functional style.
-    const PHASE_7B: &[&str] = &["Iterable", "Iterator"];
+    // Phase 7b brings the functional style. `Iterable<T>` and `Iterator<T>`
+    // are registered as native contracts in `checker.rs` and are no longer
+    // pending here; the remaining functional-style constructs are not types.
+    const PHASE_7B: &[&str] = &[];
 
     for (names, phase) in [
         (PHASE_3, Phase::THREE),
@@ -957,8 +956,9 @@ mod tests {
     fn types_from_later_phases_declare_their_phase() {
         assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
-        assert_eq!(pending_type("Resource").map(|t| t.phase), Some(Phase::FOUR));
+        assert_eq!(pending_type("Task").map(|t| t.phase), Some(Phase::FIVE));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
+        assert_eq!(pending_type("List").map(|t| t.phase), Some(Phase::SEVEN));
     }
 
     #[test]

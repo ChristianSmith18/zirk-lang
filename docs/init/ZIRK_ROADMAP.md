@@ -8,6 +8,10 @@ almost there".
 No real language was ever built by implementing its full spec in one pass. This
 document is the discipline that keeps this one from trying.
 
+For the concrete, per-feature, per-pipeline-stage status, see
+[`docs/init/ZIRK_FEATURE_STATUS.md`](./ZIRK_FEATURE_STATUS.md). This roadmap
+keeps the phase narrative; the catalog is the authoritative feature matrix.
+
 ---
 
 ## Phase 0 — Decisions before writing code

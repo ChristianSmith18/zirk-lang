@@ -8,7 +8,7 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 |---|---|---|
 | [ADR-001](./ADR-001-pin-llvm.md) | Pin LLVM 20.1 + inkwell's `llvm20-1` feature | accepted |
 | [ADR-002](./ADR-002-runtime-staticlib.md) | `zirk-runtime` as a staticlib with a C ABI boundary | accepted |
-| [ADR-003](./ADR-003-memoria.md) | Memory: constraints now, implementation in Phase 4 | accepted / open |
+| [ADR-003](./ADR-003-memoria.md) | Memory: constraints now, implementation in Phase 4 | closed / accepted (August 24, 2026) |
 | [ADR-004](./ADR-004-portabilidad.md) | Portability strategy (build vs. produce) | accepted |
 | [ADR-005](./ADR-005-representacion-string.md) | Opaque `String` behind the runtime boundary | accepted |
 | [ADR-006](./ADR-006-language-of-the-codebase.md) | The project is written in English | accepted |
@@ -20,10 +20,11 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-012](./ADR-012-layout-de-objetos.md) | Object layout: separate header, records/value classes inline without one | accepted |
 | [ADR-013](./ADR-013-forma-del-despacho.md) | Shape of dispatch: direct by default, own or contract table only when needed | accepted |
 | [ADR-014](./ADR-014-representacion-de-char.md) | `Char` shares `String`'s opaque representation | accepted |
+| [ADR-015](./ADR-015-declaracion-extern.md) | Native `extern "C" fn` declaration syntax | accepted |
 
 ## Status of Phase 0 pending items
 
 - **Workspace layout** — ✅ resolved. Nine crates under `crates/`: the eight from the roadmap plus `zirk-runtime` (ADR-002). The single dependency direction across the pipeline is documented in each crate's `lib.rs`.
 - **Diagnostics format** — ✅ resolved. `zirk-diagnostics` implements the format from `ZIRK_COMPILER_SPEC.md` section 8 with both human and structured rendering, and `zirk-codegen-llvm` already uses it.
 - **LLVM sanity check** — ✅ resolved. It lives as a permanent test in `zirk-codegen-llvm`, not as a disposable spike.
-- **Portability verification in CI** — ⏳ pending. The workflow exists; it still needs to be run. See ADR-004.
+- **Portability verification in CI** — ✅ resolved. The matrix runs in CI on Linux x86_64/aarch64, macOS aarch64 and Windows x86_64; see the verification table in ADR-004. macOS x86_64 and Windows aarch64 remain out of scope.

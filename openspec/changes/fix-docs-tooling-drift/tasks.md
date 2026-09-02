@@ -1,24 +1,24 @@
 ## 0. Investigate before writing (blocks tasks 2 and 3)
 
-- [ ] 0.1 Review `openspec/changes/archive/2026-08-25-phase-4d-callables` (proposal, tasks, specs) and confirm whether its tasks are 100% complete and archived with nothing pending.
-- [ ] 0.2 Run the test subset related to "callable and binding completion" (`cargo test -p zirk-sema -p zirk-parser -- callable`, and review `crates/zirk-cli/tests/corpus/valid` and `invalid` for closure/binding cases from Phase 4d) to verify behavior with evidence, not just wording.
-- [ ] 0.3 Decide the real status of Phase 4d ("complete" or "in progress, scope X pending") from the evidence in 0.1 and 0.2, and write that decision in a short note inside this change folder (e.g. `4d-status-decision.md`) citing the files and lines reviewed.
-- [ ] 0.4 Review `ADR-004-portabilidad.md` in full (not just the summary) to confirm whether CI portability verification is pending or already covered, and note the conclusion in the same note from 0.3.
+- [x] 0.1 Review `openspec/changes/archive/2026-08-25-phase-4d-callables` (proposal, tasks, specs) and confirm whether its tasks are 100% complete and archived with nothing pending.
+- [x] 0.2 Run the test subset related to "callable and binding completion" (`cargo test -p zirk-sema -p zirk-parser -- callable`, and review `crates/zirk-cli/tests/corpus/valid` and `invalid` for closure/binding cases from Phase 4d) to verify behavior with evidence, not just wording.
+- [x] 0.3 Decide the real status of Phase 4d ("complete" or "in progress, scope X pending") from the evidence in 0.1 and 0.2, and write that decision in a short note inside this change folder (e.g. `4d-status-decision.md`) citing the files and lines reviewed.
+- [x] 0.4 Review `ADR-004-portabilidad.md` in full (not just the summary) to confirm whether CI portability verification is pending or already covered, and note the conclusion in the same note from 0.3.
 
 ## 1. Single feature-status catalog
 
-- [ ] 1.1 Create `docs/init/ZIRK_FEATURE_STATUS.md` with a table per feature: name, owning phase (per `docs/init/ZIRK_ROADMAP.md`), recognized by the lexer (yes/no), parsed (yes/no), semantically checked (yes/no), lowered to IR (yes/no), supported by backend/runtime (yes/no), available through CLI/tooling (yes/no).
-- [ ] 1.2 Populate the table from real evidence: `Keyword::phase()`/`TokenKind::phase()` in `crates/zirk-lexer/src/token.rs`, `NOT_IMPLEMENTED`/`PENDING_FEATURE`/`NOT_LOWERED` diagnostics in `zirk-parser`/`zirk-sema`, and the tests in `zirk-ir/tests/lowering.rs`, `zirk-codegen-llvm/tests/emission.rs`, `zirk-cli/tests/end_to_end.rs`.
-- [ ] 1.3 Explicitly include in the table the Phase 4d status settled in task 0.3.
-- [ ] 1.4 Add a closing note about the recommended future direction (generating this table from the code instead of maintaining it by hand), without implementing it.
+- [x] 1.1 Create `docs/init/ZIRK_FEATURE_STATUS.md` with a table per feature: name, owning phase (per `docs/init/ZIRK_ROADMAP.md`), recognized by the lexer (yes/no), parsed (yes/no), semantically checked (yes/no), lowered to IR (yes/no), supported by backend/runtime (yes/no), available through CLI/tooling (yes/no).
+- [x] 1.2 Populate the table from real evidence: `Keyword::phase()`/`TokenKind::phase()` in `crates/zirk-lexer/src/token.rs`, `NOT_IMPLEMENTED`/`PENDING_FEATURE`/`NOT_LOWERED` diagnostics in `zirk-parser`/`zirk-sema`, and the tests in `zirk-ir/tests/lowering.rs`, `zirk-codegen-llvm/tests/emission.rs`, `zirk-cli/tests/end_to_end.rs`.
+- [x] 1.3 Explicitly include in the table the Phase 4d status settled in task 0.3.
+- [x] 1.4 Add a closing note about the recommended future direction (generating this table from the code instead of maintaining it by hand), without implementing it.
 
 ## 2. Synchronize the project's status documents
 
-- [ ] 2.1 Edit `README.md`: replace "Estado: Fase 1 completa" with the real current phase; replace the "does not yet exist" list with what is actually still missing today; add a link to `docs/init/ZIRK_FEATURE_STATUS.md` as the detailed source.
-- [ ] 2.2 Edit `docs/decisions/README.md`: mark ADR-003 as closed/accepted citing the closing date from `ADR-003-memoria.md`; add the missing ADR-015 entry; fix the portability-verification wording to match the conclusion from task 0.4.
-- [ ] 2.3 Edit `docs/init/ZIRK_ROADMAP.md` and `docs/init/ZIRK_AGENT_PROMPT.md` so both declare the same Phase 4d status settled in task 0.3, and so both reference `docs/init/ZIRK_FEATURE_STATUS.md` instead of restating per-feature status detail.
-- [ ] 2.4 Review `docs/handbook/00-getting-started/03-language-status.md` (flagged in the survey as misaligned) and fix it if it repeats the same kind of contradiction.
-- [ ] 2.5 Search (`grep`) for any other mention of "Fase 1 completa" or of a specific phase status outside `docs/init/ZIRK_FEATURE_STATUS.md`, and fix it or turn it into a link to the catalog.
+- [x] 2.1 Edit `README.md`: replace "Estado: Fase 1 completa" with the real current phase; replace the "does not yet exist" list with what is actually still missing today; add a link to `docs/init/ZIRK_FEATURE_STATUS.md` as the detailed source.
+- [x] 2.2 Edit `docs/decisions/README.md`: mark ADR-003 as closed/accepted citing the closing date from `ADR-003-memoria.md`; add the missing ADR-015 entry; fix the portability-verification wording to match the conclusion from task 0.4.
+- [x] 2.3 Edit `docs/init/ZIRK_ROADMAP.md` and `docs/init/ZIRK_AGENT_PROMPT.md` so both declare the same Phase 4d status settled in task 0.3, and so both reference `docs/init/ZIRK_FEATURE_STATUS.md` instead of restating per-feature status detail.
+- [x] 2.4 Review `docs/handbook/00-getting-started/03-language-status.md` (flagged in the survey as misaligned) and fix it if it repeats the same kind of contradiction.
+- [x] 2.5 Search (`grep`) for any other mention of "Fase 1 completa" or of a specific phase status outside `docs/init/ZIRK_FEATURE_STATUS.md`, and fix it or turn it into a link to the catalog.
 
 ## 3. Fix local verification
 
