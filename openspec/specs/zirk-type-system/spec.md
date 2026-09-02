@@ -38,324 +38,324 @@ visibility, typing, public API, compatibility, permission, and dead-code rules.
 - **THEN** expansion generates an ordinary typed route registry
 - **AND** runtime code does not rediscover erased decorator applications
 
-### Requirement: Tipos del subset
+### Requirement: Subset types
 
-El chequeador SHALL soportar los tipos `Void`, `Int32`, `Boolean`, `String`,
-tipos nulables (`T?`) y `enum` sin datos asociados, según
-`ZIRK_LANGUAGE_SPEC.md` secciones 3 y 4.
+The checker SHALL support the types `Void`, `Int32`, `Boolean`, `String`,
+nullable types (`T?`), and `enum` without associated data, per
+`ZIRK_LANGUAGE_SPEC.md` sections 3 and 4.
 
-Los aliases `Int` e `Integer` SHALL resolver a `Int32`, que es exactamente lo
-que nombran. Un alias de un tipo implementado no es una capacidad diferida.
+The aliases `Int` and `Integer` SHALL resolve to `Int32`, which is exactly
+what they name. An alias of an implemented type is not a deferred capability.
 
-#### Scenario: Tipo desconocido
-- **WHEN** una anotación nombra un tipo que no pertenece al subset
-- **THEN** se emite un diagnóstico que nombra el tipo
-- **AND** si el tipo existe en el lenguaje completo, la ayuda indica que no está implementado todavía
+#### Scenario: Unknown type
+- **WHEN** an annotation names a type that does not belong to the subset
+- **THEN** a diagnostic naming the type is emitted
+- **AND** if the type exists in the full language, the help indicates that it is not implemented yet
 
-#### Scenario: `T?` es distinto de `T`
-- **WHEN** se compara el tipo `String?` con `String`
-- **THEN** el chequeador los trata como tipos distintos, no intercambiables sin coalescencia o acceso seguro
+#### Scenario: `T?` is distinct from `T`
+- **WHEN** the type `String?` is compared with `String`
+- **THEN** the checker treats them as distinct types, not interchangeable without coalescing or safe access
 
-#### Scenario: Alias corto del entero por defecto
-- **WHEN** se declara `mut count: Int = 0;` o `mut count: Integer = 0;`
-- **THEN** el chequeo tiene éxito y el tipo es indistinguible de `Int32`
+#### Scenario: Short alias for the default integer
+- **WHEN** `mut count: Int = 0;` or `mut count: Integer = 0;` is declared
+- **THEN** the check succeeds and the type is indistinguishable from `Int32`
 
-#### Scenario: Alias de un tipo no implementado
-- **WHEN** una anotación nombra `UInt`
-- **THEN** se emite el diagnóstico de tipo no implementado con la fase de `UInt32`
+#### Scenario: Alias of an unimplemented type
+- **WHEN** an annotation names `UInt`
+- **THEN** the unimplemented-type diagnostic is emitted with `UInt32`'s phase
 
-### Requirement: Ausencia de conversiones implícitas
+### Requirement: Absence of implicit conversions
 
-El chequeador NO SHALL insertar conversiones implícitas entre tipos distintos. Según `ZIRK_LANGUAGE_SPEC.md` sección 3, las conversiones que puedan perder información no son implícitas.
+The checker SHALL NOT insert implicit conversions between distinct types. Per `ZIRK_LANGUAGE_SPEC.md` section 3, conversions that could lose information are not implicit.
 
-#### Scenario: Asignación de tipo incompatible
-- **WHEN** se declara `mut total: Int32 = "cuarenta";`
-- **THEN** se emite un diagnóstico que señala el inicializador
-- **AND** la causa indica que no hay conversión implícita de `String` a `Int32`
+#### Scenario: Assignment of an incompatible type
+- **WHEN** `mut total: Int32 = "cuarenta";` is declared
+- **THEN** a diagnostic pointing to the initializer is emitted
+- **AND** the cause indicates that there is no implicit conversion from `String` to `Int32`
 
-#### Scenario: Operandos de tipos distintos
-- **WHEN** se evalúa una operación aritmética entre `Int32` y `String`
-- **THEN** se emite un diagnóstico que señala la operación
+#### Scenario: Operands of distinct types
+- **WHEN** an arithmetic operation between `Int32` and `String` is evaluated
+- **THEN** a diagnostic pointing to the operation is emitted
 
-### Requirement: Ausencia de truthiness
+### Requirement: Absence of truthiness
 
-El chequeador SHALL exigir que toda condición sea de tipo `Boolean`. No existe truthiness numérico ni de cadena, según `ZIRK_LANGUAGE_SPEC.md` sección 3.
+The checker SHALL require every condition to be of type `Boolean`. There is no numeric or string truthiness, per `ZIRK_LANGUAGE_SPEC.md` section 3.
 
-#### Scenario: Condición numérica
-- **WHEN** se escribe `if 1 { }`
-- **THEN** se emite un diagnóstico indicando que la condición debe ser `Boolean`
+#### Scenario: Numeric condition
+- **WHEN** `if 1 { }` is written
+- **THEN** a diagnostic indicating that the condition must be `Boolean` is emitted
 
-#### Scenario: Condición booleana
-- **WHEN** se escribe `if x > 0 { }`
-- **THEN** el chequeo tiene éxito
+#### Scenario: Boolean condition
+- **WHEN** `if x > 0 { }` is written
+- **THEN** the check succeeds
 
-### Requirement: Operadores lógicos solo sobre booleanos
+### Requirement: Logical operators only on Booleans
 
-Los operadores `&&`, `||` y `!` SHALL aceptar únicamente operandos `Boolean`.
+The `&&`, `||`, and `!` operators SHALL accept only `Boolean` operands.
 
-#### Scenario: Conjunción sobre enteros
-- **WHEN** se evalúa `1 && 2`
-- **THEN** se emite un diagnóstico que señala los operandos
+#### Scenario: Conjunction over integers
+- **WHEN** `1 && 2` is evaluated
+- **THEN** a diagnostic pointing to the operands is emitted
 
-### Requirement: Mutabilidad
+### Requirement: Mutability
 
-El chequeador SHALL permitir la reasignación de variables `mut` y rechazarla en variables `inmut`, según `ZIRK_LANGUAGE_SPEC.md` sección 2.
+The checker SHALL allow reassignment of `mut` variables and reject it for `inmut` variables, per `ZIRK_LANGUAGE_SPEC.md` section 2.
 
-#### Scenario: Reasignación de variable mutable
-- **WHEN** una variable declarada con `mut` se reasigna
-- **THEN** el chequeo tiene éxito
+#### Scenario: Reassignment of a mutable variable
+- **WHEN** a variable declared with `mut` is reassigned
+- **THEN** the check succeeds
 
-#### Scenario: Reasignación de variable inmutable
-- **WHEN** una variable declarada con `inmut` se reasigna
-- **THEN** se emite un diagnóstico que señala la reasignación
-- **AND** la ayuda sugiere declararla con `mut` si debe cambiar
+#### Scenario: Reassignment of an immutable variable
+- **WHEN** a variable declared with `inmut` is reassigned
+- **THEN** a diagnostic pointing to the reassignment is emitted
+- **AND** the help suggests declaring it with `mut` if it must change
 
-### Requirement: Inferencia inequívoca
+### Requirement: Unambiguous inference
 
-El chequeador SHALL inferir el tipo de una variable sin anotación a partir de su inicializador, cuando la inferencia sea inequívoca.
+The checker SHALL infer the type of an unannotated variable from its initializer, when the inference is unambiguous.
 
-#### Scenario: Inferencia desde literal entero
-- **WHEN** se declara `mut count = 0;`
-- **THEN** el tipo inferido es `Int32`
+#### Scenario: Inference from an integer literal
+- **WHEN** `mut count = 0;` is declared
+- **THEN** the inferred type is `Int32`
 
-#### Scenario: Inferencia desde literal de cadena
-- **WHEN** se declara `mut name = "Zirk";`
-- **THEN** el tipo inferido es `String`
+#### Scenario: Inference from a string literal
+- **WHEN** `mut name = "Zirk";` is declared
+- **THEN** the inferred type is `String`
 
-### Requirement: Resolución de nombres
+### Requirement: Name resolution
 
-El chequeador SHALL resolver cada identificador a su declaración, respetando los scopes de bloque y de función de `ZIRK_LANGUAGE_SPEC.md` sección 2.
+The checker SHALL resolve every identifier to its declaration, respecting the block and function scopes from `ZIRK_LANGUAGE_SPEC.md` section 2.
 
-#### Scenario: Identificador no declarado
-- **WHEN** se usa un identificador que no ha sido declarado
-- **THEN** se emite un diagnóstico que lo nombra y señala su uso
+#### Scenario: Undeclared identifier
+- **WHEN** an identifier that has not been declared is used
+- **THEN** a diagnostic naming it and pointing to its use is emitted
 
-#### Scenario: Variable fuera de su scope
-- **WHEN** se usa una variable declarada dentro de un bloque, fuera de ese bloque
-- **THEN** se emite un diagnóstico de identificador no declarado
+#### Scenario: Variable outside its scope
+- **WHEN** a variable declared inside a block is used outside that block
+- **THEN** an undeclared-identifier diagnostic is emitted
 
-#### Scenario: Sombra en bloque interno
-- **WHEN** un bloque interno declara una variable con el nombre de una externa todavía visible
-- **THEN** se emite un diagnóstico que señala ambas declaraciones
-- **AND** no se crea una declaración que oculte silenciosamente la anterior
+#### Scenario: Shadow in an inner block
+- **WHEN** an inner block declares a variable with the name of a still-visible outer one
+- **THEN** a diagnostic pointing to both declarations is emitted
+- **AND** no declaration that silently hides the earlier one is created
 
-### Requirement: Uso antes de disponibilidad
+### Requirement: Use before availability
 
-El análisis de flujo SHALL impedir leer una variable que todavía no tenga valor, según `ZIRK_LANGUAGE_SPEC.md` sección 2.
+Flow analysis SHALL prevent reading a variable that does not yet have a value, per `ZIRK_LANGUAGE_SPEC.md` section 2.
 
-#### Scenario: Lectura antes de asignar
-- **WHEN** se lee una variable declarada sin inicializador y aún no asignada
-- **THEN** se emite un diagnóstico que señala la lectura
+#### Scenario: Read before assignment
+- **WHEN** a variable declared without an initializer and not yet assigned is read
+- **THEN** a diagnostic pointing to the read is emitted
 
-### Requirement: Correspondencia de firma en llamadas
+### Requirement: Signature correspondence in calls
 
-El chequeador SHALL verificar aridad y tipos de los argumentos de cada llamada contra la firma de la función.
+The checker SHALL verify the arity and types of the arguments of every call against the function's signature.
 
-#### Scenario: Cantidad incorrecta de argumentos
-- **WHEN** una llamada pasa más o menos argumentos que los declarados
-- **THEN** se emite un diagnóstico que indica la cantidad esperada y la recibida
+#### Scenario: Incorrect number of arguments
+- **WHEN** a call passes more or fewer arguments than declared
+- **THEN** a diagnostic indicating the expected and received count is emitted
 
-#### Scenario: Tipo incorrecto de argumento
-- **WHEN** un argumento no coincide con el tipo del parámetro
-- **THEN** se emite un diagnóstico que señala ese argumento
+#### Scenario: Incorrect argument type
+- **WHEN** an argument does not match the parameter's type
+- **THEN** a diagnostic pointing to that argument is emitted
 
-### Requirement: Coherencia del retorno
+### Requirement: Return coherence
 
-El chequeador SHALL verificar que el valor retornado coincida con el tipo de retorno declarado, y que toda ruta de una función no `Void` retorne un valor, considerando que `if`, `match` y bloques terminados en bucle infinito (`loop` sin `break` que salga) pueden formar parte de esa ruta.
+The checker SHALL verify that the returned value matches the declared return type, and that every path of a non-`Void` function returns a value, considering that `if`, `match`, and blocks terminated by an infinite loop (`loop` without an exiting `break`) may form part of that path.
 
-#### Scenario: Retorno de tipo incorrecto
-- **WHEN** una función declarada `Int32` retorna una cadena
-- **THEN** se emite un diagnóstico que señala la expresión retornada
+#### Scenario: Return of an incorrect type
+- **WHEN** a function declared `Int32` returns a string
+- **THEN** a diagnostic pointing to the returned expression is emitted
 
-#### Scenario: Ruta sin retorno
-- **WHEN** una función no `Void` tiene una ruta de ejecución que termina sin retornar
-- **THEN** se emite un diagnóstico que señala el final de esa ruta
+#### Scenario: Path without a return
+- **WHEN** a non-`Void` function has an execution path that ends without returning
+- **THEN** a diagnostic pointing to the end of that path is emitted
 
-#### Scenario: Retorno con valor en función Void
-- **WHEN** una función `Void` retorna un valor
-- **THEN** se emite un diagnóstico que señala la expresión
+#### Scenario: Return with a value in a Void function
+- **WHEN** a `Void` function returns a value
+- **THEN** a diagnostic pointing to the expression is emitted
 
-#### Scenario: Toda rama de `if` retorna
-- **WHEN** una función no `Void` termina en un `if`/`else` donde ambas ramas retornan
-- **THEN** el chequeo tiene éxito sin exigir un retorno adicional después
+#### Scenario: Every `if` branch returns
+- **WHEN** a non-`Void` function ends in an `if`/`else` where both branches return
+- **THEN** the check succeeds without requiring an additional return afterward
 
-### Requirement: Overflow de literales enteros
+### Requirement: Overflow of integer literals
 
-El chequeador SHALL rechazar literales enteros que no quepan en su tipo, según la regla de `ZIRK_LANGUAGE_SPEC.md` sección 3 de que el overflow ordinario produce error controlado.
+The checker SHALL reject integer literals that do not fit their type, per the `ZIRK_LANGUAGE_SPEC.md` section 3 rule that ordinary overflow produces a controlled error.
 
-#### Scenario: Literal fuera de rango
-- **WHEN** se asigna a un `Int32` un literal mayor que su valor máximo
-- **THEN** se emite un diagnóstico que indica el rango admitido
+#### Scenario: Literal out of range
+- **WHEN** a literal greater than its maximum value is assigned to an `Int32`
+- **THEN** a diagnostic indicating the allowed range is emitted
 
 ### Requirement: Entrypoint
 
-El chequeador SHALL exigir que exista una función `main` con la firma `fn main(): Void`, según `ZIRK_RUNTIME_SPEC.md` sección 2.
+The checker SHALL require the existence of a `main` function with the signature `fn main(): Void`, per `ZIRK_RUNTIME_SPEC.md` section 2.
 
-#### Scenario: Entrypoint ausente
-- **WHEN** el archivo compilado no declara `main`
-- **THEN** se emite un diagnóstico indicando que falta el entrypoint
+#### Scenario: Missing entrypoint
+- **WHEN** the compiled file does not declare `main`
+- **THEN** a diagnostic indicating that the entrypoint is missing is emitted
 
-#### Scenario: Entrypoint con firma incorrecta
-- **WHEN** `main` se declara con parámetros o con retorno distinto de `Void`
-- **THEN** se emite un diagnóstico que indica la firma esperada
+#### Scenario: Entrypoint with an incorrect signature
+- **WHEN** `main` is declared with parameters or with a return type other than `Void`
+- **THEN** a diagnostic indicating the expected signature is emitted
 
-### Requirement: Tipado de bucles y de `break`/`continue`
+### Requirement: Typing of loops and of `break`/`continue`
 
-El chequeador SHALL exigir que la condición de `for` y `while` sea `Boolean`, sin truthiness, y SHALL rechazar `break`/`continue` fuera de un bucle.
+The checker SHALL require the condition of `for` and `while` to be `Boolean`, without truthiness, and SHALL reject `break`/`continue` outside a loop.
 
-#### Scenario: Condición no booleana
-- **WHEN** se escribe `while 1 { }`
-- **THEN** se emite un diagnóstico indicando que la condición debe ser `Boolean`
+#### Scenario: Non-Boolean condition
+- **WHEN** `while 1 { }` is written
+- **THEN** a diagnostic indicating that the condition must be `Boolean` is emitted
 
-#### Scenario: `break` fuera de bucle
-- **WHEN** `break` aparece fuera de todo bucle, incluso dentro de una función anidada
-- **THEN** se emite un diagnóstico que señala el `break`
+#### Scenario: `break` outside a loop
+- **WHEN** `break` appears outside any loop, even inside a nested function
+- **THEN** a diagnostic pointing to the `break` is emitted
 
-### Requirement: `for ... in` sobre el protocolo mínimo de iteración
+### Requirement: `for ... in` over the minimal iteration protocol
 
-El chequeador SHALL admitir `for ... in` sobre rangos (`0..N`, `0..=N`) y sobre
-`String`, que itera por grafemas ligando un elemento de tipo `Char`. Sobre
-cualquier otro tipo, SHALL rechazarlo indicando que la iteración de tipos
-propios llega con los traits de Fase 3.
+The checker SHALL accept `for ... in` over ranges (`0..N`, `0..=N`) and over
+`String`, which iterates by graphemes binding an element of type `Char`. Over
+any other type, it SHALL reject it, indicating that iteration of user-defined
+types arrives with the Phase 3 traits.
 
-Mientras `Char` no esté implementado, la iteración de `String` SHALL diferirse
-con el diagnóstico de fase, sin ligar un elemento de otro tipo.
+While `Char` is not implemented, iteration of `String` SHALL be deferred
+with the phase diagnostic, without binding an element of another type.
 
-#### Scenario: Iteración sobre rango
-- **WHEN** se escribe `for i in 0..10 { }`
-- **THEN** `i` tiene tipo `Int32` dentro del cuerpo
+#### Scenario: Iteration over a range
+- **WHEN** `for i in 0..10 { }` is written
+- **THEN** `i` has type `Int32` within the body
 
-#### Scenario: Iteración sobre tipo no soportado
-- **WHEN** se escribe `for x in valor { }` y `valor` no es un rango ni `String`
-- **THEN** se emite un diagnóstico que indica que ese tipo no es iterable todavía
+#### Scenario: Iteration over an unsupported type
+- **WHEN** `for x in value { }` is written and `value` is neither a range nor `String`
+- **THEN** a diagnostic indicating that this type is not iterable yet is emitted
 
-#### Scenario: Iteración sobre `String`
-- **WHEN** se escribe `for c in texto { }` con `texto: String`
-- **THEN** el elemento ligado es un grafema de tipo `Char`
-- **AND** mientras `Char` no esté implementado se emite el diagnóstico de fase en vez de ligar un `String`
+#### Scenario: Iteration over `String`
+- **WHEN** `for c in text { }` is written with `text: String`
+- **THEN** the bound element is a grapheme of type `Char`
+- **AND** while `Char` is not implemented, the phase diagnostic is emitted instead of binding a `String`
 
-### Requirement: `if` como expresión exige ramas compatibles
+### Requirement: `if` as an expression requires compatible branches
 
-El chequeador SHALL admitir `if`/`else` en posición de expresión únicamente cuando ambas ramas están presentes y producen tipos compatibles. En cualquier otro caso, `if` solo es válido como sentencia.
+The checker SHALL accept `if`/`else` in expression position only when both branches are present and produce compatible types. In any other case, `if` is only valid as a statement.
 
-#### Scenario: Ramas compatibles
-- **WHEN** se evalúa `if x > 0 { "positivo" } else { "no positivo" }` en posición de expresión
-- **THEN** el tipo resultante es `String`
+#### Scenario: Compatible branches
+- **WHEN** `if x > 0 { "positive" } else { "not positive" }` is evaluated in expression position
+- **THEN** the resulting type is `String`
 
-#### Scenario: Rama `else` ausente en posición de expresión
-- **WHEN** un `if` sin `else` se usa donde se espera un valor
-- **THEN** se emite un diagnóstico que indica que falta la rama alternativa
+#### Scenario: `else` branch absent in expression position
+- **WHEN** an `if` without `else` is used where a value is expected
+- **THEN** a diagnostic indicating that the alternative branch is missing is emitted
 
-#### Scenario: Ramas de tipos incompatibles
-- **WHEN** las ramas de un `if` usado como expresión producen tipos distintos y no relacionados
-- **THEN** se emite un diagnóstico que señala ambos tipos
+#### Scenario: Branches of incompatible types
+- **WHEN** the branches of an `if` used as an expression produce distinct, unrelated types
+- **THEN** a diagnostic pointing to both types is emitted
 
-### Requirement: Tipado de parámetros opcionales, nombrados, variadic y valores por defecto
+### Requirement: Typing of optional, named, variadic parameters and default values
 
-El chequeador SHALL verificar que toda llamada resuelva a una asignación válida de argumentos a parámetros: los nombrados se emparejan por nombre, los ausentes con valor por defecto lo toman de la firma, y los que sobran se agrupan en el parámetro variadic si existe.
+The checker SHALL verify that every call resolves to a valid assignment of arguments to parameters: named ones are matched by name, absent ones with a default value take it from the signature, and any left over are grouped into the variadic parameter if one exists.
 
-#### Scenario: Parámetro opcional sin proveer
-- **WHEN** se llama a `saludo()` con `nombre?: String` sin argumento
-- **THEN** `nombre` tiene valor `null` dentro del cuerpo
+#### Scenario: Optional parameter not provided
+- **WHEN** `greet()` is called with `name?: String` and no argument
+- **THEN** `name` has value `null` within the body
 
-#### Scenario: Argumento nombrado inexistente
-- **WHEN** una llamada nombra un argumento que no existe en la firma
-- **THEN** se emite un diagnóstico que nombra el parámetro desconocido
+#### Scenario: Nonexistent named argument
+- **WHEN** a call names an argument that does not exist in the signature
+- **THEN** a diagnostic naming the unknown parameter is emitted
 
-#### Scenario: Tipo del variadic
-- **WHEN** se llama a `suma(1, 2, 3)` con `...valores: Int32`
-- **THEN** `valores` tiene el tipo de secuencia de `Int32` dentro del cuerpo
+#### Scenario: Type of the variadic
+- **WHEN** `sum(1, 2, 3)` is called with `...values: Int32`
+- **THEN** `values` has the sequence type of `Int32` within the body
 
-### Requirement: Tipado de closures y captura inmutable
+### Requirement: Typing of closures and immutable capture
 
-El chequeador SHALL inferir el tipo de una lambda a partir de sus parámetros y su cuerpo, SHALL registrar qué variables del scope envolvente captura, y SHALL rechazar la mutación de una variable capturada dentro del cuerpo de la closure.
+The checker SHALL infer the type of a lambda from its parameters and its body, SHALL record which variables of the enclosing scope it captures, and SHALL reject mutation of a captured variable within the closure's body.
 
-#### Scenario: Tipo de una lambda
-- **WHEN** se declara `inmut ADD = (a: Int32, b: Int32): Int32 => a + b;`
-- **THEN** `ADD` tiene tipo función de `(Int32, Int32)` a `Int32`
+#### Scenario: Type of a lambda
+- **WHEN** `inmut ADD = (a: Int32, b: Int32): Int32 => a + b;` is declared
+- **THEN** `ADD` has function type from `(Int32, Int32)` to `Int32`
 
-#### Scenario: Captura de una variable externa
-- **WHEN** una lambda referencia una variable declarada en el scope que la contiene
-- **THEN** el chequeo tiene éxito y la variable queda registrada como capturada
+#### Scenario: Capture of an external variable
+- **WHEN** a lambda references a variable declared in the scope that contains it
+- **THEN** the check succeeds and the variable is recorded as captured
 
-#### Scenario: Mutación de una variable capturada
-- **WHEN** el cuerpo de una lambda intenta reasignar una variable capturada del scope envolvente
-- **THEN** se emite un diagnóstico que indica que la captura es inmutable
+#### Scenario: Mutation of a captured variable
+- **WHEN** the body of a lambda attempts to reassign a captured variable from the enclosing scope
+- **THEN** a diagnostic indicating that the capture is immutable is emitted
 
-### Requirement: Exhaustividad de `match`
+### Requirement: Exhaustiveness of `match`
 
-El chequeador SHALL exigir que todo `match` sobre un `enum` cubra todos sus constructores, o incluya el comodín `_`. `match` sobre tipos sin un conjunto cerrado de valores SHALL exigir el comodín `_` como brazo final.
+The checker SHALL require every `match` over an `enum` to cover all its constructors, or include the `_` wildcard. `match` over types without a closed set of values SHALL require the `_` wildcard as the final arm.
 
-#### Scenario: `enum` cubierto por completo
-- **WHEN** un `match` sobre `Direction` tiene un brazo para cada uno de sus cuatro constructores
-- **THEN** el chequeo tiene éxito sin exigir `_`
+#### Scenario: `enum` completely covered
+- **WHEN** a `match` over `Direction` has one arm for each of its four constructors
+- **THEN** the check succeeds without requiring `_`
 
-#### Scenario: `enum` incompleto sin comodín
-- **WHEN** un `match` sobre `Direction` cubre solo dos de sus cuatro constructores y no tiene `_`
-- **THEN** se emite un diagnóstico que nombra los constructores faltantes
+#### Scenario: Incomplete `enum` without a wildcard
+- **WHEN** a `match` over `Direction` covers only two of its four constructors and has no `_`
+- **THEN** a diagnostic naming the missing constructors is emitted
 
-#### Scenario: `match` sobre `Int32` sin comodín final
-- **WHEN** un `match` sobre un valor `Int32` no termina con un brazo `_`
-- **THEN** se emite un diagnóstico indicando que el comodín es obligatorio para ese tipo
+#### Scenario: `match` over `Int32` without a final wildcard
+- **WHEN** a `match` over an `Int32` value does not end with a `_` arm
+- **THEN** a diagnostic indicating that the wildcard is mandatory for that type is emitted
 
-#### Scenario: Tipo del `match` como expresión
-- **WHEN** todos los brazos de un `match` usado como expresión producen el mismo tipo
-- **THEN** ese es el tipo del `match`
+#### Scenario: Type of `match` as an expression
+- **WHEN** all arms of a `match` used as an expression produce the same type
+- **THEN** that is the type of the `match`
 
-### Requirement: Coalescencia nula
+### Requirement: Null coalescing
 
-El chequeador SHALL exigir que ambos operandos de `??` compartan un tipo común, produciendo el tipo no nulable cuando el operando derecho no es nulable.
+The checker SHALL require both operands of `??` to share a common type, producing the non-nullable type when the right operand is not nullable.
 
-#### Scenario: Coalescencia con fallback no nulable
-- **WHEN** se evalúa `nombre ?? "anónimo"` con `nombre: String?`
-- **THEN** el resultado tiene tipo `String`
+#### Scenario: Coalescing with a non-nullable fallback
+- **WHEN** `name ?? "anonymous"` is evaluated with `name: String?`
+- **THEN** the result has type `String`
 
-#### Scenario: Coalescencia con fallback nulable
-- **WHEN** ambos operandos de `??` son nulables
-- **THEN** el resultado sigue siendo nulable
+#### Scenario: Coalescing with a nullable fallback
+- **WHEN** both operands of `??` are nullable
+- **THEN** the result remains nullable
 
-#### Scenario: `??` sobre operando izquierdo no nulable
-- **WHEN** `??` se usa sobre una expresión de tipo no nulable
-- **THEN** se emite un diagnóstico indicando que el operador es innecesario
+#### Scenario: `??` over a non-nullable left operand
+- **WHEN** `??` is used over an expression of a non-nullable type
+- **THEN** a diagnostic indicating that the operator is unnecessary is emitted
 
-#### Scenario: Operandos sin tipo común
-- **WHEN** los operandos de `??` no comparten un tipo común
-- **THEN** se emite un diagnóstico que señala ambos tipos
+#### Scenario: Operands without a common type
+- **WHEN** the operands of `??` do not share a common type
+- **THEN** a diagnostic pointing to both types is emitted
 
-### Requirement: Asignación entre tipos nulables y no nulables
+### Requirement: Assignment between nullable and non-nullable types
 
-El chequeador SHALL admitir asignar un valor de tipo `T` donde se espera `T?`, y SHALL rechazar la dirección contraria sin coalescencia explícita.
+The checker SHALL allow assigning a value of type `T` where `T?` is expected, and SHALL reject the opposite direction without explicit coalescing.
 
-#### Scenario: Ensanchar a nulable
-- **WHEN** se asigna un `String` a una variable declarada `String?`
-- **THEN** el chequeo tiene éxito
+#### Scenario: Widen to nullable
+- **WHEN** a `String` is assigned to a variable declared `String?`
+- **THEN** the check succeeds
 
-#### Scenario: Estrechar sin coalescencia
-- **WHEN** se asigna un `String?` a una variable declarada `String`
-- **THEN** se emite un diagnóstico
-- **AND** la ayuda sugiere `??` para proveer un valor por defecto
+#### Scenario: Narrow without coalescing
+- **WHEN** a `String?` is assigned to a variable declared `String`
+- **THEN** a diagnostic is emitted
+- **AND** the help suggests `??` to provide a default value
 
-#### Scenario: `null` como valor
-- **WHEN** se asigna `null` a una variable de tipo no nulable
-- **THEN** se emite un diagnóstico que indica que el tipo no admite ausencia de valor
+#### Scenario: `null` as a value
+- **WHEN** `null` is assigned to a variable of a non-nullable type
+- **THEN** a diagnostic indicating that the type does not allow absence of a value is emitted
 
-### Requirement: `?.` difiere a la fase de objetos
+### Requirement: `?.` is no longer deferred to the objects phase
 
-El chequeador SHALL tipar `expr?.miembro` como el tipo del miembro en su forma nulable cuando el receptor es nulable.
+The checker SHALL type `expr?.member` as the member's type in its nullable form when the receiver is nullable.
 
-El diferimiento de la fase anterior termina aquí: su razón era que ningún tipo tenía miembros.
+The deferral from the previous phase ends here: its reason was that no type had members.
 
-#### Scenario: Acceso seguro sobre valor nulable
-- **WHEN** `usuario` tiene tipo `User?` y `nombre` es `String`
-- **THEN** `usuario?.nombre` tiene tipo `String?`
+#### Scenario: Safe access over a nullable value
+- **WHEN** `user` has type `User?` and `name` is `String`
+- **THEN** `user?.name` has type `String?`
 
-#### Scenario: `?.` sobre valor no nulable
-- **WHEN** `?.` se usa sobre una expresión que nunca es nula
-- **THEN** se emite un diagnóstico indicando que el operador es innecesario, con `.` como sugerencia
+#### Scenario: `?.` over a non-nullable value
+- **WHEN** `?.` is used over an expression that is never null
+- **THEN** a diagnostic indicating that the operator is unnecessary, with `.` as a suggestion, is emitted
 
-#### Scenario: Miembro inexistente
-- **WHEN** `?.` nombra un miembro que el tipo no tiene
-- **THEN** se emite un diagnóstico que nombra el miembro y el tipo
+#### Scenario: Nonexistent member
+- **WHEN** `?.` names a member the type does not have
+- **THEN** a diagnostic naming the member and the type is emitted
 
 ### Requirement: Shadowing and capture qualification
 The checker SHALL reject a local declaration that hides a still-visible local or parameter. A lambda parameter MAY share a captured outer name only when the capture is addressed as `this.name`; the plain name SHALL denote the lambda-local binding.
@@ -494,7 +494,7 @@ For reference types, `mut` SHALL permit binding reassignment and referent mutati
 - **THEN** it is a valid single `Char` even though it contains multiple code points
 
 #### Scenario: Non-ASCII code
-- **WHEN** `ascii_code()` is invoked on `'é'`
+- **WHEN** `ascii_code()` is invoked on `'π'`
 - **THEN** it returns `-1`
 
 ### Requirement: Native String reference semantics and operators
@@ -523,45 +523,44 @@ Each native type SHALL expose only its documented operator set. Integer division
 - **WHEN** application code attempts `true + false`
 - **THEN** type checking rejects the operation
 
-### Requirement: Familia `Float` y tipos temporales reconocidos como pendientes
+### Requirement: `Float` family and temporal types recognized as pending
 
-El chequeador SHALL reconocer `Float16`, `Float32`, `Float64`, `Float128`,
-`Float`, los anchos enteros no implementados, `Char`, y los tipos temporales
-`Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`
-y `Period` como tipos del lenguaje pendientes, cada uno declarando la fase que
-lo trae.
+The checker SHALL recognize `Float16`, `Float32`, `Float64`, `Float128`,
+`Float`, the unimplemented integer widths, `Char`, and the temporal types
+`Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`,
+and `Period` as pending language types, each declaring the phase that
+brings it.
 
-#### Scenario: Anotación con un tipo Float
-- **WHEN** se declara `mut ratio: Float64 = 0;`
-- **THEN** el diagnóstico nombra el tipo e indica la fase en que llega
-- **AND** NO se reporta como tipo inexistente
+#### Scenario: Annotation with a Float type
+- **WHEN** `mut ratio: Float64 = 0;` is declared
+- **THEN** the diagnostic names the type and indicates the phase in which it arrives
+- **AND** it is NOT reported as a nonexistent type
 
-#### Scenario: Anotación con un tipo temporal
-- **WHEN** una anotación nombra `Instant` o `Duration`
-- **THEN** el diagnóstico indica la fase de la familia temporal
+#### Scenario: Annotation with a temporal type
+- **WHEN** an annotation names `Instant` or `Duration`
+- **THEN** the diagnostic indicates the phase of the temporal family
 
-### Requirement: Identidad e igualdad observables de `String`
+### Requirement: Observable identity and equality of `String`
 
-El chequeador y el runtime SHALL tratar `String` como referencia con identidad
-observable: `is` SHALL comparar identidad de referente y `==` SHALL comparar
-contenido.
+The checker and runtime SHALL treat `String` as a reference with observable
+identity: `is` SHALL compare referent identity and `==` SHALL compare
+content.
 
-La comparación de contenido SHALL ser indiferente a la forma de normalización
-Unicode de los operandos. El hash de un `String` SHALL derivarse de su forma
-canónica, de modo que dos cadenas iguales por `==` nunca produzcan hashes
-distintos.
+Content comparison SHALL be insensitive to the Unicode normalization form
+of the operands. The hash of a `String` SHALL derive from its canonical
+form, so that two strings equal by `==` never produce distinct hashes.
 
-#### Scenario: Igualdad indiferente a la normalización
-- **WHEN** se comparan con `==` dos cadenas con el mismo contenido percibido, una en NFC y la otra en NFD
-- **THEN** el resultado es `true`
+#### Scenario: Equality insensitive to normalization
+- **WHEN** two strings with the same perceived content, one in NFC and the other in NFD, are compared with `==`
+- **THEN** the result is `true`
 
-#### Scenario: Identidad frente a contenido
-- **WHEN** dos bindings distintos aliasan el mismo `String` y un tercero tiene el mismo contenido en otro referente
-- **THEN** `is` es `true` solo para los dos primeros y `==` es `true` para los tres
+#### Scenario: Identity versus content
+- **WHEN** two distinct bindings alias the same `String` and a third has the same content in another referent
+- **THEN** `is` is `true` only for the first two and `==` is `true` for all three
 
-#### Scenario: Coherencia entre hash e igualdad
-- **WHEN** dos cadenas iguales por `==` se usan como claves de un mapa
-- **THEN** se resuelven a la misma entrada
+#### Scenario: Consistency between hash and equality
+- **WHEN** two strings equal by `==` are used as keys in a map
+- **THEN** they resolve to the same entry
 
 ### Requirement: Projection copy and whole-reference aliasing
 The checker SHALL classify reference expressions as whole references, projection reads, or places. Whole-reference assignment/passing/return/capture SHALL preserve aliasing; projection reads SHALL require deep Clone and produce independence; places SHALL preserve access to original storage. Destructuring, matching, callable capture, collection extraction, and generic T SHALL follow the same rule.
@@ -645,173 +644,182 @@ Transferability and shareability SHALL be compiler-derived, non-forgeable proper
 - **WHEN** a class safely encapsulates mutable state behind a supported mutex
 - **THEN** the compiler may derive sharing without exposing an ordinary user-implemented marker
 
-### Requirement: Tipos nominales y subtipado
+### Requirement: Nominal types and subtyping
 
-El chequeador SHALL tratar cada clase, record, value class y enum como un tipo nominal distinto, y SHALL admitir un valor donde se espera una superclase suya o un contrato que implementa.
+The checker SHALL treat every class, record, value class and enum as a distinct nominal type, and SHALL accept a value where one of its superclasses or an implemented contract is expected.
 
-#### Scenario: Subclase donde se espera la base
-- **WHEN** se pasa una instancia de `Admin` a un parámetro de tipo `User`
-- **THEN** el chequeo tiene éxito
+#### Scenario: Subclass where base is expected
+- **WHEN** an instance of `Admin` is passed to a parameter of type `User`
+- **THEN** the check succeeds
 
-#### Scenario: Implementación donde se espera el contrato
-- **WHEN** se pasa una instancia a un parámetro cuyo tipo es un contrato que implementa
-- **THEN** el chequeo tiene éxito
+#### Scenario: Implementation where contract is expected
+- **WHEN** an instance is passed to a parameter whose type is a contract it implements
+- **THEN** the check succeeds
 
-#### Scenario: Dos tipos con la misma forma no son el mismo
-- **WHEN** dos clases declaran los mismos campos y se asigna una donde se espera la otra
-- **THEN** se emite un diagnóstico: la equivalencia es por nombre, no por forma
+#### Scenario: Two types with the same shape are not the same type
+- **WHEN** two classes declare the same fields and one is assigned where the other is expected
+- **THEN** a diagnostic is emitted: equivalence is by name, not by shape
 
-#### Scenario: Base donde se espera la subclase
-- **WHEN** se pasa una instancia de `User` a un parámetro de tipo `Admin`
-- **THEN** se emite un diagnóstico
+#### Scenario: Base where subclass is expected
+- **WHEN** an instance of `User` is passed to a parameter of type `Admin`
+- **THEN** a diagnostic is emitted
 
-### Requirement: Resolución de miembros
+### Requirement: Member resolution
 
-El chequeador SHALL resolver un acceso `expr.miembro` contra el tipo de `expr` y su cadena de herencia, respetando la visibilidad.
+The checker SHALL resolve an `expr.member` access against the type of `expr` and its inheritance chain, respecting visibility.
 
-#### Scenario: Miembro heredado
-- **WHEN** se accede a un campo declarado en la superclase
-- **THEN** resuelve a esa declaración
+#### Scenario: Inherited member
+- **WHEN** a field declared in the superclass is accessed
+- **THEN** it resolves to that declaration
 
-#### Scenario: Miembro inexistente
-- **WHEN** se accede a un miembro que ningún ancestro declara
-- **THEN** se emite un diagnóstico que nombra el miembro y el tipo
+#### Scenario: Nonexistent member
+- **WHEN** a member that no ancestor declares is accessed
+- **THEN** a diagnostic naming the member and the type is emitted
 
-#### Scenario: Miembro oculto por visibilidad
-- **WHEN** se accede desde fuera a un miembro `private`
-- **THEN** se emite un diagnóstico de visibilidad, distinto del de miembro inexistente
+#### Scenario: Member hidden by visibility
+- **WHEN** a `private` member is accessed from outside
+- **THEN** a visibility diagnostic is emitted, distinct from the nonexistent-member diagnostic
 
-### Requirement: Shadowing y captura calificada
+### Requirement: Shadowing and qualified capture
 
-El chequeador SHALL rechazar una declaración local que oculte otro local o parámetro todavía visible. Un parámetro de lambda MAY compartir el nombre de una captura únicamente cuando la captura se referencia como `this.nombre`; el nombre simple designa el parámetro.
+The checker SHALL reject a local declaration that hides another still-visible local or parameter. A lambda parameter MAY share a capture's name only when the capture is referenced as `this.name`; the plain name denotes the parameter.
 
-#### Scenario: Local duplicado en scope anidado
-- **WHEN** un bloque interno declara un nombre local todavía visible
-- **THEN** se emite un diagnóstico que señala ambas declaraciones
+#### Scenario: Duplicate local in nested scope
+- **WHEN** an inner block declares a local name that is still visible
+- **THEN** a diagnostic pointing to both declarations is emitted
 
-#### Scenario: Colisión de parámetro y captura
-- **WHEN** una lambda declara el parámetro `prefix` y lee `this.prefix`
-- **THEN** `prefix` resuelve al parámetro y `this.prefix` a la captura exterior
+#### Scenario: Parameter and capture collision
+- **WHEN** a lambda declares parameter `prefix` and reads `this.prefix`
+- **THEN** `prefix` resolves to the parameter and `this.prefix` to the outer capture
 
-### Requirement: Strictness de referencias de objeto
+### Requirement: Object reference strictness
 
-En referencias de clase, `mut` SHALL permitir reasignar y mutar el objeto,
-`inmut` SHALL impedir solo la reasignación, e `inmut::strict` SHALL impedir la
-mutación alcanzable. Una referencia strict NO SHALL convertirse en alias
-mutable ni adquirirse mientras permanezca accesible un alias mutable.
+For class references, `mut` SHALL permit rebinding and mutating the object,
+`inmut` SHALL prevent only rebinding, and `inmut::strict` SHALL prevent
+reachable mutation. A strict reference SHALL NOT become a mutable alias or be
+acquired while a mutable alias remains accessible.
 
-#### Scenario: Clon mutable desde referencia strict
-- **WHEN** un objeto strict implementa `Clone` y se clona a un binding `mut`
-- **THEN** el clon independiente puede mutarse sin alterar el objeto original
+#### Scenario: Mutable clone from a strict reference
+- **WHEN** a strict object implements `Clone` and is cloned to a `mut` binding
+- **THEN** the independent clone can be mutated without altering the original object
 
-### Requirement: Resolución de constructores
+### Requirement: Constructor resolution
 
-El chequeador SHALL seleccionar entre múltiples `construct` por aridad, tipos, opcionales y nombres, SHALL permitir reordenar argumentos nombrados y SHALL rechazar firmas efectivas duplicadas o llamadas ambiguas.
+The checker SHALL select among multiple `construct` declarations by arity, types, optionals and names, SHALL allow reordering named arguments, and SHALL reject duplicate effective signatures or ambiguous calls.
 
-#### Scenario: Construcción nombrada reordenada
-- **WHEN** `User(name: "Cristian", id: 1)` coincide con `construct(id: UInt64, name: String)`
-- **THEN** se selecciona esa firma y cada valor se liga por nombre
+#### Scenario: Reordered named construction
+- **WHEN** `User(name: "Cristian", id: 1)` matches `construct(id: UInt64, name: String)`
+- **THEN** that signature is selected and each value binds by name
 
-### Requirement: Casts comprobables
+### Requirement: Checked casts
 
-Un cast a un tipo relacionado SHALL comprobarse en tiempo de ejecución y fallar de forma controlada; un cast entre tipos no relacionados SHALL rechazarse al compilar.
+A cast to a related type SHALL be checked at runtime and fail in a controlled manner; a cast between unrelated types SHALL be rejected at compile time.
 
-#### Scenario: Descenso válido
-- **WHEN** se convierte un `User` que en realidad es un `Admin` a `Admin`
-- **THEN** el resultado es la instancia
+#### Scenario: Valid downcast
+- **WHEN** a `User` that is actually an `Admin` is cast to `Admin`
+- **THEN** the result is the instance
 
-#### Scenario: Descenso inválido
-- **WHEN** el valor no es del tipo pedido
-- **THEN** el programa termina con un error de runtime diagnosticado
-- **AND** NO incurre en comportamiento indefinido
+#### Scenario: Invalid downcast
+- **WHEN** the value is not of the requested type
+- **THEN** the program terminates with a diagnosed runtime error
+- **AND** it does NOT incur undefined behavior
 
-#### Scenario: Tipos sin relación
-- **WHEN** se convierte entre dos tipos que no comparten jerarquía ni contrato
-- **THEN** se emite un diagnóstico al compilar
+#### Scenario: Unrelated types
+- **WHEN** a cast occurs between two types that share neither hierarchy nor contract
+- **THEN** a diagnostic is emitted at compile time
 
-### Requirement: Los operadores resuelven por contrato
+### Requirement: Operators resolve by contract
 
-El chequeador SHALL resolver un operador buscando el contrato que su tipo implementa, en vez de comparar contra una lista fija de tipos.
+The checker SHALL resolve an operator by looking up the contract implemented by its type, instead of comparing against a fixed list of types.
 
-#### Scenario: Concatenación
-- **WHEN** se evalúa `"a" + "b"`
-- **THEN** el tipo resultante es `String`
+#### Scenario: Concatenation
+- **WHEN** `"a" + "b"` is evaluated
+- **THEN** the resulting type is `String`
 
-#### Scenario: Operando sin el contrato
-- **WHEN** un operando no implementa el contrato del operador
-- **THEN** el diagnóstico nombra el contrato que falta, no una lista de tipos admitidos
+#### Scenario: Operand without the contract
+- **WHEN** an operand does not implement the operator's contract
+- **THEN** the diagnostic names the missing contract, not a list of allowed types
 
-### Requirement: La sintaxis final de tipos función no se entrega en Fase 3
+### Requirement: The final function type syntax is not delivered in Phase 3
 
-El chequeador de Fase 3 SHALL rechazar cualquier posición que exija anotar el
-tipo de una closure —parámetro, retorno o atributo— con un diagnóstico que
-indique que `Function(P...) => R` / `Fn(P...) => R` llega en una fase posterior.
+The Phase 3 checker SHALL reject any position that requires annotating the
+type of a closure —parameter, return or attribute— with a diagnostic indicating
+that `Function(P...) => R` / `Fn(P...) => R` arrives in a later phase.
 
-Este es un límite de implementación, no la semántica final. El lenguaje ya
-define compatibilidad por firma, closures escapables y almacenamiento
-automático conforme a `docs/CORE_LANGUAGE_SEMANTICS.md`.
+This is an implementation limit, not the final semantics. The language already
+defines compatibility by signature, escapable closures and automatic storage
+per `docs/CORE_LANGUAGE_SEMANTICS.md`.
 
-#### Scenario: Closure en una variable local
-- **WHEN** se declara `inmut F = (a: Int32): Int32 => a + 1;` y se llama `F(1)`
-- **THEN** el chequeo tiene éxito
-- **AND** el tipo de `F` se infiere sin escribirse
+#### Scenario: Closure in a local variable
+- **WHEN** `inmut F = (a: Int32): Int32 => a + 1;` is declared and `F(1)` is called
+- **THEN** the check succeeds
+- **AND** the type of `F` is inferred without being written
 
-#### Scenario: Closure como tipo de parámetro
-- **WHEN** una función declara un parámetro cuyo tipo pretende ser una función
-- **THEN** se emite un diagnóstico indicando que los tipos función llegan en una fase posterior
-- **AND** NO se reporta como tipo desconocido
+#### Scenario: Closure as parameter type
+- **WHEN** a function declares a parameter whose type attempts to be a function
+- **THEN** a diagnostic is emitted indicating that function types arrive in a later phase
+- **AND** it is NOT reported as an unknown type
 
-#### Scenario: Closure como tipo de retorno
-- **WHEN** una función declara devolver una closure
-- **THEN** se emite el mismo diagnóstico
+#### Scenario: Closure as return type
+- **WHEN** a function declares that it returns a closure
+- **THEN** the same diagnostic is emitted
 
-#### Scenario: Closure como tipo de atributo
-- **WHEN** una clase declara un atributo cuyo tipo pretende ser una función
-- **THEN** se emite el mismo diagnóstico
+#### Scenario: Closure as attribute type
+- **WHEN** a class declares an attribute whose type attempts to be a function
+- **THEN** the same diagnostic is emitted
 
-#### Scenario: Retornar una closure creada localmente
-- **WHEN** una función construye una closure y la retorna
-- **THEN** se emite un diagnóstico indicando que una closure no puede escapar de la función que la crea
+#### Scenario: Returning a locally created closure
+- **WHEN** a function builds a closure and returns it
+- **THEN** a diagnostic is emitted indicating that a closure cannot escape the function that creates it
 
-### Requirement: Contrato `to_string()`
+### Requirement: `to_string()` contract
 
-El lenguaje SHALL definir `to_string()` como un contrato reservado, en la misma familia que los contratos de operador (`ZIRK_LANGUAGE_SPEC.md` sección 4): todo tipo nativo escalar lo implementa, y un tipo del usuario — clase, record, enum — puede implementarlo para producir su propia representación textual. `print`/`println` SHALL rutear por él en vez de aceptar únicamente una lista cerrada de tipos.
+The language SHALL define `to_string()` as a reserved contract, in the same
+family as the operator contracts (`ZIRK_LANGUAGE_SPEC.md` section 4): every
+scalar native type implements it, and a user type —class, record, enum— may
+implement it to produce its own textual representation. `print`/`println` SHALL
+route through it instead of accepting only a closed list of types.
 
-#### Scenario: Tipo nativo imprimible sin declarar nada
-- **WHEN** se imprime un `Int32`, `Float64`, `Boolean` o `Char`
-- **THEN** el chequeo tiene éxito sin que el programa declare `to_string()` para ellos
+#### Scenario: Native type printable without declaring anything
+- **WHEN** an `Int32`, `Float64`, `Boolean` or `Char` is printed
+- **THEN** the check succeeds without the program declaring `to_string()` for them
 
-#### Scenario: Tipo del usuario que implementa `to_string()`
-- **WHEN** una clase declara `to_string(): String` y una instancia se pasa a `println`
-- **THEN** el chequeo tiene éxito y el valor impreso es el que ese método produce
+#### Scenario: User type that implements `to_string()`
+- **WHEN** a class declares `to_string(): String` and an instance is passed to `println`
+- **THEN** the check succeeds and the printed value is the one produced by that method
 
-#### Scenario: Tipo del usuario que no lo implementa
-- **WHEN** una clase sin `to_string()` se pasa a `println`
-- **THEN** se emite un diagnóstico que nombra el tipo, distinto de un `TYPE_MISMATCH` genérico
+#### Scenario: User type that does not implement it
+- **WHEN** a class without `to_string()` is passed to `println`
+- **THEN** a diagnostic naming the type is emitted, distinct from a generic `TYPE_MISMATCH`
 
-### Requirement: Interpolación de strings
+### Requirement: String interpolation
 
-Un literal de `String` SHALL admitir `{expr}` en su interior, desazucarado a concatenar el texto literal con `expr.to_string()` para cada expresión interpolada, en el orden en que aparecen.
+A `String` literal SHALL allow `{expr}` inside it, desugared to concatenating
+the literal text with `expr.to_string()` for each interpolated expression, in
+the order they appear.
 
-#### Scenario: Interpolación de una variable
-- **WHEN** se escribe `"User: {user.name}"`
-- **THEN** el resultado concatena el texto literal con `user.name.to_string()`
+#### Scenario: Interpolation of a variable
+- **WHEN** `"User: {user.name}"` is written
+- **THEN** the result concatenates the literal text with `user.name.to_string()`
 
-#### Scenario: Interpolación de un tipo no imprimible
-- **WHEN** la expresión interpolada tiene un tipo sin `to_string()`
-- **THEN** se emite el mismo diagnóstico que pasar ese valor directamente a `println`
+#### Scenario: Interpolation of a non-printable type
+- **WHEN** the interpolated expression has a type without `to_string()`
+- **THEN** the same diagnostic is emitted as passing that value directly to `println`
 
-### Requirement: Contexto de literal fraccionario y aritmética mixta
+### Requirement: Fractional literal context and mixed arithmetic
 
-Un literal fraccionario sin anotación SHALL tener tipo `Float64`, y una operación aritmética entre un tipo entero y uno `Float` SHALL producir `Float`. La sección 3 de `ZIRK_LANGUAGE_SPEC.md` ya documentaba ambas reglas; esta fase es la primera en la que `Float` existe y se vuelven verificables.
+An unannotated fractional literal SHALL have type `Float64`, and an arithmetic
+operation between an integer type and a `Float` type SHALL produce `Float`.
+Section 3 of `ZIRK_LANGUAGE_SPEC.md` already documented both rules; this phase
+is the first in which `Float` exists and they become verifiable.
 
-#### Scenario: Literal fraccionario sin anotación
-- **WHEN** se escribe `mut x = 1.5;` sin anotación de tipo
-- **THEN** `x` tiene tipo `Float64`
+#### Scenario: Unannotated fractional literal
+- **WHEN** `mut x = 1.5;` is written without a type annotation
+- **THEN** `x` has type `Float64`
 
-#### Scenario: Aritmética mixta entero y `Float`
-- **WHEN** se suma un `Int32` y un `Float64`
-- **THEN** el resultado tiene tipo `Float64`
+#### Scenario: Mixed integer and `Float` arithmetic
+- **WHEN** an `Int32` and a `Float64` are added
+- **THEN** the result has type `Float64`
 
 ### Requirement: `Never` is the bottom type
 

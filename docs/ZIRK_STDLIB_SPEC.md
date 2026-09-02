@@ -56,11 +56,11 @@ Exposes three streams:
 ```text
 import { stdin, stdout, stderr } from std.io;
 
-stdout.print("Hola", 42);
-stdout.println("Mundo", user);
+stdout.print("Hello", 42);
+stdout.println("World", user);
 stdout.println();
 println("Direct convenience call");
-stderr.println("Diagnóstico");
+stderr.println("Diagnostic");
 mut line = stdin.read_line();
 ```
 

@@ -1,37 +1,37 @@
 <!--
-  Base: develop (salvo release/* o hotfix/*, que van a main).
-  Ver CONTRIBUTING.md
+  Base: develop (except release/* or hotfix/*, which go to main).
+  See CONTRIBUTING.md
 -->
 
-## Qué cambia
+## What changes
 
-<!-- Descripción breve. Qué problema resuelve, no cómo. -->
+<!-- Short description. What problem does it solve, not how. -->
 
-## Fase del roadmap
+## Roadmap phase
 
-<!-- Ej: Fase 0 — cimientos. Confirmá que no adelanta features de fases posteriores. -->
+<!-- E.g. Phase 0 — foundations. Confirm it does not advance features from later phases. -->
 
-- Fase:
-- Change de OpenSpec (si aplica):
+- Phase:
+- OpenSpec change (if applicable):
 
 ## Checklist
 
-- [ ] `cargo fmt --all --check` pasa
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` pasa
-- [ ] `cargo test --workspace` pasa
-- [ ] No adelanta features de fases posteriores del roadmap
-- [ ] Si toca reglas del lenguaje: hay al menos un caso válido y uno inválido en tests
-- [ ] Si agrega diagnósticos: tienen código estable, causa y ayuda accionable
-- [ ] Si toma una decisión de arquitectura: hay un ADR en `docs/decisions/`
+- [ ] `cargo fmt --all --check` passes
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
+- [ ] `cargo test --workspace` passes
+- [ ] Does not advance features from later roadmap phases
+- [ ] If it touches language rules: there is at least one valid and one invalid test case
+- [ ] If it adds diagnostics: they have a stable code, cause and actionable help
+- [ ] If it makes an architecture decision: there is an ADR in `docs/decisions/`
 
-## Ambigüedades encontradas
+## Ambiguities found
 
 <!--
-  Regla del spec: toda ambigüedad debe producir una pregunta o quedar
-  documentada, nunca resolverse en silencio. Si el spec no cubría algo,
-  decilo acá. Si no hubo ninguna, escribí "ninguna".
+  Spec rule: every ambiguity must produce a question or be documented,
+  never resolved silently. If the spec did not cover something, say so here.
+  If there were none, write "none".
 -->
 
-## Verificación
+## Verification
 
-<!-- Cómo comprobaste que funciona. Salida de tests, comandos, capturas. -->
+<!-- How you verified it works. Test output, commands, screenshots. -->

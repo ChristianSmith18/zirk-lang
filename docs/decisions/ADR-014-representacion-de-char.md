@@ -1,30 +1,30 @@
-# ADR-014 — `Char` comparte la representación opaca de `String`
+# ADR-014 — `Char` shares `String`'s opaque representation
 
-- **Estado:** aceptada
-- **Fecha:** 19 de agosto de 2026
-- **Fase:** 3b
+- **Status:** accepted
+- **Date:** August 19, 2026
+- **Phase:** 3b
 
-## Contexto
+## Context
 
-`ZIRK_LANGUAGE_SPEC.md` sección 3 define `Char` como "exactamente un grapheme Unicode, incluso cuando está compuesto de múltiples code points y bytes". Un grapheme cluster extendido (una base más marcas combinantes, o una secuencia de emoji unida por ZWJ como `'👨‍👩‍👧‍👦'`) no tiene un tamaño máximo garantizado por el estándar Unicode — puede ocupar arbitrariamente más de 4 bytes UTF-8.
+`ZIRK_LANGUAGE_SPEC.md` section 3 defines `Char` as "exactly one Unicode grapheme, even when it is composed of multiple code points and bytes". An extended grapheme cluster (a base plus combining marks, or a ZWJ-joined emoji sequence like `'👨‍👩‍👧‍👦'`) has no maximum size guaranteed by the Unicode standard — it can arbitrarily exceed 4 UTF-8 bytes.
 
-`openspec/changes/fase-3b-scalars-and-text/design.md` dejó esto como pregunta abierta con tres opciones: (a) una vista opaca respaldada por el runtime, como `String`; (b) un valor inline con optimización de buffer pequeño y un escape para el caso raro que excede el buffer; (c) restringir `Char` a un solo code point, lo que contradice la sección 3 tal como está escrita y necesitaría una corrección de spec primero.
+`openspec/changes/fase-3b-scalars-and-text/design.md` left this as an open question with three options: (a) an opaque view backed by the runtime, like `String`; (b) an inline value with small-buffer optimization and an escape path for the rare case that exceeds the buffer; (c) restrict `Char` to a single code point, which contradicts section 3 as written and would need a spec correction first.
 
-## Decisión
+## Decision
 
-`Char` se representa exactamente como `String` ([ADR-005](./ADR-005-representacion-string.md)): un handle opaco hacia el mismo tipo de contenido UTF-8 que el runtime ya sabe construir, comparar y liberar. La IR gana un `IrType::Char` propio — no reutiliza `IrType::String` — para que el chequeador y el verificador puedan seguir distinguiendo estáticamente "esto es exactamente un grapheme" de "esto es texto arbitrario", pero en LLVM ambos bajan al mismo puntero opaco y a los mismos símbolos `extern "C"` (`zirk_str_from_utf8` para construir, `zirk_str_eq` para `==`).
+`Char` is represented exactly like `String` ([ADR-005](./ADR-005-representacion-string.md)): an opaque handle to the same kind of UTF-8 content that the runtime already knows how to build, compare, and free. The IR gains its own `IrType::Char` — it does not reuse `IrType::String` — so the checker and the verifier can keep statically distinguishing "this is exactly one grapheme" from "this is arbitrary text", but in LLVM both lower to the same opaque pointer and the same `extern "C"` symbols (`zirk_str_from_utf8` to construct, `zirk_str_eq` for `==`).
 
-La comprobación de que un literal `'...'` contiene exactamente un grapheme extendido (UAX #29) ocurre en `zirk-sema`, no en el léxico ni en el runtime: el léxico ya documentaba esa frontera (`zirk-lexer::character()`'s propio comentario), y el runtime no necesita volver a segmentar un valor que el compilador ya validó en el único punto donde `Char` se construye desde texto literal.
+Checking that a `'...'` literal contains exactly one extended grapheme (UAX #29) happens in `zirk-sema`, not in the lexer or the runtime: the lexer already documented that boundary (in `zirk-lexer::character()`'s own comment), and the runtime doesn't need to re-segment a value the compiler already validated at the single point where a `Char` is built from literal text.
 
-## Motivo
+## Rationale
 
-- **Opción (a) sobre (b):** un buffer inline con escape duplica exactamente la máquina que `String` ya tiene — asignación cuando no cabe inline, liberación, comparación de contenido — por una ganancia de rendimiento no medida, y que además solo aplica al caso común (los graphemes de una base y pocas marcas), sin evitar el caso raro (una secuencia ZWJ larga) que de todos modos necesita la ruta de escape. La complejidad se paga dos veces: una en el runtime nuevo, otra en el codegen que ahora necesita saber cuándo un `Char` está inline y cuándo no. La opción (a) paga la complejidad una sola vez, ya pagada por `String`.
-- **Opción (c) descartada** porque exige corregir el spec antes de implementar, y el spec ya es explícito y no ambiguo en la sección 3 — no hay una lectura alternativa razonable que justifique reabrirlo solo por conveniencia de implementación.
-- **`IrType::Char` propio, en vez de reutilizar `IrType::String` directamente:** aunque la representación en tiempo de ejecución es idéntica, son tipos observablemente distintos para el programa Zirk — `Char` no tiene los métodos de mutación de `String`, y (a diferencia de `String`, ver la enmienda de ADR-005) `Char` no tiene identidad observable: `is` se rechaza sobre `Char` porque es un valor, no una referencia con semántica de alias compartido, aun cuando su representación de bajo nivel sea un puntero. Colapsar ambos en una sola `IrType` obligaría a codificar esa distinción en otro lado (una bandera, una lista de excepciones) en vez de dejar que el propio tipo la cargue.
+- **Option (a) over (b):** an inline buffer with an escape path duplicates exactly the machinery `String` already has — allocation when it doesn't fit inline, freeing, content comparison — for an unmeasured performance gain, and one that only applies to the common case (graphemes made of one base plus a few marks), without avoiding the rare case (a long ZWJ sequence) that still needs the escape path anyway. The complexity gets paid twice: once in the new runtime machinery, again in codegen, which now needs to know when a `Char` is inline and when it isn't. Option (a) pays the complexity only once, already paid by `String`.
+- **Option (c) discarded** because it requires correcting the spec before implementing, and the spec is already explicit and unambiguous in section 3 — there's no reasonable alternative reading that would justify reopening it merely for implementation convenience.
+- **Its own `IrType::Char`, instead of reusing `IrType::String` directly:** although the runtime representation is identical, they are observably distinct types for a Zirk program — `Char` doesn't have `String`'s mutation methods, and (unlike `String`, see ADR-005's amendment) `Char` has no observable identity: `is` is rejected on `Char` because it's a value, not a reference with shared-alias semantics, even though its low-level representation is a pointer. Collapsing both into a single `IrType` would force encoding that distinction elsewhere (a flag, an exception list) instead of letting the type itself carry it.
 
-## Consecuencias
+## Consequences
 
-- Ningún runtime nuevo: `Char` reutiliza `zirk_str_from_utf8`/`zirk_str_eq` tal cual.
-- Un `Char` se aloja igual que un `String` (`IrType::needs_allocation` es verdadero para ambos) — el costo de un `Char` no es distinto del de un `String` de un grapheme, lo cual es honesto dado que la representación es la misma.
-- Si en una fase posterior se mide que la indirección de un `Char` de un solo code point ASCII es un costo real en un caso concreto, se optimiza ahí con evidencia — el mismo principio de cierre que ADR-005 ya adoptó para `String`.
-- La comparación (`<`, `<=`, …) y cualquier operación específica de grapheme (mayúscula/minúscula, categoría Unicode) quedan fuera de esta decisión: son superficie de biblioteca (`ZIRK_STDLIB_SPEC.md`), no de representación.
+- No new runtime: `Char` reuses `zirk_str_from_utf8`/`zirk_str_eq` as-is.
+- A `Char` is allocated the same way as a `String` (`IrType::needs_allocation` is true for both) — the cost of a `Char` is no different from that of a one-grapheme `String`, which is honest given that the representation is the same.
+- If a later phase measures that the indirection of a single-ASCII-code-point `Char` is a real cost in a concrete case, it gets optimized there with evidence — the same closure principle ADR-005 already adopted for `String`.
+- Comparison (`<`, `<=`, …) and any grapheme-specific operation (uppercase/lowercase, Unicode category) are outside this decision's scope: they are library surface (`ZIRK_STDLIB_SPEC.md`), not representation.

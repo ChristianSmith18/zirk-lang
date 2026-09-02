@@ -2,71 +2,70 @@
 
 ## Purpose
 
-Define qué targets debe poder emitir el compilador y en qué plataformas debe poder construirse, con sus criterios de verificación.
+Define which targets the compiler must be able to emit and on which platforms it must be able to build, along with their verification criteria.
 
-Distingue dos portabilidades que no cuestan lo mismo: la de producir binarios para otras plataformas y la de construir el compilador en ellas. Ver `docs/decisions/ADR-004-portabilidad.md`.
+It distinguishes two kinds of portability that do not cost the same: producing binaries for other platforms, and building the compiler on them. See `docs/decisions/ADR-004-portabilidad.md`.
 
 ## Requirements
 
-### Requirement: Emisión de objetos para los targets del spec
+### Requirement: Object emission for the spec's targets
 
-El backend SHALL emitir archivos objeto válidos para los targets de `ZIRK_COMPILER_SPEC.md` sección 6, desde cualquier host soportado. Esta capacidad corresponde a la *portabilidad B* de [ADR-004](../../../../docs/decisions/ADR-004-portabilidad.md): qué produce el compilador.
+The backend SHALL emit valid object files for the targets in `ZIRK_COMPILER_SPEC.md` section 6, from any supported host. This capability corresponds to *portability B* from [ADR-004](../../../../docs/decisions/ADR-004-portabilidad.md): what the compiler produces.
 
-Targets cubiertos: `x86-windows`, `x86_64-windows`, `aarch64-windows`, `x86-linux`, `x86_64-linux`, `armv7-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos`.
+Covered targets: `x86-windows`, `x86_64-windows`, `aarch64-windows`, `x86-linux`, `x86_64-linux`, `armv7-linux`, `aarch64-linux`, `x86_64-macos`, `aarch64-macos`.
 
-#### Scenario: Emisión cross-target desde un único host
-- **WHEN** se ejecuta el test de matriz de targets en cualquier plataforma soportada
-- **THEN** se emite un archivo objeto para cada uno de los nueve targets
-- **AND** cada objeto tiene el formato de contenedor correcto: Mach-O para macOS, ELF para Linux, COFF para Windows
-- **AND** cada objeto declara la arquitectura correspondiente al target
+#### Scenario: Cross-target emission from a single host
+- **WHEN** the target matrix test is run on any supported platform
+- **THEN** an object file is emitted for each of the nine targets
+- **AND** each object has the correct container format: Mach-O for macOS, ELF for Linux, COFF for Windows
+- **AND** each object declares the architecture corresponding to the target
 
-#### Scenario: Target no soportado por el backend
-- **WHEN** se solicita emisión para un triple que LLVM no reconoce
-- **THEN** el compilador SHALL fallar con un diagnóstico que nombre el target solicitado
-- **AND** NO SHALL producir un objeto inválido
+#### Scenario: Target not supported by the backend
+- **WHEN** emission is requested for a triple that LLVM does not recognize
+- **THEN** the compiler SHALL fail with a diagnostic naming the requested target
+- **AND** it SHALL NOT produce an invalid object
 
-### Requirement: Construcción del compilador en las tres plataformas
+### Requirement: Building the compiler on the three platforms
 
-El compilador SHALL poder construirse desde fuente en Windows, Linux y macOS. Esta capacidad corresponde a la *portabilidad A* de ADR-004: dónde se construye el compilador.
+The compiler SHALL be buildable from source on Windows, Linux, and macOS. This capability corresponds to *portability A* from ADR-004: where the compiler is built.
 
-#### Scenario: Verificación continua en integración
-- **WHEN** se ejecuta el pipeline de integración continua
-- **THEN** el workspace se construye y sus tests pasan en Linux (x86_64 y aarch64), macOS (x86_64 y aarch64) y Windows (x86_64)
+#### Scenario: Continuous verification in integration
+- **WHEN** the continuous integration pipeline runs
+- **THEN** the workspace builds and its tests pass on Linux (x86_64 and aarch64), macOS (x86_64 and aarch64), and Windows (x86_64)
 
-#### Scenario: Fallo en una plataforma
-- **WHEN** el workspace no construye o sus tests fallan en cualquier plataforma de la matriz
-- **THEN** la portabilidad se considera no verificada
-- **AND** el hallazgo SHALL tratarse como bloqueante, no como pendiente
+#### Scenario: Failure on one platform
+- **WHEN** the workspace fails to build or its tests fail on any platform in the matrix
+- **THEN** portability is considered unverified
+- **AND** the finding SHALL be treated as blocking, not as pending
 
-### Requirement: Linker único y multiplataforma
+### Requirement: Single, cross-platform linker
 
-El proyecto SHALL usar `lld` como linker de referencia, cubriendo ELF, Mach-O y COFF desde una misma versión, en lugar de depender del linker por defecto de cada host.
+The project SHALL use `lld` as the reference linker, covering ELF, Mach-O, and COFF from a single version, instead of relying on each host's default linker.
 
-#### Scenario: Disponibilidad de drivers
-- **WHEN** se verifica la instalación del toolchain
-- **THEN** `lld` provee los drivers para los tres formatos de contenedor requeridos
+#### Scenario: Driver availability
+- **WHEN** the toolchain installation is verified
+- **THEN** `lld` provides the drivers for the three required container formats
 
-### Requirement: Cross-linking fuera de alcance en esta fase
+### Requirement: Cross-linking out of scope in this phase
 
-La producción de un ejecutable completo para un target distinto del host SHALL quedar fuera de alcance en esta fase, por requerir sysroots de destino.
+Producing a complete executable for a target other than the host SHALL be out of scope in this phase, since it requires target sysroots.
 
-#### Scenario: Alcance de la verificación de targets
-- **WHEN** se verifica la matriz de targets
-- **THEN** la verificación cubre emisión de objetos
-- **AND** NO cubre enlace de ejecutables para targets distintos del host
+#### Scenario: Scope of target verification
+- **WHEN** the target matrix is verified
+- **THEN** verification covers object emission
+- **AND** it does NOT cover linking executables for targets other than the host
 
-### Requirement: El ejecutable producido corre en el host
+### Requirement: The produced executable runs on the host
 
-La verificación SHALL comprobar que el ejecutable generado a partir de código Zirk se ejecuta correctamente en la plataforma del host, no solo que el archivo objeto se emite.
+Verification SHALL check that the executable generated from Zirk code runs correctly on the host platform, not merely that the object file is emitted.
 
-Hasta la Fase 0 se verificaba la emisión de objetos y un binario construido directamente desde Rust. Con un lenguaje real por delante, la evidencia que importa es que un `.zrk` termina siendo un proceso que corre.
+Through Phase 0, only object emission and a binary built directly from Rust were verified. With a real language ahead, the evidence that matters is that a `.zrk` file ends up as a process that runs.
 
-#### Scenario: Programa de referencia
-- **WHEN** se compila y ejecuta un programa `.zrk` que imprime una cadena
-- **THEN** el proceso termina con código de salida 0
-- **AND** la salida estándar contiene exactamente la cadena esperada
+#### Scenario: Reference program
+- **WHEN** a `.zrk` program that prints a string is compiled and run
+- **THEN** the process exits with code 0
+- **AND** the standard output contains exactly the expected string
 
-#### Scenario: Verificación en las plataformas soportadas
-- **WHEN** se ejecuta el pipeline de integración continua
-- **THEN** la compilación y ejecución del programa de referencia se verifica en cada plataforma de la matriz
-
+#### Scenario: Verification on the supported platforms
+- **WHEN** the continuous integration pipeline runs
+- **THEN** compiling and running the reference program is verified on each platform in the matrix

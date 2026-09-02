@@ -22,14 +22,28 @@ context: |
   date with --audit-date YYYY-MM-DD. The script updates mechanical hashes and
   generated content; it does not infer or approve public implementation claims.
 
+  Language: every OpenSpec change artifact (proposal.md, design.md, specs/**/*.md,
+  tasks.md) MUST be written entirely in English — prose, headings, requirement
+  and scenario text, task descriptions, and file/decision names — regardless of
+  the language used in conversation with the requester. This mirrors ADR-006
+  (docs/decisions/ADR-006-language-of-the-codebase.md): normative specs, the
+  roadmap, the agent prompt, code, diagnostics, README.md, CONTRIBUTING.md,
+  every ADR, and docs/TOOLCHAIN.md are all English. Only commit messages stay
+  in Spanish, by convention. Conversing with the requester in Spanish never
+  justifies writing a change artifact — or any other repository document — in
+  Spanish.
+
 rules:
   proposal:
     - State whether the change affects public documentation, syntax examples, normative semantics, implementation status, limitations, or roadmap content.
     - When public content or status is affected, include ../zirk-lang-site as an impacted companion repository and describe the required website update.
+    - Write the entire file in English, even when the requester described the change in Spanish.
   design:
     - Preserve the distinction between normative Zirk 1.x behavior, the currently delivered compiler subset, active work, and future roadmap scope.
     - Treat website status copy as reviewed content; never derive implementation claims from source presence, commits, documentation existence, or OpenSpec task counts alone.
+    - Write the entire file in English, even when the requester described the change in Spanish.
   tasks:
     - For public documentation or status changes, include tasks to update the authoritative zirk-lang documents first, commit them, run ./scripts/sync-website-content.sh, review the zirk-lang-site diff, and validate both repositories.
     - If project-status evidence changes, require a human review of the zirk-lang-site status catalog and an explicit --audit-date YYYY-MM-DD.
     - Keep commits for zirk-lang and zirk-lang-site separate and report both revisions so the synchronization is auditable.
+    - Write the entire file in English, even when the requester described the change in Spanish.

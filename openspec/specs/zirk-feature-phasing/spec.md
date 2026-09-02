@@ -6,59 +6,60 @@ Defines the discipline that keeps the compiler honest about what it does not imp
 
 The language is documented in full while it is built in phases. That gap is deliberate, and it is only safe as long as every documented feature has an owning phase and the compiler names that phase instead of failing as if the feature did not exist.
 ## Requirements
-### Requirement: Toda característica documentada tiene una fase dueña
+### Requirement: Every documented feature has an owning phase
 
-Cada característica definida por las fuentes normativas SHALL tener asignada
-exactamente una fase de construcción en `docs/init/ZIRK_ROADMAP.md`.
+Every feature defined by the normative sources SHALL have exactly one
+construction phase assigned to it in `docs/init/ZIRK_ROADMAP.md`.
 
-Una característica sin fase asignada no es una característica diferida: es una
-característica que nadie construirá. Asignarla es lo que impide que se cuele en
-la fase activa y la desborde, o que quede como deuda sin fecha.
+A feature without an assigned phase is not a deferred feature: it is a
+feature that nobody will build. Assigning it is what prevents it from
+sneaking into the active phase and overflowing it, or from remaining as debt
+with no due date.
 
-#### Scenario: Característica normativa sin fase
-- **WHEN** una fuente normativa define una característica que ninguna fase del roadmap nombra
-- **THEN** el roadmap se corrige asignándole una fase antes de implementar cualquier parte de ella
+#### Scenario: Normative feature without a phase
+- **WHEN** a normative source defines a feature that no phase of the roadmap names
+- **THEN** the roadmap is corrected by assigning it a phase before implementing any part of it
 
-#### Scenario: Características huérfanas del refinamiento normativo
-- **WHEN** se consultan la familia `Float`, `Char` grafémico, la conversión contextual profunda, los operadores bit a bit y de desplazamiento, y la interpolación de cadenas
-- **THEN** el roadmap las asigna a la Fase 3b
-- **AND** asigna `inmut::strict` a la Fase 4 y la familia temporal a la Fase 7
+#### Scenario: Features orphaned by normative refinement
+- **WHEN** the `Float` family, graphemic `Char`, deep contextual conversion, the bitwise and shift operators, and string interpolation are consulted
+- **THEN** the roadmap assigns them to Phase 3b
+- **AND** assigns `inmut::strict` to Phase 4 and the temporal family to Phase 7
 
-### Requirement: Diagnóstico de fase para lo no implementado
+### Requirement: Phase diagnostic for what is not implemented
 
-El compilador SHALL emitir un diagnóstico que nombre la construcción y su fase
-de llegada ante cualquier construcción, palabra clave, operador, literal o tipo
-que pertenezca al lenguaje pero no a la fase implementada.
+The compiler SHALL emit a diagnostic naming the construct and its arrival
+phase for any construct, keyword, operator, literal, or type that belongs to
+the language but not to the implemented phase.
 
-El compilador NO SHALL producir un error de sintaxis genérico, un error de
-"carácter no reconocido", ni una interpretación silenciosa distinta de la
-construcción escrita.
+The compiler SHALL NOT produce a generic syntax error, an "unrecognized
+character" error, or a silent interpretation different from the construct as
+written.
 
-#### Scenario: Construcción de una fase posterior
-- **WHEN** el source contiene una construcción del lenguaje que la fase actual no implementa
-- **THEN** el diagnóstico la nombra e indica la fase en que llega
+#### Scenario: Construct from a later phase
+- **WHEN** the source contains a language construct that the current phase does not implement
+- **THEN** the diagnostic names it and indicates the phase in which it arrives
 
-#### Scenario: Ausencia de interpretación silenciosa
-- **WHEN** el source contiene un literal o un operador del lenguaje que la fase actual no implementa
-- **THEN** el compilador lo reconoce como tal y lo difiere con su fase
-- **AND** NO lo reinterpreta como una secuencia distinta de tokens
+#### Scenario: Absence of silent interpretation
+- **WHEN** the source contains a literal or an operator of the language that the current phase does not implement
+- **THEN** the compiler recognizes it as such and defers it along with its phase
+- **AND** it does NOT reinterpret it as a different sequence of tokens
 
-### Requirement: La tabla de tipos pendientes refleja el lenguaje vigente
+### Requirement: The table of pending types reflects the current language
 
-La tabla de tipos conocidos-pero-no-implementados SHALL contener únicamente
-tipos que el lenguaje define hoy, cada uno con la fase que realmente lo trae.
+The table of known-but-not-implemented types SHALL contain only types that
+the language defines today, each with the phase that actually brings it.
 
-Un tipo retirado del lenguaje SHALL desaparecer de la tabla: anunciar su llegada
-enseña un lenguaje que no existe.
+A type withdrawn from the language SHALL disappear from the table:
+announcing its arrival would teach a language that does not exist.
 
-#### Scenario: Tipo retirado del lenguaje
-- **WHEN** una anotación nombra `Decimal64` u otro miembro de la antigua familia `Decimal`
-- **THEN** el diagnóstico lo trata como tipo inexistente
-- **AND** NO anuncia ninguna fase de llegada
+#### Scenario: Type withdrawn from the language
+- **WHEN** an annotation names `Decimal64` or another member of the old `Decimal` family
+- **THEN** the diagnostic treats it as a nonexistent type
+- **AND** it does NOT announce any arrival phase
 
-#### Scenario: Fase declarada correcta
-- **WHEN** una anotación nombra un tipo pendiente
-- **THEN** la fase indicada por el diagnóstico coincide con la que el roadmap le asigna
+#### Scenario: Correctly declared phase
+- **WHEN** an annotation names a pending type
+- **THEN** the phase indicated by the diagnostic matches the one the roadmap assigns to it
 
 ### Requirement: Memory and concurrency implementation order
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured task semantics before parallelism, OS threads, weak atomics, or advanced synchronization.

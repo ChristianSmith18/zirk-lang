@@ -1,76 +1,76 @@
 ## ADDED Requirements
 
-### Requirement: Reconocimiento de archivos fuente
+### Requirement: Source file recognition
 
-El soporte de editor SHALL asociarse a la extensión `.zrk` que define `ZIRK_SPEC_FINAL.md`.
+Editor support SHALL be associated with the `.zrk` extension defined by `ZIRK_SPEC_FINAL.md`.
 
-#### Scenario: Apertura de un archivo Zirk
-- **WHEN** se abre un archivo con extensión `.zrk`
-- **THEN** el editor lo reconoce como lenguaje Zirk
+#### Scenario: Opening a Zirk file
+- **WHEN** a file with extension `.zrk` is opened
+- **THEN** the editor recognizes it as the Zirk language
 
-### Requirement: Cobertura completa del léxico
+### Requirement: Complete lexicon coverage
 
-El resaltado SHALL cubrir **todas** las palabras clave que reconoce el lexer, no solo las del subset implementado.
+Highlighting SHALL cover **all** keywords recognized by the lexer, not only those of the implemented subset.
 
-Cubrir el lenguaje completo es deliberado: el editor muestra el lenguaje tal como lo definen las specs, y es el compilador quien indica qué construcción no está disponible todavía y en qué fase llega.
+Covering the whole language is deliberate: the editor shows the language as the specs define it, and it is the compiler that indicates which construct is not available yet and in which phase it arrives.
 
-#### Scenario: Palabra clave del subset implementado
-- **WHEN** el source contiene `fn`, `mut`, `inmut`, `if`, `else` o `return`
-- **THEN** se resaltan como palabras clave
+#### Scenario: Keyword of the implemented subset
+- **WHEN** the source contains `fn`, `mut`, `inmut`, `if`, `else` or `return`
+- **THEN** they are highlighted as keywords
 
-#### Scenario: Palabra clave de una fase posterior
-- **WHEN** el source contiene `class`, `match`, `task`, `parallel` u otra construcción todavía no implementada
-- **THEN** se resaltan igual que las del subset
+#### Scenario: Keyword of a later phase
+- **WHEN** the source contains `class`, `match`, `task`, `parallel` or another not-yet-implemented construct
+- **THEN** they are highlighted the same as subset keywords
 
-#### Scenario: Correspondencia con el lexer
-- **WHEN** se comparan las palabras clave del resaltador con las de `zirk-lexer`
-- **THEN** toda palabra que el lexer reconoce está cubierta por el resaltador
+#### Scenario: Correspondence with the lexer
+- **WHEN** the highlighter's keywords are compared with those of `zirk-lexer`
+- **THEN** every keyword the lexer recognizes is covered by the highlighter
 
-### Requirement: Distinción por rol
+### Requirement: Distinction by role
 
-El resaltado SHALL distinguir las categorías léxicas entre sí: control de flujo, modificadores, tipos, literales, operadores y comentarios.
+Highlighting SHALL distinguish lexical categories from one another: control flow, modifiers, types, literals, operators and comments.
 
-#### Scenario: Categorías diferenciadas
-- **WHEN** se resalta un archivo con construcciones de varias categorías
-- **THEN** el control de flujo, los modificadores y los tipos reciben scopes distintos
+#### Scenario: Differentiated categories
+- **WHEN** a file with constructs from several categories is highlighted
+- **THEN** control flow, modifiers and types receive distinct scopes
 
-#### Scenario: La instancia actual no es control de flujo
-- **WHEN** el source contiene `this`
-- **THEN** se resalta como referencia al valor actual, no como palabra de control
+#### Scenario: The current instance is not control flow
+- **WHEN** the source contains `this`
+- **THEN** it is highlighted as a reference to the current value, not as a control-flow word
 
-### Requirement: Configuración del lenguaje
+### Requirement: Language configuration
 
-El editor SHALL conocer los delimitadores de comentario y los pares de apertura y cierre del lenguaje.
+The editor SHALL know the comment delimiters and the opening/closing pairs of the language.
 
-#### Scenario: Comentar una selección
-- **WHEN** se usa el comando de comentar
-- **THEN** se insertan los delimitadores `//` o `/* */` de `ZIRK_LANGUAGE_SPEC.md` sección 1
+#### Scenario: Commenting a selection
+- **WHEN** the comment command is used
+- **THEN** the delimiters `//` or `/* */` from `ZIRK_LANGUAGE_SPEC.md` section 1 are inserted
 
-#### Scenario: Cierre automático
-- **WHEN** se escribe `{`, `(`, `[` o una comilla
-- **THEN** el editor ofrece el cierre correspondiente
+#### Scenario: Auto-closing
+- **WHEN** `{`, `(`, `[` or a quote is typed
+- **THEN** the editor offers the corresponding closing character
 
-### Requirement: El formateador de la extensión es provisional
+### Requirement: The extension formatter is provisional
 
-Mientras `zirk format` no exista, el soporte de editor MAY ofrecer un formateador propio, que NO SHALL considerarse la definición del estilo de Zirk.
+Until `zirk format` exists, editor support MAY offer its own formatter, which SHALL NOT be considered the definition of Zirk style.
 
-`ZIRK_COMPILER_SPEC.md` sección 10 define el formateador oficial como canónico, idempotente y sin configuración que fragmente el estilo. Un formateador de editor que respeta la configuración del usuario no cumple ese contrato.
+`ZIRK_COMPILER_SPEC.md` section 10 defines the official formatter as canonical, idempotent and without configuration that fragments style. An editor formatter that respects user configuration does not meet that contract.
 
-#### Scenario: Naturaleza provisional documentada
-- **WHEN** se consulta la documentación de la extensión
-- **THEN** indica que su formateador es provisional y que el canónico llega con `zirk format`
+#### Scenario: Documented provisional nature
+- **WHEN** the extension documentation is consulted
+- **THEN** it indicates that its formatter is provisional and that the canonical one arrives with `zirk format`
 
-#### Scenario: Llegada del formateador canónico
-- **WHEN** `zirk format` esté disponible
-- **THEN** la extensión SHALL delegar en él y retirar su formateador propio
+#### Scenario: Arrival of the canonical formatter
+- **WHEN** `zirk format` is available
+- **THEN** the extension SHALL delegate to it and remove its own formatter
 
-### Requirement: Alcance sin servidor de lenguaje
+### Requirement: Scope without language server
 
-Esta capacidad NO SHALL incluir diagnósticos dentro del editor, autocompletado, navegación ni renombrado.
+This capability SHALL NOT include diagnostics inside the editor, autocomplete, navigation or renaming.
 
-Todo eso requiere el LSP sobre un frontend incremental, que `ZIRK_COMPILER_SPEC.md` sección 10 define y el roadmap ubica en la Fase 9.
+All of that requires the LSP over an incremental frontend, which `ZIRK_COMPILER_SPEC.md` section 10 defines and the roadmap places in Phase 9.
 
-#### Scenario: Diagnósticos durante la edición
-- **WHEN** se escribe código con un error de tipos
-- **THEN** el editor no lo señala por sí solo
-- **AND** el error aparece al compilar con `zirk build` o `zirk run`
+#### Scenario: Diagnostics during editing
+- **WHEN** code with a type error is written
+- **THEN** the editor does not flag it by itself
+- **AND** the error appears when compiling with `zirk build` or `zirk run`

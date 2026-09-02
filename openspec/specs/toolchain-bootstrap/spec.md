@@ -2,69 +2,69 @@
 
 ## Purpose
 
-Define el toolchain reproducible con el que se construye el compilador de Zirk: qué versión de LLVM se exige, cómo se localiza, y qué evidencia demuestra que la cadena completa produce un binario nativo ejecutable.
+Define the reproducible toolchain used to build the Zirk compiler: which LLVM version is required, how it is located, and what evidence demonstrates that the full chain produces an executable native binary.
 
-Su razón de ser es que el backend es la parte de mayor riesgo del proyecto: un toolchain que no se puede reproducir en otra máquina invalida todo lo construido encima.
+Its reason for being is that the backend is the highest-risk part of the project: a toolchain that cannot be reproduced on another machine invalidates everything built on top of it.
 
 ## Requirements
 
-### Requirement: Pin de versión mayor de LLVM
+### Requirement: LLVM major version pin
 
-El proyecto SHALL construirse exclusivamente contra LLVM 20.1.x mediante la feature `llvm20-1` de `inkwell` 0.10. Una versión mayor distinta de LLVM NO SHALL considerarse soportada.
+The project SHALL build exclusively against LLVM 20.1.x via the `llvm20-1` feature of `inkwell` 0.10. A different major version of LLVM SHALL NOT be considered supported.
 
-#### Scenario: LLVM correcto disponible
-- **WHEN** `LLVM_SYS_201_PREFIX` apunta a una instalación de LLVM 20.1.x con bibliotecas estáticas
-- **THEN** `cargo build` del workspace completa sin errores de enlace
+#### Scenario: Correct LLVM available
+- **WHEN** `LLVM_SYS_201_PREFIX` points to an LLVM 20.1.x installation with static libraries
+- **THEN** `cargo build` for the workspace completes without link errors
 
-#### Scenario: Versión mayor de LLVM incorrecta
-- **WHEN** el entorno provee una versión mayor de LLVM distinta de 20
-- **THEN** el build SHALL fallar con un diagnóstico que indique la versión encontrada, la esperada, y una referencia a `docs/TOOLCHAIN.md`
-- **AND** el diagnóstico NO SHALL ser un error de enlace crudo del linker
+#### Scenario: Incorrect LLVM major version
+- **WHEN** the environment provides a major LLVM version other than 20
+- **THEN** the build SHALL fail with a diagnostic indicating the version found, the expected version, and a reference to `docs/TOOLCHAIN.md`
+- **AND** the diagnostic SHALL NOT be a raw linker link error
 
-#### Scenario: LLVM ausente
-- **WHEN** no existe `LLVM_SYS_201_PREFIX` ni un `llvm-config` compatible en el `PATH`
-- **THEN** el build SHALL fallar indicando qué variable de entorno definir
+#### Scenario: LLVM absent
+- **WHEN** neither `LLVM_SYS_201_PREFIX` nor a compatible `llvm-config` on the `PATH` exists
+- **THEN** the build SHALL fail indicating which environment variable to set
 
-### Requirement: Cadena completa a binario nativo
+### Requirement: Full chain to a native binary
 
-El toolchain SHALL demostrar que produce un binario nativo ejecutable partiendo de LLVM IR construido en proceso, sin depender de ninguna sintaxis de Zirk.
+The toolchain SHALL demonstrate that it produces an executable native binary starting from LLVM IR built in-process, without depending on any Zirk syntax.
 
-#### Scenario: Generación, enlace y ejecución
-- **WHEN** se ejecuta el test de sanity de `zirk-codegen-llvm`
-- **THEN** se construye un módulo LLVM que verifica correctamente
-- **AND** se emite un archivo objeto para el target del host
-- **AND** el objeto se enlaza en un ejecutable nativo
-- **AND** el ejecutable corre y termina con exit code 0
+#### Scenario: Generation, linking, and execution
+- **WHEN** the `zirk-codegen-llvm` sanity test is run
+- **THEN** an LLVM module is built that verifies correctly
+- **AND** an object file is emitted for the host target
+- **AND** the object is linked into a native executable
+- **AND** the executable runs and exits with code 0
 
-### Requirement: Configuración de toolchain no versionada por máquina
+### Requirement: Toolchain configuration not versioned per machine
 
-La ubicación de LLVM SHALL resolverse por variable de entorno. NO SHALL versionarse ninguna ruta absoluta específica de una máquina o plataforma en el repositorio.
+The location of LLVM SHALL be resolved via an environment variable. No absolute path specific to a machine or platform SHALL be versioned in the repository.
 
-#### Scenario: Ruta absoluta en configuración versionada
-- **WHEN** `.cargo/config.toml` u otro archivo versionado define `LLVM_SYS_201_PREFIX` con una ruta absoluta
-- **THEN** se considera una violación de esta especificación
+#### Scenario: Absolute path in versioned configuration
+- **WHEN** `.cargo/config.toml` or another versioned file defines `LLVM_SYS_201_PREFIX` with an absolute path
+- **THEN** it is considered a violation of this specification
 
-### Requirement: Instalación documentada por plataforma
+### Requirement: Installation documented per platform
 
-El repositorio SHALL documentar la obtención de LLVM 20.1 con bibliotecas estáticas para macOS, Linux y Windows.
+The repository SHALL document how to obtain LLVM 20.1 with static libraries for macOS, Linux, and Windows.
 
-#### Scenario: Fuente de LLVM en Windows
-- **WHEN** un desarrollador consulta la documentación de instalación para Windows
-- **THEN** la documentación SHALL indicar explícitamente que **ninguna** distribución oficial de LLVM es compatible con `llvm-sys`
-- **AND** SHALL explicar las dos razones: el instalador `.exe` no incluye bibliotecas estáticas, y el tarball de desarrollo está compilado contra una runtime de C distinta de la que usa Rust
-- **AND** SHALL dirigir a una fuente verificada como compatible, en la versión del pin
+#### Scenario: LLVM source on Windows
+- **WHEN** a developer consults the installation documentation for Windows
+- **THEN** the documentation SHALL explicitly state that **no** official LLVM distribution is compatible with `llvm-sys`
+- **AND** it SHALL explain the two reasons: the `.exe` installer does not include static libraries, and the development tarball is built against a C runtime different from the one Rust uses
+- **AND** it SHALL point to a source verified as compatible, at the pinned version
 
-### Requirement: Compatibilidad de runtime de C en Windows
+### Requirement: C runtime compatibility on Windows
 
-La distribución de LLVM usada en Windows SHALL estar compilada contra la misma runtime de C que emplea el target `x86_64-pc-windows-msvc` de Rust.
+The LLVM distribution used on Windows SHALL be built against the same C runtime used by Rust's `x86_64-pc-windows-msvc` target.
 
-Mezclar runtimes coloca dos heaps en un mismo proceso: la memoria reservada dentro de LLVM y liberada del lado de Rust cruza la frontera y aborta el proceso.
+Mixing runtimes places two heaps within a single process: memory allocated inside LLVM and freed on the Rust side crosses the boundary and aborts the process.
 
-#### Scenario: Runtime incompatible
-- **WHEN** LLVM está compilado contra una runtime de C distinta de la que usa Rust
-- **THEN** el compilador SHALL abortar con violación de acceso en la primera llamada a LLVM que devuelva una cadena
-- **AND** el fallo NO SHALL manifestarse durante el enlace, sino en tiempo de ejecución
+#### Scenario: Incompatible runtime
+- **WHEN** LLVM is built against a C runtime different from the one Rust uses
+- **THEN** the compiler SHALL abort with an access violation on the first call to LLVM that returns a string
+- **AND** the failure SHALL NOT manifest during linking, but at runtime
 
-#### Scenario: Verificación en integración continua
-- **WHEN** se ejecuta el pipeline de integración continua en Windows
-- **THEN** la suite de tests completa SHALL pasar, incluido el sanity check que emite, enlaza y ejecuta un binario nativo
+#### Scenario: Verification in continuous integration
+- **WHEN** the continuous integration pipeline runs on Windows
+- **THEN** the full test suite SHALL pass, including the sanity check that emits, links, and runs a native binary

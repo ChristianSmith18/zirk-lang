@@ -32,67 +32,67 @@ Concrete instantiations SHALL retain distinct static and runtime type identity. 
 - **WHEN** runtime type identity is requested for List<String> and List<Int32>
 - **THEN** the two complete instantiations remain distinguishable
 
-### Requirement: Parámetros de tipo
+### Requirement: Type parameters
 
-Funciones, clases y tipos de datos SHALL admitir parámetros de tipo con la sintaxis `<T>`, según `ZIRK_LANGUAGE_SPEC.md` sección 7.
+Functions, classes, and data types SHALL support type parameters with the `<T>` syntax, per `ZIRK_LANGUAGE_SPEC.md` section 7.
 
-#### Scenario: Función genérica
-- **WHEN** se declara `fn identity<T>(value: T): T { return value; }`
-- **THEN** `identity(1)` produce un `Int32` y `identity("a")` un `String`
+#### Scenario: Generic function
+- **WHEN** `fn identity<T>(value: T): T { return value; }` is declared
+- **THEN** `identity(1)` produces an `Int32` and `identity("a")` a `String`
 
-#### Scenario: Clase genérica
-- **WHEN** se declara `class Box<T>` con un campo de tipo `T`
-- **THEN** `Box<Int32>` y `Box<String>` son tipos distintos
+#### Scenario: Generic class
+- **WHEN** `class Box<T>` is declared with a field of type `T`
+- **THEN** `Box<Int32>` and `Box<String>` are distinct types
 
-#### Scenario: Parámetro de tipo sin usar
-- **WHEN** se declara un parámetro de tipo que no aparece en la firma
-- **THEN** se emite un diagnóstico que lo nombra
+#### Scenario: Unused type parameter
+- **WHEN** a type parameter that does not appear in the signature is declared
+- **THEN** a diagnostic naming it is emitted
 
-### Requirement: Restricciones con `from`
+### Requirement: Constraints with `from`
 
-Un parámetro de tipo SHALL admitir restricciones con `from`, y el chequeador SHALL verificarlas en el sitio de uso.
+A type parameter SHALL support constraints with `from`, and the checker SHALL verify them at the use site.
 
-#### Scenario: Argumento que cumple la restricción
-- **WHEN** se llama `serialize<T from Serializable>` con un tipo que implementa `Serializable`
-- **THEN** el chequeo tiene éxito
+#### Scenario: Argument satisfying the constraint
+- **WHEN** `serialize<T from Serializable>` is called with a type that implements `Serializable`
+- **THEN** the check succeeds
 
-#### Scenario: Argumento que no la cumple
-- **WHEN** se llama con un tipo que no implementa el contrato
-- **THEN** se emite un diagnóstico que nombra el tipo concreto y el contrato que le falta
+#### Scenario: Argument that does not satisfy it
+- **WHEN** it is called with a type that does not implement the contract
+- **THEN** a diagnostic naming the concrete type and the missing contract is emitted
 
-#### Scenario: El cuerpo solo usa lo que la restricción garantiza
-- **WHEN** el cuerpo de una función genérica llama a un método que la restricción no declara
-- **THEN** se emite un diagnóstico
-- **AND** la ayuda indica que la restricción debe declararlo
+#### Scenario: The body only uses what the constraint guarantees
+- **WHEN** the body of a generic function calls a method that the constraint does not declare
+- **THEN** a diagnostic is emitted
+- **AND** the help indicates that the constraint must declare it
 
-### Requirement: El genérico se chequea una vez
+### Requirement: The generic is checked once
 
-El chequeador SHALL verificar el cuerpo de una declaración genérica una sola vez contra sus restricciones, no una vez por instanciación.
+The checker SHALL verify the body of a generic declaration exactly once against its constraints, not once per instantiation.
 
-#### Scenario: Error en el cuerpo se reporta una vez
-- **WHEN** una función genérica con un error de tipos se instancia con tres tipos distintos
-- **THEN** el error se reporta una sola vez, en la declaración
+#### Scenario: Error in the body is reported once
+- **WHEN** a generic function with a type error is instantiated with three distinct types
+- **THEN** the error is reported exactly once, at the declaration
 
-### Requirement: Especialización al bajar
+### Requirement: Specialization during lowering
 
-El lowering SHALL producir una copia por combinación de argumentos de tipo efectivamente usada.
+Lowering SHALL produce one copy per combination of type arguments actually used.
 
-Es lo que `ZIRK_LANGUAGE_SPEC.md` sección 7 llama especializar donde corresponda, y lo que permite almacenar value classes inline en vez de tras un puntero.
+This is what `ZIRK_LANGUAGE_SPEC.md` section 7 calls specializing where appropriate, and it is what allows storing value classes inline instead of behind a pointer.
 
-#### Scenario: Dos instanciaciones, dos copias
-- **WHEN** `identity` se usa con `Int32` y con `String`
-- **THEN** la IR contiene una función por cada una
+#### Scenario: Two instantiations, two copies
+- **WHEN** `identity` is used with `Int32` and with `String`
+- **THEN** the IR contains one function for each
 
-#### Scenario: Instanciación repetida
-- **WHEN** la misma combinación de tipos se usa varias veces
-- **THEN** la IR contiene una sola copia
+#### Scenario: Repeated instantiation
+- **WHEN** the same combination of types is used multiple times
+- **THEN** the IR contains a single copy
 
-### Requirement: Alcance de los genéricos en esta fase
+### Requirement: Scope of generics in this phase
 
-El chequeador NO SHALL admitir varianza declarada, tipos asociados ni parámetros de tipo de orden superior.
+The checker SHALL NOT support declared variance, associated types, or higher-kinded type parameters.
 
-Ninguno está en `ZIRK_LANGUAGE_SPEC.md`, y admitirlos fijaría semántica que el spec no fija.
+None of these are in `ZIRK_LANGUAGE_SPEC.md`, and supporting them would fix semantics that the spec does not fix.
 
-#### Scenario: Construcción no soportada
-- **WHEN** se escribe una anotación de varianza
-- **THEN** se emite un diagnóstico indicando que no forma parte del lenguaje
+#### Scenario: Unsupported construct
+- **WHEN** a variance annotation is written
+- **THEN** a diagnostic indicating that it is not part of the language is emitted

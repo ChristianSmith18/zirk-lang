@@ -6,94 +6,94 @@ Defines how the files of one crate see each other: `share`, `import` and `use`.
 
 Which files make up a crate is decided by walking `import` from the entry file, so a `.zrk` nobody imports is not part of the program. Visibility is binary here — shared or private to its file. The three levels of `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and arrive with them, and per-module namespacing belongs with the project system.
 ## Requirements
-### Requirement: Visibilidad binaria entre archivos de un crate
+### Requirement: Binary visibility between files of a crate
 
-Una declaración de nivel superior SHALL ser visible únicamente dentro del archivo que la define, salvo que esté marcada `share`, en cuyo caso SHALL ser visible desde cualquier otro archivo del mismo crate que la importe.
+A top-level declaration SHALL be visible only within the file that defines it, unless it is marked `share`, in which case it SHALL be visible from any other file of the same crate that imports it.
 
-Esta fase no implementa los tres niveles de `public`/`private`/`protected` de `ZIRK_LANGUAGE_SPEC.md` sección 7 — eso depende de clases y es Fase 3. La visibilidad aquí es binaria: compartida o privada al archivo.
+This phase does not implement the three levels of `public`/`private`/`protected` from `ZIRK_LANGUAGE_SPEC.md` section 7 — that depends on classes and is Phase 3. Visibility here is binary: shared or private to the file.
 
-#### Scenario: Declaración privada al archivo
-- **WHEN** una función sin `share` se referencia desde otro archivo del mismo crate
-- **THEN** se emite un diagnóstico indicando que la declaración no es accesible desde fuera de su archivo
+#### Scenario: Declaration private to the file
+- **WHEN** a function without `share` is referenced from another file of the same crate
+- **THEN** a diagnostic indicating that the declaration is not accessible from outside its file is emitted
 
-#### Scenario: Declaración compartida
-- **WHEN** una función marcada `share` se importa desde otro archivo
-- **THEN** la referencia resuelve a esa declaración
+#### Scenario: Shared declaration
+- **WHEN** a function marked `share` is imported from another file
+- **THEN** the reference resolves to that declaration
 
-### Requirement: Resolución de `import` con rutas locales
+### Requirement: `import` resolution with local paths
 
-`import { nombres } from "ruta"` con una ruta entre comillas SHALL resolver a un archivo del mismo crate, localizado en forma relativa al archivo que importa, sin la extensión `.zrk` en la ruta escrita.
+`import { names } from "path"` with a quoted path SHALL resolve to a file of the same crate, located relative to the importing file, without the `.zrk` extension in the written path.
 
-#### Scenario: Ruta relativa resuelta
-- **WHEN** se escribe `import { Usuario } from "./dominio/usuario";` en un archivo dado
-- **THEN** se resuelve al archivo `dominio/usuario.zrk` relativo a ese archivo
+#### Scenario: Relative path resolved
+- **WHEN** `import { User } from "./domain/user";` is written in a given file
+- **THEN** it resolves to the file `domain/user.zrk` relative to that file
 
-#### Scenario: Archivo inexistente
-- **WHEN** la ruta de un `import` no corresponde a ningún archivo del crate
-- **THEN** se emite un diagnóstico que nombra la ruta no encontrada
-- **AND** señala el `import` que la pidió, no el inicio del archivo
+#### Scenario: Nonexistent file
+- **WHEN** the path of an `import` does not correspond to any file of the crate
+- **THEN** a diagnostic naming the path not found is emitted
+- **AND** it points to the `import` that requested it, not the start of the file
 
-#### Scenario: Nombre no compartido en el archivo de destino
-- **WHEN** se importa un nombre que existe en el archivo de destino pero no está marcado `share`
-- **THEN** se emite el mismo diagnóstico de visibilidad que una referencia directa
+#### Scenario: Name not shared in the destination file
+- **WHEN** a name that exists in the destination file but is not marked `share` is imported
+- **THEN** the same visibility diagnostic as a direct reference is emitted
 
-### Requirement: Alias de importación
+### Requirement: Import alias
 
-`import` SHALL admitir renombrar un nombre importado con la sintaxis `nombre -> alias`, y el nombre resuelto SHALL usarse bajo el alias dentro del archivo que importa.
+`import` SHALL support renaming an imported name with the syntax `name -> alias`, and the resolved name SHALL be used under the alias within the importing file.
 
-#### Scenario: Importación con alias
-- **WHEN** se escribe `import { Rol -> RolDeDominio } from "./dominio/usuario";`
-- **THEN** dentro del archivo, `RolDeDominio` resuelve a la declaración `Rol` del archivo importado
-- **AND** el nombre `Rol` sin alias no queda disponible en el archivo que importa
+#### Scenario: Import with alias
+- **WHEN** `import { Role -> DomainRolee } from "./domain/user";` is written
+- **THEN** within the file, `DomainRolee` resolves to the `Role` declaration of the imported file
+- **AND** the unaliased name `Role` remains unavailable in the importing file
 
-### Requirement: Importaciones mutuas
+### Requirement: Mutual imports
 
-La resolución de módulos SHALL admitir que dos archivos se importen entre sí, y SHALL leer cada archivo del crate una sola vez.
+Module resolution SHALL support two files importing each other, and SHALL read each file of the crate exactly once.
 
-Una versión anterior de este requisito exigía rechazar los ciclos. Se corrigió al implementarlo: `import` trae nombres al scope y nada en esta fase depende del orden en que se leen los archivos —las firmas se recogen antes de chequear cualquier cuerpo—, así que dos archivos que se referencian mutuamente son un programa normal. El peligro real es recorrer el ciclo indefinidamente, y eso lo resuelve leer cada archivo una vez, no rechazar el programa.
+An earlier version of this requirement required rejecting cycles. This was corrected during implementation: `import` brings names into scope and nothing in this phase depends on the order in which files are read — signatures are collected before any body is checked — so two files that reference each other mutually are a normal program. The real danger is traversing the cycle indefinitely, and that is solved by reading each file once, not by rejecting the program.
 
-#### Scenario: Ciclo directo
-- **WHEN** el archivo A importa del archivo B y el archivo B importa del archivo A
-- **THEN** el crate compila
-- **AND** cada archivo se lee una sola vez
+#### Scenario: Direct cycle
+- **WHEN** file A imports from file B and file B imports from file A
+- **THEN** the crate compiles
+- **AND** each file is read exactly once
 
-#### Scenario: Rombo de importaciones
-- **WHEN** A importa de B y de C, y ambos importan de D
-- **THEN** `D` se lee una sola vez
+#### Scenario: Diamond of imports
+- **WHEN** A imports from B and from C, and both import from D
+- **THEN** `D` is read exactly once
 
-### Requirement: Colisión de nombres compartidos
+### Requirement: Collision of shared names
 
-La resolución de módulos SHALL rechazar dos declaraciones `share` con el mismo nombre dentro del mismo crate, sin desempate implícito por orden de archivo.
+Module resolution SHALL reject two `share` declarations with the same name within the same crate, with no implicit tiebreak by file order.
 
-#### Scenario: Dos archivos comparten el mismo nombre
-- **WHEN** dos archivos distintos del crate declaran `share fn ayuda(): Void {}` con el mismo nombre
-- **THEN** se emite un diagnóstico que señala ambas declaraciones
+#### Scenario: Two files share the same name
+- **WHEN** two distinct files of the crate declare `share fn help(): Void {}` with the same name
+- **THEN** a diagnostic pointing to both declarations is emitted
 
-### Requirement: `use` habilita globals sin nombre calificado
+### Requirement: `use` enables globals without a qualified name
 
-`use` SHALL habilitar el acceso sin calificar a los globals de un módulo ya importado, sin traer nuevos nombres al scope que no hayan sido importados primero con `import`.
+`use` SHALL enable unqualified access to the globals of an already-imported module, without bringing new names into scope that were not first imported with `import`.
 
-#### Scenario: `use` sobre un import existente
-- **WHEN** un archivo importa `stdout` desde `std.io` y luego escribe `use stdout;`
-- **THEN** `println(...)` sin el calificador `stdout.` resuelve a la misma declaración
+#### Scenario: `use` over an existing import
+- **WHEN** a file imports `stdout` from `std.io` and then writes `use stdout;`
+- **THEN** `println(...)` without the `stdout.` qualifier resolves to the same declaration
 
-#### Scenario: `use` sin `import` previo
-- **WHEN** se escribe `use` sobre un nombre que el archivo no importó
-- **THEN** se emite un diagnóstico indicando que el nombre no está disponible en este archivo
+#### Scenario: `use` without a prior `import`
+- **WHEN** `use` is written over a name the file did not import
+- **THEN** a diagnostic indicating that the name is not available in this file is emitted
 
-### Requirement: Módulos estándar sin comillas
+### Requirement: Standard modules without quotes
 
-`import { nombres } from modulo.estandar;` con un nombre sin comillas SHALL resolver contra los módulos que el compilador reconoce como parte de la biblioteca estándar, según `ZIRK_LANGUAGE_SPEC.md` sección 10.
+`import { names } from standard.module;` with an unquoted name SHALL resolve against the modules the compiler recognizes as part of the standard library, per `ZIRK_LANGUAGE_SPEC.md` section 10.
 
-Esta fase solo reconoce `std.io` con `stdout`, `stdin` y `stderr`, ya existentes como intrínseco desde Fase 1. El resto de la biblioteca estándar es Fase 7.
+This phase only recognizes `std.io` with `stdout`, `stdin`, and `stderr`, already existing as intrinsics since Phase 1. The rest of the standard library is Phase 7.
 
-#### Scenario: Importación de `std.io`
-- **WHEN** se escribe `import { stdout, stderr } from std.io;`
-- **THEN** ambos nombres resuelven a los intrínsecos ya existentes
+#### Scenario: Importing `std.io`
+- **WHEN** `import { stdout, stderr } from std.io;` is written
+- **THEN** both names resolve to the existing intrinsics
 
-#### Scenario: Módulo estándar no reconocido
-- **WHEN** se importa desde un módulo estándar distinto de `std.io`
-- **THEN** se emite un diagnóstico indicando que ese módulo llega en una fase posterior
+#### Scenario: Unrecognized standard module
+- **WHEN** something is imported from a standard module other than `std.io`
+- **THEN** a diagnostic indicating that module arrives in a later phase is emitted
 
 ### Requirement: Standard-library convenience member resolution
 Importing a compiler-known standard-library object SHALL make its declared convenience members callable without qualification when the name is otherwise unambiguous. A local or imported collision SHALL require qualification through the imported object. Objects from local files or packages SHALL NOT inject their methods into file scope.

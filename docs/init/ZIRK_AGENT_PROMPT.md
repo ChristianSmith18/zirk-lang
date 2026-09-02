@@ -11,11 +11,13 @@ allows it.
 
 **Everything is written in English**: the normative specifications, this
 document, the roadmap, the source code, its comments, the diagnostics the
-compiler emits and the test names.
+compiler emits, the test names, `README.md`, `CONTRIBUTING.md`, every ADR
+under `docs/decisions/`, `docs/TOOLCHAIN.md`, and every OpenSpec change
+artifact (`proposal.md`, `design.md`, `specs/**/*.md`, `tasks.md`) — even
+when the change was requested in Spanish.
 
-The only Spanish that remains is the working documentation around the project —
-the ADRs in `docs/decisions/`, `README.md`, `CONTRIBUTING.md`, the OpenSpec
-artifacts and the commit messages.
+The only Spanish that remains is commit messages, by convention. Past
+commit messages are historical and are never rewritten.
 
 If you are an agent working on this repository: **write code, comments and
 diagnostics in English.** The rationale is in
@@ -121,7 +123,7 @@ compiled to a native binary and executed:
 
 ```zirk
 fn main(): Void {
-    stdout.println("Hola desde Zirk");
+    stdout.println("Hello from Zirk");
 }
 ```
 

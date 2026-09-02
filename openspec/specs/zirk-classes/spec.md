@@ -40,99 +40,99 @@ Only `override fn` SHALL replace a base, abstract, interface, or trait method. P
 - **WHEN** a User reference is evaluated with `as? Admin`
 - **THEN** the result is the same Admin reference when compatible or `null` otherwise
 
-### Requirement: Declaración de clase
+### Requirement: Class declaration
 
-El compilador SHALL admitir `class` con campos y métodos, según `ZIRK_LANGUAGE_SPEC.md` sección 7.
+The compiler SHALL support `class` with fields and methods, per `ZIRK_LANGUAGE_SPEC.md` section 7.
 
-#### Scenario: Clase con campos y constructor
-- **WHEN** se declara `class User { public inmut id: Int32; construct(id: Int32) { this.id = id; } }`
-- **THEN** se produce un tipo `User` con un campo y un constructor
+#### Scenario: Class with fields and constructor
+- **WHEN** `class User { public inmut id: Int32; construct(id: Int32) { this.id = id; } }` is declared
+- **THEN** a `User` type is produced with one field and one constructor
 
-#### Scenario: Campo sin modificadores
-- **WHEN** una clase declara `name: String;`
-- **THEN** el campo equivale a `public mut name: String;`
+#### Scenario: Field without modifiers
+- **WHEN** a class declares `name: String;`
+- **THEN** the field is equivalent to `public mut name: String;`
 
-#### Scenario: Múltiples constructores
-- **WHEN** una clase declara dos `construct` con firmas efectivas distintas
-- **THEN** ambos son constructores válidos y quedan disponibles para resolución
+#### Scenario: Multiple constructors
+- **WHEN** a class declares two `construct` with distinct effective signatures
+- **THEN** both are valid constructors and remain available for resolution
 
-#### Scenario: Instanciación sin `new`
-- **WHEN** se escribe `mut u = User(1);`
-- **THEN** se construye una instancia
-- **AND** escribir `new User(1)` emite un diagnóstico indicando que `new` no existe
+#### Scenario: Instantiation without `new`
+- **WHEN** `mut u = User(1);` is written
+- **THEN** an instance is constructed
+- **AND** writing `new User(1)` emits a diagnostic indicating that `new` does not exist
 
-#### Scenario: Campo sin tipo
-- **WHEN** un campo se declara sin anotación de tipo
-- **THEN** se emite un diagnóstico que señala el campo
+#### Scenario: Field without a type
+- **WHEN** a field is declared without a type annotation
+- **THEN** a diagnostic is emitted pointing to the field
 
-### Requirement: `this` designa la instancia actual
+### Requirement: `this` designates the current instance
 
-Dentro de un método o constructor, `this` SHALL referirse a la instancia sobre la que se invoca.
+Within a method or constructor, `this` SHALL refer to the instance on which it is invoked.
 
-#### Scenario: Acceso a un campo por `this`
-- **WHEN** un constructor escribe `this.id = id;`
-- **THEN** asigna al campo, no al parámetro
+#### Scenario: Accessing a field via `this`
+- **WHEN** a constructor writes `this.id = id;`
+- **THEN** it assigns to the field, not to the parameter
 
-#### Scenario: `this` fuera de una clase
-- **WHEN** `this` aparece en una función de nivel superior
-- **THEN** se emite un diagnóstico indicando que no hay instancia
+#### Scenario: `this` outside a class
+- **WHEN** `this` appears in a top-level function
+- **THEN** a diagnostic is emitted indicating that there is no instance
 
-### Requirement: Visibilidad de miembros
+### Requirement: Member visibility
 
-Un miembro SHALL admitir `public`, `private` o `protected`, con `public` por defecto, según `ZIRK_LANGUAGE_SPEC.md` sección 7.
+A member SHALL support `public`, `private`, or `protected`, with `public` as the default, per `ZIRK_LANGUAGE_SPEC.md` section 7.
 
-#### Scenario: Miembro privado desde fuera
-- **WHEN** se accede a un campo `private` desde fuera de su clase
-- **THEN** se emite un diagnóstico que nombra el miembro y su visibilidad
+#### Scenario: Private member accessed from outside
+- **WHEN** a `private` field is accessed from outside its class
+- **THEN** a diagnostic is emitted naming the member and its visibility
 
-#### Scenario: Miembro protegido desde una subclase
-- **WHEN** una subclase accede a un miembro `protected` de su superclase
-- **THEN** el acceso es válido
+#### Scenario: Protected member accessed from a subclass
+- **WHEN** a subclass accesses a `protected` member of its superclass
+- **THEN** the access is valid
 
-#### Scenario: Visibilidad por defecto
-- **WHEN** un miembro se declara sin modificador
-- **THEN** es `public`
+#### Scenario: Default visibility
+- **WHEN** a member is declared without a modifier
+- **THEN** it is `public`
 
-### Requirement: Herencia simple
+### Requirement: Single inheritance
 
-Una clase SHALL extender a lo sumo una clase. Las clases SHALL ser heredables por defecto, y `final` NO SHALL existir.
+A class SHALL extend at most one class. Classes SHALL be inheritable by default, and `final` SHALL NOT exist.
 
-#### Scenario: Subclase hereda campos y métodos
-- **WHEN** `class Admin extends User` no declara `id`
-- **THEN** una instancia de `Admin` tiene el campo `id` de `User`
+#### Scenario: Subclass inherits fields and methods
+- **WHEN** `class Admin extends User` does not declare `id`
+- **THEN** an instance of `Admin` has the `id` field from `User`
 
-#### Scenario: Herencia múltiple de clases
-- **WHEN** una clase intenta extender dos clases
-- **THEN** se emite un diagnóstico indicando que la herencia de clases es simple
+#### Scenario: Multiple class inheritance
+- **WHEN** a class attempts to extend two classes
+- **THEN** a diagnostic is emitted indicating that class inheritance is single
 
-#### Scenario: Ciclo de herencia
-- **WHEN** dos clases se extienden mutuamente
-- **THEN** se emite un diagnóstico que muestra el ciclo
+#### Scenario: Inheritance cycle
+- **WHEN** two classes extend each other
+- **THEN** a diagnostic is emitted showing the cycle
 
-### Requirement: Redefinición de métodos
+### Requirement: Method overriding
 
-Una subclase SHALL poder redefinir un método de su superclase con la misma firma, y la llamada SHALL resolver a la definición del tipo en tiempo de ejecución.
+A subclass SHALL be able to override a method of its superclass with the same signature, and the call SHALL resolve to the runtime type's definition.
 
-#### Scenario: Despacho a la redefinición
-- **WHEN** una variable declarada del tipo base sostiene una instancia de la subclase y se llama al método redefinido
-- **THEN** se ejecuta el de la subclase
+#### Scenario: Dispatch to the override
+- **WHEN** a variable declared with the base type holds an instance of the subclass and the overridden method is called
+- **THEN** the subclass's method is executed
 
-#### Scenario: Redefinición con firma distinta
-- **WHEN** una subclase redefine un método cambiando parámetros o retorno
-- **THEN** se emite un diagnóstico que muestra ambas firmas
+#### Scenario: Override with a different signature
+- **WHEN** a subclass overrides a method while changing parameters or return type
+- **THEN** a diagnostic is emitted showing both signatures
 
-### Requirement: Clases y métodos abstractos
+### Requirement: Abstract classes and methods
 
-`abstract` SHALL admitirse en clases y métodos. Una clase abstracta NO SHALL instanciarse, y una clase concreta SHALL implementar todo método abstracto que herede.
+`abstract` SHALL be supported on classes and methods. An abstract class SHALL NOT be instantiated, and a concrete class SHALL implement every abstract method it inherits.
 
-#### Scenario: Instanciar una clase abstracta
-- **WHEN** se construye una instancia de una clase `abstract`
-- **THEN** se emite un diagnóstico indicando que no es instanciable
+#### Scenario: Instantiating an abstract class
+- **WHEN** an instance of an `abstract` class is constructed
+- **THEN** a diagnostic is emitted indicating that it is not instantiable
 
-#### Scenario: Método abstracto sin implementar
-- **WHEN** una clase concreta hereda un método `abstract` y no lo implementa
-- **THEN** se emite un diagnóstico que nombra el método
+#### Scenario: Unimplemented abstract method
+- **WHEN** a concrete class inherits an `abstract` method and does not implement it
+- **THEN** a diagnostic is emitted naming the method
 
-#### Scenario: Método abstracto con cuerpo
-- **WHEN** un método `abstract` declara un cuerpo
-- **THEN** se emite un diagnóstico que señala el cuerpo
+#### Scenario: Abstract method with a body
+- **WHEN** an `abstract` method declares a body
+- **THEN** a diagnostic is emitted pointing to the body

@@ -4,65 +4,65 @@
 
 Defines the commands that compile and run a program, and how diagnostics are presented.
 ## Requirements
-### Requirement: Compilación de un archivo
+### Requirement: Compiling a file
 
-La CLI SHALL exponer un subcomando que compile un archivo `.zrk` y produzca un ejecutable nativo.
+The CLI SHALL expose a subcommand that compiles a `.zrk` file and produces a native executable.
 
-#### Scenario: Compilación exitosa
-- **WHEN** se compila un archivo válido del subset
-- **THEN** se produce un ejecutable
-- **AND** la CLI termina con código de salida 0
+#### Scenario: Successful compilation
+- **WHEN** a valid file from the subset is compiled
+- **THEN** an executable is produced
+- **AND** the CLI exits with code 0
 
-#### Scenario: Compilación con errores
-- **WHEN** el archivo contiene errores
-- **THEN** se emiten los diagnósticos correspondientes
-- **AND** NO se produce ejecutable
-- **AND** la CLI termina con código de salida distinto de 0
+#### Scenario: Compilation with errors
+- **WHEN** the file contains errors
+- **THEN** the corresponding diagnostics are emitted
+- **AND** no executable is produced
+- **AND** the CLI exits with a non-zero exit code
 
-#### Scenario: Archivo inexistente
-- **WHEN** se indica una ruta que no existe
-- **THEN** se emite un diagnóstico que nombra la ruta
+#### Scenario: Nonexistent file
+- **WHEN** a path that does not exist is given
+- **THEN** a diagnostic is emitted naming the path
 
-### Requirement: Compilar y ejecutar
+### Requirement: Compile and run
 
-La CLI SHALL exponer un subcomando que compile y ejecute el programa en un solo paso.
+The CLI SHALL expose a subcommand that compiles and runs the program in a single step.
 
-#### Scenario: Ejecución tras compilar
-- **WHEN** se ejecuta un programa válido del subset
-- **THEN** el programa corre y su salida aparece en la salida estándar
+#### Scenario: Execution after compiling
+- **WHEN** a valid program from the subset is run
+- **THEN** the program runs and its output appears on standard output
 
-#### Scenario: Propagación del código de salida
-- **WHEN** el programa compilado termina con un código de salida
-- **THEN** la CLI termina con ese mismo código
+#### Scenario: Exit code propagation
+- **WHEN** the compiled program exits with an exit code
+- **THEN** the CLI exits with that same code
 
-### Requirement: Presentación de diagnósticos
+### Requirement: Diagnostics presentation
 
-La CLI SHALL presentar los diagnósticos en el formato de `ZIRK_COMPILER_SPEC.md` sección 8, y ofrecer salida estructurada para herramientas.
+The CLI SHALL present diagnostics in the format defined by `ZIRK_COMPILER_SPEC.md` section 8, and offer structured output for tools.
 
-#### Scenario: Formato legible
-- **WHEN** se emite un diagnóstico sin solicitar salida estructurada
-- **THEN** se imprime con severidad, código, ubicación, fragmento de source, causa y ayuda
+#### Scenario: Human-readable format
+- **WHEN** a diagnostic is emitted without requesting structured output
+- **THEN** it is printed with severity, code, location, source snippet, cause, and help
 
-#### Scenario: Salida estructurada
-- **WHEN** se solicita salida estructurada
-- **THEN** los diagnósticos se emiten en formato legible por máquina
+#### Scenario: Structured output
+- **WHEN** structured output is requested
+- **THEN** diagnostics are emitted in machine-readable format
 
-#### Scenario: Los diagnósticos van a la salida de error
-- **WHEN** se emiten diagnósticos
-- **THEN** se escriben en la salida de error estándar
-- **AND** NO se mezclan con la salida del programa compilado
+#### Scenario: Diagnostics go to the error output
+- **WHEN** diagnostics are emitted
+- **THEN** they are written to standard error
+- **AND** they are NOT mixed with the compiled program's output
 
-### Requirement: Alcance de un solo archivo
+### Requirement: Single-file scope
 
-La CLI de esta fase SHALL operar sobre un único archivo, sin manifiesto de proyecto.
+The CLI in this phase SHALL operate on a single file, with no project manifest.
 
-#### Scenario: Ausencia de manifiesto
-- **WHEN** se compila un archivo sin que exista `init.zrk`
-- **THEN** la compilación procede normalmente
+#### Scenario: Absence of a manifest
+- **WHEN** a file is compiled without an `init.zrk` present
+- **THEN** compilation proceeds normally
 
-#### Scenario: Múltiples archivos
-- **WHEN** se indican varios archivos fuente
-- **THEN** se emite un diagnóstico indicando que los proyectos multi-archivo llegan en una fase posterior
+#### Scenario: Multiple files
+- **WHEN** several source files are given
+- **THEN** a diagnostic is emitted indicating that multi-file projects arrive in a later phase
 
 ### Requirement: Authority-bearing commands validate signed approval incrementally
 Before build-time or runtime code executes, relevant CLI commands SHALL compare project name/location, manifest, lockfile, permission, requester, phase, and approval fingerprints. They SHALL take a fast path when unchanged and recompute only affected requester graph segments when changed.

@@ -1,62 +1,62 @@
-# ADR-011 — Identidad, igualdad y normalización de `String`
+# ADR-011 — Identity, equality and normalization of `String`
 
-- **Estado:** aceptada
-- **Fecha:** 15 de agosto de 2026
-- **Fase:** 2 (cierre)
+- **Status:** accepted
+- **Date:** August 15, 2026
+- **Phase:** 2 (closing)
 
-## Contexto
+## Context
 
-`ZIRK_LANGUAGE_SPEC.md` sección 4 dice que `==` compara estructuralmente y que `is` compara la misma instancia. Para `String` eso no alcanza para decidir una implementación, porque Unicode permite escribir el mismo texto percibido con bytes distintos:
+`ZIRK_LANGUAGE_SPEC.md` section 4 says that `==` compares structurally and that `is` compares the same instance. For `String` that isn't enough to settle an implementation, because Unicode allows writing the same perceived text with different bytes:
 
 ```text
-"hó"  →  U+0068 U+00F3          (NFC, forma compuesta)
-"hó"  →  U+0068 U+006F U+0301   (NFD, forma descompuesta)
+"Å"   →  U+00C5                (NFC, composed form)
+"Å"   →  U+0041 U+030A         (NFD, decomposed form)
 ```
 
-Son cuatro bytes contra cinco. Un usuario que escribe ambas en su editor ve exactamente lo mismo, y muy probablemente no sabe cuál produjo cada una: depende del sistema operativo, del método de entrada y de por dónde pasó el texto antes de llegar al archivo.
+That's four bytes versus five. A user who types both in their editor sees exactly the same thing, and most likely doesn't know which one produced each: it depends on the operating system, the input method, and what the text passed through before reaching the file.
 
-La implementación actual compara bytes, así que hoy respondería `false`. Y la definición de `String` como secuencia **de grafemas** hace que esa respuesta sea incoherente con el resto del tipo: si `length` cuenta grafemas y la indexación devuelve grafemas, la igualdad no puede razonar en bytes.
+The current implementation compares bytes, so today it would answer `false`. And defining `String` as a sequence **of graphemes** makes that answer inconsistent with the rest of the type: if `length` counts graphemes and indexing returns graphemes, equality can't reason in bytes.
 
-## Decisión
+## Decision
 
-**`is` compara referentes. `==` compara contenido, y es indiferente a la forma de normalización.**
+**`is` compares referents. `==` compares content, and is indifferent to the normalization form.**
 
 ```text
-mut a = "hó";              // NFC
-mut b = "hó";              // NFD, mismo texto percibido
+mut a = "Å";               // NFC
+mut b = "Å";               // NFD, same perceived text
 mut c = a;
 
-a == b   // true   — mismo contenido
-a is b   // false  — referentes distintos
-a is c   // true   — mismo referente
+a == b   // true   — same content
+a is b   // false  — different referents
+a is c   // true   — same referent
 ```
 
-El hash se deriva de la forma canónica. Si se derivara de los bytes, dos claves iguales por `==` caerían en cubetas distintas y `Map<String, _>` contradiría al operador — un mapa en el que `m[a]` y `m[b]` son entradas separadas siendo `a == b` verdadero.
+The hash is derived from the canonical form. If it were derived from bytes, two keys equal under `==` would fall into different buckets and `Map<String, _>` would contradict the operator — a map where `m[a]` and `m[b]` are separate entries while `a == b` is true.
 
-### Cómo se paga
+### How it's paid for
 
-La regla es cara si se implementa ingenuamente —normalizar ambos lados en cada comparación— y barata si se ordenan los caminos por frecuencia:
+The rule is expensive if implemented naively — normalizing both sides on every comparison — and cheap if the paths are ordered by frequency:
 
-1. **Mismo handle** → iguales. Es también la respuesta de `is`. Un puntero.
-2. **Longitud y bytes idénticos** → iguales. Un `memcmp`, sin asignar memoria. Este es el caso abrumadoramente mayoritario.
-3. **Ambos marcados como canónicos, bytes distintos** → distintos. Dos formas canónicas distintas son textos distintos, por definición.
-4. **Resto** → comparación canónica incremental, sin materializar copias normalizadas cuando sea evitable.
+1. **Same handle** → equal. This is also `is`'s answer. A pointer.
+2. **Identical length and bytes** → equal. A `memcmp`, with no memory allocation. This is the overwhelmingly most common case.
+3. **Both marked canonical, different bytes** → different. Two distinct canonical forms are different texts, by definition.
+4. **Everything else** → incremental canonical comparison, without materializing normalized copies when avoidable.
 
-El handle guarda junto a los bytes lo que hace falta para llegar temprano a los primeros tres pasos: `is_ascii`, `normalization`, `grapheme_count` y `hash`. Una cadena ASCII no admite formas equivalentes distintas, así que `is_ascii` garantiza que el paso 2 decide.
+The handle stores, alongside the bytes, what's needed to reach the first three steps early: `is_ascii`, `normalization`, `grapheme_count` and `hash`. An ASCII string admits no distinct equivalent forms, so `is_ascii` guarantees step 2 decides.
 
-**Los literales se normalizan en tiempo de compilación** y llegan al runtime marcados como canónicos. Es trabajo que se hace una vez, en una máquina que no tiene prisa, y convierte la comparación entre literales —lo más común que hay— en comparación de bytes.
+**Literals are normalized at compile time** and reach the runtime marked as canonical. It's work done once, on a machine that isn't in a hurry, and it turns comparison between literals — the most common case there is — into a byte comparison.
 
-## Alternativas consideradas
+## Alternatives considered
 
-**Comparar bytes y ya.** Es lo que hay hoy y es lo más rápido posible. Se descarta porque hace que `"hó" == "hó"` dependa de con qué teclado se escribió cada literal, que es exactamente la clase de sorpresa que el lenguaje se propone no tener. Un usuario no puede depurar eso: los dos literales se ven idénticos en su pantalla.
+**Just compare bytes.** That's what exists today and it's the fastest possible option. It's discarded because it makes `"Å" == "Å"` depend on which keyboard each literal was typed with, which is exactly the kind of surprise the language sets out not to have. A user can't debug that: both literals look identical on their screen.
 
-**Normalizar al construir, siempre.** Toda `String` entra en forma canónica y la igualdad vuelve a ser un `memcmp`. Tentador, pero paga normalización en cada cadena construida en ejecución —incluidas las que nadie compara— y además destruye información: un programa que lee un archivo y lo vuelve a escribir alteraría bytes que no le pidieron alterar. Se descarta por eso segundo más que por el costo.
+**Always normalize on construction.** Every `String` enters canonical form and equality goes back to being a `memcmp`. Tempting, but it pays normalization on every string built at runtime — including ones nobody ever compares — and also destroys information: a program that reads a file and writes it back out would alter bytes it wasn't asked to alter. It's discarded more for that second reason than for the cost.
 
-**Exponer la normalización al usuario** (`a.normalized() == b.normalized()`). Traslada el problema a quien escribe el programa y garantiza que se olvide, porque el caso que falla es justamente el que no se ve. Además obliga a que `Map<String, _>` documente cuál de las dos igualdades usa.
+**Expose normalization to the user** (`a.normalized() == b.normalized()`). Shifts the problem to whoever writes the program and guarantees it gets forgotten, because the failing case is precisely the one that isn't visible. It also forces `Map<String, _>` to document which of the two equalities it uses.
 
-## Consecuencias
+## Consequences
 
-- El runtime gana una dependencia de datos de equivalencia canónica Unicode. Se acota a lo que la equivalencia canónica necesita, que es bastante menos que Unicode completo, y solo se toca en el paso 4.
-- El compilador gana una responsabilidad menor: normalizar el texto de los literales al emitirlos. No toca la frontera de [ADR-005](./ADR-005-representacion-string.md), porque opera sobre el texto del literal y no sobre la representación del `String`.
-- Los campos cacheados del handle —`normalization`, `grapheme_count`, `hash`— pasan a ser estado invalidable. Mientras `String` no sea mutable no hay ruta que los desincronice; la fase que introduzca la mutación se hace cargo de invalidarlos, y eso es parte de su contrato y de sus tests.
-- La misma disciplina aplicará a `Char`: un grafema comparado por contenido canónico, por las mismas razones y con los mismos caminos rápidos.
+- The runtime gains a dependency on Unicode canonical equivalence data. It's limited to what canonical equivalence needs, which is considerably less than full Unicode, and is only touched in step 4.
+- The compiler gains a minor responsibility: normalizing literal text when emitting it. It doesn't touch the boundary of [ADR-005](./ADR-005-representacion-string.md), because it operates on the literal's text and not on the `String`'s representation.
+- The handle's cached fields — `normalization`, `grapheme_count`, `hash` — become invalidatable state. As long as `String` isn't mutable there's no path that desyncs them; whichever phase introduces mutation takes on invalidating them, and that's part of its contract and its tests.
+- The same discipline will apply to `Char`: a grapheme compared by canonical content, for the same reasons and with the same fast paths.

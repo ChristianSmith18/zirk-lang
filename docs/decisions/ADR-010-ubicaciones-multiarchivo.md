@@ -1,40 +1,40 @@
-# ADR-010 — Ubicaciones a través de varios archivos
+# ADR-010 — Locations across multiple files
 
-- **Estado:** aceptada
-- **Fecha:** 14 de agosto de 2026
-- **Fase:** 2
+- **Status:** accepted
+- **Date:** August 14, 2026
+- **Phase:** 2
 
-## Contexto
+## Context
 
-Hasta la Fase 2 el compilador procesaba **un solo archivo**, y por eso `Span` es un par de offsets de bytes sin más: `{ start, end }`. Quien lo interpreta es el único `SourceFile` que existe, y `location(span)` y `snippet(span)` son métodos suyos.
+Through Phase 2 the compiler processed **a single file**, and that's why `Span` is just a pair of byte offsets: `{ start, end }`. The one who interprets it is the single `SourceFile` that exists, and `location(span)` and `snippet(span)` are its own methods.
 
-Los módulos rompen esa suposición. Un `import` trae declaraciones de otro archivo, y un diagnóstico sobre ese otro archivo, renderizado con el `SourceFile` de entrada, señalaría un fragmento equivocado del texto equivocado — sin fallar, porque los offsets son válidos en cualquier cadena lo bastante larga.
+Modules break that assumption. An `import` brings in declarations from another file, and a diagnostic about that other file, rendered with the input `SourceFile`, would point at the wrong fragment of the wrong text — without failing, because the offsets are valid in any string long enough.
 
-`Span` no es una estructura interna cualquiera: viaja en cada nodo de la AST, en cada instrucción de la IR ([ADR-007](./ADR-007-forma-de-la-ir.md)) y, por la Fase 8, dentro del `.zpkg`. `ZIRK_COMPILER_SPEC.md` sección 11 exige del debugger un mapeo fiel al `.zrk`. Cambiar su forma después cuesta más que decidirla ahora.
+`Span` isn't just some internal structure: it travels in every AST node, in every IR instruction ([ADR-007](./ADR-007-forma-de-la-ir.md)) and, by Phase 8, inside the `.zpkg`. `ZIRK_COMPILER_SPEC.md` section 11 requires the debugger to have a faithful mapping to the `.zrk`. Changing its shape later costs more than deciding it now.
 
-## Opciones consideradas
+## Options considered
 
-### Un artefacto de source map aparte, al estilo de JavaScript
+### A separate source map artifact, JavaScript-style
 
-Un archivo separado que mapea salida a entrada, generado al final. Se descarta sin discusión larga: resuelve el problema contrario. Sirve para reconstruir ubicaciones **después** de compilar, y lo que hace falta es consultarlas **durante**. Como estructura interna sería una indirección que nadie quiere pagar en cada diagnóstico.
+A separate file that maps output to input, generated at the end. Discarded without much debate: it solves the opposite problem. It's useful for reconstructing locations **after** compiling, and what's needed is to query them **during**. As an internal structure it would be an indirection nobody wants to pay for on every diagnostic.
 
-### Espacio de offsets global, al estilo de rustc
+### Global offset space, rustc-style
 
-Todos los archivos ocupan un espacio de direcciones virtual único: el archivo 2 empieza donde termina el 1. `Span` no cambia, y para saber a qué archivo pertenece se hace búsqueda binaria sobre los offsets de inicio.
+All files occupy a single virtual address space: file 2 starts where file 1 ends. `Span` doesn't change, and to know which file it belongs to, a binary search over the starting offsets is done.
 
-Es la opción **más barata hoy**: no toca el lexer, ni el parser, ni la AST, ni la IR. Cero cambios en cinco crates.
+It's the **cheapest option today**: it touches neither the lexer, nor the parser, nor the AST, nor the IR. Zero changes across five crates.
 
-Se descarta por dos razones, ambas sobre hacia dónde va este proyecto y no sobre lo que necesita esta fase:
+It's discarded for two reasons, both about where this project is heading and not about what this phase needs:
 
-1. **Un archivo que cambia de tamaño corre la base de todos los siguientes**, y con ella invalida todos sus spans. Un LSP relexa un archivo en cada pulsación de tecla: editar el primero invalidaría los spans de todo el resto. El LSP es Fase 9 y la compilación incremental viene después; adoptar ahora una representación que las estorba es elegir el costo más caro de los dos.
+1. **A file that changes size shifts the base of every following file**, and with it invalidates all their spans. An LSP re-lexes a file on every keystroke: editing the first file would invalidate the spans of everything else. The LSP is Phase 9 and incremental compilation comes after; adopting now a representation that hinders them is choosing the more expensive of the two costs.
 
-2. **Un error de cálculo en la base no falla: miente.** Un span del archivo A interpretado contra el archivo B produce un diagnóstico plausible que señala el lugar equivocado. Un diagnóstico que apunta mal es peor que uno que no sale.
+2. **A calculation error in the base doesn't fail: it lies.** A span from file A interpreted against file B produces a plausible diagnostic that points at the wrong place. A diagnostic that points wrong is worse than one that doesn't show up at all.
 
-rustc adoptó este diseño antes de tener ambiciones de LSP, y lo compensa relativizando spans al serializar para el caché incremental. Es un parche a una decisión temprana, no un modelo a copiar.
+rustc adopted this design before having LSP ambitions, and compensates for it by relativizing spans when serializing for the incremental cache. It's a patch to an early decision, not a model to copy.
 
-## Decisión
+## Decision
 
-**Un `Span` nombra su archivo. Los offsets siguen siendo locales a él.**
+**A `Span` names its file. Offsets remain local to it.**
 
 ```rust
 pub struct FileId(pub u32);
@@ -46,20 +46,20 @@ pub struct Span {
 }
 ```
 
-Un `SourceMap` posee los `SourceFile` del crate y responde `location(span)` y `snippet(span)` despachando por `span.file`. Las etapas reciben `&SourceMap` donde antes recibían `&SourceFile`; la forma de las llamadas no cambia.
+A `SourceMap` owns the crate's `SourceFile`s and answers `location(span)` and `snippet(span)` by dispatching on `span.file`. Stages receive `&SourceMap` where they used to receive `&SourceFile`; the shape of the calls doesn't change.
 
-`Span::to()` combina dos spans y **exige que sean del mismo archivo**: combinar ubicaciones de archivos distintos no significa nada, y que sea imposible por construcción es la mitad del valor de esta decisión.
+`Span::to()` combines two spans and **requires them to be from the same file**: combining locations from different files means nothing, and making it impossible by construction is half the value of this decision.
 
-### Sobre el tamaño
+### On size
 
-`Span` pasa de 8 a 12 bytes. En un crate grande —del orden de 100 000 nodos de AST— son unos 400 KB adicionales, y en la IR una cifra del mismo orden. Para un compilador eso no es una cantidad que justifique nada.
+`Span` goes from 8 to 12 bytes. In a large crate — on the order of 100,000 AST nodes — that's about 400 KB extra, and a similar order of magnitude in the IR. For a compiler that isn't a quantity that justifies anything.
 
-Se consideró empaquetar los tres campos en 64 bits (archivo de 16 bits, offsets de 24). Se descarta: el alineamiento se come buena parte del ahorro, los accesores dejan de ser campos, y la depuración empeora. Si alguna vez un perfil demuestra que importa, empaquetar es un cambio local a este tipo. Adivinarlo ahora no.
+Packing the three fields into 64 bits (16-bit file, 24-bit offsets) was considered. It's discarded: alignment eats up a good part of the savings, accessors stop being plain fields, and debugging gets worse. If a profile ever proves it matters, packing is a local change to this type. Guessing it now is not.
 
-## Consecuencias
+## Consequences
 
-- **Los diagnósticos son correctos por construcción a través de archivos.** No hay forma de renderizar un span contra el archivo equivocado sin que el tipo lo delate.
-- **Editar un archivo no invalida los spans de los demás**, que es la propiedad que el LSP de la Fase 9 y la compilación incremental necesitan.
-- **La migración es mecánica pero transversal**: el lexer construye los spans y todo lo demás los propaga, así que el punto de creación es uno solo por archivo.
-- `SourceFile` sigue existiendo con la misma responsabilidad —texto, líneas, fragmentos— y deja de ser el punto de entrada; lo es `SourceMap`.
-- La forma serializada del `.zpkg` de la Fase 8 tendrá que decidir si el `FileId` se guarda tal cual o se reindexa por paquete. Queda anotado, no resuelto: depende del formato, que no existe.
+- **Diagnostics are correct by construction across files.** There's no way to render a span against the wrong file without the type giving it away.
+- **Editing one file doesn't invalidate the spans of the others**, which is the property the Phase 9 LSP and incremental compilation need.
+- **The migration is mechanical but cross-cutting**: the lexer builds the spans and everything else propagates them, so there's a single creation point per file.
+- `SourceFile` still exists with the same responsibility — text, lines, fragments — and stops being the entry point; `SourceMap` is now that.
+- The serialized form of the Phase 8 `.zpkg` will have to decide whether `FileId` is stored as-is or reindexed per package. Noted, not resolved: it depends on the format, which doesn't exist yet.

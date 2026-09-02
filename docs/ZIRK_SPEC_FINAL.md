@@ -202,7 +202,7 @@ project {
 import { stdout } from std.io;
 
 fn main(): Void {
-    stdout.println("Hola desde Zirk");
+    stdout.println("Hello from Zirk");
 }
 ```
 
