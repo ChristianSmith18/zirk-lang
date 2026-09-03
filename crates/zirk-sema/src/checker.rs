@@ -7661,6 +7661,7 @@ impl<'a> Checker<'a> {
     /// parser, AST, or place-classification logic D5 adds.
     fn indexable_element(&self, receiver: Type) -> Option<(Type, bool)> {
         match receiver.base {
+            Base::String => Some((Type::of(Base::Char), false)),
             Base::NativeSlice(id) => Some((
                 self.native_slice_types
                     .get(id as usize)
@@ -7720,6 +7721,19 @@ impl<'a> Checker<'a> {
             );
             return (receiver, Type::UNKNOWN, false);
         };
+
+        if receiver.base == Base::String
+            && let Expr::Int(lit) = &*expr.index
+            && lit.value < 0
+        {
+            self.error(
+                codes::INDEX_OUT_OF_BOUNDS,
+                expr.index.span(),
+                "a string index must be non-negative",
+                format!("found {}", lit.value),
+                None,
+            );
+        }
 
         (receiver, element, writable)
     }
@@ -9178,9 +9192,14 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `expr` is an lvalue `Pointer.from` may take the address of —
-    /// a local/parameter name, or a field projection (task 6.1).
+    /// a local/parameter name, or a field projection whose root is one
+    /// (task 6.1). A temporary such as `Foo().x` has no stable address.
     fn is_addressable_place(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Path(_) | Expr::Field(_))
+        match expr {
+            Expr::Path(_) => true,
+            Expr::Field(field) => self.is_addressable_place(&field.object),
+            _ => false,
+        }
     }
 
     /// `Pointer.from(place)` (roadmap Phase 4e, design D8): the address of

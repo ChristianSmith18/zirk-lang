@@ -1023,26 +1023,70 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
     }
 
-    /// The address of one field inside an object.
+    /// The address of one field inside an object or value struct.
     fn field_pointer(&self, object: ir::Operand, index: u32) -> PointerValue<'ctx> {
-        let id = self.object_layout_of(object);
-        let layout = &self.module.objects[id as usize];
-        let struct_type = object_struct(
-            self.context,
-            layout,
-            &self.module.closures,
-            &self.module.values,
-            &self.module.enums,
-        );
+        let object_ty = self.value_types[&object.0];
+        let ptr = self.operand(object).into_pointer_value();
 
-        self.builder
-            .build_struct_gep(
-                struct_type,
-                self.operand(object).into_pointer_value(),
-                index + OBJECT_HEADER_FIELDS,
-                "field_ptr",
-            )
-            .expect("a verified module addresses a field the layout has")
+        match object_ty {
+            ir::IrType::Object(id) => {
+                let layout = &self.module.objects[id as usize];
+                let struct_type = object_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+
+                self.builder
+                    .build_struct_gep(struct_type, ptr, index + OBJECT_HEADER_FIELDS, "field_ptr")
+                    .expect("a verified module addresses a field the layout has")
+            }
+            ir::IrType::Pointer(pointer_id) => {
+                match self.module.pointer_types[pointer_id as usize] {
+                    ir::IrType::Object(id) => {
+                        let layout = &self.module.objects[id as usize];
+                        let struct_type = object_struct(
+                            self.context,
+                            layout,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        );
+                        self.builder
+                            .build_struct_gep(
+                                struct_type,
+                                ptr,
+                                index + OBJECT_HEADER_FIELDS,
+                                "field_ptr",
+                            )
+                            .expect("a verified module addresses a field the layout has")
+                    }
+                    ir::IrType::Value(id) => {
+                        let layout = &self.module.values[id as usize];
+                        let struct_type = value_struct(
+                            self.context,
+                            layout,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        );
+                        self.builder
+                            .build_struct_gep(struct_type, ptr, index, "value_field_ptr")
+                            .expect("a verified module addresses a field the layout has")
+                    }
+                    other => unreachable!(
+                        "PointerFromField points to {}, not an object or value",
+                        other.as_str()
+                    ),
+                }
+            }
+            other => unreachable!(
+                "field_pointer called on {}, not an object or pointer",
+                other.as_str()
+            ),
+        }
     }
 
     /// The signature of one contract method, taken from any class that
@@ -1695,6 +1739,24 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     call.try_as_basic_value()
                         .basic()
                         .expect("the constructor returns a value"),
+                )
+            }
+
+            // Byte offset of the `index`-th grapheme, or `-1` past the end
+            // (roadmap Phase 4e, `String[index]` read-only access).
+            ir::InstKind::StringGraphemeOffset { string, index } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.str_grapheme_offset,
+                        &[self.operand(*string).into(), self.operand(*index).into()],
+                        "grapheme_offset",
+                    )
+                    .expect("call to the grapheme offset lookup");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the lookup returns a value"),
                 )
             }
 

@@ -48,9 +48,9 @@ Current high-impact delivery limits include:
   the enclosing block's journal at its own entry, before running its own
   body, and writes after that point are no longer journaled. A `try`/`catch`
   nested inside `unsafe {}` that handles the exception locally does not
-  trigger a rollback. Known limitation: an early `return`/`break`/`continue`
-  out of `unsafe {}` leaks that block's journal handle (not a soundness
-  issue — just an unfreed allocation). `NativeSlice<T>`/`NativeSliceMut<T>`
+  trigger a rollback; early `return`/`break`/`continue` out of `unsafe {}`
+  now also rolls the active journal back before the jump.
+  `NativeSlice<T>`/`NativeSliceMut<T>`
   are delivered: validated bounded views constructed only via
   `pointer.as_slice(length)`/`.as_slice_mut(length)` (both `unsafe`,
   returning `Result<view, NativeError>`), checking nullability, alignment,
@@ -58,10 +58,13 @@ Current high-impact delivery limits include:
   shape only) known extent against the real underlying storage; using an
   already-constructed view needs no `unsafe`, with bounds checks active on
   every index; the `Pointer<T>` escape rule now also covers both view
-  types. Delivering this also meant adding `expr[index]` as a genuine new
+  types. Read-only `String[index]` returning a `Char` is now supported,
+  with bounds checking and negative-index rejection; `String[index] = c` is
+  rejected. Delivering this also meant adding `expr[index]` as a genuine new
   postfix expression grammar (`Expr::Index`) — indexing did not exist
   anywhere in the compiler before, and is now dispatched by receiver type
-  (today: `NativeSlice<T>`/`NativeSliceMut<T>`) so Phase 7's `Array<T>`/
+  (today: `String`, `NativeSlice<T>`/`NativeSliceMut<T>`) so Phase 7's
+  `Array<T>`/
   `List<T>` can register their own support later without another grammar
   change. Volatile access, untagged native-union access (no union type
   exists), weak atomic ordering (`Atomic<T>` is Phase 5), a

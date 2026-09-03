@@ -4497,6 +4497,60 @@ fn invalid_pointer_escapes_via_closure_capture() {
     assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
 }
 
+#[test]
+fn valid_pointer_from_record_field() {
+    accepted(
+        "record Point { x: Int32; y: Int32; }
+         fn main(): Void {
+             mut p: Point = Point(x: 1, y: 2);
+             unsafe {
+                 mut q: Pointer<Int32> = Pointer.from(p.x);
+             }
+         }",
+    );
+}
+
+#[test]
+fn valid_pointer_from_value_class_field() {
+    accepted(
+        "value class UserId(value: Int32);
+         fn main(): Void {
+             mut u: UserId = UserId(value: 5);
+             unsafe {
+                 mut p: Pointer<Int32> = Pointer.from(u.value);
+             }
+         }",
+    );
+}
+
+#[test]
+fn valid_pointer_from_nested_record_field() {
+    accepted(
+        "record Inner { a: Int32; }
+         record Outer { inner: Inner; }
+         fn main(): Void {
+             mut o: Outer = Outer(inner: Inner(a: 1));
+             unsafe {
+                 mut p: Pointer<Int32> = Pointer.from(o.inner.a);
+             }
+         }",
+    );
+}
+
+#[test]
+fn invalid_pointer_from_record_temporary() {
+    let output = rejected(
+        "record Point { x: Int32; }
+         fn make_point(): Point { return Point(x: 1); }
+         fn main(): Void {
+             unsafe {
+                 mut p: Pointer<Int32> = Pointer.from(make_point().x);
+             }
+         }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
 // --- Phase 4e: Weak<T> (`fase-4e-weak`) -------------------------------------
 
 #[test]
@@ -4863,4 +4917,45 @@ fn invalid_native_slice_escapes_into_a_declared_field() {
          fn main(): Void { }",
     );
     assert!(output.contains(codes::POINTER_ESCAPES.as_str()), "{output}");
+}
+
+// --- Phase 4e: String[index] read-only grapheme access ------------------------
+
+#[test]
+fn valid_string_index_returns_a_char() {
+    accepted(
+        "fn main(): Void {
+             mut s: String = \"hola\";
+             mut c: Char = s[1];
+             stdout.println(c.to_string());
+         }",
+    );
+}
+
+#[test]
+fn invalid_string_index_write_is_rejected() {
+    let output = rejected(
+        "fn main(): Void {
+             mut s: String = \"hola\";
+             s[0] = 'x';
+         }",
+    );
+    assert!(
+        output.contains(codes::INDEX_NOT_WRITABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_string_negative_index_is_rejected() {
+    let output = rejected(
+        "fn main(): Void {
+             mut s: String = \"hola\";
+             mut c: Char = s[-1];
+         }",
+    );
+    assert!(
+        output.contains(codes::INDEX_OUT_OF_BOUNDS.as_str()),
+        "{output}"
+    );
 }

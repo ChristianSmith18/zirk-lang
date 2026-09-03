@@ -1,0 +1,20 @@
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut c: Counter = Counter(1);
+    mut i: Int32 = 0;
+    loop {
+        i = i + 1;
+        if i == 1 {
+            unsafe {
+                c.value = 42;
+                continue;
+            }
+        }
+        break;
+    }
+    stdout.println(c.value);
+}

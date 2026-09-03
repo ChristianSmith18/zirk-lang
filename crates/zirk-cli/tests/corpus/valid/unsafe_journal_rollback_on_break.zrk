@@ -1,0 +1,15 @@
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut c: Counter = Counter(1);
+    loop {
+        unsafe {
+            c.value = 42;
+            break;
+        }
+    }
+    stdout.println(c.value);
+}

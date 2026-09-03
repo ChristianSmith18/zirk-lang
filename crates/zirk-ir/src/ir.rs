@@ -771,6 +771,13 @@ pub enum InstKind {
     /// pointer is type-erased at the runtime boundary, but `IsInstance`
     /// already proved it fits.
     TakePendingException,
+    /// Byte offset of the `index`-th grapheme in `string`, or `-1` if `index`
+    /// is past the end (roadmap Phase 4e, `String[index]` read-only grapheme
+    /// access). Used together with `GraphemeLenAt` and `GraphemeSlice`.
+    StringGraphemeOffset {
+        string: Operand,
+        index: Operand,
+    },
     /// Byte length of the grapheme at `offset` within `string`, or `-1` past
     /// the end (roadmap Phase 3b, task 6.3: `for ... in` over `String`
     /// produces `Char`). `offset` is threaded as an ordinary `Int64`

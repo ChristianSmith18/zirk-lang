@@ -1,0 +1,9 @@
+record Point { x: Int32; y: Int32; }
+
+fn main(): Void {
+    mut p: Point = Point(x: 1, y: 2);
+    unsafe {
+        mut q: Pointer<Int32> = Pointer.from(p.x);
+        stdout.println(q.read());
+    }
+}

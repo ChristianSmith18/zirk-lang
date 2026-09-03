@@ -1,0 +1,18 @@
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn maybe_set(c: Counter): Boolean {
+    unsafe {
+        c.value = 42;
+        return true;
+    }
+    return false;
+}
+
+fn main(): Void {
+    mut c: Counter = Counter(1);
+    mut result: Boolean = maybe_set(c);
+    stdout.println(c.value);
+}

@@ -409,11 +409,9 @@ open items each delivered piece above still lists.**
   handles the exception locally correctly does not trigger a rollback — the
   rollback decision is made by walking `try`/`unsafe` frames in true
   lexical nesting order, not just checking the innermost `unsafe` block in
-  isolation. **Known, accepted limitation**: an early `return`/`break`/
-  `continue` out of an `unsafe {}` block leaks that block's journal handle
-  (not a soundness issue, just an unfreed allocation) — extending the
-  existing `try`-only cleanup-on-early-exit mechanism to `unsafe` frames is
-  future work, not delivered here.
+  isolation. Early `return`/`break`/`continue` out of an `unsafe {}` block
+  now also rolls the active journal back before the jump, closing the
+  `fase-4e-cierre-pendientes` follow-up.
 - [ ] Finish resource transfer/dependency and throwable cleanup interactions that
   require the complete memory model. **Not started.**
 

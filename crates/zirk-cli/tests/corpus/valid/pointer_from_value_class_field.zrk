@@ -1,0 +1,9 @@
+value class UserId(value: Int32);
+
+fn main(): Void {
+    mut u: UserId = UserId(value: 5);
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from(u.value);
+        stdout.println(p.read());
+    }
+}
