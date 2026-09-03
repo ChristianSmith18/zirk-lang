@@ -143,6 +143,7 @@ fn shape(e: &Expr) -> String {
         }
         Expr::Unsafe(u) => format!("unsafe({} stmts)", u.body.statements.len()),
         Expr::Commit(c) => format!("commit({} stmts)", c.body.statements.len()),
+        Expr::Transfer(t) => format!("transfer({})", shape(&t.expr)),
     }
 }
 
@@ -1371,9 +1372,7 @@ fn valid_patterns_cover_the_forms_of_this_phase() {
 
 #[test]
 fn valid_match_with_binding() {
-    let e = expression(
-        "match File.open(path) with file { Result.Ok(file) => a, Result.Error(error) => b }",
-    );
+    let e = expression("match File.open(path) with file { Ok(file) => a, Error(error) => b }");
     let Expr::Match(m) = &e else {
         panic!("expected a match");
     };

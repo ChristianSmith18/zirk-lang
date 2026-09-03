@@ -338,6 +338,20 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
         .collect();
 
+    // `checked.dependent_types`/`checked.pin_types` are pushed first, in the
+    // same order, for the same reason the other generic tables are (roadmap
+    // Phase 4e, `phase-4e-memory`, design D1).
+    module.dependent_types = checked
+        .dependent_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+    module.pin_types = checked
+        .pin_types
+        .iter()
+        .map(|&referent| ir_type(referent, instance_base, enum_instance_base, checked))
+        .collect();
+
     // `extern "C" fn` declarations (roadmap Phase 4e, design D7, `ADR-015`):
     // no body to lower, only a declaration codegen turns into an LLVM
     // `declare`.
@@ -364,17 +378,17 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .collect();
 
     // One entry per `checked.fn_types` id, pushed first and in order so
-    // `Base::Function(id)` and `IrType::Closure(id)` share the same number
+    // `Base::Function(id)` and `IrType::Callable(id)` share the same number
     // (`Self::ir_type`'s own `Base::Function` arm relies on this).
     //
     // Most ids get their real content right here: the uniform, capture-less
     // `ClosureLayout` design D12 gives a named function reference or a
-    // capture-less lambda — `{function pointer}`, nothing else — shared by
-    // every value of that shape (`Self::lower_expr`'s `ast::Expr::Path` arm,
-    // `Self::lower_lambda`'s capture-less branch). `function` is left empty:
-    // nothing calls through a canonical layout's *own* stored target —
-    // `InstKind::MakeClosure` carries the target it embeds explicitly
-    // (`MakeClosure::target`), precisely so many differently-targeted values
+    // capture-less lambda — `{function pointer, null capture block}`, nothing
+    // else — shared by every value of that shape (`Self::lower_expr`'s
+    // `ast::Expr::Path` arm, `Self::lower_lambda`'s capture-less branch).
+    // `function` is left empty: nothing calls through a canonical layout's
+    // *own* stored target — `InstKind::MakeCallable` carries the target it
+    // embeds explicitly, precisely so many differently-targeted values
     // (`double`, `triple`, ...) can share one canonical shape instead of
     // each needing a layout of its own.
     //
@@ -625,6 +639,8 @@ fn synthesize_native_failure_bodies<'a>(
         (native.invalid_shift, "E_INVALID_SHIFT"),
         (native.invalid_repeat, "E_INVALID_REPEAT"),
         (native.float_nan, "E_FLOAT_NAN"),
+        (native.arithmetic_overflow, "E_ARITHMETIC_OVERFLOW"),
+        (native.invalid_cast, "E_INVALID_CAST"),
         // Roadmap Phase 4e, `fase-4e-native-slice`: two more native failure
         // classes, built through the exact same
         // `Checker::register_native_failure` closure and needing the same
@@ -1154,7 +1170,7 @@ fn ir_type(
         // read off that value directly, never through this generic
         // conversion (see `Self::lower_lambda`'s own comment on why captures
         // read the *slot's* type, not the checker's).
-        Base::Function(id) => IrType::Closure(id),
+        Base::Function(id) => IrType::Callable(id),
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -1175,6 +1191,13 @@ fn ir_type(
         // just above (roadmap Phase 4e, `fase-4e-native-slice`, design D1).
         Base::NativeSlice(id) => IrType::NativeSlice(id),
         Base::NativeSliceMut(id) => IrType::NativeSliceMut(id),
+
+        // `checked.dependent_types`/`checked.pin_types` and
+        // `module.dependent_types`/`module.pin_types` are populated the same
+        // way, for the same reason, just above (roadmap Phase 4e,
+        // `phase-4e-memory`, design D1).
+        Base::Dependent(id) => IrType::Dependent(id),
+        Base::Pin(id) => IrType::Pin(id),
 
         Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
@@ -1656,6 +1679,31 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every NativeSliceMut<T> it type-checked")
                 as u32;
             return Type::of(Base::NativeSliceMut(id));
+        }
+
+        // `Dependent<T>` / `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
+        // design D1): same treatment as `Pointer<T>`/`Weak<T>` above.
+        if reference.name == "Dependent" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .dependent_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Dependent<T> it type-checked")
+                as u32;
+            return Type::of(Base::Dependent(id));
+        }
+        if reference.name == "Pin" {
+            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .pin_types
+                .iter()
+                .position(|&t| t == referent)
+                .expect("the checker interned every Pin<T> it type-checked")
+                as u32;
+            return Type::of(Base::Pin(id));
         }
 
         let declared = self.declaration_of(&reference.name, reference.span);
@@ -2244,6 +2292,7 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Never
             | IrType::Char
             | IrType::Closure(_)
+            | IrType::Callable(_)
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -2268,7 +2317,11 @@ impl<'a> FunctionLowering<'a> {
             // checker's generalized escape rule rejects every assignment of
             // one into a field.
             | IrType::NativeSlice(_)
-            | IrType::NativeSliceMut(_) => {
+            | IrType::NativeSliceMut(_)
+            // `Dependent<T>`/`Pin<T>` fields have no default for the same
+            // reason references do not (roadmap Phase 4e, `phase-4e-memory`).
+            | IrType::Dependent(_)
+            | IrType::Pin(_) => {
                 return None;
             }
         })
@@ -2819,22 +2872,19 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::AssignTarget::Field(field) => {
                 // The object is evaluated before the value, which is the order
-                // it is written in. When the value contains its own `?.` (or
-                // any other block-opening form), lowering it moves `self.current`
-                // to a fresh block — so the object computed here does not
-                // survive to the `StoreField` below unless it goes through a
-                // slot first, the same holder pattern `lower_safe_field` uses
-                // for its own receiver (values do not cross blocks, ADR-007).
+                // it is written in. The value may now introduce a guard branch
+                // (`+`, `-`, `*`, `/`, `%` with overflow or division-by-zero
+                // checks) that moves `self.current` to a fresh block — so the
+                // object computed here does not survive to the `StoreField`
+                // below unless it goes through a slot first, the same holder
+                // pattern `lower_safe_field` uses for its own receiver (values
+                // do not cross blocks, ADR-007).
                 let object = self.lower_expr(&field.object);
                 let (index, ty) = self.field_position(&field.object, &field.name.name);
                 let object_ty = self.type_of(&field.object, field.object.span());
-                let held = if self.opens_blocks(&stmt.value) {
-                    let holder = self.declare_slot("<assign_object>", object_ty, field.span);
-                    self.emit_effect(InstKind::Store(holder, object), stmt.span);
-                    Held::Spilled(holder, object_ty)
-                } else {
-                    Held::Value(object)
-                };
+                let holder = self.declare_slot("<assign_object>", object_ty, field.span);
+                self.emit_effect(InstKind::Store(holder, object), stmt.span);
+                let held = Held::Spilled(holder, object_ty);
                 let value = self.lower_expr_as(&stmt.value, ty);
                 let object = self.reload(held, field.span);
                 self.journal_writes_to_field(object, index, stmt.span);
@@ -3554,20 +3604,19 @@ impl<'a> FunctionLowering<'a> {
                     self.emit(InstKind::Load(slot), ty, span)
                 } else {
                     // A bare function name with no local shadowing it is a
-                    // value (`Checker::check_path`, roadmap Phase 4d,
-                    // design D12): the canonical, capture-less closure the
-                    // `Self::lower` pre-pass already reserved for this
-                    // shape, targeting this specific function.
+                    // boxed callable value (`Checker::check_path`, roadmap
+                    // Phase 4d, design D12): the canonical, capture-less
+                    // layout the `Self::lower` pre-pass already reserved for
+                    // this shape, targeting this specific function.
                     let (id, target) = self
                         .named_function_value(&ident.name, ident.span)
                         .expect("a verified program only names declared variables or functions");
                     self.emit(
-                        InstKind::MakeClosure {
-                            id,
-                            captures: Vec::new(),
+                        InstKind::MakeCallable {
                             target,
+                            captures: Vec::new(),
                         },
-                        IrType::Closure(id),
+                        IrType::Callable(id),
                         span,
                     )
                 }
@@ -3575,23 +3624,39 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Unary(e) => {
                 let operand = self.lower_expr(&e.operand);
-                let (op, ty) = match e.op {
-                    // `Neg`/`BitNot` preserve the operand's own width — any
-                    // integer width for both, plus any `Float` width for
-                    // `Neg` (roadmap Phase 3b) — so the result type is read
-                    // from the value just lowered, not assumed to be
-                    // `Int32`.
-                    ast::UnaryOp::Neg | ast::UnaryOp::BitNot => {
-                        let op = if e.op == ast::UnaryOp::Neg {
-                            UnaryOp::Neg
-                        } else {
-                            UnaryOp::BitNot
-                        };
-                        (op, self.type_of_operand(operand))
+                let ty = self.type_of_operand(operand);
+                match e.op {
+                    ast::UnaryOp::Neg if matches!(ty, IrType::Int(_)) => {
+                        // Integer negation overflows for `Int.MIN`, so lower it
+                        // to a guarded `0 - x` instead of a raw `Unary`.
+                        let zero = self.const_int_at(0, ty, span);
+                        self.emit_checked_binary(BinaryOp::Sub, zero, operand, ty, span)
                     }
-                    ast::UnaryOp::Not => (UnaryOp::Not, IrType::Boolean),
-                };
-                self.emit(InstKind::Unary { op, operand }, ty, span)
+                    ast::UnaryOp::Neg => self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::Neg,
+                            operand,
+                        },
+                        ty,
+                        span,
+                    ),
+                    ast::UnaryOp::BitNot => self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::BitNot,
+                            operand,
+                        },
+                        ty,
+                        span,
+                    ),
+                    ast::UnaryOp::Not => self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::Not,
+                            operand,
+                        },
+                        IrType::Boolean,
+                        span,
+                    ),
+                }
             }
 
             ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => self.lower_coalesce(e, span),
@@ -3686,7 +3751,12 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Binary(e) => {
-                let held = self.lower_and_hold(&e.left, self.opens_blocks(&e.right));
+                // The binary itself may introduce a guard branch (integer or
+                // `Float` arithmetic, `Shl`/`Shr`), in which case the left
+                // value has to be held in a slot so it survives to the block
+                // where the operation is emitted.
+                let will_branch = self.opens_blocks(&ast::Expr::Binary(e.clone()));
+                let held = self.lower_and_hold(&e.left, will_branch);
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
                 let op = binary_op(e.op);
@@ -3789,10 +3859,10 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
-            // Calling a closure value goes through the value, not a name.
-            ast::Expr::Call(e) if self.is_closure_call(e) => {
-                let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
-                    unreachable!("checked by `is_closure_call`")
+            // Calling a callable value goes through the boxed callable, not a name.
+            ast::Expr::Call(e) if self.is_callable_call(e) => {
+                let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
+                    unreachable!("checked by `is_callable_call`")
                 };
                 let branching = e.args.iter().any(|a| self.opens_blocks(&a.value));
                 let held = self.lower_and_hold(&e.callee, branching);
@@ -3801,7 +3871,14 @@ impl<'a> FunctionLowering<'a> {
                 let returns = self.module.closures[id as usize].returns;
                 let args = self.lower_held_args(&e.args, &expected);
                 let callee = self.reload(held, e.callee.span());
-                self.emit(InstKind::CallClosure { id, callee, args }, returns, span)
+                self.emit(
+                    InstKind::CallCallable {
+                        callable: callee,
+                        args,
+                    },
+                    returns,
+                    span,
+                )
             }
 
             ast::Expr::Call(e) => {
@@ -3816,6 +3893,9 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if self.is_weak_method_call(e) {
                     return self.lower_weak_method_call(e, span);
+                }
+                if self.is_pin_call(e) {
+                    return self.lower_pin_call(e, span);
                 }
                 if self.is_derived_clone_call(e) {
                     return self.lower_derived_clone_call(e, span);
@@ -3903,6 +3983,7 @@ impl<'a> FunctionLowering<'a> {
             // statement form.
             ast::Expr::Unsafe(u) => self.lower_unsafe_block_value(&u.body),
             ast::Expr::Commit(c) => self.lower_commit_block_value(&c.body),
+            ast::Expr::Transfer(e) => self.lower_transfer(e, span),
 
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
@@ -4217,16 +4298,12 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), result_type, span)
     }
 
-    /// Lowers a lambda into a module function plus a closure value.
+    /// Lowers a lambda into a module function plus a boxed callable value.
     ///
     /// The body becomes a function whose leading parameters are the captures,
-    /// and the value pairs a pointer to it with the captured values themselves.
-    /// A capturing closure's value carries every capture inline
-    /// (`MakeClosure`), so it needs nothing from the frame that created it
-    /// once built — it is already safe to escape that frame (roadmap Phase
-    /// 4d, design D12): only *naming* the escaped position (`Fn(...) => R`
-    /// in a return type, a field, a typed local) was the gap D9 left, not
-    /// this representation.
+    /// and the value pairs a function pointer with a heap-allocated capture
+    /// block (`MakeCallable`). The capture block lets the callable escape the
+    /// frame that created it (roadmap Phase 4d, `phase-4d-callables`).
     fn lower_lambda(&mut self, expr: &ast::LambdaExpr, span: Span) -> Operand {
         let info = self
             .checked
@@ -4284,7 +4361,7 @@ impl<'a> FunctionLowering<'a> {
         // A capture-less lambda's id is the canonical, capture-less
         // `ClosureLayout` `Self::lower` already pre-populated for it (D12) —
         // shared with every other value of the same shape, so nothing here
-        // overwrites it; only the target this particular `MakeClosure`
+        // overwrites it; only the target this particular `MakeCallable`
         // embeds is specific to this lambda. A capturing lambda's id
         // (design D14) instead names a placeholder `Self::lower` reserved
         // just for this one literal — filled in for real right here, the
@@ -4323,12 +4400,11 @@ impl<'a> FunctionLowering<'a> {
         self.lifted.push(body);
 
         self.emit(
-            InstKind::MakeClosure {
-                id,
-                captures,
+            InstKind::MakeCallable {
                 target: name,
+                captures,
             },
-            IrType::Closure(id),
+            IrType::Callable(id),
             span,
         )
     }
@@ -4449,6 +4525,10 @@ impl<'a> FunctionLowering<'a> {
     /// emits a `switch` when the arms are dense, and building the table here
     /// would duplicate an optimization LLVM already does.
     fn lower_match(&mut self, expr: &ast::MatchExpr, span: Span) -> Operand {
+        if !expr.acquisitions.is_empty() {
+            return self.lower_grouped_match(expr, span);
+        }
+
         let scrutinee_type = self.type_of(&expr.scrutinee, expr.scrutinee.span());
         let value = self.lower_expr(&expr.scrutinee);
 
@@ -4658,6 +4738,338 @@ impl<'a> FunctionLowering<'a> {
             // keeps the signature of `lower_expr` total.
             None => self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span),
         }
+    }
+
+    /// Lowers a grouped `match ... with` by acquiring left-to-right and
+    /// closing right-to-left (roadmap Phase 4c). Acquisition and close
+    /// errors are merged into `ResourceFailure<BodyError,CloseError>` for
+    /// the `error` branch, and each user `close()` is guarded by an
+    /// `IsCancelled` check.
+    fn lower_grouped_match(&mut self, expr: &ast::MatchExpr, span: Span) -> Operand {
+        self.scopes.push(HashMap::new());
+
+        let continue_block = self.new_block();
+        let error_block = if expr.error.is_some() {
+            self.new_block()
+        } else {
+            continue_block
+        };
+
+        // First pass: gather acquisition types and the unified semantic error
+        // type. Every acquired resource is declared in the `match` scope before
+        // any branch needs it, so `body` and failure close blocks see it.
+        let mut acquired: Vec<(u32, u32, u32, IrType, SlotId, Type, String)> = Vec::new();
+        let mut sema_error = Type::UNKNOWN;
+        for acquisition in &expr.acquisitions {
+            let result_ty = self.type_of(&acquisition.expr, acquisition.expr.span());
+            let IrType::Enum(module_id) = result_ty else {
+                self.scopes.pop();
+                return self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+            };
+            let instance =
+                &self.checked.enum_instances[(module_id - self.enum_instance_base) as usize];
+            if Some(instance.enum_id) != self.checked.native_result {
+                self.scopes.pop();
+                return self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+            }
+            if sema_error.is_unknown() {
+                sema_error = instance.args[1];
+            }
+            let r = self.ir_type(instance.args[0]);
+            let e = self.ir_type(instance.args[1]);
+            let ok_field = self.module.enums[module_id as usize].variants[0][0];
+            let error_field = self.module.enums[module_id as usize].variants[1][0];
+            let binding_slot =
+                self.declare_slot(&acquisition.binding.name, r, acquisition.binding.span);
+            acquired.push((
+                module_id,
+                ok_field,
+                error_field,
+                e,
+                binding_slot,
+                instance.args[1],
+                acquisition.binding.name.clone(),
+            ));
+        }
+
+        // Resolve the concrete `ResourceFailure<error_type, error_type>` layout
+        // the checker interned for this grouped match.
+        let failure_info = if expr.error.is_some() && !sema_error.is_unknown() {
+            let failure_enum = self
+                .checked
+                .enums
+                .iter()
+                .position(|e| e.name == "ResourceFailure")
+                .expect("checker registered ResourceFailure") as u32;
+            let failure_instance = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|inst| {
+                    inst.enum_id == failure_enum && inst.args == [sema_error, sema_error]
+                })
+                .expect("checker interned ResourceFailure<error_type, error_type>")
+                as u32;
+            let failure_module_id = self.enum_instance_base + failure_instance;
+            let failure_type = IrType::Enum(failure_module_id);
+            Some((failure_module_id, failure_type))
+        } else {
+            None
+        };
+
+        let error_slot = failure_info.map(|(_, ty)| self.declare_slot("<error>", ty, span));
+
+        let e = acquired.first().map(|a| a.3).unwrap_or(IrType::Void);
+        let body_error_slot = self.declare_slot("<body_error>", e, span);
+        let close_error_slot = self.declare_slot("<close_error>", e, span);
+        let close_failed_slot = self.declare_slot("<close_failed>", IrType::Boolean, span);
+        let false_const = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(close_failed_slot, false_const), span);
+
+        // Chain the acquisitions left-to-right.  `next_success_target` is the
+        // block where the next acquired resource (or the body) begins.
+        let body_block = self.new_block();
+        let mut next_success_target = body_block;
+
+        for (i, (acquisition, (_module_id, ok_field, error_field, e, binding_slot, _, _))) in
+            expr.acquisitions.iter().zip(acquired.iter()).enumerate()
+        {
+            let is_last = i == expr.acquisitions.len() - 1;
+
+            let result_ty = self.type_of(&acquisition.expr, acquisition.expr.span());
+            let value = self.lower_expr(&acquisition.expr);
+            let result_slot = self.declare_slot("<result>", result_ty, span);
+            self.emit_effect(InstKind::Store(result_slot, value), span);
+
+            let object = self.emit(InstKind::Load(result_slot), result_ty, span);
+            let discriminant = self.emit(
+                InstKind::Discriminant(object),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+            let is_ok = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: discriminant,
+                    right: zero,
+                },
+                IrType::Boolean,
+                span,
+            );
+
+            let ok_block = self.new_block();
+            let fail_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_ok,
+                then_block: ok_block,
+                else_block: fail_block,
+            });
+
+            // Success: extract the resource and store it in its binding slot.
+            self.current = ok_block;
+            let object = self.emit(InstKind::Load(result_slot), result_ty, span);
+            let payload = self.emit(
+                InstKind::LoadField {
+                    object,
+                    index: *ok_field,
+                },
+                self.slots[binding_slot.0 as usize].ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(*binding_slot, payload), span);
+
+            if is_last {
+                self.terminate(Terminator::Jump(body_block));
+            } else {
+                let next_entry = self.new_block();
+                self.terminate(Terminator::Jump(next_entry));
+                next_success_target = next_entry;
+            }
+
+            // Failure: capture the acquisition error, close already-acquired
+            // resources right-to-left with cancellation checks, and merge.
+            self.current = fail_block;
+            let object = self.emit(InstKind::Load(result_slot), result_ty, span);
+            let err = self.emit(
+                InstKind::LoadField {
+                    object,
+                    index: *error_field,
+                },
+                *e,
+                span,
+            );
+            self.emit_effect(InstKind::Store(body_error_slot, err), span);
+
+            for a in expr.acquisitions.iter().take(i).rev() {
+                self.lower_resource_cleanup(
+                    &a.binding.name,
+                    close_error_slot,
+                    close_failed_slot,
+                    span,
+                );
+            }
+
+            if let Some((failure_module_id, failure_type)) = failure_info {
+                let close_failed =
+                    self.emit(InstKind::Load(close_failed_slot), IrType::Boolean, span);
+                let body_only_block = self.new_block();
+                let body_and_close_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: close_failed,
+                    then_block: body_and_close_block,
+                    else_block: body_only_block,
+                });
+
+                self.current = body_only_block;
+                let body_err = self.emit(InstKind::Load(body_error_slot), *e, span);
+                let body_value = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id: failure_module_id,
+                        variant: 0,
+                        fields: vec![body_err],
+                    },
+                    failure_type,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(error_slot.unwrap(), body_value), span);
+                self.terminate(Terminator::Jump(error_block));
+
+                self.current = body_and_close_block;
+                let body_err = self.emit(InstKind::Load(body_error_slot), *e, span);
+                let close_err = self.emit(InstKind::Load(close_error_slot), *e, span);
+                let body_and_close_value = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id: failure_module_id,
+                        variant: 2,
+                        fields: vec![body_err, close_err],
+                    },
+                    failure_type,
+                    span,
+                );
+                self.emit_effect(
+                    InstKind::Store(error_slot.unwrap(), body_and_close_value),
+                    span,
+                );
+                self.terminate(Terminator::Jump(error_block));
+            } else {
+                self.terminate(Terminator::Jump(error_block));
+            }
+
+            // Move to the entry of the next acquisition, if any.
+            if !is_last {
+                self.current = next_success_target;
+            }
+        }
+
+        // All acquisitions succeeded: run the body with a `finally` that closes
+        // every acquired resource right-to-left on every exit.
+        let mut finally_stmts = Vec::new();
+        for a in expr.acquisitions.iter().rev() {
+            let close = Self::resource_close_block(&a.binding.name, span);
+            finally_stmts.extend(close.statements.clone());
+        }
+        let finally = Some(ast::Block {
+            statements: finally_stmts,
+            span,
+        });
+
+        self.current = body_block;
+        let pushed_at = self.new_scope_seq();
+        self.try_stack.push(TryFrame {
+            catches: Vec::new(),
+            finally: finally.clone(),
+            pushed_at,
+        });
+
+        if let Some(body) = &expr.body {
+            match body.as_ref() {
+                ast::ArmBody::Expr(e) => {
+                    let _ = self.lower_expr(e);
+                }
+                ast::ArmBody::Block(b) if self.return_type == IrType::Void => {
+                    self.lower_block(b);
+                }
+                ast::ArmBody::Block(b) => {
+                    let _ = self.lower_block_value(b);
+                }
+            }
+        }
+
+        self.try_stack.pop();
+        if !self.is_terminated(self.current) {
+            // Normal body completion: close with cancellation/result checks so a
+            // close failure can be merged into `ResourceFailure.Close`.
+            for a in expr.acquisitions.iter().rev() {
+                self.lower_resource_cleanup(
+                    &a.binding.name,
+                    close_error_slot,
+                    close_failed_slot,
+                    span,
+                );
+            }
+            if let Some((failure_module_id, failure_type)) = failure_info {
+                let close_failed =
+                    self.emit(InstKind::Load(close_failed_slot), IrType::Boolean, span);
+                let close_ok_block = self.new_block();
+                let close_err_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: close_failed,
+                    then_block: close_err_block,
+                    else_block: close_ok_block,
+                });
+
+                self.current = close_err_block;
+                let close_err = self.emit(InstKind::Load(close_error_slot), e, span);
+                let close_value = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id: failure_module_id,
+                        variant: 1,
+                        fields: vec![close_err],
+                    },
+                    failure_type,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(error_slot.unwrap(), close_value), span);
+                self.terminate(Terminator::Jump(error_block));
+
+                self.current = close_ok_block;
+            }
+            if !self.is_terminated(self.current) {
+                self.terminate(Terminator::Jump(continue_block));
+            }
+        }
+
+        // Error branch: the `error` slot was already populated with a
+        // `ResourceFailure` value before jumping here.
+        if expr.error.is_some() {
+            self.current = error_block;
+            if let Some(error) = &expr.error {
+                if let Some((_, failure_type)) = failure_info {
+                    let error_slot_id = error_slot.unwrap();
+                    self.lower_pattern_bindings(&error.pattern, error_slot_id, failure_type, span);
+                }
+                match &error.body {
+                    ast::ArmBody::Expr(e) => {
+                        let _ = self.lower_expr(e);
+                    }
+                    ast::ArmBody::Block(b) if self.return_type == IrType::Void => {
+                        self.lower_block(b);
+                    }
+                    ast::ArmBody::Block(b) => {
+                        let _ = self.lower_block_value(b);
+                    }
+                }
+            }
+            if !self.is_terminated(self.current) {
+                self.terminate(Terminator::Jump(continue_block));
+            }
+        }
+
+        self.current = continue_block;
+        self.scopes.pop();
+
+        self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
     }
 
     /// Loads the scrutinee, unwrapping it when `narrowed_type` says a
@@ -4990,6 +5402,32 @@ impl<'a> FunctionLowering<'a> {
         id
     }
 
+    /// Whether `class` is, or (transitively) implements, `target` through
+    /// `extends` or `implements` abstract classes.
+    fn is_abstract_base_of(&self, class: u32, target: u32) -> bool {
+        if class == target {
+            return true;
+        }
+        let cls = &self.checked.classes[class as usize];
+        if let Some(base) = cls.base
+            && self.is_abstract_base_of(base, target)
+        {
+            return true;
+        }
+        cls.abstract_bases
+            .iter()
+            .any(|&b| self.is_abstract_base_of(b, target))
+    }
+
+    /// Whether `id` is a class that can be thrown/caught: it implements the
+    /// compiler-known `Throwable`.
+    fn is_throwable_class(&self, id: u32) -> bool {
+        let Some(native) = self.checked.native_exceptions else {
+            return false;
+        };
+        self.is_abstract_base_of(id, native.throwable)
+    }
+
     /// Whether `id` is one of the native failure classes
     /// (`fase-4d-runtimeerror`, D9) — `DivisionByZeroError`,
     /// `InvalidShiftError`, `InvalidRepeatError`, `FloatNanError`, and
@@ -5086,18 +5524,12 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Division/remainder guard (D10): before `Div`/`Rem` over integers
-    /// runs, compares the divisor to zero on a branch of its own, throwing
-    /// `DivisionByZeroError` on the failing side and performing the real
-    /// division/remainder on the other — `checked_division`'s own `trap_if`
-    /// (`zirk-codegen-llvm/src/emit.rs`), moved up from codegen to here so a
-    /// `try`/`catch` around the expression can intercept it. Both operands
-    /// are spilled ahead of the branch ([`Self::spill`]) since the actual
-    /// operation is emitted on the far side of it, in a different block. The
-    /// one overflow case a signed division can still hit (`Int32::MIN /
-    /// -1`) is untouched: `OverflowError` is explicitly out of this pass's
-    /// scope (see `proposal.md`), so `checked_division` still guards it with
-    /// `trap_if` exactly as before.
+    /// Division/remainder guard: before `Div`/`Rem` over integers runs,
+    /// first compares the divisor to zero and throws `DivisionByZeroError`,
+    /// then (for signed widths) checks the `MIN / -1` overflow pair and
+    /// throws `ArithmeticOverflowError`. Both `zirk_rt_division_by_zero`
+    /// and `zirk_rt_overflow` were driven up from codegen into `zirk-ir`
+    /// so a `try`/`catch` around the expression can intercept them.
     fn checked_int_division(
         &mut self,
         op: BinaryOp,
@@ -5106,9 +5538,14 @@ impl<'a> FunctionLowering<'a> {
         operand_type: IrType,
         span: Span,
     ) -> Operand {
+        let IrType::Int(width) = operand_type else {
+            unreachable!("the checker only lowers integer division/remainder")
+        };
+
         let left_slot = self.spill(left, operand_type, span);
         let right_slot = self.spill(right, operand_type, span);
 
+        // --- zero divisor ---
         let right_reloaded = self.emit(InstKind::Load(right_slot), operand_type, span);
         let zero = self.const_int_at(0, operand_type, span);
         let is_zero = self.emit(
@@ -5120,22 +5557,85 @@ impl<'a> FunctionLowering<'a> {
             IrType::Boolean,
             span,
         );
-        let fail = self.new_block();
-        let cont = self.new_block();
+        let zero_fail = self.new_block();
+        let pre_overflow = self.new_block();
         self.terminate(Terminator::Branch {
             condition: is_zero,
-            then_block: fail,
-            else_block: cont,
+            then_block: zero_fail,
+            else_block: pre_overflow,
         });
 
-        self.current = fail;
+        self.current = zero_fail;
         let native = self
             .checked
             .native_exceptions
             .expect("a program with integer division registered the exception hierarchy");
         self.throw_native_failure(native.division_by_zero, "division by zero", span);
 
-        self.current = cont;
+        // --- MIN / -1 overflow ---
+        self.current = pre_overflow;
+        let safe = if width.signed() {
+            let left = self.emit(InstKind::Load(left_slot), operand_type, span);
+            let right = self.emit(InstKind::Load(right_slot), operand_type, span);
+
+            let one = self.const_int_at(1, operand_type, span);
+            let bits_minus_one = self.const_int_at((width.bits() as i32) - 1, operand_type, span);
+            let min = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Shl,
+                    left: one,
+                    right: bits_minus_one,
+                },
+                operand_type,
+                span,
+            );
+            let minus_one = self.const_int_at(-1, operand_type, span);
+
+            let left_is_min = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left,
+                    right: min,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let right_is_minus_one = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: right,
+                    right: minus_one,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let overflows = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::And,
+                    left: left_is_min,
+                    right: right_is_minus_one,
+                },
+                IrType::Boolean,
+                span,
+            );
+
+            let overflow_fail = self.new_block();
+            let safe = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: overflows,
+                then_block: overflow_fail,
+                else_block: safe,
+            });
+
+            self.current = overflow_fail;
+            self.throw_native_failure(native.arithmetic_overflow, "arithmetic overflow", span);
+
+            safe
+        } else {
+            pre_overflow
+        };
+
+        self.current = safe;
         let left = self.emit(InstKind::Load(left_slot), operand_type, span);
         let right = self.emit(InstKind::Load(right_slot), operand_type, span);
         let result_type = op.result_type(operand_type);
@@ -5351,15 +5851,66 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(slot), ty, span)
     }
 
-    /// Emits a binary operation, guarded by whichever of the four native
-    /// checks D10 moved into `zirk-ir` applies to it: division/remainder and
-    /// shift are guarded before the operation runs (the operand decides the
-    /// failure, so [`Self::checked_int_division`]/[`Self::checked_shift`]
-    /// perform the operation themselves, on the far side of their own
-    /// branch), `Float` arithmetic is guarded after (the result does, so
-    /// [`Self::guard_nan`] wraps an already-emitted one). Every other
-    /// operator (comparison, bitwise, logical, `is`) has no native failure
-    /// to guard and reaches straight through to [`Self::emit`].
+    /// Overflow guard for integer `+`, `-`, and `*` (roadmap Phase 4b):
+    /// spills the operands, calls `InstKind::CheckedArithmetic` to get the
+    /// `overflowed` flag, throws `ArithmeticOverflowError` on the failing
+    /// side, and emits the real `Binary` operation on the other.
+    fn checked_int_arithmetic(
+        &mut self,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        operand_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let IrType::Int(width) = operand_type else {
+            unreachable!("the checker only lets overflow checks run over integers")
+        };
+
+        let left_slot = self.spill(left, operand_type, span);
+        let right_slot = self.spill(right, operand_type, span);
+
+        let left_reloaded = self.emit(InstKind::Load(left_slot), operand_type, span);
+        let right_reloaded = self.emit(InstKind::Load(right_slot), operand_type, span);
+        let overflowed = self.emit(
+            InstKind::CheckedArithmetic {
+                op,
+                left: left_reloaded,
+                right: right_reloaded,
+                signed: width.signed(),
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: overflowed,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with integer arithmetic registered the exception hierarchy");
+        self.throw_native_failure(native.arithmetic_overflow, "arithmetic overflow", span);
+
+        self.current = cont;
+        let left = self.emit(InstKind::Load(left_slot), operand_type, span);
+        let right = self.emit(InstKind::Load(right_slot), operand_type, span);
+        let result_type = op.result_type(operand_type);
+        self.emit(InstKind::Binary { op, left, right }, result_type, span)
+    }
+
+    /// Emits a binary operation, guarded by whichever of the six native
+    /// checks `fase-4d-runtimeerror` and `fase-4b-excepciones` moved into
+    /// `zirk-ir` applies to it: division/remainder, shift and integer
+    /// `+`/`-`/`*` are guarded before the operation runs; `Float` arithmetic
+    /// is guarded after (`guard_nan`). Every other operator (comparison,
+    /// bitwise, logical, `is`) has no native failure to guard.
     fn emit_checked_binary(
         &mut self,
         op: BinaryOp,
@@ -5373,6 +5924,15 @@ impl<'a> FunctionLowering<'a> {
         }
         if let (BinaryOp::Shl | BinaryOp::Shr, IrType::Int(_)) = (op, operand_type) {
             return self.checked_shift(op, left, right, operand_type, span);
+        }
+        if matches!(
+            (op, operand_type),
+            (
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul,
+                IrType::Int(_)
+            )
+        ) {
+            return self.checked_int_arithmetic(op, left, right, operand_type, span);
         }
 
         let result_type = op.result_type(operand_type);
@@ -5407,6 +5967,22 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::Load(slot), ty, stmt.span)
             }
         };
+
+        // A `throw` inside a `catch` carries the previously-caught exception as
+        // its suppressed cause (`Throwable.suppressed()`).
+        if stmt.value.is_some()
+            && let Some((slot, ty)) = self.current_catch
+        {
+            let suppressed = self.emit(InstKind::Load(slot), ty, stmt.span);
+            self.emit_effect(
+                InstKind::SetSuppressed {
+                    exception,
+                    suppressed,
+                },
+                stmt.span,
+            );
+        }
+
         self.emit_effect(InstKind::Throw(exception), stmt.span);
         // Dispatches to a local `catch` that covers it, or — finding
         // none — re-propagates by returning early from the current
@@ -5466,8 +6042,8 @@ impl<'a> FunctionLowering<'a> {
             // reusing it here directly, in `continue_block`, would cross
             // that boundary (ADR-007) the moment a caller actually threads
             // it onward instead of discarding it, as
-            // `Self::lower_variant_construction` does for `Result.Ok(a_void_call())`
-            // (found via `FakeFile::close`'s own `return Result.Ok(this.nothing())`).
+            // `Self::lower_variant_construction` does for `Ok(a_void_call())`
+            // (found via `FakeFile::close`'s own `return Ok(this.nothing())`).
             // A fresh placeholder in `continue_block` is exactly as
             // meaningless as `result` was — nothing ever reads a `Void`
             // value — so there is nothing to actually carry across, only a
@@ -5638,17 +6214,12 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Synthesizes `binding.close();` as a one-statement block (roadmap
-    /// Phase 4c) — a `Resource<E>`'s `close(): Result<Void,E>` called for
-    /// its own side effect and never for its returned `Result`, the same
-    /// simplification this pass's own scope narrowing accepts: a close
-    /// failure is not merged into `ResourceFailure<BodyError,CloseError>`
-    /// (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4), only
-    /// discarded. Lowered through the ordinary method-call path
-    /// (`Self::lower_expr_for_effect`'s `method_of` arm), which resolves
-    /// `binding` by its own slot in `self.scopes` — no checker-side table is
-    /// consulted, since none was built for this synthetic node.
-    fn resource_close_block(name: &str, span: Span) -> ast::Block {
+    /// Synthesizes `binding.close()` as an expression node (roadmap Phase 4c).
+    /// `Resource<E>`'s `close(): Result<Void,E>` is lowered through the
+    /// ordinary method-call path, which resolves `binding` by its own slot in
+    /// `self.scopes` — no checker-side table is consulted, since none was
+    /// built for this synthetic node.
+    fn resource_close_call(name: &str, span: Span) -> ast::Expr {
         let object = ast::Expr::Path(ast::Ident::new(name.to_string(), span));
         let callee = ast::Expr::Field(ast::FieldExpr {
             object: Box::new(object),
@@ -5656,14 +6227,180 @@ impl<'a> FunctionLowering<'a> {
             safe: false,
             span,
         });
-        let call = ast::Expr::Call(ast::CallExpr {
+        ast::Expr::Call(ast::CallExpr {
             callee: Box::new(callee),
             args: Vec::new(),
             span,
-        });
+        })
+    }
+
+    /// Synthesizes `binding.close();` as a one-statement block (roadmap
+    /// Phase 4c) for `finally` clean-up paths where the result is not merged.
+    fn resource_close_block(name: &str, span: Span) -> ast::Block {
+        let call = Self::resource_close_call(name, span);
         ast::Block {
             statements: vec![ast::Stmt::Expr(ast::ExprStmt { expr: call, span })],
             span,
+        }
+    }
+
+    /// Lowers one resource `close()` guarded by `zirk_rt_is_cancelled` and, on
+    /// the first close error, stores the error in `close_error_slot` and sets
+    /// `close_failed_slot`. Cancellation skips the close entirely.
+    fn lower_resource_cleanup(
+        &mut self,
+        name: &str,
+        close_error_slot: SlotId,
+        close_failed_slot: SlotId,
+        span: Span,
+    ) {
+        let cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, span);
+        let do_close = self.new_block();
+        let after_close = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: after_close,
+            else_block: do_close,
+        });
+
+        self.current = do_close;
+        let close_call = Self::resource_close_call(name, span);
+        let result = self.lower_expr(&close_call);
+        let result_ty = self.type_of_operand(result);
+
+        let IrType::Enum(result_module_id) = result_ty else {
+            self.terminate(Terminator::Jump(after_close));
+            return;
+        };
+        let error_field = self.module.enums[result_module_id as usize].variants[1][0];
+        let e_ty = self.module.enums[result_module_id as usize].fields[error_field as usize].ty;
+
+        // Spill the close result to a slot so it can be re-read after the
+        // branches below (values do not cross blocks, ADR-007).
+        let close_result_slot = self.declare_slot("<close_result>", result_ty, span);
+        self.emit_effect(InstKind::Store(close_result_slot, result), span);
+
+        let result_loaded = self.emit(InstKind::Load(close_result_slot), result_ty, span);
+        let discriminant = self.emit(
+            InstKind::Discriminant(result_loaded),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        let is_ok = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: discriminant,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let ok_block = self.new_block();
+        let err_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_ok,
+            then_block: ok_block,
+            else_block: err_block,
+        });
+
+        self.current = err_block;
+        let result_loaded = self.emit(InstKind::Load(close_result_slot), result_ty, span);
+        let err = self.emit(
+            InstKind::LoadField {
+                object: result_loaded,
+                index: error_field,
+            },
+            e_ty,
+            span,
+        );
+        // Spill the error to a slot so it can be stored into the first-error
+        // slot across the `is_first` branch.
+        let last_error_slot = self.declare_slot("<last_close_error>", e_ty, span);
+        self.emit_effect(InstKind::Store(last_error_slot, err), span);
+
+        let close_failed = self.emit(InstKind::Load(close_failed_slot), IrType::Boolean, span);
+        let false_const = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: close_failed,
+                right: false_const,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let store_block = self.new_block();
+        let skip_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: store_block,
+            else_block: skip_block,
+        });
+
+        self.current = store_block;
+        let err = self.emit(InstKind::Load(last_error_slot), e_ty, span);
+        self.emit_effect(InstKind::Store(close_error_slot, err), span);
+        let true_const = self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(close_failed_slot, true_const), span);
+        self.terminate(Terminator::Jump(skip_block));
+
+        self.current = skip_block;
+        self.terminate(Terminator::Jump(after_close));
+
+        self.current = ok_block;
+        self.terminate(Terminator::Jump(after_close));
+
+        self.current = after_close;
+    }
+
+    /// Lowers the bindings introduced by the `error` branch of a grouped
+    /// `match ... with` against a `ResourceFailure` value stored in `scrutinee`.
+    fn lower_pattern_bindings(
+        &mut self,
+        pattern: &ast::Pattern,
+        scrutinee: SlotId,
+        scrutinee_type: IrType,
+        span: Span,
+    ) {
+        match pattern {
+            ast::Pattern::Binding(ident) => {
+                let value = self.emit(InstKind::Load(scrutinee), scrutinee_type, ident.span);
+                let slot = self.declare_slot(&ident.name, scrutinee_type, ident.span);
+                self.emit_effect(InstKind::Store(slot, value), ident.span);
+            }
+            ast::Pattern::Wildcard(_) => {}
+            ast::Pattern::Variant(v) if !v.bindings.is_empty() => {
+                let template_id = self.enum_id_of(&v.enum_name);
+                let Some(variant) = self
+                    .checked
+                    .enums
+                    .get(template_id as usize)
+                    .and_then(|e| e.discriminant(&v.variant.name))
+                else {
+                    return;
+                };
+                let IrType::Enum(module_id) = scrutinee_type else {
+                    return;
+                };
+                let indices =
+                    self.module.enums[module_id as usize].variants[variant as usize].clone();
+                let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                for (sub_pattern, index) in v.bindings.iter().zip(indices) {
+                    let field_ty = self.module.enums[module_id as usize].fields[index as usize].ty;
+                    let value = self.emit(InstKind::LoadField { object, index }, field_ty, span);
+                    match sub_pattern {
+                        ast::Pattern::Binding(ident) => {
+                            let slot = self.declare_slot(&ident.name, field_ty, ident.span);
+                            self.emit_effect(InstKind::Store(slot, value), ident.span);
+                        }
+                        ast::Pattern::Wildcard(_) => {}
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5761,6 +6498,14 @@ impl<'a> FunctionLowering<'a> {
     fn lower_commit_block_value(&mut self, block: &ast::Block) -> Operand {
         self.commit_enclosing_unsafe(block.span);
         self.lower_block_value(block)
+    }
+
+    /// `transfer(expr)` (roadmap Phase 4c): lower the operand and call the
+    /// runtime transfer helper, returning the same resource pointer.
+    fn lower_transfer(&mut self, expr: &ast::TransferExpr, span: Span) -> Operand {
+        let source = self.lower_expr(&expr.expr);
+        let ty = self.type_of(&expr.expr, expr.expr.span());
+        self.emit(InstKind::ResourceTransfer { source }, ty, span)
     }
 
     /// Before a `Store` to `slot` (design D1/D3): emits `JournalRecordSlot`
@@ -5945,14 +6690,27 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
         }
+
+        // `Throwable` compiler intrinsics — `stack_trace()` and `suppressed()`
+        // are handled by the runtime, not by virtual dispatch on a method table.
+        if let Some(operand) = self.lower_exception_intrinsic_call(call, span) {
+            return Some(operand);
+        }
         // A record or value class's own method call is the same shape as an
         // ordinary object's — see `Self::method_of`. `extends` is rejected
         // for either kind, so no subclass can ever redefine one of its
         // methods: `virtual_index` below always comes out `None`, which is
         // what keeps this call direct rather than through a table a value
         // has no header to carry.
-        let id = match self.type_of(&field.object, field.object.span()) {
+        // `Pin<T>` implicitly unpins for method calls (roadmap Phase 4e,
+        // `phase-4e-memory`, design D1).
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let id = match receiver_ty {
             IrType::Object(id) | IrType::Value(id) => id,
+            IrType::Pin(id) => match self.module.pin_types[id as usize] {
+                IrType::Object(cid) | IrType::Value(cid) => cid,
+                _ => return None,
+            },
             _ => return None,
         };
 
@@ -5967,11 +6725,17 @@ impl<'a> FunctionLowering<'a> {
 
         let virtual_index = method.overridden.then_some(method.index as u32);
 
-        let receiver = self.lower_expr(&field.object);
+        // Hold the receiver in a slot across the argument lowering: a later
+        // argument may introduce a branch (integer overflow, `Shl`/`Shr`,
+        // `Float` NaN, a call's own throws check) and the receiver would not
+        // survive to the `Call` that lives on the far side of it.
+        let will_branch = call.args.iter().any(|arg| self.opens_blocks(&arg.value));
+        let receiver = self.lower_and_hold(&field.object, will_branch);
         let mut args = Vec::new();
         for (arg, ty) in call.args.iter().zip(params) {
             args.push(self.lower_expr_as(&arg.value, ty));
         }
+        let receiver = self.reload(receiver, field.object.span());
 
         // A method some subclass redefines has no statically known target, so
         // it goes through the object's own table. Every other call is direct.
@@ -6000,6 +6764,54 @@ impl<'a> FunctionLowering<'a> {
         })
     }
 
+    /// `Throwable.stack_trace()` and `Throwable.suppressed()` are compiler
+    /// intrinsics: they are not dispatched through the object's method table,
+    /// but answered by the runtime from metadata attached to the exception.
+    fn exception_intrinsic_type(&self, call: &ast::CallExpr) -> Option<IrType> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !call.args.is_empty() || field.safe {
+            return None;
+        }
+        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
+            return None;
+        };
+        if !self.is_throwable_class(id) {
+            return None;
+        }
+        match field.name.name.as_str() {
+            "stack_trace" => Some(IrType::String),
+            "suppressed" => Some(IrType::Nullable(Nullable::Object(
+                self.throwable_object_id(),
+            ))),
+            _ => None,
+        }
+    }
+
+    /// Lowers a `Throwable` intrinsic call to a runtime call.
+    fn lower_exception_intrinsic_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let _ty = self.exception_intrinsic_type(call)?;
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let receiver = self.lower_expr(&field.object);
+        let result = match field.name.name.as_str() {
+            "stack_trace" => self.emit(InstKind::StackTrace(receiver), IrType::String, span),
+            "suppressed" => self.emit(
+                InstKind::Suppressed(receiver),
+                IrType::Nullable(Nullable::Object(self.throwable_object_id())),
+                span,
+            ),
+            _ => return None,
+        };
+        Some(result)
+    }
+
     /// The layout id of a class, if the name is one.
     fn class_id(&self, name: &str) -> Option<u32> {
         self.module
@@ -6017,7 +6829,7 @@ impl<'a> FunctionLowering<'a> {
     /// collide with a declared class (type names are reserved), so this is
     /// checked ahead of `construction_class_id` — but a local binding could
     /// still shadow the name (nothing stops `mut Float = 5;`), which is why
-    /// this checks the scopes the same way `is_closure_call` does before
+    /// this checks the scopes the same way `is_callable_call` does before
     /// trusting the name.
     fn context_conversion_target(&self, call: &ast::CallExpr) -> Option<Type> {
         let ast::Expr::Path(callee) = &*call.callee else {
@@ -6120,6 +6932,23 @@ impl<'a> FunctionLowering<'a> {
                     && matches!(
                         self.type_of(&e.left, e.left.span()),
                         IrType::Value(_)
+                    ))
+                    // Arithmetic on `Int` (`+`, `-`, `*`, `/`, `%`) now throws
+                    // catchable `ArithmeticOverflowError`/`DivisionByZeroError`
+                    // through a branch, and `Float` arithmetic guards `NaN`
+                    // the same way. Shifts also throw `InvalidShiftError`.
+                    || (matches!(
+                        e.op,
+                        ast::BinaryOp::Add
+                            | ast::BinaryOp::Sub
+                            | ast::BinaryOp::Mul
+                            | ast::BinaryOp::Div
+                            | ast::BinaryOp::Rem
+                            | ast::BinaryOp::Shl
+                            | ast::BinaryOp::Shr
+                    ) && matches!(
+                        self.type_of(&ast::Expr::Binary(e.clone()), e.span),
+                        IrType::Int(_) | IrType::Float(_)
                     ))
                     || self.opens_blocks(&e.left)
                     || self.opens_blocks(&e.right)
@@ -6531,14 +7360,19 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Unary(u) if numeric && u.op == ast::UnaryOp::Neg => {
                 let operand = self.lower_context_tree(target, &u.operand);
-                self.emit(
-                    InstKind::Unary {
-                        op: UnaryOp::Neg,
-                        operand,
-                    },
-                    target,
-                    span,
-                )
+                if matches!(target, IrType::Int(_)) {
+                    let zero = self.const_int_at(0, target, span);
+                    self.emit_checked_binary(BinaryOp::Sub, zero, operand, target, span)
+                } else {
+                    self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::Neg,
+                            operand,
+                        },
+                        target,
+                        span,
+                    )
+                }
             }
             _ => self.lower_context_leaf(target, expr, span),
         }
@@ -6601,8 +7435,6 @@ impl<'a> FunctionLowering<'a> {
     /// object exists — and has its address, which is its identity — before its
     /// constructor runs on it.
     fn lower_construction(&mut self, call: &ast::CallExpr, id: u32, span: Span) -> Operand {
-        let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
-
         // `StackTrace()` (roadmap Phase 4b): the compiler-injected class has
         // no `program.classes` entry, so there is no real constructor
         // symbol to call — nor any field to initialize (`register_native_exception_hierarchy`'s
@@ -6615,7 +7447,7 @@ impl<'a> FunctionLowering<'a> {
             .native_exceptions
             .is_some_and(|n| n.stack_trace == id)
         {
-            return object;
+            return self.emit(InstKind::Alloc(id), IrType::Object(id), span);
         }
 
         // One of the four native failure classes (`fase-4d-runtimeerror`,
@@ -6629,6 +7461,7 @@ impl<'a> FunctionLowering<'a> {
         // one of these from a failed native check.
         if self.is_native_failure_class(id) {
             let value = self.lower_expr_as(&call.args[0].value, IrType::String);
+            let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
             self.emit_effect(
                 InstKind::StoreField {
                     object,
@@ -6649,16 +7482,24 @@ impl<'a> FunctionLowering<'a> {
             .map(|p| p.iter().map(|param| self.ir_type(param.ty)).collect())
             .expect("the checker resolved the constructor");
 
-        let mut args = vec![object];
+        // Arguments are lowered first, so any branch introduced by them (e.g.
+        // integer arithmetic overflow checks) is finished before the object is
+        // allocated. The object and the `Call` to the constructor are then
+        // emitted in the same block, and the object never crosses a branch.
+        let mut args: Vec<Operand> = Vec::new();
         for (arg, ty) in call.args.iter().zip(params) {
             args.push(self.lower_expr_as(&arg.value, ty));
         }
+
+        let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+        let mut call_args = vec![object];
+        call_args.extend(args);
 
         let name = self.module.objects[id as usize].name.clone();
         self.emit_effect(
             InstKind::Call {
                 callee: constructor_symbol(&name, index),
-                args,
+                args: call_args,
             },
             span,
         );
@@ -6719,19 +7560,32 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// The enum and discriminant a call constructs, if it names a variant
-    /// with associated data (`Shape.Circle(radius: 5)`) — the checker marks
+    /// with associated data (`Shape.Circle(radius: 5)` or the unqualified
+    /// `Ok(...)`, `Error(...)` forms of `Result<T,E>`) — the checker marks
     /// such a call's callee span the same way it marks a bare variant
     /// reference's (`self.checked.variant_accesses`), so this is the call
     /// equivalent of that check.
     fn variant_construction(&self, call: &ast::CallExpr) -> Option<(u32, u32)> {
-        let ast::Expr::Field(field) = &*call.callee else {
-            return None;
-        };
-        if !self.checked.variant_accesses.contains(&field.span) {
-            return None;
-        }
-        let ast::Expr::Path(enum_name) = &*field.object else {
-            return None;
+        let (variant_name, enum_name) = match &*call.callee {
+            ast::Expr::Field(field) => {
+                if !self.checked.variant_accesses.contains(&field.span) {
+                    return None;
+                }
+                let ast::Expr::Path(enum_name) = &*field.object else {
+                    return None;
+                };
+                (field.name.clone(), enum_name.clone())
+            }
+            ast::Expr::Path(callee) => {
+                if !self.checked.variant_accesses.contains(&callee.span) {
+                    return None;
+                }
+                if callee.name != "Ok" && callee.name != "Error" {
+                    return None;
+                }
+                (callee.clone(), ast::Ident::new("Result", callee.span))
+            }
+            _ => return None,
         };
         // A generic enum's variant construction resolves against the
         // specific instantiation the checker inferred from this call's own
@@ -6746,7 +7600,7 @@ impl<'a> FunctionLowering<'a> {
                 self.checked.enums.iter().position(|e| e.name == declared)? as u32
             }
         };
-        let variant = self.checked.enums[enum_id as usize].discriminant(&field.name.name)?;
+        let variant = self.checked.enums[enum_id as usize].discriminant(&variant_name.name)?;
         Some((enum_id, variant))
     }
 
@@ -6841,14 +7695,40 @@ impl<'a> FunctionLowering<'a> {
                 "the checker only lowers a cast whose target is a class, once identity is ruled out"
             )
         };
-        self.emit(
-            InstKind::CheckedCast {
-                object: value,
+
+        // `as` / `<T>` casts over class types now throw `InvalidCastError`
+        // instead of aborting: `IsInstance` answers the same question
+        // `CheckedCast` used to assert, and a failing branch builds the
+        // exception and dispatches it like an explicit `throw`.
+        let value_slot = self.spill(value, actual_ty, span);
+        let value_loaded = self.emit(InstKind::Load(value_slot), actual_ty, span);
+        let is_instance = self.emit(
+            InstKind::IsInstance {
+                object: value_loaded,
                 target_class,
             },
-            target_ty,
+            IrType::Boolean,
             span,
-        )
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_instance,
+            then_block: cont,
+            else_block: fail,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with a class cast registered the exception hierarchy");
+        self.throw_native_failure(native.invalid_cast, "invalid cast", span);
+
+        self.current = cont;
+        let value_loaded = self.emit(InstKind::Load(value_slot), actual_ty, span);
+        self.emit(InstKind::Retype(value_loaded), target_ty, span)
     }
 
     /// Which `construct` a call of this arity resolves to.
@@ -7393,15 +8273,22 @@ impl<'a> FunctionLowering<'a> {
         let IrType::Pointer(id) = self.type_of_operand(pointer) else {
             unreachable!("checked by `Self::is_pointer_method_call`")
         };
+        let pointer_ty = IrType::Pointer(id);
+
+        // The pointer is held in a slot so it survives an argument that
+        // opens a branch (`write(v + 1)`, `offset(n * 2)`, etc.).
+        let pointer_slot = self.spill(pointer, pointer_ty, span);
 
         match field.name.name.as_str() {
             "read" => {
+                let pointer = self.emit(InstKind::Load(pointer_slot), pointer_ty, span);
                 let t = self.module.pointer_types[id as usize];
                 self.emit(InstKind::PointerRead(pointer), t, span)
             }
             "write" => {
                 let t = self.module.pointer_types[id as usize];
                 let value = self.lower_expr_as(&e.args[0].value, t);
+                let pointer = self.emit(InstKind::Load(pointer_slot), pointer_ty, span);
                 self.emit(
                     InstKind::PointerWrite { pointer, value },
                     IrType::Void,
@@ -7410,17 +8297,19 @@ impl<'a> FunctionLowering<'a> {
             }
             "offset" => {
                 let amount = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                let pointer = self.emit(InstKind::Load(pointer_slot), pointer_ty, span);
                 self.emit(
                     InstKind::PointerOffset { pointer, amount },
-                    IrType::Pointer(id),
+                    pointer_ty,
                     span,
                 )
             }
             "offset_bytes" => {
                 let amount = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                let pointer = self.emit(InstKind::Load(pointer_slot), pointer_ty, span);
                 self.emit(
                     InstKind::PointerOffsetBytes { pointer, amount },
-                    IrType::Pointer(id),
+                    pointer_ty,
                     span,
                 )
             }
@@ -7430,11 +8319,9 @@ impl<'a> FunctionLowering<'a> {
             "as_slice" | "as_slice_mut" => {
                 let mutable = field.name.name == "as_slice_mut";
                 let element = self.module.pointer_types[id as usize];
-                // `pointer` was lowered before this `match` (shared by
-                // every arm) — spilled immediately, before the length
-                // argument below gets a chance to open a block of its own
-                // and strand it (ADR-007 D7).
-                let pointer_slot = self.spill(pointer, IrType::Pointer(id), span);
+                // `pointer` was already spilled above before the length
+                // argument below gets a chance to open a block of its own.
+
                 let length = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
                 let known_length = self.known_pointer_extent(&field.object);
                 self.lower_native_slice_construction(
@@ -7848,6 +8735,16 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    /// Whether `e` is `Pin(value)` (roadmap Phase 4e, `phase-4e-memory`,
+    /// design D1) — the compiler-built-in constructor `Checker::check_pin_construction`
+    /// already recognized the same way.
+    fn is_pin_call(&self, e: &ast::CallExpr) -> bool {
+        let ast::Expr::Path(callee) = &*e.callee else {
+            return false;
+        };
+        callee.name == "Pin" && self.try_lookup_slot(&callee.name).is_none()
+    }
+
     /// `Weak.from(value)` (design D1): allocates a fresh WeakCell and stores
     /// `value`'s own address into it — `value` is already a managed
     /// reference, so unlike `Pointer.from` this lowers the value itself
@@ -7881,6 +8778,51 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::WeakUpgrade(weak), result_ty, span)
     }
 
+    /// `Dependent.from(base, ptr)` (roadmap Phase 4e, `phase-4e-memory`,
+    /// design D1): surface-only stub. Emits `DependentFrom` with the base
+    /// object and the already-computed field pointer.
+    #[allow(dead_code)]
+    fn lower_dependent_from(
+        &mut self,
+        base: Operand,
+        field_ptr: Operand,
+        element: IrType,
+        span: Span,
+    ) -> Operand {
+        let id = self
+            .module
+            .dependent_types
+            .iter()
+            .position(|&t| t == element)
+            .expect("the checker interned every Dependent<T> it type-checked")
+            as u32;
+        let ty = IrType::Dependent(id);
+        self.emit(InstKind::DependentFrom { base, field_ptr }, ty, span)
+    }
+
+    /// `Pin(obj)` (roadmap Phase 4e, `phase-4e-memory`, design D1): pins the
+    /// object at runtime and returns the same pointer as a `Pin<T>` value.
+    fn lower_pin_call(&mut self, expr: &ast::CallExpr, span: Span) -> Operand {
+        let value = &expr.args[0].value;
+        let object = self.lower_expr(value);
+        let referent = self.type_of(value, value.span());
+        let id = self
+            .module
+            .pin_types
+            .iter()
+            .position(|&t| t == referent)
+            .expect("the checker interned every Pin<T> it type-checked") as u32;
+        let ty = IrType::Pin(id);
+        self.emit(InstKind::PinObject { object }, ty, span)
+    }
+
+    /// Releases a pin created by `Self::lower_pin_call` (roadmap Phase 4e,
+    /// `phase-4e-memory`, design D1): surface-only stub.
+    #[allow(dead_code)]
+    fn lower_unpin_object(&mut self, object: Operand, span: Span) -> Operand {
+        self.emit(InstKind::UnpinObject { object }, IrType::Void, span)
+    }
+
     /// Whether `e` is the compiler-derived `.clone()` (roadmap Phase 4e,
     /// `fase-4e-clone`, design D1/D4) — a bare, no-argument `.clone()` on an
     /// `Object`-typed receiver whose class declares no `clone` method of
@@ -7901,10 +8843,11 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return false;
         }
-        let IrType::Object(id) = self.type_of(&field.object, field.object.span()) else {
-            return false;
-        };
-        self.checked.classes[id as usize].method("clone").is_none()
+        match self.type_of(&field.object, field.object.span()) {
+            IrType::Object(id) => self.checked.classes[id as usize].method("clone").is_none(),
+            IrType::Callable(_) => true,
+            _ => false,
+        }
     }
 
     /// The compiler-derived `.clone()` (design D1/D2): lowers to a single
@@ -7922,26 +8865,31 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
-        match self.type_of(object, object.span()).unwrapped() {
-            IrType::Object(id) => {
-                let layout = &self.module.objects[id as usize];
-                let index = layout
-                    .field_index(name)
-                    .expect("the checker resolved the field against this layout");
-                (index as u32, layout.fields[index].ty)
+        fn layout_of<'a>(
+            module: &'a Module,
+            target: IrType,
+            field: &str,
+        ) -> Option<(&'a [ObjectField], usize)> {
+            match target {
+                IrType::Object(id) => {
+                    let layout = &module.objects[id as usize];
+                    let index = layout.field_index(field)?;
+                    Some((&layout.fields, index))
+                }
+                IrType::Value(id) => {
+                    let layout = &module.values[id as usize];
+                    let index = layout.field_index(field)?;
+                    Some((&layout.fields, index))
+                }
+                IrType::Pin(id) => layout_of(module, module.pin_types[id as usize], field),
+                _ => None,
             }
-            // A record or value class reads the same way (roadmap task
-            // 11.5): `LoadField` does not care whether its operand is a
-            // pointer or an inline value, only the LLVM backend does.
-            IrType::Value(id) => {
-                let layout = &self.module.values[id as usize];
-                let index = layout
-                    .field_index(name)
-                    .expect("the checker resolved the field against this layout");
-                (index as u32, layout.fields[index].ty)
-            }
-            _ => unreachable!("a verified field access reads an object or a value"),
         }
+
+        let ty = self.type_of(object, object.span()).unwrapped();
+        let (fields, index) = layout_of(self.module, ty, name)
+            .expect("a verified field access reads an object, a value, or a Pin<T> of one");
+        (index as u32, fields[index].ty)
     }
 
     /// Lowers `cond ? a : b`.
@@ -8119,7 +9067,7 @@ impl<'a> FunctionLowering<'a> {
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
-                if !self.is_closure_call(e) && {
+                if !self.is_callable_call(e) && {
                     let name = self.callee_name(e);
                     self.signature_return(&name)
                 } == IrType::Void =>
@@ -8405,8 +9353,8 @@ impl<'a> FunctionLowering<'a> {
         matches!(&*call.callee, ast::Expr::Path(ident) if &ident.name == source)
     }
 
-    fn is_closure_call(&self, call: &ast::CallExpr) -> bool {
-        // A method or `super` call is not a closure call, and asking for the
+    fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        // A method or `super` call is not a callable call, and asking for the
         // type of its callee would ask for the type of a method — which is not
         // a value. Neither is `myScalar.to_string()` — asking for the type of
         // its own callee (`field_type_of`) would try to resolve `to_string`
@@ -8436,6 +9384,12 @@ impl<'a> FunctionLowering<'a> {
             return false;
         }
 
+        // `Throwable.stack_trace()` and `Throwable.suppressed()` are runtime
+        // intrinsics, not callable values or ordinary method symbols.
+        if self.exception_intrinsic_type(call).is_some() {
+            return false;
+        }
+
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
             || self.safe_method_call_info(call).is_some()
@@ -8453,8 +9407,8 @@ impl<'a> FunctionLowering<'a> {
                 .iter()
                 .rev()
                 .find_map(|scope| scope.get(&ident.name))
-                .is_some_and(|slot| matches!(self.slot_type(*slot), IrType::Closure(_))),
-            other => matches!(self.type_of(other, other.span()), IrType::Closure(_)),
+                .is_some_and(|slot| matches!(self.slot_type(*slot), IrType::Callable(_))),
+            other => matches!(self.type_of(other, other.span()), IrType::Callable(_)),
         }
     }
 
@@ -8489,7 +9443,7 @@ impl<'a> FunctionLowering<'a> {
                     let (id, _) = self
                         .named_function_value(&ident.name, ident.span)
                         .expect("a verified program only names declared variables or functions");
-                    IrType::Closure(id)
+                    IrType::Callable(id)
                 }
             },
             // `Neg`/`BitNot` preserve the operand's own width (any integer
@@ -8547,9 +9501,9 @@ impl<'a> FunctionLowering<'a> {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
             ast::Expr::Call(e) if self.is_recursive_self_call(e) => self.return_type,
-            ast::Expr::Call(e) if self.is_closure_call(e) => {
-                let IrType::Closure(id) = self.type_of(&e.callee, e.callee.span()) else {
-                    unreachable!("checked by `is_closure_call`")
+            ast::Expr::Call(e) if self.is_callable_call(e) => {
+                let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
+                    unreachable!("checked by `is_callable_call`")
                 };
                 self.module.closures[id as usize].returns
             }
@@ -8610,6 +9564,18 @@ impl<'a> FunctionLowering<'a> {
                     Nullable::of(referent).expect("a Weak<T> referent has a nullable form"),
                 )
             }
+            ast::Expr::Call(e) if self.is_pin_call(e) => {
+                let value = &e.args[0].value;
+                let referent = self.type_of(value, value.span());
+                let id = self
+                    .module
+                    .pin_types
+                    .iter()
+                    .position(|&t| t == referent)
+                    .expect("the checker interned every Pin<T> it type-checked")
+                    as u32;
+                IrType::Pin(id)
+            }
             ast::Expr::Call(e) if self.is_derived_clone_call(e) => {
                 let ast::Expr::Field(field) = &*e.callee else {
                     unreachable!("checked by `Self::is_derived_clone_call`")
@@ -8617,6 +9583,9 @@ impl<'a> FunctionLowering<'a> {
                 self.type_of(&field.object, field.object.span())
             }
             ast::Expr::Call(e) => {
+                if let Some(ty) = self.exception_intrinsic_type(e) {
+                    return ty;
+                }
                 if let Some(method) = self.contract_method_of(e) {
                     return self.ir_type(method.returns);
                 }
@@ -8702,6 +9671,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Lambda(_) | ast::Expr::Null(_) | ast::Expr::Range(_) => {
                 unreachable!("the type of this expression comes from the value it produced")
             }
+            ast::Expr::Transfer(e) => self.type_of(&e.expr, e.expr.span()),
             ast::Expr::Cast(e) => self.ir_type_from_ref(&e.target),
             ast::Expr::Interpolated(_) => IrType::String,
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),

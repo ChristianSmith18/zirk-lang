@@ -44,7 +44,7 @@ class FakeFile implements Resource<OpenError> {
     override fn close(): Result<Void, OpenError> {
         this.closed = true;
         stdout.println("closed " + this.name);
-        return Result.Ok(this.nothing());
+        return Ok(this.nothing());
     }
 
     override fn is_closed(): Boolean {
@@ -52,22 +52,22 @@ class FakeFile implements Resource<OpenError> {
     }
 }
 
-fn open(name: String, fail: Boolean): Result<FakeFile, OpenError> {
+fn open_file(name: String, fail: Boolean): Result<FakeFile, OpenError> {
     if fail {
-        return Result.Error(OpenError("cannot open " + name));
+        return Error(OpenError("cannot open " + name));
     }
-    return Result.Ok(FakeFile(name));
+    return Ok(FakeFile(name));
 }
 
 // `return` written directly inside the arm that owns the resource still
 // closes it before leaving the function (design D3, reused as-is).
 fn read_then_return_early(name: String): Int32 {
-    match open(name, false) with file {
-        Result.Ok(file) => {
+    match open_file(name, false) with file {
+        Ok(file) => {
             stdout.println(file.read_all());
             return 7;
         }
-        Result.Error(error) => {
+        Error(error) => {
             stdout.println(error.message());
         }
     }
@@ -76,21 +76,21 @@ fn read_then_return_early(name: String): Int32 {
 
 fn main(): Void {
     // Normal completion: acquire, use, close.
-    match open("users.json", false) with file {
-        Result.Ok(file) => {
+    match open_file("users.json", false) with file {
+        Ok(file) => {
             stdout.println(file.read_all());
         }
-        Result.Error(error) => {
+        Error(error) => {
             stdout.println("failed: " + error.message());
         }
     }
 
     // The error branch never acquired anything, so nothing closes there.
-    match open("missing.json", true) with file {
-        Result.Ok(file) => {
+    match open_file("missing.json", true) with file {
+        Ok(file) => {
             stdout.println(file.read_all());
         }
-        Result.Error(error) => {
+        Error(error) => {
             stdout.println("failed: " + error.message());
         }
     }

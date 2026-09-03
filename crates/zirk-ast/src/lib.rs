@@ -289,6 +289,8 @@ pub struct MethodDecl {
     /// Written `override fn`, which replacing an inherited method requires
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7).
     pub is_override: bool,
+    /// Written `mut fn`, marking a method that mutates its receiver.
+    pub is_mut: bool,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
     /// `throws Type (| Type)*` (roadmap Phase 4b) — reuses `TypeRef`'s own
@@ -911,6 +913,8 @@ pub enum Expr {
     Unsafe(Box<UnsafeBlock>),
     /// `commit { ... }` used where a value is expected (roadmap Phase 4e).
     Commit(Box<CommitBlock>),
+    /// `transfer(expr)` — ownership transfer of a `TransferableResource`.
+    Transfer(TransferExpr),
 }
 
 /// `expr as Type` or `<Type>expr`.
@@ -918,6 +922,13 @@ pub enum Expr {
 pub struct CastExpr {
     pub expr: Box<Expr>,
     pub target: TypeRef,
+    pub span: Span,
+}
+
+/// `transfer(expr)` — ownership transfer of a `TransferableResource`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransferExpr {
+    pub expr: Box<Expr>,
     pub span: Span,
 }
 
@@ -950,6 +961,7 @@ impl Expr {
             Expr::Interpolated(e) => e.span,
             Expr::Unsafe(e) => e.span,
             Expr::Commit(e) => e.span,
+            Expr::Transfer(e) => e.span,
         }
     }
 }
@@ -1079,16 +1091,30 @@ pub enum IncrementFix {
     Postfix,
 }
 
+/// One acquisition clause of a (possibly grouped) `match ... with`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchAcquisition {
+    pub expr: Box<Expr>,
+    pub binding: Ident,
+}
+
 /// `match scrutinee { arms }`, or `match scrutinee with binding { arms }`
 /// (roadmap Phase 4c, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section
 /// 4): the `with` form owns whichever arm's pattern binds `with_binding`'s
 /// name and closes it — calling its `Resource<E>` `close()` — on every exit
 /// from that arm, normal or not.
+///
+/// The grouped form stores its clauses in `acquisitions`, a single `body` and
+/// an optional `error` branch. When `acquisitions` is empty the single form is
+/// used and `scrutinee`/`with_binding`/`arms` carry the original structure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchExpr {
     pub scrutinee: Box<Expr>,
     pub with_binding: Option<Ident>,
     pub arms: Vec<MatchArm>,
+    pub acquisitions: Vec<MatchAcquisition>,
+    pub body: Option<Box<ArmBody>>,
+    pub error: Option<Box<MatchArm>>,
     pub span: Span,
 }
 

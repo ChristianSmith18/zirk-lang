@@ -268,6 +268,19 @@ pub enum Base {
     /// type alone (not a hidden bit) decides whether `view[i] = x` is
     /// accepted (design D5).
     NativeSliceMut(u32),
+    /// `Dependent<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1),
+    /// identified by the index of its element type `T` in the checker's
+    /// `dependent_types` table.
+    ///
+    /// A reference whose lifetime is tied to the allocation that contains
+    /// the value it refers to.
+    Dependent(u32),
+    /// `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1), identified
+    /// by the index of its referent type `T` in the checker's `pin_types`
+    /// table.
+    ///
+    /// Keeps an object's address stable for native interop.
+    Pin(u32),
     /// `A | B`, identified by its index in the checker's table.
     ///
     /// The table holds the normalized alternative list: order-independent,
@@ -564,6 +577,11 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
             "NativeSliceMut<{}>",
             describe(names.native_slice_mut_element(id), names)
         ),
+        Base::Dependent(id) => format!(
+            "Dependent<{}>",
+            describe(names.dependent_element(id), names)
+        ),
+        Base::Pin(id) => format!("Pin<{}>", describe(names.pin_element(id), names)),
     };
 
     if ty.nullable {
@@ -588,6 +606,8 @@ pub trait TypeNames {
     fn weak_element(&self, id: u32) -> Type;
     fn native_slice_element(&self, id: u32) -> Type;
     fn native_slice_mut_element(&self, id: u32) -> Type;
+    fn dependent_element(&self, id: u32) -> Type;
+    fn pin_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -748,6 +768,8 @@ pub struct MethodInfo {
     /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
     /// Phase 4b) — see [`crate::scope::Signature::throws`].
     pub throws: Vec<Type>,
+    /// Written `mut fn`, marking a method that mutates its receiver.
+    pub is_mut: bool,
 }
 
 /// A declared interface or trait.

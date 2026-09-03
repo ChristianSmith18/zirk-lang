@@ -1,0 +1,40 @@
+// `ArithmeticOverflowError` is catchable for integer +, *, and signed MIN / -1.
+fn main(): Void {
+    try {
+        mut a: Int8 = 120 as Int8;
+        mut b: Int8 = 10 as Int8;
+        mut c: Int8 = a + b;
+        stdout.println(c);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("add: " + e.message());
+    }
+
+    try {
+        mut a: Int32 = 100_000;
+        mut b: Int32 = 100_000;
+        mut c: Int32 = a * b;
+        stdout.println(c);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("mul: " + e.message());
+    }
+
+    try {
+        mut a: UInt16 = 50000 as UInt16;
+        mut b: UInt16 = 50000 as UInt16;
+        mut c: UInt16 = a + b;
+        stdout.println(c);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("uadd: " + e.message());
+    }
+
+    try {
+        mut a: Int32 = -2147483648;
+        mut b: Int32 = -1;
+        mut c: Int32 = a / b;
+        stdout.println(c);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("div: " + e.message());
+    }
+
+    stdout.println("done");
+}

@@ -1,0 +1,24 @@
+fn double(n: Int32): Int32 {
+    return n * 2;
+}
+
+fn add_three(n: Int32): Int32 {
+    return n + 3;
+}
+
+class CallableBox {
+    f: Fn(Int32) => Int32;
+
+    construct() {
+        this.f = double;
+    }
+}
+
+fn main(): Void {
+    mut box = CallableBox();
+    mut local = box.f;
+    stdout.println(local(21));
+    box.f = add_three;
+    mut local2 = box.f;
+    stdout.println(local2(10));
+}

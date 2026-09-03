@@ -3,7 +3,7 @@
 // `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2). `_ = load();`
 // would be the explicit escape hatch.
 fn load(): Result<Int32, String> {
-    return Result.Ok(5);
+    return Ok(5);
 }
 
 fn main(): Void {

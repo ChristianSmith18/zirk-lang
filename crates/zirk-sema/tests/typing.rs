@@ -1007,14 +1007,14 @@ fn invalid_empty_enum_states_to_use_never() {
 fn valid_result_construction_and_match() {
     accepted(
         "fn load(fail: Boolean): Result<Int32, String> {\n\
-             if fail { return Result.Error(\"boom\"); }\n\
-             return Result.Ok(5);\n\
+             if fail { return Error(\"boom\"); }\n\
+             return Ok(5);\n\
          }\n\
          fn main(): Void {\n\
              mut r: Result<Int32, String> = load(false);\n\
              match r {\n\
-                 Result.Ok(value) => stdout.println(value);\n\
-                 Result.Error(error) => stdout.println(error);\n\
+                 Ok(value) => stdout.println(value);\n\
+                 Error(error) => stdout.println(error);\n\
              }\n\
          }",
     );
@@ -1023,7 +1023,7 @@ fn valid_result_construction_and_match() {
 #[test]
 fn valid_result_seven_in_scope_methods() {
     accepted_body(
-        "mut r: Result<Int32, String> = Result.Ok(5);\n\
+        "mut r: Result<Int32, String> = Ok(5);\n\
          mut a: Boolean = r.is_ok();\n\
          mut b: Boolean = r.is_error();\n\
          mut c: Int32? = r.ok_or_null();\n\
@@ -1036,22 +1036,20 @@ fn valid_result_seven_in_scope_methods() {
 
 #[test]
 fn invalid_result_unknown_method() {
-    let output = rejected_body("mut r: Result<Int32, String> = Result.Ok(5);\nr.map_to_string();");
+    let output = rejected_body("mut r: Result<Int32, String> = Ok(5);\nr.map_to_string();");
     assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()));
 }
 
 #[test]
 fn invalid_result_get_or_wrong_argument_type() {
-    let output = rejected_body(
-        "mut r: Result<Int32, String> = Result.Ok(5);\nmut a: Int32 = r.get_or(\"nope\");",
-    );
+    let output =
+        rejected_body("mut r: Result<Int32, String> = Ok(5);\nmut a: Int32 = r.get_or(\"nope\");");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn invalid_result_get_or_wrong_argument_count() {
-    let output =
-        rejected_body("mut r: Result<Int32, String> = Result.Ok(5);\nmut a: Int32 = r.get_or();");
+    let output = rejected_body("mut r: Result<Int32, String> = Ok(5);\nmut a: Int32 = r.get_or();");
     assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
 }
 
@@ -1064,7 +1062,7 @@ fn invalid_result_cannot_be_reimplemented() {
 #[test]
 fn invalid_result_discarded_as_a_bare_statement() {
     let output = rejected(
-        "fn load(): Result<Int32, String> { return Result.Ok(5); }\n\
+        "fn load(): Result<Int32, String> { return Ok(5); }\n\
          fn main(): Void { load(); }",
     );
     assert!(output.contains(codes::DISCARDED_RESULT.as_str()));
@@ -1073,7 +1071,7 @@ fn invalid_result_discarded_as_a_bare_statement() {
 #[test]
 fn valid_result_discarded_explicitly_with_underscore() {
     accepted(
-        "fn load(): Result<Int32, String> { return Result.Ok(5); }\n\
+        "fn load(): Result<Int32, String> { return Ok(5); }\n\
          fn main(): Void { _ = load(); }",
     );
 }
@@ -4152,6 +4150,66 @@ fn valid_catch_each_of_the_four_native_failure_classes() {
 }
 
 #[test]
+fn valid_catch_arithmetic_overflow_by_its_own_concrete_type_and_supertypes() {
+    accepted_body(
+        "try {
+             mut a: Int8 = 120 as Int8;
+             mut b: Int8 = 10 as Int8;
+             mut c: Int8 = a + b;
+         } catch ArithmeticOverflowError(e) {
+             stdout.println(e.message());
+         }",
+    );
+    accepted_body(
+        "try {
+             mut a: Int32 = 100_000;
+             mut b: Int32 = 100_000;
+             mut c: Int32 = a * b;
+         } catch RuntimeError(e) {
+             stdout.println(e.message());
+         }",
+    );
+    accepted_body(
+        "try {
+             mut a: UInt16 = 40000 as UInt16;
+             mut b: UInt16 = 40000 as UInt16;
+             mut c: UInt16 = a + b;
+         } catch Throwable(e) {
+             stdout.println(e.message());
+         }",
+    );
+}
+
+#[test]
+fn valid_catch_invalid_cast_by_its_own_concrete_type_and_supertypes() {
+    accepted(
+        "class Animal { construct() { } }
+         class Dog extends Animal { construct() { super(); } }
+         fn main(): Void {
+             try {
+                 mut a: Animal = Dog();
+                 mut d: Dog = a as Dog;
+             } catch InvalidCastError(e) {
+                 stdout.println(e.message());
+             }
+         }",
+    );
+    accepted(
+        "class Animal { construct() { } }
+         class Cat extends Animal { construct() { super(); } }
+         class Dog extends Animal { construct() { super(); } }
+         fn main(): Void {
+             try {
+                 mut a: Animal = Cat();
+                 mut d: Dog = <Dog>a;
+             } catch RuntimeError(e) {
+                 stdout.println(e.message());
+             }
+         }",
+    );
+}
+
+#[test]
 fn valid_native_failure_is_never_declared_in_a_throws_clause() {
     // A native failure is implicit by design
     // (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a function
@@ -4206,13 +4264,13 @@ const FAKE_FILE: &str = "class FakeFile implements Resource<OpenError> {
     fn nothing(): Void { return; }
     override fn close(): Result<Void, OpenError> {
         this.closed = true;
-        return Result.Ok(this.nothing());
+        return Ok(this.nothing());
     }
     override fn is_closed(): Boolean { return this.closed; }
 }
 
 fn open(name: String): Result<FakeFile, OpenError> {
-    return Result.Ok(FakeFile(name));
+    return Ok(FakeFile(name));
 }";
 
 #[test]
@@ -4258,10 +4316,10 @@ fn valid_match_with_closes_the_acquired_resource() {
          {FAKE_FILE}
          fn main(): Void {{
              match open(\"a.txt\") with file {{
-                 Result.Ok(file) => {{
+                 Ok(file) => {{
                      stdout.println(file.name);
                  }}
-                 Result.Error(error) => {{
+                 Error(error) => {{
                      stdout.println(error.message());
                  }}
              }}
@@ -4276,10 +4334,10 @@ fn valid_match_with_closes_on_early_return() {
          {FAKE_FILE}
          fn read(): Int32 {{
              match open(\"a.txt\") with file {{
-                 Result.Ok(file) => {{
+                 Ok(file) => {{
                      return 1;
                  }}
-                 Result.Error(error) => {{
+                 Error(error) => {{
                      return -1;
                  }}
              }}
@@ -4317,8 +4375,8 @@ fn invalid_match_with_binding_unused_by_any_arm() {
          {FAKE_FILE}
          fn main(): Void {{
              match open(\"a.txt\") with file {{
-                 Result.Ok(other) => {{ }}
-                 Result.Error(error) => {{ }}
+                 Ok(other) => {{ }}
+                 Error(error) => {{ }}
              }}
          }}"
     ));
@@ -4348,8 +4406,8 @@ fn invalid_match_with_binding_does_not_implement_resource() {
     let output = rejected(
         "fn describe(r: Result<Int32, String>): Void {
              match r with file {
-                 Result.Ok(file) => { }
-                 Result.Error(error) => { }
+                 Ok(file) => { }
+                 Error(error) => { }
              }
          }
          fn main(): Void { }",
@@ -4664,7 +4722,7 @@ fn invalid_class_that_implements_resource_is_not_clone() {
              inmut name: String;
              mut closed: Boolean;
              construct(name: String) { this.name = name; this.closed = false; }
-             override fn close(): Result<Void, OpenError> { this.closed = true; return Result.Ok(_void()); }
+             override fn close(): Result<Void, OpenError> { this.closed = true; return Ok(_void()); }
              override fn is_closed(): Boolean { return this.closed; }
              fn _void(): Void { return; }
          }

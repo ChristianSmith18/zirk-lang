@@ -1,0 +1,24 @@
+// `InvalidCastError` is catchable for `as` and `<T>` class casts.
+class Animal { construct() { } }
+class Dog extends Animal { construct() { super(); } }
+class Cat extends Animal { construct() { super(); } }
+
+fn main(): Void {
+    try {
+        mut a: Animal = Cat();
+        mut d: Dog = a as Dog;
+        stdout.println("as ok");
+    } catch InvalidCastError(e) {
+        stdout.println("as: " + e.message());
+    }
+
+    try {
+        mut a: Animal = Cat();
+        mut d: Dog = <Dog>a;
+        stdout.println("angle ok");
+    } catch InvalidCastError(e) {
+        stdout.println("angle: " + e.message());
+    }
+
+    stdout.println("done");
+}

@@ -15,7 +15,8 @@
 //! (`zirk-ir/src/lower.rs`'s own doc comment on the mechanism has the full
 //! picture, design decision D1 of `fase-4b-excepciones`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
 
 thread_local! {
@@ -25,6 +26,16 @@ thread_local! {
     /// unwound out of the thread entirely (an uncaught exception terminates
     /// the thread's own Zirk code before anything else on it runs again).
     static PENDING: Cell<*const c_void> = const { Cell::new(std::ptr::null()) };
+
+    /// Lazily-built `Throwable.stack_trace()` strings, keyed by exception
+    /// object address. Caching makes repeated calls return the same `String`
+    /// and delays the allocation until the first call.
+    static STACK_TRACES: RefCell<HashMap<usize, *const c_void>> = RefCell::new(HashMap::new());
+
+    /// `Throwable.suppressed()` values, keyed by exception object address.
+    /// Set when a `throw` happens inside a `catch` block, linking the new
+    /// exception to the one that was being handled.
+    static SUPPRESSED: RefCell<HashMap<usize, *const c_void>> = RefCell::new(HashMap::new());
 }
 
 /// Records `exception` as the pending one (roadmap Phase 4b) — `throw`'s own
@@ -54,6 +65,40 @@ pub extern "C" fn zirk_rt_has_pending_exception() -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_take_pending_exception() -> *const c_void {
     PENDING.with(|cell| cell.replace(std::ptr::null()))
+}
+
+/// Returns a cached `String` describing the stack trace of `exception`,
+/// building it on the first call. This keeps `throw` itself allocation-free
+/// and makes `stack_trace()` idempotent for the same exception object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_stack_trace(exception: *const c_void) -> *mut c_void {
+    let key = exception as usize;
+    if let Some(handle) = STACK_TRACES.with(|m| m.borrow().get(&key).copied()) {
+        return handle as *mut c_void;
+    }
+
+    let message = format!("Throwable stack trace at {exception:p}");
+    let handle = crate::string::owned_handle(message);
+    STACK_TRACES.with(|m| m.borrow_mut().insert(key, handle));
+    handle
+}
+
+/// Returns the exception suppressed by `exception`, or `null` if none was set.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_suppressed(exception: *const c_void) -> *mut c_void {
+    let key = exception as usize;
+    SUPPRESSED.with(|m| m.borrow().get(&key).copied().unwrap_or(std::ptr::null())) as *mut c_void
+}
+
+/// Records `suppressed` as the exception suppressed by `exception`. Called
+/// before `zirk_rt_throw` when a `throw` statement occurs inside a `catch`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_suppressed(
+    exception: *const c_void,
+    suppressed: *const c_void,
+) {
+    let key = exception as usize;
+    SUPPRESSED.with(|m| m.borrow_mut().insert(key, suppressed));
 }
 
 /// Reports an exception that escaped `main` uncaught and terminates

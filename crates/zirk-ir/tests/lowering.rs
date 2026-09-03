@@ -64,11 +64,13 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 6] = [
+const NATIVE_FAILURE_CODES: [&str; 8] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
     "E_FLOAT_NAN",
+    "E_ARITHMETIC_OVERFLOW",
+    "E_INVALID_CAST",
     "E_INDEX_OUT_OF_BOUNDS",
     "E_NATIVE_ERROR",
 ];
@@ -244,9 +246,9 @@ fn comparison_produces_a_boolean() {
 
 #[test]
 fn unary_operators_lower_with_their_type() {
-    // Negation goes through a variable: `-1` is one literal, not a negation
-    // applied to one, which is what lets `-2147483648` be written at all.
-    let f = main_body("mut n: Int32 = 1;\nmut a: Int32 = -n;\nmut b: Boolean = !true;");
+    // Integer negation is now a guarded `0 - x`, so only `!` on `Boolean`
+    // is a raw `Unary`; `BitNot` on an integer still is.
+    let f = main_body("mut n: Int32 = 1;\nmut a: Int32 = ~n;\nmut b: Boolean = !true;");
 
     let unaries: Vec<_> = f
         .blocks
@@ -1383,9 +1385,15 @@ fn a_class_to_class_cast_checks_the_target_descriptor() {
 
     assert!(
         instructions(main).iter().any(
-            |k| matches!(k, InstKind::CheckedCast { target_class, .. } if *target_class == dog_id)
+            |k| matches!(k, InstKind::IsInstance { target_class, .. } if *target_class == dog_id)
         ),
-        "a downcast is checked against the target's own layout"
+        "a downcast is tested with IsInstance before it is retyped"
+    );
+    assert!(
+        !instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedCast { .. })),
+        "CheckedCast is no longer emitted for user `as`/`<T>` casts"
     );
 }
 

@@ -1,0 +1,10 @@
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+    fn current(): Int32 { return this.value; }
+}
+
+fn main(): Void {
+    inmut::strict c: Counter = Counter(7);
+    stdout.println(c.current().to_string());
+}

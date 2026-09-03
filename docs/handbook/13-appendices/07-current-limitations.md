@@ -8,16 +8,20 @@ stage implements them.
 
 Current high-impact delivery limits include:
 
-- `Fn(P...) => R` is parseable and type-checked in every position (Phase 4d),
-  and a named function, capture-less lambda, or a single capturing closure
-  literal written directly at a local's initializer or a function's `return`
-  freely satisfies it — but general callable-type polymorphism across two or
-  more *differently-captured* closures at one position still needs the
-  captures heap-boxed behind a uniform representation, not built yet.
-- Phase 4a–4c implement expected errors, explicit exceptions, and the initial
-  one-resource `match with`, but final suppressed/combined cleanup failures,
-  grouped acquisition, complete stack traces, throwable immutability,
-  cancellation cleanup, resource transfer, and dependent lifetimes remain.
+- `Fn(P...) => R` is parseable, type-checked, and lowered in every position
+  (Phase 4d). A named function, capture-less lambda, or captured closure works
+  as a callable value, including return, local assignment, field storage, and
+  parameter passing. `.clone()` on callables is supported when every captured
+  value is `Clone`, producing an independent capture block, and capture blocks
+  are GC-tracked.
+- Phase 4a–4c implement expected errors, explicit exceptions, and single- and
+  grouped-resource `match ... with`. Grouped acquisition runs left-to-right and
+  cleanup runs right-to-left; `transfer(r)` works for `TransferableResource`
+  values, and use-after-transfer is rejected at compile time. Native
+  `ArithmeticOverflowError` and `InvalidCastError` are catchable as
+  `RuntimeError` subclasses. `ResourceFailure<BodyError,CloseError>` merging
+  and cancellation-aware close dispatch are wired in the grouped-resource error
+  path.
 - Managed memory reclaims automatically now: `docs/decisions/ADR-003-memoria.md`
   closed on a non-moving mark-sweep collector, real (not a placeholder),
   reclaiming unreachable memory including cycles without exposing GC,
@@ -32,11 +36,13 @@ Current high-impact delivery limits include:
   member. `record`/`value class` and enum-typed fields do not yet derive
   `Clone` (records have no identity of their own; a pre-existing codegen
   gap leaves an enum's inactive-variant fields uninitialized in a way the
-  shared field-offset walk would read unconditionally). Dependent
-  references and automatic pinning remain Phase 4e work. `inmut::strict` rejects a direct rebinding and a write through a field
-  projection off a strict binding; strictness declared on a field itself
-  (independent of its container's own mutability) and a mutating method call
-  reached through a strict reference remain open. `unsafe fn`/`unsafe {}`/
+  shared field-offset walk would read unconditionally). `Dependent<T>` lifetime
+  and escape analysis rejects returns, field stores, closure captures, and
+  non-dependent parameter passing; valid local use runs end-to-end. `Pin<T>`
+  supports construction with `Pin(obj)`, automatic unpin for field and method
+  access, and rejects reassignment of the pinned variable. `inmut::strict`
+  on a field declaration rejects writes through any projection and rejects
+  mutating method calls on a strict reference. `unsafe fn`/`unsafe {}`/
   `commit {}` parse and are context-checked; `Pointer<T>` (an ABI-safe
   element-type subset) supports construction/read/write/offset/cast with a
   conservative escape rule; `extern "C" fn` declares and calls a native

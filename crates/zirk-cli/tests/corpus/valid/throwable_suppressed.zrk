@@ -1,0 +1,43 @@
+// `Throwable.suppressed()` links a new exception to the one that was being
+// handled when it was thrown.
+class AppError implements Throwable {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "APP";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn main(): Void {
+    try {
+        try {
+            throw AppError("outer");
+        } catch AppError(outer) {
+            try {
+                throw AppError("inner");
+            } catch AppError(inner) {
+                stdout.println("suppressed: " + (inner.suppressed()?.message() ?? "none"));
+            }
+        }
+    } catch Throwable(_) {
+        stdout.println("unexpected");
+    }
+
+    stdout.println("done");
+}

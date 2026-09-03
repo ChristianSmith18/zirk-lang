@@ -27,13 +27,13 @@ class FakeFile implements Resource<OpenError> {
     override fn close(): Result<Void, OpenError> {
         this.closed = true;
         stdout.println("closed " + this.name);
-        return Result.Ok(this.nothing());
+        return Ok(this.nothing());
     }
     override fn is_closed(): Boolean { return this.closed; }
 }
 
-fn open(name: String): Result<FakeFile, OpenError> {
-    return Result.Ok(FakeFile(name));
+fn open_file(name: String): Result<FakeFile, OpenError> {
+    return Ok(FakeFile(name));
 }
 
 fn risky(): Int32 throws BoomError {
@@ -41,11 +41,11 @@ fn risky(): Int32 throws BoomError {
 }
 
 fn use_it(): Int32 throws BoomError {
-    match open("thrown.txt") with file {
-        Result.Ok(file) => {
+    match open_file("thrown.txt") with file {
+        Ok(file) => {
             return risky();
         }
-        Result.Error(error) => {
+        Error(error) => {
             return -1;
         }
     }

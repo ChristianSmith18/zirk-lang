@@ -1,0 +1,10 @@
+class Counter {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+    mut fn increment(): Void { this.value = this.value + 1; }
+}
+
+fn main(): Void {
+    inmut::strict c: Counter = Counter(1);
+    c.increment();
+}

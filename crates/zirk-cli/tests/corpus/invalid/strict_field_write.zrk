@@ -1,0 +1,6 @@
+record Point { inmut::strict x: Int32; }
+
+fn main(): Void {
+    mut p: Point = Point(x: 5);
+    p.x = 3;
+}

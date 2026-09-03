@@ -1,0 +1,16 @@
+// `Throwable.stack_trace()` is built lazily on the first call and cached so
+// the same `String` is returned on subsequent calls.
+fn main(): Void {
+    try {
+        mut a: Int8 = 120 as Int8;
+        mut b: Int8 = 10 as Int8;
+        mut c: Int8 = a + b;
+        stdout.println(c);
+    } catch ArithmeticOverflowError(e) {
+        mut s1: String = e.stack_trace();
+        mut s2: String = e.stack_trace();
+        stdout.println(s1 == s2);
+    }
+
+    stdout.println("done");
+}

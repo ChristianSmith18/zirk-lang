@@ -175,6 +175,13 @@ pub mod codes {
     /// A `Pointer<T>` operation requiring `unsafe` used outside one (roadmap
     /// Phase 4e, design D3).
     pub const POINTER_OP_OUTSIDE_UNSAFE: Code = Code::new("E0445");
+    /// A `Dependent<T>` value returned from a function, stored into a field,
+    /// captured by a closure, or passed where it would escape its base's
+    /// lifetime (roadmap Phase 4e, `phase-4e-memory`, design D1).
+    pub const DEPENDENT_ESCAPES: Code = Code::new("E0459");
+    /// The referent of a `Pin<T>` was moved or rebound while the pin is alive
+    /// (roadmap Phase 4e, `phase-4e-memory`, design D1).
+    pub const PINNED_OBJECT_MOVED: Code = Code::new("E0460");
     /// `commit {}` used outside an enclosing `unsafe {}` (roadmap Phase 4e,
     /// design D3).
     pub const COMMIT_OUTSIDE_UNSAFE: Code = Code::new("E0446");
@@ -209,4 +216,15 @@ pub mod codes {
     /// or an out-of-bounds index the checker can see is out of range
     /// (roadmap Phase 4e, `String[index]`).
     pub const INDEX_OUT_OF_BOUNDS: Code = Code::new("E0453");
+    /// A resource used after it was transferred.
+    pub const USE_OF_TRANSFERRED_RESOURCE: Code = Code::new("E0454");
+    /// A value passed to `transfer(...)` that does not implement `TransferableResource`.
+    pub const NOT_TRANSFERABLE: Code = Code::new("E0455");
+    /// Writing to a field declared `inmut::strict` through any projection.
+    pub const STRICT_FIELD_WRITE: Code = Code::new("E0456");
+    /// Calling a `mut` method on an `inmut::strict` receiver.
+    pub const MUTATING_METHOD_ON_STRICT: Code = Code::new("E0457");
+    /// A `Pointer.from(place).as_slice(n)`/`as_slice_mut(n)` length that
+    /// exceeds the statically known extent of `place`.
+    pub const NATIVE_SLICE_EXTENT_EXCEEDED: Code = Code::new("E0458");
 }

@@ -904,6 +904,7 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             is_override: false,
+            is_mut: false,
             params,
             return_type,
             throws,
@@ -943,6 +944,18 @@ impl<'a> Parser<'a> {
         };
         let is_override = self.eat_keyword(Keyword::Override);
 
+        // `mut fn` marks a mutating method. It must be distinguished from
+        // `mut` as a field modifier, so we only consume it when it is
+        // immediately followed by `fn`.
+        let is_mut = if self.check_keyword(Keyword::Mut)
+            && self.peek_at(1) == &TokenKind::Keyword(Keyword::Fn)
+        {
+            self.pos += 1;
+            true
+        } else {
+            false
+        };
+
         if self.check_keyword(Keyword::Construct) {
             return self
                 .parse_construct(visibility.unwrap_or(Visibility::Public), start)
@@ -955,6 +968,7 @@ impl<'a> Parser<'a> {
                     visibility.unwrap_or(Visibility::Public),
                     is_abstract,
                     is_override,
+                    is_mut,
                     start,
                 )
                 .map(ClassMember::Method);
@@ -975,22 +989,40 @@ impl<'a> Parser<'a> {
         Some(visibility)
     }
 
-    /// A field: `[visibility] [mut|inmut] name: Type;`
+    /// A field: `[visibility] [mut|inmut|inmut::strict] name: Type;`
     ///
     /// Writing neither modifier means `public mut`
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7). Both spellings produce the same
     /// member; only the flag remembers which was written.
     fn parse_field(&mut self, visibility: Option<Visibility>, start: Span) -> Option<FieldDecl> {
-        let mutability = match self.peek() {
-            TokenKind::Keyword(Keyword::Mut) => {
-                self.pos += 1;
-                Some(Mutability::Mutable)
-            }
-            TokenKind::Keyword(Keyword::Inmut) => {
-                self.pos += 1;
+        let mutability = if self.eat_keyword(Keyword::Mut) {
+            Some(Mutability::Mutable)
+        } else if self.eat_keyword(Keyword::Inmut) {
+            // `strict` is contextual, recognized right after `inmut::`, the
+            // same way `parse_let` handles it for local declarations.
+            if self.eat(&TokenKind::ColonColon) {
+                let is_strict =
+                    matches!(self.peek(), TokenKind::Identifier(name) if name == "strict");
+                if is_strict {
+                    self.pos += 1;
+                    Some(Mutability::Strict)
+                } else {
+                    let span = self.peek_span();
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "expected `strict` after `inmut::`",
+                        "`inmut::strict` is the only qualified form of `inmut`",
+                        None,
+                    );
+                    self.synchronize();
+                    return None;
+                }
+            } else {
                 Some(Mutability::Immutable)
             }
-            _ => None,
+        } else {
+            None
         };
 
         let name = self.expect_identifier("as the name of a field")?;
@@ -1031,6 +1063,7 @@ impl<'a> Parser<'a> {
         visibility: Visibility,
         is_abstract: bool,
         is_override: bool,
+        is_mut: bool,
         start: Span,
     ) -> Option<MethodDecl> {
         self.eat_keyword(Keyword::Fn);
@@ -1068,6 +1101,7 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             is_override,
+            is_mut,
             params,
             return_type,
             throws,
@@ -1442,44 +1476,54 @@ impl<'a> Parser<'a> {
     /// and a trailing `?`. Never a union on its own — see [`Self::parse_type`].
     fn parse_type_atom(&mut self) -> Option<TypeRef> {
         let span = self.peek_span();
-        if let TokenKind::Identifier(name) = self.peek().clone() {
-            self.pos += 1;
-
-            // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d):
-            // a real callable type in every position a type may appear.
-            if (name == "Fn" || name == "Function") && matches!(self.peek(), TokenKind::LParen) {
-                return self.parse_function_type(name, span);
-            }
-
-            let arguments = if matches!(self.peek(), TokenKind::Lt) {
-                self.parse_type_args()?
-            } else {
-                Vec::new()
-            };
-
-            // `T?` is `T | Null`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
-            if matches!(self.peek(), TokenKind::Question) {
-                let end = self.peek_span();
+        let name = match self.peek().clone() {
+            TokenKind::Identifier(name) => {
                 self.pos += 1;
-                let mut ty = TypeRef::nullable(name, span.to(end));
-                ty.arguments = arguments;
-                return Some(ty);
+                name
             }
+            // `Pin<T>` is a Phase 4e built-in generic type. The name is a
+            // keyword, but it is still valid in type position.
+            TokenKind::Keyword(Keyword::Pin) => {
+                self.pos += 1;
+                "Pin".to_string()
+            }
+            _ => {
+                let found = self.peek().description();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "expected a type",
+                    format!("found {found}"),
+                    Some("the available types are Void, Int32, Boolean and String".into()),
+                );
+                return None;
+            }
+        };
 
-            let mut ty = TypeRef::new(name, span);
+        // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d):
+        // a real callable type in every position a type may appear.
+        if (name == "Fn" || name == "Function") && matches!(self.peek(), TokenKind::LParen) {
+            return self.parse_function_type(name, span);
+        }
+
+        let arguments = if matches!(self.peek(), TokenKind::Lt) {
+            self.parse_type_args()?
+        } else {
+            Vec::new()
+        };
+
+        // `T?` is `T | Null`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
+        if matches!(self.peek(), TokenKind::Question) {
+            let end = self.peek_span();
+            self.pos += 1;
+            let mut ty = TypeRef::nullable(name, span.to(end));
             ty.arguments = arguments;
             return Some(ty);
         }
 
-        let found = self.peek().description();
-        self.error(
-            codes::UNEXPECTED_TOKEN,
-            span,
-            "expected a type",
-            format!("found {found}"),
-            Some("the available types are Void, Int32, Boolean and String".into()),
-        );
-        None
+        let mut ty = TypeRef::new(name, span);
+        ty.arguments = arguments;
+        Some(ty)
     }
 
     /// `Fn(P...) => R` or `Function(P...) => R` in type position (roadmap
@@ -2542,55 +2586,151 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Match);
 
-        let scrutinee = self.parse_range()?;
+        let first_expr = self.parse_range()?;
 
         // `match scrutinee with binding { ... }` (roadmap Phase 4c) scopes a
         // `Resource<E>`: `binding` names whichever arm's pattern acquires
         // one, closed automatically on every exit from that arm.
-        let with_binding = if self.eat_keyword(Keyword::With) {
-            Some(self.expect_identifier("after `with`")?)
+        if !self.eat_keyword(Keyword::With) {
+            self.expect(&TokenKind::LBrace, "before the match arms");
+
+            let mut arms = Vec::new();
+            while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
+                let before = self.pos;
+
+                if let Some(arm) = self.parse_match_arm() {
+                    arms.push(arm);
+                }
+
+                // Arms may be separated by `,` or `;`, or by nothing at all when
+                // the body is a block.
+                self.eat(&TokenKind::Comma);
+                self.eat(&TokenKind::Semicolon);
+
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
+
+            let end = self.peek_span();
+            self.expect(&TokenKind::RBrace, "to close the match arms");
+
+            if arms.is_empty() {
+                self.error(
+                    codes::EMPTY_MATCH,
+                    start.to(end),
+                    "a `match` needs at least one arm",
+                    "a match with no arms could never produce a result",
+                    Some("add an arm, or `_ => { }` to ignore every case".into()),
+                );
+                return None;
+            }
+
+            return Some(Expr::Match(MatchExpr {
+                scrutinee: Box::new(first_expr),
+                with_binding: None,
+                arms,
+                acquisitions: Vec::new(),
+                body: None,
+                error: None,
+                span: start.to(end),
+            }));
+        }
+
+        let first_binding = self.expect_identifier("after `with`")?;
+
+        // A comma after the first `with` starts a grouped acquisition list.
+        // Otherwise the single `match ... with` form falls back to match arms.
+        if !matches!(self.peek(), TokenKind::Comma) {
+            self.expect(&TokenKind::LBrace, "before the match arms");
+
+            let mut arms = Vec::new();
+            while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
+                let before = self.pos;
+
+                if let Some(arm) = self.parse_match_arm() {
+                    arms.push(arm);
+                }
+
+                // Arms may be separated by `,` or `;`, or by nothing at all when
+                // the body is a block.
+                self.eat(&TokenKind::Comma);
+                self.eat(&TokenKind::Semicolon);
+
+                if self.pos == before {
+                    self.pos += 1;
+                }
+            }
+
+            let end = self.peek_span();
+            self.expect(&TokenKind::RBrace, "to close the match arms");
+
+            if arms.is_empty() {
+                self.error(
+                    codes::EMPTY_MATCH,
+                    start.to(end),
+                    "a `match` needs at least one arm",
+                    "a match with no arms could never produce a result",
+                    Some("add an arm, or `_ => { }` to ignore every case".into()),
+                );
+                return None;
+            }
+
+            return Some(Expr::Match(MatchExpr {
+                scrutinee: Box::new(first_expr),
+                with_binding: Some(first_binding),
+                arms,
+                acquisitions: Vec::new(),
+                body: None,
+                error: None,
+                span: start.to(end),
+            }));
+        }
+
+        let mut acquisitions = vec![MatchAcquisition {
+            expr: Box::new(first_expr),
+            binding: first_binding,
+        }];
+
+        while self.eat(&TokenKind::Comma) {
+            let expr = self.parse_range()?;
+            self.expect(
+                &TokenKind::Keyword(Keyword::With),
+                "between the expression and its binding in a grouped `match with`",
+            );
+            let binding = self.expect_identifier("after `with`")?;
+            acquisitions.push(MatchAcquisition {
+                expr: Box::new(expr),
+                binding,
+            });
+        }
+
+        let body_block = self.parse_block()?;
+        let body = ArmBody::Block(body_block);
+        let mut end = body.span();
+
+        let error = if let TokenKind::Identifier(name) = self.peek().clone() {
+            if name == "error" {
+                self.pos += 1;
+                self.expect(&TokenKind::LBrace, "before the error branch");
+                let arm = self.parse_match_arm()?;
+                self.expect(&TokenKind::RBrace, "to close the error branch");
+                end = arm.span;
+                Some(Box::new(arm))
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        self.expect(&TokenKind::LBrace, "before the match arms");
-
-        let mut arms = Vec::new();
-        while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
-            let before = self.pos;
-
-            if let Some(arm) = self.parse_match_arm() {
-                arms.push(arm);
-            }
-
-            // Arms may be separated by `,` or `;`, or by nothing at all when
-            // the body is a block.
-            self.eat(&TokenKind::Comma);
-            self.eat(&TokenKind::Semicolon);
-
-            if self.pos == before {
-                self.pos += 1;
-            }
-        }
-
-        let end = self.peek_span();
-        self.expect(&TokenKind::RBrace, "to close the match arms");
-
-        if arms.is_empty() {
-            self.error(
-                codes::EMPTY_MATCH,
-                start.to(end),
-                "a `match` needs at least one arm",
-                "a match with no arms could never produce a result",
-                Some("add an arm, or `_ => { }` to ignore every case".into()),
-            );
-            return None;
-        }
-
         Some(Expr::Match(MatchExpr {
-            scrutinee: Box::new(scrutinee),
-            with_binding,
-            arms,
+            scrutinee: acquisitions[0].expr.clone(),
+            with_binding: Some(acquisitions[0].binding.clone()),
+            arms: Vec::new(),
+            acquisitions,
+            body: Some(Box::new(body)),
+            error,
             span: start.to(end),
         }))
     }
@@ -2686,6 +2826,32 @@ impl<'a> Parser<'a> {
                     return Some(Pattern::Variant(VariantPattern {
                         span: span.to(end),
                         enum_name: Ident::new(name, span),
+                        variant,
+                        bindings,
+                    }));
+                }
+
+                // `Ok(file)` and `Error(error)` are the unqualified forms of
+                // the built-in `Result<T,E>` variants; the parser resolves them
+                // to `Result` synthetically so the rest of the pipeline treats
+                // them like any other qualified variant.
+                if (name == "Ok" || name == "Error") && matches!(self.peek(), TokenKind::LParen) {
+                    let mut bindings = Vec::new();
+                    self.pos += 1;
+                    if !matches!(self.peek(), TokenKind::RParen) {
+                        loop {
+                            bindings.push(self.parse_pattern()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    let end = self.peek_span();
+                    self.expect(&TokenKind::RParen, "to close the variant's bindings");
+                    let variant = Ident::new(name, span);
+                    return Some(Pattern::Variant(VariantPattern {
+                        span: span.to(end),
+                        enum_name: Ident::new("Result", span),
                         variant,
                         bindings,
                     }));
@@ -2992,6 +3158,17 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Expr::Super(SuperExpr { span }))
             }
+            // `Pin<T>` and `Pin(obj)` are built-in generic surface syntax; the
+            // name is a keyword, but in expression position it acts like the
+            // identifier `Pin` so `Pin(c)` parses as a call.
+            TokenKind::Keyword(Keyword::Pin) => {
+                self.pos += 1;
+                self.parse_after_ident(Ident::new("Pin", span))
+            }
+            // Kept out of this arm's body on purpose: `parse_primary` runs
+            // once per level of a deeply nested expression, and every arm's
+            // locals count against that one shared frame.
+            TokenKind::Keyword(Keyword::Transfer) => self.parse_transfer(span),
             // `<Type>expr`, the prefix spelling of a cast. Unambiguous: `<`
             // never starts a primary expression otherwise — comparison needs
             // a left operand, which nothing precedes here.
@@ -3066,6 +3243,20 @@ impl<'a> Parser<'a> {
             span: span.to(operand.span()),
             expr: Box::new(operand),
             target,
+        }))
+    }
+
+    /// `transfer(<expr>)`, factored out of `parse_primary` to keep its
+    /// stack frame small for deeply nested expressions.
+    fn parse_transfer(&mut self, span: Span) -> Option<Expr> {
+        self.pos += 1; // `transfer`
+        self.expect(&TokenKind::LParen, "after `transfer`");
+        let expr = self.parse_expr()?;
+        let end = self.peek_span();
+        self.expect(&TokenKind::RParen, "to close `transfer`");
+        Some(Expr::Transfer(TransferExpr {
+            expr: Box::new(expr),
+            span: span.to(end),
         }))
     }
 

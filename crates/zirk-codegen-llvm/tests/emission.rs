@@ -162,7 +162,6 @@ fn addition_checks_for_overflow() {
         ir.contains("llvm.sadd.with.overflow.i32"),
         "ordinary overflow must be a controlled error:\n{ir}"
     );
-    assert!(ir.contains(symbols::OVERFLOW));
 }
 
 #[test]
@@ -211,15 +210,6 @@ fn the_remainder_also_checks_the_divisor() {
     ));
     assert!(ir.contains(symbols::THROW));
     assert!(ir.contains("srem i32"));
-}
-
-#[test]
-fn the_failure_handlers_do_not_return() {
-    let ir = llvm_ir(&in_main("mut a: Int32 = 1;\nmut x: Int32 = a + 2;"));
-    assert!(
-        ir.contains("unreachable"),
-        "after calling the handler nothing executes:\n{ir}"
-    );
 }
 
 // --- Comparison and logic ---------------------------------------------------

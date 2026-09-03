@@ -60,8 +60,6 @@ pub mod symbols {
     pub const STR_EQ: &str = "zirk_str_eq";
     /// Writes a `String` to standard output with a line break.
     pub const IO_PRINTLN: &str = "zirk_io_println";
-    /// Reports an arithmetic overflow and terminates.
-    pub const OVERFLOW: &str = "zirk_rt_overflow";
     /// Reports a division by zero and terminates.
     pub const DIVISION_BY_ZERO: &str = "zirk_rt_division_by_zero";
     /// Obtains storage for an object. The strategy behind it is the runtime's
@@ -108,6 +106,13 @@ pub mod symbols {
     /// terminating when it does not match (roadmap Phase 4b) — a `catch`
     /// clause's own coverage test.
     pub const IS_INSTANCE: &str = "zirk_rt_is_instance";
+    /// Returns the lazily-built `String` stack trace of an exception
+    /// (roadmap Phase 4b).
+    pub const STACK_TRACE: &str = "zirk_rt_stack_trace";
+    /// Returns the exception suppressed by another exception (roadmap Phase 4b).
+    pub const SUPPRESSED: &str = "zirk_rt_suppressed";
+    /// Attaches a suppressed exception before `throw` (roadmap Phase 4b).
+    pub const SET_SUPPRESSED: &str = "zirk_rt_set_suppressed";
     /// Reports an exception that escaped `main` uncaught and terminates
     /// (roadmap Phase 4b).
     pub const UNCAUGHT_EXCEPTION: &str = "zirk_rt_uncaught_exception";
@@ -136,6 +141,12 @@ pub mod symbols {
     /// the traversal lives here rather than being unrolled across several
     /// IR instructions.
     pub const CLONE: &str = "zirk_rt_clone";
+    /// Allocates the capture block for a boxed callable (roadmap Phase 4d,
+    /// `phase-4d-callables`, task 5). The current implementation is a stub.
+    pub const ALLOC_CALLABLE: &str = "zirk_rt_alloc_callable";
+    /// Clones the capture block of a boxed callable (roadmap Phase 4d,
+    /// `phase-4d-callables`, task 6). The current implementation is a stub.
+    pub const CLONE_CALLABLE: &str = "zirk_rt_clone_callable";
     /// Begins a new per-`unsafe`-block undo log (roadmap Phase 4e,
     /// `fase-4e-unsafe-journal`, design D1) — `InstKind::JournalBegin`'s own
     /// lowering.
@@ -156,9 +167,28 @@ pub mod symbols {
     /// validation (roadmap Phase 4e, `fase-4e-native-slice`, design D3/D5,
     /// `InstKind::NativeSliceValidate`'s own doc comment).
     pub const NATIVE_SLICE_VALIDATE: &str = "zirk_rt_native_slice_validate";
+    /// Whether an active cancellation token is set (roadmap Phase 4c,
+    /// `phase-4c-resources`, design D5) — consulted before resource close.
+    pub const IS_CANCELLED: &str = "zirk_rt_is_cancelled";
+    /// Closes a group of acquired resources right-to-left (roadmap Phase 4c,
+    /// `phase-4c-resources`, design D1/D5) — `match with` grouped cleanup.
+    pub const RESOURCE_CLOSE_GROUP: &str = "zirk_rt_resource_close_group";
+    /// Transfers ownership of a resource, invalidating the source slot
+    /// (roadmap Phase 4c, `phase-4c-resources`, design D3).
+    pub const RESOURCE_TRANSFER: &str = "zirk_rt_resource_transfer";
+    /// `zirk_rt_pin_object` (roadmap Phase 4e, `phase-4e-memory`, design D1):
+    /// adds an object to the per-thread pin list.
+    pub const PIN_OBJECT: &str = "zirk_rt_pin_object";
+    /// `zirk_rt_unpin_object` (roadmap Phase 4e, `phase-4e-memory`, design
+    /// D1): removes an object from the per-thread pin list.
+    pub const UNPIN_OBJECT: &str = "zirk_rt_unpin_object";
+    /// `zirk_rt_dependent_base` (roadmap Phase 4e, `phase-4e-memory`, design
+    /// D1): reads the base pointer from a `Dependent<T>` value.
+    pub const DEPENDENT_BASE: &str = "zirk_rt_dependent_base";
 }
 
 /// The runtime functions available to generated code.
+#[allow(dead_code)]
 pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
@@ -181,7 +211,6 @@ pub struct Runtime<'ctx> {
     pub str_grapheme_slice: FunctionValue<'ctx>,
     pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
-    pub overflow: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
@@ -189,6 +218,9 @@ pub struct Runtime<'ctx> {
     pub check_cast: FunctionValue<'ctx>,
     pub fatal_error: FunctionValue<'ctx>,
     pub throw: FunctionValue<'ctx>,
+    pub stack_trace: FunctionValue<'ctx>,
+    pub suppressed: FunctionValue<'ctx>,
+    pub set_suppressed: FunctionValue<'ctx>,
     pub has_pending_exception: FunctionValue<'ctx>,
     pub take_pending_exception: FunctionValue<'ctx>,
     pub is_instance: FunctionValue<'ctx>,
@@ -204,6 +236,10 @@ pub struct Runtime<'ctx> {
     /// `zirk_rt_clone` (roadmap Phase 4e, `fase-4e-clone`, design D2) — the
     /// whole deep-clone-graph traversal, one call per `.clone()` site.
     pub clone: FunctionValue<'ctx>,
+    /// `zirk_rt_alloc_callable` (roadmap Phase 4d, `phase-4d-callables`).
+    pub alloc_callable: FunctionValue<'ctx>,
+    /// `zirk_rt_clone_callable` (roadmap Phase 4d, `phase-4d-callables`).
+    pub clone_callable: FunctionValue<'ctx>,
     /// `zirk_rt_journal_begin` (roadmap Phase 4e, `fase-4e-unsafe-journal`,
     /// design D1).
     pub journal_begin: FunctionValue<'ctx>,
@@ -217,6 +253,22 @@ pub struct Runtime<'ctx> {
     /// `fase-4e-native-slice`, design D3/D5) — one call per
     /// `.as_slice(length)`/`.as_slice_mut(length)` construction.
     pub native_slice_validate: FunctionValue<'ctx>,
+    /// `zirk_rt_is_cancelled` (roadmap Phase 4c, `phase-4c-resources`,
+    /// design D5) — checked before resource close.
+    pub is_cancelled: FunctionValue<'ctx>,
+    /// `zirk_rt_resource_close_group` (roadmap Phase 4c,
+    /// `phase-4c-resources`, design D1/D5) — grouped `match with` cleanup.
+    pub resource_close_group: FunctionValue<'ctx>,
+    /// `zirk_rt_resource_transfer` (roadmap Phase 4c,
+    /// `phase-4c-resources`, design D3) — ownership transfer.
+    pub resource_transfer: FunctionValue<'ctx>,
+    /// `zirk_rt_pin_object` (roadmap Phase 4e, `phase-4e-memory`, design D1).
+    pub pin_object: FunctionValue<'ctx>,
+    /// `zirk_rt_unpin_object` (roadmap Phase 4e, `phase-4e-memory`, design D1).
+    pub unpin_object: FunctionValue<'ctx>,
+    /// `zirk_rt_dependent_base` (roadmap Phase 4e, `phase-4e-memory`, design
+    /// D1): reads the base pointer from a `Dependent<T>` value.
+    pub dependent_base: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -338,7 +390,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
 
     // The failure handlers never return: marking them `noreturn` lets LLVM
     // treat the code after them as unreachable and optimize accordingly.
-    let overflow = module.add_function(symbols::OVERFLOW, void.fn_type(&[], false), external);
     let division_by_zero = module.add_function(
         symbols::DIVISION_BY_ZERO,
         void.fn_type(&[], false),
@@ -352,6 +403,20 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
 
     let clone = module.add_function(symbols::CLONE, ptr.fn_type(&[ptr.into()], false), external);
+
+    // Phase 4d boxed callables: capture-block allocation and cloning are
+    // declared with C ABI linkage; the generated code does not yet emit calls
+    // to them (shortcut documented in `phase-4d-callables/tasks.md`).
+    let alloc_callable = module.add_function(
+        symbols::ALLOC_CALLABLE,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let clone_callable = module.add_function(
+        symbols::CLONE_CALLABLE,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
 
     let journal_begin =
         module.add_function(symbols::JOURNAL_BEGIN, ptr.fn_type(&[], false), external);
@@ -382,6 +447,48 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             &[ptr.into(), i64.into(), i64.into(), i64.into(), i64.into()],
             false,
         ),
+        external,
+    );
+    // `zirk_rt_is_cancelled() -> bool` (roadmap Phase 4c,
+    // `phase-4c-resources`, design D5): cancellation-aware cleanup guardrail.
+    let is_cancelled = module.add_function(
+        symbols::IS_CANCELLED,
+        context.bool_type().fn_type(&[], false),
+        external,
+    );
+    // `zirk_rt_resource_close_group(resources, close) -> *mut c_void`
+    // (roadmap Phase 4c, `phase-4c-resources`, design D1/D5): right-to-left
+    // grouped cleanup; the stub returns `null` and does not block.
+    let resource_close_group = module.add_function(
+        symbols::RESOURCE_CLOSE_GROUP,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    // `zirk_rt_resource_transfer(resource) -> *mut c_void` (roadmap Phase 4c,
+    // `phase-4c-resources`, design D3): ownership transfer stub.
+    let resource_transfer = module.add_function(
+        symbols::RESOURCE_TRANSFER,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    // `zirk_rt_pin_object(object)` / `zirk_rt_unpin_object(object)` (roadmap
+    // Phase 4e, `phase-4e-memory`, design D1): per-thread pin list stubs.
+    let pin_object = module.add_function(
+        symbols::PIN_OBJECT,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let unpin_object = module.add_function(
+        symbols::UNPIN_OBJECT,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    // `zirk_rt_dependent_base(dependent) -> *mut c_void` (roadmap Phase 4e,
+    // `phase-4e-memory`, design D1): reads the base object from a
+    // `Dependent<T>` value. Surface-only stub.
+    let dependent_base = module.add_function(
+        symbols::DEPENDENT_BASE,
+        ptr.fn_type(&[ptr.into()], false),
         external,
     );
     // Declared so the allocator can reach it, and marked `noreturn` with the
@@ -433,6 +540,21 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
 
     let throw = module.add_function(symbols::THROW, void.fn_type(&[ptr.into()], false), external);
+    let stack_trace = module.add_function(
+        symbols::STACK_TRACE,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let suppressed = module.add_function(
+        symbols::SUPPRESSED,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let set_suppressed = module.add_function(
+        symbols::SET_SUPPRESSED,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
     let bool_ty = context.bool_type();
     let has_pending_exception = module.add_function(
         symbols::HAS_PENDING_EXCEPTION,
@@ -479,7 +601,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     weak_cell_ever_allocated.set_linkage(Linkage::External);
 
     for handler in [
-        overflow,
         division_by_zero,
         allocation_failed,
         missing_contract,
@@ -519,7 +640,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_grapheme_slice,
         str_eq,
         io_println,
-        overflow,
         alloc,
         contract_table,
         str_concat,
@@ -527,6 +647,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         check_cast,
         fatal_error,
         throw,
+        stack_trace,
+        suppressed,
+        set_suppressed,
         has_pending_exception,
         take_pending_exception,
         is_instance,
@@ -536,10 +659,18 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         weak_cell_descriptor: weak_cell_descriptor.as_pointer_value(),
         weak_cell_ever_allocated: weak_cell_ever_allocated.as_pointer_value(),
         clone,
+        alloc_callable,
+        clone_callable,
         journal_begin,
         journal_record,
         journal_commit,
         journal_rollback,
         native_slice_validate,
+        is_cancelled,
+        resource_close_group,
+        resource_transfer,
+        pin_object,
+        unpin_object,
+        dependent_base,
     }
 }

@@ -1,0 +1,11 @@
+// Basic callable fixture for Phase 4d: a lambda that captures a local and
+// is assigned to a `Fn(Int32) => Int32` typed variable, then called.
+//
+// This fixture now exercises the `MakeCallable`/`CallCallable` boxed
+// representation (roadmap Phase 4d, `phase-4d-callables`).
+
+fn main(): Void {
+    inmut base = 10;
+    inmut f: Fn(Int32) => Int32 = (n: Int32): Int32 => n + base;
+    stdout.println(f(5));
+}
