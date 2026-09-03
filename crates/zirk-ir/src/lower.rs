@@ -1329,6 +1329,11 @@ struct LoopTargets {
     /// the loop, never ones enclosing it, so only `try_stack[try_depth..]`
     /// runs its `finally` on the way out (`Self::lower_break`/`lower_continue`).
     try_depth: usize,
+    /// How many `unsafe` frames were active when this loop started — so
+    /// `break`/`continue` can roll back the journals of `unsafe` blocks they
+    /// are leaving, the same way exceptions already do
+    /// (`Self::lower_pending_exception_dispatch`).
+    unsafe_depth: usize,
 }
 
 impl<'a> FunctionLowering<'a> {
@@ -2675,6 +2680,11 @@ impl<'a> FunctionLowering<'a> {
             // read-only `NativeSlice<T>` before this ever lowers.
             ast::AssignTarget::Index(index) => {
                 let receiver_ty = self.type_of(&index.receiver, index.receiver.span());
+                if receiver_ty == IrType::String {
+                    // The checker rejects `s[i] = c` as non-writable, but the
+                    // lowerer must not panic on the way to that diagnostic.
+                    return IrType::Char;
+                }
                 self.native_slice_element_type(receiver_ty)
             }
         }
@@ -2721,6 +2731,10 @@ impl<'a> FunctionLowering<'a> {
 
                 let receiver = self.lower_expr(&index_expr.receiver);
                 let receiver_ty = self.type_of_operand(receiver);
+                if receiver_ty == IrType::String {
+                    // The checker rejects `s[i] = c`; nothing to emit.
+                    return;
+                }
                 let receiver_slot = self.spill(receiver, receiver_ty, span);
 
                 let index_operand =
@@ -2989,6 +3003,7 @@ impl<'a> FunctionLowering<'a> {
             break_to: continue_block,
             continue_to: step_block,
             try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
         });
 
         self.current = body_block;
@@ -3079,6 +3094,7 @@ impl<'a> FunctionLowering<'a> {
             break_to: continue_block,
             continue_to: step_block,
             try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
         });
 
         self.current = body_block;
@@ -3181,6 +3197,7 @@ impl<'a> FunctionLowering<'a> {
             break_to: continue_block,
             continue_to: step_block,
             try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
         });
 
         self.current = body_block;
@@ -3328,6 +3345,7 @@ impl<'a> FunctionLowering<'a> {
             break_to: continue_block,
             continue_to: header,
             try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
         });
 
         self.current = body_block;
@@ -3369,7 +3387,7 @@ impl<'a> FunctionLowering<'a> {
             .last()
             .expect("a verified program only breaks inside a loop");
         let target = loop_target.break_to;
-        self.run_finally_through(loop_target.try_depth);
+        self.run_exit_cleanup(loop_target.try_depth, loop_target.unsafe_depth, _stmt.span);
         self.terminate(Terminator::Jump(target));
 
         // Statements after a `break` are unreachable, but the block they would
@@ -3384,7 +3402,7 @@ impl<'a> FunctionLowering<'a> {
             .last()
             .expect("a verified program only continues inside a loop");
         let target = loop_target.continue_to;
-        self.run_finally_through(loop_target.try_depth);
+        self.run_exit_cleanup(loop_target.try_depth, loop_target.unsafe_depth, _stmt.span);
         self.terminate(Terminator::Jump(target));
 
         let unreachable = self.new_block();
@@ -3394,45 +3412,108 @@ impl<'a> FunctionLowering<'a> {
     fn lower_return(&mut self, stmt: &ast::ReturnStmt) {
         let expected = self.return_type;
         let value = stmt.value.as_ref().map(|e| self.lower_expr_as(e, expected));
-        // Spilled ahead of `run_finally_through` below, the same reason
+        // Spilled ahead of `run_exit_cleanup` below, the same reason
         // `Self::lower_and_hold` spills any operand a later, block-opening
-        // expression would otherwise strand (ADR-007): a `finally` on the
-        // way out may itself open blocks — a call inside it does,
-        // unconditionally, since D11 (`fase-4d-runtimeerror`) — and `value`
-        // was computed in the block *before* that, so using it directly in
-        // this statement's own `Terminator::Return` below (built in
-        // whichever block lowering the `finally` left `self.current` at)
-        // would use a value from a block this one is no longer that same
-        // block (found via a `return call();` inside a `match ... with`
-        // arm whose own resource-close `finally` calls a `Void` method).
+        // expression would otherwise strand (ADR-007): `finally` or
+        // `JournalRollback` on the way out may itself open blocks — a call
+        // inside it does, unconditionally, since D11 (`fase-4d-runtimeerror`)
+        // — and `value` was computed in the block *before* that, so using it
+        // directly in this statement's own `Terminator::Return` below (built
+        // in whichever block the cleanup left `self.current` at) would use a
+        // value from a block this one is no longer that same block (found
+        // via a `return call();` inside a `match ... with` arm whose own
+        // resource-close `finally` calls a `Void` method).
         let holder = value.map(|operand| {
             let ty = self.type_of_operand(operand);
             let slot = self.declare_slot("<return_value>", ty, stmt.span);
             self.emit_effect(InstKind::Store(slot, operand), stmt.span);
             (slot, ty)
         });
-        // A `return` leaves every enclosing `try`, not just the innermost
-        // one (roadmap Phase 4b, design D3) — unlike `break`/`continue`,
-        // which only exit the ones nested *inside* the loop they target.
-        self.run_finally_through(0);
+        // A `return` leaves every enclosing `try` and `unsafe` frame, not
+        // just the innermost one (roadmap Phase 4b/4e, design D2/D3) —
+        // unlike `break`/`continue`, which only exit the ones nested *inside*
+        // the loop they target.
+        self.run_exit_cleanup(0, 0, stmt.span);
         let value = holder.map(|(slot, ty)| self.emit(InstKind::Load(slot), ty, stmt.span));
         self.terminate(Terminator::Return(value));
     }
 
-    /// Runs the `finally` of every active `try` frame from `depth` onward,
-    /// innermost first — what a `return`/`break`/`continue` leaving one or
-    /// more enclosing `try`s owes each of them on the way out (roadmap
-    /// Phase 4b, design D3). A plain slice rather than popping
-    /// `try_stack`: the frames are still active for whatever this statement
-    /// does *not* leave (a `break` only exits as far as its own loop).
-    fn run_finally_through(&mut self, depth: usize) {
-        let finally_blocks: Vec<Option<ast::Block>> = self.try_stack[depth..]
+    /// Runs the cleanup owed by `return`/`break`/`continue` leaving one or
+    /// more enclosing `try` and `unsafe` frames, from `try_depth` and
+    /// `unsafe_depth` onward, innermost first. `try` frames run their
+    /// `finally`; `unsafe` frames emit `JournalRollback` for any journal not
+    /// already durably committed. The two kinds of frames are interleaved by
+    /// their lexical `pushed_at` order, the same as a propagating exception
+    /// does (`Self::lower_pending_exception_dispatch`, roadmap Phase 4e,
+    /// design D2).
+    fn run_exit_cleanup(&mut self, try_depth: usize, unsafe_depth: usize, span: Span) {
+        enum Scope {
+            Try(TryFrame),
+            Unsafe(UnsafeFrame),
+        }
+
+        let mut scopes: Vec<Scope> = self
+            .try_stack
             .iter()
-            .rev()
-            .map(|frame| frame.finally.clone())
+            .skip(try_depth)
+            .cloned()
+            .map(Scope::Try)
+            .chain(
+                self.unsafe_stack
+                    .iter()
+                    .skip(unsafe_depth)
+                    .cloned()
+                    .map(Scope::Unsafe),
+            )
             .collect();
-        for finally in finally_blocks {
-            self.lower_finally_block(&finally);
+        scopes.sort_by_key(|scope| match scope {
+            Scope::Try(frame) => frame.pushed_at,
+            Scope::Unsafe(frame) => frame.pushed_at,
+        });
+
+        let full_try_stack = std::mem::take(&mut self.try_stack);
+        let full_unsafe_stack = std::mem::take(&mut self.unsafe_stack);
+        let mut rolled_back: Vec<SlotId> = Vec::new();
+
+        for index in (0..scopes.len()).rev() {
+            let mut outer_try = Vec::new();
+            let mut outer_unsafe = Vec::new();
+            for scope in &scopes[..index] {
+                match scope {
+                    Scope::Try(frame) => outer_try.push(frame.clone()),
+                    Scope::Unsafe(frame) => outer_unsafe.push(frame.clone()),
+                }
+            }
+            self.try_stack = outer_try;
+            self.unsafe_stack = outer_unsafe;
+
+            match &scopes[index] {
+                Scope::Try(frame) => {
+                    self.lower_finally_block(&frame.finally);
+                }
+                Scope::Unsafe(frame) => {
+                    if !frame.committed {
+                        let journal = self.emit(
+                            InstKind::Load(frame.journal_slot),
+                            IrType::JournalHandle,
+                            span,
+                        );
+                        self.emit_effect(InstKind::JournalRollback(journal), span);
+                        rolled_back.push(frame.journal_slot);
+                    }
+                }
+            }
+        }
+
+        self.try_stack = full_try_stack;
+        self.unsafe_stack = full_unsafe_stack;
+
+        for slot in rolled_back {
+            for frame in self.unsafe_stack.iter_mut() {
+                if frame.journal_slot == slot {
+                    frame.committed = true;
+                }
+            }
         }
     }
 
@@ -7264,16 +7345,29 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    /// Returns the id of `Pointer<pointee>` in `module.pointer_types`,
+    /// allocating a new entry if the pointee was not interned by the checker
+    /// (this happens for intermediate containers of a nested field access).
+    fn intern_pointer_type(&mut self, pointee: IrType) -> u32 {
+        if let Some(index) = self.module.pointer_types.iter().position(|&t| t == pointee) {
+            index as u32
+        } else {
+            let id = self.module.pointer_types.len() as u32;
+            self.module.pointer_types.push(pointee);
+            id
+        }
+    }
+
     /// `Pointer.from(place)` (design D8): the address already computed for
     /// `place`'s own storage — no allocation, just exposing it.
+    ///
+    /// For a `record` or `value class` field, the chain is built from the
+    /// innermost lvalue out: the root slot gives a `Pointer<Root>`, each
+    /// intermediate field `PointerFromField`s to the next value, and the
+    /// final field is the `Pointer<T>` requested by the user.
     fn lower_pointer_from(&mut self, place: &ast::Expr, span: Span) -> Operand {
         let pointee = self.type_of(place, place.span());
-        let id =
-            self.module
-                .pointer_types
-                .iter()
-                .position(|&t| t == pointee)
-                .expect("the checker interned every Pointer<T> it type-checked") as u32;
+        let id = self.intern_pointer_type(pointee);
         let ty = IrType::Pointer(id);
 
         match place {
@@ -7283,7 +7377,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Field(field) => {
                 let (index, _) = self.field_position(&field.object, &field.name.name);
-                let object = self.lower_expr(&field.object);
+                let object = self.lower_pointer_from(&field.object, span);
                 self.emit(InstKind::PointerFromField { object, index }, ty, span)
             }
             _ => unreachable!("the checker only accepts an addressable place"),
@@ -7634,6 +7728,10 @@ impl<'a> FunctionLowering<'a> {
         let receiver_ty = self.type_of_operand(receiver);
         let receiver_slot = self.spill(receiver, receiver_ty, span);
 
+        if receiver_ty == IrType::String {
+            return self.lower_string_index_read(receiver_slot, &expr.index, span);
+        }
+
         let index_operand = self.lower_expr_as(&expr.index, IrType::Int(IntWidth::U64));
         let index_slot = self.spill(index_operand, IrType::Int(IntWidth::U64), span);
 
@@ -7643,6 +7741,78 @@ impl<'a> FunctionLowering<'a> {
         self.emit(
             InstKind::NativeSliceLoad { receiver, index },
             element_ty,
+            span,
+        )
+    }
+
+    /// `s[i]` for `String`, returning a `Char` grapheme by copy.
+    fn lower_string_index_read(
+        &mut self,
+        receiver_slot: SlotId,
+        index_expr: &ast::Expr,
+        span: Span,
+    ) -> Operand {
+        let index = self.lower_expr_as(index_expr, IrType::Int(IntWidth::I64));
+        let index_slot = self.spill(index, IrType::Int(IntWidth::I64), span);
+
+        let string = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let offset = self.emit(
+            InstKind::StringGraphemeOffset { string, index },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let offset_slot = self.spill(offset, IrType::Int(IntWidth::I64), span);
+
+        let minus_one = self.const_i64(-1, span);
+        let is_out = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: offset,
+                right: minus_one,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_out,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program indexing a string registered the exception hierarchy");
+        self.throw_native_failure(
+            native.index_out_of_bounds,
+            "string index out of bounds",
+            span,
+        );
+
+        self.current = cont;
+        let string = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+        let offset = self.emit(
+            InstKind::Load(offset_slot),
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let length = self.emit(
+            InstKind::GraphemeLenAt { string, offset },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        self.emit(
+            InstKind::GraphemeSlice {
+                string,
+                offset,
+                len: length,
+            },
+            IrType::Char,
             span,
         )
     }

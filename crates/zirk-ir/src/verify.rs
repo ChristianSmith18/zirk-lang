@@ -204,6 +204,32 @@ fn verify_instruction(
         // own doc comment.
         InstKind::TakePendingException => {}
 
+        InstKind::StringGraphemeOffset { string, index } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I64),
+                position,
+                "StringGraphemeOffset",
+                report,
+            );
+            if let Some(ty) = type_of(string)
+                && ty != IrType::String
+            {
+                report(format!(
+                    "{position}: StringGraphemeOffset reads {}, which is not a String",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(index)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: StringGraphemeOffset's index is {}, expected Int64",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::GraphemeLenAt { string, offset } => {
             expect(
                 inst.ty,
@@ -905,13 +931,26 @@ fn verify_instruction(
             }
         }
         InstKind::PointerFromField { object, .. } => {
-            if let Some(ty) = type_of(object)
-                && !matches!(ty, IrType::Object(_) | IrType::Value(_))
-            {
-                report(format!(
-                    "{position}: PointerFromField reads {}, which is not an object or value",
-                    ty.as_str()
-                ));
+            if let Some(ty) = type_of(object) {
+                match ty {
+                    IrType::Pointer(id) => {
+                        if !matches!(
+                            module.pointer_types.get(id as usize),
+                            Some(IrType::Object(_) | IrType::Value(_))
+                        ) {
+                            report(format!(
+                                "{position}: PointerFromField reads {}, which is not a Pointer to an object or value",
+                                ty.as_str()
+                            ));
+                        }
+                    }
+                    other => {
+                        report(format!(
+                            "{position}: PointerFromField reads {}, which is not a Pointer",
+                            other.as_str()
+                        ));
+                    }
+                }
             }
             if !matches!(inst.ty, IrType::Pointer(_)) {
                 report(format!(
@@ -1352,6 +1391,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::FloatCast(operand)
         | InstKind::IntToFloat(operand)
         | InstKind::FloatToInt(operand) => vec![*operand],
+        InstKind::StringGraphemeOffset { string, index } => vec![*string, *index],
         InstKind::GraphemeLenAt { string, offset } => vec![*string, *offset],
         InstKind::GraphemeSlice {
             string,

@@ -1976,6 +1976,76 @@ fn an_exception_escaping_unsafe_emits_journal_rollback() {
     );
 }
 
+/// `return` leaving an `unsafe { ... }` block must roll back before the function exits.
+#[test]
+fn return_inside_unsafe_emits_journal_rollback() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        unsafe {
+            x = 2;
+            return;
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRollback(_))),
+        "a return leaving the unsafe block must roll back, found {kinds:?}"
+    );
+}
+
+/// `break` leaving an `unsafe { ... }` block must roll back before jumping.
+#[test]
+fn break_inside_unsafe_emits_journal_rollback() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        loop {
+            unsafe {
+                x = 2;
+                break;
+            }
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRollback(_))),
+        "a break leaving the unsafe block must roll back, found {kinds:?}"
+    );
+}
+
+/// `continue` leaving an `unsafe { ... }` block must roll back before jumping.
+#[test]
+fn continue_inside_unsafe_emits_journal_rollback() {
+    let source = "fn main(): Void {
+        mut x: Int32 = 1;
+        loop {
+            unsafe {
+                x = 2;
+                continue;
+            }
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JournalRollback(_))),
+        "a continue leaving the unsafe block must roll back, found {kinds:?}"
+    );
+}
+
 // --- NativeSlice<T>/NativeSliceMut<T> (roadmap Phase 4e, `fase-4e-native-slice`) --
 
 /// `pointer.as_slice(length)` lowers to a validation call
@@ -2004,6 +2074,48 @@ fn as_slice_construction_lowers_to_a_validation_call_producing_a_result() {
             .iter()
             .any(|k| matches!(k, InstKind::BuildEnum { .. })),
         "as_slice must build a Result value, found {kinds:?}"
+    );
+}
+
+/// `s[i]` for `String` lowers to `StringGraphemeOffset`, a bounds branch,
+/// `GraphemeLenAt`, and `GraphemeSlice` — roadmap Phase 4e.
+#[test]
+fn string_index_lowers_to_grapheme_instructions() {
+    let source = "fn main(): Void {
+        mut s: String = \"hola\";
+        mut c: Char = s[1];
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::StringGraphemeOffset { .. })),
+        "String[index] must lower to StringGraphemeOffset, found {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(
+            k,
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                ..
+            }
+        )),
+        "String[index] must compare the offset against -1, found {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::GraphemeLenAt { .. })),
+        "String[index] must lower to GraphemeLenAt, found {kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::GraphemeSlice { .. })),
+        "String[index] must lower to GraphemeSlice, found {kinds:?}"
     );
 }
 

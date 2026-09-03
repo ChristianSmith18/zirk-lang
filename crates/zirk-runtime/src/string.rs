@@ -331,6 +331,34 @@ pub unsafe extern "C" fn zirk_str_is_ascii(handle: *const c_void) -> bool {
     unsafe { borrow(handle) }.is_none_or(|string| string.is_ascii)
 }
 
+/// The byte offset of the `index`-th Unicode extended grapheme, or `-1`
+/// when `index` is past the end or the handle is missing (roadmap Phase 4e,
+/// `String[index]` read-only access).
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_grapheme_offset(handle: *const c_void, index: i64) -> i64 {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let Some(string) = (unsafe { borrow(handle) }) else {
+        return -1;
+    };
+    let text = unsafe { string.as_str() };
+    if index < 0 {
+        return -1;
+    }
+    let mut byte_offset: i64 = 0;
+    for (i, grapheme) in text.graphemes(true).enumerate() {
+        if i == index as usize {
+            return byte_offset;
+        }
+        byte_offset += grapheme.len() as i64;
+    }
+    -1
+}
+
 /// The byte length of the Unicode extended grapheme starting at `offset`, or
 /// `-1` when `offset` is at or past the end (roadmap Phase 3b, task 6.3:
 /// `for ... in` over `String`).

@@ -159,7 +159,9 @@ Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
 | `NativeSlice<T>` / `NativeSliceMut<T>` | yes | yes | yes | yes | yes | yes | `fase-4e-native-slice`; also delivered `expr[index]`. |
 | `extern "C" fn` | yes | yes | yes | yes | yes | yes | `ADR-015`; `Keyword::Extern` in subset. |
 | `commit {}` | yes | yes | yes | yes | yes | yes | `Keyword::Commit` in subset. |
-| Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`. |
+| Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `fase-4e-cierre-pendientes` closed `return`/`break`/`continue` early-exit rollback. |
+| `Pointer.from` on `record` / `value class` fields | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
+| `String[index]` read-only grapheme access | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
 | Dependent references | yes | no | no | no | no | no | Spec defined; not started. |
 | Automatic bounded native pinning | yes | no | no | no | no | no | Spec defined; not started. |
 

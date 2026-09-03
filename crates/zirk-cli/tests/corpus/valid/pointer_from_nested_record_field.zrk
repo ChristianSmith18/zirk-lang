@@ -1,0 +1,10 @@
+record Inner { a: Int32; }
+record Outer { inner: Inner; }
+
+fn main(): Void {
+    mut o: Outer = Outer(inner: Inner(a: 7));
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from(o.inner.a);
+        stdout.println(p.read());
+    }
+}

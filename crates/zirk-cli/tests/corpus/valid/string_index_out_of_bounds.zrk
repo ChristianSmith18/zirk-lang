@@ -1,0 +1,9 @@
+fn main(): Void {
+    mut s: String = "hola";
+    try {
+        mut c: Char = s[10];
+        stdout.println(c.to_string());
+    } catch IndexOutOfBoundsError(e) {
+        stdout.println("out");
+    }
+}

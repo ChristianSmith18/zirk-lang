@@ -205,4 +205,8 @@ pub mod codes {
     /// (roadmap Phase 4e, `fase-4e-native-slice`, design D5) — today, a
     /// `NativeSlice<T>` (read-only) on the left of `=`.
     pub const INDEX_NOT_WRITABLE: Code = Code::new("E0452");
+    /// `expr[index]` with a negative, constant `index` for `String` indexing,
+    /// or an out-of-bounds index the checker can see is out of range
+    /// (roadmap Phase 4e, `String[index]`).
+    pub const INDEX_OUT_OF_BOUNDS: Code = Code::new("E0453");
 }
