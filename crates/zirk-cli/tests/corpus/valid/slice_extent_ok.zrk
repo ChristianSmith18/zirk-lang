@@ -1,0 +1,7 @@
+fn main(): Void {
+    mut x: Int32 = 42;
+    unsafe {
+        mut view: NativeSlice<Int32> = Pointer.from(x).as_slice(1).unwrap();
+        stdout.println(view[0].to_string());
+    }
+}

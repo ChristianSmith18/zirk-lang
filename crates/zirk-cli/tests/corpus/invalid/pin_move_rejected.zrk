@@ -1,0 +1,12 @@
+class Counter {
+    mut value: Int32;
+    construct(v: Int32) { this.value = v; }
+}
+
+fn main(): Void {
+    mut c: Counter = Counter(5);
+    mut pinned: Pin<Counter> = Pin(c);
+    // Moving the referent while the Pin<T> is alive is rejected.
+    c = Counter(10);
+    stdout.println(pinned.value);
+}

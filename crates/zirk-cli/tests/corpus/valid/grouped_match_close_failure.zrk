@@ -1,0 +1,70 @@
+// Grouped `match ... with` where a body succeeds and a close fails.
+// The `error` branch receives `ResourceFailure.Close(e)`.
+
+class OpenError implements Error {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "OPEN";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+}
+
+class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    mut fail_close: Boolean;
+
+    construct(name: String, fail_close: Boolean) {
+        this.name = name;
+        this.fail_close = fail_close;
+    }
+
+    fn read_all(): String {
+        return "contents of " + this.name;
+    }
+
+    fn nothing(): Void {
+        return;
+    }
+
+    override fn close(): Result<Void, OpenError> {
+        if this.fail_close {
+            return Error(OpenError("close error: " + this.name));
+        }
+        return Ok(this.nothing());
+    }
+
+    override fn is_closed(): Boolean {
+        return false;
+    }
+}
+
+fn open_file(name: String, fail_open: Boolean, fail_close: Boolean): Result<FakeFile, OpenError> {
+    if fail_open {
+        return Error(OpenError("cannot open " + name));
+    }
+    return Ok(FakeFile(name, fail_close));
+}
+
+fn main(): Void {
+    match open_file("a", false, true) with a, open_file("b", false, false) with b {
+        stdout.println(a.read_all());
+        stdout.println(b.read_all());
+    } error {
+        ResourceFailure.Close(e) => {
+            stdout.println("close failed: " + e.message());
+        }
+    }
+    stdout.println("done");
+}

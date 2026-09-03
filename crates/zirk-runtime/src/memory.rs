@@ -163,6 +163,38 @@ pub unsafe extern "C" fn zirk_rt_check_cast(descriptor: *const c_void, target: u
     crate::failure::zirk_rt_invalid_cast()
 }
 
+/// Adds an object to the per-thread pin list (roadmap Phase 4e,
+/// `phase-4e-memory`, design D1). The surface implementation is a stub:
+/// the real per-thread list and non-moving compaction will be wired later.
+///
+/// # Safety
+///
+/// `object` must be a live, reference-typed value produced by this compiler.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_pin_object(_object: *const c_void) {}
+
+/// Removes an object from the per-thread pin list (roadmap Phase 4e,
+/// `phase-4e-memory`, design D1). The surface implementation is a stub.
+///
+/// # Safety
+///
+/// `object` must be the same pointer previously passed to
+/// [`zirk_rt_pin_object`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_unpin_object(_object: *const c_void) {}
+
+/// Reads the base object pointer from a `Dependent<T>` value (roadmap
+/// Phase 4e, `phase-4e-memory`, design D1). Surface stub: returns null
+/// until the two-word dependent form is wired through codegen and the GC.
+///
+/// # Safety
+///
+/// `dependent` must be a `Dependent<T>` value produced by this compiler.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_dependent_base(_dependent: *const c_void) -> *const c_void {
+    std::ptr::null()
+}
+
 /// Tests a descriptor's ancestor list against `target`, the same list
 /// [`zirk_rt_check_cast`] searches — but returns whether it matched instead
 /// of terminating when it does not (roadmap Phase 4b: a `catch Type(name)`

@@ -58,6 +58,8 @@ pub enum Keyword {
     Interface,
     Trait,
     With,
+    /// `transfer(expr)` — ownership transfer of a `TransferableResource`.
+    Transfer,
     Try,
     Catch,
     Finally,
@@ -102,6 +104,10 @@ pub enum Keyword {
     /// `extern "C" fn name(...): T;`, a bodyless native declaration (roadmap
     /// Phase 4e, `ADR-015-declaracion-extern.md`).
     Extern,
+    /// `Pin<T>` / `pin` (roadmap Phase 4e, `phase-4e-memory`): the type form
+    /// is implemented as a built-in generic, while the statement form is
+    /// reserved.
+    Pin,
 }
 
 impl Keyword {
@@ -132,6 +138,7 @@ impl Keyword {
             "interface" => Interface,
             "trait" => Trait,
             "with" => With,
+            "transfer" => Transfer,
             "try" => Try,
             "catch" => Catch,
             "finally" => Finally,
@@ -170,6 +177,7 @@ impl Keyword {
             "out" => Out,
             "commit" => Commit,
             "extern" => Extern,
+            "Pin" => Pin,
             _ => return None,
         })
     }
@@ -198,6 +206,7 @@ impl Keyword {
             Interface => "interface",
             Trait => "trait",
             With => "with",
+            Transfer => "transfer",
             Try => "try",
             Catch => "catch",
             Finally => "finally",
@@ -236,6 +245,7 @@ impl Keyword {
             Out => "out",
             Commit => "commit",
             Extern => "extern",
+            Pin => "Pin",
         }
     }
 

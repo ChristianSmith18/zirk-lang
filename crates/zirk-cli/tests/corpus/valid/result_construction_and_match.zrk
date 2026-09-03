@@ -1,18 +1,18 @@
 // `Result<T,E>` (roadmap Phase 4a, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
-// section 2): construction (`Result.Ok`/`Result.Error`), destructuring
+// section 2): construction (`Ok(...)`/`Error(...)`), destructuring
 // `match`, and the seven in-scope methods (`get_or_else` and the four
 // generic combinators are out of scope for this pass).
 fn divide(a: Int32, b: Int32): Result<Int32, String> {
     if b == 0 {
-        return Result.Error("division by zero");
+        return Error("division by zero");
     }
-    return Result.Ok(a / b);
+    return Ok(a / b);
 }
 
 fn describe(r: Result<Int32, String>): String {
     return match r {
-        Result.Ok(value) => "ok:" + value.to_string();
-        Result.Error(error) => "error:" + error;
+        Ok(value) => "ok:" + value.to_string();
+        Error(error) => "error:" + error;
     };
 }
 

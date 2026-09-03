@@ -1,0 +1,18 @@
+class Holder {
+    value: Int32;
+    p: Pointer<Int32>;
+
+    construct(p: Pointer<Int32>) {
+        this.value = 0;
+        this.p = p;
+    }
+}
+
+fn main(): Void {
+    unsafe {
+        mut x: Int32 = 1;
+        mut h = Holder(Pointer.from(x));
+        inmut f = (n: Int32): Int32 => n + h.value;
+        mut g = f.clone();
+    }
+}

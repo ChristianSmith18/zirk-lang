@@ -1,0 +1,18 @@
+class FakeFile implements TransferableResource {
+    inmut name: String;
+
+    construct(name: String) {
+        this.name = name;
+    }
+
+    fn read_all(): String {
+        return "contents of " + this.name;
+    }
+}
+
+fn main(): Void {
+    mut a = FakeFile("x");
+    mut moved = transfer(a);
+    stdout.println(moved.read_all());
+    stdout.println(a.read_all());
+}

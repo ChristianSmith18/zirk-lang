@@ -207,6 +207,75 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         })
         .collect();
 
+    // One descriptor per closure layout.  It mirrors a class descriptor's
+    // shape at the tail (`word0` is ignored, `ancestor_count`/`contract_count`
+    // are zero, then the GC field count and offsets) so `zirk_rt_clone` and
+    // the collector can both walk the captured managed references.  `word0`
+    // points back at the descriptor itself so `clone_recursive` copies a
+    // non-null descriptor into the new block and continues the traversal.
+    let ptr = context.ptr_type(AddressSpace::default());
+    let word = context.i64_type();
+    let closure_descriptors: Vec<PointerValue> = module
+        .closures
+        .iter()
+        .enumerate()
+        .map(|(index, layout)| {
+            // Build the payload struct exactly as `MakeCallable`/`CallCallable`
+            // do, so the GC-offset table and the live stores agree on every
+            // field's position (including alignment padding).
+            let payload_types: Vec<BasicTypeEnum> = layout
+                .captures
+                .iter()
+                .map(|&ty| {
+                    llvm_type_in(context, ty, &module.closures, &module.values, &module.enums)
+                        .expect("a capture has an LLVM representation")
+                })
+                .collect();
+            let payload_struct = context.struct_type(&payload_types, false);
+
+            let mut gc_paths: Vec<Vec<u32>> = Vec::new();
+            for (capture_index, capture) in layout.captures.iter().enumerate() {
+                if capture.is_managed_reference(module) {
+                    let mut prefix = vec![capture_index as u32];
+                    gc_reference_paths(module, *capture, &mut prefix, &mut gc_paths);
+                }
+            }
+
+            let gc_offsets: Vec<BasicValueEnum> = gc_paths
+                .iter()
+                .map(|path| {
+                    let field_offset = const_field_offset(context, payload_struct, path);
+                    let header = context
+                        .i64_type()
+                        .const_int(CAPTURE_BLOCK_HEADER_BYTES as u64, false);
+                    field_offset.const_add(header).into()
+                })
+                .collect();
+
+            let mut fields: Vec<BasicValueEnum> = vec![
+                ptr.const_null().into(),
+                word.const_int(0, false).into(),
+                word.const_int(0, false).into(),
+                word.const_int(gc_offsets.len() as u64, false).into(),
+            ];
+            fields.extend(gc_offsets);
+
+            let placeholder = context.const_struct(&fields, false);
+            let global = llvm.add_global(
+                placeholder.get_type(),
+                None,
+                &format!("zk.closure.type.{index}"),
+            );
+            global.set_constant(true);
+            global.set_linkage(Linkage::Private);
+
+            fields[0] = global.as_pointer_value().into();
+            global.set_initializer(&context.const_struct(&fields, false));
+
+            global.as_pointer_value()
+        })
+        .collect();
+
     for function in &module.functions {
         FunctionEmitter {
             context,
@@ -217,6 +286,7 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             functions: &functions,
             strings: &strings,
             descriptors: &descriptors,
+            closure_descriptors: &closure_descriptors,
             values: HashMap::new(),
             value_types: HashMap::new(),
             slots: HashMap::new(),
@@ -310,6 +380,11 @@ fn llvm_type_in<'ctx>(
                 .expect("a verified module declares every closure layout");
             closure_struct(context, layout, closures, values, enums).into()
         }
+        // A boxed callable is a two-word `{ function pointer, capture block
+        // pointer }` pair. The capture block is allocated by the runtime and
+        // the captured values are read back at the call site
+        // (`phase-4d-callables`).
+        ir::IrType::Callable(_) => callable_struct(context).into(),
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
         // carries no pointee type; a load/store through it supplies `T`'s
@@ -330,6 +405,13 @@ fn llvm_type_in<'ctx>(
         // maps to `i64` the same way every other integer width does).
         ir::IrType::NativeSlice(_) | ir::IrType::NativeSliceMut(_) => {
             native_slice_struct(context).into()
+        }
+        // `Dependent<T>`/`Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
+        // design D1): surface-only, represented as an opaque pointer until
+        // the two-word dependent form and the per-thread pin list are wired
+        // through codegen and the runtime.
+        ir::IrType::Dependent(_) | ir::IrType::Pin(_) => {
+            context.ptr_type(AddressSpace::default()).into()
         }
     })
 }
@@ -446,6 +528,26 @@ fn closure_struct<'ctx>(
 /// included.
 const CLOSURE_HEADER_FIELDS: u32 = 1;
 
+/// The struct a boxed callable occupies: its function pointer, then a pointer
+/// to its heap-allocated capture block.
+fn callable_struct<'ctx>(context: &'ctx Context) -> inkwell::types::StructType<'ctx> {
+    context.struct_type(
+        &[
+            context.ptr_type(AddressSpace::default()).into(),
+            context.ptr_type(AddressSpace::default()).into(),
+        ],
+        false,
+    )
+}
+
+const CALLABLE_FUNCTION_FIELD: u32 = 0;
+const CALLABLE_CAPTURE_FIELD: u32 = 1;
+
+/// The capture block returned by `zirk_rt_alloc_callable` starts with the
+/// same three-word GC header as every object (`crate::collector` design D1);
+/// the actual captured values follow.
+const CAPTURE_BLOCK_HEADER_BYTES: usize = std::mem::size_of::<usize>() * 3;
+
 /// The leaf field-index path (design D2/D6 of `fase-4e-colector-mark-sweep`)
 /// to every collector-managed reference `ty` carries, directly or nested
 /// inside a `Value`/`Enum`/`Closure`/`Nullable`.
@@ -475,9 +577,11 @@ fn gc_reference_paths(
         // `fase-4e-weak`) — the path stops at the field itself; the
         // collector's own mark pass is what stops short of tracing *through*
         // the WeakCell (design D2), not this table.
-        ir::IrType::Object(_) | ir::IrType::Contract(_) | ir::IrType::Weak(_) => {
-            out.push(prefix.clone())
-        }
+        ir::IrType::Object(_)
+        | ir::IrType::Contract(_)
+        | ir::IrType::Weak(_)
+        | ir::IrType::Dependent(_)
+        | ir::IrType::Pin(_) => out.push(prefix.clone()),
         ir::IrType::Nullable(n) => {
             let inner = n.inner();
             if inner.is_managed_reference(module) {
@@ -512,6 +616,14 @@ fn gc_reference_paths(
                     prefix.pop();
                 }
             }
+        }
+        // A boxed `Callable` is `{ fn_ptr, capture_ptr }`; only the second
+        // field is a managed reference, and its own descriptor tells the GC
+        // where the captured managed references live.
+        ir::IrType::Callable(_) => {
+            prefix.push(CALLABLE_CAPTURE_FIELD);
+            out.push(prefix.clone());
+            prefix.pop();
         }
         _ => {}
     }
@@ -758,6 +870,8 @@ struct FunctionEmitter<'ctx, 'a> {
     strings: &'a [PointerValue<'ctx>],
     /// The type descriptor of each class, by layout id.
     descriptors: &'a [PointerValue<'ctx>],
+    /// The capture-block descriptor of each closure layout, by layout id.
+    closure_descriptors: &'a [PointerValue<'ctx>],
 
     values: HashMap<ir::ValueId, BasicValueEnum<'ctx>>,
     /// The IR type of each emitted value, which a pointer alone does not carry.
@@ -899,7 +1013,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             self.builder.position_at_end(self.blocks[&block.id]);
 
             for instruction in &block.instructions {
-                self.emit_instruction(instruction, llvm_function);
+                self.emit_instruction(instruction);
             }
 
             let terminator = block
@@ -938,6 +1052,40 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("a journaled write's target is not Void")
             .size_of()
             .expect("a journaled write's target is sized")
+    }
+
+    /// The LLVM struct that describes the layout of a closure's captured
+    /// values (without the GC header that `zirk_rt_alloc_callable` prefixes).
+    fn closure_payload_struct(
+        &self,
+        layout: &ir::ClosureLayout,
+    ) -> inkwell::types::StructType<'ctx> {
+        let payload_types: Vec<BasicTypeEnum> = layout
+            .captures
+            .iter()
+            .map(|&ty| {
+                self.llvm_type(ty)
+                    .expect("a capture has an LLVM representation")
+            })
+            .collect();
+        self.context.struct_type(&payload_types, false)
+    }
+
+    /// Byte offset from the start of a capture block's payload to the
+    /// `index`-th captured value, including any alignment padding LLVM inserts
+    /// in the payload struct, plus the three-word GC header that precedes it.
+    fn closure_capture_offset(
+        &self,
+        layout: &ir::ClosureLayout,
+        index: usize,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let payload_struct = self.closure_payload_struct(layout);
+        let field_offset = const_field_offset(self.context, payload_struct, &[index as u32]);
+        let header = self
+            .context
+            .i64_type()
+            .const_int(CAPTURE_BLOCK_HEADER_BYTES as u64, false);
+        field_offset.const_add(header)
     }
 
     /// Walks a live GC reference path (`gc_reference_paths`) from a real base
@@ -1019,7 +1167,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("gc closure step");
                 self.apply_gc_path(next, field_ty, rest)
             }
-            _ => unreachable!("a gc path only steps through Value/Enum/Closure/Nullable"),
+            ir::IrType::Callable(_) => {
+                let struct_type = callable_struct(self.context);
+                let next = self
+                    .builder
+                    .build_struct_gep(struct_type, ptr, index, "gc_callable_step")
+                    .expect("gc callable step");
+                assert!(
+                    rest.is_empty(),
+                    "a boxed Callable only exposes its capture pointer to the shadow stack"
+                );
+                next
+            }
+            _ => unreachable!("a gc path only steps through Value/Enum/Closure/Nullable/Callable"),
         }
     }
 
@@ -1043,47 +1203,64 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_struct_gep(struct_type, ptr, index + OBJECT_HEADER_FIELDS, "field_ptr")
                     .expect("a verified module addresses a field the layout has")
             }
-            ir::IrType::Pointer(pointer_id) => {
-                match self.module.pointer_types[pointer_id as usize] {
-                    ir::IrType::Object(id) => {
-                        let layout = &self.module.objects[id as usize];
-                        let struct_type = object_struct(
-                            self.context,
-                            layout,
-                            &self.module.closures,
-                            &self.module.values,
-                            &self.module.enums,
-                        );
-                        self.builder
-                            .build_struct_gep(
-                                struct_type,
-                                ptr,
-                                index + OBJECT_HEADER_FIELDS,
-                                "field_ptr",
-                            )
-                            .expect("a verified module addresses a field the layout has")
-                    }
-                    ir::IrType::Value(id) => {
-                        let layout = &self.module.values[id as usize];
-                        let struct_type = value_struct(
-                            self.context,
-                            layout,
-                            &self.module.closures,
-                            &self.module.values,
-                            &self.module.enums,
-                        );
-                        self.builder
-                            .build_struct_gep(struct_type, ptr, index, "value_field_ptr")
-                            .expect("a verified module addresses a field the layout has")
-                    }
-                    other => unreachable!(
-                        "PointerFromField points to {}, not an object or value",
-                        other.as_str()
-                    ),
-                }
-            }
+            ir::IrType::Pointer(pointer_id) => self.field_pointer_of_type(
+                ptr,
+                self.module.pointer_types[pointer_id as usize],
+                index,
+                "field_ptr",
+            ),
+            ir::IrType::Pin(pin_id) => self.field_pointer_of_type(
+                ptr,
+                self.module.pin_types[pin_id as usize],
+                index,
+                "field_ptr",
+            ),
             other => unreachable!(
                 "field_pointer called on {}, not an object or pointer",
+                other.as_str()
+            ),
+        }
+    }
+
+    /// Helper for `field_pointer` when the layout is reached through an
+    /// indirection (`Pointer<T>` or `Pin<T>`): it is the same object/value
+    /// layout lookup, but the pointer is already the one to build a GEP on.
+    fn field_pointer_of_type(
+        &self,
+        ptr: PointerValue<'ctx>,
+        referent: ir::IrType,
+        index: u32,
+        name: &str,
+    ) -> PointerValue<'ctx> {
+        match referent {
+            ir::IrType::Object(id) => {
+                let layout = &self.module.objects[id as usize];
+                let struct_type = object_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                self.builder
+                    .build_struct_gep(struct_type, ptr, index + OBJECT_HEADER_FIELDS, name)
+                    .expect("a verified module addresses a field the layout has")
+            }
+            ir::IrType::Value(id) => {
+                let layout = &self.module.values[id as usize];
+                let struct_type = value_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                self.builder
+                    .build_struct_gep(struct_type, ptr, index, name)
+                    .expect("a verified module addresses a field the layout has")
+            }
+            other => unreachable!(
+                "field_pointer reached through pointer/pin refers to {}, not an object or value",
                 other.as_str()
             ),
         }
@@ -1119,7 +1296,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         id
     }
 
-    fn emit_instruction(&mut self, instruction: &ir::Instruction, function: FunctionValue<'ctx>) {
+    fn emit_instruction(&mut self, instruction: &ir::Instruction) {
         let value: Option<BasicValueEnum> = match &instruction.kind {
             ir::InstKind::ConstInt(value) => Some(
                 self.context
@@ -1828,11 +2005,92 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
 
+            ir::InstKind::SetSuppressed {
+                exception,
+                suppressed,
+            } => {
+                self.builder
+                    .build_call(
+                        self.runtime.set_suppressed,
+                        &[
+                            self.operand(*exception).into(),
+                            self.operand(*suppressed).into(),
+                        ],
+                        "",
+                    )
+                    .expect("set the suppressed exception");
+                None
+            }
+
+            ir::InstKind::StackTrace(exception) => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.stack_trace,
+                        &[self.operand(*exception).into()],
+                        "stack_trace",
+                    )
+                    .expect("get the stack trace");
+                call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::Suppressed(exception) => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.suppressed,
+                        &[self.operand(*exception).into()],
+                        "suppressed",
+                    )
+                    .expect("get the suppressed exception");
+                let ptr = call
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("a pointer result")
+                    .into_pointer_value();
+                let is_null = self
+                    .builder
+                    .build_is_null(ptr, "suppressed_is_null")
+                    .expect("null check");
+                let present = self
+                    .builder
+                    .build_not(is_null, "suppressed_present")
+                    .expect("present flag");
+
+                let ty = llvm_type_in(
+                    self.context,
+                    instruction.ty,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("a nullable type has a representation")
+                .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(ty.get_undef(), present, 0, "present")
+                    .expect("present flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag.into_struct_value(), ptr, 1, "wrapped")
+                        .expect("payload")
+                        .as_basic_value_enum(),
+                )
+            }
+
             ir::InstKind::HasPendingException => {
                 let call = self
                     .builder
                     .build_call(self.runtime.has_pending_exception, &[], "has_pending")
                     .expect("query the pending exception");
+                call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::IsCancelled => {
+                let call = self
+                    .builder
+                    .build_call(self.runtime.is_cancelled, &[], "is_cancelled")
+                    .expect("query the cancellation token");
                 call.try_as_basic_value().basic()
             }
 
@@ -1869,7 +2127,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::Unary { op, operand } => {
                 let signed = self.is_signed(self.value_types[&operand.0]);
-                Some(self.emit_unary(*op, self.operand(*operand), signed, function))
+                Some(self.emit_unary(*op, self.operand(*operand), signed))
             }
 
             ir::InstKind::Binary { op, left, right } => {
@@ -1887,9 +2145,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.operand(*left),
                     self.operand(*right),
                     signed,
-                    function,
                     left_ty,
                 ))
+            }
+
+            ir::InstKind::CheckedArithmetic {
+                op,
+                left,
+                right,
+                signed,
+            } => {
+                let l = self.operand(*left).into_int_value();
+                let r = self.operand(*right).into_int_value();
+                Some(self.emit_overflowed(*op, l, r, *signed))
             }
 
             ir::InstKind::Call { callee, args } => {
@@ -2589,17 +2857,64 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // deep-clone traversal — see `InstKind::Clone`'s own doc
             // comment for why the whole recursive walk lives there rather
             // than being unrolled into several IR instructions here.
-            ir::InstKind::Clone(value) => {
-                let source = self.operand(*value);
-                let cloned = self
-                    .builder
-                    .build_call(self.runtime.clone, &[source.into()], "cloned")
-                    .expect("call zirk_rt_clone")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("zirk_rt_clone returns a pointer");
-                Some(cloned)
-            }
+            ir::InstKind::Clone(value) => match instruction.ty {
+                ir::IrType::Callable(_) => {
+                    let source = self.operand(*value).into_struct_value();
+                    let capture_ptr = self
+                        .builder
+                        .build_extract_value(source, CALLABLE_CAPTURE_FIELD, "capture")
+                        .expect("capture pointer")
+                        .into_pointer_value();
+                    let new_capture = self
+                        .builder
+                        .build_call(
+                            self.runtime.clone_callable,
+                            &[capture_ptr.into()],
+                            "cloned_capture",
+                        )
+                        .expect("call zirk_rt_clone_callable")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("zirk_rt_clone_callable returns a pointer")
+                        .into_pointer_value();
+                    let fn_ptr = self
+                        .builder
+                        .build_extract_value(source, CALLABLE_FUNCTION_FIELD, "fn")
+                        .expect("function pointer");
+
+                    let struct_type = self
+                        .llvm_type(instruction.ty)
+                        .expect("callable type")
+                        .into_struct_type();
+                    let mut cloned = self
+                        .builder
+                        .build_insert_value(
+                            struct_type.get_undef(),
+                            fn_ptr,
+                            CALLABLE_FUNCTION_FIELD,
+                            "fn",
+                        )
+                        .expect("function pointer")
+                        .into_struct_value();
+                    cloned = self
+                        .builder
+                        .build_insert_value(cloned, new_capture, CALLABLE_CAPTURE_FIELD, "capture")
+                        .expect("capture pointer")
+                        .into_struct_value();
+                    Some(cloned.into())
+                }
+                _ => {
+                    let source = self.operand(*value);
+                    let cloned = self
+                        .builder
+                        .build_call(self.runtime.clone, &[source.into()], "cloned")
+                        .expect("call zirk_rt_clone")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("zirk_rt_clone returns a pointer");
+                    Some(cloned)
+                }
+            },
 
             // `unsafe { ... }`'s own entry (roadmap Phase 4e,
             // `fase-4e-unsafe-journal`, design D1): one call into the
@@ -2680,6 +2995,204 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("call zirk_rt_journal_rollback");
                 None
             }
+
+            // `transfer(source)` (roadmap Phase 4c): ownership transfer stub.
+            ir::InstKind::ResourceTransfer { source } => {
+                let source = self.operand(*source);
+                let transferred = self
+                    .builder
+                    .build_call(self.runtime.resource_transfer, &[source.into()], "transfer")
+                    .expect("call zirk_rt_resource_transfer")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_resource_transfer returns a pointer");
+                Some(transferred)
+            }
+
+            // Phase 4d boxed callables: build a two-word `{ fn_ptr, capture_ptr
+            // }` value. The capture block is allocated through
+            // `zirk_rt_alloc_callable` and the captured values are copied into
+            // it; callers read them back out in `CallCallable`.
+            ir::InstKind::MakeCallable { target, captures } => {
+                let ir::IrType::Callable(id) = instruction.ty else {
+                    panic!(
+                        "MakeCallable returns Callable, got {}",
+                        instruction.ty.as_str()
+                    )
+                };
+                let layout = &self.module.closures[id as usize];
+                let fn_value = self.functions[target.as_str()];
+
+                let fn_ptr = fn_value.as_global_value().as_pointer_value();
+
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let capture_ptr = if layout.captures.is_empty() {
+                    ptr_type.const_null()
+                } else {
+                    let descriptor = self.closure_descriptors[id as usize];
+                    let payload_size = self
+                        .closure_payload_struct(layout)
+                        .size_of()
+                        .expect("a closure payload is sized");
+                    let block = self
+                        .builder
+                        .build_call(
+                            self.runtime.alloc_callable,
+                            &[descriptor.into(), payload_size.into()],
+                            "capture_block",
+                        )
+                        .expect("call zirk_rt_alloc_callable")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("zirk_rt_alloc_callable returns a pointer")
+                        .into_pointer_value();
+
+                    for (index, capture) in captures.iter().enumerate() {
+                        let value = self.operand(*capture);
+                        let offset = self.closure_capture_offset(layout, index);
+                        let slot_ptr = unsafe {
+                            self.builder.build_gep(
+                                self.context.i8_type(),
+                                block,
+                                &[offset],
+                                "capture_slot",
+                            )
+                        }
+                        .expect("capture slot gep");
+                        self.builder
+                            .build_store(slot_ptr, value)
+                            .expect("store capture");
+                    }
+
+                    block
+                };
+
+                let struct_type = self
+                    .llvm_type(instruction.ty)
+                    .expect("callable type")
+                    .into_struct_type();
+                let mut value = self
+                    .builder
+                    .build_insert_value(
+                        struct_type.get_undef(),
+                        fn_ptr,
+                        CALLABLE_FUNCTION_FIELD,
+                        "fn",
+                    )
+                    .expect("function pointer")
+                    .into_struct_value();
+                value = self
+                    .builder
+                    .build_insert_value(value, capture_ptr, CALLABLE_CAPTURE_FIELD, "capture")
+                    .expect("capture pointer")
+                    .into_struct_value();
+
+                Some(value.into())
+            }
+
+            ir::InstKind::CallCallable { callable, args } => {
+                let callable_value = self.operand(*callable).into_struct_value();
+                let fn_ptr = self
+                    .builder
+                    .build_extract_value(callable_value, CALLABLE_FUNCTION_FIELD, "fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+                let capture_ptr = self
+                    .builder
+                    .build_extract_value(callable_value, CALLABLE_CAPTURE_FIELD, "capture")
+                    .expect("capture pointer")
+                    .into_pointer_value();
+
+                let id = match self.value_types.get(&callable.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("CallCallable callable is not a Callable: {:?}", other),
+                };
+                let layout = &self.module.closures[id as usize];
+
+                let mut arguments: Vec<BasicMetadataValueEnum> = Vec::new();
+                for (index, capture_ty) in layout.captures.iter().enumerate() {
+                    let offset = self.closure_capture_offset(layout, index);
+                    let slot_ptr = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(),
+                            capture_ptr,
+                            &[offset],
+                            "capture_load",
+                        )
+                    }
+                    .expect("capture load gep");
+                    let capture_ty_llvm = self
+                        .llvm_type(*capture_ty)
+                        .expect("capture type has an LLVM representation");
+                    let loaded = self
+                        .builder
+                        .build_load(capture_ty_llvm, slot_ptr, "capture")
+                        .expect("load capture");
+                    arguments.push(loaded.into());
+                }
+
+                for arg in args {
+                    arguments.push(self.operand(*arg).into());
+                }
+
+                let signature = closure_signature(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let call = self
+                    .builder
+                    .build_indirect_call(signature, fn_ptr, &arguments, "call")
+                    .expect("indirect callable call");
+
+                call.try_as_basic_value().basic()
+            }
+
+            // `Dependent.from(base, field_ptr)` (roadmap Phase 4e,
+            // `phase-4e-memory`, design D1): surface-only placeholder. The
+            // real implementation will allocate a two-word `{ base, field }`
+            // value; until then, return a null pointer of the result type so
+            // the instruction has a value.
+            ir::InstKind::DependentFrom { .. } => {
+                let ptr = llvm_type_in(
+                    self.context,
+                    instruction.ty,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("Dependent<T> has an LLVM representation")
+                .into_pointer_type();
+                Some(ptr.const_null().into())
+            }
+
+            // `PinObject` (roadmap Phase 4e, `phase-4e-memory`, design D1):
+            // records the pin in the runtime and returns the same object
+            // pointer as a `Pin<T>` value.
+            ir::InstKind::PinObject { object } => {
+                self.builder
+                    .build_call(
+                        self.runtime.pin_object,
+                        &[self.operand(*object).into()],
+                        "pin",
+                    )
+                    .expect("call zirk_rt_pin_object");
+                Some(self.operand(*object))
+            }
+            // `UnpinObject` (roadmap Phase 4e, `phase-4e-memory`, design D1):
+            // removes the object from the per-thread pin list.
+            ir::InstKind::UnpinObject { object } => {
+                self.builder
+                    .build_call(
+                        self.runtime.unpin_object,
+                        &[self.operand(*object).into()],
+                        "unpin",
+                    )
+                    .expect("call zirk_rt_unpin_object");
+                None
+            }
         };
 
         if let (Some(result), Some(value)) = (instruction.result, value) {
@@ -2712,7 +3225,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         op: ir::UnaryOp,
         operand: BasicValueEnum<'ctx>,
         signed: bool,
-        function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         // A `Float` operand only ever reaches `Neg` (`~`/`!` are integer- and
         // Boolean-only, per the checker) — flipping the sign bit cannot turn
@@ -2736,7 +3248,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 debug_assert!(signed, "the checker only allows `-` on a signed width");
                 let value = operand.into_int_value();
                 let zero = value.get_type().const_zero();
-                self.checked_arithmetic("ssub", zero, value, function)
+                self.builder
+                    .build_int_sub(zero, value, "neg")
+                    .expect("neg")
+                    .into()
             }
             // `not` is bitwise complement at the LLVM level regardless of
             // whether the checker calls it logical negation or `~`: `!true`
@@ -2755,7 +3270,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         left: BasicValueEnum<'ctx>,
         right: BasicValueEnum<'ctx>,
         signed: bool,
-        function: FunctionValue<'ctx>,
         left_ty: ir::IrType,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
@@ -2768,7 +3282,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // or a captured `T?`, compares the same way it would on its own).
         // Generalizes the same struct-shaped `is` pattern `fase-4c` already
         // built for `T?` right below.
-        if op == Identical && left.is_struct_value() && matches!(left_ty, ir::IrType::Closure(_)) {
+        if op == Identical
+            && left.is_struct_value()
+            && matches!(left_ty, ir::IrType::Closure(_) | ir::IrType::Callable(_))
+        {
             return self.identical_value(left, right, left_ty).into();
         }
 
@@ -2867,15 +3384,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         let r = right.into_int_value();
 
         match op {
-            // `ZIRK_LANGUAGE_SPEC.md` section 3: ordinary overflow produces a
-            // controlled error. The wrapping variants are explicit operations
-            // that do not exist in this subset, so every arithmetic operation
-            // is checked.
-            Add => self.checked_arithmetic(if signed { "sadd" } else { "uadd" }, l, r, function),
-            Sub => self.checked_arithmetic(if signed { "ssub" } else { "usub" }, l, r, function),
-            Mul => self.checked_arithmetic(if signed { "smul" } else { "umul" }, l, r, function),
+            // `ZIRK_LANGUAGE_SPEC.md` section 3: ordinary overflow now throws
+            // `ArithmeticOverflowError` from `zirk-ir` (`CheckedArithmetic` + a
+            // branch), so `Binary` itself is just the raw LLVM operation.
+            Add => self.builder.build_int_add(l, r, "add").expect("add").into(),
+            Sub => self.builder.build_int_sub(l, r, "sub").expect("sub").into(),
+            Mul => self.builder.build_int_mul(l, r, "mul").expect("mul").into(),
 
-            Div | Rem => self.checked_division(op, l, r, signed, function),
+            Div | Rem => self.emit_int_div_rem(op, l, r, signed),
 
             Eq => self.compare(IntPredicate::EQ, l, r),
             NotEq => self.compare(IntPredicate::NE, l, r),
@@ -3013,6 +3529,58 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
                 identical
             }
+            ir::IrType::Callable(_) => {
+                let l = left.into_struct_value();
+                let r = right.into_struct_value();
+
+                let l_fn = self
+                    .builder
+                    .build_extract_value(l, CALLABLE_FUNCTION_FIELD, "l_fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+                let r_fn = self
+                    .builder
+                    .build_extract_value(r, CALLABLE_FUNCTION_FIELD, "r_fn")
+                    .expect("function pointer")
+                    .into_pointer_value();
+                let l_fn_addr = self
+                    .builder
+                    .build_ptr_to_int(l_fn, self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r_fn_addr = self
+                    .builder
+                    .build_ptr_to_int(r_fn, self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                let same_fn = self
+                    .compare(IntPredicate::EQ, l_fn_addr, r_fn_addr)
+                    .into_int_value();
+
+                let l_cap = self
+                    .builder
+                    .build_extract_value(l, CALLABLE_CAPTURE_FIELD, "l_cap")
+                    .expect("capture pointer")
+                    .into_pointer_value();
+                let r_cap = self
+                    .builder
+                    .build_extract_value(r, CALLABLE_CAPTURE_FIELD, "r_cap")
+                    .expect("capture pointer")
+                    .into_pointer_value();
+                let l_cap_addr = self
+                    .builder
+                    .build_ptr_to_int(l_cap, self.context.i64_type(), "lhs")
+                    .expect("compare addresses");
+                let r_cap_addr = self
+                    .builder
+                    .build_ptr_to_int(r_cap, self.context.i64_type(), "rhs")
+                    .expect("compare addresses");
+                let same_cap = self
+                    .compare(IntPredicate::EQ, l_cap_addr, r_cap_addr)
+                    .into_int_value();
+
+                self.builder
+                    .build_and(same_fn, same_cap, "identical")
+                    .expect("combine")
+            }
             // `T?`: absent-vs-absent is identical, absent-vs-present is not,
             // two present ones compare by address (`fase-4c`'s own fix for
             // `is` over a nullable reference, generalized here to a nested
@@ -3140,18 +3708,29 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .into()
     }
 
-    /// Arithmetic with overflow detection through LLVM intrinsics.
+    /// Overflow flag for an integer `+`, `-`, or `*` (roadmap Phase 4b).
     ///
-    /// The intrinsic returns `{result, overflowed}`. If it overflowed, control
-    /// transfers to the runtime, which reports and terminates; otherwise
-    /// execution continues with the result.
-    fn checked_arithmetic(
+    /// The matching `InstKind::Binary` computes the raw arithmetic result;
+    /// this helper just extracts the `overflowed` bit from the matching
+    /// `llvm.*.with.overflow` intrinsic so `zirk-ir`'s `Lower` can branch on
+    /// it and throw `ArithmeticOverflowError` itself.
+    fn emit_overflowed(
         &mut self,
-        operation: &str,
+        op: ir::BinaryOp,
         left: inkwell::values::IntValue<'ctx>,
         right: inkwell::values::IntValue<'ctx>,
-        function: FunctionValue<'ctx>,
+        signed: bool,
     ) -> BasicValueEnum<'ctx> {
+        let operation = match (op, signed) {
+            (ir::BinaryOp::Add, true) => "sadd",
+            (ir::BinaryOp::Add, false) => "uadd",
+            (ir::BinaryOp::Sub, true) => "ssub",
+            (ir::BinaryOp::Sub, false) => "usub",
+            (ir::BinaryOp::Mul, true) => "smul",
+            (ir::BinaryOp::Mul, false) => "umul",
+            other => unreachable!("CheckedArithmetic does not cover {other:?}"),
+        };
+
         let intrinsic =
             inkwell::intrinsics::Intrinsic::find(&format!("llvm.{operation}.with.overflow"))
                 .expect("LLVM provides the overflow intrinsics");
@@ -3172,79 +3751,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .basic()
             .expect("the intrinsic returns a struct");
 
-        let result = self
-            .builder
-            .build_extract_value(call.into_struct_value(), 0, "value")
-            .expect("result of the operation");
-        let overflowed = self
-            .builder
+        self.builder
             .build_extract_value(call.into_struct_value(), 1, "overflowed")
-            .expect("overflow flag");
-
-        self.trap_if(overflowed.into_int_value(), self.runtime.overflow, function);
-        result
+            .expect("overflow flag")
     }
 
-    /// Division and remainder, checking the one remaining overflow case.
+    /// Raw integer division and remainder.
     ///
-    /// The divisor is no longer checked here (`fase-4d-runtimeerror`, design
-    /// D10): `zirk-ir/src/lower.rs`'s own `Lowering::guard_division` now
-    /// compares it to zero and throws `DivisionByZeroError` *before* this
-    /// point is ever reached, as an ordinary `Branch` in the IR rather than a
-    /// codegen-level `trap_if` — a `sdiv`/`udiv` by zero here would be
-    /// undefined behaviour in LLVM (`ZIRK_LANGUAGE_SPEC.md` section 9), but
-    /// the guard upstream already guarantees `right` is nonzero whenever
-    /// this function runs.
-    ///
-    /// `Int32::MIN / -1` is a separate case this function still guards
-    /// directly: its result is one past the maximum, so it overflows, and in
-    /// LLVM it is undefined rather than wrapping. `OverflowError` is out of
-    /// this pass's scope (`proposal.md`), so it keeps aborting via
-    /// `trap_if`/`fatalError`, unchanged.
-    fn checked_division(
+    /// The divisor and the `MIN / -1` pair are no longer checked here
+    /// (`fase-4b-excepciones`): `zirk-ir/src/lower.rs` guards both upstream
+    /// with ordinary `Branch`es that throw `DivisionByZeroError` and
+    /// `ArithmeticOverflowError`, so `Binary` itself reaches `sdiv`/`srem`
+    /// only on safe inputs.
+    fn emit_int_div_rem(
         &mut self,
         op: ir::BinaryOp,
         left: inkwell::values::IntValue<'ctx>,
         right: inkwell::values::IntValue<'ctx>,
         signed: bool,
-        function: FunctionValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
-        let int_ty = left.get_type();
-
-        // The one pair that overflows a division: `MIN / -1`, one past the
-        // widest value the width can hold. Unsigned has no such minimum —
-        // its `MIN` is `0`, and `0 / anything nonzero` never overflows — so
-        // the check only applies to a signed width.
-        if signed {
-            // The signed minimum's bit pattern is a lone `1` at the top bit
-            // — `2^(bits-1)` — built from 64-bit words since `Int128`
-            // itself does not fit in one (`const_int_arbitrary_precision`,
-            // little-endian words).
-            let bits = int_ty.get_bit_width();
-            let words: Vec<u64> = if bits <= 64 {
-                vec![1u64 << (bits - 1)]
-            } else {
-                vec![0, 1u64 << (bits - 65)]
-            };
-            let min = int_ty.const_int_arbitrary_precision(&words);
-            let minus_one = int_ty.const_all_ones();
-
-            let left_is_min = self
-                .builder
-                .build_int_compare(IntPredicate::EQ, left, min, "is_min")
-                .expect("dividend comparison");
-            let right_is_minus_one = self
-                .builder
-                .build_int_compare(IntPredicate::EQ, right, minus_one, "is_minus_one")
-                .expect("divisor comparison");
-            let overflows = self
-                .builder
-                .build_and(left_is_min, right_is_minus_one, "div_overflows")
-                .expect("conjunction");
-
-            self.trap_if(overflows, self.runtime.overflow, function);
-        }
-
         match (op, signed) {
             (ir::BinaryOp::Div, true) => self
                 .builder
@@ -3371,35 +3896,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .build_float_compare(predicate, left, right, "fcmp")
             .expect("comparison")
             .into()
-    }
-
-    /// Transfers control to the runtime when a condition holds.
-    ///
-    /// Splits the current block: the failure branch calls the runtime and ends
-    /// in `unreachable`, because the runtime does not return; the other branch
-    /// continues normally and becomes the block instructions keep landing in.
-    fn trap_if(
-        &mut self,
-        condition: inkwell::values::IntValue<'ctx>,
-        handler: FunctionValue<'ctx>,
-        function: FunctionValue<'ctx>,
-    ) {
-        let failure = self.context.append_basic_block(function, "trap");
-        let continuation = self.context.append_basic_block(function, "cont");
-
-        self.builder
-            .build_conditional_branch(condition, failure, continuation)
-            .expect("conditional branch");
-
-        self.builder.position_at_end(failure);
-        self.builder
-            .build_call(handler, &[], "")
-            .expect("call to the runtime handler");
-        self.builder
-            .build_unreachable()
-            .expect("the handler does not return");
-
-        self.builder.position_at_end(continuation);
     }
 
     /// Design D2: pops this activation's shadow-stack frame, pushed once at

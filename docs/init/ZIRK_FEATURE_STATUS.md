@@ -19,7 +19,7 @@ The evidence for each row is the archived OpenSpec change, the relevant
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
+Last updated with `phase-4-closeout`, **2026-09-03**.
 
 ---
 
@@ -125,16 +125,19 @@ Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
 | `throw`, rethrow | yes | yes | yes | yes | yes | yes | — |
 | `fatalError` / `Never` | yes | yes | yes | yes | yes | yes | — |
 | Typed catch dispatch | yes | yes | yes | yes | yes | yes | `Throwable` hierarchy. |
-| Catchable implicit native errors | partial | partial | partial | partial | partial | partial | 4 of 5 (div0, range shift, negative repeat, `NaN`) delivered; overflow/invalid-cast still abort. |
+| Catchable implicit native errors | yes | yes | yes | yes | yes | yes | All six concrete `RuntimeError` subclasses (div0, range shift, negative repeat, `NaN`, arithmetic overflow, invalid cast) are catchable; `ArithmeticOverflowError` and `InvalidCastError` closed the last gap. Fixtures in `crates/zirk-cli/tests/corpus/`. |
+| `Throwable.suppressed()` | yes | yes | yes | yes | yes | yes | Runtime links a new exception thrown inside a `catch` to the exception being handled. |
+| `Throwable.stack_trace()` | yes | yes | yes | yes | yes | yes | Lazily builds and caches a `String` per exception object. |
+| Deep immutability of caught objects | yes | yes | yes | yes | yes | yes | Caught exception bindings are `inmut::strict`; writes and mutable aliases through their reachable graph are rejected. |
 
 ## Phase 4c — Resources
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `match ... with` | yes | yes | yes | yes | yes | yes | `Keyword::With` no longer gated. |
-| `Resource<E>` contract | yes | yes | yes | yes | yes | yes | `register_native_resource_contract`; `pending_type` will be updated by `fix-docs-tooling-drift`. |
+| `match ... with` | yes | yes | yes | yes | yes | yes | Single-resource and grouped `match ... with` parse, type-check, and lower; left-to-right acquisition and right-to-left cleanup are implemented. |
+| `Resource<E>` contract | yes | yes | yes | yes | yes | yes | `register_native_resource_contract`; the base `Resource<E>` contract is fully usable. `ResourceFailure` merging and cancellation-aware cleanup are implemented end-to-end. |
 | Single-resource cleanup | yes | yes | yes | yes | yes | yes | `fase-4c-recursos`. |
-| Grouped acquisition / transfer | yes | partial | partial | no | no | no | Spec defined; not implemented. |
+| Grouped acquisition / transfer | yes | yes | yes | yes | yes | yes | Grouped `match ... with` acquisition/transfer parses, type-checks, lowers, and runs end-to-end. `transfer(r)` works with `TransferableResource`; use-after-transfer is rejected at compile time. `ResourceFailure` merging and cancellation-aware cleanup are implemented. |
 
 ## Phase 4d — Callable and binding completion
 
@@ -145,7 +148,7 @@ Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
 | `is` between callables | yes | yes | yes | yes | yes | yes | D15; `==`/`!=` still rejected. |
 | Recursive lambda with explicit binding | yes | yes | yes | yes | yes | yes | `fase-4d-callables` corpus. |
 | Multiple declarations, simultaneous assignment | yes | yes | yes | yes | yes | yes | `fase-4d-declaraciones-multiples`; `left, right = right, left` swaps. |
-| General callable polymorphism | partial | partial | no | no | no | no | D13 deferred; needs boxed capture representation. |
+| General callable polymorphism | yes | yes | yes | yes | yes | yes | `MakeCallable`/`CallCallable` works end-to-end. `.clone()` on callables, GC tracking of capture blocks, and stored/returned callables are implemented. |
 
 ## Phase 4e — Managed memory and unsafe
 
@@ -162,8 +165,8 @@ Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
 | Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `fase-4e-cierre-pendientes` closed `return`/`break`/`continue` early-exit rollback. |
 | `Pointer.from` on `record` / `value class` fields | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
 | `String[index]` read-only grapheme access | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
-| Dependent references | yes | no | no | no | no | no | Spec defined; not started. |
-| Automatic bounded native pinning | yes | no | no | no | no | no | Spec defined; not started. |
+| Dependent references | yes | yes | yes | yes | yes | yes | `Dependent<T>` lifetime and escape analysis rejects returns, field stores, captures, and non-dependent parameter passing; valid local use runs end-to-end. |
+| Automatic bounded native pinning | yes | yes | yes | yes | yes | yes | `Pin(c)` constructs a `Pin<T>`, automatic unpin provides field/method access, and reassignment of the pinned variable is rejected. |
 
 ## Phase 5 — Concurrency and parallelism
 
@@ -194,7 +197,7 @@ Last updated with `fix-docs-tooling-drift`, **2026-09-02**.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `fn gen` / `yield` | yes | no | no | no | no | no | `Keyword::Gen`/`Yield` gated to Phase 7b. |
-| `|>` pipe | yes | no | no | no | no | no | `TokenKind::PipeGt` gated to Phase 7b. |
+| `|>` pipe | yes | no | no | no | no | no | `TokenKind::PipeGt` gated. |
 | `map`/`filter`/`reduce` | no | no | no | no | no | no | Spec defined; not started. |
 
 ## Phase 8+ — Packaging, DX, metaprogramming, production

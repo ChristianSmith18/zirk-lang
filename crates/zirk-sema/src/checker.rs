@@ -82,6 +82,13 @@ pub struct CheckedProgram {
     /// [`Base::NativeSliceMut`] carries (roadmap Phase 4e,
     /// `fase-4e-native-slice`, design D1).
     pub native_slice_mut_types: Vec<Type>,
+    /// Interned `Dependent<T>` element types, indexed by the id their
+    /// [`Base::Dependent`] carries (roadmap Phase 4e, `phase-4e-memory`,
+    /// design D1).
+    pub dependent_types: Vec<Type>,
+    /// Interned `Pin<T>` referent types, indexed by the id their
+    /// [`Base::Pin`] carries (roadmap Phase 4e, `phase-4e-memory`, design D1).
+    pub pin_types: Vec<Type>,
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
@@ -138,10 +145,11 @@ pub struct NativeExceptions {
     pub throwable: u32,
     pub runtime_error: u32,
     pub stack_trace: u32,
-    /// The four compiler-known, concrete `RuntimeError` subclasses
-    /// `fase-4d-runtimeerror` registers (D9): division by zero, an
-    /// out-of-range shift, a negative string-repeat count, and a `Float`
-    /// operation producing `NaN`. Unlike `error`/`throwable`/`runtime_error`
+    /// The six compiler-known, concrete `RuntimeError` subclasses
+    /// `fase-4d-runtimeerror` and `fase-4b-excepciones` register (D9):
+    /// division by zero, an out-of-range shift, a negative string-repeat
+    /// count, a `Float` operation producing `NaN`, an arithmetic overflow,
+    /// and an invalid `as`/`<T>` cast. Unlike `error`/`throwable`/`runtime_error`
     /// above, these are real, instantiable classes — `zirk-ir/src/lower.rs`
     /// both builds one of these directly whenever the matching native check
     /// fails (D10) and synthesizes their four method bodies by hand (D8).
@@ -149,6 +157,8 @@ pub struct NativeExceptions {
     pub invalid_shift: u32,
     pub invalid_repeat: u32,
     pub float_nan: u32,
+    pub arithmetic_overflow: u32,
+    pub invalid_cast: u32,
     /// `IndexOutOfBoundsError` (roadmap Phase 4e, `fase-4e-native-slice`,
     /// design D3): thrown when a `NativeSlice<T>`/`NativeSliceMut<T>` index
     /// is out of range — the "controlled bounds error" the spec's own "View
@@ -216,6 +226,8 @@ struct Names<'t> {
     weak_types: &'t [Type],
     native_slice_types: &'t [Type],
     native_slice_mut_types: &'t [Type],
+    dependent_types: &'t [Type],
+    pin_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -320,6 +332,20 @@ impl TypeNames for Names<'_> {
             .copied()
             .unwrap_or(Type::UNKNOWN)
     }
+
+    fn dependent_element(&self, id: u32) -> Type {
+        self.dependent_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn pin_element(&self, id: u32) -> Type {
+        self.pin_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
 }
 
 struct Checker<'a> {
@@ -347,7 +373,7 @@ struct Checker<'a> {
     /// generic construct's own type-parameter inference
     /// (`Self::infer_type_params`'s own doc comment names this exact gap:
     /// "the expected result... not consulted yet"), when the arguments
-    /// alone leave a parameter unsolved (`Result.Ok(v)` cannot determine
+    /// alone leave a parameter unsolved (`Ok(v)` cannot determine
     /// `E` from `v` alone).
     ///
     /// Single-shot by construction: `check_expr` takes (clears) it the
@@ -464,6 +490,14 @@ struct Checker<'a> {
     /// needs none of this, since it reaches `close()`/`is_closed()` by
     /// ordinary static method dispatch on the binding's own concrete class.
     native_resource: Option<NativeResource>,
+    /// Id of the language's own `TransferableResource` marker contract,
+    /// minted by [`Self::register_native_transferable_resource_contract`]
+    /// (roadmap Phase 4c, `phase-4c-resources`).
+    native_transferable: Option<u32>,
+    /// Id of the language's own `ResourceFailure<BodyError,CloseError>`
+    /// enum, minted by [`Self::register_native_resource_failure_enum`]
+    /// (roadmap Phase 4c, `phase-4c-resources`).
+    native_resource_failure: Option<u32>,
     /// Interned `Pointer<T>` pointee types, indexed by the id their
     /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
     pointer_types: Vec<Type>,
@@ -478,6 +512,12 @@ struct Checker<'a> {
     /// [`Base::NativeSliceMut`] carries (roadmap Phase 4e,
     /// `fase-4e-native-slice`, design D1).
     native_slice_mut_types: Vec<Type>,
+    /// Interned `Dependent<T>` element types, indexed by the id their
+    /// [`Base::Dependent`] carries (roadmap Phase 4e, `phase-4e-memory`).
+    dependent_types: Vec<Type>,
+    /// Interned `Pin<T>` referent types, indexed by the id their [`Base::Pin`]
+    /// carries (roadmap Phase 4e, `phase-4e-memory`).
+    pin_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
     /// Id of the language's own `Clone` contract, minted by
@@ -563,12 +603,16 @@ impl<'a> Checker<'a> {
             native_result: None,
             native_exceptions: None,
             native_resource: None,
+            native_transferable: None,
+            native_resource_failure: None,
             for_in_iteration: HashMap::new(),
             variant_constructions: HashMap::new(),
             pointer_types: Vec::new(),
             weak_types: Vec::new(),
             native_slice_types: Vec::new(),
             native_slice_mut_types: Vec::new(),
+            dependent_types: Vec::new(),
+            pin_types: Vec::new(),
             externs: HashMap::new(),
             native_clone: None,
             clone_cache: HashMap::new(),
@@ -613,6 +657,8 @@ impl<'a> Checker<'a> {
                 weak_types: &self.weak_types,
                 native_slice_types: &self.native_slice_types,
                 native_slice_mut_types: &self.native_slice_mut_types,
+                dependent_types: &self.dependent_types,
+                pin_types: &self.pin_types,
             },
         )
     }
@@ -626,6 +672,8 @@ impl<'a> Checker<'a> {
         self.register_native_result_enum();
         self.register_native_exception_hierarchy();
         self.register_native_resource_contract();
+        self.register_native_transferable_resource_contract();
+        self.register_native_resource_failure_enum();
         self.record_imports(program);
         self.declare_type_aliases(program);
 
@@ -713,6 +761,8 @@ impl<'a> Checker<'a> {
             weak_types: self.weak_types,
             native_slice_types: self.native_slice_types,
             native_slice_mut_types: self.native_slice_mut_types,
+            dependent_types: self.dependent_types,
+            pin_types: self.pin_types,
             externs: self.externs,
         }
     }
@@ -1252,6 +1302,7 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
+                is_mut: false,
             },
             MethodInfo {
                 name: "code".into(),
@@ -1264,6 +1315,7 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
+                is_mut: false,
             },
             MethodInfo {
                 name: "cause".into(),
@@ -1276,6 +1328,7 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
+                is_mut: false,
             },
         ];
         self.classes.push(ClassType {
@@ -1306,6 +1359,7 @@ impl<'a> Checker<'a> {
             from_contract: None,
             overridden: true,
             throws: Vec::new(),
+            is_mut: false,
         });
         self.classes.push(ClassType {
             name: "Throwable".into(),
@@ -1363,6 +1417,7 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
+                    is_mut: false,
                 },
                 MethodInfo {
                     name: "code".into(),
@@ -1375,6 +1430,7 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
+                    is_mut: false,
                 },
                 MethodInfo {
                     name: "cause".into(),
@@ -1387,6 +1443,7 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
+                    is_mut: false,
                 },
                 MethodInfo {
                     name: "stack_trace".into(),
@@ -1399,6 +1456,7 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
+                    is_mut: false,
                 },
             ]
         };
@@ -1452,6 +1510,9 @@ impl<'a> Checker<'a> {
         let invalid_shift = register_native_failure(&mut self.classes, "InvalidShiftError");
         let invalid_repeat = register_native_failure(&mut self.classes, "InvalidRepeatError");
         let float_nan = register_native_failure(&mut self.classes, "FloatNanError");
+        let arithmetic_overflow =
+            register_native_failure(&mut self.classes, "ArithmeticOverflowError");
+        let invalid_cast = register_native_failure(&mut self.classes, "InvalidCastError");
         // Roadmap Phase 4e, `fase-4e-native-slice`: `IndexOutOfBoundsError`
         // (thrown by a bounds-checked `view[i]`, design D3) and
         // `NativeError` (returned in `Result<..., NativeError>` by
@@ -1470,6 +1531,8 @@ impl<'a> Checker<'a> {
             invalid_shift,
             invalid_repeat,
             float_nan,
+            arithmetic_overflow,
+            invalid_cast,
             index_out_of_bounds,
             native_error,
         });
@@ -1555,6 +1618,94 @@ impl<'a> Checker<'a> {
         self.native_resource = Some(NativeResource { resource, e });
     }
 
+    /// `TransferableResource` (roadmap Phase 4c, `phase-4c-resources`):
+    /// a marker contract that `transfer(r)` checks at compile time.  It
+    /// carries no methods of its own; like `Clone`, being registered lets
+    /// `implements TransferableResource` resolve instead of becoming
+    /// `UNKNOWN_TYPE`.
+    fn register_native_transferable_resource_contract(&mut self) {
+        let at = Span::empty(0);
+
+        let transferable = self.contracts.len() as u32;
+        self.contracts.push(ContractType {
+            name: "TransferableResource".into(),
+            kind: ContractKind::Interface,
+            methods: Vec::new(),
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+
+        self.native_transferable = Some(transferable);
+    }
+
+    /// `ResourceFailure<BodyError,CloseError>` (roadmap Phase 4c,
+    /// `phase-4c-resources`, design D2): the three-variant enum used by
+    /// grouped `match with` to surface a body failure, a close failure, or
+    /// both, without losing information.
+    fn register_native_resource_failure_enum(&mut self) {
+        let at = Span::empty(0);
+        let native_exceptions = self
+            .native_exceptions
+            .expect("register_native_exception_hierarchy runs first");
+
+        let body_error = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "BodyError".into(),
+            constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            span: at,
+        });
+
+        let close_error = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "CloseError".into(),
+            constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            span: at,
+        });
+
+        let failure = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "ResourceFailure".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Body".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "body".into(),
+                        ty: Type::of(Base::Param(body_error)),
+                    }],
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Close".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "close".into(),
+                        ty: Type::of(Base::Param(close_error)),
+                    }],
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "BodyAndClose".into(),
+                    associated: vec![
+                        AssociatedFieldInfo {
+                            name: "body".into(),
+                            ty: Type::of(Base::Param(body_error)),
+                        },
+                        AssociatedFieldInfo {
+                            name: "close".into(),
+                            ty: Type::of(Base::Param(close_error)),
+                        },
+                    ],
+                    span: at,
+                },
+            ],
+            type_params: vec![body_error, close_error],
+            shared: true,
+            span: at,
+        });
+
+        self.native_resource_failure = Some(failure);
+    }
+
     /// Registers a contract with its method signatures.
     fn declare_contract(&mut self, decl: &ContractDecl) {
         if Self::is_native_contract_name(&decl.name.name) {
@@ -1629,7 +1780,10 @@ impl<'a> Checker<'a> {
     /// injected directly into the tables rather than parsed, so application
     /// code cannot reopen them.
     fn is_native_contract_name(name: &str) -> bool {
-        matches!(name, "Iterable" | "Iterator" | "Resource" | "Clone")
+        matches!(
+            name,
+            "Iterable" | "Iterator" | "Resource" | "TransferableResource" | "Clone"
+        )
     }
 
     fn contract_id(&self, name: &str) -> Option<u32> {
@@ -2079,6 +2233,7 @@ impl<'a> Checker<'a> {
             overridden: false,
             from_contract: Some(contract),
             throws: method.throws.clone(),
+            is_mut: false,
         });
     }
 
@@ -2675,10 +2830,12 @@ impl<'a> Checker<'a> {
                 );
             }
 
-            // A record or value class is a value: every field is immutable,
-            // the same way `class`'s own `public mut` default does not apply
-            // to it. Writing `mut` explicitly says so, which is worth its own
-            // diagnostic rather than a silently ignored modifier.
+            // A record or value class is a value: every field is immutable by
+            // default, the same way `class`'s own `public mut` default does not
+            // apply to it. Writing `mut` explicitly says so, which is worth
+            // its own diagnostic rather than a silently ignored modifier.
+            // `inmut::strict` is preserved so `check_writable_field` can reject
+            // writes to strict fields even on value types.
             let mutability = if matches!(decl.kind, ClassKind::Class | ClassKind::Abstract) {
                 // A required attribute has whatever mutability its declared
                 // implementer gives it — an abstract class states that a
@@ -2694,7 +2851,11 @@ impl<'a> Checker<'a> {
                         Some("remove `mut`".into()),
                     );
                 }
-                Mutability::Immutable
+                if field.mutability == Mutability::Strict {
+                    Mutability::Strict
+                } else {
+                    Mutability::Immutable
+                }
             };
 
             fields.push(FieldInfo {
@@ -2833,6 +2994,7 @@ impl<'a> Checker<'a> {
                 overridden: decl.kind == ClassKind::Abstract,
                 from_contract: None,
                 throws,
+                is_mut: method.is_mut,
             };
             self.leave_type_params();
 
@@ -3233,6 +3395,8 @@ impl<'a> Checker<'a> {
             mutability: Mutability::Immutable,
             span: Span::new(0, 0),
             initialized: true,
+            moved: false,
+            pinned: false,
         });
         for param in params {
             let info = self.resolve_param(param);
@@ -3242,6 +3406,8 @@ impl<'a> Checker<'a> {
                 mutability: Mutability::Immutable,
                 span: param.name.span,
                 initialized: true,
+                moved: false,
+                pinned: false,
             });
         }
 
@@ -3859,6 +4025,8 @@ impl<'a> Checker<'a> {
                 Base::Weak(id) => (20, id),
                 Base::NativeSlice(id) => (21, id),
                 Base::NativeSliceMut(id) => (22, id),
+                Base::Dependent(id) => (23, id),
+                Base::Pin(id) => (24, id),
             }
         }
         bases.sort_by_key(key);
@@ -4074,6 +4242,76 @@ impl<'a> Checker<'a> {
         (self.native_slice_mut_types.len() - 1) as u32
     }
 
+    /// `Dependent<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1): a
+    /// reference whose lifetime is tied to the allocation that contains
+    /// the value it refers to. `T` is the element type.
+    fn resolve_dependent_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Dependent<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Dependent<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let element = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_dependent_type(element);
+        Type::of(Base::Dependent(id))
+    }
+
+    /// `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1): keeps an
+    /// object's address stable. `T` must be a reference type.
+    fn resolve_pin_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Pin<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Pin<T>` naming the referent type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let referent = self.resolve_type(&reference.arguments[0]);
+        if !referent.is_unknown() && !self.is_reference_type(referent) {
+            let name = self.name(referent);
+            self.error(
+                codes::WEAK_DISALLOWED_REFERENT,
+                reference.arguments[0].span,
+                format!("`{name}` is not a reference type"),
+                "Pin<T> only allows a class or contract instance, since only references have a stable address to pin",
+                Some("use a class or contract type as Pin<T>'s referent".into()),
+            );
+        }
+
+        let id = self.intern_pin_type(referent);
+        Type::of(Base::Pin(id))
+    }
+
+    /// Interns a `Dependent<T>` element type, returning the id its
+    /// [`Base::Dependent`] carries.
+    fn intern_dependent_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.dependent_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.dependent_types.push(element);
+        (self.dependent_types.len() - 1) as u32
+    }
+
+    /// Interns a `Pin<T>` referent type, returning the id its [`Base::Pin`]
+    /// carries.
+    fn intern_pin_type(&mut self, referent: Type) -> u32 {
+        if let Some(index) = self.pin_types.iter().position(|&t| t == referent) {
+            return index as u32;
+        }
+        self.pin_types.push(referent);
+        (self.pin_types.len() - 1) as u32
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
@@ -4091,6 +4329,12 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "NativeSliceMut" {
             return self.resolve_native_slice_type_ref(reference, true);
+        }
+        if reference.name == "Dependent" {
+            return self.resolve_dependent_type_ref(reference);
+        }
+        if reference.name == "Pin" {
+            return self.resolve_pin_type_ref(reference);
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -4697,6 +4941,8 @@ impl<'a> Checker<'a> {
                 mutability: Mutability::Immutable,
                 span: param.name.span,
                 initialized: true,
+                moved: false,
+                pinned: false,
             });
         }
 
@@ -4894,11 +5140,13 @@ impl<'a> Checker<'a> {
                 mutability: stmt.mutability,
                 span: stmt.name.span,
                 initialized: true,
+                moved: false,
+                pinned: false,
             });
         }
 
         // An explicit annotation is the expected type of the initializer —
-        // what lets `mut r: Result<Int32,String> = Result.Ok(5);` infer `E`
+        // what lets `mut r: Result<Int32,String> = Ok(5);` infer `E`
         // from context instead of only from `Ok`'s own argument (roadmap
         // Phase 4a, `expected_type`'s own doc comment).
         let outer_recursive_binding = self.recursive_binding.take();
@@ -4985,6 +5233,8 @@ impl<'a> Checker<'a> {
                 mutability: stmt.mutability,
                 span: stmt.name.span,
                 initialized: stmt.init.is_some(),
+                moved: false,
+                pinned: false,
             });
         }
     }
@@ -5073,15 +5323,18 @@ impl<'a> Checker<'a> {
                 // initialization"), exactly as a comma-grouped declaration's
                 // spec requires.
                 initialized: arity_matches || ty.has_default(),
+                moved: false,
+                pinned: false,
             });
         }
     }
 
     /// The `mut`/`inmut`/`inmut::strict` matrix (D11), applied to objects and
-    /// contracts: only naming another variable outright shares its reference,
-    /// so that is the only shape this looks at. A strict reference must not
-    /// gain a mutable alias, and it must not be acquired from one that is
-    /// still reachable through its own `mut` binding.
+    /// contracts. A strict reference must not gain a mutable alias, and it must
+    /// not be acquired from one that is still reachable through its own `mut`
+    /// binding. This also covers projections (`e.field`) when the root binding
+    /// is `inmut::strict`, so the reachable graph of a caught exception cannot
+    /// be aliased mutably.
     fn check_strict_alias(
         &mut self,
         init: &Expr,
@@ -5090,26 +5343,25 @@ impl<'a> Checker<'a> {
         target_name: &str,
         span: Span,
     ) {
-        let Expr::Path(source) = init else { return };
         if !self.is_reference_type(ty) {
             return;
         }
-        let Some(resolved) = self.scopes.resolve(&source.name) else {
+        let Some((source_name, source_mutability)) = self.root_binding_mutability(init) else {
             return;
         };
 
-        match (resolved.binding.mutability, target_mutability) {
+        match (source_mutability, target_mutability) {
             (Mutability::Strict, Mutability::Mutable) => {
                 self.error(
                     codes::STRICT_ALIAS_VIOLATION,
                     span,
                     format!(
                         "`{target_name}` would be a mutable alias of `{}`",
-                        source.name
+                        source_name
                     ),
                     format!(
                         "`{}` is `inmut::strict`, and a strict reference cannot produce a mutable alias",
-                        source.name
+                        source_name
                     ),
                     Some(format!("declare `{target_name}` with `inmut` or `inmut::strict`")),
                 );
@@ -5120,15 +5372,15 @@ impl<'a> Checker<'a> {
                     span,
                     format!(
                         "`{target_name}` cannot be `inmut::strict`: `{}` is still a mutable alias",
-                        source.name
+                        source_name
                     ),
                     format!(
                         "`{}` was declared `mut`, so it can still mutate the same reachable graph",
-                        source.name
+                        source_name
                     ),
                     Some(format!(
                         "clone `{}` first, once `Clone` is available, or drop the `mut` binding before this point",
-                        source.name
+                        source_name
                     )),
                 );
             }
@@ -5157,6 +5409,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The referent type of a `Pin<T>`, used for implicit unpin on field and
+    /// method access. Returns the type unchanged if it is not a `Pin<T>`.
+    fn unpin_type(&self, ty: Type) -> Type {
+        if let Base::Pin(id) = ty.base {
+            self.pin_types[id as usize]
+        } else {
+            ty
+        }
+    }
+
     /// Whether `id` `implements Resource<E>` for some `E` — the same test
     /// [`Self::check_resource_binding_type`] applies, factored out so
     /// [`Self::class_is_clone`] can reuse it (design D1:
@@ -5171,6 +5433,16 @@ impl<'a> Checker<'a> {
             .any(|&inst| {
                 self.contract_instances[inst as usize].contract == native_resource.resource
             })
+    }
+
+    /// Whether `id` `implements TransferableResource`.
+    fn class_implements_transferable(&self, id: u32) -> bool {
+        let Some(native_transferable) = self.native_transferable else {
+            return false;
+        };
+        self.classes[id as usize]
+            .contracts
+            .contains(&native_transferable)
     }
 
     /// Whether `ty` is `Clone` (roadmap Phase 4e, `fase-4e-clone`, design
@@ -5293,6 +5565,32 @@ impl<'a> Checker<'a> {
         eligible
     }
 
+    /// Whether a callable value type is `Clone` (roadmap Phase 4d,
+    /// `phase-4d-callables`): a named function or capture-less lambda is
+    /// trivially `Clone`; a capturing lambda is `Clone` iff every captured
+    /// value is.  `in_progress` guards mutually-recursive captures.
+    fn callable_is_clone(&mut self, id: u32, in_progress: &mut Vec<u32>) -> bool {
+        if in_progress.contains(&id) {
+            return true;
+        }
+        let Some(info) = self.lambdas.values().find(|i| i.fn_type == id).cloned() else {
+            // A named function (or any callable without an explicit lambda
+            // body recorded here) has no captured state to clone.
+            return true;
+        };
+        if info.captures.is_empty() {
+            return true;
+        }
+        in_progress.push(id);
+        let captures = info.captures.clone();
+        let eligible = captures.iter().all(|c| match c.ty.base {
+            Base::Function(captured_id) => self.callable_is_clone(captured_id, in_progress),
+            _ => self.is_clone_type(c.ty, in_progress),
+        });
+        in_progress.pop();
+        eligible
+    }
+
     /// For a diagnostic only (design D4): `ty` is assumed itself not
     /// `Clone` (a prior [`Self::is_clone_type`] call said so) — this walks
     /// the same shape again, this time collecting a human-readable path to
@@ -5400,6 +5698,19 @@ impl<'a> Checker<'a> {
             return;
         };
 
+        // `Pin<T>`: moving the referent while a pin is alive would invalidate
+        // the stable address the pin promises.
+        if self.scopes.is_pinned(&name.name) {
+            self.error(
+                codes::PINNED_OBJECT_MOVED,
+                name.span,
+                format!("cannot reassign `{}` while it is pinned", name.name),
+                "the referent of a `Pin<T>` cannot be moved while the pin is alive",
+                Some("drop the pin (leave its scope) before reassigning the referent".into()),
+            );
+            return;
+        }
+
         // Design D14 is deliberately narrower here than in `Self::check_let`:
         // a capturing closure literal only ever adopts a position's static
         // type through a `let`/`mut` *initializer* — never through a later
@@ -5415,6 +5726,7 @@ impl<'a> Checker<'a> {
         // position cannot hold this closure.
         self.expect_assignable(target_ty, value, value_span, "the assigned value");
         self.scopes.mark_initialized(&name.name);
+        self.scopes.mark_moved(&name.name, false);
     }
 
     /// `left, right = right, left;` (roadmap Phase 4d) — the comma-grouped
@@ -5504,6 +5816,20 @@ impl<'a> Checker<'a> {
                 format!("cannot assign to `{}`", field.name.name),
                 format!("the field is declared `inmut` on line {line}"),
                 Some("an `inmut` field is set by the constructor and not again".into()),
+            );
+        }
+
+        if let Base::Class(id) = object.base
+            && let Some(info) = self.classes[id as usize].field(&field.name.name)
+            && info.mutability == Mutability::Strict
+        {
+            let line = self.sources.location(info.span).line;
+            self.error(
+                codes::STRICT_FIELD_WRITE,
+                field.name.span,
+                format!("cannot assign to `{}`", field.name.name),
+                format!("the field is declared `inmut::strict` on line {line}"),
+                Some("an `inmut::strict` field is never writable through a projection".into()),
             );
         }
 
@@ -5685,6 +6011,8 @@ impl<'a> Checker<'a> {
             mutability: Mutability::Immutable,
             span: stmt.binding.span,
             initialized: true,
+            moved: false,
+            pinned: false,
         });
 
         self.loop_depth += 1;
@@ -5958,9 +6286,13 @@ impl<'a> Checker<'a> {
             self.declare_local(Binding {
                 name: catch.binding.name.clone(),
                 ty,
-                mutability: Mutability::Immutable,
+                // Caught exceptions are deep-frozen: any reference reachable from
+                // the thrown object is read-only inside the `catch`.
+                mutability: Mutability::Strict,
                 span: catch.binding.span,
                 initialized: true,
+                moved: false,
+                pinned: false,
             });
             let previous_catch = self.catch_type.replace(ty);
             let catch_always_returns = self.check_block(&catch.body);
@@ -6117,6 +6449,7 @@ impl<'a> Checker<'a> {
             Expr::Interpolated(e) => self.check_interpolated(e),
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
+            Expr::Transfer(e) => self.check_transfer(e, expected),
         }
     }
 
@@ -6416,6 +6749,64 @@ impl<'a> Checker<'a> {
         Type::of(Base::Char)
     }
 
+    /// `transfer(expr)` (roadmap Phase 4c): moves a `TransferableResource`
+    /// value, invalidating the source binding.
+    fn check_transfer(&mut self, expr: &TransferExpr, expected: Option<Type>) -> Type {
+        self.expected_type = expected;
+        let ty = self.check_expr(&expr.expr);
+        if ty.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if ty.nullable {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!(
+                    "cannot transfer a nullable value of type `{}`",
+                    self.name(ty)
+                ),
+                "`transfer(...) requires a non-nullable resource`",
+                None,
+            );
+            return ty;
+        }
+        let Base::Class(id) = ty.base else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`transfer(...)` can only be used on a class value",
+                "the operand is not an object",
+                None,
+            );
+            return ty;
+        };
+        if !self.class_implements_transferable(id) {
+            self.error(
+                codes::NOT_TRANSFERABLE,
+                expr.span,
+                format!(
+                    "`{}` does not implement `TransferableResource`",
+                    self.name(ty)
+                ),
+                "`transfer(...)` requires `TransferableResource`",
+                None,
+            );
+            return ty;
+        }
+        if let Expr::Path(ident) = &*expr.expr {
+            self.scopes.mark_moved(&ident.name, true);
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`transfer(...)` argument must be a local binding",
+                "only a direct binding can be moved",
+                None,
+            );
+        }
+        ty
+    }
+
     fn check_path(&mut self, ident: &Ident) -> Type {
         // A bare function name is a value: that is what lets a function be
         // passed where a closure is expected.
@@ -6434,6 +6825,16 @@ impl<'a> Checker<'a> {
             self.undeclared(ident);
             return Type::UNKNOWN;
         };
+
+        if resolved.binding.moved {
+            self.error(
+                codes::USE_OF_TRANSFERRED_RESOURCE,
+                ident.span,
+                format!("use of transferred resource `{}`", ident.name),
+                "this binding was invalidated by an earlier `transfer`",
+                None,
+            );
+        }
 
         if !resolved.binding.initialized {
             let line = self.sources.location(resolved.binding.span).line;
@@ -6472,18 +6873,58 @@ impl<'a> Checker<'a> {
         });
     }
 
-    /// The blanket `Pointer<T>` escape rule (roadmap Phase 4e, design D4):
-    /// any value of type `Pointer<T>`, regardless of how it was produced, is
-    /// rejected as a `return` value, a field-assignment source, or a value
-    /// captured by a closure — sound but deliberately more conservative than
-    /// per-value provenance tracking (see `design.md`'s D4 for why this
-    /// slice does not build that instead). Returns whether it rejected.
+    /// A `Dependent<T>` value being passed to a parameter that is not itself
+    /// `Dependent<T>` would escape into a non-dependent slot. Returns whether
+    /// it rejected.
+    fn reject_dependent_escape(
+        &mut self,
+        expected: Type,
+        actual: Type,
+        span: Span,
+        name: &str,
+    ) -> bool {
+        if matches!(actual.base, Base::Dependent(_)) && !matches!(expected.base, Base::Dependent(_))
+        {
+            let a = self.name(actual);
+            let e = self.name(expected);
+            self.error(
+                codes::DEPENDENT_ESCAPES,
+                span,
+                format!("`{a}` cannot be passed to parameter `{name}`"),
+                format!("a Dependent<T> value cannot escape into a non-dependent slot, and `{e}` is not Dependent<T>"),
+                Some("use a Dependent<T>-typed parameter, or copy the value out first".into()),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The blanket `Pointer<T>`/`Dependent<T>` escape rule (roadmap Phase 4e,
+    /// design D4 and `phase-4e-memory`, design D1): any value of one of these
+    /// types, regardless of how it was produced, is rejected as a `return`
+    /// value, a field-assignment source, or a value captured by a closure —
+    /// sound but deliberately more conservative than per-value provenance
+    /// tracking. Returns whether it rejected.
     fn reject_pointer_escape(&mut self, ty: Type, span: Span, escape: &str) -> bool {
         // Roadmap Phase 4e, `fase-4e-native-slice`, design D4: generalized
         // to match any "dependent-reference" type — `Pointer<T>` OR
-        // `NativeSlice<T>` OR `NativeSliceMut<T>` — reusing this one pass
-        // rather than duplicating it, per the existing "Native view escapes
-        // its borrow" scenario now actually enforced.
+        // `NativeSlice<T>` OR `NativeSliceMut<T>` OR `Dependent<T>` — reusing
+        // this one pass rather than duplicating it.
+        if matches!(ty.base, Base::Dependent(_)) {
+            let name = self.name(ty);
+            self.error(
+                codes::DEPENDENT_ESCAPES,
+                span,
+                format!("`{name}` cannot be {escape}"),
+                "a Dependent<T> value cannot outlive the base object it refers to",
+                Some(
+                    "copy what it points to instead, or restructure so the value stays local"
+                        .into(),
+                ),
+            );
+            return true;
+        }
         if !matches!(
             ty.base,
             Base::Pointer(_) | Base::NativeSlice(_) | Base::NativeSliceMut(_)
@@ -7222,7 +7663,105 @@ impl<'a> Checker<'a> {
         );
     }
 
+    fn check_grouped_match(&mut self, expr: &MatchExpr, _as_value: bool) -> Type {
+        let mut acquired: Vec<(Type, Type)> = Vec::new();
+        let mut error_type = Type::UNKNOWN;
+        let mut first_error = true;
+
+        for acquisition in &expr.acquisitions {
+            let scrutinee = self.check_expr(&acquisition.expr);
+            self.check_resource_match_scrutinee(&acquisition.binding, scrutinee);
+
+            if let Type {
+                nullable: false,
+                base: Base::EnumInstance(inst),
+            } = scrutinee.without_null()
+            {
+                let instance = &self.enum_instances[inst as usize];
+                if Some(instance.enum_id) == self.native_result {
+                    let r = instance.args[0];
+                    let e = instance.args[1];
+                    self.check_resource_binding_type(&acquisition.binding, r);
+                    acquired.push((r, e));
+                    if first_error {
+                        error_type = e;
+                        first_error = false;
+                    } else if let Some(unified) = error_type.unify(e) {
+                        error_type = unified;
+                    }
+                }
+            }
+        }
+
+        let failure_type = if error_type.is_unknown() || self.native_resource_failure.is_none() {
+            error_type
+        } else {
+            let failure_enum = self.native_resource_failure.unwrap();
+            let instance = self.intern_enum_instance(GenericEnumInstance {
+                enum_id: failure_enum,
+                args: vec![error_type, error_type],
+            });
+            Type::of(Base::EnumInstance(instance))
+        };
+
+        self.scopes.push();
+        for (acquisition, (r, _)) in expr.acquisitions.iter().zip(acquired.iter()) {
+            self.declare_local(Binding {
+                name: acquisition.binding.name.clone(),
+                ty: *r,
+                mutability: Mutability::Immutable,
+                span: acquisition.binding.span,
+                initialized: true,
+                moved: false,
+                pinned: false,
+            });
+        }
+
+        if let Some(body) = &expr.body {
+            match body.as_ref() {
+                ArmBody::Expr(e) => {
+                    self.check_expr(e);
+                }
+                ArmBody::Block(b) => {
+                    self.check_block(b);
+                }
+            }
+        }
+
+        if let Some(error) = &expr.error {
+            let mut covered = Vec::new();
+            let mut has_wildcard = false;
+            let mut bindings = Vec::new();
+            self.check_pattern(
+                &error.pattern,
+                failure_type,
+                &mut covered,
+                &mut has_wildcard,
+                &mut bindings,
+            );
+            for binding in bindings {
+                self.declare_local(binding);
+            }
+            match &error.body {
+                ArmBody::Expr(e) => {
+                    self.check_expr(e);
+                }
+                ArmBody::Block(b) => {
+                    self.check_block(b);
+                }
+            }
+        }
+
+        self.scopes.pop();
+
+        Type::VOID
+    }
+
     fn check_match(&mut self, expr: &MatchExpr, as_value: bool) -> Type {
+        if !expr.acquisitions.is_empty() {
+            return self.check_grouped_match(expr, as_value);
+        }
+
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
 
@@ -7296,7 +7835,7 @@ impl<'a> Checker<'a> {
                 format!("no arm's pattern binds `{}`", with_binding.name),
                 "`match ... with` names the resource one of the arms acquires by binding it in its own pattern",
                 Some(format!(
-                    "destructure it into `{}` in the arm that acquires it, e.g. `Result.Ok({})`",
+                    "destructure it into `{}` in the arm that acquires it, e.g. `Ok({})`",
                     with_binding.name, with_binding.name
                 )),
             );
@@ -7356,6 +7895,8 @@ impl<'a> Checker<'a> {
                     mutability: Mutability::Immutable,
                     span: ident.span,
                     initialized: true,
+                    moved: false,
+                    pinned: false,
                 });
             }
             Pattern::Int(lit) => {
@@ -7426,7 +7967,7 @@ impl<'a> Checker<'a> {
         self.expect_pattern_type(scrutinee, Type::of(Base::Enum(index as u32)), pattern.span);
 
         // A generic enum's variant carries its own bare `Base::Param` field
-        // types (`Result.Ok`'s `value: T`) — substituted here against the
+        // types (`Ok(...)`'s `value: T`) — substituted here against the
         // scrutinee's own concrete instantiation, the same way a generic
         // class's field read already substitutes (`Self::member_type`'s
         // `Base::Instance` arm), so a destructured binding gets `Int32`,
@@ -7530,7 +8071,7 @@ impl<'a> Checker<'a> {
         // The scrutinee's nullability is irrelevant here: a `null` pattern is
         // what covers that half.
         //
-        // A variant pattern (`Result.Ok(value)`) types itself against the
+        // A variant pattern (`Ok(value)`) types itself against the
         // bare, unparameterized enum — the same reason `bare_enum_matches_instance`'s
         // own doc comment gives for construction and `return`: nothing here
         // reads the pattern's own type arguments, only which variant it
@@ -7776,6 +8317,10 @@ impl<'a> Checker<'a> {
         if object.is_unknown() {
             return Type::UNKNOWN;
         }
+
+        // `Pin<T>` dereferences automatically for field and method access
+        // (roadmap Phase 4e, `phase-4e-memory`, design D1).
+        let object = self.unpin_type(object);
 
         // `.is_null` (roadmap Phase 4e): the one `Pointer<T>` operation that
         // needs no `unsafe` (spec scenario "Null raw pointer is inspected").
@@ -8254,7 +8799,7 @@ impl<'a> Checker<'a> {
             type_params: type_params.clone(),
             throws: Vec::new(),
         };
-        // `Result.Ok(v)` cannot determine `E` from `v` alone — no argument
+        // `Ok(v)` cannot determine `E` from `v` alone — no argument
         // ever will, since `E` names the *other* variant's payload. Seeding
         // from the expected type (`Self::expected_type`'s own doc comment)
         // is what makes a two-parameter generic enum constructible at all,
@@ -8518,6 +9063,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Expr::Transfer(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Unsafe(e) => self.check_recursive_reference_block(&e.body, name, nested),
             Expr::Commit(e) => self.check_recursive_reference_block(&e.body, name, nested),
         }
@@ -8554,6 +9100,8 @@ impl<'a> Checker<'a> {
                 mutability: Mutability::Immutable,
                 span: param.name.span,
                 initialized: true,
+                moved: false,
+                pinned: false,
             });
         }
 
@@ -8806,6 +9354,10 @@ impl<'a> Checker<'a> {
     /// receiver and wrap the result nullable, instead of duplicating the
     /// three-way dispatch for both the plain and the safe case.
     fn check_method_call_on(&mut self, object: Type, expr: &CallExpr, field: &FieldExpr) -> Type {
+        // `Pin<T>` dereferences automatically for method access (roadmap
+        // Phase 4e, `phase-4e-memory`, design D1).
+        let object = self.unpin_type(object);
+
         if let Base::Class(id) = object.base {
             // `.clone()` (roadmap Phase 4e, `fase-4e-clone`, design D1/D4):
             // a class that declares its own `clone` method (the manual
@@ -8840,6 +9392,37 @@ impl<'a> Checker<'a> {
                 .zip(instance.args)
                 .collect();
             return self.check_method_call(expr, field, instance.class, &subst);
+        }
+        if let Base::Function(id) = object.base {
+            if field.name.name == "clone" && expr.args.is_empty() {
+                let mut in_progress = Vec::new();
+                if self.callable_is_clone(id, &mut in_progress) {
+                    return object;
+                }
+                self.error(
+                    codes::NOT_CLONE,
+                    field.name.span,
+                    format!("`{}` is not `Clone`", self.name(object)),
+                    "a callable is `Clone` only when every value it captures is `Clone`".to_string(),
+                    Some("remove or replace the non-`Clone` capture, or declare your own `clone` method once supported".to_string()),
+                );
+                return Type::UNKNOWN;
+            }
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!(
+                    "`{}` has no method `{}`",
+                    self.name(object),
+                    field.name.name
+                ),
+                "callable values only support `.clone()`".to_string(),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
         }
         unreachable!("caller already matched object.base against these three")
     }
@@ -8917,6 +9500,29 @@ impl<'a> Checker<'a> {
             }
             return Type::UNKNOWN;
         };
+
+        // A `mut` method on an `inmut::strict` receiver would mutate the
+        // reachable graph the strict reference promises to freeze.
+        if method.is_mut
+            && let Some((root_name, Mutability::Strict)) =
+                self.root_binding_mutability(&field.object)
+        {
+            self.error(
+                codes::MUTATING_METHOD_ON_STRICT,
+                field.name.span,
+                format!(
+                    "cannot call `{}` on an `inmut::strict` reference",
+                    method.name
+                ),
+                format!(
+                    "`{root_name}` is `inmut::strict`, and `{}` is declared `mut`",
+                    method.name
+                ),
+                Some(format!(
+                    "declare `{root_name}` with `mut` if it must call mutating methods"
+                )),
+            );
+        }
 
         let params = if subst.is_empty() {
             method.params.clone()
@@ -9202,6 +9808,70 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// For `Pointer.from(place).as_slice(n)`, returns the `place` expression
+    /// if `expr` is exactly that inner `Pointer.from(place)` call.
+    fn as_pointer_from_place<'p>(&self, expr: &'p Expr) -> Option<&'p Expr> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let Expr::Path(base) = &*field.object else {
+            return None;
+        };
+        if base.name != "Pointer" || field.name.name != "from" {
+            return None;
+        }
+        if call.args.len() != 1 || call.args[0].name.is_some() {
+            return None;
+        }
+        Some(&call.args[0].value)
+    }
+
+    /// The statically known extent of `place` in `Pointer.from(place)`,
+    /// measured in elements of `place`'s own type.
+    ///
+    /// Today every addressable source is a single value (a scalar FFI-safe
+    /// local/parameter/field), so the extent is one. Multi-element array-like
+    /// locals are not represented in this phase.
+    fn place_extent_in_elements(&self, place: &Expr) -> Option<u64> {
+        if !self.is_addressable_place(place) {
+            return None;
+        }
+        Some(1)
+    }
+
+    /// Reject `Pointer.from(place).as_slice(n)`/`as_slice_mut(n)` when the
+    /// length `n` is a constant that exceeds the known extent of `place`.
+    /// This only handles the syntactically direct shape and constant lengths.
+    fn check_native_slice_extent(&mut self, expr: &CallExpr, field: &FieldExpr, t: Type) {
+        if t.is_unknown() {
+            return;
+        }
+        let Some(place) = self.as_pointer_from_place(&field.object) else {
+            return;
+        };
+        let Some(extent) = self.place_extent_in_elements(place) else {
+            return;
+        };
+        let Some(arg) = expr.args.first() else {
+            return;
+        };
+        let Expr::Int(lit) = &arg.value else {
+            return;
+        };
+        if lit.value < 0 || lit.value as u128 > extent as u128 {
+            self.error(
+                codes::NATIVE_SLICE_EXTENT_EXCEEDED,
+                arg.span,
+                format!("slice length {} exceeds the known extent of the source place", lit.value),
+                format!("`Pointer.from(place).as_slice(...)` can address at most {extent} element(s) of this place"),
+                Some("use a length no larger than the known extent, or take the address of a larger allocation".into()),
+            );
+        }
+    }
+
     /// `Pointer.from(place)` (roadmap Phase 4e, design D8): the address of
     /// an addressable local, parameter, or field, typed `Pointer<T>` where
     /// `T` is `place`'s own type — which must itself be FFI-safe.
@@ -9322,6 +9992,8 @@ impl<'a> Checker<'a> {
                 type_params: Vec::new(),
                 throws: Vec::new(),
             };
+
+            self.check_native_slice_extent(expr, field, t);
             return Some(self.check_direct_call(expr, &signature));
         }
 
@@ -9397,6 +10069,52 @@ impl<'a> Checker<'a> {
         Type::of(Base::Weak(id))
     }
 
+    /// `Pin(obj)` (roadmap Phase 4e, `phase-4e-memory`, design D1): pins the
+    /// address of a class/contract reference and returns `Pin<T>`.
+    fn check_pin_construction(&mut self, expr: &CallExpr, _span: Span) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Pin(obj)` takes exactly one positional argument",
+                format!("received {}", expr.args.len()),
+                Some("write `Pin(obj)` where `obj` is a class or contract reference".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let value = &expr.args[0].value;
+        let ty = self.check_expr(value);
+        if ty.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if !self.is_reference_type(ty) {
+            let name = self.name(ty);
+            self.error(
+                codes::WEAK_DISALLOWED_REFERENT,
+                value.span(),
+                format!("`{name}` is not a reference type"),
+                "Pin<T> only allows a class or contract instance, since only references have a stable address to pin",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        // Record the root binding as pinned so later reassignment can be
+        // rejected while the `Pin<T>` is alive.
+        if let Expr::Path(ident) = value
+            && self.scopes.resolve(&ident.name).is_some()
+        {
+            self.scopes.mark_pinned(&ident.name);
+        }
+
+        let id = self.intern_pin_type(ty);
+        Type::of(Base::Pin(id))
+    }
+
     /// `.upgrade()` (roadmap Phase 4e, `fase-4e-weak`, design D4) —
     /// `Weak<T>`'s one method: returns the referent when it is still
     /// reachable, `null` otherwise, typed `T?`. `.is_alive` is handled in
@@ -9459,6 +10177,25 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // `Ok(...)` and `Error(...)` are the unqualified forms of the built-in
+        // `Result<T,E>` variants. Resolve them to `Result.Ok(...)` /
+        // `Result.Error(...)` when no local binding shadows the name.
+        if let Expr::Path(callee) = &*expr.callee
+            && (callee.name == "Ok" || callee.name == "Error")
+            && self.scopes.lookup(&callee.name).is_none()
+            && let Some(enum_id) = self.enums.iter().position(|e| e.name == "Result")
+        {
+            let result_ident = Ident::new("Result", callee.span);
+            let field = FieldExpr {
+                object: Box::new(Expr::Path(result_ident)),
+                name: callee.clone(),
+                safe: false,
+                span: callee.span,
+            };
+            self.variant_accesses.insert(callee.span);
+            return self.check_variant_construction(expr, &field, enum_id as u32, expected);
+        }
+
         // `Pointer.from(place)` (roadmap Phase 4e, design D1/D8): a static
         // call on the compiler-built-in `Pointer` name, decided here for the
         // same reason `LoadState.Loading(...)` above is — `Pointer` names a
@@ -9484,6 +10221,16 @@ impl<'a> Checker<'a> {
             return self.check_weak_from(expr);
         }
 
+        // `Pin(obj)` (roadmap Phase 4e, `phase-4e-memory`, design D1): a
+        // built-in constructor that pins a mutable reference and returns
+        // `Pin<T>`. `Pin` names a type, not an ordinary function.
+        if let Expr::Path(callee) = &*expr.callee
+            && callee.name == "Pin"
+            && self.scopes.lookup(&callee.name).is_none()
+        {
+            return self.check_pin_construction(expr, callee.span);
+        }
+
         // `u.greeting()` calls a method. It is decided here and not by the
         // parser for the same reason `u.name` is: the shape does not say
         // whether the base is a value with members.
@@ -9491,6 +10238,7 @@ impl<'a> Checker<'a> {
             && !self.variant_accesses.contains(&field.span)
         {
             let object = self.check_expr(&field.object);
+            let object = self.unpin_type(object);
 
             // `myInt.to_string()`: the explicit spelling of the same
             // conversion `println`/interpolation reach implicitly (roadmap
@@ -9522,6 +10270,24 @@ impl<'a> Checker<'a> {
                     self.check_expr(&arg.value);
                 }
                 return Type::STRING;
+            }
+
+            // `Throwable.stack_trace()` / `Throwable.suppressed()` are
+            // compiler intrinsics answered by the runtime, not user-overridable
+            // methods. They take no arguments and require a `Throwable` receiver.
+            if (field.name.name == "stack_trace" || field.name.name == "suppressed")
+                && !field.safe
+                && expr.args.is_empty()
+            {
+                let object = self.check_expr(&field.object);
+                if self.is_throwable_type(object) {
+                    let native = self.native_exceptions.expect("Throwable is registered");
+                    return match field.name.name.as_str() {
+                        "stack_trace" => Type::STRING,
+                        "suppressed" => Type::of(Base::Class(native.throwable)).as_nullable(),
+                        _ => Type::UNKNOWN,
+                    };
+                }
             }
 
             // `result.is_ok()`, `.unwrap()`, … : `Result<T,E>`'s own method
@@ -9621,7 +10387,11 @@ impl<'a> Checker<'a> {
 
             if matches!(
                 object.base,
-                Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+                Base::Class(_)
+                    | Base::Contract(_)
+                    | Base::Param(_)
+                    | Base::Instance(_)
+                    | Base::Function(_)
             ) {
                 if field.safe {
                     self.reject_redundant_safe(object, field.object.span());
@@ -9773,12 +10543,11 @@ impl<'a> Checker<'a> {
         }
 
         for (index, (actual, expected)) in arguments.iter().zip(&fn_type.params).enumerate() {
-            self.expect_assignable(
-                *expected,
-                *actual,
-                expr.args[index].span,
-                &format!("argument {}", index + 1),
-            );
+            let name = format!("argument {}", index + 1);
+            if self.reject_dependent_escape(*expected, *actual, expr.args[index].span, &name) {
+                continue;
+            }
+            self.expect_assignable(*expected, *actual, expr.args[index].span, &name);
         }
 
         fn_type.returns
@@ -9904,7 +10673,7 @@ impl<'a> Checker<'a> {
     /// [`Self::check_direct_call_with_subst`], pre-populating the inferred
     /// substitution with `seed` before arguments are considered — what lets
     /// [`Self::check_variant_construction`] resolve a type parameter no
-    /// argument determines (`Result.Ok(v)`'s own `E`) from the surrounding
+    /// argument determines (`Ok(v)`'s own `E`) from the surrounding
     /// expected type instead. An argument that disagrees with the seed is
     /// still a real error: seeding happens before the argument loop, so the
     /// existing "cannot infer, would have to be both X and Y" conflict check
@@ -9934,6 +10703,9 @@ impl<'a> Checker<'a> {
 
             match slot {
                 ArgSlot::Given { ty, span } => {
+                    if self.reject_dependent_escape(param_ty, *ty, *span, &param.name) {
+                        continue;
+                    }
                     self.expect_assignable(
                         param_ty,
                         *ty,
@@ -9943,6 +10715,9 @@ impl<'a> Checker<'a> {
                 }
                 ArgSlot::Variadic(items) => {
                     for (ty, span) in items {
+                        if self.reject_dependent_escape(param_ty, *ty, *span, &param.name) {
+                            continue;
+                        }
                         self.expect_assignable(
                             param_ty,
                             *ty,

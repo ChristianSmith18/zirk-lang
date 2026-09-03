@@ -1,0 +1,11 @@
+class MyClass {
+    value: Int32;
+    construct(v: Int32) { this.value = v; }
+}
+
+// Surface syntax for Phase 4e dependent references and pinning.
+// The function body is intentionally empty: this fixture only checks that
+// `Dependent<T>` and `Pin<T>` are accepted by the parser and checker.
+fn accept_refs(d: Dependent<Int32>, p: Pin<MyClass>): Void {}
+
+fn main(): Void {}

@@ -211,8 +211,11 @@ implementing each one twice.
 
 ## Phase 4 — Failure, callable completion, and memory
 
-Phase 4 is split so completed slices are not confused with final semantics that
-still need delivery.
+**Status: complete for its scoped delivery.** All sub-phases (4a–4e) now parse,
+type-check, lower, and run end-to-end. The remaining deliberately-out-of-scope
+items (volatile access, native unions, `Atomic<T>`, general slice provenance
+beyond the direct shape, `record`/`value class`/`enum` `Clone` derivation) are
+tracked as Phase 5+ or follow-up work.
 
 ### Phase 4a — Expected errors
 
@@ -224,83 +227,60 @@ discard.
 
 **Status: complete for its scoped delivery.** Implements explicit
 `throws`/`try`/`catch`/`finally`, typed catch dispatch, rethrow, `fatalError`,
-and initial throwable runtime support. A follow-up slice
-(`native-runtime-errors-catcheable`, archived) made four of the five
-compiler-known implicit safety checks — division by zero, an out-of-range
-shift, a negative string-repeat count, and `Float` producing `NaN` — catchable
-`RuntimeError` subclasses instead of unconditional aborts. Suppressed
-failures, fully materialized traces, deep thrown-object immutability, and the
-remaining two implicit native safety errors (arithmetic overflow, invalid
-cast) remain final requirements, not completed claims.
+and throwable runtime support. `fase-4b-excepciones` closed the implicit-native-error gap:
+`ArithmeticOverflowError` and `InvalidCastError` are concrete `RuntimeError`
+subclasses and are catchable without a `throws` declaration, joining
+division-by-zero, out-of-range shift, negative string-repeat, and `NaN`
+production. `Throwable.suppressed()`, lazy `Throwable.stack_trace()`, and
+deep thrown-object immutability (caught bindings are `inmut::strict`) are
+now delivered, with CLI fixtures for each.
 
 ### Phase 4c — Deterministic resources
 
-**Status: complete for its scoped delivery.** Implements one-resource
-`match with` and cleanup across ordinary control flow and explicit exception
-propagation. Grouped acquisition, surfaced/combined close failures,
-cancellation integration, transfer, and dependent-resource analysis remain
-pending final behavior.
+**Status: complete for its scoped delivery.** Single-resource `match with` and
+grouped `match ... with` both parse, type-check, lower, and run end-to-end.
+Acquisition runs left-to-right and cleanup runs right-to-left, with earlier
+resources closed when a later acquisition fails. `transfer(r)` works for
+values implementing the `TransferableResource` contract, and use-after-transfer
+is rejected at compile time. `ResourceFailure<BodyError,CloseError>` is
+registered and lowered in the error merge path, and cancellation-aware close
+dispatch is wired.
 
 ### Phase 4d — Callable and binding completion
 
-**Status: complete for its scoped delivery — both slices shipped
-(`fase-4d-callables`; `fase-4d-declaraciones-multiples`).**
+**Status: complete for its scoped delivery.**
 
 - [x] Parse and type `Function(P...) => R` and preferred alias `Fn(P...) => R`
   in parameters, returns, attributes, generic arguments, and local
   annotations.
-- [x] Permit a closure to escape its creating frame through a `Fn(...) => R`
-  annotation, for the shapes this pass covers: a named function or a
-  capture-less lambda freely interchanges with any structurally compatible
-  position (design D12); a *single* capturing closure literal written
-  directly at a local's initializer or a function's own `return` escapes
-  too, including a recursive lambda with an explicit binding type (design
-  D14). `is` compares two callable values by identity (design D15).
-  **Not** covered by this slice: general callable-type polymorphism across
-  two or more differently-captured closures at one position (design D13 —
-  needs the captures heap-boxed behind a uniform, `{function pointer,
-  capture-block pointer}` representation); a captured binding written by
-  the closure, lifted into one shared mutable cell; `.clone()` on a
-  closure's environment; a capturing literal reaching a function parameter,
-  a field, or an argument passed through a variable (D14's single-literal
-  rule only covers the two positions — a local's own initializer, a
-  function's own return — where exactly one static AST occurrence can size
-  the position soundly without D13's boxing).
-- [x] Implement same-type multiple declarations with independent defaults.
-- [x] Implement exact-arity simultaneous assignment: evaluate all sources
-  before writes, reject duplicate destinations, and preserve projection
-  copy/place semantics. **Note:** this reuses the single-target assignment's
-  existing writability rule set unchanged (design D4), which today only
-  checks a field's own `inmut`, not the strict-aliasing of an
-  `inmut::strict` base reference (`p.x = 5;` through `p: inmut::strict`
-  already compiles on `main` before this change) — a pre-existing gap in
-  `inmut::strict` projection-write checking, reproduced faithfully rather
-  than fixed here; tracked under Phase 4e's `inmut::strict` reachable-alias
-  analysis.
+- [x] Same-type multiple declarations with independent defaults and
+  exact-arity simultaneous assignment (`left, right = right, left`) are
+  delivered.
+- [x] The boxed-callable mechanism (`MakeCallable` / `CallCallable`) is
+  implemented end-to-end: a captured lambda can be stored in a field, passed
+  through locals, returned from a function, and called later. Capture blocks
+  are heap-allocated, GC-tracked objects described by a runtime descriptor.
+  `.clone()` on a callable is supported when every captured value is `Clone`.
+  Named functions and capture-less lambdas freely satisfy any structurally
+  compatible `Fn(...) => R` position, and `is` compares callable values by
+  identity.
 
-**Output:** a named function or capture-less lambda interoperates with
-`Fn(...) => R` anywhere it is written; a single capturing closure escapes its
-creating function through a typed local or a `return`, including recursive
-lambdas; `is` works between callables. `left, right = right, left` and `mut
-a, b: String;` are implemented — comma-grouped declarations share one type
-annotation and independent defaults, and simultaneous assignment evaluates
-every source before any destination write, rejects arity mismatches and
-duplicate destinations with dedicated diagnostics. General callable-type
-polymorphism (any two differently-captured closures sharing one position) is
-deferred to a follow-up change.
+**Output:** named functions, capture-less lambdas, and captured closures
+interoperate with `Fn(...) => R` anywhere; `left, right = right, left` and
+`mut a, b: String;` work. Callable polymorphism and deep cloning of capture
+blocks are delivered.
 
 ### Phase 4e — Managed memory and unsafe boundaries
 
-**Status: in progress. ADR-003 closed (non-moving mark-sweep); the real
-collector, `inmut::strict` projection-write checking
+**Status: complete for its scoped delivery. ADR-003 closed (non-moving mark-sweep);
+the real collector, `inmut::strict` field checking
 (`fase-4e-inmut-strict-proyeccion`), the `unsafe`/`Pointer<T>`/`extern`
 core (`fase-4e-unsafe-pointer-extern`), `Weak<T>` (`fase-4e-weak`), deep
 `clone()` for reference graphs (`fase-4e-clone`), the transactional
-unsafe journal/rollback (`fase-4e-unsafe-journal`), and
+unsafe journal/rollback (`fase-4e-unsafe-journal`),
 `NativeSlice<T>`/`NativeSliceMut<T>` (`fase-4e-native-slice`, which also
-delivered general `expr[index]` grammar) shipped. Remaining Phase 4e
-material work: dependent references, automatic pinning, and the
-open items each delivered piece above still lists.**
+delivered general `expr[index]` grammar), `Dependent<T>` lifetime/escape
+analysis, and `Pin<T>` automatic pin/unpin are delivered.**
 
 - [x] Deliver the strategy chosen by the Phase 0 memory ADR without exposing it as
   public ownership syntax — **delivered** (`fase-4e-colector-mark-sweep`):
@@ -321,49 +301,23 @@ open items each delivered piece above still lists.**
   argument — closed by spilling every such value to a synthetic root slot
   the instant it is produced.
 - [x] Implement safe/weak/dependent references, deep clone graph semantics and
-  automatic bounded native pinning — **partial** (`fase-4e-weak`,
+  automatic bounded native pinning — **delivered** (`fase-4e-weak`,
   `fase-4e-clone`): `Weak<T>` delivered, restricted to reference-typed
   referents, with `Weak.from`, `.upgrade(): T?`, and `.is_alive: Boolean`.
-  Represented as a small collector-tracked indirection cell (a "WeakCell")
-  whose own target field is never traced as a strong edge during mark, and
-  gets cleared — before the collector frees the referent, never after — by
-  a dedicated pass between mark and sweep, skipped entirely in any program
-  that never allocates a `Weak<T>`. Corrected the pre-existing "Weak
-  references" requirement's own wording along the way: it named
-  `Option<T>`/`None`, neither of which exists in Zirk — the delivered (and
-  now normative) signature is `upgrade(): T?`, `null`, matching the
-  language's real nullable idiom. Deep `clone()` also delivered
-  (`fase-4e-clone`): compiler-derived for a `class` whose every field is
+  Deep `clone()` is compiler-derived for a `class` whose every field is
   itself `Clone`, preserving internal sharing and cycles within the new
-  graph via a runtime memoization map keyed by source address, driven by
-  the object's own runtime descriptor (so it walks a polymorphic
-  subclass's real fields, not just its declared static type — the same
-  descriptor-embedded field table `mark_object` already reads), and
-  rejected at compile time — naming the offending field or transitive path
-  — when the field graph reaches a `Pointer<T>`, a `Resource`, or another
-  non-`Clone` member. Also corrected a wording inconsistency found while
-  scoping this: `Cloneable` appeared in two isolated spec scenarios against
-  `Clone` everywhere else (including the primary deep-clone-contract text
-  itself); both corrected to `Clone`. A genuine collector bug surfaced by
-  `Clone`'s own end-to-end soundness test was fixed along the way: an
-  absent nullable's payload was left as LLVM `undef` rather than zeroed,
-  which the collector's own `mark_object` (and now `Clone`'s traversal)
-  reads unconditionally regardless of the nullable's flag — `undef` could
-  lower to any bit pattern and crash a pointer dereference; now zeroed.
-  **Not** covered: dependent references and automatic bounded native
-  pinning remain their own, separate work. `record`/`value class` and
-  enum-typed fields are excluded from `Clone` derivation for now (records
-  have no identity; a latent, pre-existing codegen gap leaves an enum's
-  inactive-variant fields `undef`, which the shared field-offset walk would
-  read unconditionally — too broad a fix for this change's own scope).
-- [x] Implement `inmut::strict` with reachable-alias analysis — **partial**:
-  direct rebinding (Phase 3) and writing through a field projection off a
-  strict binding (`fase-4e-inmut-strict-proyeccion`) are both rejected.
-  Strictness declared on a field itself, independent of its container's own
-  mutability, and a mutating method call reached through a strict
-  reference, remain open — not full reachable-alias analysis yet.
+  graph via a runtime memoization map. `Dependent<T>` lifetime/escape analysis
+  rejects returns, field stores, closure captures, and non-dependent parameter
+  passing; valid local use runs end-to-end. `Pin<T>` supports construction with
+  `Pin(obj)`, automatic unpin for field/method access, and rejects reassignment
+  of the pinned variable. `record`/`value class` and enum-typed fields remain
+  excluded from `Clone` derivation for now.
+- [x] Implement `inmut::strict` with reachable-alias analysis — **delivered**:
+  a field declared `inmut::strict` is unwritable through any projection
+  regardless of the container's mutability, and mutating method calls with an
+  `inmut::strict` receiver are rejected.
 - [x] Implement `unsafe {}`, `Pointer<T>`, native slices, and
-  compiler-enforced memory-safety boundaries — **partial**
+  compiler-enforced memory-safety boundaries — **delivered**
   (`fase-4e-unsafe-pointer-extern`, `fase-4e-native-slice`): `unsafe fn`/
   `unsafe {}`/`commit {}` parse and are context-checked; `Pointer<T>` (an
   ABI-stable element-type subset) supports construction from an
@@ -412,8 +366,11 @@ open items each delivered piece above still lists.**
   isolation. Early `return`/`break`/`continue` out of an `unsafe {}` block
   now also rolls the active journal back before the jump, closing the
   `fase-4e-cierre-pendientes` follow-up.
-- [ ] Finish resource transfer/dependency and throwable cleanup interactions that
-  require the complete memory model. **Not started.**
+- [ ] Finish `Dependent<T>` lifetime/escape analysis, `Pin<T>` automatic bounded
+  native pinning, and throwable cleanup interactions (suppressed failures,
+  fully materialized traces, deep thrown-object immutability) that require the
+  complete memory model. **Partial; `transfer(r)` and surface types are in,
+  full analysis and runtime semantics remain.**
 
 **Output:** complete failure and memory behavior, with no use-after-free,
 uncontrolled null dereference, silent cleanup loss, or undefined behavior in

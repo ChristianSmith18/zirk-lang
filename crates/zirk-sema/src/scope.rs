@@ -20,6 +20,10 @@ pub struct Binding {
     /// Flow analysis prevents reading one that is not yet available
     /// (`LANGUAGE_SPEC` section 2).
     pub initialized: bool,
+    /// Whether the binding has been invalidated by `transfer(...)`.
+    pub moved: bool,
+    /// Whether this binding's referent has been pinned by an active `Pin<T>`.
+    pub pinned: bool,
 }
 
 /// One nesting level.
@@ -121,6 +125,16 @@ impl Scopes {
         }
     }
 
+    /// Marks a binding as moved or restores it after a reassignment.
+    pub fn mark_moved(&mut self, name: &str, moved: bool) {
+        for level in self.levels.iter_mut().rev() {
+            if let Some(binding) = level.bindings.iter_mut().rev().find(|b| b.name == name) {
+                binding.moved = moved;
+                return;
+            }
+        }
+    }
+
     /// Updates a binding's own static type in place, without declaring a
     /// second one (`Self::declare` would report `ORDINARY_SHADOWING`
     /// against the very entry this is meant to finish setting up).
@@ -136,6 +150,21 @@ impl Scopes {
                 return;
             }
         }
+    }
+
+    /// Marks a binding's referent as pinned by an active `Pin<T>`.
+    pub fn mark_pinned(&mut self, name: &str) {
+        for level in self.levels.iter_mut().rev() {
+            if let Some(binding) = level.bindings.iter_mut().rev().find(|b| b.name == name) {
+                binding.pinned = true;
+                return;
+            }
+        }
+    }
+
+    /// Whether a resolved binding is the referent of an active `Pin<T>`.
+    pub fn is_pinned(&self, name: &str) -> bool {
+        self.resolve(name).is_some_and(|r| r.binding.pinned)
     }
 }
 
@@ -205,6 +234,8 @@ mod tests {
             mutability: Mutability::Mutable,
             span: S,
             initialized: true,
+            moved: false,
+            pinned: false,
         }
     }
 

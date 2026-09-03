@@ -1,0 +1,69 @@
+// Grouped `match ... with` where an acquisition fails and a close fails.
+// The `error` branch receives `ResourceFailure.BodyAndClose(body, close)`.
+
+class OpenError implements Error {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "OPEN";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+}
+
+class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    mut fail_close: Boolean;
+
+    construct(name: String, fail_close: Boolean) {
+        this.name = name;
+        this.fail_close = fail_close;
+    }
+
+    fn read_all(): String {
+        return "contents of " + this.name;
+    }
+
+    fn nothing(): Void {
+        return;
+    }
+
+    override fn close(): Result<Void, OpenError> {
+        if this.fail_close {
+            return Error(OpenError("close error: " + this.name));
+        }
+        return Ok(this.nothing());
+    }
+
+    override fn is_closed(): Boolean {
+        return false;
+    }
+}
+
+fn open_file(name: String, fail_open: Boolean, fail_close: Boolean): Result<FakeFile, OpenError> {
+    if fail_open {
+        return Error(OpenError("cannot open " + name));
+    }
+    return Ok(FakeFile(name, fail_close));
+}
+
+fn main(): Void {
+    match open_file("first", false, true) with a, open_file("second", true, false) with b {
+        stdout.println("unreachable");
+    } error {
+        ResourceFailure.BodyAndClose(body, close) => {
+            stdout.println("body: " + body.message());
+            stdout.println("close: " + close.message());
+        }
+    }
+}

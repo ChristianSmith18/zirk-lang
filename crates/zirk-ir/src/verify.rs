@@ -189,6 +189,58 @@ fn verify_instruction(
             }
         }
 
+        InstKind::SetSuppressed {
+            exception,
+            suppressed,
+        } => {
+            expect(inst.ty, IrType::Void, position, "SetSuppressed", report);
+            if let Some(ty) = type_of(exception)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: SetSuppressed's exception is {0}, neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(suppressed)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: SetSuppressed's suppressed is {0}, neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::StackTrace(exception) => {
+            expect(inst.ty, IrType::String, position, "StackTrace", report);
+            if let Some(ty) = type_of(exception)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: StackTrace's exception is {0}, neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::Suppressed(exception) => {
+            if !matches!(inst.ty, IrType::Nullable(_)) {
+                report(format!(
+                    "{position}: Suppressed expects a nullable type, found {}",
+                    inst.ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(exception)
+                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+            {
+                report(format!(
+                    "{position}: Suppressed's exception is {0}, neither an object nor a contract",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::HasPendingException => {
             expect(
                 inst.ty,
@@ -197,6 +249,10 @@ fn verify_instruction(
                 "HasPendingException",
                 report,
             );
+        }
+
+        InstKind::IsCancelled => {
+            expect(inst.ty, IrType::Boolean, position, "IsCancelled", report);
         }
 
         // No shape to check: `ty` is whichever class the matching `catch`
@@ -706,6 +762,33 @@ fn verify_instruction(
                 ));
             }
             expect(inst.ty, op.result_type(left_ty), position, "Binary", report);
+        }
+
+        InstKind::CheckedArithmetic {
+            op, left, right, ..
+        } => {
+            let (Some(left_ty), Some(right_ty)) = (type_of(left), type_of(right)) else {
+                return;
+            };
+            if left_ty != right_ty {
+                report(format!(
+                    "{position}: CheckedArithmetic between {} and {}",
+                    left_ty.as_str(),
+                    right_ty.as_str()
+                ));
+            }
+            if !matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+                report(format!(
+                    "{position}: CheckedArithmetic does not cover {op:?}"
+                ));
+            }
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "CheckedArithmetic",
+                report,
+            );
         }
 
         // An `extern "C" fn` (roadmap Phase 4e, design D7) shares this same
@@ -1261,6 +1344,171 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::MakeCallable { target, captures } => {
+            let IrType::Callable(id) = inst.ty else {
+                report(format!(
+                    "{position}: MakeCallable returns {}, expected a Callable type",
+                    inst.ty.as_str()
+                ));
+                return;
+            };
+
+            let Some(layout) = module.closures.get(id as usize) else {
+                report(format!(
+                    "{position}: MakeCallable names layout {id}, which does not exist"
+                ));
+                return;
+            };
+
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: MakeCallable targets `{target}`, which is not a module function"
+                ));
+                return;
+            }
+
+            if captures.len() != layout.captures.len() {
+                report(format!(
+                    "{position}: MakeCallable passes {} capture(s), the layout declares {}",
+                    captures.len(),
+                    layout.captures.len()
+                ));
+                return;
+            }
+
+            for (index, (operand, expected)) in captures.iter().zip(&layout.captures).enumerate() {
+                if let Some(actual) = type_of(operand)
+                    && actual != *expected
+                {
+                    report(format!(
+                        "{position}: capture {index} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::CallCallable { callable, args } => {
+            let Some(actual) = type_of(callable) else {
+                report(format!("{position}: CallCallable callable is undefined"));
+                return;
+            };
+            let IrType::Callable(id) = actual else {
+                report(format!(
+                    "{position}: CallCallable receives {}, expected a Callable type",
+                    actual.as_str()
+                ));
+                return;
+            };
+
+            let Some(layout) = module.closures.get(id as usize) else {
+                report(format!(
+                    "{position}: CallCallable names layout {id}, which does not exist"
+                ));
+                return;
+            };
+
+            expect(inst.ty, layout.returns, position, "CallCallable", report);
+
+            if args.len() != layout.params.len() {
+                report(format!(
+                    "{position}: CallCallable passes {} argument(s), the callable takes {}",
+                    args.len(),
+                    layout.params.len()
+                ));
+                return;
+            }
+
+            for (index, (operand, expected)) in args.iter().zip(&layout.params).enumerate() {
+                if let Some(actual) = type_of(operand)
+                    && actual != *expected
+                {
+                    report(format!(
+                        "{position}: argument {index} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::ResourceTransfer { source } => {
+            if let Some(ty) = type_of(source) {
+                if !matches!(ty, IrType::Object(_) | IrType::Contract(_)) {
+                    report(format!(
+                        "{position}: ResourceTransfer source is {}, expected an object or contract reference",
+                        ty.as_str()
+                    ));
+                }
+                if inst.ty != ty {
+                    report(format!(
+                        "{position}: ResourceTransfer declares type {} but its source is {}",
+                        inst.ty.as_str(),
+                        ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!("{position}: ResourceTransfer source is undefined"));
+            }
+        }
+        InstKind::DependentFrom { base, field_ptr } => {
+            if let Some(ty) = type_of(base) {
+                if !matches!(ty, IrType::Object(_) | IrType::Contract(_)) {
+                    report(format!(
+                        "{position}: DependentFrom base is {}, expected an object or contract reference",
+                        ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!("{position}: DependentFrom base is undefined"));
+            }
+            if let Some(ty) = type_of(field_ptr) {
+                if !matches!(ty, IrType::Pointer(_)) {
+                    report(format!(
+                        "{position}: DependentFrom field_ptr is {}, expected Pointer",
+                        ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!("{position}: DependentFrom field_ptr is undefined"));
+            }
+            if !matches!(inst.ty, IrType::Dependent(_)) {
+                report(format!(
+                    "{position}: DependentFrom declares {}, expected Dependent",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PinObject { object } => {
+            if !matches!(inst.ty, IrType::Pin(_)) {
+                report(format!(
+                    "{position}: PinObject declares {}, expected Pin",
+                    inst.ty.as_str()
+                ));
+            }
+            if let Some(ty) = type_of(object) {
+                if !matches!(ty, IrType::Object(_) | IrType::Contract(_) | IrType::Pin(_)) {
+                    report(format!(
+                        "{position}: PinObject target is {}, expected an object/contract/Pin reference",
+                        ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!("{position}: PinObject target is undefined"));
+            }
+        }
+        InstKind::UnpinObject { object } => {
+            expect(inst.ty, IrType::Void, position, "Unpin", report);
+            if let Some(ty) = type_of(object) {
+                if !matches!(ty, IrType::Object(_) | IrType::Contract(_) | IrType::Pin(_)) {
+                    report(format!(
+                        "{position}: UnpinObject target is {}, expected an object/contract/Pin reference",
+                        ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!("{position}: UnpinObject target is undefined"));
+            }
+        }
     }
 }
 
@@ -1362,6 +1610,7 @@ fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrT
             .fields
             .get(index as usize)
             .map(|f| f.ty),
+        IrType::Pin(id) => field_type(module, Some(module.pin_types[id as usize]), index),
         _ => None,
     }
 }
@@ -1375,7 +1624,14 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::ConstChar(_) => Vec::new(),
         InstKind::FatalError(message) => vec![*message],
         InstKind::Throw(exception) => vec![*exception],
-        InstKind::HasPendingException | InstKind::TakePendingException => vec![],
+        InstKind::SetSuppressed {
+            exception,
+            suppressed,
+        } => vec![*exception, *suppressed],
+        InstKind::StackTrace(exception) | InstKind::Suppressed(exception) => vec![*exception],
+        InstKind::HasPendingException | InstKind::IsCancelled | InstKind::TakePendingException => {
+            Vec::new()
+        }
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
@@ -1414,6 +1670,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::StoreField { object, value, .. } => vec![*object, *value],
         InstKind::Unary { operand, .. } => vec![*operand],
         InstKind::Binary { left, right, .. } => vec![*left, *right],
+        InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
         InstKind::Println(operand) => vec![*operand],
@@ -1457,5 +1714,14 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             index,
             value,
         } => vec![*receiver, *index, *value],
+        InstKind::MakeCallable { captures, .. } => captures.clone(),
+        InstKind::CallCallable { callable, args } => {
+            let mut operands = vec![*callable];
+            operands.extend(args.iter().copied());
+            operands
+        }
+        InstKind::ResourceTransfer { source } => vec![*source],
+        InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
+        InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],
     }
 }

@@ -84,7 +84,7 @@ fn handle(bytes: *const u8, len: usize) -> *mut c_void {
 }
 
 /// Builds a handle that takes ownership of a `String` built at runtime.
-fn owned_handle(value: String) -> *mut c_void {
+pub(crate) fn owned_handle(value: String) -> *mut c_void {
     let bytes = value.into_boxed_str();
     let len = bytes.len();
     // Leaking is what keeps the pointer valid: the handle outlives this call

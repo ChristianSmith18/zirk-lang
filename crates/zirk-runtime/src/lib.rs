@@ -40,6 +40,7 @@ mod io;
 mod journal;
 mod memory;
 mod native_slice;
+mod resource;
 mod string;
 
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
@@ -50,7 +51,8 @@ pub use io::zirk_io_println;
 pub use journal::{
     zirk_rt_journal_begin, zirk_rt_journal_commit, zirk_rt_journal_record, zirk_rt_journal_rollback,
 };
-pub use memory::zirk_rt_alloc;
+pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
+pub use resource::{zirk_rt_is_cancelled, zirk_rt_resource_close_group, zirk_rt_resource_transfer};
 pub use string::{
     zirk_str_concat, zirk_str_eq, zirk_str_from_bool, zirk_str_from_f32, zirk_str_from_f64,
     zirk_str_from_i8, zirk_str_from_i16, zirk_str_from_i32, zirk_str_from_i64, zirk_str_from_i128,
@@ -93,6 +95,51 @@ pub unsafe extern "C" fn zirk_rt_shutdown() {
     // There are no resources or managed threads yet, but the streams do have to
     // be flushed: without this, output redirected into a pipe can be lost.
     io::flush();
+}
+
+/// Allocates a boxed callable's capture block (roadmap Phase 4d,
+/// `phase-4d-callables`, task 5).
+///
+/// The returned block is a normal GC object: its header carries the supplied
+/// descriptor so the collector can trace any captured managed references, and
+/// `zirk_rt_clone` can deep-copy them for `.clone()`.
+///
+/// # Safety
+///
+/// `descriptor` must be a compiler-emitted closure descriptor and `size` must
+/// be the payload size in bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_alloc_callable(
+    descriptor: *const std::ffi::c_void,
+    size: u64,
+) -> *mut std::ffi::c_void {
+    if size == 0 {
+        return std::ptr::null_mut();
+    }
+    let total = (size as usize).saturating_add(crate::collector::HEADER_BYTES);
+    let pointer = unsafe { crate::memory::zirk_rt_alloc(total, std::mem::size_of::<usize>()) };
+    // The descriptor word is left zero by `zirk_rt_alloc`.  No collection can
+    // run between the return and this write (single-threaded, collections only
+    // start at the top of `zirk_rt_alloc`), so the momentary null is safe.
+    unsafe { *(pointer as *mut *const std::ffi::c_void) = descriptor };
+    pointer
+}
+
+/// Clones a boxed callable's capture block (roadmap Phase 4d,
+/// `phase-4d-callables`, task 6).
+///
+/// # Safety
+///
+/// `callable` must be a capture block pointer returned by `zirk_rt_alloc_callable`
+/// or a previous `zirk_rt_clone_callable`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_clone_callable(
+    callable: *const std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    if callable.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { crate::clone::zirk_rt_clone(callable as *mut std::ffi::c_void) }
 }
 
 #[cfg(test)]

@@ -147,7 +147,18 @@ pub enum IrType {
     /// its creating frame (roadmap Phase 4d) is already sound at this
     /// representation level regardless — nothing here holds a pointer back
     /// into the frame that built it, only the captured values themselves.
+    ///
+    /// This is the legacy inline-closure representation; the active
+    /// lowering path uses [`IrType::Callable`] instead.
     Closure(u32),
+    /// A boxed callable value: a two-word `{ function pointer, capture block
+    /// pointer }` pair (roadmap Phase 4d, `phase-4d-callables`).
+    ///
+    /// Like [`IrType::Closure`], it is identified by the same layout id in
+    /// `module.closures`, but its runtime representation is always a heap-
+    /// allocated capture block plus the function pointer that knows how to
+    /// use it.
+    Callable(u32),
     /// A reference to an object, identified by its layout in the module.
     ///
     /// It is a reference and not a value: an object has identity, and identity
@@ -227,6 +238,15 @@ pub enum IrType {
     /// representation; the distinction is purely in what the checker
     /// permits at each use, not in runtime shape.
     NativeSliceMut(u32),
+    /// `Dependent<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1):
+    /// a reference whose lifetime is tied to the allocation that contains
+    /// the value it refers to. Surface-only: represented as an opaque
+    /// pointer until the two-word form is wired through codegen.
+    Dependent(u32),
+    /// `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`, design D1): keeps an
+    /// object's address stable for native interop. Surface-only: represented
+    /// as an opaque pointer.
+    Pin(u32),
 }
 
 /// The types that have a nullable form.
@@ -295,6 +315,7 @@ impl IrType {
             IrType::String => "String",
             IrType::Char => "Char",
             IrType::Closure(_) => "closure",
+            IrType::Callable(_) => "Callable",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
             IrType::Value(_) => "value",
@@ -319,6 +340,8 @@ impl IrType {
             IrType::JournalHandle => "JournalHandle",
             IrType::NativeSlice(_) => "NativeSlice",
             IrType::NativeSliceMut(_) => "NativeSliceMut",
+            IrType::Dependent(_) => "Dependent",
+            IrType::Pin(_) => "Pin",
         }
     }
 
@@ -364,7 +387,11 @@ impl IrType {
             // concerned; the collector's own mark pass is what stops short
             // of tracing *through* it as a strong edge (design D2), not
             // anything decided here.
-            IrType::Object(_) | IrType::Contract(_) | IrType::Weak(_) => true,
+            IrType::Object(_)
+            | IrType::Contract(_)
+            | IrType::Weak(_)
+            | IrType::Dependent(_)
+            | IrType::Pin(_) => true,
             IrType::Nullable(n) => n.inner().is_managed_reference(module),
             IrType::Value(id) => module.values[id as usize]
                 .fields
@@ -374,10 +401,16 @@ impl IrType {
                 .fields
                 .iter()
                 .any(|f| f.ty.is_managed_reference(module)),
+            // A boxed `Callable` carries a pointer to a GC-allocated capture
+            // block (even when that block is empty, the pointer is null and
+            // `mark_object` simply returns).  Keeping the callable value rooted
+            // keeps the capture block — and therefore its captured managed
+            // references — alive across collections.
             IrType::Closure(id) => module.closures[id as usize]
                 .captures
                 .iter()
                 .any(|c| c.is_managed_reference(module)),
+            IrType::Callable(_) => true,
             _ => false,
         }
     }
@@ -436,6 +469,12 @@ pub struct Module {
     /// [`IrType::NativeSliceMut`] carries (roadmap Phase 4e,
     /// `fase-4e-native-slice`, design D1).
     pub native_slice_mut_types: Vec<IrType>,
+    /// Interned `Dependent<T>` element types, indexed by the id
+    /// [`IrType::Dependent`] carries (roadmap Phase 4e, `phase-4e-memory`).
+    pub dependent_types: Vec<IrType>,
+    /// Interned `Pin<T>` referent types, indexed by the id [`IrType::Pin`]
+    /// carries (roadmap Phase 4e, `phase-4e-memory`).
+    pub pin_types: Vec<IrType>,
     /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
     /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
     /// no Zirk-authored body.
@@ -643,6 +682,26 @@ impl Module {
         self.native_slice_mut_types.push(element);
         (self.native_slice_mut_types.len() - 1) as u32
     }
+
+    /// Interns a `Dependent<T>` element type, returning the id
+    /// [`IrType::Dependent`] carries.
+    pub fn intern_dependent_type(&mut self, element: IrType) -> u32 {
+        if let Some(index) = self.dependent_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.dependent_types.push(element);
+        (self.dependent_types.len() - 1) as u32
+    }
+
+    /// Interns a `Pin<T>` referent type, returning the id [`IrType::Pin`]
+    /// carries.
+    pub fn intern_pin_type(&mut self, referent: IrType) -> u32 {
+        if let Some(index) = self.pin_types.iter().position(|&t| t == referent) {
+            return index as u32;
+        }
+        self.pin_types.push(referent);
+        (self.pin_types.len() - 1) as u32
+    }
 }
 
 /// A function in IR form.
@@ -762,9 +821,25 @@ pub enum InstKind {
     /// propagation mechanism, design decision D1 of
     /// `fase-4b-excepciones`).
     Throw(Operand),
+    /// Attaches `suppressed` to `exception` before it is thrown (roadmap
+    /// Phase 4b). Emitted only when a `throw` occurs inside an active `catch`.
+    SetSuppressed {
+        exception: Operand,
+        suppressed: Operand,
+    },
+    /// Returns the `String` stack trace of `exception`, building it lazily
+    /// and caching the result in the runtime (roadmap Phase 4b).
+    StackTrace(Operand),
+    /// Returns the `Throwable?` suppressed by `exception`, or absent if
+    /// none was set (roadmap Phase 4b).
+    Suppressed(Operand),
     /// Whether an exception is pending (roadmap Phase 4b), `IrType::Boolean`
     /// — emitted right after a call to a function/method that can throw.
     HasPendingException,
+    /// Whether the active cancellation token is set (roadmap Phase 4c,
+    /// `phase-4c-resources`) — consulted before a resource `close()` action.
+    /// Produces `IrType::Boolean`.
+    IsCancelled,
     /// Takes the pending exception, clearing the slot (roadmap Phase 4b) —
     /// a matching `catch`'s own lowering, right after `IsInstance` confirms
     /// it. Typed as whichever class the matching `catch` declared: the
@@ -951,6 +1026,16 @@ pub enum InstKind {
         left: Operand,
         right: Operand,
     },
+    /// Overflow detection for integer `+`, `-`, and `*` (roadmap Phase 4b):
+    /// uses LLVM's `llvm.*.with.overflow` intrinsics and returns the
+    /// `overflowed` flag as a `Boolean`. The matching arithmetic result is
+    /// computed separately by `InstKind::Binary` on the non-failing path.
+    CheckedArithmetic {
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        signed: bool,
+    },
 
     Call {
         callee: String,
@@ -1010,6 +1095,27 @@ pub enum InstKind {
     CallClosure {
         id: u32,
         callee: Operand,
+        args: Vec<Operand>,
+    },
+
+    /// Builds a boxed callable value from a function reference and its
+    /// captured values (roadmap Phase 4d, boxed callables task 1).
+    ///
+    /// This is the two-word representation `{ function pointer, capture block
+    /// pointer }`. The capture block is allocated by `zirk_rt_alloc_callable`
+    /// and the captured values are copied into it during codegen.
+    MakeCallable {
+        target: String,
+        captures: Vec<Operand>,
+    },
+    /// Calls a boxed callable value.
+    ///
+    /// The callable operand carries the two-word value; the call loads the
+    /// function pointer and the capture block pointer, reads the captured
+    /// values back from the block, then calls the function pointer with the
+    /// captures followed by the written arguments.
+    CallCallable {
+        callable: Operand,
         args: Vec<Operand>,
     },
 
@@ -1203,6 +1309,32 @@ pub enum InstKind {
         receiver: Operand,
         index: Operand,
         value: Operand,
+    },
+    /// `transfer(source)` (roadmap Phase 4c): transfers ownership of a
+    /// `TransferableResource`, returning the resource pointer in a fresh owned
+    /// slot and invalidating the source binding statically.
+    ResourceTransfer {
+        source: Operand,
+    },
+
+    /// `Dependent.from(base, ptr)` (roadmap Phase 4e, `phase-4e-memory`,
+    /// design D1): records both the field pointer and the base object that
+    /// owns it, producing a `Dependent<T>` value. Surface-only stub.
+    DependentFrom {
+        base: Operand,
+        field_ptr: Operand,
+    },
+    /// `Pin<T>(object)` / automatic pin on interior pointer exposure
+    /// (roadmap Phase 4e, `phase-4e-memory`, design D1): adds `object` to the
+    /// per-thread pin list and produces a `Pin<T>` value that is the same
+    /// object pointer.
+    PinObject {
+        object: Operand,
+    },
+    /// Releases a pin previously created by [`InstKind::PinObject`]. Produces
+    /// no value (`Void`). Surface-only stub.
+    UnpinObject {
+        object: Operand,
     },
 }
 

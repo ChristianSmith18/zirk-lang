@@ -1,0 +1,45 @@
+// Objects reachable from a caught exception are read-only inside the `catch`.
+class Container {
+    mut value: Int32;
+
+    construct(value: Int32) {
+        this.value = value;
+    }
+}
+
+class Payload implements Throwable {
+    inmut reason: String;
+    inmut container: Container;
+
+    construct(reason: String, container: Container) {
+        this.reason = reason;
+        this.container = container;
+    }
+
+    override fn message(): String {
+        return this.reason;
+    }
+
+    override fn code(): String {
+        return "PAYLOAD";
+    }
+
+    override fn cause(): Error? {
+        return null;
+    }
+
+    override fn stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn main(): Void {
+    try {
+        throw Payload("boom", Container(42));
+    } catch Payload(e) {
+        stdout.println(e.message());
+        stdout.println(e.container.value);
+    }
+
+    stdout.println("done");
+}

@@ -1,0 +1,18 @@
+class Counter {
+    mut value: Int32;
+    construct(v: Int32) { this.value = v; }
+}
+
+fn pass_dependent(d: Dependent<Int32>): Int32 {
+    return 0;
+}
+
+fn use_dependent(d: Dependent<Int32>): Int32 {
+    // A Dependent<T> may be passed to another Dependent<T> parameter,
+    // keeping the value in a local, non-escaping slot.
+    return pass_dependent(d);
+}
+
+fn main(): Void {
+    stdout.println("dependent_local_only");
+}
