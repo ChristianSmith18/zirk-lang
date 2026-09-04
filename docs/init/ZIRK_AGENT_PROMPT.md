@@ -277,12 +277,10 @@ the phase:
 
 ### What is still pending
 
-- **Integer literal width inference from a simple assignment context**
-  (`mut x: Int8 = 5;` without `as`) is not implemented — a literal always
-  types `Int32` unless an explicit `as` or a deep contextual conversion
-  supplies the width. There is no literal suffix syntax for it either (only
-  `Float` has one, e.g. `1.5f32`); this was a deliberate scope decision
-  during the phase's own literal-suffix task, not an oversight.
+- **Integer and Float literal width inference from a simple assignment**
+  context (`mut x: Int8 = 5;`, `mut y: Float16 = 1.0;`) is implemented;
+  the literal takes the expected width when the value fits. There is still
+  no integer literal suffix syntax (only `Float` has one, e.g. `1.5f32`).
 - **`Float128` arithmetic is unverified on Windows**: LLVM lowers `fp128`
   operations to soft-float library calls (`__addtf3` and similar) the MSVC
   toolchain this project's CI links against does not provide the way
