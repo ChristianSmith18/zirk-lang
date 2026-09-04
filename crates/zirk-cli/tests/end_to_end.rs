@@ -880,6 +880,31 @@ fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_thresh
     assert_eq!(normalize(&output.stdout), "done\n");
 }
 
+/// `String` values built and discarded in a tight loop, with the GC threshold
+/// forced down to a small value, must complete without leaking or corrupting
+/// — evidence that the new string descriptor makes string allocations ordinary
+/// GC objects.
+#[test]
+fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
+    let source = "fn churn(n: Int32): Void {\n\
+        mut i = 0;\n\
+        while i < n {\n\
+            mut s = \"x\" + i.to_string();\n\
+            i = i + 1;\n\
+        }\n\
+    }\n\
+    \n\
+    fn main(): Void {\n\
+        churn(50000);\n\
+        stdout.println(\"done\");\n\
+    }";
+
+    let output = zirk_with_env(source, "gc_string_churn", &[("ZIRK_GC_THRESHOLD", "8192")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "done\n");
+}
+
 /// An object reachable only from a still-active *outer* frame (`main`'s own
 /// `kept`) survives collections triggered by unrelated allocation happening
 /// entirely inside an *inner*, unrelated call (`churn`) — design D2's own

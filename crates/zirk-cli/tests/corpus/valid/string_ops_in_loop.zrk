@@ -1,0 +1,13 @@
+fn main(): Void {
+    mut i = 0;
+    while i < 1000 {
+        mut a = "ab" + "cd";
+        mut b = "x" * 3;
+        mut c = "hello"[1];
+        for g in "abcd" {
+            mut d = g;
+        }
+        i = i + 1;
+    }
+    stdout.println("done");
+}
