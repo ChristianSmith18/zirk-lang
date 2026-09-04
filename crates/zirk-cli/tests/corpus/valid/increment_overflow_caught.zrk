@@ -1,0 +1,20 @@
+// `ArithmeticOverflowError` is catchable for `++` and `--`.
+fn main(): Void {
+    try {
+        mut a: Int32 = 2147483647;
+        a++;
+        stdout.println(a);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("inc: " + e.message());
+    }
+
+    try {
+        mut b: Int32 = -2147483648;
+        --b;
+        stdout.println(b);
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("dec: " + e.message());
+    }
+
+    stdout.println("done");
+}

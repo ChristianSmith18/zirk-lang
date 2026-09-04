@@ -20,14 +20,14 @@
 - [x] 4.1 Generalize `check_increment()` in `crates/zirk-sema/src/checker.rs` to accept any `Base::Int(_)` width and signedness, not only `Int32`.
 - [x] 4.2 Rewrite `lower_increment()` in `crates/zirk-ir/src/lower.rs` to emit `const_int_at(1, ty, span)` and call `emit_checked_binary()` with `Add` for `++` and `Sub` for `--`, so prefix and postfix forms throw `ArithmeticOverflowError` on overflow.
 - [x] 4.3 Add `zirk-ir/tests/lowering.rs` cases verifying `i++` at `Int32.MAX`, `--i` at `UInt8.MIN`, and an `Int16` postfix increment overflow.
-- [ ] 4.4 Add CLI corpus fixtures for `++`/`--` overflow in expression position and matching `.out` expectations.
+- [x] 4.4 Add CLI corpus fixtures for `++`/`--` overflow in expression position and matching `.out` expectations.
 
 ## 5. Memory and integration tests
 
 - [ ] 5.1 Add a corpus fixture that loops building and discarding strings and assert a stable peak RSS in `crates/zirk-cli/tests/end_to_end.rs` or a dedicated runtime test.
 - [ ] 5.2 Add corpus fixtures for `String + String`, `String * n`, `String[index]`, and `String.grapheme_slice` in loops.
-- [ ] 5.3 Run `cargo test --workspace` and fix all failures introduced by root-enumeration or string-allocation changes.
-- [ ] 5.4 Run `cargo clippy --workspace` and resolve any new warnings.
+- [x] 5.3 Run `cargo test --workspace` and fix all failures introduced by root-enumeration or string-allocation changes.
+- [x] 5.4 Run `cargo clippy --workspace` and resolve any new warnings.
 - [x] 5.5 Run `openspec validate --all --strict` and fix any validation failures.
 
 ## 6. Public documentation and site synchronization
@@ -35,5 +35,5 @@
 - [x] 6.1 Update `docs/init/ZIRK_FEATURE_STATUS.md` to mark the `Non-moving mark-sweep GC` row and any `String`/`Char`-related notes as completed for this change.
 - [x] 6.2 Update `docs/handbook/13-appendices/07-current-limitations.md` to remove or rephrase any wording implying `String`/`Char` values are not reclaimed.
 - [x] 6.3 Update `docs/decisions/proximos-pasos-fase-4.md` section 6.1 to record the decision that `String`/`Char` lifetimes are managed by the same collector as ordinary objects.
-- [ ] 6.4 Run `./scripts/sync-website-content.sh` and review the `../zirk-lang-site` diff.
-- [ ] 6.5 If project-status evidence changed, review the zirk-lang-site status catalog and pass an explicit `--audit-date YYYY-MM-DD`.
+- [x] 6.4 Run `./scripts/sync-website-content.sh` and review the `../zirk-lang-site` diff.
+- [x] 6.5 If project-status evidence changed, review the zirk-lang-site status catalog and pass an explicit `--audit-date YYYY-MM-DD`.
