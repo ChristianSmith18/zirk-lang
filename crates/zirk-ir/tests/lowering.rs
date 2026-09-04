@@ -630,6 +630,36 @@ fn both_increment_forms_store_the_updated_value() {
     }
 }
 
+#[test]
+fn postfix_increment_overflow_at_int32_max_is_guarded() {
+    let f = main_body("mut i = 2147483647;\nmut x = i++;");
+    let kinds = instructions(&f);
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        "i++ at Int32.MAX must overflow-check"
+    );
+}
+
+#[test]
+fn prefix_decrement_underflow_at_uint8_min_is_guarded() {
+    let f = main_body("mut i: UInt8 = 0 as UInt8;\nmut x = --i;");
+    let kinds = instructions(&f);
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        "--i at UInt8.MIN must underflow-check"
+    );
+}
+
+#[test]
+fn int16_postfix_increment_overflow_is_guarded() {
+    let f = main_body("mut i: Int16 = 32767 as Int16;\nmut x = i++;");
+    let kinds = instructions(&f);
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        "i++ at Int16.MAX must overflow-check"
+    );
+}
+
 // --- Objetos -----------------------------------------------------------------
 
 /// A program with a class, plus the `main` every program needs.

@@ -8962,16 +8962,18 @@ impl<'a> FunctionLowering<'a> {
         let ty = self.slot_type(slot);
 
         let previous = self.emit(InstKind::Load(slot), ty, span);
-        let one = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), span);
-        let updated = self.emit(
-            InstKind::Binary {
-                op: binary_op(expr.op.as_binary()),
-                left: previous,
-                right: one,
-            },
+        let one = self.const_int_at(1, ty, span);
+        let updated = self.emit_checked_binary(
+            binary_op(expr.op.as_binary()),
+            previous,
+            one,
             ty,
             span,
         );
+        // `emit_checked_binary` may have split into a continuation block. The
+        // slot has not been updated yet, so re-reading it here gives the same
+        // pre-increment value `previous` had in the original block.
+        let previous = self.emit(InstKind::Load(slot), ty, span);
         self.journal_writes_to_slot(slot, span);
         self.emit_effect(InstKind::Store(slot, updated), span);
 

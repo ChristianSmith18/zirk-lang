@@ -145,6 +145,15 @@ unsafe fn clone_recursive(
     let size = unsafe { crate::collector::object_size(source) };
     let descriptor = unsafe { crate::collector::object_descriptor(source) };
 
+    // `String`/`Char` objects are immutable, have no reference fields, and
+    // their `bytes` pointer points to either the inline region after the
+    // payload or a global constant. Copying the whole object byte-for-byte
+    // would leave the clone's `bytes` pointer pointing at the source's inline
+    // bytes, so sharing the handle is the correct and sound behaviour.
+    if descriptor == crate::collector::string_descriptor() {
+        return source;
+    }
+
     // `align` is never read back from a live object (design D1 of
     // `fase-4e-colector-mark-sweep`: only `size` is in the header) and
     // `crate::collector::allocation_align` substitutes its own fixed
@@ -334,6 +343,26 @@ mod tests {
             assert!(
                 !cloned_leaf.is_null(),
                 "the cloned chain's leaf must survive a collection triggered mid-clone"
+            );
+        }
+    }
+
+    #[test]
+    fn cloning_a_class_with_a_string_field_shares_the_string_handle() {
+        let _guard = reset_state();
+        let string = crate::string::alloc_owned("adjunto");
+        let class_descriptor = collector::descriptor_with_fields_for_tests(&[24]);
+        unsafe {
+            let object = synthetic_clonable_object(class_descriptor.as_ptr() as *const c_void, 1);
+            let field = (object as usize + 24) as *mut *mut c_void;
+            *field = string;
+
+            let cloned = zirk_rt_clone(object);
+            let cloned_field = *((cloned as usize + 24) as *mut *mut c_void);
+
+            assert_eq!(
+                cloned_field, string,
+                "the clone must share the original string handle"
             );
         }
     }

@@ -8,17 +8,14 @@
 //!
 //! # Memory
 //!
-//! Phase 1 **does not release** strings. The memory strategy is decided in
-//! Phase 4 (`docs/decisions/ADR-003-memoria.md`), and inventing one here would
-//! be exactly the kind of tacit assumption that ADR forbids.
-//!
-//! For literals the leak is bounded by the source. For strings built at runtime
-//! —conversions from `Int32`, from `Boolean`— it is not: a program that
-//! converts inside a loop would grow without bound. There are no loops in the
-//! Phase 1 subset, so the bound holds today; Phase 2 brings loops and Phase 4
-//! brings the memory strategy, in that order.
+//! `String`/`Char` objects are allocated through `zirk_rt_alloc` and reclaimed
+//! by the non-moving mark-sweep collector (`docs/decisions/ADR-003-memoria.md`).
+//! A string handle is the object pointer itself, with a `ZirkString` payload
+//! starting after the standard three-word GC header.
 
 use std::ffi::c_void;
+
+use crate::collector::{HEADER_BYTES, string_descriptor};
 
 /// A Zirk string.
 ///
@@ -62,36 +59,72 @@ impl ZirkString {
     }
 }
 
-/// Builds a handle over bytes the runtime does not own.
+#[inline]
+unsafe fn payload_ptr(handle: *mut c_void) -> *mut ZirkString { unsafe {
+    (handle as *mut u8).add(HEADER_BYTES) as *mut ZirkString
+}}
+
+#[inline]
+unsafe fn data_ptr(handle: *mut c_void) -> *mut u8 { unsafe {
+    (handle as *mut u8)
+        .add(HEADER_BYTES)
+        .add(std::mem::size_of::<ZirkString>())
+}}
+
+/// Allocates an owned string object with room for `len` inline bytes.
 ///
-/// The bytes reaching here are always canonical: either a literal the compiler
-/// normalized, or text this runtime produced. Recording that is what lets
-/// equality stop at a byte comparison.
-fn handle(bytes: *const u8, len: usize) -> *mut c_void {
+/// The returned object has the GC descriptor set and `bytes`/`len` initialized.
+/// The caller must copy the UTF-8 contents into `data_ptr(handle)` and set
+/// `is_ascii` before returning it to generated code.
+unsafe fn alloc_string(len: usize) -> *mut c_void { unsafe {
+    let size = HEADER_BYTES + std::mem::size_of::<ZirkString>() + len;
+    let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
+    let payload = payload_ptr(object);
+    *(object as *mut *mut c_void) = string_descriptor();
+    (*payload).len = len;
+    (*payload).bytes = if len == 0 {
+        std::ptr::null()
+    } else {
+        data_ptr(object) as *const u8
+    };
+    // `is_ascii` is left for the caller to set after writing the bytes.
+    object
+}}
+
+/// Builds an owned string from `text`.
+pub(crate) fn alloc_owned(text: &str) -> *mut c_void {
+    let len = text.len();
+    let object = unsafe { alloc_string(len) };
+    unsafe {
+        let payload = payload_ptr(object);
+        if len > 0 {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), data_ptr(object), len);
+        }
+        (*payload).is_ascii = text.is_ascii();
+    }
+    object
+}
+
+/// Builds a string object whose bytes are not owned by the runtime.
+///
+/// # Safety
+///
+/// `bytes` must point at `len` readable bytes that outlive the returned handle.
+unsafe fn alloc_literal(bytes: *const u8, len: usize) -> *mut c_void { unsafe {
+    let size = HEADER_BYTES + std::mem::size_of::<ZirkString>();
+    let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
+    let payload = payload_ptr(object);
     let is_ascii = if bytes.is_null() || len == 0 {
         true
     } else {
-        unsafe { std::slice::from_raw_parts(bytes, len) }.is_ascii()
+        std::slice::from_raw_parts(bytes, len).is_ascii()
     };
-
-    let string = Box::new(ZirkString {
-        bytes,
-        len,
-        is_ascii,
-    });
-    // Deliberately leaked: see the memory note in this module.
-    Box::into_raw(string) as *mut c_void
-}
-
-/// Builds a handle that takes ownership of a `String` built at runtime.
-pub(crate) fn owned_handle(value: String) -> *mut c_void {
-    let bytes = value.into_boxed_str();
-    let len = bytes.len();
-    // Leaking is what keeps the pointer valid: the handle outlives this call
-    // and nothing releases it in this phase.
-    let raw = Box::into_raw(bytes) as *const u8;
-    handle(raw, len)
-}
+    *(object as *mut *mut c_void) = string_descriptor();
+    (*payload).len = len;
+    (*payload).bytes = if len == 0 { std::ptr::null() } else { bytes };
+    (*payload).is_ascii = is_ascii;
+    object
+}}
 
 /// Builds a `String` from UTF-8 bytes and a length.
 ///
@@ -104,19 +137,21 @@ pub(crate) fn owned_handle(value: String) -> *mut c_void {
 /// Codegen satisfies this by passing global constants of the module.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_from_utf8(bytes: *const u8, len: usize) -> *mut c_void {
-    handle(bytes, len)
+    unsafe { alloc_literal(bytes, len) }
 }
 
 /// Converts an `Int8` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_i8(value: i8) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts an `Int16` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_i16(value: i16) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts an `Int32` into a `String`.
@@ -128,13 +163,15 @@ pub extern "C" fn zirk_str_from_i16(value: i16) -> *mut c_void {
 /// through — codegen picks the right one from the value's own recorded width.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_i32(value: i32) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts an `Int64` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_i64(value: i64) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts an `Int128` into a `String`.
@@ -149,31 +186,36 @@ pub extern "C" fn zirk_str_from_i64(value: i64) -> *mut c_void {
 /// `value` must point at a readable, initialized `i128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_from_i128(value: *const i128) -> *mut c_void {
-    owned_handle(unsafe { value.read_unaligned() }.to_string())
+    let text = unsafe { value.read_unaligned() }.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `UInt8` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_u8(value: u8) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `UInt16` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_u16(value: u16) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `UInt32` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_u32(value: u32) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `UInt64` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_u64(value: u64) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `UInt128` into a `String`. See [`zirk_str_from_i128`] for why
@@ -184,7 +226,8 @@ pub extern "C" fn zirk_str_from_u64(value: u64) -> *mut c_void {
 /// `value` must point at a readable, initialized `u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
-    owned_handle(unsafe { value.read_unaligned() }.to_string())
+    let text = unsafe { value.read_unaligned() }.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `Float32` into a `String`.
@@ -197,13 +240,15 @@ pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
 /// consistent with `Float128` arithmetic's own portability gap on Windows.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `Float64` into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f64(value: f64) -> *mut c_void {
-    owned_handle(value.to_string())
+    let text = value.to_string();
+    alloc_owned(&text)
 }
 
 /// Converts a `Boolean` into a `String`.
@@ -212,7 +257,7 @@ pub extern "C" fn zirk_str_from_f64(value: f64) -> *mut c_void {
 /// `ZIRK_LANGUAGE_SPEC.md` section 3.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_bool(value: bool) -> *mut c_void {
-    owned_handle(if value { "true" } else { "false" }.to_string())
+    alloc_owned(if value { "true" } else { "false" })
 }
 
 /// Concatenates two strings.
@@ -226,18 +271,33 @@ pub extern "C" fn zirk_str_from_bool(value: bool) -> *mut c_void {
 /// Both handles must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_concat(left: *const c_void, right: *const c_void) -> *mut c_void {
-    let left = unsafe { borrow(left) };
-    let right = unsafe { borrow(right) };
+    let left = unsafe { borrow(left) }.map(|s| unsafe { s.as_str() });
+    let right = unsafe { borrow(right) }.map(|s| unsafe { s.as_str() });
+    let left_text = left.unwrap_or("");
+    let right_text = right.unwrap_or("");
 
-    let mut joined = String::new();
-    if let Some(s) = left {
-        joined.push_str(unsafe { s.as_str() });
+    let len = left_text.len() + right_text.len();
+    let object = unsafe { alloc_string(len) };
+    let payload = unsafe { payload_ptr(object) };
+    unsafe {
+        if len > 0 {
+            let data = data_ptr(object);
+            if !left_text.is_empty() {
+                std::ptr::copy_nonoverlapping(left_text.as_ptr(), data, left_text.len());
+            }
+            if !right_text.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    right_text.as_ptr(),
+                    data.add(left_text.len()),
+                    right_text.len(),
+                );
+            }
+            (*payload).is_ascii = std::slice::from_raw_parts((*payload).bytes, len).is_ascii();
+        } else {
+            (*payload).is_ascii = true;
+        }
     }
-    if let Some(s) = right {
-        joined.push_str(unsafe { s.as_str() });
-    }
-
-    owned_handle(joined)
+    object
 }
 
 /// Repeats a string a non-negative number of times.
@@ -256,9 +316,13 @@ pub unsafe extern "C" fn zirk_str_concat(left: *const c_void, right: *const c_vo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *mut c_void {
     let Some(string) = (unsafe { borrow(handle) }) else {
-        return owned_handle(String::new());
+        return alloc_owned("");
     };
     let text = unsafe { string.as_str() };
+
+    if text.is_empty() || count <= 0 {
+        return alloc_owned("");
+    }
 
     // The size is checked before asking for it: a count that overflows what
     // can be addressed is a controlled error, not an allocator surprise.
@@ -269,7 +333,20 @@ pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *
         crate::failure::zirk_rt_invalid_repeat()
     }
 
-    owned_handle(text.repeat(count as usize))
+    let object = unsafe { alloc_string(size) };
+    let payload = unsafe { payload_ptr(object) };
+    unsafe {
+        let data = data_ptr(object);
+        for i in 0..(count as usize) {
+            std::ptr::copy_nonoverlapping(
+                text.as_ptr(),
+                data.add(i * text.len()),
+                text.len(),
+            );
+        }
+        (*payload).is_ascii = string.is_ascii;
+    }
+    object
 }
 
 /// Content equality of two strings.
@@ -412,7 +489,7 @@ pub unsafe extern "C" fn zirk_str_grapheme_slice(
     let text = unsafe { string.as_str() };
     let start = offset as usize;
     let end = start + len as usize;
-    owned_handle(text[start..end].to_string())
+    alloc_owned(&text[start..end])
 }
 
 /// Hash of a string's contents.
@@ -442,12 +519,13 @@ pub unsafe extern "C" fn zirk_str_hash(handle: *const c_void) -> u64 {
 /// # Safety
 ///
 /// `handle` must come from this runtime and must not have been released.
-pub(crate) unsafe fn borrow<'a>(handle: *const c_void) -> Option<&'a ZirkString> {
+pub(crate) unsafe fn borrow<'a>(handle: *const c_void) -> Option<&'a ZirkString> { unsafe {
     if handle.is_null() {
         return None;
     }
-    Some(unsafe { &*(handle as *const ZirkString) })
-}
+    let payload = (handle as *const u8).add(HEADER_BYTES) as *const ZirkString;
+    Some(&*payload)
+}}
 
 #[cfg(test)]
 mod tests {
