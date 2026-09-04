@@ -1,8 +1,0 @@
-// `Float128` has no stable Rust primitive to format through, and unlike
-// `Float16` there is no lossless narrower width to widen through instead
-// (roadmap Phase 3b, task 8.3's own documented gap) — printing one is
-// rejected at compile time.
-fn main(): Void {
-    mut a: Float128 = 1.5f128;
-    stdout.println(a);
-}

@@ -136,9 +136,8 @@ fn valid_explicit_sign_crossing_with_as() {
 }
 
 #[test]
-fn invalid_arithmetic_between_different_integer_widths() {
-    let output = rejected_body("mut a: Int64 = 1;\nmut b: Int32 = 2;\nmut c = a + b;");
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+fn valid_arithmetic_between_different_integer_widths() {
+    accepted_body("mut a: Int64 = 1;\nmut b: Int32 = 2;\nmut c = a + b;");
 }
 
 #[test]
@@ -192,8 +191,110 @@ fn valid_mixed_integer_and_float_arithmetic_produces_float() {
 }
 
 #[test]
-fn invalid_arithmetic_between_different_float_widths() {
-    let output = rejected_body("mut a: Float32 = 1.5f32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
+fn valid_arithmetic_between_different_float_widths() {
+    accepted_body("mut a: Float32 = 1.5f32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
+}
+
+#[test]
+fn valid_integer_literal_infers_its_contextual_width() {
+    accepted_body(
+        "mut a: Int8 = 1;\n\
+         mut b: UInt8 = 1;\n\
+         mut c: Int16 = 1;\n\
+         mut d: Int128 = 1;\n\
+         mut e: Int = 1;",
+    );
+}
+
+#[test]
+fn valid_float_literal_infers_its_contextual_width() {
+    accepted_body(
+        "mut a: Float16 = 1.0;\n\
+         mut b: Float32 = 1.0;\n\
+         mut c: Float64 = 1.0;\n\
+         mut d: Float = 1.0;\n\
+         mut e: Float128 = 1.0;",
+    );
+}
+
+#[test]
+fn valid_int_literal_widens_to_float_when_exact() {
+    accepted_body(
+        "mut a: Float16 = 1;\n\
+         mut b: Float32 = 1000;\n\
+         mut c: Float64 = 100000;\n\
+         mut d: Float128 = 1000000000000;",
+    );
+}
+
+#[test]
+fn valid_mixed_signedness_arithmetic_promotes_to_a_common_width() {
+    accepted_body(
+        "mut a: UInt8 = 1 as UInt8;\n\
+         mut b: Int32 = -1;\n\
+         mut c = a + b;\n\
+         mut d: UInt32 = 2 as UInt32;\n\
+         mut e: Int64 = -3;\n\
+         mut f = d + e;",
+    );
+}
+
+#[test]
+fn valid_mixed_width_float_and_int_arithmetic() {
+    accepted_body(
+        "mut a: Int8 = 1;\n\
+         mut b: Float16 = 2.0f16;\n\
+         mut c = a + b;\n\
+         mut d: UInt32 = 4 as UInt32;\n\
+         mut e: Float64 = 8.0;\n\
+         mut f = d + e;",
+    );
+}
+
+#[test]
+fn valid_increment_and_decrement_keep_narrow_widths() {
+    accepted_body(
+        "mut a: Int8 = 1;\n\
+         a++;\n\
+         --a;\n\
+         mut b: Float16 = 1.0f16;\n\
+         b--;",
+    );
+}
+
+#[test]
+fn valid_string_repetition_accepts_any_integer_width() {
+    accepted_body(
+        "mut a: Int8 = 3;\n\
+         mut b: UInt64 = 4 as UInt64;\n\
+         mut s = \"x\" * a;\n\
+         mut t = b * \"y\";",
+    );
+}
+
+#[test]
+fn invalid_int_literal_out_of_range_for_narrow_width() {
+    let output = rejected_body("mut a: Int8 = 128;");
+    assert!(output.contains(codes::INTEGER_OUT_OF_RANGE.as_str()));
+}
+
+#[test]
+fn invalid_int_literal_to_float_not_exactly_representable() {
+    let output = rejected_body("mut a: Float16 = 100000;");
+    assert!(output.contains(codes::INTEGER_OUT_OF_RANGE.as_str()));
+}
+
+#[test]
+fn invalid_float_literal_with_fraction_for_int() {
+    let output = rejected_body("mut a: Int = 1.5;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_no_common_numeric_type() {
+    let output = rejected_body(
+        "mut a: UInt128 = 1 as UInt128;\nmut b: Int128 = 2;\nmut c = a + b;",
+    );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
@@ -873,10 +974,10 @@ fn valid_printing_of_float16() {
 }
 
 #[test]
-fn invalid_printing_of_float128() {
-    let output = rejected_body("mut a: Float128 = 1.5f128;\nstdout.println(a);");
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
-    assert!(output.contains("cannot be printed"));
+fn valid_printing_of_float128() {
+    // Float128 prints by truncating to Float64; this is accepted but can lose
+    // precision for values not exactly representable in f64.
+    accepted_body("mut a: Float128 = 1.5f128;\nstdout.println(a);");
 }
 
 #[test]

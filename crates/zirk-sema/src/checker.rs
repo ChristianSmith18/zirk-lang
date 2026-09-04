@@ -92,6 +92,13 @@ pub struct CheckedProgram {
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
+    /// The type checker result for every expression, keyed by its span.
+    ///
+    /// Lowering uses this to know the semantic type of literals and other
+    /// expressions whose IR type would otherwise be ambiguous after context-
+    /// directed inference.
+    pub expr_types: HashMap<Span, Type>,
+
     /// Which `Base::Instance` a generic class's construction call resolved
     /// to, keyed by the call's span — an id into `generic_instances`.
     ///
@@ -536,6 +543,9 @@ struct Checker<'a> {
     /// provisional cycle-breaking `true` seen mid-computation is never
     /// cached as final ahead of the fields that would actually disprove it.
     clone_cache: HashMap<u32, bool>,
+    /// The inferred type of every expression, keyed by span. Lowering reads
+    /// this to emit literals and operations at the width the context chose.
+    expr_types: HashMap<Span, Type>,
 }
 
 /// See [`Checker::native_resource`].
@@ -616,6 +626,7 @@ impl<'a> Checker<'a> {
             externs: HashMap::new(),
             native_clone: None,
             clone_cache: HashMap::new(),
+            expr_types: HashMap::new(),
         }
     }
 
@@ -764,6 +775,7 @@ impl<'a> Checker<'a> {
             dependent_types: self.dependent_types,
             pin_types: self.pin_types,
             externs: self.externs,
+            expr_types: self.expr_types,
         }
     }
 
@@ -888,9 +900,10 @@ impl<'a> Checker<'a> {
             Base::Int(_) | Base::Boolean | Base::String | Base::Char => true,
             // `Float16` prints by widening to `Float32` first — always
             // exact, since every `f16` value is representable in `f32`
-            // without loss (`Type::accepts`'s float-widening rule). No such
-            // safe fallback exists for `Float128`.
-            Base::Float(w) => matches!(w, FloatWidth::F16 | FloatWidth::F32 | FloatWidth::F64),
+            // without loss (`Type::accepts`'s float-widening rule). `Float128`
+            // prints by truncating to `Float64`; this can lose precision for
+            // values that are not exactly representable in `f64`.
+            Base::Float(_) => true,
             Base::Class(id) => self.classes[id as usize]
                 .method("to_string")
                 .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
@@ -5632,7 +5645,11 @@ impl<'a> Checker<'a> {
     }
 
     fn check_assign(&mut self, stmt: &AssignStmt) {
+        let target_hint = self.assignment_target_type(&stmt.target);
+        let saved_expected = self.expected_type;
+        self.expected_type = target_hint;
         let value = self.check_expr(&stmt.value);
+        self.expected_type = saved_expected;
 
         // `_ = expr;` discards `value` deliberately — the escape hatch a
         // mandatory-consumption type like `Result` needs
@@ -5645,6 +5662,18 @@ impl<'a> Checker<'a> {
         }
 
         self.check_assign_target(&stmt.target, value, stmt.value.span());
+    }
+
+    /// The type a value is being assigned to, for contextual literal inference.
+    /// Only `Name` targets are resolved here; field/index targets keep their
+    /// existing behavior.
+    fn assignment_target_type(&self, target: &AssignTarget) -> Option<Type> {
+        match target {
+            AssignTarget::Name(name) if name.name != "_" => {
+                self.scopes.resolve(&name.name).map(|resolved| resolved.binding.ty)
+            }
+            _ => None,
+        }
     }
 
     /// The rules a single `(target, value)` pair of an assignment must obey
@@ -5766,8 +5795,11 @@ impl<'a> Checker<'a> {
         }
 
         let n = stmt.targets.len().min(stmt.values.len());
+        let saved_expected = self.expected_type;
         for i in 0..n {
+            self.expected_type = self.assignment_target_type(&stmt.targets[i]);
             let value = self.check_expr(&stmt.values[i]);
+            self.expected_type = saved_expected;
 
             // `_` discards this position's value exactly as it does in a
             // single assignment (`Self::check_assign`'s own handling).
@@ -6375,16 +6407,16 @@ impl<'a> Checker<'a> {
         // unless something explicitly sets it again first. See
         // `expected_type`'s own doc comment for why that matters.
         let expected = self.expected_type.take();
-        match expr {
-            Expr::Int(lit) => self.check_int_literal(lit),
-            Expr::Float(lit) => self.check_float_literal(lit),
+        let ty = match expr {
+            Expr::Int(lit) => self.check_int_literal(lit, expected),
+            Expr::Float(lit) => self.check_float_literal(lit, expected),
             Expr::Char(lit) => self.check_char_literal(lit),
             Expr::Str(_) => Type::STRING,
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
             Expr::Path(ident) => self.check_path(ident),
             Expr::Unary(e) => self.check_unary(e),
-            Expr::Binary(e) => self.check_binary(e),
+            Expr::Binary(e) => self.check_binary(e, expected),
             Expr::Call(e) => self.check_call(e, expected),
             // A range is not a value: there is no `Range` type to hold one
             // until Phase 3 brings collections. It only means something as the
@@ -6450,7 +6482,9 @@ impl<'a> Checker<'a> {
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
             Expr::Transfer(e) => self.check_transfer(e, expected),
-        }
+        };
+        self.expr_types.insert(expr.span(), ty);
+        ty
     }
 
     /// `"text {expr} text"` (roadmap Phase 3b).
@@ -6661,15 +6695,53 @@ impl<'a> Checker<'a> {
         false
     }
 
-    /// Integer literals are `Int32`, the only integer type in the subset.
+    /// Integer literals take the width of their expected type when it is a
+    /// numeric type the value fits in, otherwise fall back to `Int32`.
     ///
     /// The value is kept in `i128` by the lexer precisely so overflow of the
     /// destination type is detected here rather than lost while parsing
     /// (`LANGUAGE_SPEC` section 3: ordinary overflow is a controlled error).
-    fn check_int_literal(&mut self, lit: &IntLit) -> Type {
-        if let Some((min, max)) = Type::INT32.integer_range()
-            && (lit.value < min || lit.value > max)
-        {
+    fn check_int_literal(&mut self, lit: &IntLit, expected: Option<Type>) -> Type {
+        let expected = expected.map(Type::without_null).filter(|t| !t.is_unknown());
+
+        if let Some(ty) = expected {
+            match ty.base {
+                Base::Int(width) => {
+                    let (min, max) = width.literal_range();
+                    if lit.value < min || lit.value > max {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!("the literal {} does not fit in {}", lit.value, width.name()),
+                            format!("{} admits values from {min} to {max}", width.name()),
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    return ty;
+                }
+                Base::Float(width) => {
+                    if !Self::int_value_fits_in_float(lit.value, width) {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!("the literal {} does not fit in {}", lit.value, width.name()),
+                            format!(
+                                "{} cannot represent this integer value exactly",
+                                width.name()
+                            ),
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    return ty;
+                }
+                _ => {}
+            }
+        }
+
+        let (min, max) = IntWidth::I32.literal_range();
+        if lit.value < min || lit.value > max {
             self.error(
                 codes::INTEGER_OUT_OF_RANGE,
                 lit.span,
@@ -6682,45 +6754,143 @@ impl<'a> Checker<'a> {
         Type::INT32
     }
 
-    /// A fractional or scientific literal is `Float64` unless it names an
-    /// explicit width suffix (roadmap Phase 3b) — there is no context-directed
-    /// inference yet (task 7, deep contextual conversion covers the operator
-    /// case; a bare literal's own destination is separate and not built).
+    /// Whether the integer `value` is exactly representable in `float` and
+    /// within the finite range of that width.
+    fn int_value_fits_in_float(value: i128, float: FloatWidth) -> bool {
+        if value == 0 {
+            return true;
+        }
+        let Some(bound) = float.literal_bound() else {
+            // Float128: range is effectively unbounded for `i128` values, so
+            // only the mantissa-bit exactness check matters.
+            return Self::int_value_bit_length(value) <= float.mantissa_bits() + 1;
+        };
+        let magnitude = if let Some(abs) = value.checked_abs() {
+            abs
+        } else {
+            // i128::MIN cannot be represented as positive; its bit length
+            // guarantees it exceeds any float's mantissa.
+            return false;
+        };
+        if magnitude as f64 > bound {
+            return false;
+        }
+        Self::int_value_bit_length(value) <= float.mantissa_bits() + 1
+    }
+
+    /// Number of significant bits of an integer value (sign-agnostic).
+    fn int_value_bit_length(value: i128) -> u32 {
+        let magnitude = if value < 0 {
+            value.checked_abs().unwrap_or(i128::MAX)
+        } else {
+            value
+        };
+        128 - magnitude.leading_zeros()
+    }
+
+    /// A fractional or scientific literal takes the width of its expected
+    /// type when it is a numeric type the value fits in; otherwise it is
+    /// `Float64` unless it names an explicit width suffix (roadmap Phase 3b).
     ///
     /// The magnitude check parses the text as `f64` purely to catch a literal
-    /// that overflows to infinity in its destination width — it does not
-    /// decide the literal's runtime value, which `zirk-codegen-llvm` builds
-    /// straight from this same text through LLVM's own parser, at the actual
-    /// destination width. `Float128` is exempted: its true range vastly
-    /// exceeds what an `f64` parse can even represent, so there is no `f64`
-    /// bound to check it against without a false result — see
-    /// `FloatWidth::literal_bound`.
-    fn check_float_literal(&mut self, lit: &FloatLit) -> Type {
+    /// that overflows to infinity in the destination width. `Float128` is
+    /// exempted: its true range vastly exceeds what an `f64` parse can
+    /// represent, so there is no `f64`-based bound for it.
+    fn check_float_literal(&mut self, lit: &FloatLit, expected: Option<Type>) -> Type {
         use FloatWidth::*;
-        let width = match lit.width.as_deref() {
-            None => F64,
-            Some("f16") => F16,
-            Some("f32") => F32,
-            Some("f64") => F64,
-            Some("f128") => F128,
-            Some(_) => F64,
+        let explicit_width = match lit.width.as_deref() {
+            None => None,
+            Some("f16") => Some(F16),
+            Some("f32") => Some(F32),
+            Some("f64") => Some(F64),
+            Some("f128") => Some(F128),
+            Some(_) => None,
         };
 
         let value: f64 = lit.text.parse().unwrap_or(f64::NAN);
-        if let Some(bound) = width.literal_bound()
-            && value.abs() > bound
+
+        // When an integer type is expected, the literal is allowed only if it
+        // has no fractional part and fits in that integer range. This is the
+        // literal half of `Int = 1.0` style initialization.
+        if let Some(ty) = expected.map(Type::without_null).filter(|t| !t.is_unknown())
+            && let Base::Int(width) = ty.base
         {
+            if let Some(int_value) = Self::float_text_as_exact_integer(&lit.text, value) {
+                let (min, max) = width.literal_range();
+                if int_value < min || int_value > max {
+                    self.error(
+                        codes::INTEGER_OUT_OF_RANGE,
+                        lit.span,
+                        format!("the literal {} does not fit in {}", lit.text, width.name()),
+                        format!("{} admits values from {min} to {max}", width.name()),
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                return ty;
+            }
+            self.error(
+                codes::TYPE_MISMATCH,
+                lit.span,
+                format!("the literal {} cannot be used as an integer", lit.text),
+                "it has a non-zero fractional part or is not exactly representable",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        let width = explicit_width.unwrap_or_else(|| {
+            expected
+                .map(Type::without_null)
+                .and_then(|t| match t.base {
+                    Base::Float(w) => Some(w),
+                    _ => None,
+                })
+                .unwrap_or(F64)
+        });
+
+        if let Some(bound) = width.literal_bound() {
+            if value.is_nan() || value.abs() > bound {
+                self.error(
+                    codes::INTEGER_OUT_OF_RANGE,
+                    lit.span,
+                    format!("the literal {} does not fit in {}", lit.text, width.name()),
+                    format!("{} admits magnitudes up to {bound}", width.name()),
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+        } else if value.is_nan() {
             self.error(
                 codes::INTEGER_OUT_OF_RANGE,
                 lit.span,
-                format!("the literal {} does not fit in {}", lit.text, width.name()),
-                format!("{} admits magnitudes up to {bound}", width.name()),
+                format!("the literal {} is not a finite number", lit.text),
+                "Float128 literals must be finite",
                 None,
             );
             return Type::UNKNOWN;
         }
 
         Type::of(Base::Float(width))
+    }
+
+    /// Parses a float literal text as an exact integer, if possible. Only
+    /// accepts values that `f64` can represent exactly and which have no
+    /// fractional part, to avoid silently rounding large values.
+    fn float_text_as_exact_integer(_text: &str, parsed: f64) -> Option<i128> {
+        if parsed.is_nan() || parsed.is_infinite() {
+            return None;
+        }
+        // Values larger than 2^53 cannot be trusted to be exact integers in
+        // an `f64` parse, and parsing the decimal text directly is out of scope.
+        const EXACT_INTEGER_LIMIT: f64 = (1u64 << 53) as f64;
+        if parsed.abs() > EXACT_INTEGER_LIMIT {
+            return None;
+        }
+        if parsed.fract() != 0.0 {
+            return None;
+        }
+        Some(parsed as i128)
     }
 
     /// A `Char` literal must be exactly one Unicode grapheme
@@ -7017,9 +7187,21 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_binary(&mut self, expr: &BinaryExpr) -> Type {
+    fn check_binary(&mut self, expr: &BinaryExpr, outer_expected: Option<Type>) -> Type {
+        // For arithmetic, propagate the expected result type down into operands
+        // so that `mut x: Int8 = 1 + 2;` can infer the literals as `Int8` and
+        // `Float = 1 + 2` can infer them as `Float`. Non-numeric expectations
+        // are ignored.
+        let operand_expected = outer_expected
+            .map(Type::without_null)
+            .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)));
+
+        let saved = self.expected_type;
+        self.expected_type = operand_expected;
         let left = self.check_expr(&expr.left);
+        self.expected_type = operand_expected;
         let right = self.check_expr(&expr.right);
+        self.expected_type = saved;
 
         use BinaryOp::*;
         match expr.op {
@@ -7466,12 +7648,12 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         };
 
-        if !ty.is_unknown() && !matches!(ty.base, Base::Int(_)) {
+        if !ty.is_unknown() && !matches!(ty.base, Base::Int(_) | Base::Float(_)) {
             let found = self.name(ty);
             self.error(
                 codes::TYPE_MISMATCH,
                 expr.op_span,
-                format!("`{}` requires an integer", expr.op.as_str()),
+                format!("`{}` requires a number", expr.op.as_str()),
                 format!("`{}` has type {found}", expr.target.name()),
                 None,
             );
@@ -7900,7 +8082,7 @@ impl<'a> Checker<'a> {
                 });
             }
             Pattern::Int(lit) => {
-                let ty = self.check_int_literal(lit);
+                let ty = self.check_int_literal(lit, Some(scrutinee));
                 self.expect_pattern_type(scrutinee, ty, lit.span);
             }
             Pattern::Str(lit) => self.expect_pattern_type(scrutinee, Type::STRING, lit.span),
@@ -11416,36 +11598,22 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
     }
 
     match (left.base, right.base, op) {
-        // Both operands must already be the same width and signedness —
-        // mixed-width arithmetic needs an explicit conversion first (roadmap
-        // Phase 3b, task 4.3), the same rule that already applied when
-        // `Int32` was the only width there was to mismatch.
-        (Base::Int(l), Base::Int(r), Add | Sub | Mul | Div | Rem) if l == r => {
-            Some(Type::of(Base::Int(l)))
-        }
-        // Same rule, one family over: both `Float` operands must already
-        // share a width.
-        (Base::Float(l), Base::Float(r), Add | Sub | Mul | Div | Rem) if l == r => {
-            Some(Type::of(Base::Float(l)))
-        }
-        // Mixed integer and `Float` arithmetic produces `Float`
-        // (`ZIRK_LANGUAGE_SPEC.md` section 3), in either operand order: the
-        // integer side is implicitly widened to the `Float` operand's own
-        // width before the operation (`zirk-ir/lower.rs`'s `lower_binary`),
-        // never the other way, so nothing here is lossy.
-        (Base::Int(_), Base::Float(f), Add | Sub | Mul | Div | Rem)
-        | (Base::Float(f), Base::Int(_), Add | Sub | Mul | Div | Rem) => {
-            Some(Type::of(Base::Float(f)))
+        // Numeric arithmetic is performed in the smallest common type that
+        // can represent every value of both operands without loss. The
+        // checker already guaranteed the common type exists; lower widens.
+        (_, _, Add | Sub | Mul | Div | Rem)
+            if matches!(left.base, Base::Int(_) | Base::Float(_))
+                && matches!(right.base, Base::Int(_) | Base::Float(_)) =>
+        {
+            left.common_numeric(right)
         }
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
-        // `String * Integer` repeats, in either order: `"ja" * 3` and
-        // `3 * "ja"` are the same request written two ways. `Int32`
-        // specifically: the runtime's own `zirk_str_repeat` takes its count
-        // as `Int32`, and nothing converts a wider or narrower count for it
-        // yet.
-        (Base::String, Base::Int(IntWidth::I32), Mul)
-        | (Base::Int(IntWidth::I32), Base::String, Mul) => Some(Type::STRING),
+        // `String * Integer` repeats, accepting any integer width; lower
+        // widens the count to `Int32` for the runtime call.
+        (Base::String, Base::Int(_), Mul) | (Base::Int(_), Base::String, Mul) => {
+            Some(Type::STRING)
+        }
         _ => None,
     }
 }

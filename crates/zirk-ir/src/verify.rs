@@ -140,13 +140,11 @@ fn verify_instruction(
     let type_of = |operand: &Operand| values.get(&operand.0).map(|(_, ty)| *ty);
 
     match &inst.kind {
-        InstKind::ConstInt(_) => expect(
-            inst.ty,
-            IrType::Int(IntWidth::I32),
-            position,
-            "ConstInt",
-            report,
-        ),
+        InstKind::ConstInt(_) => {
+            if !matches!(inst.ty, IrType::Int(_)) {
+                report(format!("{position}: ConstInt must produce an Int type, got {ty:?}", ty = inst.ty));
+            }
+        }
         InstKind::ConstBool(_) => expect(inst.ty, IrType::Boolean, position, "ConstBool", report),
         InstKind::ConstString(id) => {
             expect(inst.ty, IrType::String, position, "ConstString", report);

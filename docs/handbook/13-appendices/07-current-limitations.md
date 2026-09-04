@@ -137,8 +137,9 @@ Current high-impact delivery limits include:
   compact declaration grammar has no `implements` clause or method-body
   syntax at all, independent of this feature — extending that grammar is
   its own, separate future work. Still required: user generic contracts.
-- `Float128` arithmetic lacks complete Windows verification and `Float128`
-  currently lacks `to_string()` support.
+- `Float128` arithmetic lacks complete Windows verification. `Float128`
+  `to_string()` is implemented by truncating to `Float64` first, which can
+  lose precision for values not exactly representable in `f64`.
 - Standard-library, structured-concurrency, packaging, developer-tooling,
   decorator, and public documentation surfaces are specified ahead of full
   compiler/runtime delivery.

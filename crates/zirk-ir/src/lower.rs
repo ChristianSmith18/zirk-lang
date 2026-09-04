@@ -1052,6 +1052,21 @@ const fn ir_int_width(width: SemaIntWidth) -> IntWidth {
     }
 }
 
+const fn sema_int_width(width: IntWidth) -> SemaIntWidth {
+    match width {
+        IntWidth::I8 => SemaIntWidth::I8,
+        IntWidth::I16 => SemaIntWidth::I16,
+        IntWidth::I32 => SemaIntWidth::I32,
+        IntWidth::I64 => SemaIntWidth::I64,
+        IntWidth::I128 => SemaIntWidth::I128,
+        IntWidth::U8 => SemaIntWidth::U8,
+        IntWidth::U16 => SemaIntWidth::U16,
+        IntWidth::U32 => SemaIntWidth::U32,
+        IntWidth::U64 => SemaIntWidth::U64,
+        IntWidth::U128 => SemaIntWidth::U128,
+    }
+}
+
 /// A float literal's width, from its optional suffix — mirrors the checker's
 /// own `check_float_literal`, since lowering re-derives a literal's type from
 /// the tree rather than re-checking it.
@@ -1071,6 +1086,15 @@ const fn ir_float_width(width: SemaFloatWidth) -> FloatWidth {
         SemaFloatWidth::F32 => FloatWidth::F32,
         SemaFloatWidth::F64 => FloatWidth::F64,
         SemaFloatWidth::F128 => FloatWidth::F128,
+    }
+}
+
+const fn sema_float_width(width: FloatWidth) -> SemaFloatWidth {
+    match width {
+        FloatWidth::F16 => SemaFloatWidth::F16,
+        FloatWidth::F32 => SemaFloatWidth::F32,
+        FloatWidth::F64 => SemaFloatWidth::F64,
+        FloatWidth::F128 => SemaFloatWidth::F128,
     }
 }
 
@@ -1506,13 +1530,14 @@ impl<'a> FunctionLowering<'a> {
         id
     }
 
-    /// An `Int64` constant. `ConstInt` always declares `Int32` (a literal
-    /// always types `Int32` — `ast::Expr::Int`'s own lowering does the
-    /// same), so a wider constant goes through `IntCast` from one, exactly
-    /// the same as any other `Int32` value reaching a wider destination.
-    fn const_i64(&mut self, value: i32, span: Span) -> Operand {
-        let narrow = self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span);
-        self.emit(InstKind::IntCast(narrow), IrType::Int(IntWidth::I64), span)
+    /// An `Int64` constant. `ConstInt` carries the value at its declared
+    /// width, so it is emitted directly as `Int64` here.
+    fn const_i64(&mut self, value: i128, span: Span) -> Operand {
+        self.emit(
+            InstKind::ConstInt(value),
+            IrType::Int(IntWidth::I64),
+            span,
+        )
     }
 
     fn lookup_slot(&self, name: &str) -> SlotId {
@@ -1907,7 +1932,7 @@ impl<'a> FunctionLowering<'a> {
             }
 
             let value = self.lower_expr(expr);
-            let actual = self.type_of(expr, expr.span());
+            let actual = self.type_of_operand(value);
             if actual == expected {
                 return value;
             }
@@ -1938,10 +1963,10 @@ impl<'a> FunctionLowering<'a> {
                 && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
             {
                 self.emit(InstKind::Retype(value), base.inner(), expr.span())
-            } else if matches!(actual, IrType::Int(_)) && matches!(base, Nullable::Int(_)) {
-                self.emit(InstKind::IntCast(value), base.inner(), expr.span())
-            } else if matches!(actual, IrType::Float(_)) && matches!(base, Nullable::Float(_)) {
-                self.emit(InstKind::FloatCast(value), base.inner(), expr.span())
+            } else if Self::is_numeric_ir_type(actual)
+                && Self::is_numeric_ir_type(base.inner())
+            {
+                self.convert_numeric(value, actual, base.inner(), expr.span())
             } else {
                 value
             };
@@ -1985,18 +2010,12 @@ impl<'a> FunctionLowering<'a> {
             return self.emit(InstKind::Retype(value), expected, expr.span());
         }
 
-        // The checker's own safe-widening rule (`Type::accepts`, roadmap
-        // Phase 3b task 4.3): a narrower integer of the same signedness
-        // fits a wider one implicitly, but the bits still need to be
-        // sign/zero-extended at the IR level — unlike an object reference,
-        // an integer's representation does change size.
-        if matches!(expected, IrType::Int(_)) {
-            return self.emit(InstKind::IntCast(value), expected, expr.span());
-        }
-        // Same idea, one family over: `Float` widening is always exact
-        // (`Type::accepts`'s float arm), but the bits still need extending.
-        if matches!(expected, IrType::Float(_)) {
-            return self.emit(InstKind::FloatCast(value), expected, expr.span());
+        // The checker has already proven `actual` can be converted to
+        // `expected` without loss (`Type::accepts`). Emit the right numeric
+        // conversion (including Int -> Float) and fall back to the value
+        // itself when the type already matches.
+        if Self::is_numeric_ir_type(actual) && Self::is_numeric_ir_type(expected) {
+            return self.convert_numeric(value, actual, expected, expr.span());
         }
 
         value
@@ -2017,6 +2036,45 @@ impl<'a> FunctionLowering<'a> {
     /// operand) and writing it into the fresh allocation at the same index
     /// — no new instruction kind, and no store ever targets the box again
     /// after this (design D3: the box is read-only from here on).
+    fn convert_numeric(&mut self, value: Operand, from: IrType, to: IrType, span: Span) -> Operand {
+        if from == to {
+            return value;
+        }
+        match (from, to) {
+            (IrType::Int(_), IrType::Int(_)) => self.emit(InstKind::IntCast(value), to, span),
+            (IrType::Float(_), IrType::Float(_)) => {
+                self.emit(InstKind::FloatCast(value), to, span)
+            }
+            (IrType::Int(_), IrType::Float(_)) => {
+                self.emit(InstKind::IntToFloat(value), to, span)
+            }
+            (IrType::Float(_), IrType::Int(_)) => {
+                self.emit(InstKind::FloatToInt(value), to, span)
+            }
+            _ => value,
+        }
+    }
+
+    const fn is_numeric_ir_type(ty: IrType) -> bool {
+        matches!(ty, IrType::Int(_) | IrType::Float(_))
+    }
+
+    /// The smallest IR numeric type that can represent every value of `left`
+    /// and `right` without loss, using the checker's own `Type::common_numeric`.
+    fn common_numeric_ir_type(&self, left: IrType, right: IrType) -> Option<IrType> {
+        let ty = |ir: IrType| -> Option<Type> {
+            match ir {
+                IrType::Int(w) => Some(Type::of(Base::Int(sema_int_width(w)))),
+                IrType::Float(w) => Some(Type::of(Base::Float(sema_float_width(w)))),
+                _ => None,
+            }
+        };
+        let l = ty(left)?;
+        let r = ty(right)?;
+        let common = l.common_numeric(r)?;
+        Some(self.ir_type(common))
+    }
+
     fn lower_box_value(&mut self, value: Operand, id: u32, span: Span) -> Operand {
         let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
         let field_count = self.module.values[id as usize].fields.len();
@@ -3372,7 +3430,7 @@ impl<'a> FunctionLowering<'a> {
             stmt.span,
         );
         let expected = self.emit(
-            InstKind::ConstInt(item as i32),
+            InstKind::ConstInt(item as i128),
             IrType::Int(IntWidth::I32),
             stmt.span,
         );
@@ -3573,18 +3631,63 @@ impl<'a> FunctionLowering<'a> {
         let span = expr.span();
 
         match expr {
-            ast::Expr::Int(lit) => self.emit(
-                InstKind::ConstInt(lit.value as i32),
-                IrType::Int(IntWidth::I32),
-                span,
-            ),
+            ast::Expr::Int(lit) => {
+                let ty = self
+                    .checked
+                    .expr_types
+                    .get(&span)
+                    .copied()
+                    .filter(|t| !t.is_unknown())
+                    .map(|t| self.ir_type(t))
+                    .unwrap_or(IrType::Int(IntWidth::I32));
+                match ty {
+                    IrType::Float(w) => {
+                        let text = lit.value.to_string();
+                        self.emit(InstKind::ConstFloat(w, text), ty, span)
+                    }
+                    IrType::Int(_) => self.emit(InstKind::ConstInt(lit.value), ty, span),
+                    _ => self.emit(
+                        InstKind::ConstInt(lit.value),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    ),
+                }
+            }
             ast::Expr::Float(lit) => {
-                let width = float_literal_width(lit);
-                self.emit(
-                    InstKind::ConstFloat(width, lit.text.clone()),
-                    IrType::Float(width),
-                    span,
-                )
+                let ty = self
+                    .checked
+                    .expr_types
+                    .get(&span)
+                    .copied()
+                    .filter(|t| !t.is_unknown())
+                    .map(|t| self.ir_type(t))
+                    .unwrap_or(IrType::Float(float_literal_width(lit)));
+                match ty {
+                    IrType::Int(_) => {
+                        let parsed: f64 = lit.text.parse().unwrap_or(f64::NAN);
+                        if !parsed.is_nan() && parsed.fract() == 0.0 {
+                            self.emit(InstKind::ConstInt(parsed as i128), ty, span)
+                        } else {
+                            let width = float_literal_width(lit);
+                            self.emit(
+                                InstKind::ConstFloat(width, lit.text.clone()),
+                                IrType::Float(width),
+                                span,
+                            )
+                        }
+                    }
+                    IrType::Float(w) => {
+                        self.emit(InstKind::ConstFloat(w, lit.text.clone()), ty, span)
+                    }
+                    _ => {
+                        let width = float_literal_width(lit);
+                        self.emit(
+                            InstKind::ConstFloat(width, lit.text.clone()),
+                            IrType::Float(width),
+                            span,
+                        )
+                    }
+                }
             }
             ast::Expr::Bool(lit) => {
                 self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
@@ -3764,70 +3867,72 @@ impl<'a> FunctionLowering<'a> {
                 let left_ty = self.type_of(&e.left, e.left.span());
                 let right_ty = self.type_of(&e.right, e.right.span());
 
-                // Mixed integer/`Float` arithmetic implicitly widens the
-                // integer operand to the `Float` operand's own width before
-                // the operation (`ZIRK_LANGUAGE_SPEC.md` section 3) — the
-                // checker already accepted this specific combination
-                // (`native_arithmetic`'s mixed arm), so lowering only has to
-                // insert the conversion the verifier's `Binary` check then
-                // finds both operands already agreeing on. Every other
-                // operator the checker allows through here (comparison,
-                // bitwise, shift, equality) already requires the same type
-                // on both sides, so this never fires for them — except `is`:
-                // unlike `==`, the checker deliberately lets `T is T?`
-                // through (`Checker::check_binary`'s `Is` arm has no
-                // `reject_nullable_comparison`, on purpose — identity is
-                // exactly the one place absence is allowed to participate,
-                // `ZIRK_LANGUAGE_SPEC.md` §4), the same way `T` widens to
-                // `T?` anywhere else it is assigned. `Wrap` here mirrors that
-                // widening so both operands reach the IR already agreeing on
-                // type (verify.rs's `Binary` check requires it).
-                let (left, right, operand_type) = match (left_ty, right_ty) {
-                    (IrType::Int(_), IrType::Float(w)) => {
-                        let left =
-                            self.emit(InstKind::IntToFloat(left), IrType::Float(w), e.left.span());
-                        (left, right, IrType::Float(w))
-                    }
-                    (IrType::Float(w), IrType::Int(_)) => {
-                        let right = self.emit(
-                            InstKind::IntToFloat(right),
-                            IrType::Float(w),
-                            e.right.span(),
-                        );
-                        (left, right, IrType::Float(w))
-                    }
-                    (base, IrType::Nullable(_))
-                        if op == BinaryOp::Identical && !matches!(base, IrType::Nullable(_)) =>
-                    {
-                        let nb = Nullable::of(base)
-                            .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
-                        let left = self.emit(
-                            InstKind::Wrap {
-                                base: nb,
-                                value: left,
-                            },
-                            right_ty,
-                            e.left.span(),
-                        );
-                        (left, right, right_ty)
-                    }
-                    (IrType::Nullable(_), base)
-                        if op == BinaryOp::Identical && !matches!(base, IrType::Nullable(_)) =>
-                    {
-                        let nb = Nullable::of(base)
-                            .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
-                        let right = self.emit(
-                            InstKind::Wrap {
-                                base: nb,
-                                value: right,
-                            },
-                            left_ty,
-                            e.right.span(),
-                        );
-                        (left, right, left_ty)
-                    }
-                    _ => (left, right, left_ty),
-                };
+                // Numeric operands are lowered to the common type the checker
+                // already computed, which is recorded in `checked.expr_types`.
+                // The semantic type may differ from the value's actual IR type
+                // for literals that were contextually inferred (e.g. `1.0`
+                // treated as `Int8`), so each operand is converted from its
+                // own actual type to the common type.
+                let (left, right, operand_type) =
+                    if Self::is_numeric_ir_type(left_ty) && Self::is_numeric_ir_type(right_ty) {
+                        if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem)
+                        {
+                            let common = self
+                                .common_numeric_ir_type(left_ty, right_ty)
+                                .unwrap_or(left_ty);
+                            let left_actual = self.type_of_operand(left);
+                            let right_actual = self.type_of_operand(right);
+                            let left =
+                                self.convert_numeric(left, left_actual, common, e.left.span());
+                            let right =
+                                self.convert_numeric(right, right_actual, common, e.right.span());
+                            (left, right, common)
+                        } else {
+                            let left_actual = self.type_of_operand(left);
+                            let right_actual = self.type_of_operand(right);
+                            let left =
+                                self.convert_numeric(left, left_actual, left_ty, e.left.span());
+                            let right =
+                                self.convert_numeric(right, right_actual, left_ty, e.right.span());
+                            (left, right, left_ty)
+                        }
+                    } else {
+                        match (left_ty, right_ty) {
+                            (base, IrType::Nullable(_))
+                                if op == BinaryOp::Identical
+                                    && !matches!(base, IrType::Nullable(_)) =>
+                            {
+                                let nb = Nullable::of(base)
+                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                                let left = self.emit(
+                                    InstKind::Wrap {
+                                        base: nb,
+                                        value: left,
+                                    },
+                                    right_ty,
+                                    e.left.span(),
+                                );
+                                (left, right, right_ty)
+                            }
+                            (IrType::Nullable(_), base)
+                                if op == BinaryOp::Identical
+                                    && !matches!(base, IrType::Nullable(_)) =>
+                            {
+                                let nb = Nullable::of(base)
+                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                                let right = self.emit(
+                                    InstKind::Wrap {
+                                        base: nb,
+                                        value: right,
+                                    },
+                                    left_ty,
+                                    e.right.span(),
+                                );
+                                (left, right, left_ty)
+                            }
+                            _ => (left, right, left_ty),
+                        }
+                    };
 
                 self.emit_checked_binary(op, left, right, operand_type, span)
             }
@@ -3961,7 +4066,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Match(e) => self.lower_match(e, span),
             ast::Expr::Variant(e) => {
                 let value = self.discriminant(&e.enum_name, &e.variant.name);
-                self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
+                self.emit(InstKind::ConstInt(value as i128), IrType::Int(IntWidth::I32), span)
             }
 
             ast::Expr::Println(e) => {
@@ -5102,7 +5207,7 @@ impl<'a> FunctionLowering<'a> {
     ) -> Operand {
         let expected = match pattern {
             ast::Pattern::Int(lit) => self.emit(
-                InstKind::ConstInt(lit.value as i32),
+                InstKind::ConstInt(lit.value),
                 IrType::Int(IntWidth::I32),
                 span,
             ),
@@ -5115,7 +5220,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Pattern::Variant(v) => {
                 let value = self.discriminant(&v.enum_name, &v.variant.name);
-                self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
+                self.emit(InstKind::ConstInt(value as i128), IrType::Int(IntWidth::I32), span)
             }
             // `null` tests absence rather than a value, so it is the one
             // pattern that does not compare against anything — and the one
@@ -5509,19 +5614,9 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// An integer constant at an arbitrary width (a guard's own `0` or bit
-    /// width, which may need to compare against an operand narrower or
-    /// wider than `Int32`) — the same `ConstInt` declares `Int32`, widen
-    /// with `IntCast`" shape [`Self::const_i64`] already uses, generalized
-    /// to any destination width: the verifier requires every `ConstInt`
-    /// itself to declare `Int32` (a literal always types `Int32`), so a
-    /// different destination goes through an explicit `IntCast` from one.
-    fn const_int_at(&mut self, value: i32, ty: IrType, span: Span) -> Operand {
-        let narrow = self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span);
-        if ty == IrType::Int(IntWidth::I32) {
-            narrow
-        } else {
-            self.emit(InstKind::IntCast(narrow), ty, span)
-        }
+    /// A small integer constant emitted at the requested Int width.
+    fn const_int_at(&mut self, value: i128, ty: IrType, span: Span) -> Operand {
+        self.emit(InstKind::ConstInt(value), ty, span)
     }
 
     /// Division/remainder guard: before `Div`/`Rem` over integers runs,
@@ -5579,7 +5674,7 @@ impl<'a> FunctionLowering<'a> {
             let right = self.emit(InstKind::Load(right_slot), operand_type, span);
 
             let one = self.const_int_at(1, operand_type, span);
-            let bits_minus_one = self.const_int_at((width.bits() as i32) - 1, operand_type, span);
+            let bits_minus_one = self.const_int_at((width.bits() as i128) - 1, operand_type, span);
             let min = self.emit(
                 InstKind::Binary {
                     op: BinaryOp::Shl,
@@ -5669,7 +5764,7 @@ impl<'a> FunctionLowering<'a> {
         let right_slot = self.spill(right, amount_ty, span);
 
         let amount = self.emit(InstKind::Load(right_slot), amount_ty, span);
-        let bits = self.const_int_at(width.bits() as i32, amount_ty, span);
+        let bits = self.const_int_at(width.bits() as i128, amount_ty, span);
 
         // An unsigned amount is never negative by construction — the same
         // narrowing `checked_shift`'s own `right_signed` branch made at the
@@ -5740,23 +5835,23 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Binary { op, left, right }, operand_type, span)
     }
 
-    /// Invalid-repeat guard (D10): before `String * Int32` runs, checks the
-    /// count is non-negative — the one check that used to live inside the
-    /// runtime itself (`zirk_rt_invalid_repeat`'s own negative-count branch
-    /// in `zirk-runtime/src/string.rs`), now moved ahead of the call so a
-    /// `try`/`catch` can intercept it, throwing `InvalidRepeatError` on the
-    /// failing side and performing the real repetition on the other. Both
-    /// operands are spilled ahead of the branch ([`Self::spill`]), the same
-    /// reason [`Self::checked_int_division`] does. The runtime keeps its own
-    /// other check (an overflowing byte size): that guards `OverflowError`'s
-    /// own territory, out of this pass's scope.
+    /// Invalid-repeat guard (D10): before `String * Int` runs, checks the
+    /// count fits in the `Int32` the runtime expects: it must be non-negative
+    /// and no larger than `Int32::MAX`. Counts of any integer width are widened
+    /// to `Int128` first so the bounds check is exact, then narrowed to `Int32`
+    /// once it has passed.
     fn checked_repeat(&mut self, string: Operand, count: Operand, span: Span) -> Operand {
-        let string_slot = self.spill(string, IrType::String, span);
-        let count_slot = self.spill(count, IrType::Int(IntWidth::I32), span);
+        let count_ty = self.type_of_operand(count);
+        let i128_ty = IrType::Int(IntWidth::I128);
+        let count = self.convert_numeric(count, count_ty, i128_ty, span);
 
-        let count_reloaded =
-            self.emit(InstKind::Load(count_slot), IrType::Int(IntWidth::I32), span);
-        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+        let string_slot = self.spill(string, IrType::String, span);
+        let count_slot = self.spill(count, i128_ty, span);
+
+        let count_reloaded = self.emit(InstKind::Load(count_slot), i128_ty, span);
+        let zero = self.const_int_at(0, i128_ty, span);
+        let i32_max = self.const_int_at(i32::MAX as i128, i128_ty, span);
+
         let is_negative = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Lt,
@@ -5766,10 +5861,29 @@ impl<'a> FunctionLowering<'a> {
             IrType::Boolean,
             span,
         );
+        let too_large = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: count_reloaded,
+                right: i32_max,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: is_negative,
+                right: too_large,
+            },
+            IrType::Boolean,
+            span,
+        );
+
         let fail = self.new_block();
         let cont = self.new_block();
         self.terminate(Terminator::Branch {
-            condition: is_negative,
+            condition: invalid,
             then_block: fail,
             else_block: cont,
         });
@@ -5787,7 +5901,8 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = cont;
         let string = self.emit(InstKind::Load(string_slot), IrType::String, span);
-        let count = self.emit(InstKind::Load(count_slot), IrType::Int(IntWidth::I32), span);
+        let count = self.emit(InstKind::Load(count_slot), i128_ty, span);
+        let count = self.convert_numeric(count, i128_ty, IrType::Int(IntWidth::I32), span);
         self.emit(InstKind::Repeat { string, count }, IrType::String, span)
     }
 
@@ -7848,7 +7963,7 @@ impl<'a> FunctionLowering<'a> {
                 )
             } else {
                 self.emit(
-                    InstKind::ConstInt(discriminant),
+                    InstKind::ConstInt(discriminant as i128),
                     IrType::Int(IntWidth::I32),
                     span,
                 )
@@ -8962,7 +9077,11 @@ impl<'a> FunctionLowering<'a> {
         let ty = self.slot_type(slot);
 
         let previous = self.emit(InstKind::Load(slot), ty, span);
-        let one = self.const_int_at(1, ty, span);
+        let one = if let IrType::Float(w) = ty {
+            self.emit(InstKind::ConstFloat(w, "1".to_string()), ty, span)
+        } else {
+            self.const_int_at(1, ty, span)
+        };
         let updated = self.emit_checked_binary(
             binary_op(expr.op.as_binary()),
             previous,
@@ -9433,6 +9552,17 @@ impl<'a> FunctionLowering<'a> {
     /// Total on a verified program. It is derivation, not checking: everything
     /// the checker would have rejected never reaches this point.
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
+        // The checker records the contextual width for numeric literals and the
+        // result type for binary operations; use it when available so lowering
+        // matches the semantic type. Other expressions keep their IR-derived type
+        // (slot, layout, etc.).
+        if matches!(expr, ast::Expr::Int(_) | ast::Expr::Float(_) | ast::Expr::Binary(_))
+            && let Some(&ty) = self.checked.expr_types.get(&expr.span())
+            && !ty.is_unknown()
+        {
+            return self.ir_type(ty);
+        }
+
         match expr {
             ast::Expr::Int(_) => IrType::Int(IntWidth::I32),
             ast::Expr::Float(lit) => IrType::Float(float_literal_width(lit)),
@@ -9711,16 +9841,8 @@ fn is_string_operator(left: IrType, right: IrType, op: ast::BinaryOp) -> bool {
     matches!(
         (left, right, op),
         (IrType::String, IrType::String, ast::BinaryOp::Add)
-            | (
-                IrType::String,
-                IrType::Int(IntWidth::I32),
-                ast::BinaryOp::Mul
-            )
-            | (
-                IrType::Int(IntWidth::I32),
-                IrType::String,
-                ast::BinaryOp::Mul
-            )
+            | (IrType::String, IrType::Int(_), ast::BinaryOp::Mul)
+            | (IrType::Int(_), IrType::String, ast::BinaryOp::Mul)
     )
 }
 

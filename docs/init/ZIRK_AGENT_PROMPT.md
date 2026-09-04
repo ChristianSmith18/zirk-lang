@@ -289,12 +289,10 @@ the phase:
   `glibc`/`libSystem` do on Linux/macOS — it crashed the Windows runner
   (an access violation, not a failing assertion) rather than just failing a
   test, so `Float128` is excluded from the cross-platform corpus.
-- **`Float128` still has no `to_string()`**: unlike `Float16`, there is no
-  lossless narrower width to widen through instead — an `f64` cannot
-  represent every `f128` value exactly the way `f32` can every `f16` — and
-  it is not a stable Rust primitive in this toolchain either way. Printing or
-  interpolating one is rejected at compile time with a clear diagnostic, not
-  silently wrong.
+- **`Float128` `to_string()` is lossy**: because `f128` is not a stable Rust
+  primitive in this toolchain, `Float128` values are truncated to `Float64`
+  before formatting. This means the printed decimal is an `f64` approximation
+  of the original `f128` value, not an exact decimal expansion.
 - **An enum cannot implement `to_string()`.** Corrected from an earlier,
   wrong characterization of this as debt: `ZIRK_LANGUAGE_SPEC.md` section 7
   is explicit — "enums are data-only and declare no user methods" — the same
