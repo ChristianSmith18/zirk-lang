@@ -24,8 +24,8 @@
 
 ## 5. Memory and integration tests
 
-- [ ] 5.1 Add a corpus fixture that loops building and discarding strings and assert a stable peak RSS in `crates/zirk-cli/tests/end_to_end.rs` or a dedicated runtime test.
-- [ ] 5.2 Add corpus fixtures for `String + String`, `String * n`, `String[index]`, and `String.grapheme_slice` in loops.
+- [x] 5.1 Add a corpus fixture that loops building and discarding strings and assert a stable peak RSS in `crates/zirk-cli/tests/end_to_end.rs` or a dedicated runtime test.
+- [x] 5.2 Add corpus fixtures for `String + String`, `String * n`, `String[index]`, and `String.grapheme_slice` in loops.
 - [x] 5.3 Run `cargo test --workspace` and fix all failures introduced by root-enumeration or string-allocation changes.
 - [x] 5.4 Run `cargo clippy --workspace` and resolve any new warnings.
 - [x] 5.5 Run `openspec validate --all --strict` and fix any validation failures.
