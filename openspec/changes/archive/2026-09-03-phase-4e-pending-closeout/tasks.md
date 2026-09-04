@@ -36,7 +36,7 @@
 - [x] 4.3 Update `docs/handbook/13-appendices/07-current-limitations.md` to remove or rephrase the limitations closed by this change.
 - [x] 4.4 Run `cargo fmt --all` and `cargo clippy --workspace`, fixing any formatting or lint warnings introduced.
 - [x] 4.5 Run `cargo test --workspace` and fix all failures before considering the change complete.
-- [x] 4.6 Run `openspec validate fase-4e-cierre-pendientes --strict` and archive or sync the change once the implementation is merged.
+- [x] 4.6 Run `openspec validate phase-4e-pending-closeout --strict` and archive or sync the change once the implementation is merged.
 
 ## 5. Quality gates and test coverage
 
@@ -46,4 +46,4 @@
 - [x] 5.4 Verify that every new CLI fixture has a matching `.out` file and that `crates/zirk-cli/tests/end_to_end.rs` passes all corpus fixtures.
 - [x] 5.5 Run `cargo test -p zirk-sema`, `cargo test -p zirk-ir`, and `cargo test -p zirk-codegen-llvm` individually to isolate regressions during development.
 - [x] 5.6 Confirm that `cargo clippy --workspace` produces no new warnings introduced by this change.
-- [x] 5.7 Confirm that `cargo test --workspace` and `openspec validate fase-4e-cierre-pendientes --strict` pass before archiving.
+- [x] 5.7 Confirm that `cargo test --workspace` and `openspec validate phase-4e-pending-closeout --strict` pass before archiving.
