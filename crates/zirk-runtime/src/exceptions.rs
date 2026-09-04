@@ -78,7 +78,7 @@ pub unsafe extern "C" fn zirk_rt_stack_trace(exception: *const c_void) -> *mut c
     }
 
     let message = format!("Throwable stack trace at {exception:p}");
-    let handle = crate::string::owned_handle(message);
+    let handle = crate::string::alloc_owned(&message);
     STACK_TRACES.with(|m| m.borrow_mut().insert(key, handle));
     handle
 }

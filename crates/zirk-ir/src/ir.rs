@@ -368,17 +368,12 @@ impl IrType {
     /// `Value`/`Enum`/`Closure`) at least one collector-managed heap
     /// reference (`fase-4e-colector-mark-sweep`, design D2/D4).
     ///
-    /// `String`/`Char` are deliberately excluded: they are heap-allocated too,
-    /// but through `zirk-runtime`'s own string module, not `zirk_rt_alloc` —
-    /// out of this collector's reach, unchanged from today's "never frees"
-    /// behavior (design D4 names exactly `Object`, `Contract`, and any
-    /// `Value`/`Enum`/`Closure` that contains one — nothing else).
-    ///
-    /// A slot/instruction result of this kind is what both the shadow-stack
-    /// root descriptor (D2) and the D4 synthetic-slot spill key off of. A
-    /// `Value`/`Enum`/`Closure` layout can never nest itself (that would be an
-    /// infinitely sized type, already rejected upstream), so this recursion
-    /// always terminates.
+    /// `String`/`Char` are now collector-managed opaque handles as well, so
+    /// they are included here. A slot/instruction result of this kind is what
+    /// both the shadow-stack root descriptor (D2) and the D4 synthetic-slot
+    /// spill key off of. A `Value`/`Enum`/`Closure` layout can never nest
+    /// itself (that would be an infinitely sized type, already rejected
+    /// upstream), so this recursion always terminates.
     pub fn is_managed_reference(self, module: &Module) -> bool {
         match self {
             // A `Weak<T>` value is a pointer to a collector-tracked WeakCell
@@ -391,7 +386,9 @@ impl IrType {
             | IrType::Contract(_)
             | IrType::Weak(_)
             | IrType::Dependent(_)
-            | IrType::Pin(_) => true,
+            | IrType::Pin(_)
+            | IrType::String
+            | IrType::Char => true,
             IrType::Nullable(n) => n.inner().is_managed_reference(module),
             IrType::Value(id) => module.values[id as usize]
                 .fields

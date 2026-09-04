@@ -154,7 +154,7 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| Non-moving mark-sweep GC | n/a | n/a | n/a | partial | partial | partial | `ADR-003` closed; `zirk_rt_alloc` now reclaims. |
+| Non-moving mark-sweep GC | n/a | n/a | n/a | yes | yes | partial | `ADR-003` closed; `zirk_rt_alloc` now reclaims ordinary objects, `String`/`Char` handles, and cycles. |
 | `Weak<T>` | yes | yes | yes | yes | yes | yes | `fase-4e-weak`. |
 | Deep `clone()` for reference graphs | yes | yes | yes | yes | yes | yes | `fase-4e-clone`. |
 | `unsafe fn`/`unsafe {}` | yes | yes | yes | yes | yes | yes | `Keyword::Unsafe` in subset. |
@@ -162,9 +162,9 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 | `NativeSlice<T>` / `NativeSliceMut<T>` | yes | yes | yes | yes | yes | yes | `fase-4e-native-slice`; also delivered `expr[index]`. |
 | `extern "C" fn` | yes | yes | yes | yes | yes | yes | `ADR-015`; `Keyword::Extern` in subset. |
 | `commit {}` | yes | yes | yes | yes | yes | yes | `Keyword::Commit` in subset. |
-| Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `fase-4e-cierre-pendientes` closed `return`/`break`/`continue` early-exit rollback. |
-| `Pointer.from` on `record` / `value class` fields | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
-| `String[index]` read-only grapheme access | yes | yes | yes | yes | yes | yes | `fase-4e-cierre-pendientes`. |
+| Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `phase-4e-pending-closeout` closed `return`/`break`/`continue` early-exit rollback. |
+| `Pointer.from` on `record` / `value class` fields | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
+| `String[index]` read-only grapheme access | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
 | Dependent references | yes | yes | yes | yes | yes | yes | `Dependent<T>` lifetime and escape analysis rejects returns, field stores, captures, and non-dependent parameter passing; valid local use runs end-to-end. |
 | Automatic bounded native pinning | yes | yes | yes | yes | yes | yes | `Pin(c)` constructs a `Pin<T>`, automatic unpin provides field/method access, and reassignment of the pinned variable is rejected. |
 

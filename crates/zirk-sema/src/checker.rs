@@ -7466,12 +7466,12 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         };
 
-        if !ty.is_unknown() && !Type::INT32.accepts(ty) {
+        if !ty.is_unknown() && !matches!(ty.base, Base::Int(_)) {
             let found = self.name(ty);
             self.error(
                 codes::TYPE_MISMATCH,
                 expr.op_span,
-                format!("`{}` requires a number", expr.op.as_str()),
+                format!("`{}` requires an integer", expr.op.as_str()),
                 format!("`{}` has type {found}", expr.target.name()),
                 None,
             );

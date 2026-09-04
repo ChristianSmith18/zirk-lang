@@ -581,7 +581,9 @@ fn gc_reference_paths(
         | ir::IrType::Contract(_)
         | ir::IrType::Weak(_)
         | ir::IrType::Dependent(_)
-        | ir::IrType::Pin(_) => out.push(prefix.clone()),
+        | ir::IrType::Pin(_)
+        | ir::IrType::String
+        | ir::IrType::Char => out.push(prefix.clone()),
         ir::IrType::Nullable(n) => {
             let inner = n.inner();
             if inner.is_managed_reference(module) {

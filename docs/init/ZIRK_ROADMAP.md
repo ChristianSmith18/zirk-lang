@@ -365,7 +365,7 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   lexical nesting order, not just checking the innermost `unsafe` block in
   isolation. Early `return`/`break`/`continue` out of an `unsafe {}` block
   now also rolls the active journal back before the jump, closing the
-  `fase-4e-cierre-pendientes` follow-up.
+  `phase-4e-pending-closeout` follow-up.
 - [ ] Finish `Dependent<T>` lifetime/escape analysis, `Pin<T>` automatic bounded
   native pinning, and throwable cleanup interactions (suppressed failures,
   fully materialized traces, deep thrown-object immutability) that require the

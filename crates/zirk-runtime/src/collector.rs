@@ -104,9 +104,24 @@ pub static zirk_rt_weak_cell_descriptor: u8 = 0;
 #[allow(non_upper_case_globals)]
 pub static mut zirk_rt_weak_cell_ever_allocated: u8 = 0;
 
+/// Descriptor for collector-managed `String`/`Char` objects.
+///
+/// The payload is a `ZirkString` (private to `crates/zirk-runtime/src/string.rs`);
+/// `gc_field_count` is zero because the bytes following the header are owned
+/// data, not GC references. This lets the collector reclaim string/char
+/// objects exactly as it does ordinary class objects.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static zirk_rt_string_descriptor: [usize; 4] = [0, 0, 0, 0];
+
 #[inline]
 fn weak_cell_descriptor() -> *mut c_void {
     (&raw const zirk_rt_weak_cell_descriptor) as *mut c_void
+}
+
+#[inline]
+pub(crate) fn string_descriptor() -> *mut c_void {
+    zirk_rt_string_descriptor.as_ptr() as *mut c_void
 }
 
 #[inline]

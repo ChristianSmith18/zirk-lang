@@ -268,11 +268,11 @@ risk ADR-003 (phase 0) set out to avoid from the start.
 
 These items were deliberately left unresolved while closing the documentation and tooling alignment change. Each one has a suggested change name for the next OpenSpec change that addresses it.
 
-### 6.1 `String`/`Char` lifetime strategy outside the mark-sweep collector
+### 6.1 `String`/`Char` lifetime strategy under the mark-sweep collector
 
-- **Suggested change:** `fase-4e-memoria-de-strings`
-- **Why it matters:** The current design relies on a tracing/escape-analysis collector (ADR-003, accepted). `String` and `Char` may need a different lifetime story — constants, small-string optimization, reference counting for cross-ABI strings, or a pinned buffer contract — that the general memory strategy does not cover.
-- **What to decide before implementation:** Are `String`/`Char` purely managed by the same collector as objects? Can a `String` escape into native code? Is `Char` always a 21-bit Unicode scalar and, if so, does it get the same unboxed treatment as a small integer?
+- **Suggested change:** `string-char-gc-and-increment-overflow` (now implemented)
+- **Why it matters:** The decision has been closed. `String` and `Char` values are now ordinary collector-managed objects: they are allocated through `zirk_rt_alloc`, use a dedicated `zirk_rt_string_descriptor` with no traced fields, and are reclaimed by the same non-moving mark-sweep collector as ordinary objects. This keeps ADR-005's opaque-handle guarantee intact and leaves cross-ABI lifetime, small-string optimization, and interning as future follow-up work.
+- **What was decided:** `String`/`Char` are purely managed by the same collector as objects. The runtime owns the bytes for runtime-built strings; string literals keep their global-constant bytes untouched. `Char` shares `String`'s representation bit for bit (ADR-014).
 
 ### 6.2 Audit of `static mut` and `thread_local!` in `zirk-runtime` before Phase 5
 
