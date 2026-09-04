@@ -1,0 +1,6 @@
+// Float128 now prints by truncating to Float64 for text conversion.
+// This is a lossy conversion for values not exactly representable in f64.
+fn main(): Void {
+    mut a: Float128 = 1.5;
+    stdout.println(a);
+}

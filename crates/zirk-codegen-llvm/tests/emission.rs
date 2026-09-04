@@ -212,6 +212,57 @@ fn the_remainder_also_checks_the_divisor() {
     assert!(ir.contains("srem i32"));
 }
 
+// --- Mixed-width numeric promotion ------------------------------------------
+
+#[test]
+fn mixed_int8_and_int32_sign_extends_before_adding() {
+    let ir = llvm_ir(&in_main(
+        "mut a: Int8 = 1;\nmut b: Int32 = 2;\nmut c: Int32 = a + b;",
+    ));
+    assert!(ir.contains("sext i8"), "the Int8 operand must be sign-extended:\n{ir}");
+    assert!(
+        ir.contains("llvm.sadd.with.overflow.i32"),
+        "overflow must be checked at the common Int32 width:\n{ir}"
+    );
+}
+
+#[test]
+fn mixed_uint8_and_int32_converts_both_to_float64() {
+    let ir = llvm_ir(&in_main(
+        "mut a: UInt8 = 1 as UInt8;\nmut b: Int32 = -2;\nmut c = a + b;",
+    ));
+    assert!(
+        ir.contains("uitofp i8"),
+        "UInt8 must be converted unsigned to Float64:\n{ir}"
+    );
+    assert!(
+        ir.contains("sitofp i32"),
+        "Int32 must be converted signed to Float64:\n{ir}"
+    );
+    assert!(ir.contains("fadd double"), "the addition must run at Float64:\n{ir}");
+}
+
+#[test]
+fn mixed_int32_and_float64_converts_int_to_float() {
+    let ir = llvm_ir(&in_main(
+        "mut a: Int32 = 1;\nmut b: Float64 = 2.5;\nmut c = a + b;",
+    ));
+    assert!(
+        ir.contains("sitofp i32"),
+        "Int32 must be converted to Float64:\n{ir}"
+    );
+    assert!(ir.contains("fadd double"), "the addition must run at Float64:\n{ir}");
+}
+
+#[test]
+fn int8_postfix_increment_uses_i8_overflow_check() {
+    let ir = llvm_ir(&in_main("mut a: Int8 = 1;\na++;"));
+    assert!(
+        ir.contains("llvm.sadd.with.overflow.i8"),
+        "Int8++ must check overflow at the i8 width:\n{ir}"
+    );
+}
+
 // --- Comparison and logic ---------------------------------------------------
 
 #[test]

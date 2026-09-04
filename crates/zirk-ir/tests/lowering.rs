@@ -223,6 +223,121 @@ fn arithmetic_lowers_to_a_binary_instruction() {
 }
 
 #[test]
+fn mixed_int8_and_int32_widens_to_int32() {
+    let f = main_body("mut a: Int8 = 1;\nmut b: Int32 = 2;\nmut c = a + b;");
+
+    let has_widen = instructions(&f).iter().any(|i| matches!(i, InstKind::IntCast(_)));
+    assert!(has_widen, "the Int8 operand must be widened to Int32");
+
+    let add = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .find(|i| {
+            matches!(
+                i.kind,
+                InstKind::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            )
+        })
+        .expect("there must be an addition");
+    assert_eq!(add.ty, IrType::Int(IntWidth::I32));
+}
+
+#[test]
+fn mixed_uint8_and_int32_promotes_to_float64() {
+    let f = main_body(
+        "mut a: UInt8 = 1 as UInt8;\nmut b: Int32 = 2;\nmut c = a + b;",
+    );
+
+    let int_to_float = instructions(&f)
+        .iter()
+        .filter(|i| matches!(i, InstKind::IntToFloat(_)))
+        .count();
+    assert_eq!(int_to_float, 2, "both operands must be converted to Float64");
+
+    let add = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .find(|i| {
+            matches!(
+                i.kind,
+                InstKind::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            )
+        })
+        .expect("there must be an addition");
+    assert_eq!(add.ty, IrType::Float(FloatWidth::F64));
+}
+
+#[test]
+fn mixed_int32_and_float64_promotes_to_float64() {
+    let f = main_body("mut a: Int32 = 1;\nmut b: Float64 = 2.5;\nmut c = a + b;");
+
+    let has_int_to_float = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::IntToFloat(_)));
+    assert!(has_int_to_float, "the Int32 operand must be converted to Float64");
+
+    let add = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .find(|i| {
+            matches!(
+                i.kind,
+                InstKind::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            )
+        })
+        .expect("there must be an addition");
+    assert_eq!(add.ty, IrType::Float(FloatWidth::F64));
+}
+
+#[test]
+fn int8_increment_uses_int8_arithmetic() {
+    let f = main_body("mut a: Int8 = 1;\na++;");
+
+    let has_one = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::ConstInt(1)));
+    assert!(has_one, "the step literal must be an Int8 1");
+
+    let add = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .find(|i| {
+            matches!(
+                i.kind,
+                InstKind::Binary {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            )
+        })
+        .expect("there must be an increment addition");
+    assert_eq!(add.ty, IrType::Int(IntWidth::I8));
+}
+
+#[test]
+fn string_repetition_with_int8_count_lowers_to_repeat() {
+    let f = main_body("mut a: Int8 = 3;\nmut s = \"x\" * a;");
+
+    let has_repeat = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::Repeat { .. }));
+    assert!(has_repeat, "String * Int8 must lower to a Repeat instruction");
+}
+
+#[test]
 fn comparison_produces_a_boolean() {
     let f = main_body("mut x: Boolean = 1 < 2;");
 

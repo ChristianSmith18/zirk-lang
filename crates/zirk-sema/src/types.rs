@@ -107,6 +107,26 @@ impl IntWidth {
             U128 => (0, i128::MAX),
         }
     }
+
+    /// Whether every value of `other` fits in `self` without loss.
+    pub fn can_represent_all_of(self, other: Self) -> bool {
+        use IntWidth::*;
+        match (self, other) {
+            (a, b) if a == b => true,
+            (I8 | I16 | I32 | I64 | I128, U8 | U16 | U32 | U64 | U128) => false,
+            (U8 | U16 | U32 | U64 | U128, I8 | I16 | I32 | I64 | I128) => false,
+            (I8 | I16 | I32 | I64 | I128, I8 | I16 | I32 | I64 | I128) => self.bits() >= other.bits(),
+            (U8 | U16 | U32 | U64 | U128, U8 | U16 | U32 | U64 | U128) => self.bits() >= other.bits(),
+        }
+    }
+
+    /// Whether this integer type can be converted to `float` without losing
+    /// any integer value. An n-bit integer needs a float whose mantissa can
+    /// represent n bits, i.e. `n <= mantissa_bits + 1`.
+    pub const fn fits_exactly_in_float(self, float: FloatWidth) -> bool {
+        let mantissa = float.mantissa_bits();
+        self.bits() <= mantissa + 1
+    }
 }
 
 /// Every binary floating-point type the language has (roadmap Phase 3b):
@@ -160,6 +180,19 @@ impl FloatWidth {
             F32 => Some(f32::MAX as f64),
             F64 => Some(f64::MAX),
             F128 => None,
+        }
+    }
+
+    /// Number of mantissa bits (excluding the implicit leading 1) for this
+    /// IEEE 754 width. A float with `m` mantissa bits can exactly represent
+    /// every integer with absolute value < 2^(m+1).
+    pub const fn mantissa_bits(self) -> u32 {
+        use FloatWidth::*;
+        match self {
+            F16 => 10,
+            F32 => 23,
+            F64 => 52,
+            F128 => 112,
         }
     }
 }
@@ -387,16 +420,19 @@ impl Type {
             // requires for an implicit conversion, so neither goes through
             // here; both need `as` instead.
             return match (self.base, other.base) {
+                // Integer widening, including unsigned-to-signed when the
+                // signed target has enough magnitude bits.
                 (Base::Int(dst), Base::Int(src)) => {
-                    dst.signed() == src.signed()
-                        && dst.bits() >= src.bits()
-                        && (self.nullable || !other.nullable)
+                    dst.can_represent_all_of(src) && (self.nullable || !other.nullable)
                 }
-                // Unlike integers, widening between float formats loses
-                // nothing regardless of signedness — there is none — so the
-                // only condition is the destination being at least as wide.
+                // Float widening is always exact.
                 (Base::Float(dst), Base::Float(src)) => {
                     dst.bits() >= src.bits() && (self.nullable || !other.nullable)
+                }
+                // Int -> Float is safe when every source value is exactly
+                // representable in the target float.
+                (Base::Float(dst), Base::Int(src)) => {
+                    src.fits_exactly_in_float(dst) && (self.nullable || !other.nullable)
                 }
                 _ => false,
             };
@@ -404,6 +440,40 @@ impl Type {
 
         // `T` fits `T?`; `T?` does not fit `T`.
         self.nullable || !other.nullable
+    }
+
+    /// The smallest numeric type that can represent every value of `self` and
+    /// `other` without loss. Returns `None` if no such type exists.
+    ///
+    /// Candidates are tried in order of increasing cost (bit width, then
+    /// integer before float at the same width) so the first match is the
+    /// preferred common type.
+    pub fn common_numeric(self, other: Type) -> Option<Type> {
+        use Base::*;
+        if self.nullable || other.nullable {
+            return None;
+        }
+
+        let candidates = [
+            Type::of(Int(IntWidth::I8)),
+            Type::of(Int(IntWidth::U8)),
+            Type::of(Int(IntWidth::I16)),
+            Type::of(Int(IntWidth::U16)),
+            Type::of(Int(IntWidth::I32)),
+            Type::of(Int(IntWidth::U32)),
+            Type::of(Int(IntWidth::I64)),
+            Type::of(Int(IntWidth::U64)),
+            Type::of(Int(IntWidth::I128)),
+            Type::of(Int(IntWidth::U128)),
+            Type::of(Float(FloatWidth::F16)),
+            Type::of(Float(FloatWidth::F32)),
+            Type::of(Float(FloatWidth::F64)),
+            Type::of(Float(FloatWidth::F128)),
+        ];
+
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.accepts(self) && candidate.accepts(other))
     }
 
     /// The type both operands of `??` or of a `match` share, if any.

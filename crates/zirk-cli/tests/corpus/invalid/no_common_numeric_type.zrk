@@ -1,0 +1,5 @@
+fn main(): Void {
+    mut a: UInt128 = 1 as UInt128;
+    mut b: Int128 = 2;
+    mut c = a + b;
+}

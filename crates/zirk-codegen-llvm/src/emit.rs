@@ -1301,10 +1301,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     fn emit_instruction(&mut self, instruction: &ir::Instruction) {
         let value: Option<BasicValueEnum> = match &instruction.kind {
             ir::InstKind::ConstInt(value) => Some(
-                self.context
-                    .i32_type()
-                    .const_int(*value as u64, true)
-                    .into(),
+                match instruction.ty {
+                    ir::IrType::Int(width) => {
+                        let int_type = self
+                            .context
+                            .custom_width_int_type(
+                                std::num::NonZeroU32::new(width.bits())
+                                    .expect("every IntWidth is nonzero"),
+                            )
+                            .expect("every IntWidth is a valid LLVM integer width");
+                        if width.bits() <= 64 {
+                            int_type.const_int(*value as u64, true).into()
+                        } else {
+                            let bits = *value as u128;
+                            int_type
+                                .const_int_arbitrary_precision(&[bits as u64, (bits >> 64) as u64])
+                                .into()
+                        }
+                    }
+                    _ => unreachable!("ConstInt must have an Int type"),
+                },
             ),
             ir::InstKind::ConstBool(value) => Some(
                 self.context
@@ -2229,17 +2245,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             ir::FloatWidth::F64 => self.runtime.str_from_f64,
                             // `F16` is caught by the dedicated arm above —
                             // never reaches here, but the match still needs
-                            // it to stay exhaustive. `Float128` has no
-                            // equivalent safe widening: an `f64` cannot
-                            // represent every `f128` value exactly the way
-                            // `f32` can every `f16`, so there is no honest
-                            // conversion to fall back to. The checker's
-                            // `is_printable` never accepts it (roadmap Phase
-                            // 3b task 8.3's own documented gap), so a
-                            // verified program never reaches this arm with
-                            // one.
-                            ir::FloatWidth::F16 | ir::FloatWidth::F128 => {
-                                unreachable!("ToString over Float128")
+                            // it to stay exhaustive. `Float128` has no stable
+                            // Rust primitive to format through, so it is
+                            // truncated to `Float64` for printing. This is a
+                            // lossy conversion for values that are not exactly
+                            // representable in `f64`; it is a pragmatic
+                            // bridge rather than an exact formatter.
+                            ir::FloatWidth::F128 => {
+                                value = self
+                                    .builder
+                                    .build_float_trunc(
+                                        value.into_float_value(),
+                                        self.context.f64_type(),
+                                        "to_string.f128_trunc",
+                                    )
+                                    .expect("truncating f128 to f64 for printing")
+                                    .into();
+                                self.runtime.str_from_f64
+                            }
+                            ir::FloatWidth::F16 => {
+                                unreachable!("ToString over Float16 reaches the F16 arm")
                             }
                         },
                         // A `String` needs no conversion; the lowering does

@@ -109,6 +109,7 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 | Deep contextual conversion | yes | yes | yes | yes | yes | yes | `Float(3 / 4)` etc. |
 | String interpolation | yes | yes | yes | yes | yes | yes | `to_string()` contract. |
 | `Float128` on Windows | yes | yes | yes | yes | partial | partial | Excluded from Windows corpus; crashes the MSVC linker due to soft-float lib calls. |
+| Contextual numeric literal typing / mixed-width arithmetic | yes | yes | yes | yes | yes | yes | Every width resolves; literals take the context type; binary operators promote to the smallest common numeric type. `Float128` `to_string()` prints by truncating to `Float64` (lossy for values not exactly representable in `f64`). |
 
 ## Phase 4a — Expected errors
 

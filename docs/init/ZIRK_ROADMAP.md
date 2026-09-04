@@ -181,8 +181,10 @@ generics.
 
 ## Phase 3b — Complete scalars, conversions and text
 
-**Status: complete for its scoped delivery.** Platform and formatting limits
-for `Float128` remain tracked as implementation limitations.
+**Status: complete for its scoped delivery.** `Float128` formatting is now
+implemented by truncating to `Float64` first, which can lose precision for
+values not exactly representable in `f64`. Windows `Float128` arithmetic
+remains an implementation limitation.
 
 Phase 1 implemented one integer width, one Boolean and an opaque `String`.
 Everything else the type system promises about scalars was never assigned a

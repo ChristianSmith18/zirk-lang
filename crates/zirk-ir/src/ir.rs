@@ -790,7 +790,7 @@ impl Instruction {
 /// What an instruction does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstKind {
-    ConstInt(i32),
+    ConstInt(i128),
     ConstBool(bool),
     /// Materializes a string literal. This is the only allocating operation of
     /// the subset, and it is expressed without naming a memory strategy.

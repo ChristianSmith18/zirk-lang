@@ -14,6 +14,7 @@
 //! `ZIRK_COMPILER_SPEC.md` section 9 — `test`, `bench`, `format`, `lint` —
 //! arrive in later phases, and each says so when invoked.
 
+#[cfg(feature = "backend")]
 use std::path::PathBuf;
 use zirk_cli::{codes, frontend};
 use zirk_diagnostics::Phase;
@@ -175,6 +176,7 @@ fn compile(args: &[String], action: Action) -> i32 {
 }
 
 #[cfg(not(feature = "backend"))]
+#[allow(dead_code)]
 fn compile(_args: &[String], _action: &str) -> i32 {
     fail(
         codes::NOT_IMPLEMENTED,
