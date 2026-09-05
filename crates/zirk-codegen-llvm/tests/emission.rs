@@ -219,7 +219,10 @@ fn mixed_int8_and_int32_sign_extends_before_adding() {
     let ir = llvm_ir(&in_main(
         "mut a: Int8 = 1;\nmut b: Int32 = 2;\nmut c: Int32 = a + b;",
     ));
-    assert!(ir.contains("sext i8"), "the Int8 operand must be sign-extended:\n{ir}");
+    assert!(
+        ir.contains("sext i8"),
+        "the Int8 operand must be sign-extended:\n{ir}"
+    );
     assert!(
         ir.contains("llvm.sadd.with.overflow.i32"),
         "overflow must be checked at the common Int32 width:\n{ir}"
@@ -239,7 +242,10 @@ fn mixed_uint8_and_int32_converts_both_to_float64() {
         ir.contains("sitofp i32"),
         "Int32 must be converted signed to Float64:\n{ir}"
     );
-    assert!(ir.contains("fadd double"), "the addition must run at Float64:\n{ir}");
+    assert!(
+        ir.contains("fadd double"),
+        "the addition must run at Float64:\n{ir}"
+    );
 }
 
 #[test]
@@ -251,7 +257,10 @@ fn mixed_int32_and_float64_converts_int_to_float() {
         ir.contains("sitofp i32"),
         "Int32 must be converted to Float64:\n{ir}"
     );
-    assert!(ir.contains("fadd double"), "the addition must run at Float64:\n{ir}");
+    assert!(
+        ir.contains("fadd double"),
+        "the addition must run at Float64:\n{ir}"
+    );
 }
 
 #[test]

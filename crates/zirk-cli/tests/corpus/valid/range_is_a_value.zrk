@@ -1,1 +1,9 @@
-fn main(): Void { mut r = 0..10; }
+// Roadmap Phase 7 (`Range<T>`): a range is a real value now — stored in a
+// variable, annotated, reversed, sliced — and still iterated by
+// `for ... in`.
+fn main(): Void {
+    mut r: Range<Int32> = 0..10;
+    for i in r[0:3] {
+        stdout.println(i);
+    }
+}

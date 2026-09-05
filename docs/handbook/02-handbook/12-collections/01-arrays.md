@@ -153,11 +153,11 @@ removed. A managed reference: assignment aliases, `clone()` separates.
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `Array(e0, e1, …)` / `[e0, e1, …]` | `Array<T>` | Literal construction; infers fixed length | specified |
+| `Array(e0, e1, …)` / `[e0, e1, …]` | `Array<T>` | Literal construction; infers fixed length | implemented |
 | `Array(n)` | `Array<T>` | `n` default-initialized elements; `T` comes from the binding annotation | implemented |
-| `a[i]` | `T` | Checked indexing | implemented — negative-from-end indices are specified; today they are bounds errors |
+| `a[i]` | `T` | Checked indexing | implemented — negative-from-end indices resolve as `length + index` |
 | `a[i] = v` | `Void` | Checked element replacement | implemented |
-| `a[start:end:step]` | `Array<T>` | Copying slice (safe code) | specified |
+| `a[start:end:step]` | `Array<T>` | Copying slice (safe code) | implemented |
 | `a.get(i)` | `Result<T, BoundsError>` | Checked access reporting absence | specified |
 | `a.get_or_null(i)` | `T?` | Access collapsing absence to `null` | specified |
 | `a.fill(value)` | `Void` | Overwrite every element | specified |
@@ -174,8 +174,8 @@ removed. A managed reference: assignment aliases, `clone()` separates.
 | `a.to_list()` | `List<T>` | Materializes as a list | specified |
 | `a.to_set()` | `Set<T>` | Materializes as a set | specified |
 | `a.iterator()` | `Iterator<T>` | Lazy single-pass iterator | specified |
-| `a.clone()` | `Array<T>` | Independent logical copy | specified |
-| `a.to_string()` | `String` | Rendering | specified |
+| `a.clone()` | `Array<T>` | Independent logical copy | implemented |
+| `a.to_string()` | `String` | Rendering | implemented |
 
 `fill`, `copy_from`, and slice replacement preserve exact length. Structural
 mutation during iteration is a controlled error (`IteratorInvalidatedError`).

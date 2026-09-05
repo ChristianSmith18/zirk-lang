@@ -1,0 +1,19 @@
+fn main(): Void {
+    inmut r = re'(?<word>\\w+) (?<num>\\d+)';
+    inmut m = r.find("abc 123");
+    match m {
+        null => {
+            stdout.println("not found");
+        }
+        found => {
+            stdout.println(found.text);
+            stdout.println(found.start);
+            stdout.println(found.end);
+            stdout.println(found.group("word"));
+            stdout.println(found.group("num"));
+            stdout.println(found.group(0));
+            stdout.println(found.group(1));
+            stdout.println(found.group("missing"));
+        }
+    }
+}

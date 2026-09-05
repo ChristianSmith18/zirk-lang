@@ -142,7 +142,10 @@ fn verify_instruction(
     match &inst.kind {
         InstKind::ConstInt(_) => {
             if !matches!(inst.ty, IrType::Int(_)) {
-                report(format!("{position}: ConstInt must produce an Int type, got {ty:?}", ty = inst.ty));
+                report(format!(
+                    "{position}: ConstInt must produce an Int type, got {ty:?}",
+                    ty = inst.ty
+                ));
             }
         }
         InstKind::ConstBool(_) => expect(inst.ty, IrType::Boolean, position, "ConstBool", report),
@@ -1507,6 +1510,150 @@ fn verify_instruction(
                 report(format!("{position}: UnpinObject target is undefined"));
             }
         }
+
+        InstKind::ArrayLength(operand) => {
+            if inst.ty != IrType::Int(IntWidth::U64) {
+                report(format!("{position}: ArrayLength declares {}, expected UInt64", inst.ty.as_str()));
+            }
+            if !matches!(type_of(operand), Some(IrType::Array(_))) {
+                report(format!("{position}: ArrayLength receiver is not an Array"));
+            }
+        }
+        InstKind::ListLength(operand) => {
+            if inst.ty != IrType::Int(IntWidth::U64) {
+                report(format!("{position}: ListLength declares {}, expected UInt64", inst.ty.as_str()));
+            }
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!("{position}: ListLength receiver is not a List"));
+            }
+        }
+
+        InstKind::ArrayNew { element_id, capacity } => {
+            if inst.ty != IrType::Array(*element_id) {
+                report(format!("{position}: ArrayNew declares {}, expected Array<{element_id}>", inst.ty.as_str()));
+            }
+            if let Some(ty) = type_of(capacity) && !matches!(ty, IrType::Int(_)) {
+                report(format!("{position}: ArrayNew capacity is {}, expected an integer", ty.as_str()));
+            }
+        }
+        InstKind::ListNew { element_id } => {
+            if inst.ty != IrType::List(*element_id) {
+                report(format!("{position}: ListNew declares {}, expected List<{element_id}>", inst.ty.as_str()));
+            }
+        }
+        InstKind::ArrayListLoad { receiver, index } => {
+            let element = match type_of(receiver).unwrap_or(IrType::Void) {
+                IrType::Array(id) => module.array_types.get(id as usize).copied().unwrap_or(IrType::Void),
+                IrType::List(id) => module.list_types.get(id as usize).copied().unwrap_or(IrType::Void),
+                _ => IrType::Void,
+            };
+            if element != IrType::Void && inst.ty != element {
+                report(format!("{position}: ArrayListLoad declares {}, expected {}", inst.ty.as_str(), element.as_str()));
+            }
+            if let Some(ty) = type_of(index) && !matches!(ty, IrType::Int(_)) {
+                report(format!("{position}: ArrayListLoad index is {}, expected an integer", ty.as_str()));
+            }
+        }
+        InstKind::ArrayListStore { receiver, index, value } => {
+            expect(inst.ty, IrType::Void, position, "ArrayListStore", report);
+            let element = match type_of(receiver).unwrap_or(IrType::Void) {
+                IrType::Array(id) => module.array_types.get(id as usize).copied().unwrap_or(IrType::Void),
+                IrType::List(id) => module.list_types.get(id as usize).copied().unwrap_or(IrType::Void),
+                _ => IrType::Void,
+            };
+            if let Some(ty) = type_of(value) && element != IrType::Void && ty != element {
+                report(format!("{position}: ArrayListStore value is {}, expected {}", ty.as_str(), element.as_str()));
+            }
+            if let Some(ty) = type_of(index) && !matches!(ty, IrType::Int(_)) {
+                report(format!("{position}: ArrayListStore index is {}, expected an integer", ty.as_str()));
+            }
+        }
+        InstKind::ListAdd { receiver, value } => {
+            expect(inst.ty, IrType::Void, position, "ListAdd", report);
+            let element = if let IrType::List(id) = type_of(receiver).unwrap_or(IrType::Void) {
+                module.list_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(value) && element != IrType::Void && ty != element {
+                report(format!("{position}: ListAdd value is {}, expected {}", ty.as_str(), element.as_str()));
+            }
+        }
+        InstKind::ListInsert { receiver, index, value } => {
+            expect(inst.ty, IrType::Void, position, "ListInsert", report);
+            let element = if let IrType::List(id) = type_of(receiver).unwrap_or(IrType::Void) {
+                module.list_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(value) && element != IrType::Void && ty != element {
+                report(format!("{position}: ListInsert value is {}, expected {}", ty.as_str(), element.as_str()));
+            }
+            if let Some(ty) = type_of(index) && !matches!(ty, IrType::Int(_)) {
+                report(format!("{position}: ListInsert index is {}, expected an integer", ty.as_str()));
+            }
+        }
+        InstKind::ListRemove { receiver, index } => {
+            expect(inst.ty, IrType::Void, position, "ListRemove", report);
+            if !matches!(type_of(receiver).unwrap_or(IrType::Void), IrType::List(_)) {
+                report(format!("{position}: ListRemove receiver is not a List"));
+            }
+            if let Some(ty) = type_of(index) && !matches!(ty, IrType::Int(_)) {
+                report(format!("{position}: ListRemove index is {}, expected an integer", ty.as_str()));
+            }
+        }
+        InstKind::ListRemoveValue { receiver, value } => {
+            expect(inst.ty, IrType::Boolean, position, "ListRemoveValue", report);
+            let element = if let Some(IrType::List(id)) = type_of(receiver) {
+                module.list_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if element == IrType::Void {
+                report(format!("{position}: ListRemoveValue receiver is not a List"));
+            }
+            if let Some(ty) = type_of(value) && ty != element {
+                report(format!("{position}: ListRemoveValue value is {}, expected {}", ty.as_str(), element.as_str()));
+            }
+        }
+        InstKind::ArrayClone { receiver } => {
+            let expected = if let Some(IrType::Array(id)) = type_of(receiver) {
+                IrType::Array(id)
+            } else {
+                report(format!("{position}: ArrayClone receiver is not an Array"));
+                inst.ty
+            };
+            if inst.ty != expected {
+                report(format!("{position}: ArrayClone declares {}, expected {}", inst.ty.as_str(), expected.as_str()));
+            }
+        }
+        InstKind::ListClone { receiver } => {
+            let expected = if let Some(IrType::List(id)) = type_of(receiver) {
+                IrType::List(id)
+            } else {
+                report(format!("{position}: ListClone receiver is not a List"));
+                inst.ty
+            };
+            if inst.ty != expected {
+                report(format!("{position}: ListClone declares {}, expected {}", inst.ty.as_str(), expected.as_str()));
+            }
+        }
+        InstKind::ArraySlice { receiver, start, end, step } => {
+            let expected = if let Some(IrType::Array(id)) = type_of(receiver) {
+                IrType::Array(id)
+            } else {
+                report(format!("{position}: ArraySlice receiver is not an Array"));
+                inst.ty
+            };
+            if inst.ty != expected {
+                report(format!("{position}: ArraySlice declares {}, expected {}", inst.ty.as_str(), expected.as_str()));
+            }
+            for (name, op) in [("start", start), ("end", end), ("step", step)] {
+                if let Some(ty) = type_of(op) && !matches!(ty, IrType::Int(_)) {
+                    report(format!("{position}: ArraySlice {name} is {}, expected an integer", ty.as_str()));
+                }
+            }
+        }
     }
 }
 
@@ -1706,6 +1853,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         } => vec![*pointer, *length],
         InstKind::NativeSliceValue { pointer, length } => vec![*pointer, *length],
         InstKind::NativeSliceLength(operand) => vec![*operand],
+        InstKind::ArrayLength(operand) | InstKind::ListLength(operand) => vec![*operand],
         InstKind::NativeSliceLoad { receiver, index } => vec![*receiver, *index],
         InstKind::NativeSliceStore {
             receiver,
@@ -1721,5 +1869,15 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::ResourceTransfer { source } => vec![*source],
         InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
         InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],
+        InstKind::ArrayNew { capacity, .. } => vec![*capacity],
+        InstKind::ListNew { .. } => Vec::new(),
+        InstKind::ArrayListLoad { receiver, index } => vec![*receiver, *index],
+        InstKind::ArrayListStore { receiver, index, value } => vec![*receiver, *index, *value],
+        InstKind::ListAdd { receiver, value } => vec![*receiver, *value],
+        InstKind::ListInsert { receiver, index, value } => vec![*receiver, *index, *value],
+        InstKind::ListRemove { receiver, index } => vec![*receiver, *index],
+        InstKind::ListRemoveValue { receiver, value } => vec![*receiver, *value],
+        InstKind::ArrayClone { receiver } | InstKind::ListClone { receiver } => vec![*receiver],
+        InstKind::ArraySlice { receiver, start, end, step } => vec![*receiver, *start, *end, *step],
     }
 }

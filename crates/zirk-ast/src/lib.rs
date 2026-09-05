@@ -174,14 +174,14 @@ pub struct ClassDecl {
     /// The class this one extends, if any.
     ///
     /// At most one: `ZIRK_LANGUAGE_SPEC.md` section 7 admits a single base
-    /// class, and several contracts. Always `None` for a record or value
-    /// class, which the grammar accepts and the checker rejects — the same
+    /// class, and several contracts. Always `None` for a record,
+    /// which the grammar accepts and the checker rejects — the same
     /// treatment as any other rule tied to `kind`.
     pub extends: Option<Ident>,
     pub fields: Vec<FieldDecl>,
     /// Every `construct` the class declares. More than one is allowed when
     /// their effective signatures differ (`ZIRK_LANGUAGE_SPEC.md` section 7).
-    /// Always empty for a record or value class: construction is always the
+    /// Always empty for a record: construction is always the
     /// implicit named constructor over `fields`.
     pub constructors: Vec<ConstructDecl>,
     pub methods: Vec<MethodDecl>,
@@ -199,9 +199,6 @@ pub enum ClassKind {
     /// A nominal value: named-only construction, structural equality, no
     /// identity, no inheritance, no mutation.
     Record,
-    /// A record's semantics compressed into one declaration:
-    /// `value class Name(field: Type, ...);`.
-    ValueClass,
     /// `abstract class Name { ... }`: a nominal set of required attributes
     /// and `abstract fn` signatures, with no constructor, method body,
     /// allocated state or layout contribution of its own. A concrete class
@@ -215,7 +212,6 @@ impl ClassKind {
             ClassKind::Class => "class",
             ClassKind::Record => "record",
             ClassKind::Abstract => "abstract class",
-            ClassKind::ValueClass => "value class",
         }
     }
 }
@@ -711,7 +707,7 @@ pub struct JumpStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {
     pub mutability: Mutability,
-    pub name: Ident,
+    pub pattern: Pattern,
     /// Explicit annotation. Absent when the type is inferred.
     pub ty: Option<TypeRef>,
     pub init: Option<Expr>,
@@ -843,6 +839,10 @@ pub enum Expr {
     Int(IntLit),
     /// A fractional or scientific literal (roadmap Phase 3b).
     Float(FloatLit),
+    /// A duration literal such as `250ms` or `1.5s`.
+    Duration(DurationLit),
+    /// A regex literal such as `re'[a-z]+'`.
+    Regex(RegexLit),
     /// A character literal (roadmap Phase 3b).
     Char(CharLit),
     Str(StrLit),
@@ -886,6 +886,8 @@ pub enum Expr {
     /// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design
     /// D5) — see [`IndexExpr`].
     Index(IndexExpr),
+    /// `receiver[start:end:step]` (roadmap Phase 7) — see [`SliceExpr`].
+    Slice(SliceExpr),
     /// `match x { p => v, ... }`, in either position.
     ///
     /// There is no separate statement node: in statement position the parser
@@ -915,6 +917,8 @@ pub enum Expr {
     Commit(Box<CommitBlock>),
     /// `transfer(expr)` — ownership transfer of a `TransferableResource`.
     Transfer(TransferExpr),
+    /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
+    Tuple(TupleExpr),
 }
 
 /// `expr as Type` or `<Type>expr`.
@@ -937,6 +941,8 @@ impl Expr {
         match self {
             Expr::Int(e) => e.span,
             Expr::Float(e) => e.span,
+            Expr::Duration(e) => e.span,
+            Expr::Regex(e) => e.span,
             Expr::Char(e) => e.span,
             Expr::Str(e) => e.span,
             Expr::Bool(e) => e.span,
@@ -951,6 +957,7 @@ impl Expr {
             Expr::Super(e) => e.span,
             Expr::Field(e) => e.span,
             Expr::Index(e) => e.span,
+            Expr::Slice(e) => e.span,
             Expr::Ternary(e) => e.span,
             Expr::Increment(e) => e.span,
             Expr::Match(e) => e.span,
@@ -962,6 +969,7 @@ impl Expr {
             Expr::Unsafe(e) => e.span,
             Expr::Commit(e) => e.span,
             Expr::Transfer(e) => e.span,
+            Expr::Tuple(e) => e.span,
         }
     }
 }
@@ -987,13 +995,24 @@ pub struct NullLit {
     pub span: Span,
 }
 
-/// `start..end` or `start..=end`.
+/// `start..end`, `start..=end` or `start..end..step` (roadmap Phase 7,
+/// `Range<T>`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RangeExpr {
     pub start: Box<Expr>,
     pub end: Box<Expr>,
+    /// The distance between elements, `None` when the source did not write
+    /// one (which means `1`).
+    pub step: Option<Box<Expr>>,
     /// `..=` includes the endpoint; `..` does not.
     pub inclusive: bool,
+    pub span: Span,
+}
+
+/// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleExpr {
+    pub elements: Vec<Expr>,
     pub span: Span,
 }
 
@@ -1030,6 +1049,17 @@ pub struct FieldExpr {
 pub struct IndexExpr {
     pub receiver: Box<Expr>,
     pub index: Box<Expr>,
+    pub span: Span,
+}
+
+/// `receiver[start:end:step]` (roadmap Phase 7, `String` slicing) — each
+/// part is optional, so `s[:]`, `s[::2]` and `s[1:]` all parse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceExpr {
+    pub receiver: Box<Expr>,
+    pub start: Option<Box<Expr>>,
+    pub end: Option<Box<Expr>>,
+    pub step: Option<Box<Expr>>,
     pub span: Span,
 }
 
@@ -1158,6 +1188,22 @@ pub enum Pattern {
     Str(StrLit),
     Bool(BoolLit),
     Null(NullLit),
+    Tuple(TuplePattern),
+    /// `re'pattern' name?` — matches a `String` scrutinee against the regex
+    /// and optionally binds the resulting `Regex.Match` to `name`.
+    Regex(RegexPattern),
+}
+
+/// `re'pattern' name?` in pattern position (roadmap Phase 7, `zirk-regex`
+/// "Regex integration in match statements").
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegexPattern {
+    /// The source pattern, escapes intact (same payload a `RegexLit`
+    /// expression carries).
+    pub pattern: String,
+    /// The name the `Regex.Match` binds to inside the arm, if written.
+    pub binding: Option<Ident>,
+    pub span: Span,
 }
 
 impl Pattern {
@@ -1170,12 +1216,26 @@ impl Pattern {
             Pattern::Str(l) => l.span,
             Pattern::Bool(l) => l.span,
             Pattern::Null(l) => l.span,
+            Pattern::Tuple(t) => t.span,
+            Pattern::Regex(r) => r.span,
         }
     }
 
     /// Whether the pattern matches every possible value.
     pub fn is_irrefutable(&self) -> bool {
-        matches!(self, Pattern::Wildcard(_) | Pattern::Binding(_))
+        match self {
+            Pattern::Wildcard(_) | Pattern::Binding(_) => true,
+            Pattern::Tuple(t) => t.elements.iter().all(|p| p.is_irrefutable()),
+            _ => false,
+        }
+    }
+
+    /// The name bound by a simple binding pattern, if any.
+    pub fn binding_name(&self) -> Option<&str> {
+        match self {
+            Pattern::Binding(i) => Some(&i.name),
+            _ => None,
+        }
     }
 }
 
@@ -1196,6 +1256,13 @@ pub struct VariantPattern {
     /// One pattern per associated field, in declaration order. Empty for a
     /// traditional variant or a bare algebraic variant with no data.
     pub bindings: Vec<Pattern>,
+    pub span: Span,
+}
+
+/// `(a, b)` in pattern position — one pattern per element, in source order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuplePattern {
+    pub elements: Vec<Pattern>,
     pub span: Span,
 }
 
@@ -1220,6 +1287,20 @@ pub struct IntLit {
     /// overflow of the destination type can be detected in `zirk-sema` instead
     /// of being lost while parsing.
     pub value: i128,
+    pub span: Span,
+}
+
+/// A duration literal, stored as nanoseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurationLit {
+    pub nanos: i64,
+    pub span: Span,
+}
+
+/// A regex literal, stored as the source pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegexLit {
+    pub pattern: String,
     pub span: Span,
 }
 

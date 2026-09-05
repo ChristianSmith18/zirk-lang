@@ -1,0 +1,14 @@
+fn main(): Void {
+    mut arr: Array<Int32> = Array(1, 2, 3);
+    stdout.println(arr.to_string());
+
+    mut l: List<String> = List("a", "b");
+    stdout.println(l.to_string());
+
+    mut outer: Array<Array<Int32>> = Array(2);
+    mut inner1: Array<Int32> = Array(1, 2);
+    mut inner2: Array<Int32> = Array(3, 4);
+    outer[0] = inner1;
+    outer[1] = inner2;
+    stdout.println(outer.to_string());
+}

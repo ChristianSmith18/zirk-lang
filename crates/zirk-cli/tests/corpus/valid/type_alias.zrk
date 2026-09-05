@@ -1,0 +1,13 @@
+type Meters = Int32;
+type Name = String;
+
+fn distance(m: Meters): Int32 { return m; }
+
+fn main(): Void {
+    mut d: Meters = 42;
+    stdout.println(distance(d));
+    mut n: Name = "zirk";
+    stdout.println(n);
+    mut other: Int32 = d;
+    stdout.println(other);
+}

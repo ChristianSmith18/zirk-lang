@@ -11,7 +11,8 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe, pending_type,
+    IntWidth, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe,
+    pending_type,
 };
 use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
@@ -54,6 +55,12 @@ pub struct CheckedProgram {
     /// Recording the answer here means lowering resolves it once, here, rather
     /// than repeating the decision with the same tables.
     pub variant_accesses: std::collections::HashSet<Span>,
+    /// Member accesses and calls on a scalar/regex *type name*
+    /// (`Int32.MAX`, `Int32.parse("5")`, `Regex.parse(p)`), by the field
+    /// expression's span (`native-type-member-surface`). The base names a
+    /// type, not a value — lowering emits the constant or the static call
+    /// without ever evaluating the path.
+    pub scalar_static_accesses: std::collections::HashSet<Span>,
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     pub type_params: Vec<TypeParamInfo>,
@@ -89,6 +96,21 @@ pub struct CheckedProgram {
     /// Interned `Pin<T>` referent types, indexed by the id their
     /// [`Base::Pin`] carries (roadmap Phase 4e, `phase-4e-memory`, design D1).
     pub pin_types: Vec<Type>,
+    /// Interned `Tuple(T...)` element types, indexed by the id their
+    /// [`Base::Tuple`] carries (roadmap Phase 3b).
+    pub tuple_types: Vec<TupleType>,
+    /// Interned `Array<T>` element types, indexed by the id their
+    /// [`Base::Array`] carries.
+    pub array_types: Vec<Type>,
+    /// Interned `List<T>` element types, indexed by the id their
+    /// [`Base::List`] carries.
+    pub list_types: Vec<Type>,
+    /// Interned `Range<T>` element types, indexed by the id their
+    /// [`Base::Range`] carries (roadmap Phase 7).
+    pub range_types: Vec<Type>,
+    /// `module.values` records class layouts before tuple layouts; this is
+    /// the index where the first tuple's `ValueLayout` lives.
+    pub tuple_base: u32,
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
@@ -98,6 +120,14 @@ pub struct CheckedProgram {
     /// expressions whose IR type would otherwise be ambiguous after context-
     /// directed inference.
     pub expr_types: HashMap<Span, Type>,
+    /// The compiler-known `RegexMatch` record class id.
+    pub regex_match_class: u32,
+    /// `type` aliases, by name, holding the still-unresolved target they were
+    /// declared with (`TypeRef` rather than `Type`, the same reason
+    /// `Checker::type_aliases` keeps it: resolution is lazy so a forward
+    /// reference works). `zirk-ir`'s `resolve_written_type` expands them at
+    /// the same point the checker does.
+    pub type_aliases: HashMap<String, TypeRef>,
 
     /// Which `Base::Instance` a generic class's construction call resolved
     /// to, keyed by the call's span — an id into `generic_instances`.
@@ -180,6 +210,19 @@ pub struct NativeExceptions {
     /// as the five classes above since its shape (a `RuntimeError`
     /// subclass with one `reason: String` field) is identical.
     pub native_error: u32,
+    /// `InvalidStepError` (roadmap Phase 7): thrown when a `Range` or a
+    /// `[start:end:step]` slice is built with a step of `0` — a stride that
+    /// can never advance is a construction error, not an empty sequence.
+    pub invalid_step: u32,
+    /// `ParseError` (`native-type-member-surface`): the `Error` half of the
+    /// `Result` `IntN.parse`/`FloatN.parse` return.
+    pub parse_error: u32,
+    /// `OverflowError`: the `Error` half of the `Result` `checked_*`
+    /// integer methods return.
+    pub overflow_error: u32,
+    /// `RegexError`: the `Error` half of the `Result` `Regex.parse`
+    /// returns.
+    pub regex_error: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -235,6 +278,10 @@ struct Names<'t> {
     native_slice_mut_types: &'t [Type],
     dependent_types: &'t [Type],
     pin_types: &'t [Type],
+    tuple_types: &'t [TupleType],
+    array_types: &'t [Type],
+    list_types: &'t [Type],
+    range_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -353,6 +400,35 @@ impl TypeNames for Names<'_> {
             .copied()
             .unwrap_or(Type::UNKNOWN)
     }
+
+    fn tuple_name(&self, id: u32) -> String {
+        let Some(tuple) = self.tuple_types.get(id as usize) else {
+            return "<tuple>".into();
+        };
+        let names: Vec<String> = tuple.elements.iter().map(|&t| describe(t, self)).collect();
+        format!("Tuple({})", names.join(", "))
+    }
+
+    fn array_element(&self, id: u32) -> Type {
+        self.array_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn list_element(&self, id: u32) -> Type {
+        self.list_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn range_element(&self, id: u32) -> Type {
+        self.range_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
 }
 
 struct Checker<'a> {
@@ -367,6 +443,7 @@ struct Checker<'a> {
     lambdas: HashMap<Span, LambdaInfo>,
     matches: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
+    scalar_static_accesses: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Use sites whose written name differs from the declaration's.
@@ -525,6 +602,18 @@ struct Checker<'a> {
     /// Interned `Pin<T>` referent types, indexed by the id their [`Base::Pin`]
     /// carries (roadmap Phase 4e, `phase-4e-memory`).
     pin_types: Vec<Type>,
+    /// Interned `Tuple(T...)` element types, indexed by the id their
+    /// [`Base::Tuple`] carries (roadmap Phase 3b).
+    tuple_types: Vec<TupleType>,
+    /// Interned `Array<T>` element types, indexed by the id their
+    /// [`Base::Array`] carries.
+    array_types: Vec<Type>,
+    /// Interned `Range<T>` element types, indexed by the id
+    /// [`Base::Range`] carries.
+    range_types: Vec<Type>,
+    /// Interned `List<T>` element types, indexed by the id their
+    /// [`Base::List`] carries.
+    list_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
     /// Id of the language's own `Clone` contract, minted by
@@ -546,6 +635,8 @@ struct Checker<'a> {
     /// The inferred type of every expression, keyed by span. Lowering reads
     /// this to emit literals and operations at the width the context chose.
     expr_types: HashMap<Span, Type>,
+    /// The compiler-known `RegexMatch` record class id, minted at startup.
+    regex_match_class: u32,
 }
 
 /// See [`Checker::native_resource`].
@@ -573,7 +664,7 @@ struct NativeIteration {
 
 impl<'a> Checker<'a> {
     fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
-        Self {
+        let mut checker = Self {
             sources,
             sink,
             scopes: Scopes::new(),
@@ -585,6 +676,7 @@ impl<'a> Checker<'a> {
             lambdas: HashMap::new(),
             matches: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
+            scalar_static_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
@@ -623,11 +715,88 @@ impl<'a> Checker<'a> {
             native_slice_mut_types: Vec::new(),
             dependent_types: Vec::new(),
             pin_types: Vec::new(),
+            tuple_types: Vec::new(),
+            array_types: Vec::new(),
+            range_types: Vec::new(),
+            list_types: Vec::new(),
             externs: HashMap::new(),
             native_clone: None,
             clone_cache: HashMap::new(),
             expr_types: HashMap::new(),
-        }
+            regex_match_class: 0,
+        };
+        checker.register_regex_match_class();
+        checker
+    }
+
+    /// Registers the compiler-known `RegexMatch` record class used by
+    /// `Regex.find` and its `group` methods.
+    fn register_regex_match_class(&mut self) {
+        // `Pointer<Regex>` is an implementation detail: it stores the regex
+        // handle needed to re-run captures in `group`, without being traced by
+        // the GC (it points at a leaked, process-wide cache entry).
+        let regex_pointer_id = self.pointer_types.len() as u32;
+        self.pointer_types.push(Type::REGEX);
+
+        let span = Span::empty(0);
+        let class_id = self.classes.len() as u32;
+        let class = ClassType {
+            name: "RegexMatch".to_string(),
+            kind: zirk_ast::ClassKind::Class,
+            base: None,
+            fields: vec![
+                FieldInfo {
+                    name: "text".to_string(),
+                    ty: Type::STRING,
+                    visibility: zirk_ast::Visibility::Public,
+                    mutability: zirk_ast::Mutability::Immutable,
+                    span,
+                    owner: class_id,
+                },
+                FieldInfo {
+                    name: "haystack".to_string(),
+                    ty: Type::STRING,
+                    visibility: zirk_ast::Visibility::Private,
+                    mutability: zirk_ast::Mutability::Immutable,
+                    span,
+                    owner: class_id,
+                },
+                FieldInfo {
+                    name: "start".to_string(),
+                    ty: Type::of(Base::Int(IntWidth::I64)),
+                    visibility: zirk_ast::Visibility::Public,
+                    mutability: zirk_ast::Mutability::Immutable,
+                    span,
+                    owner: class_id,
+                },
+                FieldInfo {
+                    name: "end".to_string(),
+                    ty: Type::of(Base::Int(IntWidth::I64)),
+                    visibility: zirk_ast::Visibility::Public,
+                    mutability: zirk_ast::Mutability::Immutable,
+                    span,
+                    owner: class_id,
+                },
+                FieldInfo {
+                    name: "regex".to_string(),
+                    ty: Type::of(Base::Pointer(regex_pointer_id)),
+                    visibility: zirk_ast::Visibility::Private,
+                    mutability: zirk_ast::Mutability::Immutable,
+                    span,
+                    owner: class_id,
+                },
+            ],
+            constructors: Vec::new(),
+            methods: Vec::new(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params: Vec::new(),
+            shared: false,
+            span,
+        };
+        self.regex_match_class = class_id;
+        self.classes.push(class);
     }
 
     // --- Diagnostics ------------------------------------------------------
@@ -670,6 +839,10 @@ impl<'a> Checker<'a> {
                 native_slice_mut_types: &self.native_slice_mut_types,
                 dependent_types: &self.dependent_types,
                 pin_types: &self.pin_types,
+                tuple_types: &self.tuple_types,
+                array_types: &self.array_types,
+                list_types: &self.list_types,
+                range_types: &self.range_types,
             },
         )
     }
@@ -748,6 +921,7 @@ impl<'a> Checker<'a> {
         }
         self.scopes.pop();
 
+        let tuple_base = self.classes.len() as u32;
         CheckedProgram {
             functions: self.functions,
             enums: self.enums,
@@ -757,6 +931,7 @@ impl<'a> Checker<'a> {
             lambdas: self.lambdas,
             matches: self.matches,
             variant_accesses: self.variant_accesses,
+            scalar_static_accesses: self.scalar_static_accesses,
             aliases: self.aliases,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -774,8 +949,15 @@ impl<'a> Checker<'a> {
             native_slice_mut_types: self.native_slice_mut_types,
             dependent_types: self.dependent_types,
             pin_types: self.pin_types,
+            tuple_types: self.tuple_types,
+            array_types: self.array_types,
+            range_types: self.range_types,
+            list_types: self.list_types,
+            tuple_base,
             externs: self.externs,
             expr_types: self.expr_types,
+            regex_match_class: self.regex_match_class,
+            type_aliases: self.type_aliases,
         }
     }
 
@@ -897,7 +1079,7 @@ impl<'a> Checker<'a> {
     /// reserved-method dispatch (`_add`, `_subtract`, …) already uses.
     fn is_printable(&self, ty: Type) -> bool {
         match ty.base {
-            Base::Int(_) | Base::Boolean | Base::String | Base::Char => true,
+            Base::Int(_) | Base::Boolean | Base::String | Base::Char | Base::Duration => true,
             // `Float16` prints by widening to `Float32` first — always
             // exact, since every `f16` value is representable in `f32`
             // without loss (`Type::accepts`'s float-widening rule). `Float128`
@@ -1534,6 +1716,17 @@ impl<'a> Checker<'a> {
         let index_out_of_bounds =
             register_native_failure(&mut self.classes, "IndexOutOfBoundsError");
         let native_error = register_native_failure(&mut self.classes, "NativeError");
+        // Roadmap Phase 7: `InvalidStepError` — a range or slice whose
+        // step is `0` can never advance, so constructing one is a
+        // controlled failure, the same kind as a negative repeat count.
+        let invalid_step = register_native_failure(&mut self.classes, "InvalidStepError");
+        // `native-type-member-surface`: the `Result`-carried error types of
+        // `IntN.parse`/`FloatN.parse`, `checked_*`, and `Regex.parse` —
+        // registered through the same closure so `lower.rs` synthesizes
+        // their method bodies alongside the classes above.
+        let parse_error = register_native_failure(&mut self.classes, "ParseError");
+        let overflow_error = register_native_failure(&mut self.classes, "OverflowError");
+        let regex_error = register_native_failure(&mut self.classes, "RegexError");
 
         self.native_exceptions = Some(NativeExceptions {
             error,
@@ -1548,6 +1741,10 @@ impl<'a> Checker<'a> {
             invalid_cast,
             index_out_of_bounds,
             native_error,
+            invalid_step,
+            parse_error,
+            overflow_error,
+            regex_error,
         });
     }
 
@@ -1744,7 +1941,22 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let type_params = self.enter_type_params(&decl.type_params);
+        // A contract's own `<T>` needs no specialization (roadmap Phase 7):
+        // dispatch through a contract is keyed by the contract id and the
+        // method index alone — `Base::ContractInstance` resolves to the same
+        // `IrType::Contract` an unparameterized contract names — so the
+        // `enter_type_params` blanket gate a generic *function* still needs
+        // does not apply here. Mint the ids and open their scope directly,
+        // the same way `register_enum` already does for an enum's own
+        // parameters.
+        let type_params = self.mint_type_param_ids(&decl.type_params);
+        self.report_declared_variance(&decl.type_params);
+        self.type_param_scope.push(
+            decl.type_params
+                .iter()
+                .map(|p| (p.name.name.clone(), self.type_param_ids[&p.span]))
+                .collect(),
+        );
         let mut methods: Vec<ContractMethod> = Vec::new();
         for (index, method) in decl.methods.iter().enumerate() {
             if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
@@ -1984,25 +2196,44 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // `implements Iterable<T>` and `implements Iterator<T>` are the
-        // generic contract instantiations that lower (roadmap task 13.5,
-        // `for ... in` over a type's own iterator, which needs both halves
-        // of the protocol implemented): any other stays gated, since
-        // nothing else specializes a class's own generic contract table yet
-        // — except `implements Resource<E>` (roadmap Phase 4c), which needs
-        // no specialized dispatch table at all: `match ... with` reaches
+        // `implements Iterable<T>` and `implements Iterator<T>` always lower
+        // (roadmap task 13.5, `for ... in` over a type's own iterator, which
+        // needs both halves of the protocol implemented), and
+        // `implements Resource<E>` needs no specialized dispatch table at
+        // all (roadmap Phase 4c: `match ... with` reaches
         // `close()`/`is_closed()` by ordinary static dispatch on the
         // binding's own concrete class, never through a `Resource`-typed
-        // reference.
-        if self
+        // reference).
+        //
+        // Any other generic contract lowers when none of its declared
+        // members actually name its own type parameter (roadmap Phase 7):
+        // a contract's dispatch table is keyed by the contract id and the
+        // method index alone — `ContractTable` never carries the type
+        // arguments — so a marker like `interface Tagged<T>` or a contract
+        // whose methods use only concrete types needs no specialization at
+        // all. A member that does name `T` (`fn put(x: T)`, `fn get(): T`)
+        // still needs the substitution pass `lower_contract_call` does not
+        // build, and stays gated.
+        let params_in_members = {
+            let declared = &self.contracts[contract as usize];
+            declared.methods.iter().any(|m| {
+                m.params
+                    .iter()
+                    .any(|p| self.type_references_any_param(p.ty, &expected))
+                    || self.type_references_any_param(m.returns, &expected)
+            })
+        };
+        let native = self
             .native_iteration
-            .is_none_or(|n| contract != n.iterable && contract != n.iterator)
-            && self.native_resource.is_none_or(|n| contract != n.resource)
-        {
+            .is_some_and(|n| contract == n.iterable || contract == n.iterator)
+            || self
+                .native_resource
+                .is_some_and(|n| contract == n.resource);
+        if params_in_members && !native {
             self.not_lowered(
                 reference.span,
-                "an implementation of a generic contract",
-                "implement it manually per concrete type for now, without naming the contract's own type parameter",
+                "an implementation of a generic contract whose members name its type parameter",
+                "declare the contract's members with concrete types, or implement it manually per concrete type for now",
             );
         }
 
@@ -2788,18 +3019,18 @@ impl<'a> Checker<'a> {
                 // class's (below too), so `CallVirtual` has a shared index to
                 // read regardless of which concrete adopter is behind it.
             }
-            // A record or value class lowers to an inline value (roadmap
-            // task 11.5) — but only a non-generic one: combining that with
+            // A record lowers to an inline value (roadmap task 11.5) —
+            // but only a non-generic one: combining that with
             // per-instantiation specialization (11.1) is a separate concern
             // this pass does not build.
-            ClassKind::Record | ClassKind::ValueClass if !decl.type_params.is_empty() => {
+            ClassKind::Record if !decl.type_params.is_empty() => {
                 self.not_lowered(
                     decl.name.span,
                     &format!("a generic {}", decl.kind.as_str()),
                     "model it as an ordinary `class` for now, with a `construct` that sets every field",
                 );
             }
-            ClassKind::Record | ClassKind::ValueClass => {}
+            ClassKind::Record => {}
         }
 
         // Inherited members come first, which is what makes a subclass's
@@ -3522,16 +3753,6 @@ impl<'a> Checker<'a> {
             }
             self.type_aliases
                 .insert(decl.name.name.clone(), decl.target.clone());
-
-            // Resolution is real (`Self::resolve_type_alias`), but lowering
-            // independently re-resolves a written type name from the AST in
-            // some paths and does not know aliases exist yet, so a lowered
-            // program could still crash on one.
-            self.not_lowered(
-                decl.span,
-                "a `type` alias",
-                "write the aliased type directly for now",
-            );
         }
     }
 
@@ -4015,7 +4236,7 @@ impl<'a> Checker<'a> {
                 Base::Boolean => (4, 0),
                 Base::String => (5, 0),
                 Base::Null => (6, 0),
-                Base::Range => (7, 0),
+                Base::Range(id) => (7, id),
                 Base::Unknown => (8, 0),
                 // A union is meant to drop `Never` entirely, not just sort
                 // it (`ZIRK_LANGUAGE_SPEC.md` section 7: "removes
@@ -4040,6 +4261,11 @@ impl<'a> Checker<'a> {
                 Base::NativeSliceMut(id) => (22, id),
                 Base::Dependent(id) => (23, id),
                 Base::Pin(id) => (24, id),
+                Base::Duration => (25, 0),
+                Base::Regex => (26, 0),
+                Base::Tuple(id) => (27, id),
+                Base::Array(id) => (28, id),
+                Base::List(id) => (29, id),
             }
         }
         bases.sort_by_key(key);
@@ -4325,6 +4551,142 @@ impl<'a> Checker<'a> {
         (self.pin_types.len() - 1) as u32
     }
 
+    /// `Array<T>`: resolves `T` and interns it.
+    fn resolve_array_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Array<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Array<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_array_type(element);
+        Type::of(Base::Array(id))
+    }
+
+    /// `List<T>`: resolves `T` and interns it.
+    fn resolve_list_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`List<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `List<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_list_type(element);
+        Type::of(Base::List(id))
+    }
+
+    /// Interns an `Array<T>` element type, returning the id its
+    /// [`Base::Array`] carries.
+    fn intern_array_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.array_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.array_types.push(element);
+        (self.array_types.len() - 1) as u32
+    }
+
+    /// Interns a `List<T>` element type, returning the id its [`Base::List`]
+    /// carries.
+    fn intern_list_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.list_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.list_types.push(element);
+        (self.list_types.len() - 1) as u32
+    }
+
+    /// Interns a `Range<T>` element type, returning the id its
+    /// [`Base::Range`] carries (roadmap Phase 7).
+    fn intern_range_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.range_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.range_types.push(element);
+        (self.range_types.len() - 1) as u32
+    }
+
+    /// `Range<T>` (roadmap Phase 7): resolves `T` — a numeric or `Duration`
+    /// element, since the sequence is arithmetic — and interns it.
+    fn resolve_range_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Range<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Range<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        if !element.is_unknown()
+            && !matches!(element.base, Base::Int(_) | Base::Duration)
+        {
+            let found = self.name(element);
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[0].span,
+                format!("`Range<{found}>` is not a range type"),
+                "a range's element is numeric or `Duration` — it is the sequence's step amount",
+                Some("write `Range<Int32>` or `Range<Duration>`".into()),
+            );
+        }
+        let id = self.intern_range_type(element);
+        Type::of(Base::Range(id))
+    }
+
+    /// Resolves `Tuple(T...)` as an interned value type (roadmap Phase 3b).
+    fn resolve_tuple_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() < 2 {
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.span,
+                "a tuple needs at least two element types",
+                format!(
+                    "found {} {}",
+                    reference.arguments.len(),
+                    if reference.arguments.len() == 1 {
+                        "element"
+                    } else {
+                        "elements"
+                    }
+                ),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let mut elements = Vec::with_capacity(reference.arguments.len());
+        for arg in &reference.arguments {
+            let ty = self.resolve_type(arg);
+            if ty.is_unknown() {
+                return Type::UNKNOWN;
+            }
+            elements.push(ty);
+        }
+        let id = self.intern_tuple_type(TupleType { elements });
+        Type::of(Base::Tuple(id))
+    }
+
+    /// Interns a `Tuple(T...)` element list, returning the id its
+    /// [`Base::Tuple`] carries.
+    fn intern_tuple_type(&mut self, tuple: TupleType) -> u32 {
+        if let Some(index) = self.tuple_types.iter().position(|t| *t == tuple) {
+            return index as u32;
+        }
+        self.tuple_types.push(tuple);
+        (self.tuple_types.len() - 1) as u32
+    }
+
     /// One alternative of a type reference on its own — never a union; see
     /// [`Self::resolve_type`] for that.
     fn resolve_type_atom(&mut self, reference: &TypeRef) -> Type {
@@ -4348,6 +4710,18 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Pin" {
             return self.resolve_pin_type_ref(reference);
+        }
+        if reference.name == "Array" {
+            return self.resolve_array_type_ref(reference);
+        }
+        if reference.name == "List" {
+            return self.resolve_list_type_ref(reference);
+        }
+        if reference.name == "Range" {
+            return self.resolve_range_type_ref(reference);
+        }
+        if reference.name == "Tuple" {
+            return self.resolve_tuple_type_ref(reference);
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -4604,6 +4978,33 @@ impl<'a> Checker<'a> {
         Type::of(Base::EnumInstance(id))
     }
 
+    /// Checks that every argument of `expr` is an integer
+    /// (`native-type-member-surface`): the integer method surface takes
+    /// same-domain arguments (`min`, `clamp`, `checked_*`, …).
+    fn check_int_argument(&mut self, expr: &CallExpr, receiver: Type) {
+        for arg in &expr.args {
+            let t = self.check_expr(&arg.value);
+            if !t.is_unknown() && !matches!(t.base, Base::Int(_)) {
+                self.expect_assignable(receiver, t, arg.value.span(), "the argument");
+            }
+        }
+    }
+
+    /// The `Result<T, E>` type `register_native_result_enum` mints,
+    /// instantiated with the caller's own success type and the caller's
+    /// error class — `native-type-member-surface`'s `parse`/`checked_*`/
+    /// `Regex.parse` all need `Result` halves other than `NativeError`.
+    fn native_result_with(&mut self, value: Type, error: u32) -> Type {
+        let native_result = self
+            .native_result
+            .expect("register_native_result_enum runs before any type is checked");
+        let id = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: native_result,
+            args: vec![value, Type::of(Base::Class(error))],
+        });
+        Type::of(Base::EnumInstance(id))
+    }
+
     /// Interns a generic enum instantiation, returning the id its
     /// `Base::EnumInstance` carries.
     fn intern_enum_instance(&mut self, instance: GenericEnumInstance) -> u32 {
@@ -4674,18 +5075,12 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // `Iterator<T>`, written as `iterator()`'s return type, is the one
-        // generic contract instantiation that lowers (roadmap task 13.5):
-        // dispatch through a contract's table never depended on its type
-        // arguments to begin with, so nothing more is needed to name it.
-        if self.native_iteration.is_none_or(|n| contract != n.iterator) {
-            self.not_lowered(
-                reference.span,
-                "a generic contract instantiation",
-                "name the contract without `<...>` for now, or model the concrete case as its own type",
-            );
-        }
-
+        // Naming a generic contract instantiation lowers (roadmap Phase 7):
+        // a contract's dispatch table never depended on its own type
+        // arguments — only the contract id and the method index matter
+        // (task 10.7) — so `Iterable<Int32>` is the same `IrType::Contract`
+        // an unparameterized `Iterable` would be, with the arguments living
+        // in `contract_instances` for the checker's own satisfaction checks.
         Type::of(Base::ContractInstance(self.intern_contract_instance(
             GenericContractInstance { contract, args },
         )))
@@ -5128,6 +5523,30 @@ impl<'a> Checker<'a> {
     fn check_let(&mut self, stmt: &LetStmt) {
         let annotated = stmt.ty.as_ref().map(|t| self.resolve_type(t));
 
+        // Only irrefutable patterns are allowed in a declaration, and a tuple
+        // pattern needs an initializer to destructure.
+        if !stmt.pattern.is_irrefutable() {
+            self.error(
+                codes::TYPE_MISMATCH,
+                stmt.pattern.span(),
+                "a variable declaration must use an irrefutable pattern",
+                "only names, wildcards, and tuple patterns are allowed here",
+                None,
+            );
+        }
+        if matches!(stmt.pattern, Pattern::Tuple(_)) && stmt.init.is_none() {
+            self.error(
+                codes::TYPE_MISMATCH,
+                stmt.pattern.span(),
+                "a tuple pattern needs an initializer",
+                "give it a tuple value to destructure, or annotate the names individually",
+                None,
+            );
+        }
+
+        let binding_name = stmt.pattern.binding_name();
+        let pattern_span = stmt.pattern.span();
+
         // A recursive lambda calling itself by its own binding name needs
         // that name in scope *while its own body is checked*
         // (`ZIRK_LANGUAGE_SPEC.md` section 6: "recursive lambdas require an
@@ -5144,14 +5563,15 @@ impl<'a> Checker<'a> {
                 base: Base::Function(_),
                 ..
             })
-        ) && matches!(stmt.init.as_ref(), Some(Expr::Lambda(_)));
+        ) && matches!(stmt.init.as_ref(), Some(Expr::Lambda(_)))
+            && binding_name.is_some();
 
         if self_recursive {
             self.declare_local(Binding {
-                name: stmt.name.name.clone(),
+                name: binding_name.expect("checked by `self_recursive` above").to_string(),
                 ty: annotated.expect("checked by `self_recursive` above"),
                 mutability: stmt.mutability,
-                span: stmt.name.span,
+                span: pattern_span,
                 initialized: true,
                 moved: false,
                 pinned: false,
@@ -5163,7 +5583,7 @@ impl<'a> Checker<'a> {
         // from context instead of only from `Ok`'s own argument (roadmap
         // Phase 4a, `expected_type`'s own doc comment).
         let outer_recursive_binding = self.recursive_binding.take();
-        self.recursive_binding = self_recursive.then(|| stmt.name.name.clone());
+        self.recursive_binding = self_recursive.then(|| binding_name.unwrap().to_string());
         let initializer = stmt.init.as_ref().map(|e| {
             self.expected_type = annotated;
             self.check_expr(e)
@@ -5202,12 +5622,13 @@ impl<'a> Checker<'a> {
                 // `mut x = null;` gives no base to infer: nullability alone is
                 // not a type.
                 if matches!(inferred.base, Base::Null) {
+                    let name = binding_name.unwrap_or("_");
                     self.error(
                         codes::UNKNOWN_TYPE,
                         stmt.span,
-                        format!("cannot infer the type of `{}`", stmt.name.name),
+                        format!("cannot infer the type of `{}`", name),
                         "`null` alone does not say which type is absent",
-                        Some(format!("annotate it, as in `{}: String?`", stmt.name.name)),
+                        Some(format!("annotate it, as in `{}: String?`", name)),
                     );
                     Type::UNKNOWN
                 } else {
@@ -5219,36 +5640,44 @@ impl<'a> Checker<'a> {
 
         // `Void` has no representable value, so no variable can hold it.
         if ty == Type::VOID {
+            let name = binding_name.unwrap_or("_");
             self.error(
                 codes::VOID_VARIABLE,
                 stmt.span,
-                format!("variable `{}` cannot be of type Void", stmt.name.name),
+                format!("variable `{}` cannot be of type Void", name),
                 "`Void` represents the absence of a value, so it cannot be stored",
                 None,
             );
         }
 
         if let Some(init) = &stmt.init {
-            self.check_strict_alias(init, ty, stmt.mutability, &stmt.name.name, stmt.name.span);
+            self.check_strict_alias(init, ty, stmt.mutability, binding_name.unwrap_or("_"), pattern_span);
+        }
+
+        // `check_pattern` validates the pattern and collects the bindings it
+        // introduces.  We then apply the declaration's own mutability and
+        // initialization state before registering them in the scope.
+        let mut covered = Vec::new();
+        let mut has_wildcard = false;
+        let mut bindings = Vec::new();
+        self.check_pattern(&stmt.pattern, ty, &mut covered, &mut has_wildcard, &mut bindings);
+
+        for binding in &mut bindings {
+            binding.mutability = stmt.mutability;
+            binding.initialized = stmt.init.is_some();
         }
 
         if self_recursive {
-            // Already declared above (so the lambda body could call itself)
-            // — only its final type might still need updating, in case D14
-            // adopted the literal's own id; declaring it a second time
-            // would report `ORDINARY_SHADOWING` against the entry this is
-            // finishing.
-            self.scopes.retype(&stmt.name.name, ty);
-        } else {
-            self.declare_local(Binding {
-                name: stmt.name.name.clone(),
-                ty,
-                mutability: stmt.mutability,
-                span: stmt.name.span,
-                initialized: stmt.init.is_some(),
-                moved: false,
-                pinned: false,
-            });
+            let name = binding_name.expect("checked by `self_recursive` above");
+            self.scopes.retype(name, ty);
+        }
+
+        let recursive_name = self_recursive.then(|| binding_name.unwrap().to_string());
+        for binding in bindings {
+            if recursive_name.as_ref().is_some_and(|n| n == &binding.name) {
+                continue;
+            }
+            self.declare_local(binding);
         }
     }
 
@@ -5418,6 +5847,7 @@ impl<'a> Checker<'a> {
                     == ClassKind::Class
             }
             Base::Contract(_) | Base::ContractInstance(_) => true,
+            Base::Array(_) | Base::List(_) => true,
             _ => false,
         }
     }
@@ -5491,31 +5921,36 @@ impl<'a> Checker<'a> {
             | Base::Char
             | Base::Boolean
             | Base::String
+            // A `Range<T>` is three scalars — copying it copies them all.
+            | Base::Range(_)
             | Base::Null => true,
             Base::Class(id) => self.class_is_clone(id, in_progress),
+            // A `record` is a `Base::Class` too (it lands in the arm above);
+            // an enum — traditional or algebraic (`Enum`/`EnumInstance`) —
+            // derives `Clone` the same structural way: every variant's
+            // associated fields must themselves be `Clone` (roadmap Phase 7).
+            Base::Enum(id) => self.enum_is_clone(id, &[], in_progress),
+            Base::EnumInstance(id) => {
+                let instance = self.enum_instances[id as usize].clone();
+                let subst: Vec<(u32, Type)> = self.enums[instance.enum_id as usize]
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                self.enum_is_clone(instance.enum_id, &subst, in_progress)
+            }
             // `Pointer<T>`, `Weak<T>`, a contract/contract-instance-typed
             // member, a generic class instantiation and a function/closure
             // value: see this function's own doc comment.
             //
-            // An enum (`Base::Enum`/`Base::EnumInstance`), algebraic or not,
-            // is conservatively excluded too — not for a structural reason
-            // (a genuinely scalar-only enum's own field graph is trivially
-            // `Clone`), but because of a runtime layout hazard this change's
-            // own end-to-end tests found while exercising `Node?` (found
-            // and fixed for `Nullable` specifically —
-            // `crates/zirk-codegen-llvm/src/emit.rs`'s `InstKind::NullValue`
-            // arm's own doc comment tells that story): `BuildEnum`'s own
-            // codegen (`emit.rs`) only inserts the *active* variant's own
-            // fields into the flattened enum struct, leaving every other
-            // variant's own field slots undefined — but
-            // `gc_field_offsets`/`gc_reference_paths` walks *every*
-            // variant's fields unconditionally, regardless of which one is
-            // active, the same class of hazard `NullValue`'s undef payload
-            // was. Unlike `Nullable` (one small, fully-audited fix), fixing
-            // this for every enum shape is a larger, separate surface this
-            // change's own scope and test coverage do not reach — excluding
-            // enum-typed fields from `Clone` derivation entirely is the
-            // correctness-first choice until that is addressed on its own.
+            // An enum is handled by the arms above (`Enum`/`EnumInstance`),
+            // which `zirk-ir` clones variant-aware rather than through the
+            // runtime's field-offset walk — that walk is the hazard the
+            // earlier exclusion guarded against (`BuildEnum` leaves every
+            // inactive variant's payload undefined while
+            // `gc_field_offsets` walks all of them), and lowering the clone
+            // as a discriminant dispatch never reads an inactive payload.
             _ => false,
         }
     }
@@ -5543,20 +5978,18 @@ impl<'a> Checker<'a> {
         if let Some(cached) = self.clone_cache.get(&id) {
             return *cached;
         }
-        // A `record`/`value class` has no identity of its own (task 11.5:
-        // inline, no allocation, no `is`), so it never needs the reference-
-        // graph traversal this change builds — its own field values are
-        // already independently copied wherever it is copied (assignment,
-        // pass, return), by ordinary value semantics. Deep-cloning the
-        // *reference*-typed fields it might itself carry (a record holding
-        // a class reference) would need the runtime's own generic clone
-        // traversal to have an `IrType::Value` entry point too, which this
-        // change's own IR/codegen (`InstKind::Clone`, `is_derived_clone_call`)
-        // does not build — scoped out deliberately (reference-graph `Clone`
-        // is this change's stated focus; a record wanting the same needs a
-        // manual `clone()` implementation, the general escape hatch, same
-        // as any other member this checker cannot derive automatically).
-        if self.classes[id as usize].kind != ClassKind::Class {
+        // A `record` has no identity of its own (task 11.5: inline, no
+        // allocation, no `is`), but `Clone` is still derived for it when
+        // every field is `Clone` (roadmap Phase 7): `zirk-ir` clones a
+        // record field-wise — scalars copy, reference-typed fields go
+        // through the same deep traversal a class gets — so it does not
+        // need the `IrType::Value` runtime entry point the earlier design
+        // deferred. An `abstract class` declares no layout of its own, so
+        // there is nothing to derive on it.
+        if !matches!(
+            self.classes[id as usize].kind,
+            ClassKind::Class | ClassKind::Record
+        ) {
             self.clone_cache.insert(id, false);
             return false;
         }
@@ -5575,6 +6008,31 @@ impl<'a> Checker<'a> {
         if is_outermost {
             self.clone_cache.insert(id, eligible);
         }
+        eligible
+    }
+
+    /// Whether enum `id` derives `Clone` (roadmap Phase 7): every variant's
+    /// associated fields are themselves `Clone`, under `subst` for a
+    /// generic enum's own parameters. `in_progress` holds class ids — an
+    /// enum's id is tagged with `ENUM_TAG` so the two id spaces cannot
+    /// collide in one list (a recursive enum, `enum Node { Done, More(Node) }`,
+    /// resolves `true` provisionally exactly like a recursive class does).
+    fn enum_is_clone(&mut self, id: u32, subst: &[(u32, Type)], in_progress: &mut Vec<u32>) -> bool {
+        const ENUM_TAG: u32 = 1 << 31;
+        let tag = id | ENUM_TAG;
+        if in_progress.contains(&tag) {
+            return true;
+        }
+        in_progress.push(tag);
+        let variants = self.enums[id as usize].variants.clone();
+        let subst = subst.to_vec();
+        let eligible = variants.iter().all(|variant| {
+            variant.associated.iter().all(|f| {
+                let ty = self.substitute_type(f.ty, &subst);
+                self.is_clone_type(ty, in_progress)
+            })
+        });
+        in_progress.pop();
         eligible
     }
 
@@ -5669,9 +6127,10 @@ impl<'a> Checker<'a> {
     /// existing behavior.
     fn assignment_target_type(&self, target: &AssignTarget) -> Option<Type> {
         match target {
-            AssignTarget::Name(name) if name.name != "_" => {
-                self.scopes.resolve(&name.name).map(|resolved| resolved.binding.ty)
-            }
+            AssignTarget::Name(name) if name.name != "_" => self
+                .scopes
+                .resolve(&name.name)
+                .map(|resolved| resolved.binding.ty),
             _ => None,
         }
     }
@@ -5702,6 +6161,44 @@ impl<'a> Checker<'a> {
                 AssignTarget::Index(index) => {
                     let (receiver_ty, element, writable) = self.check_index(index);
                     if element.is_unknown() {
+                        return;
+                    }
+                    // `s[i] = c` (roadmap Phase 7, `zirk-standard-library`'s
+                    // "String write by index"): rebinding a `String` slot is
+                    // a write, so it is permitted only when the receiver is
+                    // a writable variable — a `String` computed on the spot
+                    // has nowhere for the result to live.
+                    if !writable && receiver_ty.base == Base::String {
+                        let Expr::Path(name) = &*index.receiver else {
+                            self.error(
+                                codes::INDEX_NOT_WRITABLE,
+                                index.span,
+                                "cannot write through a `String` that is not a variable",
+                                "`s[i] = c` rebinds the variable `s` names, so the receiver has to be one",
+                                Some("assign the string to a `mut` variable first".into()),
+                            );
+                            return;
+                        };
+                        if self.require_writable(name).is_none() {
+                            return;
+                        }
+                        // A `Char` or a single-grapheme `String` is what the
+                        // spec allows; both share `String`'s representation
+                        // (ADR-014), so either handle is accepted here.
+                        if !value.is_unknown()
+                            && !matches!(value.base, Base::Char | Base::String)
+                        {
+                            let found = self.name(value);
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                value_span,
+                                "a `String` index write expects a `Char` or `String`",
+                                format!("found {found}"),
+                                None,
+                            );
+                        }
+                        self.scopes.mark_initialized(&name.name);
+                        self.scopes.mark_moved(&name.name, false);
                         return;
                     }
                     if !writable {
@@ -6030,7 +6527,15 @@ impl<'a> Checker<'a> {
         // The range is checked directly here rather than through `check_expr`,
         // which rejects it: this is the one position where it is meaningful.
         let iterable = match &stmt.iterable {
-            Expr::Range(range) => self.check_range(range),
+            Expr::Range(range) => {
+                // `check_expr` is not the caller here, so the range's own
+                // `Range<T>` is recorded by hand — `zirk-ir`'s
+                // `range_loop_element_type` reads it back to pick the
+                // counter's width (`Int32` vs `Duration`'s `i64`).
+                let ty = self.check_range(range);
+                self.expr_types.insert(range.span, ty);
+                ty
+            }
             other => self.check_expr(other),
         };
         let element = self.element_type(iterable, stmt.iterable.span());
@@ -6064,14 +6569,58 @@ impl<'a> Checker<'a> {
     /// changes for it, and Phase 2's corpus keeps compiling unmodified.
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
         match iterable.base {
-            Base::Range => Type::INT32,
+            Base::Range(id) => self
+                .range_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN),
             // A `String` iterates by grapheme, binding a `Char` — the debt
             // Phase 2 first noted and Phase 3b's task 6.3 retires: `zirk-ir`
             // lowers this as a byte-offset walk over the string's own
             // graphemes (`lower_for_in_string`), the same shape a range loop
             // already threads its own counter with.
             Base::String => Type::of(Base::Char),
+            Base::Array(id) => self
+                .array_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN),
+            Base::List(id) => self
+                .list_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN),
             Base::Unknown => Type::UNKNOWN,
+            // `it: Iterable<Int32>` — a contract-typed iterable (roadmap
+            // Phase 7): the element type is the instantiation's own type
+            // argument, and the loop's `Iteration<T>` is interned and
+            // recorded exactly like the class receiver below.
+            Base::ContractInstance(id) => {
+                let iterable_contract = self
+                    .native_iteration
+                    .expect("registered unconditionally before any program declaration")
+                    .iterable;
+                let instance = self.contract_instances[id as usize].clone();
+                if instance.contract != iterable_contract {
+                    let name = self.name(iterable);
+                    self.error(
+                        codes::NOT_ITERABLE,
+                        span,
+                        format!("`{name}` cannot be iterated"),
+                        "`for ... in` requires `Iterable<T>`, which this type does not implement",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                let element = instance.args[0];
+                let iteration = self.native_iteration.unwrap().iteration;
+                let instance_id = self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: iteration,
+                    args: vec![element],
+                });
+                self.for_in_iteration.insert(span, instance_id);
+                element
+            }
             Base::Class(id) => {
                 let Some(element) = self.iterable_element_type(id) else {
                     let name = self.name(iterable);
@@ -6410,28 +6959,50 @@ impl<'a> Checker<'a> {
         let ty = match expr {
             Expr::Int(lit) => self.check_int_literal(lit, expected),
             Expr::Float(lit) => self.check_float_literal(lit, expected),
+            Expr::Duration(_) => {
+                if let Some(expected) = expected
+                    && !expected.accepts(Type::DURATION)
+                {
+                    let found = self.name(Type::DURATION);
+                    let expected_name = self.name(expected);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span(),
+                        format!(
+                            "cannot use a duration literal where `{expected_name}` is expected"
+                        ),
+                        format!("{found} is not compatible with {expected_name}"),
+                        None,
+                    );
+                }
+                Type::DURATION
+            }
             Expr::Char(lit) => self.check_char_literal(lit),
             Expr::Str(_) => Type::STRING,
+            Expr::Regex(lit) => {
+                if regex::Regex::new(&lit.pattern).is_err() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        lit.span,
+                        "invalid regular expression",
+                        format!("`{}` is not a valid regex pattern", lit.pattern),
+                        None,
+                    );
+                    Type::UNKNOWN
+                } else {
+                    Type::REGEX
+                }
+            }
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
             Expr::Path(ident) => self.check_path(ident),
             Expr::Unary(e) => self.check_unary(e),
             Expr::Binary(e) => self.check_binary(e, expected),
             Expr::Call(e) => self.check_call(e, expected),
-            // A range is not a value: there is no `Range` type to hold one
-            // until Phase 3 brings collections. It only means something as the
-            // iterable of a `for ... in`, which checks it directly.
-            Expr::Range(e) => {
-                self.check_range(e);
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    e.span,
-                    "a range is not a value",
-                    "it can only be iterated, not stored or passed around",
-                    Some("write it directly in a `for ... in`".into()),
-                );
-                Type::UNKNOWN
-            }
+            // `a..b` is a `Range<T>` value (roadmap Phase 7) — stored,
+            // passed, reversed, sliced; `for ... in` still iterates it.
+            Expr::Range(e) => self.check_range(e),
+            Expr::Tuple(tuple) => self.check_tuple_literal(tuple, expected),
             Expr::If(e) => self.check_if_expr(e),
             Expr::This(e) => match self.this_type {
                 Some(ty) => {
@@ -6467,6 +7038,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Field(e) => self.check_field(e),
             Expr::Index(e) => self.check_index(e).1,
+            Expr::Slice(e) => self.check_slice(e),
             Expr::Ternary(e) => self.check_ternary(e),
             Expr::Increment(e) => self.check_increment(e),
             Expr::Match(e) => self.check_match(e, true),
@@ -7140,10 +7712,12 @@ impl<'a> Checker<'a> {
                 // Only a signed integer width: negating an unsigned value has
                 // no representable result in its own type (roadmap Phase 3b).
                 // Every `Float` width is signed by construction (IEEE 754's
-                // sign bit), so it needs no equivalent guard.
+                // sign bit), so it needs no equivalent guard. `Duration` is a
+                // signed nanosecond count, so it negates too.
                 let ok = !operand.nullable
                     && (matches!(operand.base, Base::Int(w) if w.signed())
-                        || matches!(operand.base, Base::Float(_)));
+                        || matches!(operand.base, Base::Float(_))
+                        || operand.base == Base::Duration);
                 if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
                     self.error(
@@ -7359,10 +7933,7 @@ impl<'a> Checker<'a> {
         // checked-but-not-compilable diagnostic this whole comparison used
         // to get unconditionally, but now scoped to just that field (D3).
         if let Base::Class(id) = left.base
-            && matches!(
-                self.classes[id as usize].kind,
-                ClassKind::Record | ClassKind::ValueClass
-            )
+            && matches!(self.classes[id as usize].kind, ClassKind::Record)
         {
             if let Some(unsupported) = self.structural_equality_unsupported_field(left) {
                 let name = self.name(unsupported);
@@ -7431,7 +8002,7 @@ impl<'a> Checker<'a> {
                 if all_bare { None } else { Some(ty) }
             }
             Base::Class(id) => match self.classes[id as usize].kind {
-                ClassKind::Record | ClassKind::ValueClass => self.classes[id as usize]
+                ClassKind::Record => self.classes[id as usize]
                     .fields
                     .iter()
                     .find_map(|f| self.structural_equality_unsupported_field(f.ty)),
@@ -7547,14 +8118,98 @@ impl<'a> Checker<'a> {
         unified
     }
 
+    /// `start..end`, `start..=end` or `start..end..step` (roadmap Phase 7,
+    /// `Range<T>`): a real value — a finite arithmetic sequence. The element
+    /// type is `Int32` when every part is an integer, `Duration` when they
+    /// all are; mixing a `Duration` with an integer is rejected, since no
+    /// implicit conversion exists between an amount of time and a count.
     fn check_range(&mut self, expr: &RangeExpr) -> Type {
         let start = self.check_expr(&expr.start);
         let end = self.check_expr(&expr.end);
+        let step = expr.step.as_ref().map(|s| self.check_expr(s));
+
+        let parts: Vec<(Type, Span)> = [
+            Some((start, expr.start.span())),
+            Some((end, expr.end.span())),
+            step.map(|s| (s, expr.step.as_ref().unwrap().span())),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let any_duration = parts
+            .iter()
+            .any(|(t, _)| matches!(t.base, Base::Duration));
+        if any_duration {
+            for (part, span) in &parts {
+                if !part.is_unknown() && !matches!(part.base, Base::Duration) {
+                    let found = self.name(*part);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        *span,
+                        "a `Range<Duration>`'s parts must all be `Duration`",
+                        format!("found {found}"),
+                        Some("make every part a duration, or none".into()),
+                    );
+                }
+            }
+            let id = self.intern_range_type(Type::DURATION);
+            return Type::of(Base::Range(id));
+        }
 
         self.expect_numeric_value(start, expr.start.span(), "the start of a range");
         self.expect_numeric_value(end, expr.end.span(), "the end of a range");
+        if let Some(step_ty) = step {
+            self.expect_numeric_value(
+                step_ty,
+                expr.step.as_ref().unwrap().span(),
+                "the step of a range",
+            );
+        }
 
-        Type::RANGE
+        let id = self.intern_range_type(Type::INT32);
+        Type::of(Base::Range(id))
+    }
+
+    /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
+    fn check_tuple_literal(&mut self, tuple: &TupleExpr, expected: Option<Type>) -> Type {
+        let expected_elements = expected.and_then(|ty| match ty.base {
+            Base::Tuple(id) => Some(self.tuple_types.get(id as usize)?.elements.clone()),
+            _ => None,
+        });
+
+        let mut elements = Vec::with_capacity(tuple.elements.len());
+        for (index, expr) in tuple.elements.iter().enumerate() {
+            if let Some(expected) = expected_elements
+                .as_ref()
+                .and_then(|v| v.get(index).copied())
+            {
+                self.expected_type = Some(expected);
+            }
+            let ty = self.check_expr(expr);
+            elements.push(ty);
+        }
+
+        if let Some(expected) = expected
+            && let Base::Tuple(_) = expected.base {
+                let actual = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
+                    elements: elements.clone(),
+                })));
+                if !actual.without_null().accepts(expected.without_null()) {
+                    let found = self.name(actual);
+                    let exp_name = self.name(expected);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        tuple.span,
+                        format!("expected `{exp_name}`, found `{found}`"),
+                        "the tuple's elements do not match the declared type",
+                        None,
+                    );
+                }
+            }
+
+        let id = self.intern_tuple_type(TupleType { elements });
+        Type::of(Base::Tuple(id))
     }
 
     /// `if` used where a value is expected. Decision D7.
@@ -8107,6 +8762,77 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            Pattern::Tuple(t) => {
+                let inner = scrutinee.without_null();
+                let Base::Tuple(id) = inner.base else {
+                    let name = self.name(scrutinee);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        pattern.span(),
+                        format!("cannot match a tuple pattern against `{name}`"),
+                        "the pattern expects a tuple",
+                        None,
+                    );
+                    return;
+                };
+                let Some(tuple) = self.tuple_types.get(id as usize) else {
+                    return;
+                };
+                let element_types = tuple.elements.clone();
+                if t.elements.len() != element_types.len() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        pattern.span(),
+                        "the tuple pattern has the wrong number of elements",
+                        format!(
+                            "expected {}, found {}",
+                            element_types.len(),
+                            t.elements.len()
+                        ),
+                        None,
+                    );
+                    return;
+                }
+                if pattern.is_irrefutable() {
+                    *has_wildcard = true;
+                }
+                for (sub, &element) in t.elements.iter().zip(element_types.iter()) {
+                    let element = if scrutinee.nullable {
+                        element.as_nullable()
+                    } else {
+                        element
+                    };
+                    self.check_pattern(sub, element, covered, has_wildcard, bindings);
+                }
+            }
+            // `re'pattern' name?` matches a `String` scrutinee and binds the
+            // `Regex.Match` when a name follows the literal. It is refutable
+            // — a string that does not match falls through to the next arm.
+            Pattern::Regex(r) => {
+                self.expect_pattern_type(scrutinee, Type::STRING, r.span);
+                // The same compile-time validation an `re'...'` expression
+                // literal gets (`Expr::Regex` in `Self::check_expr`).
+                if regex::Regex::new(&r.pattern).is_err() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        r.span,
+                        "invalid regular expression",
+                        format!("`{}` is not a valid regex pattern", r.pattern),
+                        None,
+                    );
+                }
+                if let Some(binding) = &r.binding {
+                    bindings.push(Binding {
+                        name: binding.name.clone(),
+                        ty: Type::of(Base::Class(self.regex_match_class)),
+                        mutability: Mutability::Immutable,
+                        span: binding.span,
+                        initialized: true,
+                        moved: false,
+                        pinned: false,
+                    });
+                }
+            }
             Pattern::Variant(v) => self.check_variant_pattern(v, scrutinee, covered, bindings),
         }
     }
@@ -8399,6 +9125,20 @@ impl<'a> Checker<'a> {
                     .unwrap_or(Type::UNKNOWN),
                 true,
             )),
+            Base::Array(id) => Some((
+                self.array_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN),
+                true,
+            )),
+            Base::List(id) => Some((
+                self.list_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN),
+                true,
+            )),
             _ => None,
         }
     }
@@ -8433,6 +9173,34 @@ impl<'a> Checker<'a> {
             );
         }
 
+        if let Base::Tuple(id) = receiver.base {
+            let Some(tuple) = self.tuple_types.get(id as usize) else {
+                return (receiver, Type::UNKNOWN, false);
+            };
+            let Expr::Int(lit) = &*expr.index else {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.index.span(),
+                    "a tuple index must be an integer literal",
+                    "the element position must be known at compile time",
+                    None,
+                );
+                return (receiver, Type::UNKNOWN, false);
+            };
+            let index = lit.value;
+            if index < 0 || index as usize >= tuple.elements.len() {
+                self.error(
+                    codes::INDEX_OUT_OF_BOUNDS,
+                    expr.index.span(),
+                    "tuple index out of bounds",
+                    format!("valid indices are 0..{}", tuple.elements.len()),
+                    None,
+                );
+                return (receiver, Type::UNKNOWN, false);
+            }
+            return (receiver, tuple.elements[index as usize], false);
+        }
+
         let Some((element, writable)) = self.indexable_element(receiver) else {
             let name = self.name(receiver);
             self.error(
@@ -8445,20 +9213,58 @@ impl<'a> Checker<'a> {
             return (receiver, Type::UNKNOWN, false);
         };
 
-        if receiver.base == Base::String
-            && let Expr::Int(lit) = &*expr.index
-            && lit.value < 0
-        {
-            self.error(
-                codes::INDEX_OUT_OF_BOUNDS,
-                expr.index.span(),
-                "a string index must be non-negative",
-                format!("found {}", lit.value),
-                None,
-            );
-        }
+        // `native-type-member-surface`: negative indices on `String`,
+        // `Array<T>` and `List<T>` count from the end, resolved at runtime.
 
         (receiver, element, writable)
+    }
+
+    /// `receiver[start:end:step]` (roadmap Phase 7, `String` slicing): every
+    /// part is optional and integer-typed when present; the receiver decides
+    /// the result — a `String` slices to a new `String`.
+    fn check_slice(&mut self, expr: &SliceExpr) -> Type {
+        let receiver = self.check_expr(&expr.receiver);
+        for part in [&expr.start, &expr.end, &expr.step].into_iter().flatten() {
+            let ty = self.check_expr(part);
+            if !ty.is_unknown() && (!matches!(ty.base, Base::Int(_)) || ty.nullable) {
+                let found = self.name(ty);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    part.span(),
+                    "a slice bound must be an integer",
+                    format!("found {found}"),
+                    None,
+                );
+            }
+        }
+
+        if receiver.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if receiver.nullable {
+            self.reject_absent_receiver(receiver, expr.receiver.span());
+            return Type::UNKNOWN;
+        }
+
+        match receiver.base {
+            Base::String => Type::STRING,
+            // `r[lo:hi:st]` (roadmap Phase 7): a `Range<T>` slices to a
+            // `Range<T>` of the same element type — the bounds index the
+            // element sequence, not `T` itself.
+            Base::Range(_) => receiver,
+            Base::Array(_) | Base::List(_) => receiver,
+            _ => {
+                let name = self.name(receiver);
+                self.error(
+                    codes::INDEXING_NOT_SUPPORTED,
+                    expr.receiver.span(),
+                    format!("`{name}` does not support slicing"),
+                    "slicing is defined for `String`, `Range<T>`, `Array<T>` and `List<T>`",
+                    None,
+                );
+                Type::UNKNOWN
+            }
+        }
     }
 
     /// `a.b`, which is an enum variant or a field of an object.
@@ -8484,8 +9290,45 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // `Int32.MAX`/`Float64.EPSILON` — a static member of a scalar type
+        // name (`native-type-member-surface`). Decided here for the same
+        // reason `Color.Red` is above: the base names a type, not a value
+        // with a field to evaluate. A local binding shadowing the type name
+        // (e.g. `let Int32 = …`) wins, exactly like the `Pointer.from`/
+        // `Weak.from` guards in `check_call`.
+        if let Expr::Path(base) = &*expr.object
+            && !expr.safe
+            && self.scopes.lookup(&base.name).is_none()
+            && let Some(scalar) = Type::from_name(&base.name)
+            && let Some(member_ty) = Self::scalar_static_member_type(scalar, &expr.name.name)
+        {
+            self.scalar_static_accesses.insert(expr.span);
+            return member_ty;
+        }
+
         let object = self.check_expr(&expr.object);
         self.member_type(object, &expr.name, expr.object.span(), expr.safe)
+    }
+
+    /// The type of `TypeName.member` for the scalar families' static
+    /// members (`native-type-member-surface`): `IntN.MIN`/`MAX`/`BITS`,
+    /// `FloatN.MIN`/`MAX`/`LOWEST`/`EPSILON`/`POSITIVE_INFINITY`/
+    /// `NEGATIVE_INFINITY`. `None` when the member does not exist on that
+    /// family, letting the ordinary member lookup report it.
+    fn scalar_static_member_type(scalar: Type, member: &str) -> Option<Type> {
+        match scalar.base {
+            Base::Int(_) => match member {
+                "MIN" | "MAX" => Some(scalar),
+                "BITS" => Some(Type::INT32),
+                _ => None,
+            },
+            Base::Float(_) => match member {
+                "MIN" | "MAX" | "LOWEST" | "EPSILON" | "POSITIVE_INFINITY"
+                | "NEGATIVE_INFINITY" => Some(scalar),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// The type of a member read from a value, reporting why it cannot be.
@@ -8529,6 +9372,14 @@ impl<'a> Checker<'a> {
         // `unsafe` needed to read/write through a view, only to construct
         // one (task 1.3).
         if matches!(object.base, Base::NativeSlice(_) | Base::NativeSliceMut(_)) {
+            match member.name.as_str() {
+                "length" => return Type::of(Base::Int(IntWidth::U64)),
+                "is_empty" => return Type::BOOLEAN,
+                _ => {}
+            }
+        }
+
+        if matches!(object.base, Base::Array(_) | Base::List(_)) {
             match member.name.as_str() {
                 "length" => return Type::of(Base::Int(IntWidth::U64)),
                 "is_empty" => return Type::BOOLEAN,
@@ -8588,6 +9439,54 @@ impl<'a> Checker<'a> {
             } else {
                 self.substitute_type(ty, &subst)
             };
+        }
+
+        // `Range<T>`'s own members (roadmap Phase 7): `start`, `end` and
+        // `step`, all of the element type. `reverse()` is a call — handled
+        // in `check_call`, where methods live.
+        if let Base::Range(id) = object.base {
+            let element = self
+                .range_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN);
+            if matches!(member.name.as_str(), "start" | "end" | "step") {
+                return element;
+            }
+            let name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{name}` has no member `{}`", member.name),
+                "a range exposes `start`, `end`, `step` and `reverse()`",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        // Native value-type metadata properties (`native-type-member-
+        // surface`): `String.length`/`byte_length`, `Char.byte_length`/
+        // `codepoint_count`, `Tuple.length` — all `Int32` per the
+        // handbook's reference tables.
+        match object.base {
+            Base::String if matches!(member.name.as_str(), "length" | "byte_length") => {
+                return Type::INT32;
+            }
+            Base::Char if matches!(member.name.as_str(), "byte_length" | "codepoint_count") => {
+                return Type::INT32;
+            }
+            Base::Tuple(_) if member.name == "length" => {
+                return Type::INT32;
+            }
+            // A traditional-enum case: `name` (the declared case name) and
+            // `value` (the mapping, the name today) are `String`s. Algebraic
+            // `EnumInstance` payloads have their own field names instead.
+            Base::Enum(_) | Base::EnumInstance(_)
+                if matches!(member.name.as_str(), "name" | "value") =>
+            {
+                return Type::STRING;
+            }
+            _ => {}
         }
 
         let Base::Class(id) = object.base else {
@@ -9154,8 +10053,10 @@ impl<'a> Checker<'a> {
             | Expr::Float(_)
             | Expr::Char(_)
             | Expr::Str(_)
+            | Expr::Regex(_)
             | Expr::Bool(_)
             | Expr::Null(_)
+            | Expr::Duration(_)
             | Expr::Path(_)
             | Expr::This(_)
             | Expr::Super(_)
@@ -9179,6 +10080,17 @@ impl<'a> Checker<'a> {
             Expr::Range(e) => {
                 self.check_recursive_reference(&e.start, name, nested);
                 self.check_recursive_reference(&e.end, name, nested);
+            }
+            Expr::Slice(e) => {
+                self.check_recursive_reference(&e.receiver, name, nested);
+                for part in [&e.start, &e.end, &e.step].into_iter().flatten() {
+                    self.check_recursive_reference(part, name, nested);
+                }
+            }
+            Expr::Tuple(e) => {
+                for element in &e.elements {
+                    self.check_recursive_reference(element, name, nested);
+                }
             }
             Expr::If(e) => {
                 self.check_recursive_reference(&e.condition, name, nested);
@@ -9422,6 +10334,68 @@ impl<'a> Checker<'a> {
         self.check_direct_call(expr, &signature)
     }
 
+    /// `s.m(...)` where `s` is a generic contract instantiation
+    /// (`Tagged<String>`, roadmap Phase 7): the contract's own `T` is
+    /// substituted by the instantiation's arguments before the signature is
+    /// checked, the same way a generic class's own members substitute —
+    /// gated to contracts whose members never name their parameters in
+    /// [`Self::resolve_implements_args`]/[`Self::resolve_contract_reference`],
+    /// so the substitution here only ever rewrites a signature that is
+    /// already concrete anyway; the machinery stays for the day the gate
+    /// lifts.
+    fn check_contract_instance_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        inst_id: u32,
+    ) -> Type {
+        let instance = self.contract_instances[inst_id as usize].clone();
+        let subst: Vec<(u32, Type)> = self.contracts[instance.contract as usize]
+            .type_params
+            .iter()
+            .copied()
+            .zip(instance.args.iter().copied())
+            .collect();
+        let contract = &self.contracts[instance.contract as usize];
+        let contract_name = contract.name.clone();
+        let Some(method) = contract.method(&field.name.name).cloned() else {
+            let known: Vec<&str> = contract.methods.iter().map(|m| m.name.as_str()).collect();
+            let help = if known.is_empty() {
+                format!("`{contract_name}` declares no methods")
+            } else {
+                format!("its methods are: {}", known.join(", "))
+            };
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!("`{contract_name}` has no method `{}`", field.name.name),
+                help,
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+        let signature = Signature {
+            name: method.name.clone(),
+            params: method
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    ty: self.substitute_type(p.ty, &subst),
+                    ..p.clone()
+                })
+                .collect(),
+            returns: self.substitute_type(method.returns, &subst),
+            shared: true,
+            span: method.span,
+            type_params: Vec::new(),
+            throws: method.throws.clone(),
+        };
+        self.check_direct_call(expr, &signature)
+    }
+
     /// `super(...)`, which runs the base's constructor on this instance.
     fn check_super_construction(&mut self, expr: &CallExpr) -> Type {
         let Some(base) = self.enclosing_base(expr.span, "super(...)") else {
@@ -9540,6 +10514,45 @@ impl<'a> Checker<'a> {
         // Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
 
+        // `.clone()` on an enum (roadmap Phase 7, derived `Clone` on `enum`):
+        // decided structurally — every variant's associated fields must
+        // themselves be `Clone`. A traditional enum (no associated data at
+        // all) qualifies trivially: it is a bare discriminant.
+        if field.name.name == "clone" && expr.args.is_empty() {
+            let (enum_id, subst) = match object.base {
+                Base::Enum(id) => (Some(id), Vec::new()),
+                Base::EnumInstance(id) => {
+                    let instance = self.enum_instances[id as usize].clone();
+                    let subst: Vec<(u32, Type)> = self.enums[instance.enum_id as usize]
+                        .type_params
+                        .iter()
+                        .copied()
+                        .zip(instance.args.iter().copied())
+                        .collect();
+                    (Some(instance.enum_id), subst)
+                }
+                _ => (None, Vec::new()),
+            };
+            if let Some(enum_id) = enum_id {
+                let mut in_progress = Vec::new();
+                if self.enum_is_clone(enum_id, &subst, &mut in_progress) {
+                    return object;
+                }
+                let name = self.name(object);
+                self.error(
+                    codes::NOT_CLONE,
+                    field.name.span,
+                    format!("`{name}` is not `Clone`"),
+                    "a variant's associated field is not `Clone`",
+                    Some(
+                        "implement `Clone` manually where possible, or remove/replace the offending field"
+                            .into(),
+                    ),
+                );
+                return Type::UNKNOWN;
+            }
+        }
+
         if let Base::Class(id) = object.base {
             // `.clone()` (roadmap Phase 4e, `fase-4e-clone`, design D1/D4):
             // a class that declares its own `clone` method (the manual
@@ -9561,6 +10574,9 @@ impl<'a> Checker<'a> {
         }
         if let Base::Contract(id) = object.base {
             return self.check_contract_call(expr, field, id);
+        }
+        if let Base::ContractInstance(id) = object.base {
+            return self.check_contract_instance_call(expr, field, id);
         }
         if let Base::Param(id) = object.base {
             return self.check_param_call(expr, field, id);
@@ -9599,6 +10615,24 @@ impl<'a> Checker<'a> {
                     field.name.name
                 ),
                 "callable values only support `.clone()`".to_string(),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        // An enum's only method is the derived `.clone()` handled at the
+        // top (roadmap Phase 7) — anything else is an ordinary unknown
+        // member, reported rather than unreachable.
+        if matches!(object.base, Base::Enum(_) | Base::EnumInstance(_)) {
+            let name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!("`{name}` has no method `{}`", field.name.name),
+                "an enum's only method is the derived `.clone()`",
                 None,
             );
             for arg in &expr.args {
@@ -9843,6 +10877,140 @@ impl<'a> Checker<'a> {
         let instance = self.intern_instance(GenericInstance { class: id, args });
         self.generic_constructions.insert(expr.span, instance);
         Type::of(Base::Instance(instance))
+    }
+
+    /// `Array<T>(capacity)` — the element type is taken from the expected
+    /// type or an explicit `Array<T>` annotation; capacity must be an integer.
+    fn check_array_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`Array<T>(capacity)` needs a known element type",
+                "write `let a: Array<T> = Array(capacity)` or use an explicit type annotation",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let element = if let Base::Array(id) = expected.base {
+            self.array_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Array` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return expected;
+        };
+
+        if expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Array<T>` needs a capacity or element arguments",
+                "found 0 argument(s)",
+                None,
+            );
+            return expected;
+        }
+
+        if expr.args.len() == 1 && expr.args[0].name.is_none() {
+            // `Array<T>(capacity)` — the single-argument form remains capacity.
+            let capacity = self.check_expr(&expr.args[0].value);
+            if !capacity.is_unknown() && !matches!(capacity.base, Base::Int(_)) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.args[0].value.span(),
+                    "`Array<T>` capacity must be an integer",
+                    format!("found {}", self.name(capacity)),
+                    None,
+                );
+            }
+        } else {
+            // `Array(e0, e1, …)` — an element literal.
+            for arg in &expr.args {
+                if let Some(name) = &arg.name {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        name.span,
+                        "an `Array` literal element cannot be named",
+                        "remove the name",
+                        None,
+                    );
+                }
+                let arg_ty = self.check_expr(&arg.value);
+                if !element.is_unknown() && !arg_ty.is_unknown() {
+                    self.expect_assignable(element, arg_ty, arg.value.span(), "array literal element");
+                }
+            }
+        }
+
+        if element.is_unknown() {
+            return expected;
+        }
+        let id = self.intern_array_type(element);
+        Type::of(Base::Array(id))
+    }
+
+    /// `List<T>()` — the element type is taken from the expected type.
+    fn check_list_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`List<T>()` needs a known element type",
+                "write `let l: List<T> = List()` or use an explicit type annotation",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let element = if let Base::List(id) = expected.base {
+            self.list_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`List` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            return expected;
+        };
+
+        for arg in &expr.args {
+            if let Some(name) = &arg.name {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    name.span,
+                    "a `List` literal element cannot be named",
+                    "remove the name",
+                    None,
+                );
+            }
+            let arg_ty = self.check_expr(&arg.value);
+            if !element.is_unknown() && !arg_ty.is_unknown() {
+                self.expect_assignable(element, arg_ty, arg.value.span(), "list literal element");
+            }
+        }
+
+        if element.is_unknown() {
+            return expected;
+        }
+        let id = self.intern_list_type(element);
+        Type::of(Base::List(id))
     }
 
     /// `Point(x: 1, y: 2)`: the implicit constructor of a record or value
@@ -10333,6 +11501,128 @@ impl<'a> Checker<'a> {
         Some(self.check_direct_call(expr, &signature))
     }
 
+    /// Built-in methods on `Array<T>` and `List<T>`: `add`, `insert`, and
+    /// `remove` for `List<T>`; no call-level methods on `Array<T>` apart
+    /// from those handled by the indexing and member paths.
+    fn check_array_list_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let element = match object.base {
+            Base::Array(id) => self.array_types.get(id as usize).copied(),
+            Base::List(id) => self.list_types.get(id as usize).copied(),
+            _ => return None,
+        }
+        .unwrap_or(Type::UNKNOWN);
+
+        match field.name.name.as_str() {
+            "add" if matches!(object.base, Base::List(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`List.add` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::VOID);
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !element.accepts(arg) {
+                    self.expect_assignable(element, arg, expr.args[0].value.span(), "the argument");
+                }
+                Some(Type::VOID)
+            }
+            "insert" if matches!(object.base, Base::List(_)) => {
+                if expr.args.len() != 2 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`List.insert` takes two arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::VOID);
+                }
+                let index = self.check_expr(&expr.args[0].value);
+                if !index.is_unknown() && !matches!(index.base, Base::Int(_)) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.args[0].value.span(),
+                        "`List.insert` index must be an integer",
+                        format!("found {}", self.name(index)),
+                        None,
+                    );
+                }
+                let arg = self.check_expr(&expr.args[1].value);
+                if !arg.is_unknown() && !element.accepts(arg) {
+                    self.expect_assignable(element, arg, expr.args[1].value.span(), "the argument");
+                }
+                Some(Type::VOID)
+            }
+            "remove" if matches!(object.base, Base::List(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`List.remove` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::VOID);
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !element.accepts(arg) && !matches!(arg.base, Base::Int(_)) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.args[0].value.span(),
+                        "`List.remove` argument must be an index or the element value",
+                        format!("found {}", self.name(arg)),
+                        None,
+                    );
+                }
+                Some(Type::BOOLEAN)
+            }
+            "clone" => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`clone` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                }
+                Some(object)
+            }
+            "to_string" => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`to_string` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                }
+                Some(Type::STRING)
+            }
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
@@ -10403,6 +11693,75 @@ impl<'a> Checker<'a> {
             return self.check_weak_from(expr);
         }
 
+        // `Int32.parse("5")`, `Float64.parse("1.5")`, `Regex.parse(p)`
+        // (`native-type-member-surface`): static calls on type names, decided
+        // here for the same reason `Pointer.from`/`Weak.from` above are —
+        // the base names a type, not a value with a member. Each returns a
+        // `Result` carrying its own error type.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && field.name.name == "parse"
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            let target = if base.name == "Regex" {
+                Some(Type::REGEX)
+            } else {
+                Type::from_name(&base.name)
+                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)))
+            };
+            if let Some(target) = target {
+                // `parse(text)` and `parse(text, radix: n)` — the radix form
+                // only exists on the integer family.
+                let radix = expr.args.len() == 2
+                    && expr.args[1].name.as_ref().is_some_and(|n| n.name == "radix")
+                    && matches!(target.base, Base::Int(_));
+                if expr.args.len() != 1 && !radix {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`parse` takes one argument (integers also accept `radix:`)",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        arg,
+                        expr.args[0].value.span(),
+                        "the argument",
+                    );
+                }
+                if radix {
+                    let r = self.check_expr(&expr.args[1].value);
+                    if !r.is_unknown() && !matches!(r.base, Base::Int(_)) {
+                        self.expect_assignable(
+                            Type::INT32,
+                            r,
+                            expr.args[1].value.span(),
+                            "the radix",
+                        );
+                    }
+                }
+                let native = self
+                    .native_exceptions
+                    .expect("the exception hierarchy is registered");
+                let error = if matches!(target.base, Base::Regex) {
+                    native.regex_error
+                } else {
+                    native.parse_error
+                };
+                self.scalar_static_accesses.insert(field.span);
+                return self.native_result_with(target, error);
+            }
+        }
+
         // `Pin(obj)` (roadmap Phase 4e, `phase-4e-memory`, design D1): a
         // built-in constructor that pins a mutable reference and returns
         // `Pin<T>`. `Pin` names a type, not an ordinary function.
@@ -10422,6 +11781,16 @@ impl<'a> Checker<'a> {
             let object = self.check_expr(&field.object);
             let object = self.unpin_type(object);
 
+            // `Array<T>` and `List<T>` built-in methods. These are recognized
+            // by receiver type and lowered to runtime calls.
+            if matches!(object.base, Base::Array(_) | Base::List(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_array_list_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
             // `myInt.to_string()`: the explicit spelling of the same
             // conversion `println`/interpolation reach implicitly (roadmap
             // Phase 3b, task 8's own follow-up). A native scalar has no
@@ -10437,6 +11806,12 @@ impl<'a> Checker<'a> {
                     object.base,
                     Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
                 )
+                // `v.to_string(radix: n)` on an integer is its own member
+                // (`native-type-member-surface`) — the dedicated integer
+                // branch below checks it, so this one stays out of its way.
+                && !(matches!(object.base, Base::Int(_))
+                    && expr.args.len() == 1
+                    && expr.args[0].name.as_ref().is_some_and(|n| n.name == "radix"))
                 && self.is_printable(object)
             {
                 if !expr.args.is_empty() {
@@ -10452,6 +11827,541 @@ impl<'a> Checker<'a> {
                     self.check_expr(&arg.value);
                 }
                 return Type::STRING;
+            }
+
+            // Default `to_string()` for structured values without a declared
+            // one (`native-type-member-surface`): tuples, enum cases,
+            // records, `Weak<T>` and callable values answer a readable
+            // default rendering. A `class` that *does* declare `to_string`
+            // still reaches `check_method_call_on` below — this branch only
+            // covers receivers `is_printable` and the method table reject.
+            if field.name.name == "to_string"
+                && !field.safe
+                && !object.nullable
+                && expr.args.is_empty()
+                && match object.base {
+                    Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
+                    | Base::Function(_) | Base::Weak(_) => true,
+                    Base::Class(id) => {
+                        let class = &self.classes[id as usize];
+                        matches!(class.kind, zirk_ast::ClassKind::Record)
+                            && class.method("to_string").is_none()
+                    }
+                    _ => false,
+                }
+            {
+                return Type::STRING;
+            }
+
+            // `regex.matches(text)`: built-in regex method, lowered to a
+            // runtime call.
+            if field.name.name == "matches"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Regex)
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`matches` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        arg,
+                        expr.args[0].value.span(),
+                        "the argument",
+                    );
+                }
+                return Type::BOOLEAN;
+            }
+
+            // `regex.replace(text, replacement)`: built-in regex method.
+            if field.name.name == "replace"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Regex)
+            {
+                if expr.args.len() != 2 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`replace` takes two arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let text = self.check_expr(&expr.args[0].value);
+                let repl = self.check_expr(&expr.args[1].value);
+                if !text.is_unknown() && !Type::STRING.accepts(text) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        text,
+                        expr.args[0].value.span(),
+                        "the first argument",
+                    );
+                }
+                if !repl.is_unknown() && !Type::STRING.accepts(repl) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        repl,
+                        expr.args[1].value.span(),
+                        "the second argument",
+                    );
+                }
+                return Type::STRING;
+            }
+
+            // `regex.find(text)`: built-in regex method, lowered to a
+            // runtime call returning `Regex.Match?`.
+            if field.name.name == "find"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Regex)
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`find` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        arg,
+                        expr.args[0].value.span(),
+                        "the argument",
+                    );
+                }
+                return Type::of(Base::Class(self.regex_match_class)).as_nullable();
+            }
+
+            // `regex.split(text)`: built-in regex method, lowered to a runtime
+            // call returning `List<String>`.
+            if field.name.name == "split"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Regex)
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`split` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        arg,
+                        expr.args[0].value.span(),
+                        "the argument",
+                    );
+                }
+                let id = self.intern_list_type(Type::STRING);
+                return Type::of(Base::List(id));
+            }
+
+            // `regex.find_all(text)`: built-in regex method, lowered to a
+            // runtime call returning `List<Regex.Match>` — the iterable
+            // entry point over every non-overlapping match (`matches`
+            // already means `Boolean` match testing, so iteration lives
+            // under its own name).
+            if field.name.name == "find_all"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Regex)
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`find_all` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                    self.expect_assignable(
+                        Type::STRING,
+                        arg,
+                        expr.args[0].value.span(),
+                        "the argument",
+                    );
+                }
+                let id =
+                    self.intern_list_type(Type::of(Base::Class(self.regex_match_class)));
+                return Type::of(Base::List(id));
+            }
+
+            // `Regex.Match.group(n)` / `Regex.Match.group(name)`: built-in
+            // regex match method, lowered to a runtime call.
+            if field.name.name == "group"
+                && !field.safe
+                && !object.nullable
+                && matches!(object.base, Base::Class(id) if id == self.regex_match_class)
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`group` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let arg = self.check_expr(&expr.args[0].value);
+                if !arg.is_unknown() && !matches!(arg.base, Base::Int(_) | Base::String) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.args[0].value.span(),
+                        "`group` expects an integer index or a string name",
+                        format!("received {}", self.name(arg)),
+                        None,
+                    );
+                }
+                return Type::STRING;
+            }
+
+            // `String` built-in methods (roadmap Phase 7, `String` ops).
+            // These are recognized by receiver type and lowered to runtime
+            // calls.
+            if matches!(object.base, Base::String) && !field.safe && !object.nullable {
+                match field.name.name.as_str() {
+                    "trim" | "trim_start" | "trim_end" | "to_lowercase"
+                    | "to_uppercase" | "clone"
+                        if expr.args.is_empty() =>
+                    {
+                        return Type::STRING;
+                    }
+                    "is_empty" if expr.args.is_empty() => return Type::BOOLEAN,
+                    "contains" | "starts_with" | "ends_with" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::BOOLEAN;
+                    }
+                    "split" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::of(Base::List(self.intern_list_type(Type::STRING)));
+                    }
+                    "split_whitespace" | "lines" if expr.args.is_empty() => {
+                        return Type::of(Base::List(self.intern_list_type(Type::STRING)));
+                    }
+                    "bytes" if expr.args.is_empty() => {
+                        return Type::of(Base::List(
+                            self.intern_list_type(Type::of(Base::Int(IntWidth::U8))),
+                        ));
+                    }
+                    "codepoints" if expr.args.is_empty() => {
+                        return Type::of(Base::List(
+                            self.intern_list_type(Type::of(Base::Int(IntWidth::U32))),
+                        ));
+                    }
+                    "chars" if expr.args.is_empty() => {
+                        return Type::of(Base::List(self.intern_list_type(Type::of(Base::Char))));
+                    }
+                    "substring" if expr.args.len() == 2 => {
+                        for arg in &expr.args {
+                            let t = self.check_expr(&arg.value);
+                            if !t.is_unknown() && !matches!(t.base, Base::Int(_)) {
+                                self.error(
+                                    codes::TYPE_MISMATCH,
+                                    arg.value.span(),
+                                    "expected an integer",
+                                    format!("received {}", self.name(t)),
+                                    None,
+                                );
+                            }
+                        }
+                        return Type::STRING;
+                    }
+                    "search" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::of(Base::Int(IntWidth::I64));
+                    }
+                    // `s.find(needle)` (`native-type-member-surface`): the
+                    // first grapheme index or `null` — `search`'s `-1`
+                    // contract expressed as a nullable `Int64`.
+                    "find" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::of(Base::Int(IntWidth::I64)).as_nullable();
+                    }
+                    "replace" if expr.args.len() == 2 => {
+                        for arg in &expr.args {
+                            let t = self.check_expr(&arg.value);
+                            if !t.is_unknown() && !Type::STRING.accepts(t) {
+                                self.expect_assignable(
+                                    Type::STRING,
+                                    t,
+                                    arg.value.span(),
+                                    "the argument",
+                                );
+                            }
+                        }
+                        return Type::STRING;
+                    }
+                    // `s.normalize("NFC")` — the form is spelled as text;
+                    // unknown forms are a runtime `InvalidCastError`-style
+                    // failure handled by the helper.
+                    "normalize" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::STRING;
+                    }
+                    _ => {}
+                }
+            }
+
+            // `r.reverse()` (roadmap Phase 7, `Range<T>`): the same range
+            // walked from its last element to its first — a new `Range<T>`,
+            // the receiver is untouched.
+            if matches!(object.base, Base::Range(_))
+                && field.name.name == "reverse"
+                && !field.safe
+                && !object.nullable
+            {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`reverse` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                }
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return object;
+            }
+
+            // `Char` built-in classification and normalization methods
+            // (`native-type-member-surface` adds the metadata and the rest
+            // of the documented classification surface).
+            if matches!(object.base, Base::Char) && !field.safe && !object.nullable {
+                match field.name.name.as_str() {
+                    "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter"
+                    | "is_whitespace" | "is_ascii" | "is_alphabetic" | "is_numeric"
+                    | "is_alphanumeric"
+                        if expr.args.is_empty() =>
+                    {
+                        return Type::BOOLEAN;
+                    }
+                    "to_uppercase" | "to_lowercase" if expr.args.is_empty() => {
+                        return Type::STRING;
+                    }
+                    "ascii_code" if expr.args.is_empty() => {
+                        return Type::of(Base::Int(IntWidth::I32));
+                    }
+                    "normalize" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !Type::STRING.accepts(arg) {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return Type::STRING;
+                    }
+                    _ => {}
+                }
+            }
+
+            // `Duration` sign and magnitude methods (roadmap Phase 7,
+            // `native-type-member-surface`): pure nanosecond operations on
+            // the `i64` representation, recognized by receiver type and
+            // lowered to runtime calls or plain comparisons.
+            if matches!(object.base, Base::Duration) && !field.safe && !object.nullable {
+                match field.name.name.as_str() {
+                    "abs" if expr.args.is_empty() => return Type::DURATION,
+                    "sign" if expr.args.is_empty() => return Type::INT32,
+                    "is_zero" | "is_positive" | "is_negative" if expr.args.is_empty() => {
+                        return Type::BOOLEAN;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Integer value methods (`native-type-member-surface`): every
+            // `Int8`…`UInt128` receiver exposes the documented math, bit,
+            // and deliberate-overflow surface. Arguments that name another
+            // integer accept any integer type — the runtime helpers work in
+            // `i128` and narrow to the receiver's width.
+            if let Base::Int(_) = object.base
+                && !field.safe
+                && !object.nullable
+            {
+                match field.name.name.as_str() {
+                    "abs" | "sign" | "bit_count" | "leading_zeros" | "trailing_zeros"
+                        if expr.args.is_empty() =>
+                    {
+                        return match field.name.name.as_str() {
+                            "abs" => object,
+                            _ => Type::INT32,
+                        };
+                    }
+                    "is_zero" | "is_even" | "is_odd" if expr.args.is_empty() => {
+                        return Type::BOOLEAN;
+                    }
+                    "min" | "max" | "rotate_left" | "rotate_right" | "wrapping_add"
+                    | "wrapping_sub" | "wrapping_mul" | "saturating_add"
+                    | "saturating_sub" | "saturating_mul"
+                        if expr.args.len() == 1 =>
+                    {
+                        self.check_int_argument(expr, object);
+                        return object;
+                    }
+                    "clamp" if expr.args.len() == 2 => {
+                        self.check_int_argument(expr, object);
+                        return object;
+                    }
+                    "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
+                    | "checked_rem" | "checked_pow"
+                        if expr.args.len() == 1 =>
+                    {
+                        self.check_int_argument(expr, object);
+                        let overflow = self
+                            .native_exceptions
+                            .expect("the exception hierarchy is registered")
+                            .overflow_error;
+                        return self.native_result_with(object, overflow);
+                    }
+                    "to_string"
+                        if expr.args.len() == 1
+                            && expr.args[0].name.as_ref().is_some_and(|n| n.name == "radix") =>
+                    {
+                        self.check_int_argument(expr, object);
+                        return Type::STRING;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Float value methods (`native-type-member-surface`).
+            if let Base::Float(_) = object.base
+                && !field.safe
+                && !object.nullable
+            {
+                match field.name.name.as_str() {
+                    "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction"
+                    | "sqrt"
+                        if expr.args.is_empty() =>
+                    {
+                        return object;
+                    }
+                    "sign" if expr.args.is_empty() => return Type::INT32,
+                    "is_zero" | "is_finite" | "is_infinite" | "is_negative"
+                        if expr.args.is_empty() =>
+                    {
+                        return Type::BOOLEAN;
+                    }
+                    "min" | "max" | "pow" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown()
+                            && !matches!(arg.base, Base::Int(_) | Base::Float(_))
+                        {
+                            self.expect_assignable(
+                                object,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        return object;
+                    }
+                    "clamp" if expr.args.len() == 2 => {
+                        for arg in &expr.args {
+                            let t = self.check_expr(&arg.value);
+                            if !t.is_unknown() && !object.accepts(t) {
+                                self.expect_assignable(
+                                    object,
+                                    t,
+                                    arg.value.span(),
+                                    "the argument",
+                                );
+                            }
+                        }
+                        return object;
+                    }
+                    _ => {}
+                }
             }
 
             // `Throwable.stack_trace()` / `Throwable.suppressed()` are
@@ -10567,13 +12477,22 @@ impl<'a> Checker<'a> {
                 };
             }
 
+            // `Base::Enum`/`EnumInstance` are here only for the derived
+            // `.clone()` `check_method_call_on` itself recognizes (roadmap
+            // Phase 7) — every other member still falls through to the
+            // ordinary "no members" diagnostic. `Base::ContractInstance`
+            // dispatches its methods through `check_contract_instance_call`
+            // the same way `Base::Contract` does.
             if matches!(
                 object.base,
                 Base::Class(_)
                     | Base::Contract(_)
+                    | Base::ContractInstance(_)
                     | Base::Param(_)
                     | Base::Instance(_)
                     | Base::Function(_)
+                    | Base::Enum(_)
+                    | Base::EnumInstance(_)
             ) {
                 if field.safe {
                     self.reject_redundant_safe(object, field.object.span());
@@ -10647,6 +12566,16 @@ impl<'a> Checker<'a> {
                 && matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String)
             {
                 return self.check_context_conversion(target, expr);
+            }
+
+            // `Array<T>(capacity)` and `List<T>()` are compiler-built-in
+            // constructors; the element type comes from the surrounding
+            // expected type when no explicit type arguments are written.
+            if callee.name == "Array" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_array_construction(expr, expected);
+            }
+            if callee.name == "List" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_list_construction(expr, expected);
             }
 
             // `User(1, "x")` builds an instance. There is no `new`: the type
@@ -11358,7 +13287,8 @@ impl<'a> Checker<'a> {
         if actual.is_unknown() {
             return;
         }
-        if !actual.nullable && matches!(actual.base, Base::Int(_) | Base::Float(_)) {
+        if !actual.nullable && matches!(actual.base, Base::Int(_) | Base::Float(_) | Base::Duration)
+        {
             return;
         }
 
@@ -11607,13 +13537,16 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         {
             left.common_numeric(right)
         }
+        // `Duration` arithmetic.
+        (Base::Duration, Base::Duration, Add | Sub) => Some(Type::DURATION),
+        (Base::Duration, Base::Duration, Div) => Some(Type::FLOAT64),
+        (Base::Duration, Base::Int(_) | Base::Float(_), Mul | Div)
+        | (Base::Int(_) | Base::Float(_), Base::Duration, Mul) => Some(Type::DURATION),
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, accepting any integer width; lower
         // widens the count to `Int32` for the runtime call.
-        (Base::String, Base::Int(_), Mul) | (Base::Int(_), Base::String, Mul) => {
-            Some(Type::STRING)
-        }
+        (Base::String, Base::Int(_), Mul) | (Base::Int(_), Base::String, Mul) => Some(Type::STRING),
         _ => None,
     }
 }

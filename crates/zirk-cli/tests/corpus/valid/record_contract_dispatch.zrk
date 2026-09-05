@@ -6,10 +6,8 @@
 // existing dispatch (unchanged by this feature) reaches the record's own
 // `describe()` correctly through the interface-typed reference.
 //
-// (`value class` cannot exercise this: its compact one-line grammar has no
-// `implements` clause and no method body at all — only `record`'s own body
-// form can declare either, so it is the only value type this scenario can
-// use today.)
+// (Only `record`'s own body form can declare `implements` and methods,
+// so it is the only value type this scenario can use today.)
 interface Describable {
     fn describe(): String;
 }

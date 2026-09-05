@@ -115,8 +115,12 @@ impl IntWidth {
             (a, b) if a == b => true,
             (I8 | I16 | I32 | I64 | I128, U8 | U16 | U32 | U64 | U128) => false,
             (U8 | U16 | U32 | U64 | U128, I8 | I16 | I32 | I64 | I128) => false,
-            (I8 | I16 | I32 | I64 | I128, I8 | I16 | I32 | I64 | I128) => self.bits() >= other.bits(),
-            (U8 | U16 | U32 | U64 | U128, U8 | U16 | U32 | U64 | U128) => self.bits() >= other.bits(),
+            (I8 | I16 | I32 | I64 | I128, I8 | I16 | I32 | I64 | I128) => {
+                self.bits() >= other.bits()
+            }
+            (U8 | U16 | U32 | U64 | U128, U8 | U16 | U32 | U64 | U128) => {
+                self.bits() >= other.bits()
+            }
         }
     }
 
@@ -213,6 +217,10 @@ pub enum Base {
     Char,
     Boolean,
     String,
+    /// An exact elapsed-time value, stored as nanoseconds.
+    Duration,
+    /// A compiled regular expression, represented as an opaque runtime handle.
+    Regex,
     /// The type of the `null` literal, assignable to any nullable type.
     Null,
     /// A declared enum, identified by its index in the checker's table.
@@ -325,8 +333,13 @@ pub enum Base {
     /// every other type's `?`, so a `Union` always has at least two
     /// alternatives.
     Union(u32),
-    /// The result of `a..b`, iterable by `for ... in`.
-    Range,
+    /// `Range<T>` (roadmap Phase 7): the result of `a..b`, `a..=b` or
+    /// `a..b..step`, iterable by `for ... in`, identified by the index of
+    /// its element type `T` in the checker's `range_types` table.
+    Range(u32),
+    /// `Tuple(T...)` (roadmap Phase 3b), identified by its index in the
+    /// checker's `tuple_types` table.
+    Tuple(u32),
     /// The bottom type (roadmap Phase 4a): no value of it exists, so an
     /// expression of this type is assignable anywhere and unifies with any
     /// type at a branch join (`cond ? 5 : fatalError("...")` types `Int32`,
@@ -339,6 +352,12 @@ pub enum Base {
     /// anything involving an `Unknown` is silently accepted, because the real
     /// error was already reported at its origin.
     Unknown,
+    /// `Array<T>`, identified by the index of its element type `T` in the
+    /// checker's `array_types` table.
+    Array(u32),
+    /// `List<T>`, identified by the index of its element type `T` in the
+    /// checker's `list_types` table.
+    List(u32),
 }
 
 impl Type {
@@ -347,8 +366,10 @@ impl Type {
     pub const FLOAT64: Type = Type::of(Base::Float(FloatWidth::F64));
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
+    pub const DURATION: Type = Type::of(Base::Duration);
+    pub const REGEX: Type = Type::of(Base::Regex);
     pub const NULL: Type = Type::of(Base::Null);
-    pub const RANGE: Type = Type::of(Base::Range);
+
     pub const UNKNOWN: Type = Type::of(Base::Unknown);
 
     pub const fn of(base: Base) -> Self {
@@ -540,7 +561,7 @@ impl Type {
         matches!(
             self.base,
             Base::Int(_) | Base::Float(_) | Base::Boolean | Base::String
-        )
+        ) && !matches!(self.base, Base::Tuple(_))
     }
 
     /// Range of values representable by the type, for integer literals.
@@ -586,6 +607,8 @@ impl Type {
             "Char" => Type::of(Base::Char),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
+            "Duration" => Type::DURATION,
+            "Regex" => Type::REGEX,
             "Never" => Type::of(Base::Never),
             _ => return None,
         })
@@ -607,6 +630,7 @@ pub fn is_ffi_safe(ty: Type, pointer_types: &[Type]) -> bool {
         Base::Pointer(id) => pointer_types
             .get(id as usize)
             .is_some_and(|&inner| is_ffi_safe(inner, pointer_types)),
+        Base::Tuple(_) => false,
         _ => false,
     }
 }
@@ -624,8 +648,10 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Char => "Char".to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
+        Base::Duration => "Duration".to_string(),
+        Base::Regex => "Regex".to_string(),
         Base::Null => "Null".to_string(),
-        Base::Range => "Range".to_string(),
+        Base::Range(id) => format!("Range<{}>", describe(names.range_element(id), names)),
         Base::Never => "Never".to_string(),
         Base::Unknown => "<unknown>".to_string(),
         Base::Enum(id) => names.enum_name(id),
@@ -652,6 +678,9 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
             describe(names.dependent_element(id), names)
         ),
         Base::Pin(id) => format!("Pin<{}>", describe(names.pin_element(id), names)),
+        Base::Tuple(id) => names.tuple_name(id),
+        Base::Array(id) => format!("Array<{}>", describe(names.array_element(id), names)),
+        Base::List(id) => format!("List<{}>", describe(names.list_element(id), names)),
     };
 
     if ty.nullable {
@@ -678,6 +707,10 @@ pub trait TypeNames {
     fn native_slice_mut_element(&self, id: u32) -> Type;
     fn dependent_element(&self, id: u32) -> Type;
     fn pin_element(&self, id: u32) -> Type;
+    fn tuple_name(&self, id: u32) -> String;
+    fn array_element(&self, id: u32) -> Type;
+    fn list_element(&self, id: u32) -> Type;
+    fn range_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -755,11 +788,17 @@ pub struct AssociatedFieldInfo {
     pub ty: Type,
 }
 
+/// One element of a tuple type, a value type without a name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TupleType {
+    pub elements: Vec<Type>,
+}
+
 /// A declared class: a nominal type with fields, constructors and methods.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassType {
     pub name: String,
-    /// `Class`, `Record` or `ValueClass` — what rules apply, per
+    /// `Class` or `Record` — what rules apply, per
     /// `zirk_ast::ClassKind`.
     pub kind: zirk_ast::ClassKind,
     /// The class this one extends, by its id.
@@ -947,19 +986,15 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // families. They are compiler-known native types, not library objects:
     // what that phase adds is their implementation, not their existence.
     const PHASE_7: &[&str] = &[
-        "List",
         "Map",
         "Set",
-        "Array",
         "Date",
         "Time",
         "DateTime",
         "Instant",
         "ZonedDateTime",
         "TimeZone",
-        "Duration",
         "Period",
-        "Regex",
     ];
     // Phase 7b brings the functional style. `Iterable<T>` and `Iterator<T>`
     // are registered as native contracts in `checker.rs` and are no longer
@@ -1050,7 +1085,9 @@ mod tests {
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Task").map(|t| t.phase), Some(Phase::FIVE));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
-        assert_eq!(pending_type("List").map(|t| t.phase), Some(Phase::SEVEN));
+        assert_eq!(pending_type("Map").map(|t| t.phase), Some(Phase::SEVEN));
+        assert!(pending_type("Array").is_none(), "`Array<T>` is implemented");
+        assert!(pending_type("List").is_none(), "`List<T>` is implemented");
     }
 
     #[test]
@@ -1062,7 +1099,6 @@ mod tests {
             "Instant",
             "ZonedDateTime",
             "TimeZone",
-            "Duration",
             "Period",
         ] {
             assert_eq!(
@@ -1071,6 +1107,15 @@ mod tests {
                 "`{name}` should announce its phase"
             );
         }
+    }
+
+    #[test]
+    fn duration_resolves_to_its_own_type() {
+        assert_eq!(Type::from_name("Duration"), Some(Type::DURATION));
+        assert!(
+            pending_type("Duration").is_none(),
+            "`Duration` is implemented, not pending"
+        );
     }
 
     #[test]

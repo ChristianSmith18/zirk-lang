@@ -89,14 +89,18 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
     // Zirk functions so `InstKind::Call` finds either uniformly (design D7:
     // an extern call lowers through the same `Call` instruction).
     for extern_fn in &module.externs {
-        let declared = declare_extern_fn(
-            context,
-            &llvm,
-            extern_fn,
-            &module.closures,
-            &module.values,
-            &module.enums,
-        );
+        let declared = if let Some(existing) = llvm.get_function(&extern_fn.name) {
+            existing
+        } else {
+            declare_extern_fn(
+                context,
+                &llvm,
+                extern_fn,
+                &module.closures,
+                &module.values,
+                &module.enums,
+            )
+        };
         functions.insert(extern_fn.name.clone(), declared);
     }
 
@@ -340,6 +344,8 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Boolean => context.bool_type().into(),
         // `String` is an opaque pointer. Its layout belongs to the runtime.
         ir::IrType::String => context.ptr_type(AddressSpace::default()).into(),
+        // `Regex` is an opaque pointer to a process-wide cache entry.
+        ir::IrType::Regex => context.ptr_type(AddressSpace::default()).into(),
         // `Char` shares `String`'s opaque runtime representation (ADR-014).
         ir::IrType::Char => context.ptr_type(AddressSpace::default()).into(),
         // An object is reached through its address: identity *is* the address,
@@ -349,7 +355,7 @@ fn llvm_type_in<'ctx>(
         // Reached through the contract, but still just the object's address:
         // the descriptor it already carries answers which body to run.
         ir::IrType::Contract(_) => context.ptr_type(AddressSpace::default()).into(),
-        // A record or value class carries no identity, so it is the struct
+        // A record carries no identity, so it is the struct
         // itself, not a pointer to one — passed, returned and stored inline,
         // with no allocation (roadmap task 11.5).
         ir::IrType::Value(id) => {
@@ -413,6 +419,9 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Dependent(_) | ir::IrType::Pin(_) => {
             context.ptr_type(AddressSpace::default()).into()
         }
+        // `Array<T>`/`List<T>` are opaque GC-managed object handles, exactly
+        // like `String`/`Object`.
+        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
@@ -434,7 +443,7 @@ fn native_slice_struct<'ctx>(context: &'ctx Context) -> inkwell::types::StructTy
 const NATIVE_SLICE_POINTER_FIELD: u32 = 0;
 const NATIVE_SLICE_LENGTH_FIELD: u32 = 1;
 
-/// The struct a record or value class occupies — its fields, in declaration
+/// The struct a record occupies — its fields, in declaration
 /// order, with no header and no indirection (roadmap task 11.5).
 fn value_struct<'ctx>(
     context: &'ctx Context,
@@ -1056,6 +1065,66 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("a journaled write's target is sized")
     }
 
+    /// Alignment of `ty` in bytes, as an LLVM `i64` value.
+    fn byte_align_of(&self, ty: ir::IrType) -> inkwell::values::IntValue<'ctx> {
+        let llvm = self
+            .llvm_type(ty)
+            .expect("a sized target is not Void");
+        let bits = llvm.get_alignment();
+        self.builder
+            .build_int_z_extend(bits, self.context.i64_type(), "align")
+            .expect("align to i64")
+    }
+
+    /// Whether `ty` is a single GC-managed pointer the runtime should trace.
+    fn is_gc_reference(&self, ty: ir::IrType) -> bool {
+        matches!(
+            ty,
+            ir::IrType::String
+                | ir::IrType::Char
+                | ir::IrType::Regex
+                | ir::IrType::Object(_)
+                | ir::IrType::Contract(_)
+                | ir::IrType::Weak(_)
+                | ir::IrType::Dependent(_)
+                | ir::IrType::Pin(_)
+                | ir::IrType::Array(_)
+                | ir::IrType::List(_)
+        )
+    }
+
+    /// Element `IrType` and metadata for an `Array<T>` or `List<T>` id.
+    fn array_list_element(&self, ty: ir::IrType) -> (u32, ir::IrType, bool) {
+        let (id, table) = match ty {
+            ir::IrType::Array(id) => (id, &self.module.array_types),
+            ir::IrType::List(id) => (id, &self.module.list_types),
+            _ => panic!("expected Array/List, got {ty:?}"),
+        };
+        let element = table[id as usize];
+        let is_ref = self.is_gc_reference(element);
+        (id, element, is_ref)
+    }
+
+    /// Builds an `i1` boolean constant for the runtime's `is_ref` flag.
+    fn bool_const(&self, value: bool) -> inkwell::values::IntValue<'ctx> {
+        self.context.bool_type().const_int(value as u64, false)
+    }
+
+    /// Spills `value` to a stack slot of `element` type and returns its
+    /// address; used to pass element values by pointer to list helpers.
+    fn element_value_ptr(
+        &self,
+        value: inkwell::values::BasicValueEnum<'ctx>,
+        element: ir::IrType,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let ty = self
+            .llvm_type(element)
+            .expect("an element type has an LLVM representation");
+        let slot = self.builder.build_alloca(ty, "list_value").expect("alloca");
+        self.builder.build_store(slot, value).expect("store element");
+        slot
+    }
+
     /// The LLVM struct that describes the layout of a closure's captured
     /// values (without the GC header that `zirk_rt_alloc_callable` prefixes).
     fn closure_payload_struct(
@@ -1300,28 +1369,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     fn emit_instruction(&mut self, instruction: &ir::Instruction) {
         let value: Option<BasicValueEnum> = match &instruction.kind {
-            ir::InstKind::ConstInt(value) => Some(
-                match instruction.ty {
-                    ir::IrType::Int(width) => {
-                        let int_type = self
-                            .context
-                            .custom_width_int_type(
-                                std::num::NonZeroU32::new(width.bits())
-                                    .expect("every IntWidth is nonzero"),
-                            )
-                            .expect("every IntWidth is a valid LLVM integer width");
-                        if width.bits() <= 64 {
-                            int_type.const_int(*value as u64, true).into()
-                        } else {
-                            let bits = *value as u128;
-                            int_type
-                                .const_int_arbitrary_precision(&[bits as u64, (bits >> 64) as u64])
-                                .into()
-                        }
+            ir::InstKind::ConstInt(value) => Some(match instruction.ty {
+                ir::IrType::Int(width) => {
+                    let int_type = self
+                        .context
+                        .custom_width_int_type(
+                            std::num::NonZeroU32::new(width.bits())
+                                .expect("every IntWidth is nonzero"),
+                        )
+                        .expect("every IntWidth is a valid LLVM integer width");
+                    if width.bits() <= 64 {
+                        int_type.const_int(*value as u64, true).into()
+                    } else {
+                        let bits = *value as u128;
+                        int_type
+                            .const_int_arbitrary_precision(&[bits as u64, (bits >> 64) as u64])
+                            .into()
                     }
-                    _ => unreachable!("ConstInt must have an Int type"),
-                },
-            ),
+                }
+                _ => unreachable!("ConstInt must have an Int type"),
+            }),
             ir::InstKind::ConstBool(value) => Some(
                 self.context
                     .bool_type()
@@ -1754,7 +1821,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             ir::InstKind::LoadField { .. } if instruction.ty == ir::IrType::Void => None,
 
             ir::InstKind::LoadField { object, index } => {
-                // A record, value class or enum payload field comes straight
+                // A record or enum payload field comes straight
                 // out of the value with `extractvalue`: there is no pointer
                 // to GEP into (roadmap tasks 11.3/11.5). An enum's field
                 // sits past its discriminant, the same way an object's sits
@@ -2502,7 +2569,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             // `Pointer.from(place)` where `place` is a field (design D8):
             // the field's own already-computed GEP. Only an `Object`
-            // receiver is supported by this slice — a record/value class's
+            // receiver is supported by this slice — a record's
             // field has no address of its own to take without deciding
             // where the value itself lives first, which is out of scope
             // here (the checker's escape rule and the FFI-safe element
@@ -2753,6 +2820,294 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_store(element, value_operand)
                     .expect("native slice store");
                 None
+            }
+
+            // `Array<T>(capacity)` / `List<T>()` allocation.
+            ir::InstKind::ArrayNew { element_id, capacity } => {
+                let element = self.module.array_types[*element_id as usize];
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let capacity = self.operand(*capacity).into_int_value();
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.array_new,
+                        &[
+                            capacity.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "array",
+                    )
+                    .expect("array new");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::ListNew { element_id } => {
+                let element = self.module.list_types[*element_id as usize];
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.list_new,
+                        &[elem_size.into(), elem_align.into(), is_ref.into()],
+                        "list",
+                    )
+                    .expect("list new");
+                call.try_as_basic_value().basic()
+            }
+
+            // `array.length` / `list.length`.
+            ir::InstKind::ArrayLength(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let call = self
+                    .builder
+                    .build_call(self.runtime.array_length, &[receiver.into()], "array_length")
+                    .expect("array length");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::ListLength(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let call = self
+                    .builder
+                    .build_call(self.runtime.list_length, &[receiver.into()], "list_length")
+                    .expect("list length");
+                call.try_as_basic_value().basic()
+            }
+
+            // `array[i]` / `list[i]` read.
+            ir::InstKind::ArrayListLoad { receiver, index } => {
+                let element = instruction.ty;
+                let receiver_value = self.operand(*receiver);
+                let function = if matches!(self.value_types[&receiver.0], ir::IrType::Array(_)) {
+                    self.runtime.array_element
+                } else {
+                    self.runtime.list_element
+                };
+                let elem_size = self.byte_size_of(element);
+                let ptr = self
+                    .builder
+                    .build_call(
+                        function,
+                        &[
+                            receiver_value.into_pointer_value().into(),
+                            self.operand(*index).into_int_value().into(),
+                            elem_size.into(),
+                        ],
+                        "array_list_elem_ptr",
+                    )
+                    .expect("array/list element pointer")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("element pointer")
+                    .into_pointer_value();
+                let llvm_element = self
+                    .llvm_type(element)
+                    .expect("an element is never Void");
+                Some(
+                    self.builder
+                        .build_load(llvm_element, ptr, "array_list_load")
+                        .expect("array/list load"),
+                )
+            }
+
+            // `array[i] = value` / `list[i] = value`.
+            ir::InstKind::ArrayListStore { receiver, index, value } => {
+                let value_operand = self.operand(*value);
+                let element_ty = self.value_types[&value.0];
+                let receiver_value = self.operand(*receiver);
+                let function = if matches!(self.value_types[&receiver.0], ir::IrType::Array(_)) {
+                    self.runtime.array_element
+                } else {
+                    self.runtime.list_element
+                };
+                let elem_size = self.byte_size_of(element_ty);
+                let ptr = self
+                    .builder
+                    .build_call(
+                        function,
+                        &[
+                            receiver_value.into_pointer_value().into(),
+                            self.operand(*index).into_int_value().into(),
+                            elem_size.into(),
+                        ],
+                        "array_list_elem_ptr",
+                    )
+                    .expect("array/list element pointer")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("element pointer")
+                    .into_pointer_value();
+                self.builder
+                    .build_store(ptr, value_operand)
+                    .expect("array/list store");
+                None
+            }
+
+            // `list.add(value)`.
+            ir::InstKind::ListAdd { receiver, value } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let value = self.operand(*value);
+                let value_ptr = self.element_value_ptr(value, element);
+                self.builder
+                    .build_call(
+                        self.runtime.list_add,
+                        &[
+                            receiver.into(),
+                            value_ptr.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("list add");
+                None
+            }
+            // `list.insert(index, value)`.
+            ir::InstKind::ListInsert { receiver, index, value } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let index = self.operand(*index).into_int_value();
+                let value = self.operand(*value);
+                let value_ptr = self.element_value_ptr(value, element);
+                self.builder
+                    .build_call(
+                        self.runtime.list_insert,
+                        &[
+                            receiver.into(),
+                            index.into(),
+                            value_ptr.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("list insert");
+                None
+            }
+            // `list.remove(index)`.
+            ir::InstKind::ListRemove { receiver, index } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let index = self.operand(*index).into_int_value();
+                self.builder
+                    .build_call(
+                        self.runtime.list_remove,
+                        &[
+                            receiver.into(),
+                            index.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("list remove");
+                None
+            }
+            // `list.remove(value)` — removes the first matching element and
+            // returns whether one was removed.
+            ir::InstKind::ListRemoveValue { receiver, value } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let value = self.operand(*value);
+                let value_ptr = self.element_value_ptr(value, element);
+                self.builder
+                    .build_call(
+                        self.runtime.list_remove_value,
+                        &[
+                            receiver.into(),
+                            value_ptr.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("list remove value")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            // `array.clone()` / `list.clone()` — a shallow copy of the
+            // element buffer; the runtime's `is_ref` flag keeps the GC
+            // informed.
+            ir::InstKind::ArrayClone { receiver } | ir::InstKind::ListClone { receiver } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let function = if matches!(receiver_ty, ir::IrType::Array(_)) {
+                    self.runtime.array_clone
+                } else {
+                    self.runtime.list_clone
+                };
+                self.builder
+                    .build_call(
+                        function,
+                        &[
+                            receiver.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("array/list clone")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            // `array[start:end:step]` — shallow copy of the selected elements.
+            ir::InstKind::ArraySlice { receiver, start, end, step } => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let (_, element, _) = self.array_list_element(receiver_ty);
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let start = self.operand(*start).into_int_value();
+                let end = self.operand(*end).into_int_value();
+                let step = self.operand(*step).into_int_value();
+                self.builder
+                    .build_call(
+                        self.runtime.array_slice,
+                        &[
+                            receiver.into(),
+                            start.into(),
+                            end.into(),
+                            step.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            is_ref.into(),
+                        ],
+                        "",
+                    )
+                    .expect("array slice")
+                    .try_as_basic_value()
+                    .basic()
             }
 
             // `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design

@@ -1,0 +1,19 @@
+fn main(): Void {
+    mut arr: Array<String> = Array(2);
+    arr[0] = "hello";
+    arr[1] = "world";
+    stdout.println(arr[0]);
+    stdout.println(arr[1]);
+    stdout.println(arr.length.to_string());
+
+    mut l: List<String> = List();
+    l.add("one");
+    l.add("two");
+    l.insert(1, "between");
+    stdout.println(l[0]);
+    stdout.println(l[1]);
+    stdout.println(l[2]);
+    l.remove(0);
+    stdout.println(l[0]);
+    stdout.println(l.length.to_string());
+}

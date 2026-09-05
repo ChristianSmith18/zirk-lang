@@ -1,0 +1,31 @@
+// `Regex` literals and built-in methods.
+fn main(): Void {
+    inmut r = re'\\d+';
+    stdout.println(r.matches("123"));
+    stdout.println(r.matches("abc"));
+    stdout.println(r.replace("a1b2c", "X"));
+
+    match r.find("abc 123 def") {
+        null => stdout.println("not found"),
+        m => {
+            stdout.println(m.text);
+            stdout.println(m.start);
+            stdout.println(m.end);
+        },
+    }
+
+    match r.find("abc") {
+        null => stdout.println("not found"),
+        m => stdout.println(m.text),
+    }
+
+    inmut g = re'abc (\\d+) def';
+    match g.find("abc 123 def") {
+        null => stdout.println("not found"),
+        m => {
+            stdout.println(m.text);
+            stdout.println(m.group(0));
+            stdout.println(m.group(1));
+        },
+    }
+}

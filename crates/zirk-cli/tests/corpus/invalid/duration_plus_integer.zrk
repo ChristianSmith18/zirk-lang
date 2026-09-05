@@ -1,0 +1,5 @@
+// A `Duration` is not an integer count: mixing them in arithmetic is an
+// error, not an implicit conversion.
+fn main(): Void {
+    stdout.println(1s + 5);
+}

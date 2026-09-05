@@ -1,4 +1,4 @@
-value class UserId(value: Int32);
+record UserId { value: Int32; }
 
 fn main(): Void {
     mut u: UserId = UserId(value: 5);

@@ -1,0 +1,6 @@
+fn main(): Void {
+    inmut r = re',';
+    for part in r.split("a,b,c") {
+        stdout.println(part);
+    }
+}

@@ -7,8 +7,8 @@
 
 use crate::codes;
 use zirk_ast::*;
-use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, Phase, SourceFile, Span};
-use zirk_lexer::{Keyword, StrPart, Token, TokenKind, tokenize};
+use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
+use zirk_lexer::{DurationUnit, Keyword, StrPart, Token, TokenKind, tokenize};
 
 /// Parses a sequence of tokens into a program.
 ///
@@ -33,7 +33,7 @@ pub fn parse(source: &SourceFile, tokens: &[Token], sink: &mut DiagnosticSink) -
 /// Raising it means giving the compiler a stack of its own to run on, the way
 /// `rustc` spawns a thread for the job. That belongs with the compilation
 /// driver, not here.
-const MAX_NESTING: u32 = 128;
+const MAX_NESTING: u32 = 96;
 
 struct Parser<'a> {
     source: &'a SourceFile,
@@ -253,28 +253,6 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Reports a literal the language has and this phase does not implement.
-    ///
-    /// Literals cannot go through [`Self::report_if_from_another_phase`]: that
-    /// one names the token by its symbol, and a literal's symbol is its
-    /// content, which would put the user's own text where the construct's name
-    /// belongs.
-    fn pending_literal(&mut self, span: Span, what: &str, phase: Phase) -> Option<Expr> {
-        self.error(
-            codes::NOT_IMPLEMENTED,
-            span,
-            format!("{what} is not implemented yet"),
-            format!("it exists in the language but arrives in Phase {phase}"),
-            Some("see docs/init/ZIRK_ROADMAP.md for the scope of each phase".into()),
-        );
-        self.pos += 1;
-        // The statement is abandoned whole. Without this, the `;` left behind
-        // produces a second "expected an expression" that matches no mistake
-        // the user made.
-        self.synchronize();
-        None
-    }
-
     /// Advances to a point where resuming the parse makes sense.
     ///
     /// Without this, one error produces a cascade of derived errors that hides
@@ -477,19 +455,6 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            // `value` is contextual: only a `class` right after it makes this
-            // a value class instead of an identifier starting an expression,
-            // which cannot appear at the top level anyway.
-            if matches!(self.peek(), TokenKind::Identifier(name) if name == "value")
-                && self.tokens.get(self.pos + 1).map(|t| &t.kind)
-                    == Some(&TokenKind::Keyword(Keyword::Class))
-            {
-                if let Some(c) = self.parse_value_class(shared_at.is_some()) {
-                    classes.push(c);
-                }
-                continue;
-            }
-
             if self.check_keyword(Keyword::Type) {
                 if let Some(a) = self.parse_type_alias(shared_at.is_some()) {
                     type_aliases.push(a);
@@ -668,7 +633,6 @@ impl<'a> Parser<'a> {
             // `abstract` is consumed by the caller, ahead of `class` itself.
             ClassKind::Class | ClassKind::Abstract => Keyword::Class,
             ClassKind::Record => Keyword::Record,
-            ClassKind::ValueClass => unreachable!("a value class has its own compact grammar"),
         };
         self.eat_keyword(keyword);
 
@@ -751,59 +715,6 @@ impl<'a> Parser<'a> {
     }
 
     /// `value class Name(field: Type, field: Type, ...);`
-    ///
-    /// A record's semantics compressed into one declaration: the parenthesized
-    /// list becomes `fields`, exactly as if each had been written
-    /// `field: Type;` in a `record` body. `value` is contextual — recognized
-    /// only in front of `class`, the same way `strict` is only meaningful
-    /// after `inmut::`.
-    fn parse_value_class(&mut self, shared: bool) -> Option<ClassDecl> {
-        let start = self.peek_span();
-        self.pos += 1; // `value`
-        self.eat_keyword(Keyword::Class);
-
-        let name = self.expect_identifier("after `value class`")?;
-        self.expect(&TokenKind::LParen, "after the value class name");
-
-        let mut fields = Vec::new();
-        if !matches!(self.peek(), TokenKind::RParen) {
-            loop {
-                let field_start = self.peek_span();
-                let field_name = self.expect_identifier("as a field name")?;
-                self.expect(&TokenKind::Colon, "after the field name");
-                let ty = self.parse_type()?;
-                let field_end = ty.span;
-                fields.push(FieldDecl {
-                    name: field_name,
-                    ty,
-                    visibility: Visibility::Public,
-                    mutability: Mutability::Immutable,
-                    explicit_modifiers: false,
-                    span: field_start.to(field_end),
-                });
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.expect(&TokenKind::RParen, "to close the value class's fields");
-        let end = self.peek_span();
-        self.expect(&TokenKind::Semicolon, "after a value class declaration");
-
-        Some(ClassDecl {
-            name,
-            kind: ClassKind::ValueClass,
-            type_params: Vec::new(),
-            implements: Vec::new(),
-            extends: None,
-            fields,
-            constructors: Vec::new(),
-            methods: Vec::new(),
-            shared,
-            span: start.to(end),
-        })
-    }
-
     /// `interface Name { ... }` or `trait Name { ... }`
     fn parse_contract(&mut self, shared: bool) -> Option<ContractDecl> {
         let start = self.peek_span();
@@ -2001,13 +1912,16 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let name = self.expect_identifier("after `mut` or `inmut`")?;
+        let pattern = self.parse_pattern()?;
 
         // A comma-grouped declaration (roadmap Phase 4d): `mut first, second:
         // String;`. Kept as its own node (design D1/D2) rather than folding
         // this into `LetStmt` — the single-name path below is left untouched.
-        if matches!(self.peek(), TokenKind::Comma) {
-            return self.parse_multi_let(start, mutability, name);
+        // Only a bare binding pattern can start a comma-grouped list.
+        if let Pattern::Binding(first) = &pattern
+            && matches!(self.peek(), TokenKind::Comma)
+        {
+            return self.parse_multi_let(start, mutability, first.clone());
         }
 
         let ty = if self.eat(&TokenKind::Colon) {
@@ -2024,15 +1938,19 @@ impl<'a> Parser<'a> {
 
         // With neither a type nor an initializer there is no way to know it.
         if ty.is_none() && init.is_none() {
-            let span = start.to(name.span);
+            let span = pattern.span();
+            let name = pattern
+                .binding_name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "_".to_string());
             self.error(
                 codes::UNTYPED_DECLARATION,
                 span,
-                format!("cannot determine the type of `{}`", name.name),
+                format!("cannot determine the type of `{}`", name),
                 "the declaration has neither a type annotation nor an initial value",
                 Some(format!(
                     "write `{}: Int32` or give it an initial value",
-                    name.name
+                    name
                 )),
             );
         }
@@ -2042,7 +1960,7 @@ impl<'a> Parser<'a> {
 
         Some(Stmt::Let(LetStmt {
             mutability,
-            name,
+            pattern,
             ty,
             init,
             span: start.to(end),
@@ -2788,6 +2706,25 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Pattern::Str(StrLit { value, span }))
             }
+            // `re'pattern' name?` — the optional trailing identifier binds
+            // the `Regex.Match` inside the arm.
+            TokenKind::Regex(pattern) => {
+                self.pos += 1;
+                let mut end = span;
+                let binding = if let TokenKind::Identifier(name) = self.peek().clone() {
+                    let binding_span = self.peek_span();
+                    self.pos += 1;
+                    end = binding_span;
+                    Some(Ident::new(name, binding_span))
+                } else {
+                    None
+                };
+                Some(Pattern::Regex(RegexPattern {
+                    pattern,
+                    binding,
+                    span: span.to(end),
+                }))
+            }
             TokenKind::Keyword(Keyword::True) => {
                 self.pos += 1;
                 Some(Pattern::Bool(BoolLit { value: true, span }))
@@ -2799,6 +2736,24 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Null) => {
                 self.pos += 1;
                 Some(Pattern::Null(NullLit { span }))
+            }
+            TokenKind::LParen => {
+                self.pos += 1;
+                let mut elements = Vec::new();
+                if !matches!(self.peek(), TokenKind::RParen) {
+                    loop {
+                        elements.push(self.parse_pattern()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                let end = self.peek_span();
+                self.expect(&TokenKind::RParen, "to close the tuple pattern");
+                Some(Pattern::Tuple(TuplePattern {
+                    elements,
+                    span: span.to(end),
+                }))
             }
             TokenKind::Identifier(name) => {
                 self.pos += 1;
@@ -2919,10 +2874,24 @@ impl<'a> Parser<'a> {
 
         let end = self.parse_binary(0)?;
 
+        // `start..end..step` (roadmap Phase 7): a second `..` — never `..=`,
+        // the step does not bind a bound — introduces the step.
+        let step = if self.eat(&TokenKind::DotDot) {
+            Some(Box::new(self.parse_binary(0)?))
+        } else {
+            None
+        };
+
+        let span = step
+            .as_ref()
+            .map(|s| start.span().to(s.span()))
+            .unwrap_or_else(|| start.span().to(end.span()));
+
         Some(Expr::Range(RangeExpr {
-            span: start.span().to(end.span()),
+            span,
             start: Box::new(start),
             end: Box::new(end),
+            step,
             inclusive,
         }))
     }
@@ -3134,10 +3103,17 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 self.parse_interpolated(parts, span)
             }
-            TokenKind::Duration(_, _) => {
-                self.pending_literal(span, "a duration literal", Phase::SEVEN)
+            TokenKind::Duration(lit, unit) => {
+                self.pos += 1;
+                Some(Expr::Duration(DurationLit {
+                    nanos: duration_nanos(&lit.text, unit),
+                    span,
+                }))
             }
-            TokenKind::Regex(_) => self.pending_literal(span, "a regex literal", Phase::SEVEN),
+            TokenKind::Regex(pattern) => {
+                self.pos += 1;
+                Some(Expr::Regex(RegexLit { pattern, span }))
+            }
             TokenKind::Keyword(Keyword::True) => {
                 self.pos += 1;
                 Some(Expr::Bool(BoolLit { value: true, span }))
@@ -3182,9 +3158,28 @@ impl<'a> Parser<'a> {
             TokenKind::Lt => self.parse_prefix_cast(span),
             TokenKind::LParen => {
                 self.pos += 1;
-                let expr = self.parse_expr()?;
-                self.expect(&TokenKind::RParen, "to close the parenthesis");
-                Some(expr)
+                // A parenthesized expression has one value; a comma makes it
+                // a tuple literal `(a, b, ...)` (roadmap Phase 3b).
+                let first = self.parse_expr()?;
+                if !self.eat(&TokenKind::Comma) {
+                    self.expect(&TokenKind::RParen, "to close the parenthesis");
+                    return Some(first);
+                }
+                let mut elements = vec![first];
+                if !matches!(self.peek(), TokenKind::RParen) {
+                    loop {
+                        elements.push(self.parse_expr()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                let end = self.peek_span();
+                self.expect(&TokenKind::RParen, "to close the tuple");
+                Some(Expr::Tuple(TupleExpr {
+                    elements,
+                    span: span.to(end),
+                }))
             }
             TokenKind::Identifier(name) => {
                 self.pos += 1;
@@ -3367,19 +3362,104 @@ impl<'a> Parser<'a> {
                 // actually support it.
                 TokenKind::LBracket => {
                     self.pos += 1;
-                    let index = self.parse_expr()?;
+                    // `receiver[start:end:step]` (roadmap Phase 7, `String`
+                    // slicing): a `:` (or the `::` the lexer fuses two of
+                    // into, as in `s[::2]`) before or after the first
+                    // expression makes this a slice rather than an index.
+                    // Every part is optional — `s[:]`, `s[::2]`, `s[1:]`.
+                    if self.eat(&TokenKind::ColonColon) {
+                        // `s[::step]` — both bounds omitted.
+                        let step = if matches!(self.peek(), TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(self.parse_expr()?)
+                        };
+                        let end = self.peek_span();
+                        self.expect(&TokenKind::RBracket, "to close the slice expression");
+                        object = Expr::Slice(SliceExpr {
+                            span: object.span().to(end),
+                            receiver: Box::new(object),
+                            start: None,
+                            end: None,
+                            step: step.map(Box::new),
+                        });
+                        continue;
+                    }
+                    if self.eat(&TokenKind::Colon) {
+                        let (end_expr, step) = self.parse_slice_tail()?;
+                        let end = self.peek_span();
+                        self.expect(&TokenKind::RBracket, "to close the slice expression");
+                        object = Expr::Slice(SliceExpr {
+                            span: object.span().to(end),
+                            receiver: Box::new(object),
+                            start: None,
+                            end: end_expr.map(Box::new),
+                            step: step.map(Box::new),
+                        });
+                        continue;
+                    }
+                    let first = self.parse_expr()?;
+                    if self.eat(&TokenKind::ColonColon) {
+                        // `s[start::step]` — the end is omitted.
+                        let step = if matches!(self.peek(), TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(self.parse_expr()?)
+                        };
+                        let end_span = self.peek_span();
+                        self.expect(&TokenKind::RBracket, "to close the slice expression");
+                        object = Expr::Slice(SliceExpr {
+                            span: object.span().to(end_span),
+                            receiver: Box::new(object),
+                            start: Some(Box::new(first)),
+                            end: None,
+                            step: step.map(Box::new),
+                        });
+                        continue;
+                    }
+                    if self.eat(&TokenKind::Colon) {
+                        let (end, step) = self.parse_slice_tail()?;
+                        let end_span = self.peek_span();
+                        self.expect(&TokenKind::RBracket, "to close the slice expression");
+                        object = Expr::Slice(SliceExpr {
+                            span: object.span().to(end_span),
+                            receiver: Box::new(object),
+                            start: Some(Box::new(first)),
+                            end: end.map(Box::new),
+                            step: step.map(Box::new),
+                        });
+                        continue;
+                    }
                     let end = self.peek_span();
                     self.expect(&TokenKind::RBracket, "to close the index expression");
 
                     object = Expr::Index(IndexExpr {
                         span: object.span().to(end),
                         receiver: Box::new(object),
-                        index: Box::new(index),
+                        index: Box::new(first),
                     });
                 }
                 _ => return Some(object),
             }
         }
+    }
+
+    /// The `end` and `step` of a slice after the first `:` was consumed:
+    /// `:end:step` with either part optional (`:end`, `:end:`, `::step`, `:`).
+    fn parse_slice_tail(&mut self) -> Option<(Option<Expr>, Option<Expr>)> {
+        let end = if matches!(self.peek(), TokenKind::Colon | TokenKind::RBracket) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        let step = if self.eat(&TokenKind::Colon)
+            && !matches!(self.peek(), TokenKind::RBracket)
+        {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Some((end, step))
     }
 
     /// The argument list of a call, positional or named.
@@ -3465,6 +3545,33 @@ fn increment_op(kind: &TokenKind) -> Option<IncrementOp> {
 /// The literal `1` that `++` and `--` add or subtract.
 fn one(span: Span) -> Expr {
     Expr::Int(IntLit { value: 1, span })
+}
+
+/// Converts a duration literal's magnitude and unit into nanoseconds.
+fn duration_nanos(text: &str, unit: DurationUnit) -> i64 {
+    use DurationUnit::*;
+    let multiplier: i64 = match unit {
+        Nanoseconds => 1,
+        Microseconds => 1_000,
+        Milliseconds => 1_000_000,
+        Seconds => 1_000_000_000,
+        Minutes => 60 * 1_000_000_000,
+        Hours => 60 * 60 * 1_000_000_000,
+        Days => 24 * 60 * 60 * 1_000_000_000,
+        Weeks => 7 * 24 * 60 * 60 * 1_000_000_000,
+    };
+
+    // Try exact integer parsing first; fall back to `f64` for fractional
+    // values. A literal beyond `i64` nanoseconds saturates — the same ceiling
+    // `Duration`'s own arithmetic keeps.
+    if !text.contains(['.', 'e', 'E'].as_slice())
+        && let Ok(value) = text.parse::<i128>() {
+            return value
+                .saturating_mul(multiplier as i128)
+                .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        }
+    let value = text.parse::<f64>().unwrap_or(0.0);
+    (value * multiplier as f64) as i64
 }
 
 /// One parsed member of a class body, before it is filed by kind.

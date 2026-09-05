@@ -77,6 +77,12 @@ pub extern "C" fn zirk_rt_allocation_failed() -> ! {
     fatal("could not allocate an object")
 }
 
+/// Reports an out-of-bounds array/list index and terminates.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_index_out_of_bounds() -> ! {
+    fatal("index out of bounds")
+}
+
 /// Reports a checked cast (`as`) whose runtime type does not match and
 /// terminates (roadmap task 11.6).
 ///

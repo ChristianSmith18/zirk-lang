@@ -185,6 +185,75 @@ pub mod symbols {
     /// `zirk_rt_dependent_base` (roadmap Phase 4e, `phase-4e-memory`, design
     /// D1): reads the base pointer from a `Dependent<T>` value.
     pub const DEPENDENT_BASE: &str = "zirk_rt_dependent_base";
+    /// Compiles a pattern into a `Regex` handle.
+    pub const REGEX_FROM_PATTERN: &str = "zirk_regex_from_pattern";
+    /// Tests whether a `Regex` matches a string.
+    pub const REGEX_IS_MATCH: &str = "zirk_regex_is_match";
+    /// Replaces matches of a `Regex` in a string.
+    pub const REGEX_REPLACE: &str = "zirk_regex_replace";
+    /// Renders a `Regex` as its pattern string.
+    pub const REGEX_TO_STRING: &str = "zirk_regex_to_string";
+    /// Finds the first match of a `Regex` in `text`.
+    pub const REGEX_FIND: &str = "zirk_regex_find";
+    /// Returns the nth positional capture group of a `Regex.Match`.
+    pub const REGEX_MATCH_GROUP_POS: &str = "zirk_regex_match_group_pos";
+    /// Returns the named capture group of a `Regex.Match`.
+    pub const REGEX_MATCH_GROUP_NAME: &str = "zirk_regex_match_group_name";
+    /// `zirk_str_trim(handle) -> *mut c_void`.
+    pub const STR_TRIM: &str = "zirk_str_trim";
+    /// `zirk_str_contains(handle, pat) -> bool`.
+    pub const STR_CONTAINS: &str = "zirk_str_contains";
+    /// `zirk_str_starts_with(handle, pat) -> bool`.
+    pub const STR_STARTS_WITH: &str = "zirk_str_starts_with";
+    /// `zirk_str_ends_with(handle, pat) -> bool`.
+    pub const STR_ENDS_WITH: &str = "zirk_str_ends_with";
+    /// `zirk_str_substring(handle, start, end) -> *mut c_void`.
+    pub const STR_SUBSTRING: &str = "zirk_str_substring";
+    /// `zirk_str_search(handle, pat) -> i64`.
+    pub const STR_SEARCH: &str = "zirk_str_search";
+    /// `zirk_char_is_uppercase(c) -> bool`.
+    pub const CHAR_IS_UPPERCASE: &str = "zirk_char_is_uppercase";
+    /// `zirk_char_is_lowercase(c) -> bool`.
+    pub const CHAR_IS_LOWERCASE: &str = "zirk_char_is_lowercase";
+    /// `zirk_char_is_digit(c) -> bool`.
+    pub const CHAR_IS_DIGIT: &str = "zirk_char_is_digit";
+    /// `zirk_char_is_letter(c) -> bool`.
+    pub const CHAR_IS_LETTER: &str = "zirk_char_is_letter";
+    /// `zirk_char_is_whitespace(c) -> bool`.
+    pub const CHAR_IS_WHITESPACE: &str = "zirk_char_is_whitespace";
+    /// `zirk_char_to_uppercase(c) -> *mut c_void`.
+    pub const CHAR_TO_UPPERCASE: &str = "zirk_char_to_uppercase";
+    /// `zirk_char_to_lowercase(c) -> *mut c_void`.
+    pub const CHAR_TO_LOWERCASE: &str = "zirk_char_to_lowercase";
+
+    /// `zirk_rt_array_new(capacity, elem_size, elem_align, is_ref) -> *mut c_void`.
+    pub const ARRAY_NEW: &str = "zirk_rt_array_new";
+    /// `zirk_rt_list_new(elem_size, elem_align, is_ref) -> *mut c_void`.
+    pub const LIST_NEW: &str = "zirk_rt_list_new";
+    /// `zirk_rt_array_length(array) -> usize`.
+    pub const ARRAY_LENGTH: &str = "zirk_rt_array_length";
+    /// `zirk_rt_list_length(list) -> usize`.
+    pub const LIST_LENGTH: &str = "zirk_rt_list_length";
+    /// `zirk_rt_array_element(array, index, elem_size) -> *mut c_void`.
+    pub const ARRAY_ELEMENT: &str = "zirk_rt_array_element";
+    /// `zirk_rt_list_element(list, index, elem_size) -> *mut c_void`.
+    pub const LIST_ELEMENT: &str = "zirk_rt_list_element";
+    /// `zirk_rt_list_add(list, value_ptr, elem_size, elem_align, is_ref)`.
+    pub const LIST_ADD: &str = "zirk_rt_list_add";
+    /// `zirk_rt_list_insert(list, index, value_ptr, elem_size, elem_align, is_ref)`.
+    pub const LIST_INSERT: &str = "zirk_rt_list_insert";
+    /// `zirk_rt_list_remove(list, index, elem_size, elem_align, is_ref)`.
+    pub const LIST_REMOVE: &str = "zirk_rt_list_remove";
+    /// `zirk_rt_array_clone(array, elem_size, elem_align, is_ref) -> *mut c_void`.
+    pub const ARRAY_CLONE: &str = "zirk_rt_array_clone";
+    /// `zirk_rt_list_clone(list, elem_size, elem_align, is_ref) -> *mut c_void`.
+    pub const LIST_CLONE: &str = "zirk_rt_list_clone";
+    /// `zirk_rt_array_slice(array, start, end, step, elem_size, elem_align, is_ref) -> *mut c_void`.
+    pub const ARRAY_SLICE: &str = "zirk_rt_array_slice";
+    /// `zirk_rt_list_remove_value(list, value_ptr, elem_size, elem_align, is_ref) -> bool`.
+    pub const LIST_REMOVE_VALUE: &str = "zirk_rt_list_remove_value";
+    /// Reports an out-of-bounds index and terminates.
+    pub const INDEX_OUT_OF_BOUNDS: &str = "zirk_rt_index_out_of_bounds";
 }
 
 /// The runtime functions available to generated code.
@@ -269,6 +338,61 @@ pub struct Runtime<'ctx> {
     /// `zirk_rt_dependent_base` (roadmap Phase 4e, `phase-4e-memory`, design
     /// D1): reads the base pointer from a `Dependent<T>` value.
     pub dependent_base: FunctionValue<'ctx>,
+    /// `zirk_regex_from_pattern(pattern, len) -> *mut c_void`.
+    pub regex_from_pattern: FunctionValue<'ctx>,
+    /// `zirk_regex_is_match(handle, text, len) -> bool`.
+    pub regex_is_match: FunctionValue<'ctx>,
+    /// `zirk_regex_replace(handle, text, text_len, repl, repl_len, out_len) -> *mut u8`.
+    pub regex_replace: FunctionValue<'ctx>,
+    /// `zirk_regex_to_string(handle, out_len) -> *mut u8`.
+    pub regex_to_string: FunctionValue<'ctx>,
+    /// `zirk_regex_find(handle, text) -> {bool, *mut c_void}`.
+    pub regex_find: FunctionValue<'ctx>,
+    /// `zirk_regex_match_group_pos(match_object, n) -> *mut c_void`.
+    pub regex_match_group_pos: FunctionValue<'ctx>,
+    /// `zirk_regex_match_group_name(match_object, name) -> *mut c_void`.
+    pub regex_match_group_name: FunctionValue<'ctx>,
+    /// `zirk_str_trim(handle) -> *mut c_void`.
+    pub str_trim: FunctionValue<'ctx>,
+    /// `zirk_str_contains(handle, pat) -> bool`.
+    pub str_contains: FunctionValue<'ctx>,
+    /// `zirk_str_starts_with(handle, pat) -> bool`.
+    pub str_starts_with: FunctionValue<'ctx>,
+    /// `zirk_str_ends_with(handle, pat) -> bool`.
+    pub str_ends_with: FunctionValue<'ctx>,
+    /// `zirk_str_substring(handle, start, end) -> *mut c_void`.
+    pub str_substring: FunctionValue<'ctx>,
+    /// `zirk_str_search(handle, pat) -> i64`.
+    pub str_search: FunctionValue<'ctx>,
+    /// `zirk_char_is_uppercase(c) -> bool`.
+    pub char_is_uppercase: FunctionValue<'ctx>,
+    /// `zirk_char_is_lowercase(c) -> bool`.
+    pub char_is_lowercase: FunctionValue<'ctx>,
+    /// `zirk_char_is_digit(c) -> bool`.
+    pub char_is_digit: FunctionValue<'ctx>,
+    /// `zirk_char_is_letter(c) -> bool`.
+    pub char_is_letter: FunctionValue<'ctx>,
+    /// `zirk_char_is_whitespace(c) -> bool`.
+    pub char_is_whitespace: FunctionValue<'ctx>,
+    /// `zirk_char_to_uppercase(c) -> *mut c_void`.
+    pub char_to_uppercase: FunctionValue<'ctx>,
+    /// `zirk_char_to_lowercase(c) -> *mut c_void`.
+    pub char_to_lowercase: FunctionValue<'ctx>,
+
+    pub array_new: FunctionValue<'ctx>,
+    pub list_new: FunctionValue<'ctx>,
+    pub array_length: FunctionValue<'ctx>,
+    pub list_length: FunctionValue<'ctx>,
+    pub array_element: FunctionValue<'ctx>,
+    pub list_element: FunctionValue<'ctx>,
+    pub list_add: FunctionValue<'ctx>,
+    pub list_insert: FunctionValue<'ctx>,
+    pub list_remove: FunctionValue<'ctx>,
+    pub array_clone: FunctionValue<'ctx>,
+    pub list_clone: FunctionValue<'ctx>,
+    pub array_slice: FunctionValue<'ctx>,
+    pub list_remove_value: FunctionValue<'ctx>,
+    pub index_out_of_bounds: FunctionValue<'ctx>,
 }
 
 /// Declares every runtime symbol in the module.
@@ -491,6 +615,259 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[ptr.into()], false),
         external,
     );
+    // `Regex` runtime helpers: opaque handles, matching, replacement and
+    // pattern-to-string conversion.  See `crates/zirk-runtime/src/regex.rs`.
+    let regex_from_pattern = module.add_function(
+        symbols::REGEX_FROM_PATTERN,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let regex_is_match = module.add_function(
+        symbols::REGEX_IS_MATCH,
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let regex_replace = module.add_function(
+        symbols::REGEX_REPLACE,
+        ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let regex_to_string = module.add_function(
+        symbols::REGEX_TO_STRING,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    // `Regex.find` returns a `Regex.Match?` object, represented as a
+    // present flag followed by an opaque object pointer — the same shape as
+    // every other nullable object/reference type.
+    let nullable_object_ty = context.struct_type(&[context.bool_type().into(), ptr.into()], false);
+    let regex_find = module.add_function(
+        symbols::REGEX_FIND,
+        nullable_object_ty.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let regex_match_group_pos = module.add_function(
+        symbols::REGEX_MATCH_GROUP_POS,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let regex_match_group_name = module.add_function(
+        symbols::REGEX_MATCH_GROUP_NAME,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    // `String` built-in methods (roadmap Phase 7, `String` ops).
+    let str_trim = module.add_function(
+        symbols::STR_TRIM,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let str_contains = module.add_function(
+        symbols::STR_CONTAINS,
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let str_starts_with = module.add_function(
+        symbols::STR_STARTS_WITH,
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let str_ends_with = module.add_function(
+        symbols::STR_ENDS_WITH,
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let str_substring = module.add_function(
+        symbols::STR_SUBSTRING,
+        ptr.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
+        external,
+    );
+    let str_search = module.add_function(
+        symbols::STR_SEARCH,
+        i64.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    // `Char` built-in classification and normalization.
+    let char_is_uppercase = module.add_function(
+        symbols::CHAR_IS_UPPERCASE,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_is_lowercase = module.add_function(
+        symbols::CHAR_IS_LOWERCASE,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_is_digit = module.add_function(
+        symbols::CHAR_IS_DIGIT,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_is_letter = module.add_function(
+        symbols::CHAR_IS_LETTER,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_is_whitespace = module.add_function(
+        symbols::CHAR_IS_WHITESPACE,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_to_uppercase = module.add_function(
+        symbols::CHAR_TO_UPPERCASE,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let char_to_lowercase = module.add_function(
+        symbols::CHAR_TO_LOWERCASE,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+
+    // `Array<T>` / `List<T>` runtime helpers.
+    let array_new = module.add_function(
+        symbols::ARRAY_NEW,
+        ptr.fn_type(&[i64.into(), i64.into(), i64.into(), context.bool_type().into()], false),
+        external,
+    );
+    let list_new = module.add_function(
+        symbols::LIST_NEW,
+        ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
+        external,
+    );
+    let array_length = module.add_function(
+        symbols::ARRAY_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let list_length = module.add_function(
+        symbols::LIST_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let array_element = module.add_function(
+        symbols::ARRAY_ELEMENT,
+        ptr.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
+        external,
+    );
+    let list_element = module.add_function(
+        symbols::LIST_ELEMENT,
+        ptr.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
+        external,
+    );
+    let list_add = module.add_function(
+        symbols::LIST_ADD,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let list_insert = module.add_function(
+        symbols::LIST_INSERT,
+        void.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let list_remove = module.add_function(
+        symbols::LIST_REMOVE,
+        void.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let array_clone = module.add_function(
+        symbols::ARRAY_CLONE,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let list_clone = module.add_function(
+        symbols::LIST_CLONE,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let array_slice = module.add_function(
+        symbols::ARRAY_SLICE,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let list_remove_value = module.add_function(
+        symbols::LIST_REMOVE_VALUE,
+        context.bool_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let index_out_of_bounds = module.add_function(
+        symbols::INDEX_OUT_OF_BOUNDS,
+        void.fn_type(&[], false),
+        external,
+    );
+
     // Declared so the allocator can reach it, and marked `noreturn` with the
     // rest: generated code never calls it directly, the runtime does.
     let allocation_failed = module.add_function(
@@ -610,6 +987,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         float_nan,
         fatal_error,
         uncaught_exception,
+        index_out_of_bounds,
     ] {
         let noreturn = context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noreturn"),
@@ -672,5 +1050,40 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         pin_object,
         unpin_object,
         dependent_base,
+        regex_from_pattern,
+        regex_is_match,
+        regex_replace,
+        regex_to_string,
+        regex_find,
+        regex_match_group_pos,
+        regex_match_group_name,
+        str_trim,
+        str_contains,
+        str_starts_with,
+        str_ends_with,
+        str_substring,
+        str_search,
+        char_is_uppercase,
+        char_is_lowercase,
+        char_is_digit,
+        char_is_letter,
+        char_is_whitespace,
+        char_to_uppercase,
+        char_to_lowercase,
+
+        array_new,
+        list_new,
+        array_length,
+        list_length,
+        array_element,
+        list_element,
+        list_add,
+        list_insert,
+        list_remove,
+        array_clone,
+        list_clone,
+        array_slice,
+        list_remove_value,
+        index_out_of_bounds,
     }
 }

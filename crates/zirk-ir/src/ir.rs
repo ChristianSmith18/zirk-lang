@@ -132,6 +132,8 @@ pub enum IrType {
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
     String,
+    /// A compiled regular expression, represented as an opaque runtime handle.
+    Regex,
     /// Exactly one Unicode grapheme (roadmap Phase 3b) — the same opaque
     /// runtime handle as `String` (ADR-014), but a distinct static type: no
     /// mutation methods, and no identity (`is` is rejected, unlike `String`).
@@ -247,6 +249,19 @@ pub enum IrType {
     /// object's address stable for native interop. Surface-only: represented
     /// as an opaque pointer.
     Pin(u32),
+    /// `Array<T>`, identified by the id of its element type in the module's
+    /// `array_types` table.
+    Array(u32),
+    /// `List<T>`, identified by the id of its element type in the module's
+    /// `list_types` table.
+    List(u32),
+    /// `Range<T>` (roadmap Phase 7): a finite arithmetic sequence —
+    /// `start`, `end`, `step` and the `..=` flag — held as an opaque
+    /// runtime object, the same category `String` and `Regex` already are.
+    /// The element type is a checking concern only: at this level every
+    /// part is an `i64` (a `Duration` is nanoseconds, an `Int32` sign-
+    /// extended), so the handle carries no parameter.
+    Range,
 }
 
 /// The types that have a nullable form.
@@ -270,6 +285,8 @@ pub enum Nullable {
     Contract(u32),
     Value(u32),
     Enum(u32),
+    Array(u32),
+    List(u32),
 }
 
 impl Nullable {
@@ -284,6 +301,8 @@ impl Nullable {
             Nullable::Contract(id) => IrType::Contract(id),
             Nullable::Value(id) => IrType::Value(id),
             Nullable::Enum(id) => IrType::Enum(id),
+            Nullable::Array(id) => IrType::Array(id),
+            Nullable::List(id) => IrType::List(id),
         }
     }
 
@@ -299,6 +318,8 @@ impl Nullable {
             IrType::Contract(id) => Nullable::Contract(id),
             IrType::Value(id) => Nullable::Value(id),
             IrType::Enum(id) => Nullable::Enum(id),
+            IrType::Array(id) => Nullable::Array(id),
+            IrType::List(id) => Nullable::List(id),
             _ => return None,
         })
     }
@@ -313,6 +334,8 @@ impl IrType {
             IrType::Float(width) => width.as_str(),
             IrType::Boolean => "Boolean",
             IrType::String => "String",
+            IrType::Regex => "Regex",
+            IrType::Range => "Range",
             IrType::Char => "Char",
             IrType::Closure(_) => "closure",
             IrType::Callable(_) => "Callable",
@@ -334,6 +357,8 @@ impl IrType {
                 Nullable::Contract(_) => "contract?",
                 Nullable::Value(_) => "value?",
                 Nullable::Enum(_) => "enum?",
+                Nullable::Array(_) => "Array?",
+                Nullable::List(_) => "List?",
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
@@ -342,6 +367,8 @@ impl IrType {
             IrType::NativeSliceMut(_) => "NativeSliceMut",
             IrType::Dependent(_) => "Dependent",
             IrType::Pin(_) => "Pin",
+            IrType::Array(_) => "Array",
+            IrType::List(_) => "List",
         }
     }
 
@@ -361,7 +388,7 @@ impl IrType {
     /// names malloc, reference counting or garbage collection.
     pub const fn needs_allocation(self) -> bool {
         // `Char` shares `String`'s opaque runtime representation (ADR-014).
-        matches!(self, IrType::String | IrType::Char)
+        matches!(self, IrType::String | IrType::Char | IrType::Regex)
     }
 
     /// Whether a value of this type carries (directly, or nested inside a
@@ -388,7 +415,10 @@ impl IrType {
             | IrType::Dependent(_)
             | IrType::Pin(_)
             | IrType::String
-            | IrType::Char => true,
+            | IrType::Char
+            | IrType::Array(_)
+            | IrType::List(_)
+            | IrType::Range => true,
             IrType::Nullable(n) => n.inner().is_managed_reference(module),
             IrType::Value(id) => module.values[id as usize]
                 .fields
@@ -472,6 +502,12 @@ pub struct Module {
     /// Interned `Pin<T>` referent types, indexed by the id [`IrType::Pin`]
     /// carries (roadmap Phase 4e, `phase-4e-memory`).
     pub pin_types: Vec<IrType>,
+    /// Interned `Array<T>` element types, indexed by the id [`IrType::Array`]
+    /// carries.
+    pub array_types: Vec<IrType>,
+    /// Interned `List<T>` element types, indexed by the id [`IrType::List`]
+    /// carries.
+    pub list_types: Vec<IrType>,
     /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
     /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
     /// no Zirk-authored body.
@@ -1289,6 +1325,10 @@ pub enum InstKind {
     /// `view.length` (roadmap Phase 4e, `fase-4e-native-slice`): reads the
     /// length word out of the `(pointer, length)` representation.
     NativeSliceLength(Operand),
+    /// `array.length`: the element count of an `Array<T>`.
+    ArrayLength(Operand),
+    /// `list.length`: the element count of a `List<T>`.
+    ListLength(Operand),
     /// `view[i]` read (design D5): a bounds-checked load at `pointer + i *
     /// sizeof(T)`. Only ever emitted on the branch a bounds check
     /// (`Self::lower_native_slice_bounds_check`) already proved `i` safe
@@ -1307,6 +1347,69 @@ pub enum InstKind {
         index: Operand,
         value: Operand,
     },
+
+    /// `Array<T>(capacity)`: allocates a collector-managed array of `capacity`
+    /// elements of `element_id`. Result type is `IrType::Array(element_id)`.
+    ArrayNew {
+        element_id: u32,
+        capacity: Operand,
+    },
+    /// `List<T>()` allocates an empty list. Result type is
+    /// `IrType::List(element_id)`.
+    ListNew {
+        element_id: u32,
+    },
+    /// `array[i]` / `list[i]` read: returns the element at `index`. The
+    /// instruction's own `ty` is the element type.
+    ArrayListLoad {
+        receiver: Operand,
+        index: Operand,
+    },
+    /// `array[i] = value` / `list[i] = value`: writes `value` into the
+    /// element slot. `ty` is `Void`.
+    ArrayListStore {
+        receiver: Operand,
+        index: Operand,
+        value: Operand,
+    },
+    /// `list.add(value)`: appends `value` to the list. `ty` is `Void`.
+    ListAdd {
+        receiver: Operand,
+        value: Operand,
+    },
+    /// `list.insert(index, value)`: inserts `value` at `index`. `ty` is `Void`.
+    ListInsert {
+        receiver: Operand,
+        index: Operand,
+        value: Operand,
+    },
+    /// `list.remove(index)`: removes the element at `index`. `ty` is `Void`.
+    ListRemove {
+        receiver: Operand,
+        index: Operand,
+    },
+    /// `list.remove(value)`: removes the first matching element. `ty` is `Boolean`.
+    ListRemoveValue {
+        receiver: Operand,
+        value: Operand,
+    },
+    /// `array.clone()`: returns a new `Array<T>` with the same elements.
+    ArrayClone {
+        receiver: Operand,
+    },
+    /// `list.clone()`: returns a new `List<T>` with the same elements.
+    ListClone {
+        receiver: Operand,
+    },
+    /// `array[start:end:step]`: returns a new `Array<T>` with the selected
+    /// elements, following the same bound/negative/step rules as `String` slicing.
+    ArraySlice {
+        receiver: Operand,
+        start: Operand,
+        end: Operand,
+        step: Operand,
+    },
+
     /// `transfer(source)` (roadmap Phase 4c): transfers ownership of a
     /// `TransferableResource`, returning the resource pointer in a fresh owned
     /// slot and invalidating the source binding statically.

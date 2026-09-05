@@ -1,0 +1,11 @@
+fn main(): Void {
+    mut l: List<Int32> = List(1, 2, 3, 2);
+    stdout.println(l.remove(2).to_string());
+    stdout.println(l.remove(5).to_string());
+    stdout.println(l.length.to_string());
+    stdout.println(l.to_string());
+
+    mut ls: List<String> = List("one", "two", "three");
+    ls.remove("two");
+    stdout.println(ls.to_string());
+}

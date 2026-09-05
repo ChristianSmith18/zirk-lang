@@ -64,7 +64,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 8] = [
+const NATIVE_FAILURE_CODES: [&str; 12] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -73,6 +73,14 @@ const NATIVE_FAILURE_CODES: [&str; 8] = [
     "E_INVALID_CAST",
     "E_INDEX_OUT_OF_BOUNDS",
     "E_NATIVE_ERROR",
+    // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step is
+    // `0`), synthesized through the same `register_native_failure` path.
+    "E_INVALID_STEP",
+    // `native-type-member-surface`: the `Result`-carried error types of
+    // `parse`, `checked_*`, and `Regex.parse`.
+    "E_PARSE",
+    "E_OVERFLOW",
+    "E_REGEX",
 ];
 
 const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
@@ -226,7 +234,9 @@ fn arithmetic_lowers_to_a_binary_instruction() {
 fn mixed_int8_and_int32_widens_to_int32() {
     let f = main_body("mut a: Int8 = 1;\nmut b: Int32 = 2;\nmut c = a + b;");
 
-    let has_widen = instructions(&f).iter().any(|i| matches!(i, InstKind::IntCast(_)));
+    let has_widen = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::IntCast(_)));
     assert!(has_widen, "the Int8 operand must be widened to Int32");
 
     let add = f
@@ -248,15 +258,16 @@ fn mixed_int8_and_int32_widens_to_int32() {
 
 #[test]
 fn mixed_uint8_and_int32_promotes_to_float64() {
-    let f = main_body(
-        "mut a: UInt8 = 1 as UInt8;\nmut b: Int32 = 2;\nmut c = a + b;",
-    );
+    let f = main_body("mut a: UInt8 = 1 as UInt8;\nmut b: Int32 = 2;\nmut c = a + b;");
 
     let int_to_float = instructions(&f)
         .iter()
         .filter(|i| matches!(i, InstKind::IntToFloat(_)))
         .count();
-    assert_eq!(int_to_float, 2, "both operands must be converted to Float64");
+    assert_eq!(
+        int_to_float, 2,
+        "both operands must be converted to Float64"
+    );
 
     let add = f
         .blocks
@@ -282,7 +293,10 @@ fn mixed_int32_and_float64_promotes_to_float64() {
     let has_int_to_float = instructions(&f)
         .iter()
         .any(|i| matches!(i, InstKind::IntToFloat(_)));
-    assert!(has_int_to_float, "the Int32 operand must be converted to Float64");
+    assert!(
+        has_int_to_float,
+        "the Int32 operand must be converted to Float64"
+    );
 
     let add = f
         .blocks
@@ -334,7 +348,10 @@ fn string_repetition_with_int8_count_lowers_to_repeat() {
     let has_repeat = instructions(&f)
         .iter()
         .any(|i| matches!(i, InstKind::Repeat { .. }));
-    assert!(has_repeat, "String * Int8 must lower to a Repeat instruction");
+    assert!(
+        has_repeat,
+        "String * Int8 must lower to a Repeat instruction"
+    );
 }
 
 #[test]
@@ -750,7 +767,9 @@ fn postfix_increment_overflow_at_int32_max_is_guarded() {
     let f = main_body("mut i = 2147483647;\nmut x = i++;");
     let kinds = instructions(&f);
     assert!(
-        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
         "i++ at Int32.MAX must overflow-check"
     );
 }
@@ -760,7 +779,9 @@ fn prefix_decrement_underflow_at_uint8_min_is_guarded() {
     let f = main_body("mut i: UInt8 = 0 as UInt8;\nmut x = --i;");
     let kinds = instructions(&f);
     assert!(
-        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
         "--i at UInt8.MIN must underflow-check"
     );
 }
@@ -770,7 +791,9 @@ fn int16_postfix_increment_overflow_is_guarded() {
     let f = main_body("mut i: Int16 = 32767 as Int16;\nmut x = i++;");
     let kinds = instructions(&f);
     assert!(
-        kinds.iter().any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CheckedArithmetic { .. })),
         "i++ at Int16.MAX must overflow-check"
     );
 }
@@ -1290,7 +1313,7 @@ fn two_different_instantiations_get_two_layouts() {
     assert_ne!(specialized[0].fields[0].ty, specialized[1].fields[0].ty);
 }
 
-// --- Records y value classes (roadmap task 11.5) -----------------------------
+// --- Records (roadmap task 11.5) --------------------------------------------
 
 #[test]
 fn a_record_becomes_a_value_layout_not_an_object() {
@@ -2378,7 +2401,7 @@ const BOXED_POINT: &str = "interface Describable { fn describe(): String; }
         fn describe(): String { return \"point\"; }
     }";
 
-/// Converting a `record`/`value class` value into a reference of a contract
+/// Converting a `record` value into a reference of a contract
 /// it implements lowers to an allocation of the value's own layout id (the
 /// two tables share an id space, `IrType::Value`/`IrType::Object` doc
 /// comment), one `LoadField`/`StoreField` pair per field copying its inline
@@ -2520,3 +2543,4 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
         }
     }
 }
+

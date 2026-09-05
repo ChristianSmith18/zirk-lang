@@ -16,7 +16,7 @@ use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
-    ParamInfo, Type,
+    ParamInfo, TupleType, Type,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -92,10 +92,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             // `ir_type` has nothing to substitute here, and its methods'
             // bodies are never lowered (skipped in the loop below), so a
             // symbol in its table would name a function that does not exist.
-            let is_unboxed_value = matches!(
-                class.kind,
-                ast::ClassKind::Record | ast::ClassKind::ValueClass
-            ) && class.contracts.is_empty();
+            let is_unboxed_value =
+                matches!(class.kind, ast::ClassKind::Record) && class.contracts.is_empty();
             if !class.type_params.is_empty() || is_unboxed_value {
                 return ObjectLayout {
                     name: class.name.clone(),
@@ -193,10 +191,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 // already passes, value type or not — so
                                 // that one needs no wrapper at all, the same
                                 // as a class's.
-                                if matches!(
-                                    class.kind,
-                                    ast::ClassKind::Record | ast::ClassKind::ValueClass
-                                ) && supplied.from_contract.is_none()
+                                if matches!(class.kind, ast::ClassKind::Record)
+                                    && supplied.from_contract.is_none()
                                 {
                                     box_thunk_symbol(&class.name, &supplied.name)
                                 } else {
@@ -214,16 +210,11 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // is, sharing `checked.classes`' id space (roadmap task 11.5); an
     // ordinary class's or a still-generic template's entry here is the
     // empty placeholder, symmetric with `objects` above.
-    let values = checked
+    let mut values: Vec<ValueLayout> = checked
         .classes
         .iter()
         .map(|class| {
-            if !class.type_params.is_empty()
-                || !matches!(
-                    class.kind,
-                    ast::ClassKind::Record | ast::ClassKind::ValueClass
-                )
-            {
+            if !class.type_params.is_empty() || !matches!(class.kind, ast::ClassKind::Record) {
                 return ValueLayout {
                     name: class.name.clone(),
                     fields: Vec::new(),
@@ -242,6 +233,23 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             }
         })
         .collect();
+
+    // Tuple value layouts follow all class layouts: a `Base::Tuple(id)` maps
+    // to `module.values[checked.tuple_base + id]` (roadmap Phase 3b).
+    for (id, tuple) in checked.tuple_types.iter().enumerate() {
+        values.push(ValueLayout {
+            name: format!("Tuple({})", id),
+            fields: tuple
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, &ty)| ObjectField {
+                    name: format!("_{index}"),
+                    ty: ir_type(ty, instance_base, enum_instance_base, checked),
+                })
+                .collect(),
+        });
+    }
 
     // An algebraic enum's own layout, indexed the same way `checked.enums`
     // is (roadmap task 11.3). A traditional enum (no payload anywhere) or a
@@ -352,6 +360,34 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|&referent| ir_type(referent, instance_base, enum_instance_base, checked))
         .collect();
 
+    // `checked.array_types`/`checked.list_types` are pushed first, in the
+    // same order, for the same reason the other generic tables are.
+    module.array_types = checked
+        .array_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+    module.list_types = checked
+        .list_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+
+    // `Regex.split` returns `List<String>` and `Regex.find_all` returns
+    // `List<Regex.Match>`; the checker interns each element type only when
+    // the method is actually called, so the extern signatures below are
+    // registered conditionally on the id existing.
+    let list_string_id = checked
+        .list_types
+        .iter()
+        .position(|&t| t == Type::STRING)
+        .map(|index| index as u32);
+    let list_regex_match_id = checked
+        .list_types
+        .iter()
+        .position(|&t| t == Type::of(Base::Class(checked.regex_match_class)))
+        .map(|index| index as u32);
+
     // `extern "C" fn` declarations (roadmap Phase 4e, design D7, `ADR-015`):
     // no body to lower, only a declaration codegen turns into an LLVM
     // `declare`.
@@ -376,6 +412,678 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             })
         })
         .collect();
+
+    // The `Duration` helpers `lower_duration_binary`/`lower_to_string_expr`
+    // emit `InstKind::Call` for are not Zirk functions — they are `extern "C"`
+    // runtime symbols resolved at link time. Registering them here, with their
+    // signatures, is what lets the verifier check their calls' arity and
+    // result type like any other extern's (and what puts them in codegen's
+    // function table).
+    let nanos = IrType::Int(IntWidth::I64);
+    let f64 = IrType::Float(FloatWidth::F64);
+
+    module.externs.extend([
+        ExternFn {
+            name: "zirk_regex_from_pattern".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Regex,
+        },
+        ExternFn {
+            name: "zirk_regex_is_match".to_string(),
+            params: vec![IrType::Regex, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_regex_to_string".to_string(),
+            params: vec![IrType::Regex],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_regex_replace".to_string(),
+            params: vec![IrType::Regex, IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_regex_find".to_string(),
+            params: vec![IrType::Regex, IrType::String],
+            return_type: IrType::Nullable(Nullable::Object(checked.regex_match_class)),
+        },
+        ExternFn {
+            name: "zirk_regex_match_group_pos".to_string(),
+            params: vec![
+                IrType::Object(checked.regex_match_class),
+                IrType::Int(IntWidth::I64),
+            ],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_regex_match_group_name".to_string(),
+            params: vec![IrType::Object(checked.regex_match_class), IrType::String],
+            return_type: IrType::String,
+        },
+        // `String` built-in methods (roadmap Phase 7, `String` ops).
+        ExternFn {
+            name: "zirk_str_trim".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_contains".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_str_starts_with".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_str_ends_with".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_str_substring".to_string(),
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+            ],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_search".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        // `s[i] = c` (roadmap Phase 7, "String write by index"):
+        // (handle, byte offset, grapheme byte length, replacement) → the
+        // replacement `String`. The third parameter is `Char`/`String`'s
+        // shared representation (ADR-014); the extern's `String` spelling is
+        // the canonical one.
+        ExternFn {
+            name: "zirk_str_set".to_string(),
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::String,
+            ],
+            return_type: IrType::String,
+        },
+        // `s[start:end:step]` (roadmap Phase 7, `String` slicing):
+        // `i64::MIN` marks a part the source left out.
+        ExternFn {
+            name: "zirk_str_slice".to_string(),
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+            ],
+            return_type: IrType::String,
+        },
+        // `s.split(sep)` (roadmap Phase 7, `String` split): a `List<String>`
+        // of parts; the `List` id is element-agnostic for the runtime call.
+        ExternFn {
+            name: "zirk_str_split".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::List(0),
+        },
+        // `d.abs()`/`d.sign()` on a `Duration` (`native-type-member-surface`):
+        // nanoseconds in, nanoseconds or an `i32` sign out.
+        ExternFn {
+            name: "zirk_duration_abs".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_sign".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
+        // a `Duration` is nanoseconds, an `Int32` sign-extends — and the
+        // handle itself is element-agnostic, so the same seven entry points
+        // serve every `T`.
+        ExternFn {
+            name: "zirk_range_new".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+            ],
+            return_type: IrType::Range,
+        },
+        ExternFn {
+            name: "zirk_range_start".to_string(),
+            params: vec![IrType::Range],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_range_end".to_string(),
+            params: vec![IrType::Range],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_range_step".to_string(),
+            params: vec![IrType::Range],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_range_inclusive".to_string(),
+            params: vec![IrType::Range],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_range_reverse".to_string(),
+            params: vec![IrType::Range],
+            return_type: IrType::Range,
+        },
+        ExternFn {
+            name: "zirk_range_slice".to_string(),
+            params: vec![
+                IrType::Range,
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+            ],
+            return_type: IrType::Range,
+        },
+        // `Char` classification and normalization (roadmap Phase 7).
+        ExternFn {
+            name: "zirk_char_is_uppercase".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_lowercase".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_digit".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_letter".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_whitespace".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_to_uppercase".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_char_to_lowercase".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::String,
+        },
+        // `native-type-member-surface`: the rest of the `Char` surface —
+        // metadata (`i32` counts), the ASCII query, and the remaining
+        // classification methods.
+        ExternFn {
+            name: "zirk_char_byte_length".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_char_codepoint_count".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_char_ascii_code".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_char_is_ascii".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_alphabetic".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_numeric".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_is_alphanumeric".to_string(),
+            params: vec![IrType::Char],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_char_normalize".to_string(),
+            params: vec![IrType::Char, IrType::String],
+            return_type: IrType::String,
+        },
+        // `native-type-member-surface`: the `String` metadata, search,
+        // transformation, normalization and view surface.
+        ExternFn {
+            name: "zirk_str_length".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_str_byte_length".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_str_is_empty".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_str_find".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_str_replace".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_trim_start".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_trim_end".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_to_lowercase".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_to_uppercase".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_normalize".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_clone".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_str_split_whitespace".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(0),
+        },
+        ExternFn {
+            name: "zirk_str_lines".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(0),
+        },
+        ExternFn {
+            name: "zirk_str_chars".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(0),
+        },
+        ExternFn {
+            name: "zirk_str_bytes".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(0),
+        },
+        ExternFn {
+            name: "zirk_str_codepoints".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(0),
+        },
+        // `native-type-member-surface`: integer helpers. Values travel as
+        // `i128`; `bits` and `signed` carry the receiver's width semantics.
+        ExternFn {
+            name: "zirk_int_abs".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_sign".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_int_min".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_max".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_clamp".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_is_zero".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_is_even".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_is_odd".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_bit_count".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_int_leading_zeros".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_int_trailing_zeros".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_int_rotate_left".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_rotate_right".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_wrapping_add".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_wrapping_sub".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_wrapping_mul".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_saturating_add".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_saturating_sub".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_saturating_mul".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_to_string_radix".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32)],
+            return_type: IrType::String,
+        },
+        // `checked_*` and `IntN.parse` split into an `ok` status and a
+        // `value` call — lowering builds the `Result` from the pair.
+        ExternFn {
+            name: "zirk_int_checked_add_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_add_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_checked_sub_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_sub_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_checked_mul_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_mul_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_checked_div_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_div_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_checked_rem_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_rem_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_checked_pow_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_checked_pow_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_parse_ok".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_parse_value".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_int_parse_radix_ok".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_int_parse_radix_value".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        // Float helpers — `f64` is the widest helper signature; lowering
+        // `FloatCast`s around the call.
+        ExternFn {
+            name: "zirk_float_abs".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_sign".to_string(),
+            params: vec![f64],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_float_min".to_string(),
+            params: vec![f64, f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_max".to_string(),
+            params: vec![f64, f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_clamp".to_string(),
+            params: vec![f64, f64, f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_is_zero".to_string(),
+            params: vec![f64],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_float_floor".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_ceil".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_round".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_truncate".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_fraction".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_is_finite".to_string(),
+            params: vec![f64],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_float_is_infinite".to_string(),
+            params: vec![f64],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_float_is_negative".to_string(),
+            params: vec![f64],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_float_pow".to_string(),
+            params: vec![f64, IrType::Int(IntWidth::I64)],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_powf".to_string(),
+            params: vec![f64, f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_sqrt".to_string(),
+            params: vec![f64],
+            return_type: f64,
+        },
+        ExternFn {
+            name: "zirk_float_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_float_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: f64,
+        },
+        // `Regex.parse` — the `ok` half; the handle comes from the existing
+        // `zirk_regex_from_pattern`.
+        ExternFn {
+            name: "zirk_regex_is_valid_pattern".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_duration_to_string".to_string(),
+            params: vec![nanos],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_duration_to_string".to_string(),
+            params: vec![nanos],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_duration_mul_f64".to_string(),
+            params: vec![nanos, f64],
+            return_type: nanos,
+        },
+        ExternFn {
+            name: "zirk_rt_duration_div_f64".to_string(),
+            params: vec![nanos, f64],
+            return_type: nanos,
+        },
+        ExternFn {
+            name: "zirk_rt_duration_div_duration".to_string(),
+            params: vec![nanos, nanos],
+            return_type: f64,
+        },
+    ]);
+
+    // `Regex.split`/`Regex.find_all` return `List<T>`s whose element types
+    // the checker only interns when the methods are called; register the
+    // externs only when the id exists.
+    if let Some(id) = list_string_id {
+        module.externs.push(ExternFn {
+            name: "zirk_regex_split".to_string(),
+            params: vec![IrType::Regex, IrType::String],
+            return_type: IrType::List(id),
+        });
+    }
+    if let Some(id) = list_regex_match_id {
+        module.externs.push(ExternFn {
+            name: "zirk_regex_find_all".to_string(),
+            params: vec![IrType::Regex, IrType::String],
+            return_type: IrType::List(id),
+        });
+    }
 
     // One entry per `checked.fn_types` id, pushed first and in order so
     // `Base::Function(id)` and `IrType::Callable(id)` share the same number
@@ -533,12 +1241,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // pointer receiver and needs no wrapper.
     for (id, class) in checked.classes.iter().enumerate() {
         let id = id as u32;
-        if !class.type_params.is_empty()
-            || !matches!(
-                class.kind,
-                ast::ClassKind::Record | ast::ClassKind::ValueClass
-            )
-        {
+        if !class.type_params.is_empty() || !matches!(class.kind, ast::ClassKind::Record) {
             continue;
         }
         // Two contracts the same class implements may share a method name
@@ -647,6 +1350,14 @@ fn synthesize_native_failure_bodies<'a>(
         // hand-built bodies as the original four above.
         (native.index_out_of_bounds, "E_INDEX_OUT_OF_BOUNDS"),
         (native.native_error, "E_NATIVE_ERROR"),
+        // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step
+        // is `0`), registered and built through the same closure.
+        (native.invalid_step, "E_INVALID_STEP"),
+        // `native-type-member-surface`: the `Result`-carried errors of
+        // `parse`/`checked_*`/`Regex.parse`.
+        (native.parse_error, "E_PARSE"),
+        (native.overflow_error, "E_OVERFLOW"),
+        (native.regex_error, "E_REGEX"),
     ];
 
     for (class_id, code) in classes {
@@ -1129,6 +1840,8 @@ fn ir_type(
         Base::Float(width) => IrType::Float(ir_float_width(width)),
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
+        Base::Duration => IrType::Int(IntWidth::I64),
+        Base::Regex => IrType::Regex,
         Base::Char => IrType::Char,
         // A traditional enum — none of its variants carry data — is exactly
         // its discriminant. One with at least one algebraic variant gets a
@@ -1138,12 +1851,7 @@ fn ir_type(
         // A record or value class is a value, not a reference: neither has
         // identity (roadmap task 11.5). An ordinary class is reached through
         // its address, which is its identity.
-        Base::Class(id)
-            if matches!(
-                checked.classes[id as usize].kind,
-                ast::ClassKind::Record | ast::ClassKind::ValueClass
-            ) =>
-        {
+        Base::Class(id) if matches!(checked.classes[id as usize].kind, ast::ClassKind::Record) => {
             IrType::Value(id)
         }
         Base::Class(id) => IrType::Object(id),
@@ -1223,7 +1931,15 @@ fn ir_type(
         Base::Dependent(id) => IrType::Dependent(id),
         Base::Pin(id) => IrType::Pin(id),
 
-        Base::Unknown | Base::Null | Base::Range | Base::Param(_) | Base::Union(_) => {
+        Base::Array(id) => IrType::Array(id),
+        Base::List(id) => IrType::List(id),
+        // `Range<T>` (roadmap Phase 7): the runtime handle its constructor
+        // extern `zirk_range_new` produces — the element type lives only in
+        // `checked.range_types`, the handle itself is element-agnostic.
+        Base::Range(_) => IrType::Range,
+
+        Base::Tuple(id) => IrType::Value(checked.tuple_base + id),
+        Base::Unknown | Base::Null | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -1533,11 +2249,7 @@ impl<'a> FunctionLowering<'a> {
     /// An `Int64` constant. `ConstInt` carries the value at its declared
     /// width, so it is emitted directly as `Int64` here.
     fn const_i64(&mut self, value: i128, span: Span) -> Operand {
-        self.emit(
-            InstKind::ConstInt(value),
-            IrType::Int(IntWidth::I64),
-            span,
-        )
+        self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I64), span)
     }
 
     fn lookup_slot(&self, name: &str) -> SlotId {
@@ -1731,9 +2443,75 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Pin(id));
         }
 
+        // `Array<T>` / `List<T>`: same interned-by-content treatment as slices.
+        if reference.name == "Array" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .array_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Array<T> it type-checked")
+                as u32;
+            return Type::of(Base::Array(id));
+        }
+        if reference.name == "List" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .list_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every List<T> it type-checked")
+                as u32;
+            return Type::of(Base::List(id));
+        }
+
+        // `Range<T>` (roadmap Phase 7): same interned-by-content treatment —
+        // the element type the checker stored is resolved and matched back
+        // against `checked.range_types`.
+        if reference.name == "Range" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .range_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Range<T> it type-checked")
+                as u32;
+            return Type::of(Base::Range(id));
+        }
+
+        // `Tuple<T...>` (roadmap Phase 3b): same interned-by-content treatment.
+        if reference.name == "Tuple" {
+            let elements: Vec<Type> = reference
+                .arguments
+                .iter()
+                .map(|a| self.resolve_written_type(a))
+                .collect();
+            let tuple = TupleType { elements };
+            let id = self
+                .checked
+                .tuple_types
+                .iter()
+                .position(|t| *t == tuple)
+                .expect("the checker interned every Tuple<T...> it type-checked")
+                as u32;
+            return Type::of(Base::Tuple(id));
+        }
+
         let declared = self.declaration_of(&reference.name, reference.span);
         if let Some(ty) = Type::from_name(&reference.name) {
             return ty;
+        }
+        // A `type` alias is transparent (roadmap Phase 7): it expands to the
+        // target it was declared with, resolved here the same way the
+        // checker's own `resolve_type` does — cycles were already rejected
+        // there, so this cannot recurse forever.
+        if let Some(target) = self.checked.type_aliases.get(&declared).cloned() {
+            let mut resolved = self.resolve_written_type(&target);
+            resolved.nullable = reference.nullable;
+            return resolved;
         }
         if let Some(id) = self.checked.enums.iter().position(|e| e.name == declared) {
             if reference.arguments.is_empty() {
@@ -1963,9 +2741,7 @@ impl<'a> FunctionLowering<'a> {
                 && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
             {
                 self.emit(InstKind::Retype(value), base.inner(), expr.span())
-            } else if Self::is_numeric_ir_type(actual)
-                && Self::is_numeric_ir_type(base.inner())
-            {
+            } else if Self::is_numeric_ir_type(actual) && Self::is_numeric_ir_type(base.inner()) {
                 self.convert_numeric(value, actual, base.inner(), expr.span())
             } else {
                 value
@@ -2042,15 +2818,9 @@ impl<'a> FunctionLowering<'a> {
         }
         match (from, to) {
             (IrType::Int(_), IrType::Int(_)) => self.emit(InstKind::IntCast(value), to, span),
-            (IrType::Float(_), IrType::Float(_)) => {
-                self.emit(InstKind::FloatCast(value), to, span)
-            }
-            (IrType::Int(_), IrType::Float(_)) => {
-                self.emit(InstKind::IntToFloat(value), to, span)
-            }
-            (IrType::Float(_), IrType::Int(_)) => {
-                self.emit(InstKind::FloatToInt(value), to, span)
-            }
+            (IrType::Float(_), IrType::Float(_)) => self.emit(InstKind::FloatCast(value), to, span),
+            (IrType::Int(_), IrType::Float(_)) => self.emit(InstKind::IntToFloat(value), to, span),
+            (IrType::Float(_), IrType::Int(_)) => self.emit(InstKind::FloatToInt(value), to, span),
             _ => value,
         }
     }
@@ -2376,10 +3146,17 @@ impl<'a> FunctionLowering<'a> {
             // one into a field.
             | IrType::NativeSlice(_)
             | IrType::NativeSliceMut(_)
+            // A `Range<T>` is a runtime handle — there is no constant form
+            // of one to default to, the same reason an `Object` has none.
+            | IrType::Range
             // `Dependent<T>`/`Pin<T>` fields have no default for the same
             // reason references do not (roadmap Phase 4e, `phase-4e-memory`).
             | IrType::Dependent(_)
-            | IrType::Pin(_) => {
+            | IrType::Pin(_)
+            | IrType::Regex
+            // `Array<T>`/`List<T>` are managed references with no default.
+            | IrType::Array(_)
+            | IrType::List(_) => {
                 return None;
             }
         })
@@ -2723,10 +3500,25 @@ impl<'a> FunctionLowering<'a> {
             (Some(ty), None) => ty,
         };
 
-        let slot = self.declare_slot(&stmt.name.name, ty, stmt.name.span);
-
-        if let Some((operand, _)) = value {
-            self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+        match &stmt.pattern {
+            ast::Pattern::Binding(ident) => {
+                let slot = self.declare_slot(&ident.name, ty, ident.span);
+                if let Some((operand, _)) = value {
+                    self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+                }
+            }
+            ast::Pattern::Wildcard(_) => {
+                // No binding is declared; the value, if any, was already
+                // lowered for its side effects.
+            }
+            ast::Pattern::Tuple(_) => {
+                let slot = self.declare_slot("<tuple>", ty, stmt.pattern.span());
+                if let Some((operand, _)) = value {
+                    self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+                }
+                self.lower_pattern_bindings(&stmt.pattern, slot, ty, stmt.span);
+            }
+            _ => unreachable!("the checker only allows irrefutable patterns in `let`"),
         }
     }
 
@@ -2843,7 +3635,10 @@ impl<'a> FunctionLowering<'a> {
                 let receiver = self.lower_expr(&index_expr.receiver);
                 let receiver_ty = self.type_of_operand(receiver);
                 if receiver_ty == IrType::String {
-                    // The checker rejects `s[i] = c`; nothing to emit.
+                    // `s[i] = c` (roadmap Phase 7): same lowering
+                    // `lower_assign` reaches — the value `lower_multi_assign`
+                    // staged is already a plain operand.
+                    self.lower_string_index_write(index_expr, value, span);
                     return;
                 }
                 let receiver_slot = self.spill(receiver, receiver_ty, span);
@@ -2966,9 +3761,45 @@ impl<'a> FunctionLowering<'a> {
             // `value` is spilled too, since the bounds check just below
             // opens a split of its own regardless of what `stmt.value` did.
             ast::AssignTarget::Index(index_expr) => {
+                // `s[i] = c` (roadmap Phase 7, "String write by index"):
+                // a `String` cannot be mutated in place — its bytes are
+                // inline and a replacement grapheme may be a different
+                // length — so the write lowers to a fresh `String` stored
+                // back into the variable the checker required the receiver
+                // to be.
+                if self.type_of(&index_expr.receiver, index_expr.receiver.span())
+                    == IrType::String
+                {
+                    // `Char` and `String` share one runtime representation
+                    // (ADR-014): whichever the checker accepted is already
+                    // the handle `zirk_str_set` reads.
+                    let value = self.lower_expr(&stmt.value);
+                    self.lower_string_index_write(index_expr, value, stmt.span);
+                    return;
+                }
+
                 let receiver = self.lower_expr(&index_expr.receiver);
                 let receiver_ty = self.type_of_operand(receiver);
                 let receiver_slot = self.spill(receiver, receiver_ty, stmt.span);
+
+                if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
+                    let index_operand =
+                        self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::I64));
+                    let index_slot = self.spill(index_operand, IrType::Int(IntWidth::I64), stmt.span);
+                    let element_ty = self.array_list_element_type(receiver_ty);
+                    let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, stmt.span);
+                    let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), stmt.span);
+                    let value = self.lower_expr_as(&stmt.value, element_ty);
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver,
+                            index,
+                            value,
+                        },
+                        stmt.span,
+                    );
+                    return;
+                }
 
                 let index_operand =
                     self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::U64));
@@ -2995,6 +3826,87 @@ impl<'a> FunctionLowering<'a> {
                 );
             }
         }
+    }
+
+    /// `s[i] = c` where `s` is a `String` variable (roadmap Phase 7): builds
+    /// the replacement `String` through `zirk_str_set` — bounds-checked the
+    /// same way a `s[i]` read is (`StringGraphemeOffset` answering `-1` when
+    /// the index is out of range throws `IndexOutOfBoundsError`) — and stores
+    /// it back into the variable's slot. `value` is an already-lowered
+    /// `Char`/`String` handle.
+    fn lower_string_index_write(
+        &mut self,
+        index_expr: &ast::IndexExpr,
+        value: Operand,
+        span: Span,
+    ) {
+        let ast::Expr::Path(name) = &*index_expr.receiver else {
+            unreachable!("the checker only writes through a `String` variable")
+        };
+        let slot = self.lookup_slot(&name.name);
+        let value_ty = self.type_of_operand(value);
+        let value_slot = self.spill(value, value_ty, span);
+
+        let string = self.emit(InstKind::Load(slot), IrType::String, index_expr.span);
+        let string_slot = self.spill(string, IrType::String, span);
+        let index = self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::I64));
+        let index_slot = self.spill(index, IrType::Int(IntWidth::I64), span);
+
+        let string = self.emit(InstKind::Load(string_slot), IrType::String, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let offset = self.emit(
+            InstKind::StringGraphemeOffset { string, index },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let offset_slot = self.spill(offset, IrType::Int(IntWidth::I64), span);
+
+        let minus_one = self.const_i64(-1, span);
+        let offset = self.emit(InstKind::Load(offset_slot), IrType::Int(IntWidth::I64), span);
+        let is_out = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: offset,
+                right: minus_one,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_out,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program indexing a string registered the exception hierarchy");
+        self.throw_native_failure(native.index_out_of_bounds, "string index out of bounds", span);
+
+        self.current = cont;
+        let string = self.emit(InstKind::Load(string_slot), IrType::String, span);
+        let offset = self.emit(InstKind::Load(offset_slot), IrType::Int(IntWidth::I64), span);
+        let length = self.emit(
+            InstKind::GraphemeLenAt { string, offset },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let value = self.emit(InstKind::Load(value_slot), value_ty, span);
+        let replaced = self.emit(
+            InstKind::Call {
+                callee: "zirk_str_set".to_string(),
+                args: vec![string, offset, length, value],
+            },
+            IrType::String,
+            span,
+        );
+        self.journal_writes_to_slot(slot, span);
+        self.emit_effect(InstKind::Store(slot, replaced), span);
     }
 
     /// Lowers `if`/`else` into blocks with a conditional branch.
@@ -3140,29 +4052,159 @@ impl<'a> FunctionLowering<'a> {
         if let ast::Expr::Range(range) = &stmt.iterable {
             return self.lower_for_in_range(stmt, range);
         }
-        if self.type_of(&stmt.iterable, stmt.iterable.span()) == IrType::String {
+        let iterable_ty = self.type_of(&stmt.iterable, stmt.iterable.span());
+        if iterable_ty == IrType::String {
             return self.lower_for_in_string(stmt);
+        }
+        if iterable_ty == IrType::Range {
+            return self.lower_for_in_range_value(stmt);
+        }
+        if matches!(iterable_ty, IrType::Array(_) | IrType::List(_)) {
+            return self.lower_for_in_array_list(stmt, iterable_ty);
         }
         self.lower_for_in_iterable(stmt);
     }
 
-    /// Lowers `for i in a..b { ... }`.
+    /// The element type `for ... in` over a `Range<T>` binds — read back
+    /// from the checker's record of the iterable expression (`expr_types`
+    /// keyed by the `RangeExpr`'s own span, or the iterable's), lowered to
+    /// its `i32`/`i64` width.
+    fn range_loop_element_type(&mut self, span: Span) -> IrType {
+        let Some(&ty) = self.checked.expr_types.get(&span) else {
+            return IrType::Int(IntWidth::I32);
+        };
+        let Base::Range(id) = ty.base else {
+            return IrType::Int(IntWidth::I32);
+        };
+        let element = self.checked.range_types[id as usize];
+        self.ir_type(element)
+    }
+
+    /// Lowers `for i in a..b { ... }`, `a..=b` and `a..b..step` (roadmap
+    /// Phase 7, `Range<T>`): the literal form never materializes a `Range`
+    /// object — the loop runs a counter of the element's own width
+    /// (`Int32`, or `i64` nanoseconds for `Duration`) straight off the
+    /// written operands, exactly the values `zirk_range_new` would store.
     fn lower_for_in_range(&mut self, stmt: &ast::ForInStmt, range: &ast::RangeExpr) {
+        let element = self.range_loop_element_type(range.span);
+        let start = self.lower_expr_as(&range.start, element);
+        let end = self.lower_expr_as(&range.end, element);
+        let step = match &range.step {
+            Some(step) => self.lower_expr_as(step, element),
+            None => self.const_int_at(1, element, stmt.span),
+        };
+        let inclusive = range.inclusive;
+        self.emit_range_loop(stmt, element, start, end, step, inclusive);
+    }
+
+    /// `for x in range` where `range` is a `Range<T>` value rather than a
+    /// literal (roadmap Phase 7): the object's fields feed the exact same
+    /// counter loop the literal spelling takes. The runtime stores every
+    /// part as `i64`, so each is read back through `IntCast` into the
+    /// element's own width.
+    fn lower_for_in_range_value(&mut self, stmt: &ast::ForInStmt) {
+        let element = self.range_loop_element_type(stmt.iterable.span());
+        let range = self.lower_expr(&stmt.iterable);
+        let getter = |this: &mut Self, name: &str| {
+            let value = this.emit(
+                InstKind::Call {
+                    callee: name.to_string(),
+                    args: vec![range],
+                },
+                IrType::Int(IntWidth::I64),
+                stmt.span,
+            );
+            if element == IrType::Int(IntWidth::I64) {
+                value
+            } else {
+                this.emit(InstKind::IntCast(value), element, stmt.span)
+            }
+        };
+        let start = getter(self, "zirk_range_start");
+        let end = getter(self, "zirk_range_end");
+        let step = getter(self, "zirk_range_step");
+        let inclusive = self.emit(
+            InstKind::Call {
+                callee: "zirk_range_inclusive".to_string(),
+                args: vec![range],
+            },
+            IrType::Int(IntWidth::I64),
+            stmt.span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), stmt.span);
+        let inclusive = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::NotEq,
+                left: inclusive,
+                right: zero,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        self.emit_range_loop_dynamic(stmt, element, start, end, step, inclusive);
+    }
+
+    /// The loop `for ... in <range>` emits once its operands are known.
+    /// `step` may carry any sign, so the keep-going test cannot pick its
+    /// comparison at lowering time: it computes
+    /// `forward ? cur {<|<=} end : cur {>|>=} end` — a `step` of `0`
+    /// throws `InvalidStepError` before the loop is entered, since such a
+    /// stride can never advance.
+    fn emit_range_loop(
+        &mut self,
+        stmt: &ast::ForInStmt,
+        element: IrType,
+        start: Operand,
+        end: Operand,
+        step: Operand,
+        inclusive: bool,
+    ) {
         self.scopes.push(HashMap::new());
 
-        let start = self.lower_expr(&range.start);
-        let binding = self.declare_slot(
-            &stmt.binding.name,
-            IrType::Int(IntWidth::I32),
-            stmt.binding.span,
-        );
+        let binding = self.declare_slot(&stmt.binding.name, element, stmt.binding.span);
         self.emit_effect(InstKind::Store(binding, start), stmt.span);
 
-        // The end is evaluated once, before the loop: re-evaluating it each
-        // iteration would call any function in it repeatedly.
-        let end = self.lower_expr(&range.end);
-        let limit = self.declare_slot("<range end>", IrType::Int(IntWidth::I32), range.end.span());
+        // `end` and `step` are evaluated once, before the loop:
+        // re-evaluating them each iteration would call any function in
+        // them repeatedly.
+        let limit = self.declare_slot("<range end>", element, stmt.span);
         self.emit_effect(InstKind::Store(limit, end), stmt.span);
+        let stride = self.declare_slot("<range step>", element, stmt.span);
+        self.emit_effect(InstKind::Store(stride, step), stmt.span);
+
+        // `a..b..0` can never advance — a controlled `InvalidStepError`
+        // (roadmap Phase 7), thrown before the loop starts.
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let zero = self.const_int_at(0, element, stmt.span);
+        let zero_step = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: stride_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let fail_block = self.new_block();
+        let ok_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: zero_step,
+            then_block: fail_block,
+            else_block: ok_block,
+        });
+        self.current = fail_block;
+        let invalid_step = self
+            .checked
+            .native_exceptions
+            .expect("a program constructing a range registered the exception hierarchy")
+            .invalid_step;
+        self.throw_native_failure(
+            invalid_step,
+            "a range's step cannot be zero",
+            stmt.span,
+        );
+        self.terminate(Terminator::Jump(ok_block));
+        self.current = ok_block;
 
         let header = self.new_block();
         let body_block = self.new_block();
@@ -3172,22 +4214,64 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(header));
 
         self.current = header;
-        let current = self.emit(
-            InstKind::Load(binding),
-            IrType::Int(IntWidth::I32),
-            stmt.span,
-        );
-        let bound = self.emit(InstKind::Load(limit), IrType::Int(IntWidth::I32), stmt.span);
-        let op = if range.inclusive {
-            BinaryOp::LtEq
-        } else {
-            BinaryOp::Lt
-        };
-        let keep_going = self.emit(
+        let current = self.emit(InstKind::Load(binding), element, stmt.span);
+        let bound = self.emit(InstKind::Load(limit), element, stmt.span);
+        // `forward ? cur {<|<=} bound : cur {>|>=} bound` — the step's sign
+        // is not known until run time, so both comparisons run and the sign
+        // picks one.
+        let within = self.emit(
             InstKind::Binary {
-                op,
+                op: if inclusive { BinaryOp::LtEq } else { BinaryOp::Lt },
                 left: current,
                 right: bound,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let within_back = self.emit(
+            InstKind::Binary {
+                op: if inclusive { BinaryOp::GtEq } else { BinaryOp::Gt },
+                left: current,
+                right: bound,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let zero = self.const_int_at(0, element, stmt.span);
+        let forward = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: stride_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let backward = self.emit(InstKind::Unary { op: UnaryOp::Not, operand: forward }, IrType::Boolean, stmt.span);
+        let keep_forward = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: forward,
+                right: within,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let keep_backward = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: backward,
+                right: within_back,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: keep_forward,
+                right: keep_backward,
             },
             IrType::Boolean,
             stmt.span,
@@ -3212,22 +4296,345 @@ impl<'a> FunctionLowering<'a> {
         self.loops.pop();
 
         self.current = step_block;
+        let value = self.emit(InstKind::Load(binding), element, stmt.span);
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: value,
+                right: stride_value,
+            },
+            element,
+            stmt.span,
+        );
+        self.emit_effect(InstKind::Store(binding, next), stmt.span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    /// The value-form twin of [`Self::emit_range_loop`]: `inclusive` is
+    /// itself dynamic here (read from the range object), so the endpoint
+    /// compare is `(forward && (incl ? cur <= end : cur < end)) ||
+    /// (!forward && (incl ? cur >= end : cur > end))` — the flag picks the
+    /// comparison the literal spelling writes into the IR directly.
+    fn emit_range_loop_dynamic(
+        &mut self,
+        stmt: &ast::ForInStmt,
+        element: IrType,
+        start: Operand,
+        end: Operand,
+        step: Operand,
+        inclusive: Operand,
+    ) {
+        self.scopes.push(HashMap::new());
+
+        let binding = self.declare_slot(&stmt.binding.name, element, stmt.binding.span);
+        self.emit_effect(InstKind::Store(binding, start), stmt.span);
+
+        // `end`, `step` and the `..=` flag are evaluated once, before the
+        // loop: re-evaluating them each iteration would re-run whatever
+        // produced the range.
+        let limit = self.declare_slot("<range end>", element, stmt.span);
+        self.emit_effect(InstKind::Store(limit, end), stmt.span);
+        let stride = self.declare_slot("<range step>", element, stmt.span);
+        self.emit_effect(InstKind::Store(stride, step), stmt.span);
+        let incl = self.declare_slot("<range inclusive>", IrType::Boolean, stmt.span);
+        self.emit_effect(InstKind::Store(incl, inclusive), stmt.span);
+
+        // A range object can only be built by `zirk_range_new`, whose own
+        // caller guards `step == 0`; slices and `reverse()` produce
+        // non-zero steps. The check repeats anyway — a hand-off through a
+        // slot is exactly where such an invariant is easiest to lose.
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let zero = self.const_int_at(0, element, stmt.span);
+        let zero_step = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: stride_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let fail_block = self.new_block();
+        let ok_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: zero_step,
+            then_block: fail_block,
+            else_block: ok_block,
+        });
+        self.current = fail_block;
+        let invalid_step = self
+            .checked
+            .native_exceptions
+            .expect("a program constructing a range registered the exception hierarchy")
+            .invalid_step;
+        self.throw_native_failure(
+            invalid_step,
+            "a range's step cannot be zero",
+            stmt.span,
+        );
+        self.terminate(Terminator::Jump(ok_block));
+        self.current = ok_block;
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let current = self.emit(InstKind::Load(binding), element, stmt.span);
+        let bound = self.emit(InstKind::Load(limit), element, stmt.span);
+        let inclusive = self.emit(InstKind::Load(incl), IrType::Boolean, stmt.span);
+        let exclusive = self.emit(
+            InstKind::Unary { op: UnaryOp::Not, operand: inclusive },
+            IrType::Boolean,
+            stmt.span,
+        );
+
+        // Within the bound, forward: `incl ? cur <= end : cur < end`.
+        let lt = self.emit(
+            InstKind::Binary { op: BinaryOp::Lt, left: current, right: bound },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let le = self.emit(
+            InstKind::Binary { op: BinaryOp::LtEq, left: current, right: bound },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let incl_le = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: inclusive, right: le },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let excl_lt = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: exclusive, right: lt },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let within_fwd = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: incl_le,
+                right: excl_lt,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+
+        // Within the bound, backward: `incl ? cur >= end : cur > end`.
+        let gt = self.emit(
+            InstKind::Binary { op: BinaryOp::Gt, left: current, right: bound },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let ge = self.emit(
+            InstKind::Binary { op: BinaryOp::GtEq, left: current, right: bound },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let incl_ge = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: inclusive, right: ge },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let excl_gt = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: exclusive, right: gt },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let within_bwd = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: incl_ge,
+                right: excl_gt,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+
+        // The step's sign picks which direction's test answers.
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let zero = self.const_int_at(0, element, stmt.span);
+        let forward = self.emit(
+            InstKind::Binary { op: BinaryOp::Gt, left: stride_value, right: zero },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let backward = self.emit(
+            InstKind::Unary {
+                op: UnaryOp::Not,
+                operand: forward,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let keep_fwd = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: forward, right: within_fwd },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let keep_bwd = self.emit(
+            InstKind::Binary { op: BinaryOp::And, left: backward, right: within_bwd },
+            IrType::Boolean,
+            stmt.span,
+        );
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: keep_fwd,
+                right: keep_bwd,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep_going,
+            then_block: body_block,
+            else_block: continue_block,
+        });
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: step_block,
+            try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
+        });
+
+        self.current = body_block;
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(step_block));
+
+        self.loops.pop();
+
+        self.current = step_block;
+        let value = self.emit(InstKind::Load(binding), element, stmt.span);
+        let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: value,
+                right: stride_value,
+            },
+            element,
+            stmt.span,
+        );
+        self.emit_effect(InstKind::Store(binding, next), stmt.span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = continue_block;
+        self.scopes.pop();
+    }
+
+    /// Lowers `for x in arrayOrList { ... }` using a counter and the
+    /// collection's own length instruction.
+    fn lower_for_in_array_list(&mut self, stmt: &ast::ForInStmt, iterable_ty: IrType) {
+        self.scopes.push(HashMap::new());
+
+        let iterable = self.lower_expr(&stmt.iterable);
+        let iterable_slot = self.declare_slot("<iterable>", iterable_ty, stmt.iterable.span());
+        self.emit_effect(InstKind::Store(iterable_slot, iterable), stmt.span);
+
+        let iterable_value = self.emit(InstKind::Load(iterable_slot), iterable_ty, stmt.span);
+        let length = self.emit(
+            if matches!(iterable_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(iterable_value)
+            } else {
+                InstKind::ListLength(iterable_value)
+            },
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
+        let length_slot = self.declare_slot("<length>", IrType::Int(IntWidth::U64), stmt.span);
+        self.emit_effect(InstKind::Store(length_slot, length), stmt.span);
+
+        let element_ty = self.array_list_element_type(iterable_ty);
+        let counter = self.declare_slot(
+            &stmt.binding.name,
+            IrType::Int(IntWidth::U64),
+            stmt.binding.span,
+        );
+        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), stmt.span);
+        let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), stmt.span);
+        self.emit_effect(InstKind::Store(counter, zero), stmt.span);
+
+        let header = self.new_block();
+        let body_block = self.new_block();
+        let step_block = self.new_block();
+        let continue_block = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let current = self.emit(
+            InstKind::Load(counter),
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
+        let bound = self.emit(InstKind::Load(length_slot), IrType::Int(IntWidth::U64), stmt.span);
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: current,
+                right: bound,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep_going,
+            then_block: body_block,
+            else_block: continue_block,
+        });
+
+        self.loops.push(LoopTargets {
+            break_to: continue_block,
+            continue_to: step_block,
+            try_depth: self.try_stack.len(),
+            unsafe_depth: self.unsafe_stack.len(),
+        });
+
+        self.current = body_block;
+        let iterable_value = self.emit(InstKind::Load(iterable_slot), iterable_ty, stmt.span);
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), stmt.span);
+        let element = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: iterable_value,
+                index,
+            },
+            element_ty,
+            stmt.span,
+        );
+        let binding = self.declare_slot(&stmt.binding.name, element_ty, stmt.binding.span);
+        self.emit_effect(InstKind::Store(binding, element), stmt.span);
+        self.lower_block(&stmt.body);
+        self.terminate(Terminator::Jump(step_block));
+
+        self.loops.pop();
+
+        self.current = step_block;
         let value = self.emit(
-            InstKind::Load(binding),
-            IrType::Int(IntWidth::I32),
+            InstKind::Load(counter),
+            IrType::Int(IntWidth::U64),
             stmt.span,
         );
         let one = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), stmt.span);
+        let one = self.emit(InstKind::IntCast(one), IrType::Int(IntWidth::U64), stmt.span);
         let next = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Add,
                 left: value,
                 right: one,
             },
-            IrType::Int(IntWidth::I32),
+            IrType::Int(IntWidth::U64),
             stmt.span,
         );
-        self.emit_effect(InstKind::Store(binding, next), stmt.span);
+        self.emit_effect(InstKind::Store(counter, next), stmt.span);
         self.terminate(Terminator::Jump(header));
 
         self.current = continue_block;
@@ -3653,6 +5060,11 @@ impl<'a> FunctionLowering<'a> {
                     ),
                 }
             }
+            ast::Expr::Duration(lit) => self.emit(
+                InstKind::ConstInt(lit.nanos as i128),
+                IrType::Int(IntWidth::I64),
+                span,
+            ),
             ast::Expr::Float(lit) => {
                 let ty = self
                     .checked
@@ -3695,6 +5107,18 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Str(lit) => {
                 let id = self.module.intern_string(&lit.value);
                 self.emit(InstKind::ConstString(id), IrType::String, span)
+            }
+            ast::Expr::Regex(lit) => {
+                let pattern_id = self.module.intern_string(&lit.pattern);
+                let pattern = self.emit(InstKind::ConstString(pattern_id), IrType::String, span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_from_pattern".to_string(),
+                        args: vec![pattern],
+                    },
+                    IrType::Regex,
+                    span,
+                )
             }
             ast::Expr::Char(lit) => {
                 let id = self.module.intern_string(&lit.value);
@@ -3862,6 +5286,14 @@ impl<'a> FunctionLowering<'a> {
                 let held = self.lower_and_hold(&e.left, will_branch);
                 let right = self.lower_expr(&e.right);
                 let left = self.reload(held, e.left.span());
+
+                // `Duration` keeps an `i64` representation but has its own
+                // arithmetic rules (runtime calls for scalar multiply/divide,
+                // ordinary integer add/sub, and a ratio for `Div`).
+                if self.is_duration(&e.left) || self.is_duration(&e.right) {
+                    return self.lower_duration_binary(e, left, right, span);
+                }
+
                 let op = binary_op(e.op);
 
                 let left_ty = self.type_of(&e.left, e.left.span());
@@ -3873,66 +5305,71 @@ impl<'a> FunctionLowering<'a> {
                 // for literals that were contextually inferred (e.g. `1.0`
                 // treated as `Int8`), so each operand is converted from its
                 // own actual type to the common type.
-                let (left, right, operand_type) =
-                    if Self::is_numeric_ir_type(left_ty) && Self::is_numeric_ir_type(right_ty) {
-                        if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem)
+                let (left, right, operand_type) = if Self::is_numeric_ir_type(left_ty)
+                    && Self::is_numeric_ir_type(right_ty)
+                {
+                    if matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Rem
+                    ) {
+                        let common = self
+                            .common_numeric_ir_type(left_ty, right_ty)
+                            .unwrap_or(left_ty);
+                        let left_actual = self.type_of_operand(left);
+                        let right_actual = self.type_of_operand(right);
+                        let left = self.convert_numeric(left, left_actual, common, e.left.span());
+                        let right =
+                            self.convert_numeric(right, right_actual, common, e.right.span());
+                        (left, right, common)
+                    } else {
+                        let left_actual = self.type_of_operand(left);
+                        let right_actual = self.type_of_operand(right);
+                        let left = self.convert_numeric(left, left_actual, left_ty, e.left.span());
+                        let right =
+                            self.convert_numeric(right, right_actual, left_ty, e.right.span());
+                        (left, right, left_ty)
+                    }
+                } else {
+                    match (left_ty, right_ty) {
+                        (base, IrType::Nullable(_))
+                            if op == BinaryOp::Identical
+                                && !matches!(base, IrType::Nullable(_)) =>
                         {
-                            let common = self
-                                .common_numeric_ir_type(left_ty, right_ty)
-                                .unwrap_or(left_ty);
-                            let left_actual = self.type_of_operand(left);
-                            let right_actual = self.type_of_operand(right);
-                            let left =
-                                self.convert_numeric(left, left_actual, common, e.left.span());
-                            let right =
-                                self.convert_numeric(right, right_actual, common, e.right.span());
-                            (left, right, common)
-                        } else {
-                            let left_actual = self.type_of_operand(left);
-                            let right_actual = self.type_of_operand(right);
-                            let left =
-                                self.convert_numeric(left, left_actual, left_ty, e.left.span());
-                            let right =
-                                self.convert_numeric(right, right_actual, left_ty, e.right.span());
+                            let nb = Nullable::of(base)
+                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                            let left = self.emit(
+                                InstKind::Wrap {
+                                    base: nb,
+                                    value: left,
+                                },
+                                right_ty,
+                                e.left.span(),
+                            );
+                            (left, right, right_ty)
+                        }
+                        (IrType::Nullable(_), base)
+                            if op == BinaryOp::Identical
+                                && !matches!(base, IrType::Nullable(_)) =>
+                        {
+                            let nb = Nullable::of(base)
+                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
+                            let right = self.emit(
+                                InstKind::Wrap {
+                                    base: nb,
+                                    value: right,
+                                },
+                                left_ty,
+                                e.right.span(),
+                            );
                             (left, right, left_ty)
                         }
-                    } else {
-                        match (left_ty, right_ty) {
-                            (base, IrType::Nullable(_))
-                                if op == BinaryOp::Identical
-                                    && !matches!(base, IrType::Nullable(_)) =>
-                            {
-                                let nb = Nullable::of(base)
-                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
-                                let left = self.emit(
-                                    InstKind::Wrap {
-                                        base: nb,
-                                        value: left,
-                                    },
-                                    right_ty,
-                                    e.left.span(),
-                                );
-                                (left, right, right_ty)
-                            }
-                            (IrType::Nullable(_), base)
-                                if op == BinaryOp::Identical
-                                    && !matches!(base, IrType::Nullable(_)) =>
-                            {
-                                let nb = Nullable::of(base)
-                                    .expect("`is` only ever reaches a type with identity, and every one has a nullable form");
-                                let right = self.emit(
-                                    InstKind::Wrap {
-                                        base: nb,
-                                        value: right,
-                                    },
-                                    left_ty,
-                                    e.right.span(),
-                                );
-                                (left, right, left_ty)
-                            }
-                            _ => (left, right, left_ty),
-                        }
-                    };
+                        _ => (left, right, left_ty),
+                    }
+                };
 
                 self.emit_checked_binary(op, left, right, operand_type, span)
             }
@@ -4015,14 +5452,48 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
                 }
-                if let Some(operand) = self.lower_contract_call(e, span) {
-                    let ty = self.type_of_operand(operand);
-                    return self.lower_throws_check(operand, ty, span);
+                // `native-type-member-surface` statics and native methods
+                // have to be lowered before any lookup that would try to
+                // resolve their base name as a variable or contract method
+                // (`Int32.parse(...)` / `Int32.MAX.to_string()`).
+                if let Some(operand) = self.lower_native_static_call(e, span) {
+                    return operand;
                 }
                 if let Some(operand) = self.lower_native_to_string_call(e, span) {
                     return operand;
                 }
+                if let Some(operand) = self.lower_scalar_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_string_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_char_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_duration_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_regex_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_regex_match_group_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_contract_call(e, span) {
+                    let ty = self.type_of_operand(operand);
+                    return self.lower_throws_check(operand, ty, span);
+                }
                 if let Some(operand) = self.lower_result_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_range_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_array_list_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_array_list_construction(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_method_call(e, span) {
@@ -4038,7 +5509,7 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(id) = self.construction_class_id(e) {
                     return if matches!(
                         self.checked.classes[id as usize].kind,
-                        ast::ClassKind::Record | ast::ClassKind::ValueClass
+                        ast::ClassKind::Record
                     ) {
                         self.lower_record_construction(e, id, span)
                     } else {
@@ -4055,6 +5526,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::If(e) => self.lower_if_expr(e, span),
             ast::Expr::Field(e) => self.lower_field(e, span),
             ast::Expr::Index(e) => self.lower_index_read(e, span),
+            ast::Expr::Slice(e) => self.lower_slice(e, span),
             ast::Expr::This(_) | ast::Expr::Super(_) => {
                 // `super` names where to look, not what to look at: the value
                 // is the same instance.
@@ -4066,7 +5538,11 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Match(e) => self.lower_match(e, span),
             ast::Expr::Variant(e) => {
                 let value = self.discriminant(&e.enum_name, &e.variant.name);
-                self.emit(InstKind::ConstInt(value as i128), IrType::Int(IntWidth::I32), span)
+                self.emit(
+                    InstKind::ConstInt(value as i128),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                )
             }
 
             ast::Expr::Println(e) => {
@@ -4092,10 +5568,87 @@ impl<'a> FunctionLowering<'a> {
 
             // `null` has no type of its own: it only appears where a
             // destination supplies one, and `lower_expr_as` handles it there.
-            ast::Expr::Null(_) | ast::Expr::Range(_) => {
+            ast::Expr::Tuple(tuple) => {
+                let ty = self.type_of(expr, expr.span());
+                let IrType::Value(layout_id) = ty else {
+                    unreachable!("a tuple literal has a value layout")
+                };
+                let mut fields = Vec::with_capacity(tuple.elements.len());
+                for element in &tuple.elements {
+                    fields.push(self.lower_expr(element));
+                }
+                self.emit(
+                    InstKind::BuildValue {
+                        class: layout_id,
+                        fields,
+                    },
+                    ty,
+                    span,
+                )
+            }
+            ast::Expr::Range(range) => self.lower_range_value(range, span),
+            ast::Expr::Null(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
+    }
+
+    /// `start..end(..step)` as a `Range<T>` value (roadmap Phase 7): each
+    /// part widens to `i64` — the runtime's `ZirkRange` word — and a `step`
+    /// of `0` throws `InvalidStepError` before the object exists, since such
+    /// a stride could never advance.
+    fn lower_range_value(&mut self, range: &ast::RangeExpr, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let start = self.lower_expr_as(&range.start, i64_ty);
+        let start = self.spill(start, i64_ty, range.start.span());
+        let end = self.lower_expr_as(&range.end, i64_ty);
+        let end = self.spill(end, i64_ty, range.end.span());
+        let step = match &range.step {
+            Some(step) => self.lower_expr_as(step, i64_ty),
+            None => self.const_i64(1, span),
+        };
+        let step = self.spill(step, i64_ty, span);
+
+        let step_value = self.emit(InstKind::Load(step), i64_ty, span);
+        let zero = self.const_i64(0, span);
+        let zero_step = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: step_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let keep = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: zero_step,
+            then_block: fail,
+            else_block: keep,
+        });
+        self.current = fail;
+        let invalid_step = self
+            .checked
+            .native_exceptions
+            .expect("a program constructing a range registered the exception hierarchy")
+            .invalid_step;
+        self.throw_native_failure(invalid_step, "a range's step cannot be zero", span);
+        self.terminate(Terminator::Jump(keep));
+        self.current = keep;
+
+        let start = self.emit(InstKind::Load(start), i64_ty, span);
+        let end = self.emit(InstKind::Load(end), i64_ty, span);
+        let step = self.emit(InstKind::Load(step), i64_ty, span);
+        let inclusive = self.const_i64(range.inclusive as i128, span);
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_range_new".to_string(),
+                args: vec![start, end, step, inclusive],
+            },
+            IrType::Range,
+            span,
+        )
     }
 
     /// Lowers `&&` and `||` so the right operand only runs when it matters.
@@ -4727,6 +6280,31 @@ impl<'a> FunctionLowering<'a> {
                 let slot = self.declare_slot(&ident.name, narrowed_type, ident.span);
                 self.emit_effect(InstKind::Store(slot, current), ident.span);
             }
+            // A regex pattern binds the `Regex.Match` its test found — the
+            // `Regex.Match?` `lower_regex_pattern_test` held in a slot is
+            // unwrapped here, on the path where the match exists.
+            if let ast::Pattern::Regex(r) = &arm.pattern
+                && let Some(binding) = &r.binding
+            {
+                let held = self
+                    .try_lookup_slot("<regex match>")
+                    .expect("a regex pattern's own test stored the match");
+                let held_ty = IrType::Nullable(Nullable::Object(self.checked.regex_match_class));
+                let object_ty = IrType::Object(self.checked.regex_match_class);
+                let held = self.emit(InstKind::Load(held), held_ty, binding.span);
+                let value = self.emit(InstKind::Unwrap(held), object_ty, binding.span);
+                let slot = self.declare_slot(&binding.name, object_ty, binding.span);
+                self.emit_effect(InstKind::Store(slot, value), binding.span);
+            }
+            // A tuple pattern destructures its elements into the names each
+            // sub-pattern binds (roadmap Phase 3b).
+            if let ast::Pattern::Tuple(_) = &arm.pattern {
+                let current =
+                    self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
+                let slot = self.declare_slot("<tuple>", narrowed_type, span);
+                self.emit_effect(InstKind::Store(slot, current), span);
+                self.lower_pattern_bindings(&arm.pattern, slot, narrowed_type, span);
+            }
             // A variant pattern destructures its own associated fields, each
             // into the name its sub-pattern binds (roadmap task 11.4) — the
             // checker only accepts a binding or a wildcard here, so a
@@ -5205,6 +6783,13 @@ impl<'a> FunctionLowering<'a> {
         narrowed_type: IrType,
         span: Span,
     ) -> Operand {
+        // `re'pattern' name?` finds the regex in the `String` scrutinee; the
+        // `Regex.Match?` it produces goes into a slot the arm's own binding
+        // reads (`lower_match`'s `Pattern::Regex` arm), since values do not
+        // cross blocks (ADR-007).
+        if let ast::Pattern::Regex(r) = pattern {
+            return self.lower_regex_pattern_test(r, scrutinee, scrutinee_type, narrowed_type, span);
+        }
         let expected = match pattern {
             ast::Pattern::Int(lit) => self.emit(
                 InstKind::ConstInt(lit.value),
@@ -5220,7 +6805,11 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Pattern::Variant(v) => {
                 let value = self.discriminant(&v.enum_name, &v.variant.name);
-                self.emit(InstKind::ConstInt(value as i128), IrType::Int(IntWidth::I32), span)
+                self.emit(
+                    InstKind::ConstInt(value as i128),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                )
             }
             // `null` tests absence rather than a value, so it is the one
             // pattern that does not compare against anything — and the one
@@ -5228,6 +6817,12 @@ impl<'a> FunctionLowering<'a> {
             ast::Pattern::Null(_) => {
                 let value = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
                 return self.emit(InstKind::IsNull(value), IrType::Boolean, span);
+            }
+            ast::Pattern::Tuple(_) => {
+                unreachable!("tuple patterns are not lowered yet")
+            }
+            ast::Pattern::Regex(_) => {
+                unreachable!("handled above, before the comparison chain")
             }
             ast::Pattern::Wildcard(_) | ast::Pattern::Binding(_) => {
                 unreachable!("an irrefutable pattern is not tested this way")
@@ -5255,6 +6850,51 @@ impl<'a> FunctionLowering<'a> {
                 op: BinaryOp::Eq,
                 left,
                 right: expected,
+            },
+            IrType::Boolean,
+            span,
+        )
+    }
+
+    /// `re'pattern' name?` against a `String` scrutinee: compiles the
+    /// literal, calls `zirk_regex_find`, and holds the `Regex.Match?` in a
+    /// slot the arm body reads when a binding follows the literal.
+    fn lower_regex_pattern_test(
+        &mut self,
+        pattern: &ast::RegexPattern,
+        scrutinee: SlotId,
+        scrutinee_type: IrType,
+        narrowed_type: IrType,
+        span: Span,
+    ) -> Operand {
+        let pattern_id = self.module.intern_string(&pattern.pattern);
+        let pattern_string = self.emit(InstKind::ConstString(pattern_id), IrType::String, span);
+        let regex = self.emit(
+            InstKind::Call {
+                callee: "zirk_regex_from_pattern".to_string(),
+                args: vec![pattern_string],
+            },
+            IrType::Regex,
+            span,
+        );
+        let text = self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
+        let found_ty = IrType::Nullable(Nullable::Object(self.checked.regex_match_class));
+        let found = self.emit(
+            InstKind::Call {
+                callee: "zirk_regex_find".to_string(),
+                args: vec![regex, text],
+            },
+            found_ty,
+            span,
+        );
+        let held = self.declare_slot("<regex match>", found_ty, span);
+        self.emit_effect(InstKind::Store(held, found), span);
+        let found = self.emit(InstKind::Load(held), found_ty, span);
+        let is_null = self.emit(InstKind::IsNull(found), IrType::Boolean, span);
+        self.emit(
+            InstKind::Unary {
+                op: UnaryOp::Not,
+                operand: is_null,
             },
             IrType::Boolean,
             span,
@@ -5289,6 +6929,28 @@ impl<'a> FunctionLowering<'a> {
                             self.module.enums[module_id as usize].fields[index as usize].ty;
                         self.declare_slot(&ident.name, field_ty, ident.span);
                     }
+                }
+            }
+            ast::Pattern::Tuple(t) => {
+                let IrType::Value(layout_id) = scrutinee_type else {
+                    return;
+                };
+                let fields: Vec<_> = self.module.values[layout_id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty)
+                    .collect();
+                for (sub_pattern, field_ty) in t.elements.iter().zip(fields.iter()) {
+                    self.declare_pattern_types(sub_pattern, *field_ty);
+                }
+            }
+            ast::Pattern::Regex(r) => {
+                if let Some(binding) = &r.binding {
+                    self.declare_slot(
+                        &binding.name,
+                        IrType::Object(self.checked.regex_match_class),
+                        binding.span,
+                    );
                 }
             }
             _ => {}
@@ -5551,6 +7213,10 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.float_nan
                 || id == n.index_out_of_bounds
                 || id == n.native_error
+                || id == n.invalid_step
+                || id == n.parse_error
+                || id == n.overflow_error
+                || id == n.regex_error
         })
     }
 
@@ -6325,6 +7991,9 @@ impl<'a> FunctionLowering<'a> {
         match pattern {
             ast::Pattern::Binding(ident) => ident.name == name,
             ast::Pattern::Variant(v) => v.bindings.iter().any(|p| Self::pattern_binds(p, name)),
+            ast::Pattern::Regex(r) => {
+                r.binding.as_ref().is_some_and(|b| b.name == name)
+            }
             _ => false,
         }
     }
@@ -6486,6 +8155,33 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_effect(InstKind::Store(slot, value), ident.span);
             }
             ast::Pattern::Wildcard(_) => {}
+            ast::Pattern::Tuple(t) => {
+                let IrType::Value(layout_id) = scrutinee_type else {
+                    return;
+                };
+                let layout = self.module.values[layout_id as usize].clone();
+                let object = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                for (sub_pattern, (index, field)) in
+                    t.elements.iter().zip(layout.fields.iter().enumerate())
+                {
+                    let value = self.emit(
+                        InstKind::LoadField {
+                            object,
+                            index: index as u32,
+                        },
+                        field.ty,
+                        span,
+                    );
+                    match sub_pattern {
+                        ast::Pattern::Binding(ident) => {
+                            let slot = self.declare_slot(&ident.name, field.ty, ident.span);
+                            self.emit_effect(InstKind::Store(slot, value), ident.span);
+                        }
+                        ast::Pattern::Wildcard(_) => {}
+                        _ => {}
+                    }
+                }
+            }
             ast::Pattern::Variant(v) if !v.bindings.is_empty() => {
                 let template_id = self.enum_id_of(&v.enum_name);
                 let Some(variant) = self
@@ -6753,7 +8449,19 @@ impl<'a> FunctionLowering<'a> {
         let contract = &self.checked.contracts[id as usize];
         let method = contract.method(&field.name.name)?;
         let index = method.index as u32;
-        let returns = self.ir_type(method.returns);
+        // The method's declared return type may name the contract's own
+        // type parameter (`Iterator<T>.next(): Iteration<T>`) — the call
+        // site knows the substitution (`it.next()` on `Iterator<Int32>`
+        // produces `Iteration<Int32>`), so the checker's recorded type wins
+        // whenever it recorded one.
+        let returns = self
+            .checked
+            .expr_types
+            .get(&span)
+            .copied()
+            .filter(|ty| !ty.is_unknown())
+            .map(|ty| self.ir_type(ty))
+            .unwrap_or_else(|| self.ir_type(method.returns));
         let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let receiver = self.lower_expr(&field.object);
@@ -6793,9 +8501,8 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             unreachable!("checked by is_native_to_string_call")
         };
-        let receiver_ty = self.type_of(&field.object, field.object.span());
         let receiver = self.lower_expr(&field.object);
-        Some(self.lower_to_string(receiver, receiver_ty, span))
+        Some(self.lower_to_string_expr(&field.object, receiver, span))
     }
 
     fn lower_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
@@ -6900,6 +8607,1550 @@ impl<'a> FunctionLowering<'a> {
             "suppressed" => Some(IrType::Nullable(Nullable::Object(
                 self.throwable_object_id(),
             ))),
+            _ => None,
+        }
+    }
+
+    /// `regex.matches(text)` and `regex.replace(text, replacement)`: built-in
+    /// runtime calls.
+    fn lower_regex_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("matches", 1) | ("replace", 2) | ("find", 1) | ("split", 1) | ("find_all", 1)
+        ) {
+            return None;
+        }
+        if self.type_of(&field.object, field.object.span()) != IrType::Regex {
+            return None;
+        }
+        let receiver = self.lower_expr(&field.object);
+        match field.name.name.as_str() {
+            "matches" => {
+                let text = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_is_match".to_string(),
+                        args: vec![receiver, text],
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "replace" => {
+                let text = self.lower_expr(&call.args[0].value);
+                let repl = self.lower_expr(&call.args[1].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_replace".to_string(),
+                        args: vec![receiver, text, repl],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "find" => {
+                let text = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_find".to_string(),
+                        args: vec![receiver, text],
+                    },
+                    IrType::Nullable(Nullable::Object(self.checked.regex_match_class)),
+                    span,
+                ))
+            }
+            "split" => {
+                let text = self.lower_expr(&call.args[0].value);
+                let list_id = self
+                    .checked
+                    .list_types
+                    .iter()
+                    .position(|&t| t == Type::STRING)
+                    .expect("the checker interned `List<String>` for `Regex.split`")
+                    as u32;
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_split".to_string(),
+                        args: vec![receiver, text],
+                    },
+                    IrType::List(list_id),
+                    span,
+                ))
+            }
+            "find_all" => {
+                let text = self.lower_expr(&call.args[0].value);
+                let list_id = self.regex_match_list_id();
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_find_all".to_string(),
+                        args: vec![receiver, text],
+                    },
+                    IrType::List(list_id),
+                    span,
+                ))
+            }
+            _ => unreachable!("name checked above"),
+        }
+    }
+
+    /// The interned `List<Regex.Match>` id — present whenever `find_all` is
+    /// reachable, since checking the call interns it.
+    fn regex_match_list_id(&self) -> u32 {
+        self.checked
+            .list_types
+            .iter()
+            .position(|&t| t == Type::of(Base::Class(self.checked.regex_match_class)))
+            .expect("the checker interned `List<Regex.Match>` for `Regex.find_all`")
+            as u32
+    }
+
+    /// `Regex.Match.group(n)` / `Regex.Match.group(name)`: built-in runtime
+    /// calls that re-run captures on the match's haystack.
+    fn lower_regex_match_group_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if field.name.name != "group" || call.args.len() != 1 {
+            return None;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span()).unwrapped();
+        let IrType::Object(id) = receiver_ty else {
+            return None;
+        };
+        if id != self.checked.regex_match_class {
+            return None;
+        }
+
+        // The runtime expects a `RegexMatch` object pointer so it can read
+        // `haystack`, `start`, and `regex` without copying the object.
+        let receiver = self.lower_expr(&field.object);
+
+        let arg = self.lower_expr(&call.args[0].value);
+        let arg_ty = self.type_of_operand(arg);
+        let (callee, params) = if matches!(arg_ty, IrType::Int(_)) {
+            ("zirk_regex_match_group_pos", vec![receiver, arg])
+        } else {
+            ("zirk_regex_match_group_name", vec![receiver, arg])
+        };
+
+        Some(self.emit(
+            InstKind::Call {
+                callee: callee.to_string(),
+                args: params,
+            },
+            IrType::String,
+            span,
+        ))
+    }
+
+    /// `String` built-in methods (roadmap Phase 7, `String` ops).
+    fn lower_string_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("trim", 0)
+                | ("trim_start", 0)
+                | ("trim_end", 0)
+                | ("to_lowercase", 0)
+                | ("to_uppercase", 0)
+                | ("clone", 0)
+                | ("is_empty", 0)
+                | ("split_whitespace", 0)
+                | ("lines", 0)
+                | ("bytes", 0)
+                | ("codepoints", 0)
+                | ("chars", 0)
+                | ("contains", 1)
+                | ("starts_with", 1)
+                | ("ends_with", 1)
+                | ("substring", 2)
+                | ("search", 1)
+                | ("find", 1)
+                | ("replace", 2)
+                | ("normalize", 1)
+                | ("split", 1)
+        ) {
+            return None;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        if !matches!(receiver_ty, IrType::String) {
+            return None;
+        }
+        // The `List<T>`-returning methods get their element id from the
+        // checker's own record — the extern ABI ignores it, but the IR
+        // value's type is what the verifier and later passes read.
+        let result_ty = |lower: &Self| {
+            lower
+                .checked
+                .expr_types
+                .get(&call.span)
+                .map(|&ty| lower.ir_type(ty))
+                .unwrap_or(IrType::String)
+        };
+        let receiver = self.lower_expr(&field.object);
+        match field.name.name.as_str() {
+            "trim" | "trim_start" | "trim_end" | "to_lowercase" | "to_uppercase"
+            | "clone" => Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_str_{}", field.name.name),
+                    args: vec![receiver],
+                },
+                IrType::String,
+                span,
+            )),
+            "is_empty" => Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_str_is_empty".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Boolean,
+                span,
+            )),
+            "split_whitespace" | "lines" | "chars" | "bytes" | "codepoints" => {
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_str_{}", field.name.name),
+                        args: vec![receiver],
+                    },
+                    result_ty(self),
+                    span,
+                ))
+            }
+            "find" => {
+                // `Int64?` — `-1` from the runtime maps to `null`.
+                let arg = self.lower_expr(&call.args[0].value);
+                let index = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_find".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let minus_one = self.emit(
+                    InstKind::ConstInt(-1),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let absent = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: index,
+                        right: minus_one,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let nullable = IrType::Nullable(Nullable::Int(IntWidth::I64));
+                let result_slot = self.declare_slot("<find>", nullable, span);
+                let null_block = self.new_block();
+                let some_block = self.new_block();
+                let continue_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: absent,
+                    then_block: null_block,
+                    else_block: some_block,
+                });
+                self.current = null_block;
+                let null = self.emit(InstKind::NullValue(Nullable::Int(IntWidth::I64)), nullable, span);
+                self.emit_effect(InstKind::Store(result_slot, null), span);
+                self.terminate(Terminator::Jump(continue_block));
+                self.current = some_block;
+                let wrapped = self.emit(
+                    InstKind::Wrap {
+                        base: Nullable::Int(IntWidth::I64),
+                        value: index,
+                    },
+                    nullable,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, wrapped), span);
+                self.terminate(Terminator::Jump(continue_block));
+                self.current = continue_block;
+                Some(self.emit(InstKind::Load(result_slot), nullable, span))
+            }
+            "replace" => {
+                let needle = self.lower_expr(&call.args[0].value);
+                let repl = self.lower_expr(&call.args[1].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_replace".to_string(),
+                        args: vec![receiver, needle, repl],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "normalize" => {
+                let form = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_normalize".to_string(),
+                        args: vec![receiver, form],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "contains" => {
+                let arg = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_contains".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "starts_with" => {
+                let arg = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_starts_with".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "ends_with" => {
+                let arg = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_ends_with".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "substring" => {
+                let start = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+                let end = self.lower_expr_as(&call.args[1].value, IrType::Int(IntWidth::I64));
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_substring".to_string(),
+                        args: vec![receiver, start, end],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "search" => {
+                let arg = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_search".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                ))
+            }
+            "split" => {
+                let arg = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_str_split".to_string(),
+                        args: vec![receiver, arg],
+                    },
+                    IrType::List(self.string_list_id()),
+                    span,
+                ))
+            }
+            _ => unreachable!("name checked above"),
+        }
+    }
+
+    /// The interned `List<String>` id — present whenever `split` is
+    /// reachable, since checking the call interns it.
+    fn string_list_id(&self) -> u32 {
+        self.checked
+            .list_types
+            .iter()
+            .position(|&t| t == Type::STRING)
+            .expect("the checker interned `List<String>` for `String.split`") as u32
+    }
+
+    /// `d.abs()`/`d.sign()`/`d.is_zero()`/`d.is_positive()`/`d.is_negative()`
+    /// on a `Duration` (roadmap Phase 7, `native-type-member-surface`): the
+    /// receiver is a nanosecond `i64`, so predicates are plain comparisons
+    /// and `abs`/`sign` are runtime calls. `abs` on `i64::MIN` traps like
+    /// `Int64` arithmetic does — `ArithmeticOverflowError`, checked here in
+    /// IR before the helper runs.
+    fn lower_duration_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("abs", 0)
+                | ("sign", 0)
+                | ("is_zero", 0)
+                | ("is_positive", 0)
+                | ("is_negative", 0)
+        ) || field.safe
+        {
+            return None;
+        }
+        let is_duration = self
+            .checked
+            .expr_types
+            .get(&field.object.span())
+            .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Duration));
+        if !is_duration {
+            return None;
+        }
+        let receiver = self.lower_expr(&field.object);
+        match field.name.name.as_str() {
+            "abs" => {
+                let slot = self.spill(receiver, IrType::Int(IntWidth::I64), span);
+                let value = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span);
+                let min = self.emit(
+                    InstKind::ConstInt(i64::MIN as i128),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let is_min = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: value,
+                        right: min,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let trap = self.new_block();
+                let ok = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_min,
+                    then_block: trap,
+                    else_block: ok,
+                });
+                self.current = trap;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("the checker registered the exception hierarchy");
+                self.throw_native_failure(
+                    native.arithmetic_overflow,
+                    "Duration.abs on the minimum representable duration",
+                    span,
+                );
+                self.current = ok;
+                let value = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_duration_abs".to_string(),
+                        args: vec![value],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                ))
+            }
+            "sign" => Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_duration_sign".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            )),
+            "is_zero" | "is_positive" | "is_negative" => {
+                let zero = self.emit(
+                    InstKind::ConstInt(0),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let op = match field.name.name.as_str() {
+                    "is_zero" => BinaryOp::Eq,
+                    "is_positive" => BinaryOp::Gt,
+                    _ => BinaryOp::Lt,
+                };
+                Some(self.emit(
+                    InstKind::Binary {
+                        op,
+                        left: receiver,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            _ => unreachable!("name checked above"),
+        }
+    }
+
+    /// Whether `call` is a `Duration` sign/magnitude method — consulted by
+    /// `is_callable_call` so the callee is never type-queried as a field
+    /// (a `Duration` lowers to `Int64`, which has no field layout).
+    fn is_duration_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("abs", 0)
+                | ("sign", 0)
+                | ("is_zero", 0)
+                | ("is_positive", 0)
+                | ("is_negative", 0)
+        ) || field.safe
+        {
+            return false;
+        }
+        self.checked
+            .expr_types
+            .get(&field.object.span())
+            .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Duration))
+    }
+
+    /// Maps a semantic integer width to the IR's own `IntWidth`.
+    fn ir_int_width(&self, width: zirk_sema::IntWidth) -> IntWidth {
+        use zirk_sema::IntWidth as S;
+        use IntWidth;
+        match width {
+            S::I8 => IntWidth::I8,
+            S::I16 => IntWidth::I16,
+            S::I32 => IntWidth::I32,
+            S::I64 => IntWidth::I64,
+            S::I128 => IntWidth::I128,
+            S::U8 => IntWidth::U8,
+            S::U16 => IntWidth::U16,
+            S::U32 => IntWidth::U32,
+            S::U64 => IntWidth::U64,
+            S::U128 => IntWidth::U128,
+        }
+    }
+
+    /// Maps a semantic float width to the IR's own `FloatWidth`.
+    fn ir_float_width(&self, width: zirk_sema::FloatWidth) -> FloatWidth {
+        use zirk_sema::FloatWidth as S;
+        use FloatWidth;
+        match width {
+            S::F16 => FloatWidth::F16,
+            S::F32 => FloatWidth::F32,
+            S::F64 => FloatWidth::F64,
+            S::F128 => FloatWidth::F128,
+        }
+    }
+
+    /// `v.<method>(...)` on an `Int`/`Float` receiver
+    /// (`native-type-member-surface`): the documented scalar member surface.
+    /// Integers travel to the runtime helpers as `i128` (every width fits),
+    /// with `bits`/`signed` constants carrying the receiver's own width
+    /// semantics; results come back `i128` and `IntCast` narrows them.
+    /// Floats travel as `f64` with `FloatCast` around the call.
+    fn lower_scalar_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if field.safe {
+            return None;
+        }
+        let sema = self.checked.expr_types.get(&field.object.span()).copied()?;
+        let name = field.name.name.as_str();
+        match sema.base {
+            zirk_sema::Base::Int(width) => {
+                let width = self.ir_int_width(width);
+                self.lower_int_method_call(call, field, width, name, span)
+            }
+            zirk_sema::Base::Float(width) => {
+                let width = self.ir_float_width(width);
+                self.lower_float_method_call(call, field, width, name, span)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `call` is a native `Int`/`Float` member — the `Duration`
+    /// receiver shares `Int64`'s IR type, so the semantic type answers.
+    fn is_scalar_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if field.safe {
+            return false;
+        }
+        const INT0: &[&str] = &[
+            "abs", "sign", "bit_count", "leading_zeros", "trailing_zeros", "is_zero",
+            "is_even", "is_odd",
+        ];
+        const INT1: &[&str] = &[
+            "min", "max", "rotate_left", "rotate_right", "wrapping_add", "wrapping_sub",
+            "wrapping_mul", "saturating_add", "saturating_sub", "saturating_mul",
+            "checked_add", "checked_sub", "checked_mul", "checked_div", "checked_rem",
+            "checked_pow",
+        ];
+        const FLOAT0: &[&str] = &[
+            "abs", "sign", "is_zero", "floor", "ceil", "round", "truncate", "fraction",
+            "is_finite", "is_infinite", "is_negative", "sqrt",
+        ];
+        const FLOAT1: &[&str] = &["min", "max", "pow"];
+        let Some(sema) = self.checked.expr_types.get(&field.object.span()) else {
+            return false;
+        };
+        let name = field.name.name.as_str();
+        match sema.base {
+            zirk_sema::Base::Int(_) => {
+                (INT0.contains(&name) && call.args.is_empty())
+                    || (INT1.contains(&name) && call.args.len() == 1)
+                    || (name == "clamp" && call.args.len() == 2)
+                    || (name == "to_string"
+                        && call.args.len() == 1
+                        && call.args[0].name.as_ref().is_some_and(|n| n.name == "radix"))
+            }
+            zirk_sema::Base::Float(_) => {
+                (FLOAT0.contains(&name) && call.args.is_empty())
+                    || (FLOAT1.contains(&name) && call.args.len() == 1)
+                    || (name == "clamp" && call.args.len() == 2)
+            }
+            _ => false,
+        }
+    }
+
+    /// Widens `operand` (any `Int` width) to `i128` for the scalar helpers.
+    fn int_to_i128(&mut self, operand: Operand, from: IrType, span: Span) -> Operand {
+        if from == IrType::Int(IntWidth::I128) {
+            operand
+        } else {
+            self.emit(
+                InstKind::IntCast(operand),
+                IrType::Int(IntWidth::I128),
+                span,
+            )
+        }
+    }
+
+    /// Narrows an `i128` helper result back to the receiver's width.
+    fn int_from_i128(&mut self, operand: Operand, to: IntWidth, span: Span) -> Operand {
+        if to == IntWidth::I128 {
+            operand
+        } else {
+            self.emit(InstKind::IntCast(operand), IrType::Int(to), span)
+        }
+    }
+
+    /// `Int32`/`UInt` receiver methods — see `lower_scalar_method_call`.
+    fn lower_int_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        field: &ast::FieldExpr,
+        width: IntWidth,
+        name: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let receiver_ir = IrType::Int(width);
+        let bits = width.bits() as i32;
+        let signed = if width.signed() { 1 } else { 0 };
+        let receiver = self.lower_expr(&field.object);
+        let wide = self.int_to_i128(receiver, receiver_ir, span);
+        let bits_op = self.emit(
+            InstKind::ConstInt(bits as i128),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let signed_op = self.emit(
+            InstKind::ConstInt(signed as i128),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let arg_i128 = |lower: &mut Self, arg: &ast::Expr| {
+            let raw = lower.lower_expr(arg);
+            let raw_ty = lower.type_of_operand(raw);
+            lower.int_to_i128(raw, raw_ty, span)
+        };
+        let call_i128 = |lower: &mut Self, callee: &str, extra: Vec<Operand>| {
+            let mut args = vec![wide];
+            args.extend(extra);
+            args.push(bits_op);
+            args.push(signed_op);
+            lower.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args,
+                },
+                IrType::Int(IntWidth::I128),
+                span,
+            )
+        };
+        match name {
+            "abs" if call.args.is_empty() => {
+                // `MIN.abs()` traps like `Int64` arithmetic — checked in IR
+                // before the helper runs (same shape as `Duration.abs`).
+                if width.signed() {
+                    let min = self.emit(
+                        InstKind::ConstInt(-(1i128 << (bits - 1))),
+                        receiver_ir,
+                        span,
+                    );
+                    let at_min = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: receiver,
+                            right: min,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let wide_slot = self.spill(wide, IrType::Int(IntWidth::I128), span);
+                    let trap = self.new_block();
+                    let ok = self.new_block();
+                    self.terminate(Terminator::Branch {
+                        condition: at_min,
+                        then_block: trap,
+                        else_block: ok,
+                    });
+                    self.current = trap;
+                    let native = self
+                        .checked
+                        .native_exceptions
+                        .expect("the checker registered the exception hierarchy");
+                    self.throw_native_failure(
+                        native.arithmetic_overflow,
+                        "abs on the minimum representable value",
+                        span,
+                    );
+                    self.current = ok;
+                    let wide = self.emit(InstKind::Load(wide_slot), IrType::Int(IntWidth::I128), span);
+                    let bits_op = self.emit(InstKind::ConstInt(bits as i128), IrType::Int(IntWidth::I32), span);
+                    let signed_op = self.emit(InstKind::ConstInt(signed as i128), IrType::Int(IntWidth::I32), span);
+                    let result = self.emit(
+                        InstKind::Call {
+                            callee: "zirk_int_abs".to_string(),
+                            args: vec![wide, bits_op, signed_op],
+                        },
+                        IrType::Int(IntWidth::I128),
+                        span,
+                    );
+                    return Some(self.int_from_i128(result, width, span));
+                }
+                let result = call_i128(self, "zirk_int_abs", vec![]);
+                Some(self.int_from_i128(result, width, span))
+            }
+            "sign" | "bit_count" | "leading_zeros" | "trailing_zeros"
+                if call.args.is_empty() =>
+            {
+                let callee = match name {
+                    "sign" => "zirk_int_sign",
+                    _ => &format!("zirk_int_{name}"),
+                };
+                // `bit_count`/`leading_zeros`/`trailing_zeros` take no
+                // `signed` parameter — the helpers' own signatures differ,
+                // so they are emitted directly rather than through
+                // `call_i128`.
+                let args = if name == "sign" {
+                    vec![wide, bits_op, signed_op]
+                } else {
+                    vec![wide, bits_op]
+                };
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: callee.to_string(),
+                        args,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ))
+            }
+            "is_zero" | "is_even" | "is_odd" if call.args.is_empty() => Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_int_{name}"),
+                    args: vec![wide],
+                },
+                IrType::Boolean,
+                span,
+            )),
+            "min" | "max" | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
+            | "saturating_add" | "saturating_sub" | "saturating_mul"
+                if call.args.len() == 1 =>
+            {
+                let other = arg_i128(self, &call.args[0].value);
+                let result = call_i128(self, &format!("zirk_int_{name}"), vec![other]);
+                Some(self.int_from_i128(result, width, span))
+            }
+            "rotate_left" | "rotate_right" if call.args.len() == 1 => {
+                let raw = self.lower_expr(&call.args[0].value);
+                let raw_ty = self.type_of_operand(raw);
+                let n = if raw_ty == IrType::Int(IntWidth::I64) {
+                    raw
+                } else {
+                    self.emit(
+                        InstKind::IntCast(raw),
+                        IrType::Int(IntWidth::I64),
+                        span,
+                    )
+                };
+                let result = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_int_{name}"),
+                        args: vec![wide, n, bits_op],
+                    },
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                Some(self.int_from_i128(result, width, span))
+            }
+            "clamp" if call.args.len() == 2 => {
+                let lo = arg_i128(self, &call.args[0].value);
+                let hi = arg_i128(self, &call.args[1].value);
+                let result = call_i128(self, "zirk_int_clamp", vec![lo, hi]);
+                Some(self.int_from_i128(result, width, span))
+            }
+            "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
+            | "checked_rem" | "checked_pow"
+                if call.args.len() == 1 =>
+            {
+                let other = arg_i128(self, &call.args[0].value);
+                let wide_slot = self.spill(wide, IrType::Int(IntWidth::I128), span);
+                let other_slot = self.spill(other, IrType::Int(IntWidth::I128), span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_int_{name}_ok"),
+                        args: vec![wide, other, bits_op, signed_op],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call, span,
+                    ok,
+                    move |lower| {
+                        let wide = lower.emit(InstKind::Load(wide_slot), IrType::Int(IntWidth::I128), span);
+                        let other = lower.emit(InstKind::Load(other_slot), IrType::Int(IntWidth::I128), span);
+                        let bits_op = lower.emit(InstKind::ConstInt(bits as i128), IrType::Int(IntWidth::I32), span);
+                        let signed_op = lower.emit(InstKind::ConstInt(signed as i128), IrType::Int(IntWidth::I32), span);
+                        let value = lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_int_{name}_value"),
+                                args: vec![wide, other, bits_op, signed_op],
+                            },
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        );
+                        lower.int_from_i128(value, width, span)
+                    },
+                    "integer overflow or division by zero",
+                ))
+            }
+            "to_string"
+                if call.args.len() == 1
+                    && call.args[0].name.as_ref().is_some_and(|n| n.name == "radix") =>
+            {
+                let raw = self.lower_expr(&call.args[0].value);
+                let raw_ty = self.type_of_operand(raw);
+                let radix = if raw_ty == IrType::Int(IntWidth::I32) {
+                    raw
+                } else {
+                    self.emit(
+                        InstKind::IntCast(raw),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_int_to_string_radix".to_string(),
+                        args: vec![wide, radix],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Float` receiver methods — `f64` is the helper signature width;
+    /// `FloatCast` converts around the call (`native-type-member-surface`).
+    fn lower_float_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        field: &ast::FieldExpr,
+        width: FloatWidth,
+        name: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let receiver_ir = IrType::Float(width);
+        let f64_ty = IrType::Float(FloatWidth::F64);
+        let receiver = self.lower_expr(&field.object);
+        let wide = if receiver_ir == f64_ty {
+            receiver
+        } else {
+            self.emit(InstKind::FloatCast(receiver), f64_ty, span)
+        };
+        let narrow = |lower: &mut Self, value: Operand| {
+            if receiver_ir == f64_ty {
+                value
+            } else {
+                lower.emit(InstKind::FloatCast(value), receiver_ir, span)
+            }
+        };
+        let arg_f64 = |lower: &mut Self, arg: &ast::Expr| {
+            let raw = lower.lower_expr(arg);
+            if lower.type_of_operand(raw) == f64_ty {
+                raw
+            } else {
+                lower.emit(InstKind::FloatCast(raw), f64_ty, span)
+            }
+        };
+        match name {
+            "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction"
+                if call.args.is_empty() =>
+            {
+                let result = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_float_{name}"),
+                        args: vec![wide],
+                    },
+                    f64_ty,
+                    span,
+                );
+                Some(narrow(self, result))
+            }
+            "sign" if call.args.is_empty() => Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_float_sign".to_string(),
+                    args: vec![wide],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            )),
+            "is_zero" | "is_finite" | "is_infinite" | "is_negative"
+                if call.args.is_empty() =>
+            {
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_float_{name}"),
+                        args: vec![wide],
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "sqrt" if call.args.is_empty() => {
+                // A negative argument has no real answer and Zirk's `Float`
+                // family has no `NaN` to give back — `FloatNanError`, the
+                // same failure an indeterminate operation raises.
+                let zero = self.emit(InstKind::ConstFloat(FloatWidth::F64, "0.0".to_string()), f64_ty, span);
+                let negative = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: wide,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let wide_slot = self.spill(wide, f64_ty, span);
+                let trap = self.new_block();
+                let ok = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: negative,
+                    then_block: trap,
+                    else_block: ok,
+                });
+                self.current = trap;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("the checker registered the exception hierarchy");
+                self.throw_native_failure(
+                    native.float_nan,
+                    "sqrt of a negative value",
+                    span,
+                );
+                self.current = ok;
+                let wide = self.emit(InstKind::Load(wide_slot), f64_ty, span);
+                let result = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_float_sqrt".to_string(),
+                        args: vec![wide],
+                    },
+                    f64_ty,
+                    span,
+                );
+                Some(narrow(self, result))
+            }
+            "min" | "max" | "pow" if call.args.len() == 1 => {
+                // `pow` accepts an integer exponent too (`powi`) — the
+                // argument's own type picks the helper.
+                let arg_is_int = self
+                    .checked
+                    .expr_types
+                    .get(&call.args[0].value.span())
+                    .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Int(_)));
+                if name == "pow" && arg_is_int {
+                    let raw = self.lower_expr(&call.args[0].value);
+                    let raw_ty = self.type_of_operand(raw);
+                    let n = if raw_ty == IrType::Int(IntWidth::I64) {
+                        raw
+                    } else {
+                        self.emit(
+                            InstKind::IntCast(raw),
+                            IrType::Int(IntWidth::I64),
+                            span,
+                        )
+                    };
+                    let result = self.emit(
+                        InstKind::Call {
+                            callee: "zirk_float_pow".to_string(),
+                            args: vec![wide, n],
+                        },
+                        f64_ty,
+                        span,
+                    );
+                    return Some(narrow(self, result));
+                }
+                let other = arg_f64(self, &call.args[0].value);
+                let callee = if name == "pow" {
+                    "zirk_float_powf".to_string()
+                } else {
+                    format!("zirk_float_{name}")
+                };
+                let result = self.emit(
+                    InstKind::Call {
+                        callee,
+                        args: vec![wide, other],
+                    },
+                    f64_ty,
+                    span,
+                );
+                Some(narrow(self, result))
+            }
+            "clamp" if call.args.len() == 2 => {
+                let lo = arg_f64(self, &call.args[0].value);
+                let hi = arg_f64(self, &call.args[1].value);
+                let result = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_float_clamp".to_string(),
+                        args: vec![wide, lo, hi],
+                    },
+                    f64_ty,
+                    span,
+                );
+                Some(narrow(self, result))
+            }
+            _ => None,
+        }
+    }
+
+    /// Builds `Result<T, E>` from a runtime-computed `ok` flag — the shared
+    /// shape of `checked_*`, `IntN.parse`, `FloatN.parse`, and
+    /// `Regex.parse` (`native-type-member-surface`): the `Ok` arm runs
+    /// `produce`, the `Error` arm builds a native failure whose class is
+    /// the `E` the checker recorded for this call. `is_overflow` picks the
+    /// message for the `checked_*` family.
+    fn build_result_from_flag(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+        ok: Operand,
+        produce: impl FnOnce(&mut Self) -> Operand,
+        error_message: &str,
+    ) -> Operand {
+        // `Result<T, E>`'s IR type and the `E` class id both come from the
+        // checker's own record of this call.
+        let result_sema = self
+            .checked
+            .expr_types
+            .get(&call.span)
+            .copied()
+            .expect("the checker recorded this call's Result type");
+        let result_ty = self.ir_type(result_sema);
+        let IrType::Enum(result_enum) = result_ty else {
+            unreachable!("Result<T,E> always lowers to IrType::Enum")
+        };
+        let zirk_sema::Base::EnumInstance(instance_id) = result_sema.base else {
+            unreachable!("checked_* and parse always type to a Result instance")
+        };
+        let error_class = match self.checked.enum_instances[instance_id as usize].args[1].base {
+            zirk_sema::Base::Class(id) => id,
+            _ => unreachable!("the checker interned the error class"),
+        };
+
+        let result_slot = self.declare_slot("<result>", result_ty, span);
+        let ok_block = self.new_block();
+        let error_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: ok,
+            then_block: ok_block,
+            else_block: error_block,
+        });
+
+        self.current = ok_block;
+        let value = produce(self);
+        let ok_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 0,
+                fields: vec![value],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, ok_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = error_block;
+        let error_object = self.build_native_failure(error_class, error_message, span);
+        let error_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 1,
+                fields: vec![error_object],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, error_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), result_ty, span)
+    }
+
+    /// `IntN.parse(text)`, `FloatN.parse(text)`, `Regex.parse(pattern)` —
+    /// static calls on type names (`native-type-member-surface`). The
+    /// checker recorded the callee's span in `scalar_static_accesses` and
+    /// the call's `Result<T, E>` in `expr_types`.
+    fn lower_native_static_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !self.checked.scalar_static_accesses.contains(&field.span) {
+            return None;
+        }
+        if field.name.name != "parse" {
+            return None;
+        }
+        let ast::Expr::Path(base) = &*field.object else {
+            return None;
+        };
+        let target = if base.name == "Regex" {
+            Type::REGEX
+        } else {
+            Type::from_name(&base.name)?
+        };
+        let text = self.lower_expr(&call.args[0].value);
+        match target.base {
+            zirk_sema::Base::Regex => {
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_is_valid_pattern".to_string(),
+                        args: vec![text],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call, span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_regex_from_pattern".to_string(),
+                                args: vec![text],
+                            },
+                            IrType::Regex,
+                            span,
+                        )
+                    },
+                    "invalid regex pattern",
+                ))
+            }
+            zirk_sema::Base::Int(width) => {
+                let width = self.ir_int_width(width);
+                let bits_value = width.bits() as i128;
+                let signed_flag = if width.signed() { 1 } else { 0 } as i128;
+                let bits = self.emit(
+                    InstKind::ConstInt(bits_value),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let signed = self.emit(
+                    InstKind::ConstInt(signed_flag),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                // `parse(text, radix: n)` — the radix form on the integer
+                // family only.
+                let radix = if call.args.len() == 2 {
+                    let raw = self.lower_expr(&call.args[1].value);
+                    let raw_ty = self.type_of_operand(raw);
+                    if raw_ty == IrType::Int(IntWidth::I32) {
+                        raw
+                    } else {
+                        self.emit(
+                            InstKind::IntCast(raw),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        )
+                    }
+                } else {
+                    self.emit(
+                        InstKind::ConstInt(10),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                let suffix = if call.args.len() == 2 { "_radix" } else { "" };
+                let ok_args = if call.args.len() == 2 {
+                    vec![text, radix, bits, signed]
+                } else {
+                    vec![text, bits, signed]
+                };
+                let text_slot = self.spill(text, IrType::String, span);
+                let radix_slot = self.spill(radix, IrType::Int(IntWidth::I32), span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_int_parse{suffix}_ok"),
+                        args: ok_args,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call, span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        let radix = lower.emit(InstKind::Load(radix_slot), IrType::Int(IntWidth::I32), span);
+                        let bits = lower.emit(InstKind::ConstInt(bits_value), IrType::Int(IntWidth::I32), span);
+                        let signed = lower.emit(InstKind::ConstInt(signed_flag), IrType::Int(IntWidth::I32), span);
+                        let value = lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_int_parse{suffix}_value"),
+                                args: if suffix.is_empty() {
+                                    vec![text, bits, signed]
+                                } else {
+                                    vec![text, radix, bits, signed]
+                                },
+                            },
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        );
+                        lower.int_from_i128(value, width, span)
+                    },
+                    "invalid integer literal or out of range for the width",
+                ))
+            }
+            zirk_sema::Base::Float(width) => {
+                let width = self.ir_float_width(width);
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_float_parse_ok".to_string(),
+                        args: vec![text],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call, span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        let value = lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_float_parse_value".to_string(),
+                                args: vec![text],
+                            },
+                            IrType::Float(FloatWidth::F64),
+                            span,
+                        );
+                        if width == FloatWidth::F64 {
+                            value
+                        } else {
+                            lower.emit(
+                                InstKind::FloatCast(value),
+                                IrType::Float(width),
+                                span,
+                            )
+                        }
+                    },
+                    "invalid float literal",
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `call` is a `TypeName.parse(...)` static — consulted by
+    /// `is_callable_call` so the callee is never type-queried as a field.
+    fn is_native_static_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(
+            &*call.callee,
+            ast::Expr::Field(field)
+                if self.checked.scalar_static_accesses.contains(&field.span)
+        )
+    }
+
+    /// `r.reverse()` on a `Range<T>` (roadmap Phase 7): the same elements
+    /// produced last to first — a new `Range`, the receiver untouched.
+    fn lower_range_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        if !self.is_range_method_call(call) {
+            return None;
+        }
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let receiver = self.lower_expr(&field.object);
+        Some(self.emit(
+            InstKind::Call {
+                callee: "zirk_range_reverse".to_string(),
+                args: vec![receiver],
+            },
+            IrType::Range,
+            span,
+        ))
+    }
+
+    /// Whether `call` is `r.reverse()` on a `Range<T>` receiver.
+    fn is_range_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if field.name.name != "reverse" || !call.args.is_empty() || field.safe {
+            return false;
+        }
+        self.type_of(&field.object, field.object.span()) == IrType::Range
+    }
+
+    /// `Char` built-in classification and normalization methods.
+    fn lower_char_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("is_uppercase", 0)
+                | ("is_lowercase", 0)
+                | ("is_digit", 0)
+                | ("is_letter", 0)
+                | ("is_whitespace", 0)
+                | ("is_ascii", 0)
+                | ("is_alphabetic", 0)
+                | ("is_numeric", 0)
+                | ("is_alphanumeric", 0)
+                | ("ascii_code", 0)
+                | ("to_uppercase", 0)
+                | ("to_lowercase", 0)
+                | ("normalize", 1)
+        ) {
+            return None;
+        }
+        if self.type_of(&field.object, field.object.span()) != IrType::Char {
+            return None;
+        }
+        let receiver = self.lower_expr(&field.object);
+        if field.name.name == "normalize" {
+            let form = self.lower_expr(&call.args[0].value);
+            return Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_char_normalize".to_string(),
+                    args: vec![receiver, form],
+                },
+                IrType::String,
+                span,
+            ));
+        }
+        let (callee, returns) = match field.name.name.as_str() {
+            "is_uppercase" => ("zirk_char_is_uppercase", IrType::Boolean),
+            "is_lowercase" => ("zirk_char_is_lowercase", IrType::Boolean),
+            "is_digit" => ("zirk_char_is_digit", IrType::Boolean),
+            "is_letter" => ("zirk_char_is_letter", IrType::Boolean),
+            "is_whitespace" => ("zirk_char_is_whitespace", IrType::Boolean),
+            "is_ascii" => ("zirk_char_is_ascii", IrType::Boolean),
+            "is_alphabetic" => ("zirk_char_is_alphabetic", IrType::Boolean),
+            "is_numeric" => ("zirk_char_is_numeric", IrType::Boolean),
+            "is_alphanumeric" => ("zirk_char_is_alphanumeric", IrType::Boolean),
+            "ascii_code" => ("zirk_char_ascii_code", IrType::Int(IntWidth::I32)),
+            "to_uppercase" => ("zirk_char_to_uppercase", IrType::String),
+            "to_lowercase" => ("zirk_char_to_lowercase", IrType::String),
+            _ => unreachable!("name checked above"),
+        };
+        Some(self.emit(
+            InstKind::Call {
+                callee: callee.to_string(),
+                args: vec![receiver],
+            },
+            returns,
+            span,
+        ))
+    }
+
+    /// `list.add(v)`, `list.insert(i, v)` and `list.remove(i)` are lowered to
+    /// runtime calls through dedicated instructions; the checker has already
+    /// validated the receiver and argument types.
+    fn lower_array_list_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return None;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let element_ty = match receiver_ty {
+            IrType::Array(_) | IrType::List(_) => self.array_list_element_type(receiver_ty),
+            _ => return None,
+        };
+        let receiver = self.lower_expr(&field.object);
+        match (field.name.name.as_str(), call.args.len(), receiver_ty) {
+            ("add", 1, IrType::List(_)) => {
+                let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                Some(self.emit(
+                    InstKind::ListAdd { receiver, value },
+                    IrType::Void,
+                    span,
+                ))
+            }
+            ("insert", 2, IrType::List(_)) => {
+                let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+                let value = self.lower_expr_as(&call.args[1].value, element_ty);
+                Some(self.emit(
+                    InstKind::ListInsert { receiver, index, value },
+                    IrType::Void,
+                    span,
+                ))
+            }
+            ("remove", 1, IrType::List(_)) => {
+                let receiver_ty = self.value_types[&receiver.0];
+                let element_ty = self.array_list_element_type(receiver_ty);
+                let arg_ty = self.type_of(&call.args[0].value, call.args[0].value.span());
+                if arg_ty == element_ty {
+                    let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                    Some(self.emit(
+                        InstKind::ListRemoveValue { receiver, value },
+                        IrType::Boolean,
+                        span,
+                    ))
+                } else if matches!(arg_ty, IrType::Int(_)) {
+                    let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+                    Some(self.emit(
+                        InstKind::ListRemove { receiver, index },
+                        IrType::Void,
+                        span,
+                    ))
+                } else {
+                    let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                    Some(self.emit(
+                        InstKind::ListRemoveValue { receiver, value },
+                        IrType::Boolean,
+                        span,
+                    ))
+                }
+            }
+            ("clone", 0, _) => {
+                let kind = if matches!(self.value_types[&receiver.0], IrType::Array(_)) {
+                    InstKind::ArrayClone { receiver }
+                } else {
+                    InstKind::ListClone { receiver }
+                };
+                let ty = self.value_types[&receiver.0];
+                Some(self.emit(kind, ty, span))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Array<T>(capacity)` and `List<T>()` are lowered to dedicated
+    /// allocation instructions; the element type comes from the checker's
+    /// recorded semantic type.
+    fn lower_array_list_construction(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let ast::Expr::Path(callee) = &*call.callee else {
+            return None;
+        };
+        if !matches!(callee.name.as_str(), "Array" | "List") {
+            return None;
+        }
+        let &ty = self.checked.expr_types.get(&call.span)?;
+        match (callee.name.as_str(), ty.base) {
+            ("Array", Base::Array(id)) if !call.args.is_empty() => {
+                if call.args.len() == 1 {
+                    // `Array<T>(capacity)` — the single-argument form keeps
+                    // its historical meaning as an empty array with room.
+                    let capacity = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::U64));
+                    return Some(self.emit(
+                        InstKind::ArrayNew { element_id: id, capacity },
+                        IrType::Array(id),
+                        span,
+                    ));
+                }
+                // `Array(e0, e1, …)` — a literal of `args.len()` elements.
+                let len = call.args.len() as u64;
+                let capacity = self.emit(
+                    InstKind::ConstInt(len as i128),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let array = self.emit(
+                    InstKind::ArrayNew { element_id: id, capacity },
+                    IrType::Array(id),
+                    span,
+                );
+                let array_slot = self.spill(array, IrType::Array(id), span);
+                let element_ty = self.module.array_types[id as usize];
+                for (i, arg) in call.args.iter().enumerate() {
+                    let receiver = self.emit(InstKind::Load(array_slot), IrType::Array(id), span);
+                    let index = self.emit(
+                        InstKind::ConstInt(i as i128),
+                        IrType::Int(IntWidth::I64),
+                        span,
+                    );
+                    let value = self.lower_expr_as(&arg.value, element_ty);
+                    self.emit_effect(
+                        InstKind::ArrayListStore { receiver, index, value },
+                        span,
+                    );
+                }
+                Some(self.emit(InstKind::Load(array_slot), IrType::Array(id), span))
+            }
+            ("List", Base::List(id)) => {
+                let list = self.emit(
+                    InstKind::ListNew { element_id: id },
+                    IrType::List(id),
+                    span,
+                );
+                if call.args.is_empty() {
+                    return Some(list);
+                }
+                let list_slot = self.spill(list, IrType::List(id), span);
+                let element_ty = self.module.list_types[id as usize];
+                for arg in call.args.iter() {
+                    let receiver = self.emit(InstKind::Load(list_slot), IrType::List(id), span);
+                    let value = self.lower_expr_as(&arg.value, element_ty);
+                    self.emit(
+                        InstKind::ListAdd { receiver, value },
+                        IrType::Void,
+                        span,
+                    );
+                }
+                Some(self.emit(InstKind::Load(list_slot), IrType::List(id), span))
+            }
             _ => None,
         }
     }
@@ -7085,6 +10336,10 @@ impl<'a> FunctionLowering<'a> {
             // a binary operator, …) must go through a slot the same way it
             // would across an `if`/`match`/`?.`.
             ast::Expr::Index(_) => true,
+            // A slice's own bounds handling lives in the runtime, but its
+            // receiver and bounds are still expressions that can open
+            // blocks of their own — spilling them is mandatory.
+            ast::Expr::Slice(_) => true,
             ast::Expr::Call(_) => true,
             ast::Expr::Println(e) => self.opens_blocks(&e.arg),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
@@ -7527,7 +10782,7 @@ impl<'a> FunctionLowering<'a> {
             (IrType::Float(_), IrType::Int(_)) => {
                 self.emit(InstKind::FloatToInt(operand), target, span)
             }
-            (_, IrType::String) => self.lower_to_string(operand, actual, span),
+            (_, IrType::String) => self.lower_to_string_expr(expr, operand, span),
             _ => unreachable!("the checker validated this conversion"),
         }
     }
@@ -7935,6 +11190,144 @@ impl<'a> FunctionLowering<'a> {
             }
         }
 
+        // `native-type-member-surface` field/property lowering.
+        //
+        // Static scalar constants, `String`/`Char` metadata, `Tuple.length`,
+        // and `Enum` `.name`/`.value`/`.to_string` all have no in-memory
+        // layout to read; they are produced at compile time or by runtime
+        // calls.  The order mirrors `field_type_of`.
+        if self.checked.scalar_static_accesses.contains(&expr.span) {
+            return self.lower_scalar_static(&expr.object, &expr.name.name, span);
+        }
+
+        // A bare enum variant access (`Shape.Circle` or `Direction.North`)
+        // names the enum itself as `object`; it has no runtime value to
+        // take a property from, so it must be handled before any `type_of`
+        // call on `object`.
+        if self.checked.variant_accesses.contains(&expr.span) {
+            let ast::Expr::Path(enum_name) = &*expr.object else {
+                unreachable!("a variant access names its enum")
+            };
+            let enum_id = self.enum_id_of(enum_name);
+            let discriminant = self.discriminant(enum_name, &expr.name.name);
+            return if enum_has_payload(self.checked, enum_id) {
+                self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: discriminant as u32,
+                        fields: Vec::new(),
+                    },
+                    IrType::Enum(enum_id),
+                    span,
+                )
+            } else {
+                self.emit(
+                    InstKind::ConstInt(discriminant as i128),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                )
+            };
+        }
+
+        if self.type_of(&expr.object, expr.object.span()) == IrType::String
+            && let Some(operand) = self.lower_string_property(&expr.object, &expr.name.name, span) {
+                return operand;
+            }
+        if self.type_of(&expr.object, expr.object.span()) == IrType::Char
+            && let Some(operand) = self.lower_char_property(&expr.object, &expr.name.name, span) {
+                return operand;
+            }
+        if self
+            .checked
+            .expr_types
+            .get(&expr.object.span())
+            .is_some_and(|ty| matches!(ty.base, Base::Tuple(_)))
+            && expr.name.name == "length"
+        {
+            return self.lower_tuple_length(&expr.object, span);
+        }
+        if let Some(operand) = self.lower_enum_property(expr, span) {
+            return operand;
+        }
+
+        // `r.start`/`r.end`/`r.step` on a `Range<T>` (roadmap Phase 7): the
+        // runtime stores every part as `i64`, so the getter's result narrows
+        // back to the element's own width for an `Int32` range.
+        if matches!(expr.name.name.as_str(), "start" | "end" | "step")
+            && self.type_of(&expr.object, expr.object.span()) == IrType::Range
+        {
+            let receiver = self.lower_expr(&expr.object);
+            let callee = match expr.name.name.as_str() {
+                "start" => "zirk_range_start",
+                "end" => "zirk_range_end",
+                "step" => "zirk_range_step",
+                _ => unreachable!("checked just above"),
+            };
+            let value = self.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I64),
+                span,
+            );
+            let element = self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .and_then(|ty| match ty.base {
+                    Base::Range(id) => Some(self.checked.range_types[id as usize]),
+                    _ => None,
+                })
+                .map(|element| self.ir_type(element))
+                .unwrap_or(IrType::Int(IntWidth::I64));
+            return if element == IrType::Int(IntWidth::I64) {
+                value
+            } else {
+                self.emit(InstKind::IntCast(value), element, span)
+            };
+        }
+
+        // `.length`/`.is_empty` on `Array<T>`/`List<T>`.
+        if matches!(expr.name.name.as_str(), "length" | "is_empty")
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Array(_) | IrType::List(_)
+            )
+        {
+            let receiver = self.lower_expr(&expr.object);
+            let is_list = matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::List(_)
+            );
+            let length = self.emit(
+                if is_list {
+                    InstKind::ListLength(receiver)
+                } else {
+                    InstKind::ArrayLength(receiver)
+                },
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+            match expr.name.name.as_str() {
+                "length" => return length,
+                "is_empty" => {
+                    let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+                    let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), span);
+                    return self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: length,
+                            right: zero,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -8048,6 +11441,308 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), result_type, span)
+    }
+
+    /// Builds a `String` from a literal, interning it once.
+    fn const_string(&mut self, text: &str, span: Span) -> Operand {
+        let id = self.module.intern_string(text);
+        self.emit(InstKind::ConstString(id), IrType::String, span)
+    }
+
+    /// `Int32.MAX`, `Float64.EPSILON`, etc. — the value is a constant the
+    /// checker already validated (`native-type-member-surface`).
+    fn lower_scalar_static(
+        &mut self,
+        object: &ast::Expr,
+        member: &str,
+        span: Span,
+    ) -> Operand {
+        let ast::Expr::Path(base) = object else {
+            unreachable!("a scalar static access names a type")
+        };
+        let Some(ty) = Type::from_name(&base.name) else {
+            unreachable!("the checker only records existing scalar types")
+        };
+        match ty.base {
+            zirk_sema::Base::Int(width) => self.lower_int_constant(self.ir_int_width(width), member, span),
+            zirk_sema::Base::Float(width) => self.lower_float_constant(self.ir_float_width(width), member, span),
+            _ => unreachable!("the checker only records scalar types"),
+        }
+    }
+
+    fn lower_int_constant(&mut self, width: IntWidth, member: &str, span: Span) -> Operand {
+        let bits = width.bits();
+        let value = match member {
+            "MIN" => {
+                if width.signed() {
+                    -(1i128 << (bits - 1))
+                } else {
+                    0
+                }
+            }
+            "MAX" => {
+                if width.signed() {
+                    (1i128 << (bits - 1)) - 1
+                } else if bits == 128 {
+                    u128::MAX as i128
+                } else {
+                    (1i128 << bits) - 1
+                }
+            }
+            "BITS" => bits as i128,
+            _ => unreachable!("the checker only records MIN/MAX/BITS"),
+        };
+        let ir = IrType::Int(width);
+        if member == "BITS" {
+            let raw = self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span);
+            if ir == IrType::Int(IntWidth::I32) {
+                raw
+            } else {
+                self.emit(InstKind::IntCast(raw), ir, span)
+            }
+        } else {
+            self.emit(InstKind::ConstInt(value), ir, span)
+        }
+    }
+
+    fn lower_float_constant(&mut self, width: FloatWidth, member: &str, span: Span) -> Operand {
+        use zirk_sema::FloatWidth as W;
+        // The literal strings are widened via `FloatCast` below for `F16`/
+        // `F32`/`F128`; `f64` values here are the widest currently used.
+        let f64_str = match member {
+            "MIN" => match self.sema_float_width(width) {
+                W::F16 => "6.103515625e-5",
+                W::F32 => "1.1754943508222875e-38",
+                W::F64 => "2.2250738585072014e-308",
+                W::F128 => "3.3621031431120935062626778173217526e-4932",
+            },
+            "MAX" => match self.sema_float_width(width) {
+                W::F16 => "65504",
+                W::F32 => "3.4028234663852886e38",
+                W::F64 => "1.7976931348623157e308",
+                W::F128 => "1.189731495357231765085759326628007e4932",
+            },
+            "LOWEST" => match self.sema_float_width(width) {
+                W::F16 => "-65504",
+                W::F32 => "-3.4028234663852886e38",
+                W::F64 => "-1.7976931348623157e308",
+                W::F128 => "-1.189731495357231765085759326628007e4932",
+            },
+            "EPSILON" => match self.sema_float_width(width) {
+                W::F16 => "0.0009765625",
+                W::F32 => "1.1920928955078125e-7",
+                W::F64 => "2.220446049250313e-16",
+                W::F128 => "1.925929944387235853055977942584927e-34",
+            },
+            "POSITIVE_INFINITY" => "inf",
+            "NEGATIVE_INFINITY" => "-inf",
+            _ => unreachable!("the checker only records the documented float constants"),
+        };
+        let value = self.emit(
+            InstKind::ConstFloat(FloatWidth::F64, f64_str.to_string()),
+            IrType::Float(FloatWidth::F64),
+            span,
+        );
+        if width == FloatWidth::F64 {
+            value
+        } else {
+            self.emit(InstKind::FloatCast(value), IrType::Float(width), span)
+        }
+    }
+
+    fn sema_float_width(&self, width: FloatWidth) -> zirk_sema::FloatWidth {
+        use FloatWidth as I;
+        use zirk_sema::FloatWidth as S;
+        match width {
+            I::F16 => S::F16,
+            I::F32 => S::F32,
+            I::F64 => S::F64,
+            I::F128 => S::F128,
+        }
+    }
+
+    /// `s.length`, `s.byte_length`, `s.is_empty` and `c` metadata fields
+    /// (`native-type-member-surface`).
+    fn lower_string_property(
+        &mut self,
+        object: &ast::Expr,
+        member: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let receiver = self.lower_expr(object);
+        Some(match member {
+            "length" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_str_length".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "byte_length" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_str_byte_length".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "is_empty" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_str_is_empty".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Boolean,
+                span,
+            ),
+            _ => return None,
+        })
+    }
+
+    fn lower_char_property(
+        &mut self,
+        object: &ast::Expr,
+        member: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let receiver = self.lower_expr(object);
+        Some(match member {
+            "byte_length" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_char_byte_length".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "codepoint_count" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_char_codepoint_count".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "ascii_code" => self.emit(
+                InstKind::Call {
+                    callee: "zirk_char_ascii_code".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "is_ascii" | "is_alphabetic" | "is_numeric" | "is_alphanumeric"
+            | "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter" | "is_whitespace" => {
+                self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_char_{member}"),
+                        args: vec![receiver],
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            }
+            _ => return None,
+        })
+    }
+
+    fn lower_tuple_length(&mut self, object: &ast::Expr, span: Span) -> Operand {
+        let ast::Expr::Tuple(t) = object else {
+            unreachable!("the checker only types `.length` on a tuple expression")
+        };
+        self.emit(
+            InstKind::ConstInt(t.elements.len() as i128),
+            IrType::Int(IntWidth::I32),
+            span,
+        )
+    }
+
+    fn lower_enum_property(&mut self, expr: &ast::FieldExpr, span: Span) -> Option<Operand> {
+        let object = &expr.object;
+        let name = expr.name.name.as_str();
+        if !matches!(name, "name" | "value" | "to_string") {
+            return None;
+        }
+        let sema = self.checked.expr_types.get(&object.span())?;
+        if !matches!(sema.base, Base::Enum(_) | Base::EnumInstance(_)) {
+            return None;
+        }
+
+        // For a variant access (`Color.Red`) the case is known now.
+        if let ast::Expr::Field(variant_expr) = &**object
+            && self.checked.variant_accesses.contains(&variant_expr.span)
+        {
+            let ast::Expr::Path(enum_name) = &*variant_expr.object else {
+                unreachable!("a variant access names its enum")
+            };
+            let enum_id = self.enum_id_of(enum_name);
+            let discriminant = self.discriminant(enum_name, &variant_expr.name.name) as usize;
+            let variant_name = self.checked.enums[enum_id as usize].variants[discriminant].name.clone();
+            return if name == "value" {
+                Some(self.emit(
+                    InstKind::ConstInt(discriminant as i128),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ))
+            } else {
+                Some(self.const_string(&variant_name, span))
+            };
+        }
+
+        // For a runtime `Enum` value, emit a switch over the discriminant.
+        let receiver = self.lower_expr(object);
+        let IrType::Enum(enum_id) = self.type_of(object, object.span()) else {
+            unreachable!("an enum value lowers to IrType::Enum")
+        };
+        let result = self.declare_slot("<enum_prop>", if name == "value" { IrType::Int(IntWidth::I32) } else { IrType::String }, span);
+        let disc = self.emit(
+            InstKind::Discriminant(receiver),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+
+        let variants = self.checked.enums[enum_id as usize].variants.clone();
+        let continue_block = self.new_block();
+        let mut current = self.current;
+        for (i, variant) in variants.iter().enumerate() {
+            let arm = self.new_block();
+            self.current = current;
+            let index = self.emit(InstKind::ConstInt(i as i128), IrType::Int(IntWidth::I32), span);
+            let test = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: disc,
+                    right: index,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let next = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: test,
+                then_block: arm,
+                else_block: next,
+            });
+            self.current = arm;
+            let value = if name == "value" {
+                self.emit(InstKind::ConstInt(i as i128), IrType::Int(IntWidth::I32), span)
+            } else {
+                self.const_string(&variant.name, span)
+            };
+            self.emit_effect(InstKind::Store(result, value), span);
+            self.terminate(Terminator::Jump(continue_block));
+            current = next;
+        }
+        self.current = current;
+        let fallback = if name == "value" {
+            self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
+        } else {
+            self.const_string("", span)
+        };
+        self.emit_effect(InstKind::Store(result, fallback), span);
+        self.terminate(Terminator::Jump(continue_block));
+        self.current = continue_block;
+        Some(self.emit(InstKind::Load(result), if name == "value" { IrType::Int(IntWidth::I32) } else { IrType::String }, span))
     }
 
     /// Which body a safe method call (`u?.greet()`) reaches, once the
@@ -8256,20 +11951,175 @@ impl<'a> FunctionLowering<'a> {
         {
             return IrType::Boolean;
         }
+        // `regex.matches` / `regex.replace` are not real fields, but the
+        // type-of pass for `Expr::Call` asks for their field type to decide the
+        // call shape.  Check the name first: `expr.object` may be a type name
+        // for a variant construction like `Wrapper.Inner(...)`.
+        if matches!(
+            expr.name.name.as_str(),
+            "matches" | "replace" | "find" | "split" | "find_all"
+        ) && self.type_of(&expr.object, expr.object.span()) == IrType::Regex
+        {
+            return match expr.name.name.as_str() {
+                "matches" => IrType::Boolean,
+                "replace" => IrType::String,
+                "find" => IrType::Nullable(Nullable::Object(self.checked.regex_match_class)),
+                "split" => {
+                    let id = self
+                        .checked
+                        .list_types
+                        .iter()
+                        .position(|&t| t == Type::STRING)
+                        .expect("the checker interned `List<String>` for `Regex.split`")
+                        as u32;
+                    IrType::List(id)
+                }
+                "find_all" => IrType::List(self.regex_match_list_id()),
+                _ => unreachable!("name checked above"),
+            };
+        }
         // `.length`/`.is_empty` (roadmap Phase 4e, `fase-4e-native-slice`) —
         // see `Self::lower_field`'s matching branch, member name checked
         // first for the same reason.
         if matches!(expr.name.name.as_str(), "length" | "is_empty")
             && matches!(
                 self.type_of(&expr.object, expr.object.span()),
-                IrType::NativeSlice(_) | IrType::NativeSliceMut(_)
+                IrType::NativeSlice(_) | IrType::NativeSliceMut(_) | IrType::Array(_) | IrType::List(_)
             )
         {
             match expr.name.name.as_str() {
                 "length" => return IrType::Int(IntWidth::U64),
                 "is_empty" => return IrType::Boolean,
-                _ => unreachable!("the checker only types `.length`/`.is_empty` on a native view"),
+                _ => unreachable!("the checker only types `.length`/`.is_empty` on a collection"),
             }
+        }
+        // `s.split` named as a callee: `is_string_method_call` classifies
+        // the call, so this type is only ever asked whether it is
+        // `Callable` — `List<String>` answers that without
+        // `field_position`'s layout walk, which a string has no part in
+        // (same reasoning as `r.reverse` below).
+        if expr.name.name == "split"
+            && self.type_of(&expr.object, expr.object.span()) == IrType::String
+        {
+            return IrType::List(self.string_list_id());
+        }
+        // `d.abs`/`d.sign`/`d.is_*` named as callees (`native-type-member-
+        // surface`): a `Duration` lowers to `Int64`, which has no field
+        // layout — answer with the method's own return type instead.
+        if matches!(
+            expr.name.name.as_str(),
+            "abs" | "sign" | "is_zero" | "is_positive" | "is_negative"
+        ) && self
+            .checked
+            .expr_types
+            .get(&expr.object.span())
+            .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Duration))
+        {
+            return match expr.name.name.as_str() {
+                "abs" => IrType::Int(IntWidth::I64),
+                "sign" => IrType::Int(IntWidth::I32),
+                _ => IrType::Boolean,
+            };
+        }
+        // `native-type-member-surface`: static members of scalar type
+        // names (`Int32.MAX`, `Float64.EPSILON`) — the checker already
+        // resolved the base as a type, not a value.
+        if self.checked.scalar_static_accesses.contains(&expr.span) {
+            let ast::Expr::Path(base) = &*expr.object else {
+                unreachable!("a scalar static access names a type")
+            };
+            let Some(ty) = Type::from_name(&base.name) else {
+                unreachable!("the checker only records existing scalar types")
+            };
+            return self.ir_type(ty);
+        }
+
+        // `s.length` / `s.byte_length` / `c.byte_length` /
+        // `c.codepoint_count` / `c.ascii_code` — the runtime-provided
+        // property surface.
+        if matches!(expr.name.name.as_str(), "length" | "byte_length")
+            && self.type_of(&expr.object, expr.object.span()) == IrType::String {
+                return IrType::Int(IntWidth::I32);
+            }
+        if matches!(
+            expr.name.name.as_str(),
+            "byte_length" | "codepoint_count" | "ascii_code"
+        ) && self.type_of(&expr.object, expr.object.span()) == IrType::Char
+        {
+            return IrType::Int(IntWidth::I32);
+        }
+        if matches!(
+            expr.name.name.as_str(),
+            "is_ascii"
+                | "is_alphabetic"
+                | "is_numeric"
+                | "is_alphanumeric"
+                | "is_uppercase"
+                | "is_lowercase"
+                | "is_digit"
+                | "is_letter"
+                | "is_whitespace"
+        ) && self.type_of(&expr.object, expr.object.span()) == IrType::Char
+        {
+            return IrType::Boolean;
+        }
+        if expr.name.name == "is_empty"
+            && self.type_of(&expr.object, expr.object.span()) == IrType::String
+        {
+            return IrType::Boolean;
+        }
+
+        // `t.length` on a `Tuple` (the doc surface) and `.name`/`.value` /
+        // `.to_string` on an `Enum` value or variant access.
+        if expr.name.name == "length"
+            && self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .is_some_and(|ty| matches!(ty.base, Base::Tuple(_)))
+        {
+            return IrType::Int(IntWidth::I32);
+        }
+        if matches!(expr.name.name.as_str(), "name" | "value" | "to_string")
+            && self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .is_some_and(|ty| matches!(ty.base, Base::Enum(_) | Base::EnumInstance(_)))
+        {
+            return match expr.name.name.as_str() {
+                "name" | "to_string" => IrType::String,
+                "value" => IrType::Int(IntWidth::I32),
+                _ => unreachable!(),
+            };
+        }
+
+        // `r.start`/`r.end`/`r.step` on a `Range<T>` (roadmap Phase 7) —
+        // the member's type is the range's element type; see
+        // `Self::lower_field`'s matching branch.
+        if matches!(expr.name.name.as_str(), "start" | "end" | "step")
+            && self.type_of(&expr.object, expr.object.span()) == IrType::Range
+        {
+            return self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .and_then(|ty| match ty.base {
+                    Base::Range(id) => Some(self.checked.range_types[id as usize]),
+                    _ => None,
+                })
+                .map(|element| self.ir_type(element))
+                .unwrap_or(IrType::Int(IntWidth::I64));
+        }
+        // `r.reverse` named as a callee (roadmap Phase 7): `is_callable_call`
+        // and `is_range_method_call` classify the call, so this type is
+        // only ever asked whether it is `Callable` — `Range` answers that
+        // without `field_position`'s layout walk, which a range has no
+        // part in.
+        if expr.name.name == "reverse"
+            && self.type_of(&expr.object, expr.object.span()) == IrType::Range
+        {
+            return IrType::Range;
         }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
@@ -8660,6 +12510,15 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    /// The element type of an `Array<T>` or `List<T>` receiver.
+    fn array_list_element_type(&self, receiver_ty: IrType) -> IrType {
+        match receiver_ty {
+            IrType::Array(id) => self.module.array_types[id as usize],
+            IrType::List(id) => self.module.list_types[id as usize],
+            _ => unreachable!("the checker only accepts an Array/List receiver here"),
+        }
+    }
+
     /// `receiver[index]` (design D5): bounds-checks `index` against the
     /// receiver's own carried length, throwing `IndexOutOfBoundsError` on
     /// failure (design D3's "controlled bounds error", spec scenario "View
@@ -8734,6 +12593,20 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_string_index_read(receiver_slot, &expr.index, span);
         }
 
+        if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
+            return self.lower_array_list_index_read(receiver_slot, &expr.index, receiver_ty, span);
+        }
+
+        if let IrType::Value(layout_id) = receiver_ty {
+            let ast::Expr::Int(lit) = &*expr.index else {
+                unreachable!("a tuple index is a constant integer literal")
+            };
+            let index = lit.value as u32;
+            let field_ty = self.module.values[layout_id as usize].fields[index as usize].ty;
+            let object = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+            return self.emit(InstKind::LoadField { object, index }, field_ty, span);
+        }
+
         let index_operand = self.lower_expr_as(&expr.index, IrType::Int(IntWidth::U64));
         let index_slot = self.spill(index_operand, IrType::Int(IntWidth::U64), span);
 
@@ -8743,6 +12616,102 @@ impl<'a> FunctionLowering<'a> {
         self.emit(
             InstKind::NativeSliceLoad { receiver, index },
             element_ty,
+            span,
+        )
+    }
+
+    /// `array[i]` / `list[i]` read for `Array<T>` and `List<T>`.
+    fn lower_array_list_index_read(
+        &mut self,
+        receiver_slot: SlotId,
+        index_expr: &ast::Expr,
+        receiver_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let element_ty = self.array_list_element_type(receiver_ty);
+        let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.lower_expr_as(index_expr, IrType::Int(IntWidth::I64));
+        self.emit(
+            InstKind::ArrayListLoad { receiver, index },
+            element_ty,
+            span,
+        )
+    }
+
+    /// `s[start:end:step]` for `String` (roadmap Phase 7): every part is an
+    /// `Int64` at the ABI, `i64::MIN` marking a part the source left out —
+    /// the runtime resolves defaults against the actual grapheme count,
+    /// which only it can see. Receiver and each bound are spilled as they
+    /// lower so a bound that opens a block of its own cannot strand an
+    /// earlier operand (ADR-007).
+    fn lower_slice(&mut self, expr: &ast::SliceExpr, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        // `r[lo:hi:st]` (roadmap Phase 7, `Range<T>`): the runtime resolves
+        // the bounds against the range's own element sequence and returns a
+        // new `Range` — the receiver is never mutated.
+        if self.type_of(&expr.receiver, expr.receiver.span()) == IrType::Range {
+            let receiver = self.lower_expr(&expr.receiver);
+            let receiver_slot = self.spill(receiver, IrType::Range, span);
+            let mut lower_part = |part: &Option<Box<ast::Expr>>| {
+                let operand = match part {
+                    Some(e) => self.lower_expr_as(e, i64_ty),
+                    None => self.const_i64(i64::MIN as i128, span),
+                };
+                self.spill(operand, i64_ty, span)
+            };
+            let start = lower_part(&expr.start);
+            let end = lower_part(&expr.end);
+            let step = lower_part(&expr.step);
+            let range = self.emit(InstKind::Load(receiver_slot), IrType::Range, span);
+            let start = self.emit(InstKind::Load(start), i64_ty, span);
+            let end = self.emit(InstKind::Load(end), i64_ty, span);
+            let step = self.emit(InstKind::Load(step), i64_ty, span);
+            return self.emit(
+                InstKind::Call {
+                    callee: "zirk_range_slice".to_string(),
+                    args: vec![range, start, end, step],
+                },
+                IrType::Range,
+                span,
+            );
+        }
+        let receiver = self.lower_expr(&expr.receiver);
+        let receiver_ty = self.type_of_operand(receiver);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+
+        let mut lower_part = |part: &Option<Box<ast::Expr>>| {
+            let operand = match part {
+                Some(e) => self.lower_expr_as(e, i64_ty),
+                None => self.const_i64(i64::MIN as i128, span),
+            };
+            self.spill(operand, i64_ty, span)
+        };
+        let start = lower_part(&expr.start);
+        let end = lower_part(&expr.end);
+        let step = lower_part(&expr.step);
+
+        if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
+            let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+            let start = self.emit(InstKind::Load(start), i64_ty, span);
+            let end = self.emit(InstKind::Load(end), i64_ty, span);
+            let step = self.emit(InstKind::Load(step), i64_ty, span);
+            return self.emit(
+                InstKind::ArraySlice { receiver, start, end, step },
+                receiver_ty,
+                span,
+            );
+        }
+
+        let string = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+        let start = self.emit(InstKind::Load(start), i64_ty, span);
+        let end = self.emit(InstKind::Load(end), i64_ty, span);
+        let step = self.emit(InstKind::Load(step), i64_ty, span);
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_str_slice".to_string(),
+                args: vec![string, start, end, step],
+            },
+            IrType::String,
             span,
         )
     }
@@ -8958,6 +12927,22 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return false;
         }
+        // A `record`/`enum` `.clone()` (roadmap Phase 7) has no `Object`
+        // receiver to recognize it by — the checker's own recorded
+        // expression type says which it is (a `record` resolves to
+        // `IrType::Value`, an enum to `Int32` or `IrType::Enum`).
+        match self
+            .checked
+            .expr_types
+            .get(&field.object.span())
+            .map(|t| t.base)
+        {
+            Some(Base::Enum(_) | Base::EnumInstance(_)) => return true,
+            Some(Base::Class(id)) => {
+                return self.checked.classes[id as usize].method("clone").is_none();
+            }
+            _ => {}
+        }
         match self.type_of(&field.object, field.object.span()) {
             IrType::Object(id) => self.checked.classes[id as usize].method("clone").is_none(),
             IrType::Callable(_) => true,
@@ -8965,18 +12950,153 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// The compiler-derived `.clone()` (design D1/D2): lowers to a single
-    /// `InstKind::Clone`, typed as the receiver's own type — see that
-    /// variant's own doc comment for why the whole graph traversal lives in
-    /// the runtime rather than being unrolled into several IR instructions
-    /// here.
+    /// The compiler-derived `.clone()` (design D1/D2): an object or callable
+    /// lowers to a single `InstKind::Clone`, typed as the receiver's own
+    /// type — see that variant's own doc comment for why the whole graph
+    /// traversal lives in the runtime rather than being unrolled into
+    /// several IR instructions here. A `record`/`enum` (roadmap Phase 7)
+    /// clones field-wise instead: `Self::lower_clone_value` rebuilds the
+    /// value with each `Clone` field's own copy.
     fn lower_derived_clone_call(&mut self, e: &ast::CallExpr, span: Span) -> Operand {
         let ast::Expr::Field(field) = &*e.callee else {
             unreachable!("checked by `Self::is_derived_clone_call`")
         };
         let ty = self.type_of(&field.object, field.object.span());
         let value = self.lower_expr(&field.object);
-        self.emit(InstKind::Clone(value), ty, span)
+        self.lower_clone_value(value, ty, span)
+    }
+
+    /// The `Clone` copy of one value: scalars copy as they are; an object or
+    /// callable goes through `zirk_rt_clone`'s graph traversal
+    /// (`InstKind::Clone`); a `record` (`IrType::Value`) rebuilds itself
+    /// field by field, recursively; an algebraic enum dispatches on its
+    /// discriminant and rebuilds the active variant (roadmap Phase 7 — a
+    /// whole-value copy would read an *inactive* variant's undefined
+    /// payload, the hazard `Checker::is_clone_type`'s own comment names).
+    fn lower_clone_value(&mut self, value: Operand, ty: IrType, span: Span) -> Operand {
+        match ty {
+            IrType::Nullable(inner) => {
+                let inner_op =
+                    self.emit(InstKind::Unwrap(value), inner.inner(), span);
+                let cloned = self.lower_clone_value(inner_op, inner.inner(), span);
+                self.emit(InstKind::Wrap { base: inner, value: cloned }, ty, span)
+            }
+            IrType::Object(_) | IrType::Callable(_) => {
+                self.emit(InstKind::Clone(value), ty, span)
+            }
+            IrType::Value(id) => {
+                let field_tys: Vec<IrType> = self.module.values[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty)
+                    .collect();
+                let mut fields = Vec::with_capacity(field_tys.len());
+                let slot = self.spill(value, ty, span);
+                for (index, field_ty) in field_tys.iter().copied().enumerate() {
+                    let whole = self.emit(InstKind::Load(slot), ty, span);
+                    let field = self.emit(
+                        InstKind::LoadField {
+                            object: whole,
+                            index: index as u32,
+                        },
+                        field_ty,
+                        span,
+                    );
+                    fields.push(self.lower_clone_value(field, field_ty, span));
+                }
+                self.emit(InstKind::BuildValue { class: id, fields }, ty, span)
+            }
+            IrType::Enum(id) => self.lower_clone_enum(value, id, ty, span),
+            _ => value,
+        }
+    }
+
+    /// The `Clone` copy of an algebraic enum: dispatches on the
+    /// discriminant so only the *active* variant's payload is read — an
+    /// inactive variant's fields are undefined bits (`BuildEnum`'s own
+    /// contract), which is why this cannot be a whole-value copy.
+    fn lower_clone_enum(&mut self, value: Operand, enum_id: u32, ty: IrType, span: Span) -> Operand {
+        let source = self.spill(value, ty, span);
+        let result = self.declare_slot("<clone>", ty, span);
+        let variants: Vec<(Vec<u32>, Vec<IrType>)> = self.module.enums[enum_id as usize]
+            .variants
+            .iter()
+            .map(|indices| {
+                let tys = indices
+                    .iter()
+                    .map(|&i| self.module.enums[enum_id as usize].fields[i as usize].ty)
+                    .collect();
+                (indices.clone(), tys)
+            })
+            .collect();
+        let done = self.new_block();
+
+        for (variant_index, (indices, field_tys)) in variants.iter().enumerate() {
+            let whole = self.emit(InstKind::Load(source), ty, span);
+            let disc = self.emit(
+                InstKind::Discriminant(whole),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let expected = self.emit(
+                InstKind::ConstInt(variant_index as i128),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let is_variant = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: disc,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let body = self.new_block();
+            let next = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_variant,
+                then_block: body,
+                else_block: next,
+            });
+
+            self.current = body;
+            let mut fields = Vec::with_capacity(indices.len());
+            for (i, &index) in indices.iter().enumerate() {
+                let whole = self.emit(InstKind::Load(source), ty, span);
+                let field = self.emit(
+                    InstKind::LoadField {
+                        object: whole,
+                        index,
+                    },
+                    field_tys[i],
+                    span,
+                );
+                fields.push(self.lower_clone_value(field, field_tys[i], span));
+            }
+            let rebuilt = self.emit(
+                InstKind::BuildEnum {
+                    enum_id,
+                    variant: variant_index as u32,
+                    fields,
+                },
+                ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result, rebuilt), span);
+            self.terminate(Terminator::Jump(done));
+
+            self.current = next;
+        }
+
+        // The verifier's own `match`-exhaustiveness guarantee means one arm
+        // always matched; reaching `done` without a `result` would be an
+        // uninitialized read, so fall through into `done` only after the
+        // last variant was tested — its `next` is dead by construction, but
+        // a jump keeps the terminator-correctness the IR requires.
+        self.terminate(Terminator::Jump(done));
+        self.current = done;
+        self.emit(InstKind::Load(result), ty, span)
     }
 
     fn field_position(&self, object: &ast::Expr, name: &str) -> (u32, IrType) {
@@ -9082,13 +13202,8 @@ impl<'a> FunctionLowering<'a> {
         } else {
             self.const_int_at(1, ty, span)
         };
-        let updated = self.emit_checked_binary(
-            binary_op(expr.op.as_binary()),
-            previous,
-            one,
-            ty,
-            span,
-        );
+        let updated =
+            self.emit_checked_binary(binary_op(expr.op.as_binary()), previous, one, ty, span);
         // `emit_checked_binary` may have split into a continuation block. The
         // slot has not been updated yet, so re-reading it here gives the same
         // pre-increment value `previous` had in the original block.
@@ -9185,6 +13300,13 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) if self.safe_method_call_info(e).is_some() => {
                 self.lower_safe_method_call(e, expr.span());
             }
+            // `array.add(...)`, `list.remove(...)` and other built-in collection
+            // methods are lowered to collection instructions/runtime calls.
+            ast::Expr::Call(e) if self.is_array_list_method_call(e) => {
+                if let Some(result) = self.lower_array_list_method_call(e, expr.span()) {
+                    let _ = result;
+                }
+            }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
@@ -9222,6 +13344,10 @@ impl<'a> FunctionLowering<'a> {
     fn lower_to_string(&mut self, operand: Operand, ty: IrType, span: Span) -> Operand {
         if ty == IrType::String {
             return operand;
+        }
+
+        if matches!(ty, IrType::Array(_) | IrType::List(_)) {
+            return self.lower_collection_to_string(operand, ty, span);
         }
 
         if let IrType::Object(id) | IrType::Value(id) = ty
@@ -9274,6 +13400,156 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::ToString(operand), IrType::String, span)
     }
 
+    /// `Array<T>` / `List<T>` `to_string()`: builds `[e0, e1, ...]` by
+    /// looping over the collection, converting each element with
+    /// [`Self::lower_to_string`], and concatenating with `", ".
+    fn lower_collection_to_string(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let u64_ty = IrType::Int(IntWidth::U64);
+        let zero = self.const_int_at(0, u64_ty, span);
+
+        // The collection itself, its length and the accumulating result string
+        // live in slots so the loop blocks can reload them.
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let length = if matches!(receiver_ty, IrType::List(_)) {
+            self.emit(InstKind::ListLength(receiver), u64_ty, span)
+        } else {
+            self.emit(InstKind::ArrayLength(receiver), u64_ty, span)
+        };
+        let length_slot = self.spill(length, u64_ty, span);
+
+        let open = self.const_string("[", span);
+        let result_slot = self.spill(open, IrType::String, span);
+        let i_slot = self.spill(zero, u64_ty, span);
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let comma = self.new_block();
+        let after_comma = self.new_block();
+        let end = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let length = self.emit(InstKind::Load(length_slot), u64_ty, span);
+        let cond = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: cond,
+            then_block: body,
+            else_block: end,
+        });
+
+        self.current = body;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: i,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: after_comma,
+            else_block: comma,
+        });
+
+        self.current = comma;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let sep = self.const_string(", ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: sep,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        self.terminate(Terminator::Jump(after_comma));
+
+        self.current = after_comma;
+        let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let element_ty = self.array_list_element_type(receiver_ty);
+        let element = self.emit(
+            InstKind::ArrayListLoad { receiver, index: i },
+            element_ty,
+            span,
+        );
+        let element_str = self.lower_to_string(element, element_ty, span);
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: element_str,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let one = self.const_int_at(1, u64_ty, span);
+        let i = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: i,
+                right: one,
+            },
+            u64_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(i_slot, i), span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = end;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let close = self.const_string("]", span);
+        self.emit(
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// [`Self::lower_to_string`]'s expression-aware form: `Duration` is an
+    /// `Int64` at the IR level, which `ToString` would render as a raw
+    /// nanosecond count, so it goes through the runtime's own duration
+    /// formatter instead.
+    fn lower_to_string_expr(&mut self, expr: &ast::Expr, operand: Operand, span: Span) -> Operand {
+        if self.is_duration(expr) {
+            return self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_duration_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            );
+        }
+        let ty = self.type_of(expr, expr.span());
+        self.lower_to_string(operand, ty, span)
+    }
+
     /// Lowers the argument of a `println`, converting it via `to_string()`
     /// when it is not already a `String`.
     ///
@@ -9282,8 +13558,7 @@ impl<'a> FunctionLowering<'a> {
     /// were a pointer.
     fn lower_println_argument(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
         let operand = self.lower_expr(&expr.arg);
-        let ty = self.type_of(&expr.arg, expr.arg.span());
-        self.lower_to_string(operand, ty, span)
+        self.lower_to_string_expr(&expr.arg, operand, span)
     }
 
     /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each
@@ -9308,8 +13583,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 ast::InterpolatedPart::Expr(inner) => {
                     let operand = self.lower_expr(inner);
-                    let ty = self.type_of(inner, inner.span());
-                    self.lower_to_string(operand, ty, span)
+                    self.lower_to_string_expr(inner, operand, span)
                 }
             };
 
@@ -9464,6 +13738,111 @@ impl<'a> FunctionLowering<'a> {
             )
     }
 
+    /// Whether `call` is `regex.matches(text)` or `regex.replace(text, repl)`.
+    fn is_regex_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("matches", 1) | ("replace", 2) | ("find", 1) | ("split", 1) | ("find_all", 1)
+        ) {
+            return false;
+        }
+        self.type_of(&field.object, field.object.span()) == IrType::Regex
+    }
+
+    /// Whether `call` is `Regex.Match.group(n)` / `Regex.Match.group(name)`.
+    fn is_regex_match_group_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if field.name.name != "group" || call.args.len() != 1 {
+            return false;
+        }
+        let ty = self.type_of(&field.object, field.object.span()).unwrapped();
+        matches!(ty, IrType::Object(id) if id == self.checked.regex_match_class)
+    }
+
+    /// Whether `call` is a built-in `String` method.
+    fn is_string_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("trim", 0)
+                | ("trim_start", 0)
+                | ("trim_end", 0)
+                | ("to_lowercase", 0)
+                | ("to_uppercase", 0)
+                | ("clone", 0)
+                | ("is_empty", 0)
+                | ("split_whitespace", 0)
+                | ("lines", 0)
+                | ("bytes", 0)
+                | ("codepoints", 0)
+                | ("chars", 0)
+                | ("contains", 1)
+                | ("starts_with", 1)
+                | ("ends_with", 1)
+                | ("substring", 2)
+                | ("search", 1)
+                | ("find", 1)
+                | ("replace", 2)
+                | ("normalize", 1)
+                | ("split", 1)
+        ) {
+            return false;
+        }
+        self.type_of(&field.object, field.object.span()) == IrType::String
+    }
+
+    /// Whether `call` is a built-in `Char` method.
+    fn is_char_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if !matches!(
+            (field.name.name.as_str(), call.args.len()),
+            ("is_uppercase", 0)
+                | ("is_lowercase", 0)
+                | ("is_digit", 0)
+                | ("is_letter", 0)
+                | ("is_whitespace", 0)
+                | ("is_ascii", 0)
+                | ("is_alphabetic", 0)
+                | ("is_numeric", 0)
+                | ("is_alphanumeric", 0)
+                | ("ascii_code", 0)
+                | ("to_uppercase", 0)
+                | ("to_lowercase", 0)
+                | ("normalize", 1)
+        ) {
+            return false;
+        }
+        self.type_of(&field.object, field.object.span()) == IrType::Char
+    }
+
+    /// Whether `call` is a built-in `Array<T>`/`List<T>` method call.
+    fn is_array_list_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if matches!(field.name.name.as_str(), "length" | "is_empty") {
+            return false;
+        }
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Array(_) | IrType::List(_)
+        )
+    }
+
     /// Whether `call` is a recursive lambda calling itself by its own
     /// binding name (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d)
     /// — see `Self::recursive_call`'s own doc comment.
@@ -9511,11 +13890,38 @@ impl<'a> FunctionLowering<'a> {
             return false;
         }
 
+        // `native-type-member-surface`: static calls on type names
+        // (`Int32.parse(...)`) and built-in method calls whose receiver is a
+        // type name or a native scalar (`Int32.MAX.to_string()`,
+        // `s.find("x")`) must be recognized before `method_of`/`contract`
+        // resolution tries to look the base up as a variable/function.
+        if self.is_native_static_call(call)
+            || self.is_native_to_string_call(call)
+            || self.is_scalar_method_call(call)
+            || self.is_string_method_call(call)
+            || self.is_char_method_call(call)
+            || self.is_duration_method_call(call)
+            || self.is_regex_method_call(call)
+            || self.is_regex_match_group_call(call)
+            || self.is_array_list_method_call(call)
+            || self.result_method(call).is_some()
+        {
+            return false;
+        }
+
         if self.method_of(call).is_some()
             || self.contract_method_of(call).is_some()
             || self.safe_method_call_info(call).is_some()
             || self.variant_construction(call).is_some()
             || self.is_native_to_string_call(call)
+            || self.is_regex_method_call(call)
+            || self.is_regex_match_group_call(call)
+            || self.is_duration_method_call(call)
+            || self.is_string_method_call(call)
+            || self.is_char_method_call(call)
+            || self.is_scalar_method_call(call)
+            || self.is_native_static_call(call)
+            || self.is_array_list_method_call(call)
             || self.result_method(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
@@ -9556,8 +13962,10 @@ impl<'a> FunctionLowering<'a> {
         // result type for binary operations; use it when available so lowering
         // matches the semantic type. Other expressions keep their IR-derived type
         // (slot, layout, etc.).
-        if matches!(expr, ast::Expr::Int(_) | ast::Expr::Float(_) | ast::Expr::Binary(_))
-            && let Some(&ty) = self.checked.expr_types.get(&expr.span())
+        if matches!(
+            expr,
+            ast::Expr::Int(_) | ast::Expr::Float(_) | ast::Expr::Duration(_) | ast::Expr::Binary(_)
+        ) && let Some(&ty) = self.checked.expr_types.get(&expr.span())
             && !ty.is_unknown()
         {
             return self.ir_type(ty);
@@ -9565,9 +13973,11 @@ impl<'a> FunctionLowering<'a> {
 
         match expr {
             ast::Expr::Int(_) => IrType::Int(IntWidth::I32),
+            ast::Expr::Duration(_) => IrType::Int(IntWidth::I64),
             ast::Expr::Float(lit) => IrType::Float(float_literal_width(lit)),
             ast::Expr::Bool(_) => IrType::Boolean,
             ast::Expr::Str(_) => IrType::String,
+            ast::Expr::Regex(_) => IrType::Regex,
             ast::Expr::Char(_) => IrType::Char,
             ast::Expr::Path(ident) => match self.try_lookup_slot(&ident.name) {
                 Some(slot) => self.slot_type(slot),
@@ -9715,13 +14125,39 @@ impl<'a> FunctionLowering<'a> {
                 self.type_of(&field.object, field.object.span())
             }
             ast::Expr::Call(e) => {
+                // `native-type-member-surface`: the checker already resolved
+                // the concrete type of built-in method/static calls and of
+                // every other well-typed call — use it before any name-based
+                // fallback that cannot handle a `Field` callee.
+                if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                    && !ty.is_unknown()
+                {
+                    return self.ir_type(ty);
+                }
                 if let Some(ty) = self.exception_intrinsic_type(e) {
                     return ty;
                 }
                 if let Some(method) = self.contract_method_of(e) {
+                    // A generic contract member may name the contract's own
+                    // type parameter (`Iterator<T>.next(): Iteration<T>`):
+                    // `method.returns` is the unsubstituted signature, whose
+                    // layout is the placeholder `module.enums` keeps for a
+                    // still-generic instance. The checker recorded this
+                    // call's substituted type (`Iteration<Int32>`) — use it
+                    // when it exists (roadmap Phase 7, task 12.3).
+                    if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                        && !ty.is_unknown()
+                    {
+                        return self.ir_type(ty);
+                    }
                     return self.ir_type(method.returns);
                 }
                 if let Some(method) = self.method_of(e) {
+                    if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                        && !ty.is_unknown()
+                    {
+                        return self.ir_type(ty);
+                    }
                     return self.ir_type(method.returns);
                 }
                 if let Some((returns, ..)) = self.safe_method_call_info(e) {
@@ -9741,6 +14177,61 @@ impl<'a> FunctionLowering<'a> {
                 if self.is_native_to_string_call(e) {
                     return IrType::String;
                 }
+                if self.is_regex_method_call(e)
+                    && let ast::Expr::Field(field) = &*e.callee {
+                        return match field.name.name.as_str() {
+                            "matches" => IrType::Boolean,
+                            "replace" => IrType::String,
+                            "find" => {
+                                IrType::Nullable(Nullable::Object(self.checked.regex_match_class))
+                            }
+                            "split" => {
+                                let id = self
+                                    .checked
+                                    .list_types
+                                    .iter()
+                                    .position(|&t| t == Type::STRING)
+                                    .expect(
+                                        "the checker interned `List<String>` for `Regex.split`",
+                                    ) as u32;
+                                IrType::List(id)
+                            }
+                            "find_all" => IrType::List(self.regex_match_list_id()),
+                            _ => unreachable!("checked by `is_regex_method_call`"),
+                        };
+                    }
+                if self.is_regex_match_group_call(e) {
+                    return IrType::String;
+                }
+                if self.is_range_method_call(e) {
+                    return IrType::Range;
+                }
+                if self.is_string_method_call(e)
+                    && let ast::Expr::Field(field) = &*e.callee {
+                        return match field.name.name.as_str() {
+                            "trim" | "substring" => IrType::String,
+                            "contains" | "starts_with" | "ends_with" => IrType::Boolean,
+                            "search" => IrType::Int(IntWidth::I64),
+                            _ => unreachable!("checked by `is_string_method_call`"),
+                        };
+                    }
+                if self.is_char_method_call(e)
+                    && let ast::Expr::Field(field) = &*e.callee {
+                        return match field.name.name.as_str() {
+                            "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter"
+                            | "is_whitespace" => IrType::Boolean,
+                            "to_uppercase" | "to_lowercase" => IrType::String,
+                            _ => unreachable!("checked by `is_char_method_call`"),
+                        };
+                    }
+                if self.is_duration_method_call(e)
+                    && let ast::Expr::Field(field) = &*e.callee {
+                        return match field.name.name.as_str() {
+                            "abs" => IrType::Int(IntWidth::I64),
+                            "sign" => IrType::Int(IntWidth::I32),
+                            _ => IrType::Boolean,
+                        };
+                    }
                 if let Some((name, t, e_ty)) = self.result_method(e) {
                     return match name {
                         "is_ok" | "is_error" => IrType::Boolean,
@@ -9755,6 +14246,43 @@ impl<'a> FunctionLowering<'a> {
                         "unwrap_error" => e_ty,
                         _ => unreachable!("checked by `result_method`"),
                     };
+                }
+                if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                    && matches!(ty.base, Base::Array(_) | Base::List(_))
+                {
+                    return self.ir_type(ty);
+                }
+                // A call through a contract instantiation (`it.next()` on an
+                // `Iterator<Int32>`-typed value): the method's declared
+                // signature may name the contract's own `T`, so the
+                // checker's substituted record of this call's type is the
+                // answer — `ir_type` of `method.returns` would point at the
+                // unsubstituted `Iteration<T>` layout (roadmap Phase 7).
+                if let ast::Expr::Field(field) = &*e.callee
+                    && matches!(
+                        self.type_of(&field.object, field.object.span()),
+                        IrType::Contract(_)
+                    )
+                    && let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                    && !ty.is_unknown()
+                {
+                    return self.ir_type(ty);
+                }
+                // `native-type-member-surface`: the checker already knows
+                // the final type for built-in method/static calls; use it
+                // before the name-based resolution below, which cannot
+                // handle a `Field` callee (`Int32.MAX.to_string()`,
+                // `s.find("x")`, etc.).
+                if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+                    && !ty.is_unknown()
+                    && (self.is_native_static_call(e)
+                        || self.is_scalar_method_call(e)
+                        || self.is_string_method_call(e)
+                        || self.is_char_method_call(e)
+                        || self.is_native_to_string_call(e)
+                        || self.is_array_list_method_call(e))
+                {
+                    return self.ir_type(ty);
                 }
                 match self.construction_class_id(e) {
                     Some(id) => self.ir_type(Type::of(Base::Class(id))),
@@ -9782,8 +14310,29 @@ impl<'a> FunctionLowering<'a> {
             // design D5): the element type its indexing entry carries.
             ast::Expr::Index(e) => {
                 let receiver_ty = self.type_of(&e.receiver, e.receiver.span());
-                self.native_slice_element_type(receiver_ty)
+                if receiver_ty == IrType::String {
+                    IrType::Char
+                } else if let IrType::Value(layout_id) = receiver_ty {
+                    let ast::Expr::Int(lit) = &*e.index else {
+                        unreachable!("a tuple index is a constant integer literal")
+                    };
+                    let index = lit.value as usize;
+                    self.module.values[layout_id as usize]
+                        .fields
+                        .get(index)
+                        .map(|f| f.ty)
+                        .unwrap_or(IrType::Never)
+                } else if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
+                    self.array_list_element_type(receiver_ty)
+                } else {
+                    self.native_slice_element_type(receiver_ty)
+                }
             }
+            // `receiver[start:end:step]` (roadmap Phase 7) — the checker only
+            // accepts a `String` receiver today.
+            // `r[...]` slices to a `Range` of the same element type
+            // (roadmap Phase 7); a `String` slice stays `String`.
+            ast::Expr::Slice(e) => self.type_of(&e.receiver, e.receiver.span()),
             ast::Expr::This(_) | ast::Expr::Super(_) => self.slot_type(self.lookup_slot("this")),
             ast::Expr::Ternary(e) => {
                 let true_ty = self.type_of(&e.when_true, e.when_true.span());
@@ -9800,7 +14349,14 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Println(_) => IrType::Void,
             // A lambda's type is the closure layout it produced, which only
             // exists once it has been lowered: the caller asks the value.
-            ast::Expr::Lambda(_) | ast::Expr::Null(_) | ast::Expr::Range(_) => {
+            ast::Expr::Tuple(_) => {
+                let Some(&ty) = self.checked.expr_types.get(&expr.span()) else {
+                    unreachable!("a tuple expression has a recorded semantic type")
+                };
+                self.ir_type(ty)
+            }
+            ast::Expr::Range(_) => IrType::Range,
+            ast::Expr::Lambda(_) | ast::Expr::Null(_) => {
                 unreachable!("the type of this expression comes from the value it produced")
             }
             ast::Expr::Transfer(e) => self.type_of(&e.expr, e.expr.span()),
@@ -9809,6 +14365,235 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
             ast::Expr::Commit(c) => self.block_value_type(&c.body),
         }
+    }
+
+    /// The semantic type the checker recorded for an expression, if any.
+    fn semantic_type(&self, expr: &ast::Expr) -> Option<zirk_sema::Type> {
+        self.checked.expr_types.get(&expr.span()).copied()
+    }
+
+    fn is_duration(&self, expr: &ast::Expr) -> bool {
+        self.semantic_type(expr)
+            .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Duration))
+    }
+
+    /// Lowers `Duration` arithmetic and comparison. A `Duration` is an `i64`
+    /// nanosecond count, so `+`/`-`, comparisons and `Duration * Int` /
+    /// `Duration / Int` are exactly the checked `i64` operations the same
+    /// shapes already are for `Int64`. The cases an `i64` instruction cannot
+    /// express — a `Float` scalar and the `Duration / Duration` ratio — go
+    /// through the runtime.
+    fn lower_duration_binary(
+        &mut self,
+        expr: &ast::BinaryExpr,
+        left: Operand,
+        right: Operand,
+        span: Span,
+    ) -> Operand {
+        use ast::BinaryOp::*;
+
+        let left_actual = self.type_of_operand(left);
+        let right_actual = self.type_of_operand(right);
+        let left_is_duration = self.is_duration(&expr.left);
+        let right_is_duration = self.is_duration(&expr.right);
+
+        // `Duration` (+|-) `Duration` and every comparison run directly on
+        // the nanosecond count, with the same overflow check an `Int64`
+        // operation gets.
+        if matches!(expr.op, Add | Sub | Eq | NotEq | Lt | LtEq | Gt | GtEq) {
+            let left = self.convert_numeric(
+                left,
+                left_actual,
+                IrType::Int(IntWidth::I64),
+                expr.left.span(),
+            );
+            let right = self.convert_numeric(
+                right,
+                right_actual,
+                IrType::Int(IntWidth::I64),
+                expr.right.span(),
+            );
+            return self.emit_checked_binary(
+                binary_op(expr.op),
+                left,
+                right,
+                IrType::Int(IntWidth::I64),
+                span,
+            );
+        }
+
+        // `Duration / Duration` answers a `Float64` ratio, not a duration.
+        // The divisor's zero check is the same `DivisionByZeroError` integer
+        // division gets.
+        if expr.op == Div && left_is_duration && right_is_duration {
+            let left = self.convert_numeric(
+                left,
+                left_actual,
+                IrType::Int(IntWidth::I64),
+                expr.left.span(),
+            );
+            let right = self.convert_numeric(
+                right,
+                right_actual,
+                IrType::Int(IntWidth::I64),
+                expr.right.span(),
+            );
+            return self.duration_ratio(left, right, span);
+        }
+
+        // `Duration (*|/) scalar`. The duration is whichever side carries it:
+        // `*` is commutative in the checker too, so `2 * 1s` reaches here
+        // with the scalar on the left.
+        debug_assert!(
+            !(expr.op == Mul && left_is_duration && right_is_duration),
+            "the checker rejects `Duration * Duration`",
+        );
+        let (nanos, nanos_actual, scalar, scalar_actual, scalar_span) = if left_is_duration {
+            (left, left_actual, right, right_actual, expr.right.span())
+        } else {
+            (right, right_actual, left, left_actual, expr.left.span())
+        };
+        let nanos = self.convert_numeric(nanos, nanos_actual, IrType::Int(IntWidth::I64), span);
+
+        match scalar_actual {
+            // An integer scalar keeps exact `Int64` semantics — `*` overflows
+            // and `/` guards its divisor the same way.
+            IrType::Int(_) => {
+                let scalar = self.convert_numeric(
+                    scalar,
+                    scalar_actual,
+                    IrType::Int(IntWidth::I64),
+                    scalar_span,
+                );
+                self.emit_checked_binary(
+                    binary_op(expr.op),
+                    nanos,
+                    scalar,
+                    IrType::Int(IntWidth::I64),
+                    span,
+                )
+            }
+            // A `Float` scalar needs the runtime: the result is a
+            // nanosecond count again, which no float instruction answers.
+            IrType::Float(_) => {
+                let scalar = self.convert_numeric(
+                    scalar,
+                    scalar_actual,
+                    IrType::Float(FloatWidth::F64),
+                    scalar_span,
+                );
+                if expr.op == Div {
+                    return self.duration_float_div(nanos, scalar, span);
+                }
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_duration_mul_f64".to_string(),
+                        args: vec![nanos, scalar],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                )
+            }
+            _ => unreachable!("the checker only admits a numeric scalar here"),
+        }
+    }
+
+    /// `Duration / Duration`: a `Float64` ratio, guarded against a zero
+    /// divisor exactly like `checked_int_division` guards integer division.
+    fn duration_ratio(&mut self, left: Operand, right: Operand, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let left_slot = self.spill(left, i64_ty, span);
+        let right_slot = self.spill(right, i64_ty, span);
+
+        let divisor = self.emit(InstKind::Load(right_slot), i64_ty, span);
+        let zero = self.const_int_at(0, i64_ty, span);
+        let is_zero = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: divisor,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let ok = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_zero,
+            then_block: fail,
+            else_block: ok,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with division registered the exception hierarchy");
+        self.throw_native_failure(native.division_by_zero, "division by zero", span);
+
+        self.current = ok;
+        let left = self.emit(InstKind::Load(left_slot), i64_ty, span);
+        let right = self.emit(InstKind::Load(right_slot), i64_ty, span);
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_duration_div_duration".to_string(),
+                args: vec![left, right],
+            },
+            IrType::Float(FloatWidth::F64),
+            span,
+        )
+    }
+
+    /// `Duration / Float` scalar: a zero scalar throws the same
+    /// `DivisionByZeroError` an integer divisor does — a `Duration` cannot
+    /// hold the infinity `nanos / 0.0` would otherwise produce.
+    fn duration_float_div(&mut self, nanos: Operand, scalar: Operand, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let f64_ty = IrType::Float(FloatWidth::F64);
+        let nanos_slot = self.spill(nanos, i64_ty, span);
+        let scalar_slot = self.spill(scalar, f64_ty, span);
+
+        let divisor = self.emit(InstKind::Load(scalar_slot), f64_ty, span);
+        let zero = self.emit(
+            InstKind::ConstFloat(FloatWidth::F64, "0".to_string()),
+            f64_ty,
+            span,
+        );
+        let is_zero = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: divisor,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let ok = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_zero,
+            then_block: fail,
+            else_block: ok,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with division registered the exception hierarchy");
+        self.throw_native_failure(native.division_by_zero, "division by zero", span);
+
+        self.current = ok;
+        let nanos = self.emit(InstKind::Load(nanos_slot), i64_ty, span);
+        let scalar = self.emit(InstKind::Load(scalar_slot), f64_ty, span);
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_duration_div_f64".to_string(),
+                args: vec![nanos, scalar],
+            },
+            i64_ty,
+            span,
+        )
     }
 
     /// The type of an already emitted value.

@@ -1,0 +1,22 @@
+class Tag {
+    label: String;
+    construct(label: String) { this.label = label; }
+}
+
+record Point {
+    x: Int32;
+    y: Int32;
+    name: String;
+    tag: Tag;
+}
+
+fn main(): Void {
+    mut p = Point(x: 1, y: 2, name: "hi", tag: Tag("t"));
+    mut q = p.clone();
+    stdout.println(p.x);
+    stdout.println(q.x);
+    stdout.println(q.name);
+    stdout.println(p.tag.label);
+    stdout.println(q.tag.label);
+    stdout.println(q.tag is p.tag);
+}

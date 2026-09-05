@@ -133,9 +133,8 @@ independent reference-backed result.
 
 ## 5. Algebraic data and matching
 
-`Tuple(A, B)` is the type of `(a, b)`. Access is `result[n]`, where `n` is a
-compile-time integer constant; negative indexes count from the end. Tuples do
-not slice. Contracts derive component-wise.
+`Tuple(A, B)` is the type of `(a, b)`. Access is `result.n`, where `n` is a
+compile-time integer literal. Tuples do not slice. Contracts derive component-wise.
 
 Records are nominal immutable values with named construction and type defaults
 for omitted members. They may have non-mutating methods, but no custom

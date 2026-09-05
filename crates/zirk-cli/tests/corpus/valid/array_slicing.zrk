@@ -1,0 +1,16 @@
+fn main(): Void {
+    mut arr: Array<Int32> = Array(0, 1, 2, 3, 4, 5);
+    mut s = arr[1:4];
+    stdout.println(s.length.to_string());
+    stdout.println(s[0].to_string());
+    stdout.println(s[2].to_string());
+
+    mut rev = arr[::-1];
+    stdout.println(rev.length.to_string());
+    stdout.println(rev[0].to_string());
+    stdout.println(rev[5].to_string());
+
+    mut step2 = arr[::2];
+    stdout.println(step2.length.to_string());
+    stdout.println(step2[1].to_string());
+}

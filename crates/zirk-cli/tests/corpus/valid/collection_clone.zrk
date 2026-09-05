@@ -1,0 +1,13 @@
+fn main(): Void {
+    mut arr: Array<Int32> = Array(1, 2, 3);
+    mut arr2 = arr.clone();
+    arr2[1] = 99;
+    stdout.println(arr[1].to_string());
+    stdout.println(arr2[1].to_string());
+
+    mut l: List<String> = List("x", "y");
+    mut l2 = l.clone();
+    l2.remove("x");
+    stdout.println(l.length.to_string());
+    stdout.println(l2.length.to_string());
+}

@@ -1,6 +1,6 @@
-// Derived structural equality for `record`/`value class` (roadmap task
+// Derived structural equality for `record` (roadmap task
 // 11.5's own gap, closed by `fase-3-structural-equality`): `==`/`!=`
-// compares every field, recursing into a nested `record`/`value class`
+// compares every field, recursing into a nested `record`
 // field, and short-circuits on the first difference (design D1).
 
 record Point {
@@ -13,7 +13,7 @@ record Line {
     end: Point;
 }
 
-value class Money(amount: Int32, currency: String);
+record Money { amount: Int32; currency: String; }
 
 // A `class` field inside a `record` compares by its own `==` rule
 // (design D2): here, its own `_equals`. `Tick.value` printing lets the
@@ -42,7 +42,7 @@ fn main(): Void {
     stdout.println(a != b);
     stdout.println(a != c);
 
-    // `value class`, same rules.
+    // `record`, same rules.
     mut m1 = Money(amount: 100, currency: "USD");
     mut m2 = Money(amount: 100, currency: "USD");
     mut m3 = Money(amount: 100, currency: "EUR");

@@ -77,6 +77,7 @@ fn without_spans(statements: &[Stmt]) -> String {
 fn shape(e: &Expr) -> String {
     match e {
         Expr::Int(i) => i.value.to_string(),
+        Expr::Duration(d) => format!("{}ns", d.nanos),
         Expr::Float(f) => match &f.width {
             Some(width) => format!("{}{width}", f.text),
             None => f.text.clone(),
@@ -144,6 +145,23 @@ fn shape(e: &Expr) -> String {
         Expr::Unsafe(u) => format!("unsafe({} stmts)", u.body.statements.len()),
         Expr::Commit(c) => format!("commit({} stmts)", c.body.statements.len()),
         Expr::Transfer(t) => format!("transfer({})", shape(&t.expr)),
+        Expr::Tuple(t) => format!(
+            "({})",
+            t.elements.iter().map(shape).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Slice(s) => {
+            let part = |p: &Option<Box<Expr>>| {
+                p.as_ref().map(|e| shape(e)).unwrap_or_else(|| "_".to_string())
+            };
+            format!(
+                "{}[{}:{}:{}]",
+                shape(&s.receiver),
+                part(&s.start),
+                part(&s.end),
+                part(&s.step)
+            )
+        }
+        Expr::Regex(r) => format!("re'{:?}'", r.pattern),
     }
 }
 
@@ -198,7 +216,7 @@ fn valid_variable_with_explicit_type() {
     };
 
     assert_eq!(l.mutability, Mutability::Mutable);
-    assert_eq!(l.name.name, "count");
+    assert_eq!(l.pattern.binding_name().unwrap(), "count");
     assert_eq!(l.ty.unwrap().name, "Int32");
     assert!(l.init.is_some());
 }
@@ -229,7 +247,7 @@ fn valid_strict_variable() {
     };
 
     assert_eq!(l.mutability, Mutability::Strict);
-    assert_eq!(l.name.name, "s");
+    assert_eq!(l.pattern.binding_name().unwrap(), "s");
 }
 
 #[test]
@@ -1228,7 +1246,7 @@ fn invalid_abstract_method_with_a_body() {
     );
 }
 
-// --- Records and value classes -----------------------------------------------
+// --- Records -----------------------------------------------------------------
 
 #[test]
 fn valid_record_declaration() {
@@ -1260,37 +1278,18 @@ fn invalid_record_without_a_name() {
 }
 
 #[test]
-fn valid_value_class_declaration() {
-    let p = program("value class UserId(value: Int32);\nfn main(): Void { }");
-    let v = &p.classes[0];
-
-    assert_eq!(v.kind, ClassKind::ValueClass);
-    assert_eq!(v.name.name, "UserId");
-    assert_eq!(v.fields.len(), 1);
-    assert_eq!(v.fields[0].name.name, "value");
-    assert_eq!(v.fields[0].ty.name, "Int32");
-    assert!(v.constructors.is_empty());
-}
-
-#[test]
-fn valid_value_class_with_several_fields() {
-    let p = program("value class Point(x: Float64, y: Float64);\nfn main(): Void { }");
-    assert_eq!(p.classes[0].fields.len(), 2);
-}
-
-#[test]
 fn valid_value_does_not_stop_being_an_ordinary_identifier() {
-    // `value` is contextual: only `value class` is special.
+    // `value` is an ordinary identifier: there is no `value class` form.
     let stmts = statements("mut value = 1;");
     let Stmt::Let(l) = &stmts[0] else {
         panic!("expected a declaration");
     };
-    assert_eq!(l.name.name, "value");
+    assert_eq!(l.pattern.binding_name().unwrap(), "value");
 }
 
 #[test]
-fn invalid_unclosed_value_class() {
-    let output = errors("value class UserId(value: Int32\nfn main(): Void { }");
+fn invalid_unclosed_record() {
+    let output = errors("record UserId { value: Int32\nfn main(): Void { }");
     assert!(
         output.contains(codes::UNEXPECTED_TOKEN.as_str()),
         "{output}"
@@ -1475,7 +1474,7 @@ fn valid_every_node_exposes_its_span() {
     let Stmt::Let(l) = &f.body.statements[0] else {
         panic!("expected a declaration");
     };
-    assert_eq!(source.slice(l.name.span), "x");
+    assert_eq!(source.slice(l.pattern.span()), "x");
     assert_eq!(source.slice(l.init.as_ref().unwrap().span()), "42");
 }
 
@@ -1589,54 +1588,27 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
     );
 }
 
-// --- Literals from later phases ---------------------------------------------
-
-#[test]
-fn invalid_literals_from_other_phases_name_themselves_and_their_phase() {
-    for (source_text, what, phase) in [
-        (
-            "fn main(): Void { mut x = 250ms; }",
-            "duration literal",
-            "Phase 7",
-        ),
-        (
-            "fn main(): Void { mut x = re'^a$'; }",
-            "regex literal",
-            "Phase 7",
-        ),
-    ] {
-        let output = errors(source_text);
-        assert!(
-            output.contains(codes::NOT_IMPLEMENTED.as_str()),
-            "for {what}:\n{output}"
-        );
-        assert!(
-            output.contains(what),
-            "the diagnostic must name {what}:\n{output}"
-        );
-        assert!(
-            output.contains(phase),
-            "the diagnostic must say {phase} for {what}:\n{output}"
-        );
-    }
-}
-
-#[test]
-fn invalid_literal_from_another_phase_reports_once() {
-    // Abandoning the statement whole is what keeps a second "expected an
-    // expression" — matching no mistake the user made — from following it.
-    let output = errors("fn main(): Void { mut x = 250ms; }");
-    assert!(
-        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
-        "a recognized literal must not also be an unexpected token:\n{output}"
-    );
-}
-
 #[test]
 fn valid_float_literal_shapes() {
     assert_eq!(shape(&expression("1.5")), "1.5");
     assert_eq!(shape(&expression("6.02e23")), "6.02e23");
     assert_eq!(shape(&expression("1.5f32")), "1.5f32");
+}
+
+#[test]
+fn valid_duration_literal_becomes_nanoseconds() {
+    match expression("250ms") {
+        Expr::Duration(d) => assert_eq!(d.nanos, 250_000_000),
+        other => panic!("expected a duration literal, got {other:?}"),
+    }
+    match expression("1.5s") {
+        Expr::Duration(d) => assert_eq!(d.nanos, 1_500_000_000),
+        other => panic!("expected a duration literal, got {other:?}"),
+    }
+    match expression("2h") {
+        Expr::Duration(d) => assert_eq!(d.nanos, 7_200_000_000_000),
+        other => panic!("expected a duration literal, got {other:?}"),
+    }
 }
 
 #[test]

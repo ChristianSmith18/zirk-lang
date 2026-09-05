@@ -1,0 +1,10 @@
+fn main(): Void {
+    for d in 0s..5s..1s {
+        stdout.println(d);
+    }
+    stdout.println("done");
+    mut rd: Range<Duration> = 10ms..30ms..5ms;
+    for d in rd {
+        stdout.println(d);
+    }
+}

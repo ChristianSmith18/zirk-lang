@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn implemented_keywords_declare_no_phase() {
-        // Phase 3's full vocabulary: objects, records, value classes, type
+        // Phase 3's full vocabulary: objects, records, type
         // aliases, contracts and casts.
         for k in [
             Keyword::Class,

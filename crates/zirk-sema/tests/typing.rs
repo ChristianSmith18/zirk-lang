@@ -292,9 +292,8 @@ fn invalid_float_literal_with_fraction_for_int() {
 
 #[test]
 fn invalid_no_common_numeric_type() {
-    let output = rejected_body(
-        "mut a: UInt128 = 1 as UInt128;\nmut b: Int128 = 2;\nmut c = a + b;",
-    );
+    let output =
+        rejected_body("mut a: UInt128 = 1 as UInt128;\nmut b: Int128 = 2;\nmut c = a + b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
@@ -733,25 +732,6 @@ fn valid_strict_alias_of_a_strict_object_reference() {
              inmut::strict s = User(\"ana\");
              inmut::strict alias = s;
          }",
-    );
-}
-
-#[test]
-fn valid_strict_matrix_does_not_apply_to_value_classes() {
-    // Value classes are inline, not reference-backed (task 11.5), so the
-    // aliasing half of D11 has nothing to police for them. `value class` is
-    // itself still gated by `NOT_LOWERED` (task 11.5 lowers it), so this
-    // checks that gate is the only error, not the strict-alias one.
-    let output = rejected(
-        "value class Point(x: Int32, y: Int32);
-         fn main(): Void {
-             mut m = Point(1, 2);
-             inmut::strict s = m;
-         }",
-    );
-    assert!(
-        !output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
-        "{output}"
     );
 }
 
@@ -1408,6 +1388,75 @@ fn valid_for_in_over_a_users_iterable_lowers() {
              mut c = Counter();
              for x in c { }
          }",
+    );
+}
+
+// `Iterator<T>` conformance is what makes `next()` callable directly on the
+// implementing class (`has_next` is an ordinary method of the class, not a
+// member of the contract — `Iteration<T>`'s `Item`/`Done` is the language's
+// has-next signal).
+#[test]
+fn valid_iterator_next_called_directly_on_the_implementing_class() {
+    accepted(
+        "class CounterIterator implements Iterator<Int32> {
+             limit: Int32;
+             current: Int32;
+             construct(limit: Int32) { this.limit = limit; this.current = 0; }
+             fn next(): Iteration<Int32> {
+                 if (this.current >= this.limit) { return Iteration.Done; }
+                 mut value = this.current;
+                 this.current = this.current + 1;
+                 return Iteration.Item(value: value);
+             }
+             fn has_next(): Boolean { return this.current < this.limit; }
+         }
+         fn main(): Void {
+             mut it = CounterIterator(2);
+             mut more = it.has_next();
+             match it.next() {
+                 Iteration.Item(v) => { mut x: Int32 = v; },
+                 Iteration.Done => { },
+             }
+         }",
+    );
+}
+
+#[test]
+fn valid_iterator_next_called_through_the_contract_type() {
+    // Roadmap Phase 7, task 12.3: generic contract satisfaction lowers —
+    // `next()` on an `Iterator<Int32>`-typed value dispatches through the
+    // contract table like any other contract call.
+    accepted(
+        "class CounterIterator implements Iterator<Int32> {
+             construct() { }
+             fn next(): Iteration<Int32> { return Iteration.Done; }
+         }
+         class Counter implements Iterable<Int32> {
+             construct() { }
+             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+         }
+         fn main(): Void {
+             mut c = Counter();
+             mut it = c.iterator();
+             mut step = it.next();
+         }",
+    );
+}
+
+#[test]
+fn valid_for_in_over_the_builtin_collections() {
+    // `Array<T>`, `List<T>` and `String` iterate without a user-written
+    // `iterator()`: the collection loops are lowered directly.
+    accepted_body(
+        "mut a: Array<Int32> = Array(2);\n\
+         a[0] = 1;\n\
+         a[1] = 2;\n\
+         mut l: List<Int32> = List();\n\
+         l.add(3);\n\
+         mut total = 0;\n\
+         for x in a { total = total + x; }\n\
+         for y in l { total = total + y; }\n\
+         for c in \"hi\" { mut g: Char = c; }",
     );
 }
 
@@ -2808,7 +2857,7 @@ fn invalid_literal_pattern_destructuring_a_variant_is_not_lowered_yet() {
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
-// --- Records y value classes --------------------------------------------------
+// --- Records ------------------------------------------------------------------
 
 #[test]
 fn valid_record_construction_and_field_access() {
@@ -2911,16 +2960,16 @@ fn valid_record_equality_is_derived_without_a_reserved_method() {
 }
 
 #[test]
-fn valid_value_class_equality_is_derived_without_a_reserved_method() {
+fn valid_record_equality_inline_basic() {
     accepted(
-        "value class Money(amount: Int32, currency: String);
+        "record Money { amount: Int32; currency: String; }
          fn main(): Void { mut a = Money(amount: 1, currency: \"USD\"); mut b = Money(amount: 1, currency: \"USD\"); stdout.println(a == b); }",
     );
 }
 
 #[test]
 fn valid_record_equality_over_a_nested_record_field() {
-    // Design D1: a nested `record`/`value class` field recurses the same
+    // Design D1: a nested `record` field recurses the same
     // way its own top-level `==` would.
     accepted(
         "record Point { x: Int32; y: Int32; }
@@ -2994,10 +3043,8 @@ fn invalid_identity_comparison_on_a_record() {
 
 #[test]
 fn invalid_generic_record_is_not_lowered_yet() {
-    // A non-generic record/value class fully lowers (task 11.5); combining
+    // A non-generic record fully lowers (task 11.5); combining
     // that with per-instantiation specialization (11.1) is out of scope.
-    // `value class` sugar has no syntax for `<T>` at all, so only a
-    // `record` can even be written generic.
     let output = rejected("record Box<T> { value: T; }\nfn main(): Void { }");
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
@@ -3092,8 +3139,8 @@ fn invalid_record_not_implementing_the_named_interface() {
 }
 
 #[test]
-fn valid_value_class_construction() {
-    accepted("value class UserId(value: Int32);\nfn main(): Void { mut u = UserId(value: 5); }");
+fn valid_record_construction() {
+    accepted("record UserId { value: Int32; }\nfn main(): Void { mut u = UserId(value: 5); }");
 }
 
 #[test]
@@ -3253,24 +3300,25 @@ fn invalid_member_access_still_rejected_on_a_non_nullable_match_binding() {
 
 #[test]
 fn valid_type_alias_is_transparent_with_its_target() {
-    let output = rejected("type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; }");
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // Roadmap Phase 7, task 12.1: a `type` alias lowers — it expands to its
+    // target everywhere, so there is nothing left to reject.
+    accepted("type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; }");
 }
 
 #[test]
 fn valid_type_alias_to_a_declared_class() {
-    let output = rejected(
+    accepted(
         "class User { construct() { } }
          type Account = User;
          fn main(): Void { mut a: Account = User(); }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
-fn invalid_type_alias_is_not_lowered_yet() {
-    let output = rejected("type UserId = Int32;\nfn main(): Void { }");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+fn valid_type_alias_lowers() {
+    // The `NOT_LOWERED` gate this used to assert is gone (roadmap Phase 7,
+    // task 12.1): an alias resolves to its target and lowers.
+    accepted("type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; mut other: Int32 = id; }");
 }
 
 #[test]
@@ -3308,12 +3356,11 @@ fn invalid_type_alias_cycle() {
 
 #[test]
 fn valid_type_alias_chain() {
-    let output = rejected(
+    accepted(
         "type A = Int32;
          type B = A;
          fn main(): Void { mut x: B = 5; }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 // --- Uniones ---------------------------------------------------------------
@@ -4389,25 +4436,15 @@ fn valid_native_contract_type_annotations_are_not_pending() {
     // contracts in `checker.rs`; they must not be rejected with a pending-phase
     // diagnostic just because `pending_type` used to name a later phase for them.
     //
-    // `Iterator<T>` is already the one generic contract instantiation that lowers
-    // (it is the return type of `iterator()`), so it is accepted outright.
-    // `Iterable<T>` and `Resource<E>` as value types are still `NOT_LOWERED`
-    // (E0423), but the diagnostic must not be `PENDING_FEATURE` (E0424).
+    // Generic contract instantiations name a real type now (roadmap Phase 7,
+    // task 12.3): `Iterator<T>` (the return type of `iterator()`),
+    // `Iterable<T>` and `Resource<E>` all resolve to the same
+    // `IrType::Contract` their unparameterized contract already lowered to.
     accepted("fn f(x: Iterator<Int32>): Void {}\nfn main(): Void {}");
-
-    let output = rejected("fn f(x: Iterable<Int32>): Void {}\nfn main(): Void {}");
-    assert!(
-        !output.contains(codes::PENDING_FEATURE.as_str()),
-        "expected no PENDING_FEATURE for Iterable<T>:\n{output}"
-    );
-
-    let output = rejected(&format!(
+    accepted("fn f(x: Iterable<Int32>): Void {}\nfn main(): Void {}");
+    accepted(&format!(
         "{OPEN_ERROR}\nfn f(x: Resource<OpenError>): Void {{ }}\nfn main(): Void {{ }}"
     ));
-    assert!(
-        !output.contains(codes::PENDING_FEATURE.as_str()),
-        "expected no PENDING_FEATURE for Resource<E>:\n{output}"
-    );
 }
 
 #[test]
@@ -4670,9 +4707,9 @@ fn valid_pointer_from_record_field() {
 }
 
 #[test]
-fn valid_pointer_from_value_class_field() {
+fn valid_pointer_from_user_record_field() {
     accepted(
-        "value class UserId(value: Int32);
+        "record UserId { value: Int32; }
          fn main(): Void {
              mut u: UserId = UserId(value: 5);
              unsafe {
@@ -5092,29 +5129,14 @@ fn valid_string_index_returns_a_char() {
 }
 
 #[test]
-fn invalid_string_index_write_is_rejected() {
-    let output = rejected(
+fn valid_string_index_write() {
+    // `s[i] = c` writes a grapheme in place (roadmap Phase 7, task 10.1) —
+    // the `INDEX_NOT_WRITABLE` gate this used to assert is gone.
+    accepted(
         "fn main(): Void {
              mut s: String = \"hola\";
              s[0] = 'x';
          }",
     );
-    assert!(
-        output.contains(codes::INDEX_NOT_WRITABLE.as_str()),
-        "{output}"
-    );
 }
 
-#[test]
-fn invalid_string_negative_index_is_rejected() {
-    let output = rejected(
-        "fn main(): Void {
-             mut s: String = \"hola\";
-             mut c: Char = s[-1];
-         }",
-    );
-    assert!(
-        output.contains(codes::INDEX_OUT_OF_BOUNDS.as_str()),
-        "{output}"
-    );
-}
