@@ -89,3 +89,15 @@ An engineering risk discovered during a status audit and requiring its own desig
 - **THEN** it is documented as debt with a description of the risk and the suggested name of a future OpenSpec change
 - **AND** the change that performed the audit does not attempt to resolve that risk in the same commit
 
+### Requirement: New type chapters stay consistent with the feature-status catalog
+
+Any expanded or new type chapter that makes an implementation-status claim (e.g., "`List<T>` is delivered" or "`Regex` is specified") SHALL reference `docs/init/ZIRK_FEATURE_STATUS.md` and SHALL be updated in the same change if the status catalog is updated. The chapter SHALL NOT promote a feature to implemented unless the catalog already marks it implemented.
+
+#### Scenario: A chapter mentions a delivered collection
+- **WHEN** the `List` chapter states that `List<T>` is implemented
+- **THEN** the feature-status catalog contains the same status and the change includes both updates
+
+#### Scenario: A chapter describes a specified but pending feature
+- **WHEN** the `Regex` or `Map` chapter documents behavior not yet implemented
+- **THEN** the page displays a visible implementation-status notice and does not claim the feature runs today
+
