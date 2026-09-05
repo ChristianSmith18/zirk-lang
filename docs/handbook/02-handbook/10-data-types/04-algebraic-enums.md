@@ -61,14 +61,14 @@ a time. Generic algebraic enums are allowed (generic enum lowering delivered by
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `type` | `Type` | Universal member | implemented |
+| `type` | `Type` | Universal member | specified |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `LoadState.Ready(doc)` | `LoadState` | Variants are ordinary typed constructors | implemented |
-| `value.to_string()` | `String` | Universal member | implemented |
+| `value.to_string()` | `String` | Universal member | specified |
 | `value.clone()` | `LoadState` | Derived `Clone` when every payload is `Clone` | specified |
 
 > Payload extraction is legal only inside `match`; direct enum destructuring is

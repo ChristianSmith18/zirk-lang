@@ -38,18 +38,13 @@ need not implement the throwable `Error` contract.
 > express yet, and `get_or_else` additionally needs `Fn` as a writable
 > parameter type.
 
-### Properties
-
-| Member | Type | Description | Status |
-| --- | --- | --- | --- |
-| `r.is_ok` | `Boolean` | `true` for `Ok(T)` | implemented |
-| `r.is_error` | `Boolean` | `true` for `Error(E)` | implemented |
-
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `Ok(value)` / `Error(err)` | `Result<T, E>` | Variant constructors | implemented |
+| `r.is_ok()` | `Boolean` | `true` for `Ok(T)` | implemented — a method today; the property form is specified |
+| `r.is_error()` | `Boolean` | `true` for `Error(E)` | implemented — a method today; the property form is specified |
 | `r.ok_or_null()` | `T?` | Value or `null` | implemented |
 | `r.error_or_null()` | `E?` | Error or `null` | implemented |
 | `r.get_or(fallback)` | `T` | Value or the supplied default | implemented |

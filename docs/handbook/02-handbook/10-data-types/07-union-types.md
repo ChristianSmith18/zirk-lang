@@ -34,8 +34,8 @@ available before narrowing:
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `type` | `Type` | Universal member | implemented |
-| `to_string()` | `String` | Available when every member provides it | implemented |
+| `type` | `Type` | Universal member | specified — union values are not compilable yet |
+| `to_string()` | `String` | Available when every member provides it | specified — union values are not compilable yet |
 
 Narrow with `match`, a type pattern, or proven flow analysis. Zirk does not
 select an alternative dynamically to rescue an invalid operator.

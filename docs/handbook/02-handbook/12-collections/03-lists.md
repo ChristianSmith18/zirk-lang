@@ -151,15 +151,15 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Element count | implemented |
+| `length` | `UInt64` | Element count | implemented |
 | `is_empty` | `Boolean` | `length == 0` | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `List()` / `List(e0, e1, …)` | `List<T>` | Empty or pre-populated list | implemented |
-| `l[i]` / `l[i] = v` | `T` / `Void` | Checked indexing (negative from end) | implemented |
+| `List()` / `List(e0, e1, …)` | `List<T>` | Empty or pre-populated list | implemented — `List()` empty only; the `List(e0, …)` form is specified |
+| `l[i]` / `l[i] = v` | `T` / `Void` | Checked indexing | implemented — negative-from-end indices are specified; today they are bounds errors |
 | `l.add(value)` | `Void` | Amortized-constant append | implemented |
 | `l.insert(index, value)` | `Void` | Shifting insertion | implemented |
 | `l.remove(index)` | `T` | Removes and returns element at `index` | implemented |
@@ -180,8 +180,8 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 | `l.to_set()` | `Set<T>` | Materializes as a set (`T` must satisfy `Hash` + `Equal`) | specified |
 | `l.sort()` / `l.sort_by(fn)` / `l.sort_with(cmp)` / `l.sort_unstable()` | `Void` | Stable sort in place | specified |
 | `l.iterator()` | `Iterator<T>` | Lazy single-pass iterator; use `collect()`/`to_list()` to terminate | specified |
-| `l.clone()` | `List<T>` | Independent logical copy | implemented |
-| `l.to_string()` | `String` | Rendering | implemented |
+| `l.clone()` | `List<T>` | Independent logical copy | specified |
+| `l.to_string()` | `String` | Rendering | specified |
 
 Mutation through `inmut::strict` and mutation during iteration are controlled
 errors.

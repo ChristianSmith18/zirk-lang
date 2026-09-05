@@ -104,9 +104,9 @@ class-declaration path that had never been exercised for a user abstract
 class (method `overridden` flags, method-index seeding, `implements`-aware
 hierarchy ordering) and a pre-existing diagnostic bug (`MISSING_OVERRIDE`
 reported instead of `MISSING_IMPLEMENTATION`). `fase-3-structural-equality`
-(merged) closed the derived-equality gap: `==`/`!=` on a `record`/`value
-class` now lowers to a field-by-field, short-circuiting comparison —
-recursing into a nested `record`/`value class` field and dispatching a
+(merged) closed the derived-equality gap: `==`/`!=` on a `record`
+now lowers to a field-by-field, short-circuiting comparison —
+recursing into a nested `record` field and dispatching a
 `class`-typed field to its own existing equality rule (`_equals` if
 declared, otherwise `is`) — reusing the same short-circuit block shape `&&`
 already builds, generalized from two operands to however many fields a type
@@ -163,15 +163,12 @@ type's own contract-method bodies (a trait's inherited default already
 expects a pointer receiver, so needs none). Verified against the scenario
 that specifically rules out a static-monomorphization alternative: two
 different concrete `record` adopters dispatched correctly through the same
-unchanged, non-generic call site. `value class` cannot exercise this yet —
-a pre-existing, separate gap: its own compact declaration grammar has no
-`implements` clause or method-body syntax at all today. Generic contracts
-remain.
+unchanged, non-generic call site. Generic contracts remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
 - Generics with `from` (constraints).
-- Records, value classes, algebraic enums, unions.
+- Records, algebraic enums, unions.
 - Casts (`as`, `<T>`, `unsafe` casts).
 
 **Output:** the object-oriented subset of the spec working, including basic
@@ -216,7 +213,7 @@ implementing each one twice.
 **Status: complete for its scoped delivery.** All sub-phases (4a–4e) now parse,
 type-check, lower, and run end-to-end. The remaining deliberately-out-of-scope
 items (volatile access, native unions, `Atomic<T>`, general slice provenance
-beyond the direct shape, `record`/`value class`/`enum` `Clone` derivation) are
+beyond the direct shape, `record`/`enum` `Clone` derivation) are
 tracked as Phase 5+ or follow-up work.
 
 ### Phase 4a — Expected errors
@@ -312,7 +309,7 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   rejects returns, field stores, closure captures, and non-dependent parameter
   passing; valid local use runs end-to-end. `Pin<T>` supports construction with
   `Pin(obj)`, automatic unpin for field/method access, and rejects reassignment
-  of the pinned variable. `record`/`value class` and enum-typed fields remain
+  of the pinned variable. `record` and enum-typed fields remain
   excluded from `Clone` derivation for now.
 - [x] Implement `inmut::strict` with reachable-alias analysis — **delivered**:
   a field declared `inmut::strict` is unwritable through any projection
@@ -432,20 +429,28 @@ distinction changes who implements them:
 - The **temporal family** — `Date`, `Time`, `DateTime`, `Instant`,
   `ZonedDateTime`, `TimeZone`, `Duration` and `Period` — are compiler-known
   native immutable values with their own literals, operators and type rules.
-  The lexer and the checker know them before `std.time` exists; what this phase
-  adds is their implementation, their IANA zone data and their API, not their
-  existence as types.
+  `Duration` (literals, arithmetic and printing) is already implemented in
+  `array-list-tuple-duration-regex`; this phase completes the remaining
+  civil/zone types, their IANA data, and the `std.time` API.
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
-  native reference types under the same rule.
+  native reference types under the same rule. `Array<T>` (fixed-capacity) and
+  `List<T>` (resizable) are implemented in `array-list-tuple-duration-regex`;
+  this phase completes `Map<K,V>` and `Set<T>` plus the wider
+  `std.collections` API.
 
-`String` grapheme indexing also lands here, which is the moment ADR-005's
-boundary was designed to protect. With indexing come the forms that depend on
-it: slicing `[start:end:step]`, and `Range<T>`'s `.step(distance)` and
-`.reverse()`.
+`String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
+the search/trim/`substring` methods are delivered in
+`array-list-tuple-duration-regex` — the moment ADR-005's boundary was designed
+to protect. `String.split` returns `List<String>` and lands with `List<T>`;
+`Range<T>`'s `start`/`end`/`step`, `.reverse()` and range slicing are still
+pending in the same change.
 
-Regex also lands here — the `re'pattern'` literal and regex patterns in `match`.
-The literal is core syntax and the lexer knows it earlier, but it means nothing
-without an engine to run it, and the engine is a library.
+`Regex` core support also lands here — the `re'pattern'` literal, the
+`Regex.matches(text): Boolean`, `Regex.find(text): Regex.Match?` and
+`Regex.replace(text, replacement): String` operations are delivered in
+`array-list-tuple-duration-regex`, including capture-group access on
+`Regex.Match`. Still pending: `split` (needs `List<T>`), iteration over
+`matches(text): Iterable<Regex.Match>`, and `re'...'` patterns in `match`.
 
 **Output:** real non-trivial applications (a CLI, a simple backend) writable in
 Zirk using only the stdlib.

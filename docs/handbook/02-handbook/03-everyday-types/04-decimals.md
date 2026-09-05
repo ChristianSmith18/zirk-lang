@@ -54,33 +54,33 @@ verification, and its formatting currently truncates to `Float64` precision.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `Float64.MIN` | `Float64` | Smallest positive normalized value | implemented |
-| `Float64.MAX` | `Float64` | Largest finite value | implemented |
-| `Float64.LOWEST` | `Float64` | Most negative finite value (`−MAX`) | implemented |
-| `Float64.EPSILON` | `Float64` | Difference between `1.0` and the next representable value | implemented |
-| `Float64.POSITIVE_INFINITY` | `Float64` | Explicit infinity for algorithms and interop | implemented |
-| `Float64.NEGATIVE_INFINITY` | `Float64` | Explicit negative infinity | implemented |
+| `Float64.MIN` | `Float64` | Smallest positive normalized value | specified |
+| `Float64.MAX` | `Float64` | Largest finite value | specified |
+| `Float64.LOWEST` | `Float64` | Most negative finite value (`−MAX`) | specified |
+| `Float64.EPSILON` | `Float64` | Difference between `1.0` and the next representable value | specified |
+| `Float64.POSITIVE_INFINITY` | `Float64` | Explicit infinity for algorithms and interop | specified |
+| `Float64.NEGATIVE_INFINITY` | `Float64` | Explicit negative infinity | specified |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `value.abs()` | same as `value` | Absolute value | implemented |
-| `value.sign()` | `Int32` | `-1`, `0`, or `1` | implemented |
-| `value.min(other)` / `value.max(other)` | same as `value` | Smaller/larger of two values | implemented |
-| `value.clamp(low, high)` | same as `value` | Confines `value` to `[low, high]` | implemented |
-| `value.is_zero()` | `Boolean` | `true` when `value == 0.0` | implemented |
-| `value.floor()` | same as `value` | Largest integer ≤ `value` | implemented |
-| `value.ceil()` | same as `value` | Smallest integer ≥ `value` | implemented |
-| `value.round()` | same as `value` | Nearest integer, half away from zero | implemented |
-| `value.truncate()` | same as `value` | Integer part, toward zero | implemented |
-| `value.fraction()` | same as `value` | Fractional part (`value - truncate()`) | implemented |
-| `value.is_finite()` | `Boolean` | `true` when not an infinity | implemented |
-| `value.is_infinite()` | `Boolean` | `true` for either infinity | implemented |
+| `value.abs()` | same as `value` | Absolute value | specified |
+| `value.sign()` | `Int32` | `-1`, `0`, or `1` | specified |
+| `value.min(other)` / `value.max(other)` | same as `value` | Smaller/larger of two values | specified |
+| `value.clamp(low, high)` | same as `value` | Confines `value` to `[low, high]` | specified |
+| `value.is_zero()` | `Boolean` | `true` when `value == 0.0` | specified |
+| `value.floor()` | same as `value` | Largest integer ≤ `value` | specified |
+| `value.ceil()` | same as `value` | Smallest integer ≥ `value` | specified |
+| `value.round()` | same as `value` | Nearest integer, half away from zero | specified |
+| `value.truncate()` | same as `value` | Integer part, toward zero | specified |
+| `value.fraction()` | same as `value` | Fractional part (`value - truncate()`) | specified |
+| `value.is_finite()` | `Boolean` | `true` when not an infinity | specified |
+| `value.is_infinite()` | `Boolean` | `true` for either infinity | specified |
 | `value.is_negative()` | `Boolean` | `true` when `value < 0.0` (includes `−0.0` sign) | specified |
 | `value.pow(exp)` | same as `value` | Floating power | specified |
 | `value.sqrt()` | same as `value` | Square root; negative input is a controlled error | specified |
-| `Float64.parse(text)` | `Result<Float64, ParseError>` | Parses decimal/scientific text | implemented |
+| `Float64.parse(text)` | `Result<Float64, ParseError>` | Parses decimal/scientific text | specified |
 | `value.to_string()` | `String` | Shortest round-trip decimal rendering | implemented |
 | `value.format(spec)` | `String` | Contract-driven presentation formatting | specified |
 | `Int32(value)` / `Float64(value)` | target type | Explicit checked conversion; fails on non-finite or unrepresentable results | implemented |
