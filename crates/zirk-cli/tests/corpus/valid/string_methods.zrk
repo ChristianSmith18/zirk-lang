@@ -1,0 +1,18 @@
+// `String` built-in methods and `Char` classification/normalization.
+fn main(): Void {
+    inmut s = "  hello  ";
+    stdout.println(s.trim());
+    stdout.println(s.contains("ell"));
+    stdout.println(s.starts_with("  "));
+    stdout.println(s.ends_with("  "));
+    stdout.println(s.substring(2, 5));
+    stdout.println(s.search("lo"));
+    inmut c = 'A';
+    stdout.println(c.is_uppercase());
+    stdout.println(c.is_digit());
+    stdout.println(c.to_lowercase());
+    inmut parts = "a,b,c".split(",");
+    for p in parts { stdout.println(p); }
+    inmut chars = "abc".split("");
+    for ch in chars { stdout.println(ch); }
+}

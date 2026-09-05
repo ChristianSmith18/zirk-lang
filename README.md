@@ -16,11 +16,11 @@ fn main(): Void {
 
 ---
 
-## Status: Phase 4e in progress
+## Status: Phase 4e delivered; everyday data types in progress
 
 **The example above compiles and runs.** `zirk run hello.zrk` produces a native binary and runs it. The full compiler pipeline is green and 995 tests pass.
 
-Phase 4d — callable and binding completion — is **complete for its scoped delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` archived). The active development phase is now **4e — managed memory and unsafe boundaries**.
+Phase 4d — callable and binding completion — is **complete for its scoped delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` archived). Phase 4e — managed memory and unsafe boundaries — delivered the non-moving mark-sweep collector, `Weak<T>`, deep `clone()`, `Pointer<T>`/`extern "C"`, transactional `unsafe {}`/`commit {}`, and `NativeSlice<T>`/`NativeSliceMut<T>`. The active change is **`array-list-tuple-duration-regex`**, which adds `Tuple`, `Array<T>`, `List<T>`, `Duration`, `Regex`, the `String`/`Char` method surface, `Range<T>`, `type` alias lowering, and removes `value class`.
 
 ```
    .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ binary
@@ -29,14 +29,14 @@ Phase 4d — callable and binding completion — is **complete for its scoped de
 
 The complete, feature-by-feature status is in [docs/init/ZIRK_FEATURE_STATUS.md](docs/init/ZIRK_FEATURE_STATUS.md). Use it before assuming a construct is available; this README no longer repeats that enumeration.
 
-Implemented through Phase 4d: the full Phase 1 pipeline, Phase 2 control flow and closures, Phase 3 objects/generics/records/value classes/abstract dispatch/structural equality, Phase 3b scalar/text families, Phase 4a `Result<T,E>`, 4b exceptions, 4c single-resource `match ... with`, and 4d `Fn(...) => R` annotations, escaping closures, multiple declarations and simultaneous assignment.
+Implemented through Phase 4e and the start of the data-types work: the full Phase 1 pipeline, Phase 2 control flow and closures, Phase 3 objects/generics/records/abstract dispatch/structural equality, Phase 3b scalar/text families, Phase 4a `Result<T,E>`, 4b exceptions, 4c single-resource `match ... with`, 4d `Fn(...) => R` annotations, escaping closures, multiple declarations and simultaneous assignment, and 4e managed memory with `unsafe`/`Pointer<T>`/`NativeSlice<T>`. The `array-list-tuple-duration-regex` change adds `Tuple`, `Duration` literals and arithmetic, `Regex` (`re'...'`, `matches`/`find`/`replace`), the `String` mutation/search surface, `Char` classification, `type` alias lowering, and — in flight — `Array<T>`/`List<T>`; it also removes `value class` (use `record`).
 
 ```sh
 zirk build hello.zrk    # compiles to a native executable
 zirk run hello.zrk      # compiles and runs
 ```
 
-Artifacts land in `build/`. Still in progress or not yet implemented: dependent references and automatic bounded native pinning (Phase 4e), concurrency (`task`/`await`/`parallel`/channels/atomics, Phase 5), the multi-file project system and `init.zrk` (Phase 6), the standard library collections and temporal family (Phase 7), generators and the pipe operator (Phase 7b), and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
+Artifacts land in `build/`. Still in progress or not yet implemented: `Array<T>`/`List<T>` completion, `Range<T>`, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); concurrency (`task`/`await`/`parallel`/channels/atomics, Phase 5); the multi-file project system and `init.zrk` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
 
 ## Architecture
 

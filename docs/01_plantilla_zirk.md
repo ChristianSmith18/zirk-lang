@@ -4609,7 +4609,7 @@ mut id: UserId = UInt64(10);
 
 Esto no contradice el uso de `->`: la flecha renombra símbolos durante imports o destructuración, mientras que `type` declara un nombre alternativo para un tipo.
 
-Cuando se necesite crear un tipo nominal realmente distinto deberá utilizarse una `value class` u otra construcción nominal, no un alias.
+Cuando se necesite crear un tipo nominal realmente distinto deberá utilizarse un `record` u otra construcción nominal, no un alias.
 
 ---
 
@@ -6421,7 +6421,7 @@ class UserService {}
 
 **Respuesta:**
 
-Clases, interfaces, traits, enums, records y value classes utilizarán `PascalCase`:
+Clases, interfaces, traits, enums y records utilizarán `PascalCase`:
 
 ```text
 class UserService {}
@@ -6429,7 +6429,6 @@ interface Serializable {}
 trait Comparable {}
 enum RequestStatus {}
 record UserSummary {}
-value class UserId {}
 ```
 
 Las variantes de enum también utilizarán `PascalCase`, por ejemplo `RequestStatus.Active`.
@@ -6746,7 +6745,7 @@ second.name = "Ana";
 first is second; // true
 ```
 
-Los tipos con semántica de valor —números, booleanos, chars, enums, records y value classes— se copiarán semánticamente al asignarse.
+Los tipos con semántica de valor —números, booleanos, chars, enums, records y tuplas— se copiarán semánticamente al asignarse.
 
 El compilador decidirá la representación física, pero no podrá cambiar estas reglas observables.
 
@@ -6806,7 +6805,7 @@ struct Point {
 Posible:
 
 ```text
-value class Point {
+record Point {
     inmut x: Float32;
     inmut y: Float32;
 }
@@ -6816,10 +6815,10 @@ value class Point {
 
 **Respuesta:**
 
-Sí. Existirán `value class` para crear tipos nominales ligeros con semántica de valor:
+Sí. Existirán `record` para crear tipos nominales ligeros con semántica de valor:
 
 ```text
-value class UserId {
+record UserId {
     inmut VALUE: UInt64;
 }
 ```
@@ -6833,7 +6832,7 @@ mut order_id: OrderId;
 user_id = order_id; // Error de compilación.
 ```
 
-Las value classes tendrán igualdad estructural, no tendrán identidad observable y podrán almacenarse inline. No heredarán de otras clases, pero podrán implementar traits e interfaces.
+Los records tendrán igualdad estructural, no tendrán identidad observable y podrán almacenarse inline. No heredarán de otras clases, pero podrán implementar traits e interfaces.
 
 ---
 
@@ -6951,7 +6950,7 @@ a == b; // true si su contenido es estructuralmente igual.
 a is b; // false porque son instancias diferentes.
 ```
 
-Números, booleanos, chars, enums, records y value classes no tendrán identidad observable. Aplicar `is` a esos tipos producirá un error de compilación; su representación física no formará parte de la semántica pública.
+Números, booleanos, chars, enums, records y tuplas no tendrán identidad observable. Aplicar `is` a esos tipos producirá un error de compilación; su representación física no formará parte de la semántica pública.
 
 ---
 
@@ -7767,7 +7766,7 @@ Cuando hayas rellenado el documento, revisar:
 11. ¿Async significa concurrencia, paralelismo o ninguna de las dos?
 12. ¿Todo es realmente una clase desde la semántica del lenguaje?
 13. ¿Los números generan objetos en heap o son clases optimizadas por valor?
-14. ¿Cuál es la diferencia entre clase, record y value class?
+14. ¿Cuál es la diferencia entre clase y record?
 15. ¿Cómo se compara igualdad?
 16. ¿Cómo se compara identidad?
 17. ¿Qué ocurre con overflow?

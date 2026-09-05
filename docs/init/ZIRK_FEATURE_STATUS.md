@@ -19,7 +19,7 @@ The evidence for each row is the archived OpenSpec change, the relevant
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last updated with `phase-4-closeout`, **2026-09-03**.
+Last updated with `array-list-tuple-duration-regex`, **2026-09-05**.
 
 ---
 
@@ -91,12 +91,16 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 | `implements` | yes | yes | yes | yes | yes | yes | — |
 | Generics with `from` constraints | yes | yes | yes | partial | partial | partial | User generic *class*/`enum` instantiation works for flat cases; generic contract/enum dispatch still pending. |
 | Records | yes | yes | yes | yes | yes | yes | — |
-| `value class` | yes | yes | partial | partial | partial | partial | Compact declaration has no `implements`/method-body syntax; value-type contract dispatch delivered for `record`. |
+| Tuples (literals, `.N` indexing, `match` destructuring) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`. |
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |
 | `as` casts | yes | yes | yes | yes | yes | yes | — |
 | `abstract class` dynamic dispatch | yes | yes | yes | yes | yes | yes | `fase-3-abstract-dispatch`. |
-| Structural equality on records/value classes | yes | yes | yes | yes | yes | yes | `fase-3-structural-equality`. |
+| Structural equality on records | yes | yes | yes | yes | yes | yes | `fase-3-structural-equality`. |
 | `record` contract dispatch | yes | yes | yes | yes | yes | yes | `fase-3-value-type-contract-dispatch`. |
+| `type` alias lowering | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; an alias resolves to its underlying type through the whole pipeline and is usable in executable programs. |
+| `value class` | n/a | n/a | n/a | n/a | n/a | n/a | **Removed** by `array-list-tuple-duration-regex`; migrate to `record` (or `class` when identity/mutability is wanted). |
+| Derived `Clone` for `record`/`enum` | n/a | n/a | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — every field must be `Clone`. |
+| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — native `Iterable<T>` satisfaction works, user-defined generic `implements` does not lower yet. |
 
 ## Phase 3b — Scalars and text
 
@@ -110,6 +114,8 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 | String interpolation | yes | yes | yes | yes | yes | yes | `to_string()` contract. |
 | `Float128` on Windows | yes | yes | yes | yes | partial | partial | Excluded from Windows corpus; crashes the MSVC linker due to soft-float lib calls. |
 | Contextual numeric literal typing / mixed-width arithmetic | yes | yes | yes | yes | yes | yes | Every width resolves; literals take the context type; binary operators promote to the smallest common numeric type. `Float128` `to_string()` prints by truncating to `Float64` (lossy for values not exactly representable in `f64`). |
+| `String` methods and mutation | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `s[i] = c` write with grapheme-cache invalidation, `[start:end:step]` slicing, `trim`, `search`, `contains`, `starts_with`, `ends_with`, `substring`. `split(separator): List<String>` lands with `List<T>`. |
+| `Char` classification and normalization | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `is_uppercase`, `is_lowercase`, `is_digit`, `is_whitespace`, `is_letter`, `is_alphanumeric`, `to_uppercase`, `to_lowercase`. |
 
 ## Phase 4a — Expected errors
 
@@ -164,8 +170,8 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 | `extern "C" fn` | yes | yes | yes | yes | yes | yes | `ADR-015`; `Keyword::Extern` in subset. |
 | `commit {}` | yes | yes | yes | yes | yes | yes | `Keyword::Commit` in subset. |
 | Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `phase-4e-pending-closeout` closed `return`/`break`/`continue` early-exit rollback. |
-| `Pointer.from` on `record` / `value class` fields | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
-| `String[index]` read-only grapheme access | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
+| `Pointer.from` on `record` fields | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
+| `String[index]` grapheme access | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout` delivered read access; `array-list-tuple-duration-regex` adds `s[i] = c` write. |
 | Dependent references | yes | yes | yes | yes | yes | yes | `Dependent<T>` lifetime and escape analysis rejects returns, field stores, captures, and non-dependent parameter passing; valid local use runs end-to-end. |
 | Automatic bounded native pinning | yes | yes | yes | yes | yes | yes | `Pin(c)` constructs a `Pin<T>`, automatic unpin provides field/method access, and reassignment of the pinned variable is rejected. |
 
@@ -189,9 +195,12 @@ Last updated with `phase-4-closeout`, **2026-09-03**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `List<T>`, `Map<K,V>`, `Set<T>`, `Array<T>` | yes | no | no | no | no | no | `pending_type` Phase 7; the `Iterable`/`Iterator` contracts are already registered, but concrete collection objects are not. |
-| Temporal family (`Date`, `Time`, `DateTime`, ...) | yes | no | no | no | no | no | `pending_type` Phase 7. |
-| `Regex` | yes | no | no | no | no | no | `pending_type` Phase 7. |
+| `Array<T>`, `List<T>` | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` + `native-type-member-surface`: `Array(e0, …)`/`List(e0, …)` literals, negative indexing, `Array` slicing (`[start:end:step]`), `clone()`, `to_string()`, and `List.remove(value)` added alongside `add`/`insert`/`remove(index)`. |
+| `Map<K,V>`, `Set<T>` | yes | no | no | no | no | no | `pending_type` Phase 7; concrete collection objects are not implemented. |
+| `Range<T>` | yes | no | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — `start`, `end`, `step`, `reverse()`, slicing, and `Iterable<T>` for numeric/`Duration` `T`. |
+| `Duration` (literals, arithmetic, printing) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; exact signed nanosecond duration with suffixes `ns`–`w`. |
+| Other temporal family (`Date`, `Time`, `DateTime`, ...) | yes | no | no | no | no | no | `pending_type` Phase 7; civil/zone types beyond `Duration` are not yet available. |
+| `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `re'...'` literal, `matches`, `find` (returns `Regex.Match?` with `group(n)`/`group(name)`/`start`/`end`/`text`), and `replace` delivered. `split` is pending `List<T>`; `matches(text): Iterable<Regex.Match>` iteration and `match`-expression pattern integration remain. |
 
 ## Phase 7b — Functional style
 

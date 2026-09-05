@@ -158,13 +158,13 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `List()` / `List(e0, e1, …)` | `List<T>` | Empty or pre-populated list | implemented — `List()` empty only; the `List(e0, …)` form is specified |
-| `l[i]` / `l[i] = v` | `T` / `Void` | Checked indexing | implemented — negative-from-end indices are specified; today they are bounds errors |
+| `List()` / `List(e0, e1, …)` | `List<T>` | Empty or pre-populated list | implemented |
+| `l[i]` / `l[i] = v` | `T` / `Void` | Checked indexing | implemented — negative-from-end indices resolve as `length + index` |
 | `l.add(value)` | `Void` | Amortized-constant append | implemented |
 | `l.insert(index, value)` | `Void` | Shifting insertion | implemented |
 | `l.remove(index)` | `T` | Removes and returns element at `index` | implemented |
 | `l.remove_at(index)` | `T` | Named form of index removal | specified |
-| `l.remove(value)` | `Boolean` | Removes first equal element | specified |
+| `l.remove(value)` | `Boolean` | Removes first equal element | implemented |
 | `l.splice(start, delete_count, replacement)` | `Void` | General splice | specified |
 | `l.clear()` | `Void` | Logical emptying; no capacity promise | specified |
 | `l.get(i)` / `l.get_or_null(i)` | `Result<T, BoundsError>` / `T?` | Explicit-absence access | specified |
@@ -180,8 +180,8 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 | `l.to_set()` | `Set<T>` | Materializes as a set (`T` must satisfy `Hash` + `Equal`) | specified |
 | `l.sort()` / `l.sort_by(fn)` / `l.sort_with(cmp)` / `l.sort_unstable()` | `Void` | Stable sort in place | specified |
 | `l.iterator()` | `Iterator<T>` | Lazy single-pass iterator; use `collect()`/`to_list()` to terminate | specified |
-| `l.clone()` | `List<T>` | Independent logical copy | specified |
-| `l.to_string()` | `String` | Rendering | specified |
+| `l.clone()` | `List<T>` | Independent logical copy | implemented |
+| `l.to_string()` | `String` | Rendering | implemented |
 
 Mutation through `inmut::strict` and mutation during iteration are controlled
 errors.
@@ -210,11 +210,13 @@ inmut eager_from_lazy: List<String> = users
 ## Implementation status
 
 > `List<T>` is delivered as a resizable native reference collection with
-indexed read/write, `add`, `insert`, `remove`, `length`, `is_empty`, and
->`for ... in`. Eager chainable `map`, `filter`, `flat_map`, `reduce`, `take`,
->`skip`, `reverse`, and family conversions (`to_array`, `to_set`) are specified
->but remain ahead of the current compiler. Use `iterator()` and `collect()` for
->the delivered lazy pipeline today.
+indexed read/write (including negative-from-end indices), `add`, `insert`,
+>`remove(index)`, `remove(value)`, `clone()`, `to_string()`, `length`, `is_empty`,
+>and `for ... in`. Pre-populated `List(e0, …)` literals are also implemented.
+>Eager chainable `map`, `filter`, `flat_map`, `reduce`, `take`, `skip`, `reverse`,
+>and family conversions (`to_array`, `to_set`) are specified but remain ahead of
+>the current compiler. Use `iterator()` and `collect()` for the delivered lazy
+>pipeline today.
 
 ---
 

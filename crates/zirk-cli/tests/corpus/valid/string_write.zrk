@@ -1,0 +1,15 @@
+// `s[i] = c` (roadmap Phase 7, "String write by index") — a `String`
+// variable's graphemes replaced in place.
+fn main(): Void {
+    mut s = "abc";
+    s[1] = 'X';
+    stdout.println(s);
+
+    // The replacement may be a different byte length than the grapheme it
+    // replaces: the write rebuilds the string.
+    mut t = "héllo";
+    t[1] = 'e';
+    stdout.println(t);
+    t[0] = 'H';
+    stdout.println(t);
+}

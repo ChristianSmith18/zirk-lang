@@ -1,0 +1,9 @@
+fn main(): Void {
+    mut (n, s) = (42, "hello");
+    stdout.println(n);
+    stdout.println(s);
+    n = 100;
+    s = "world";
+    stdout.println(n);
+    stdout.println(s);
+}

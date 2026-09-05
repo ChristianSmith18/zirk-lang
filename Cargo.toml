@@ -23,6 +23,8 @@ zirk-sema = { path = "crates/zirk-sema" }
 # 3b): decidir si un literal `'...'` contiene exactamente un grapheme es
 # semántica, no léxico (ver el comentario de `character()` en zirk-lexer).
 unicode-segmentation = "1"
+unicode-normalization = "0.1"
+regex = "1.13.1"
 
 # inkwell no se declara acá: su conjunto de features depende del target y se
 # define en crates/zirk-codegen-llvm/Cargo.toml. Ver el issue #2.

@@ -60,36 +60,40 @@ impl ZirkString {
 }
 
 #[inline]
-unsafe fn payload_ptr(handle: *mut c_void) -> *mut ZirkString { unsafe {
-    (handle as *mut u8).add(HEADER_BYTES) as *mut ZirkString
-}}
+pub(crate) unsafe fn payload_ptr(handle: *mut c_void) -> *mut ZirkString {
+    unsafe { (handle as *mut u8).add(HEADER_BYTES) as *mut ZirkString }
+}
 
 #[inline]
-unsafe fn data_ptr(handle: *mut c_void) -> *mut u8 { unsafe {
-    (handle as *mut u8)
-        .add(HEADER_BYTES)
-        .add(std::mem::size_of::<ZirkString>())
-}}
+unsafe fn data_ptr(handle: *mut c_void) -> *mut u8 {
+    unsafe {
+        (handle as *mut u8)
+            .add(HEADER_BYTES)
+            .add(std::mem::size_of::<ZirkString>())
+    }
+}
 
 /// Allocates an owned string object with room for `len` inline bytes.
 ///
 /// The returned object has the GC descriptor set and `bytes`/`len` initialized.
 /// The caller must copy the UTF-8 contents into `data_ptr(handle)` and set
 /// `is_ascii` before returning it to generated code.
-unsafe fn alloc_string(len: usize) -> *mut c_void { unsafe {
-    let size = HEADER_BYTES + std::mem::size_of::<ZirkString>() + len;
-    let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
-    let payload = payload_ptr(object);
-    *(object as *mut *mut c_void) = string_descriptor();
-    (*payload).len = len;
-    (*payload).bytes = if len == 0 {
-        std::ptr::null()
-    } else {
-        data_ptr(object) as *const u8
-    };
-    // `is_ascii` is left for the caller to set after writing the bytes.
-    object
-}}
+unsafe fn alloc_string(len: usize) -> *mut c_void {
+    unsafe {
+        let size = HEADER_BYTES + std::mem::size_of::<ZirkString>() + len;
+        let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
+        let payload = payload_ptr(object);
+        *(object as *mut *mut c_void) = string_descriptor();
+        (*payload).len = len;
+        (*payload).bytes = if len == 0 {
+            std::ptr::null()
+        } else {
+            data_ptr(object) as *const u8
+        };
+        // `is_ascii` is left for the caller to set after writing the bytes.
+        object
+    }
+}
 
 /// Builds an owned string from `text`.
 pub(crate) fn alloc_owned(text: &str) -> *mut c_void {
@@ -110,21 +114,23 @@ pub(crate) fn alloc_owned(text: &str) -> *mut c_void {
 /// # Safety
 ///
 /// `bytes` must point at `len` readable bytes that outlive the returned handle.
-unsafe fn alloc_literal(bytes: *const u8, len: usize) -> *mut c_void { unsafe {
-    let size = HEADER_BYTES + std::mem::size_of::<ZirkString>();
-    let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
-    let payload = payload_ptr(object);
-    let is_ascii = if bytes.is_null() || len == 0 {
-        true
-    } else {
-        std::slice::from_raw_parts(bytes, len).is_ascii()
-    };
-    *(object as *mut *mut c_void) = string_descriptor();
-    (*payload).len = len;
-    (*payload).bytes = if len == 0 { std::ptr::null() } else { bytes };
-    (*payload).is_ascii = is_ascii;
-    object
-}}
+unsafe fn alloc_literal(bytes: *const u8, len: usize) -> *mut c_void {
+    unsafe {
+        let size = HEADER_BYTES + std::mem::size_of::<ZirkString>();
+        let object = crate::zirk_rt_alloc(size, std::mem::align_of::<ZirkString>());
+        let payload = payload_ptr(object);
+        let is_ascii = if bytes.is_null() || len == 0 {
+            true
+        } else {
+            std::slice::from_raw_parts(bytes, len).is_ascii()
+        };
+        *(object as *mut *mut c_void) = string_descriptor();
+        (*payload).len = len;
+        (*payload).bytes = if len == 0 { std::ptr::null() } else { bytes };
+        (*payload).is_ascii = is_ascii;
+        object
+    }
+}
 
 /// Builds a `String` from UTF-8 bytes and a length.
 ///
@@ -338,11 +344,7 @@ pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *
     unsafe {
         let data = data_ptr(object);
         for i in 0..(count as usize) {
-            std::ptr::copy_nonoverlapping(
-                text.as_ptr(),
-                data.add(i * text.len()),
-                text.len(),
-            );
+            std::ptr::copy_nonoverlapping(text.as_ptr(), data.add(i * text.len()), text.len());
         }
         (*payload).is_ascii = string.is_ascii;
     }
@@ -423,7 +425,9 @@ pub unsafe extern "C" fn zirk_str_grapheme_offset(handle: *const c_void, index: 
         return -1;
     };
     let text = unsafe { string.as_str() };
-    if index < 0 {
+    let count = text.graphemes(true).count() as i64;
+    let index = if index < 0 { count + index } else { index };
+    if index < 0 || index >= count {
         return -1;
     }
     let mut byte_offset: i64 = 0;
@@ -514,18 +518,606 @@ pub unsafe extern "C" fn zirk_str_hash(handle: *const c_void) -> u64 {
     hasher.finish()
 }
 
+/// Removes leading and trailing whitespace.
+///
+/// # Safety
+///
+/// The handle must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_trim(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(text.trim())
+}
+
+/// Whether `handle` contains `pat` anywhere in its contents.
+///
+/// # Safety
+///
+/// Both handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_contains(handle: *const c_void, pat: *const c_void) -> bool {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let pattern = unsafe { borrow(pat) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.contains(pattern)
+}
+
+/// Whether `handle` starts with `pat`.
+///
+/// # Safety
+///
+/// Both handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_starts_with(handle: *const c_void, pat: *const c_void) -> bool {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let pattern = unsafe { borrow(pat) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.starts_with(pattern)
+}
+
+/// Whether `handle` ends with `pat`.
+///
+/// # Safety
+///
+/// Both handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_ends_with(handle: *const c_void, pat: *const c_void) -> bool {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let pattern = unsafe { borrow(pat) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.ends_with(pattern)
+}
+
+/// The slice of `handle` between byte offsets `start` and `end`.
+///
+/// The offsets are clamped to the string's length; a range that is inverted
+/// or does not fall on UTF-8 code point boundaries produces the empty string
+/// rather than a panic.
+///
+/// # Safety
+///
+/// The handle must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_substring(
+    handle: *const c_void,
+    start: i64,
+    end: i64,
+) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let len = text.len() as i64;
+    let start = start.clamp(0, len) as usize;
+    let end = end.clamp(0, len) as usize;
+    if start > end {
+        return alloc_owned("");
+    }
+    match text.get(start..end) {
+        Some(slice) => alloc_owned(slice),
+        None => alloc_owned(""),
+    }
+}
+
+/// Builds the `String` that results from replacing the grapheme at byte
+/// range `[offset, offset + len)` of `handle` with `ch` (roadmap Phase 7,
+/// `s[i] = c` — "String write by index").
+///
+/// `String` is not mutated in place: its bytes are stored inline in the
+/// object and a replacement grapheme may be a different length, so a fresh
+/// handle is produced and generated code stores it back into the variable
+/// slot. There is no grapheme cache to invalidate yet — `ZirkString` carries
+/// only `bytes`/`len`/`is_ascii`, and the `is_ascii` flag is recomputed on
+/// the replacement — so recomputing here *is* the invalidation the spec
+/// requires.
+///
+/// A `ch` that is more than one grapheme replaces the single grapheme at
+/// the range with the whole text; the result is still a valid `String`.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime; `offset`/`len` must be a byte range
+/// `zirk_str_grapheme_offset`/`zirk_str_grapheme_len_at` produced for this
+/// same string. `ch` is a `Char`/`String` handle (they share representation,
+/// ADR-014).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_set(
+    handle: *const c_void,
+    offset: i64,
+    len: i64,
+    ch: *const c_void,
+) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let replacement = unsafe { borrow(ch) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+
+    let start = offset.max(0) as usize;
+    let end = start.saturating_add(len.max(0) as usize);
+    if start > text.len()
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return alloc_owned(text);
+    }
+
+    let mut out = String::with_capacity(text.len() - (end - start) + replacement.len());
+    out.push_str(&text[..start]);
+    out.push_str(replacement);
+    out.push_str(&text[end..]);
+    alloc_owned(&out)
+}
+
+/// `s[start:end:step]` over graphemes (roadmap Phase 7, `String` slicing).
+///
+/// `start`, `end` and `step` are grapheme indices; `i64::MIN` marks a part
+/// the source left out. Bounds follow the Python convention: negative
+/// indices count from the end, out-of-range values clamp, a positive `step`
+/// walks `[start, end)` forward and a negative one walks `(end, start]`
+/// backward (defaulting to the whole string reversed). A `step` of `0`
+/// produces the empty string rather than a fault — the slice of a stride
+/// that never advances is not an indexing error, it is nothing.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_slice(
+    handle: *const c_void,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> *mut c_void {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const MISSING: i64 = i64::MIN;
+
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+
+    let graphemes: Vec<&str> = text.graphemes(true).collect();
+    let n = graphemes.len() as i64;
+
+    let step = if step == MISSING { 1 } else { step };
+    if step == 0 || n == 0 {
+        return alloc_owned("");
+    }
+
+    // Resolves a bound that counts from the end when negative, clamped
+    // into `0..=n` for a forward slice.
+    let forward = |bound: i64| -> i64 {
+        if bound < 0 {
+            (n + bound).max(0)
+        } else {
+            bound.min(n)
+        }
+    };
+
+    let mut out = String::with_capacity(text.len());
+    if step > 0 {
+        let lo = if start == MISSING { 0 } else { forward(start) };
+        let hi = if end == MISSING { n } else { forward(end) };
+        if lo >= hi {
+            return alloc_owned("");
+        }
+        let mut i = lo;
+        while i < hi {
+            out.push_str(graphemes[i as usize]);
+            i += step;
+        }
+    } else {
+        // A backward slice's `end` is exclusive and may be `-1` ("to the
+        // beginning"), which is exactly what an omitted end means.
+        let lo = if start == MISSING {
+            n - 1
+        } else {
+            (if start < 0 { n + start } else { start }).clamp(-1, n - 1)
+        };
+        let hi = if end == MISSING {
+            -1
+        } else {
+            (if end < 0 { n + end } else { end }).clamp(-1, n - 1)
+        };
+        let mut i = lo;
+        while i > hi {
+            out.push_str(graphemes[i as usize]);
+            i += step;
+        }
+    }
+    alloc_owned(&out)
+}
+
+/// The byte index of the first occurrence of `pat` in `handle`, or `-1`.
+///
+/// # Safety
+///
+/// Both handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_search(handle: *const c_void, pat: *const c_void) -> i64 {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let pattern = unsafe { borrow(pat) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.find(pattern).map(|index| index as i64).unwrap_or(-1)
+}
+
+/// `text.split(separator)` — a `List<String>` of parts.
+///
+/// An empty separator splits into grapheme clusters.
+///
+/// # Safety
+///
+/// `handle` and `sep` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_split(
+    handle: *const c_void,
+    sep: *const c_void,
+) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let sep_str = unsafe { borrow(sep) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+
+    let elem_size = std::mem::size_of::<*mut c_void>();
+    let elem_align = std::mem::align_of::<*mut c_void>();
+    let list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, true) };
+
+    let push = |part: &str| {
+        let part_handle = alloc_owned(part);
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                &part_handle as *const *mut c_void as *const c_void,
+                elem_size,
+                elem_align,
+                true,
+            )
+        };
+    };
+
+    if sep_str.is_empty() {
+        use unicode_segmentation::UnicodeSegmentation;
+        for part in text.graphemes(true) {
+            push(part);
+        }
+    } else {
+        for part in text.split(sep_str) {
+            push(part);
+        }
+    }
+    list
+}
+
+/// `s.length` — the grapheme count (`native-type-member-surface`).
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_length(handle: *const c_void) -> i32 {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.graphemes(true).count() as i32
+}
+
+/// `s.byte_length` — the UTF-8 byte count.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_byte_length(handle: *const c_void) -> i32 {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.len() as i32
+}
+
+/// `s.is_empty()` — whether the string has no characters.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_is_empty(handle: *const c_void) -> bool {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    text.is_empty()
+}
+
+/// `s.find(needle)` — the first grapheme index of `needle`, or `-1`.
+///
+/// # Safety
+///
+/// `handle` and `needle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_find(handle: *const c_void, needle: *const c_void) -> i64 {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let needle_str = unsafe { borrow(needle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let Some(byte_index) = text.find(needle_str) else {
+        return -1;
+    };
+    text[..byte_index].graphemes(true).count() as i64
+}
+
+/// `s.replace(needle, replacement)` — a new string with every occurrence
+/// of `needle` replaced.
+///
+/// # Safety
+///
+/// All handles must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_replace(
+    handle: *const c_void,
+    needle: *const c_void,
+    replacement: *const c_void,
+) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let needle_str = unsafe { borrow(needle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let repl = unsafe { borrow(replacement) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&text.replace(needle_str, repl))
+}
+
+/// `s.trim_start()` — leading whitespace removed.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_trim_start(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(text.trim_start())
+}
+
+/// `s.trim_end()` — trailing whitespace removed.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_trim_end(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(text.trim_end())
+}
+
+/// `s.to_lowercase()` — Unicode-aware lowercase.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_to_lowercase(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&text.to_lowercase())
+}
+
+/// `s.to_uppercase()` — Unicode-aware uppercase.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_to_uppercase(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&text.to_uppercase())
+}
+
+/// Applies the named normalization form, `NFC`/`NFD`/`NFKC`/`NFKD`; an
+/// unknown form returns the text unchanged.
+fn normalize_text(text: &str, form: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    match form {
+        "NFC" => text.nfc().collect(),
+        "NFD" => text.nfd().collect(),
+        "NFKC" => text.nfkc().collect(),
+        "NFKD" => text.nfkd().collect(),
+        _ => text.to_string(),
+    }
+}
+
+/// `s.normalize(form)` — `form` spelled as text (`"NFC"`, `"NFD"`,
+/// `"NFKC"`, `"NFKD"`); an unknown form returns the string unchanged.
+///
+/// # Safety
+///
+/// `handle` and `form` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_normalize(
+    handle: *const c_void,
+    form: *const c_void,
+) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let form_str = unsafe { borrow(form) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&normalize_text(text, form_str))
+}
+
+/// `s.clone()` — a new string with the same contents.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_clone(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(text)
+}
+
+/// Builds a `List` of opaque handles (`String`, `Char` — same
+/// representation) from the given parts.
+unsafe fn handle_list<'a>(parts: impl Iterator<Item = &'a str>) -> *mut c_void {
+    let elem_size = std::mem::size_of::<*mut c_void>();
+    let elem_align = std::mem::align_of::<*mut c_void>();
+    let list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, true) };
+    for part in parts {
+        let part_handle = alloc_owned(part);
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                &part_handle as *const *mut c_void as *const c_void,
+                elem_size,
+                elem_align,
+                true,
+            )
+        };
+    }
+    list
+}
+
+/// `s.split_whitespace()` — a `List<String>` of whitespace-separated parts.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_split_whitespace(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    unsafe { handle_list(text.split_whitespace()) }
+}
+
+/// `s.lines()` — a `List<String>` split on line terminators.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_lines(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    unsafe { handle_list(text.lines()) }
+}
+
+/// `s.chars()` — a `List<Char>` of the string's graphemes.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_chars(handle: *const c_void) -> *mut c_void {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    unsafe { handle_list(text.graphemes(true)) }
+}
+
+/// `s.bytes()` — a `List<UInt8>` of the string's UTF-8 bytes.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_bytes(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let elem_size = std::mem::size_of::<u8>();
+    let elem_align = std::mem::align_of::<u8>();
+    let list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, false) };
+    for byte in text.bytes() {
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                &byte as *const u8 as *const c_void,
+                elem_size,
+                elem_align,
+                false,
+            )
+        };
+    }
+    list
+}
+
+/// `s.codepoints()` — a `List<UInt32>` of the string's code points.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_str_codepoints(handle: *const c_void) -> *mut c_void {
+    let text = unsafe { borrow(handle) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    let elem_size = std::mem::size_of::<u32>();
+    let elem_align = std::mem::align_of::<u32>();
+    let list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, false) };
+    for point in text.chars() {
+        let value = point as u32;
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                &value as *const u32 as *const c_void,
+                elem_size,
+                elem_align,
+                false,
+            )
+        };
+    }
+    list
+}
+
 /// Reads a handle produced by this runtime.
 ///
 /// # Safety
 ///
 /// `handle` must come from this runtime and must not have been released.
-pub(crate) unsafe fn borrow<'a>(handle: *const c_void) -> Option<&'a ZirkString> { unsafe {
-    if handle.is_null() {
-        return None;
+pub(crate) unsafe fn borrow<'a>(handle: *const c_void) -> Option<&'a ZirkString> {
+    unsafe {
+        if handle.is_null() {
+            return None;
+        }
+        let payload = (handle as *const u8).add(HEADER_BYTES) as *const ZirkString;
+        Some(&*payload)
     }
-    let payload = (handle as *const u8).add(HEADER_BYTES) as *const ZirkString;
-    Some(&*payload)
-}}
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,23 @@
+// `Regex.find_all` returns a `List<Regex.Match>` usable in `for ... in`.
+fn main(): Void {
+    inmut r = re'\\d+';
+    for m in r.find_all("1 22 333") {
+        stdout.println(m.text);
+        stdout.println(m.start);
+        stdout.println(m.end);
+    }
+
+    inmut g = re'(\\w+)@(\\w+)';
+    for m in g.find_all("a@b c@d") {
+        stdout.println(m.group(1));
+        stdout.println(m.group(2));
+    }
+
+    inmut empty = re'\\d+';
+    mut count = 0;
+    for m in empty.find_all("abc") {
+        stdout.println(m.text);
+        count++;
+    }
+    stdout.println(count);
+}

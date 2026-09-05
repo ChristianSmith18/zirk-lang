@@ -181,9 +181,10 @@ Two more, which produce no diagnostic because they are not user-visible:
 **Zirk is object-oriented.** `class`, `construct`, visibility
 (`public`/`private`/`protected`), single inheritance with `super`/`override`,
 interfaces and traits (with reusable default bodies), generics with `from`
-constraints (specialized per instantiation, not erased), records and value
-classes (inline, no allocation), algebraic enums with associated data, and
-checked casts (`as`) all compile to a native binary and run.
+constraints (specialized per instantiation, not erased), records (inline, no
+allocation), algebraic enums with associated data, and checked casts (`as`)
+all compile to a native binary and run. (`value class` was later removed by
+`array-list-tuple-duration-regex` as redundant with `record`.)
 
 The three debts Phase 2 deferred to this phase are retired: `?.` (both a field
 and a method through it), `+` on `String`, and `for ... in` over a type's own
@@ -213,13 +214,13 @@ reaches a backend that cannot compile it:
   verified — but a value typed *through* the abstract class would need
   dynamic dispatch through whichever concrete class adopted it, and that path
   does not exist yet.
-- **A record or value class implementing a contract** is checked for real
-  conformance, and its own methods dispatch statically when called directly on
-  the concrete type — but it has no descriptor to carry the contract's own
-  table, so reaching one through the contract type is not compilable yet.
-- **Structural equality on a record or value class** (`==`/`!=`) type-checks
-  without a reserved method — the language derives it from every field — but
-  lowering the comparison itself does not exist yet.
+- **A record implementing a contract** is checked for real conformance, and
+  its own methods dispatch statically when called directly on the concrete type
+  — but it has no descriptor to carry the contract's own table, so reaching one
+  through the contract type is not compilable yet.
+- **Structural equality on a record** (`==`/`!=`) type-checks without a
+  reserved method — the language derives it from every field — but lowering the
+  comparison itself does not exist yet.
 - **`unsafe {}` and reinterpreting casts** stay out of scope, same as
   Phase 2's `?.`: they need machinery later phases own.
 
@@ -319,8 +320,17 @@ stack traces.
 
 Phase 4d — callable and binding completion — is **complete for its scoped
 delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` are
-archived and verified). The active implementation phase is now **4e — managed
-memory and unsafe boundaries**.
+archived and verified). Phase 4e — managed memory and unsafe boundaries —
+delivered the non-moving mark-sweep collector, `Weak<T>`, deep `clone()`,
+`Pointer<T>`/`extern "C"`, transactional `unsafe {}`/`commit {}`, and
+`NativeSlice<T>`/`NativeSliceMut<T>`. The active change is
+**`array-list-tuple-duration-regex`**: `Tuple`, `Duration`, `Regex`
+(`re'...'` with `matches`/`find`/`replace`), the `String` mutation and
+search surface, `Char` classification/normalization, and `type` alias
+lowering are delivered; `Array<T>`/`List<T>` are being delivered in the same
+change; `Range<T>`, derived `Clone` for `record`/`enum`, user-defined generic
+contract lowering, and `Regex.split`/`String.split` (pending `List<T>`)
+remain. It also removes `value class` — use `record`.
 
 The per-feature, per-pipeline-stage source of truth is
 `docs/init/ZIRK_FEATURE_STATUS.md`. Use it instead of this prompt's high-level

@@ -1,0 +1,34 @@
+fn main(): Void {
+    for i in 0..5 {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    for i in 0..10..2 {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    for i in 0..=4 {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    for i in 5..0..-1 {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    mut r: Range<Int32> = 2..9;
+    stdout.println(r.start);
+    stdout.println(r.end);
+    stdout.println(r.step);
+    mut rr: Range<Int32> = r.reverse();
+    for i in rr {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    for i in r[2:5] {
+        stdout.println(i);
+    }
+    stdout.println("done");
+    for i in r[::2] {
+        stdout.println(i);
+    }
+}

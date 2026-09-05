@@ -36,6 +36,8 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         native_slice_mut_types: Vec::new(),
         dependent_types: Vec::new(),
         pin_types: Vec::new(),
+        array_types: Vec::new(),
+        list_types: Vec::new(),
         externs: Vec::new(),
     }
 }
@@ -299,6 +301,8 @@ fn a_binary_operation_between_different_types_is_rejected() {
         native_slice_mut_types: Vec::new(),
         dependent_types: Vec::new(),
         pin_types: Vec::new(),
+        array_types: Vec::new(),
+        list_types: Vec::new(),
         externs: Vec::new(),
     };
 

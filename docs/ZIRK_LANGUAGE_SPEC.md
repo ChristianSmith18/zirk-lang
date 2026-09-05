@@ -374,8 +374,7 @@ Additional data types:
 - immutable nominal records with named construction, type defaults, methods
   without mutation and structural field equality;
 - immutable heterogeneous tuples typed `Tuple(A, B)`, constructed `(a, b)` and
-  indexed only by compile-time constant `tuple[n]` (including negative indexes);
-- value classes without observable identity, storable inline;
+  indexed only by compile-time integer literal `tuple.n`;
 - fixed-length arrays written as `T[]`, canonically sized as `T[n]`, or
   constructed as `Array<T>(n)`; resizable `List<T>`; `Map<K,V>` and `Set<T>`.
 
@@ -385,9 +384,9 @@ capabilities. A traditional enum exposes native `.name` and `.value`, plus
 explicit name/value lookup, without implicit mapping conversion or declaration
 order. Domain behavior for any enum is an external function using `match`.
 
-A normal class has identity and state; a record represents data; a value class
-represents a compact value. `clone()` exists only through an explicit trait and
-may be derived when every field is cloneable.
+A normal class has identity and state; a record represents data. `clone()`
+exists only through an explicit trait and may be derived when every field is
+cloneable.
 
 ## 8. Iteration and functional style
 

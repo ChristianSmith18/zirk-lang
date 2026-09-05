@@ -690,12 +690,22 @@ impl<'a> Lexer<'a> {
                     );
                     return None;
                 }
-                // An escaped quote belongs to the pattern, backslash included.
+                // A doubled backslash collapses to one, so the pattern can
+                // itself use regex escapes like `\d`.  Any other character
+                // after a backslash is preserved literally.
                 Some('\\') => {
-                    pattern.push('\\');
                     self.pos += 1;
-                    if let Some(c) = self.advance() {
-                        pattern.push(c);
+                    match self.peek() {
+                        Some('\\') => {
+                            pattern.push('\\');
+                            self.pos += 1;
+                        }
+                        Some(c) => {
+                            pattern.push('\\');
+                            pattern.push(c);
+                            self.pos += 1;
+                        }
+                        None => {}
                     }
                 }
                 Some('\'') => {

@@ -1,0 +1,5 @@
+// A `Range<T>`'s element is numeric or `Duration` — `Range<String>` names
+// no arithmetic sequence.
+fn main(): Void {
+    mut r: Range<String> = 0..3;
+}

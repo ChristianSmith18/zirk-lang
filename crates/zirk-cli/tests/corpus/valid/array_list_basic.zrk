@@ -1,0 +1,24 @@
+fn main(): Void {
+    mut arr: Array<Int32> = Array(3);
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    stdout.println(arr.length.to_string());
+    stdout.println(arr[0].to_string());
+
+    mut l: List<Int32> = List();
+    l.add(1);
+    l.add(2);
+    l.add(3);
+    stdout.println(l.length.to_string());
+    l.insert(1, 99);
+    stdout.println(l[1].to_string());
+    l.remove(2);
+    stdout.println(l.length.to_string());
+
+    mut sum = 0;
+    for x in l {
+        sum = sum + x;
+    }
+    stdout.println(sum.to_string());
+}

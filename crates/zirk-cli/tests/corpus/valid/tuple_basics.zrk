@@ -1,0 +1,11 @@
+fn main(): Void {
+    mut t = (1, "hello");
+    stdout.println(t[0]);
+    stdout.println(t[1]);
+    match t {
+        (a, b) => {
+            stdout.println(a);
+            stdout.println(b);
+        }
+    }
+}

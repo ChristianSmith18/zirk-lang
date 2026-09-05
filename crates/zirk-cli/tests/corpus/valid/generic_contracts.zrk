@@ -1,0 +1,46 @@
+interface Named<T> {
+    fn name(): String;
+}
+
+record Tag implements Named<Int32> {
+    fn name(): String { return "tag"; }
+}
+
+class Box2 implements Named<Int32> {
+    construct() {}
+    fn name(): String { return "box"; }
+}
+
+fn show(n: Named<Int32>): String { return n.name(); }
+
+class Counter implements Iterable<Int32> {
+    construct() {}
+    fn iterator(): Iterator<Int32> { return CounterIt(); }
+}
+class CounterIt implements Iterator<Int32> {
+    current: Int32;
+    construct() { this.current = 0; }
+    fn next(): Iteration<Int32> {
+        if (this.current >= 3) { return Iteration.Done; }
+        mut v = this.current;
+        this.current = this.current + 1;
+        return Iteration.Item(value: v);
+    }
+}
+
+fn main(): Void {
+    mut t = Tag();
+    mut b = Box2();
+    stdout.println(t.name());
+    stdout.println(show(b));
+    for i in Counter() {
+        stdout.println(i);
+    }
+    // `next()` through an `Iterator<Int32>`-typed binding: generic contract
+    // dispatch (roadmap Phase 7, task 12.3).
+    mut it: Iterator<Int32> = Counter().iterator();
+    match it.next() {
+        Iteration.Item(value) => stdout.println(value);
+        Iteration.Done => stdout.println("done");
+    }
+}

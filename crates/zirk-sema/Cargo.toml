@@ -9,6 +9,7 @@ license.workspace = true
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
 unicode-segmentation.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 zirk-lexer.workspace = true

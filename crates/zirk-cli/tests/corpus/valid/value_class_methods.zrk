@@ -2,9 +2,7 @@
 // virtual methods, confirmed at closeout: no descriptor exists to carry a
 // table, so nothing here is ever virtual) — a real, preexisting gap found
 // while closing the phase: no corpus program had ever called a method
-// directly on a record or value class, and doing so crashed. (A `value
-// class`'s own compact grammar has no body, so it cannot declare a method
-// at all — a record is the shape that can.)
+// directly on a record, and doing so crashed.
 record Point {
     x: Int32;
     y: Int32;

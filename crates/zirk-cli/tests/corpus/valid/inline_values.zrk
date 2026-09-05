@@ -1,5 +1,5 @@
-// Records and value classes lower inline, with no allocation and no
-// indirection (roadmap task 11.5, ADR-003): construction, field access,
+// Records lower inline, with no allocation and no indirection
+// (roadmap task 11.5, ADR-003): construction, field access,
 // passing to and returning from a function, nesting one inside another,
 // and living behind a nullable all work the same as any other value.
 record Point {
@@ -12,7 +12,7 @@ record Line {
     end: Point;
 }
 
-value class Money(amount: Int32, currency: String);
+record Money { amount: Int32; currency: String; }
 
 record Config {
     name: String;

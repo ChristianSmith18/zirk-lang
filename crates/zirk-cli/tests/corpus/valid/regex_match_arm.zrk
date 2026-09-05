@@ -1,0 +1,21 @@
+fn main(): Void {
+    inmut s = "devin";
+    match s {
+        re'(?<name>\\w+)' m => {
+            stdout.println(m.text);
+            stdout.println(m.group("name"));
+            stdout.println(m.start);
+            stdout.println(m.end);
+        },
+        _ => stdout.println("no match"),
+    }
+    match "123" {
+        re'[a-z]+' => stdout.println("letters"),
+        re'\\d+' d => stdout.println(d.text),
+        _ => stdout.println("none"),
+    }
+    match "zzz" {
+        re'\\d+' => stdout.println("digits"),
+        _ => stdout.println("no digits"),
+    }
+}

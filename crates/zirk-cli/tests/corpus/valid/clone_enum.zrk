@@ -1,0 +1,20 @@
+enum Shape {
+    Circle(radius: Int32),
+    Point,
+    Rect(w: Int32, h: Int32),
+}
+
+fn area(s: Shape): Int32 {
+    return match s {
+        Shape.Circle(radius) => radius * radius;
+        Shape.Point => 0;
+        Shape.Rect(w, h) => w * h;
+    };
+}
+
+fn main(): Void {
+    mut s: Shape = Shape.Rect(w: 3, h: 4);
+    mut c = s.clone();
+    stdout.println(area(c));
+    stdout.println(area(s));
+}

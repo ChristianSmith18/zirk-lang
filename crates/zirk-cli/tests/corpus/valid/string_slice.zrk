@@ -1,0 +1,13 @@
+// `s[start:end:step]` (roadmap Phase 7) — grapheme slicing with
+// Python-style bounds: defaults, negatives and a backward step.
+fn main(): Void {
+    stdout.println("hello"[1:4]);
+    stdout.println("abcdef"[::2]);
+    stdout.println("hello"[2:]);
+    stdout.println("hello"[:2]);
+    stdout.println("hello"[-3:]);
+    stdout.println("hello"[:-2]);
+    stdout.println("hello"[::-1]);
+    stdout.println("hello"[4:1:-1]);
+    stdout.println("héllo wörld"[0:11]);
+}

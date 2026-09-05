@@ -32,33 +32,52 @@
 //! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
 //! and Phase 5 (concurrency) hook without refactoring codegen.
 
+mod array;
+mod char;
 mod clone;
 mod collector;
+mod duration;
 mod exceptions;
 mod failure;
 mod io;
 mod journal;
+mod list;
 mod memory;
 mod native_slice;
+mod range;
+mod regex;
 mod resource;
+mod scalar;
 mod string;
 
+pub use char::*;
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
+pub use array::*;
+pub use list::*;
 pub use failure::{
-    zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error, zirk_rt_overflow,
+    zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
+    zirk_rt_index_out_of_bounds, zirk_rt_overflow,
 };
 pub use io::zirk_io_println;
 pub use journal::{
     zirk_rt_journal_begin, zirk_rt_journal_commit, zirk_rt_journal_record, zirk_rt_journal_rollback,
 };
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
+pub use range::{
+    zirk_range_end, zirk_range_inclusive, zirk_range_new, zirk_range_reverse,
+    zirk_range_slice, zirk_range_start, zirk_range_step,
+};
+pub use regex::{
+    zirk_regex_find, zirk_regex_find_all, zirk_regex_from_pattern, zirk_regex_is_match, zirk_regex_match_group_name,
+    zirk_regex_match_group_pos, zirk_regex_replace, zirk_regex_split, zirk_regex_to_string,
+};
 pub use resource::{zirk_rt_is_cancelled, zirk_rt_resource_close_group, zirk_rt_resource_transfer};
 pub use string::{
     zirk_str_concat, zirk_str_eq, zirk_str_from_bool, zirk_str_from_f32, zirk_str_from_f64,
     zirk_str_from_i8, zirk_str_from_i16, zirk_str_from_i32, zirk_str_from_i64, zirk_str_from_i128,
     zirk_str_from_u8, zirk_str_from_u16, zirk_str_from_u32, zirk_str_from_u64, zirk_str_from_u128,
     zirk_str_from_utf8, zirk_str_grapheme_len_at, zirk_str_grapheme_slice, zirk_str_hash,
-    zirk_str_is_ascii, zirk_str_repeat,
+    zirk_str_is_ascii, zirk_str_repeat, zirk_str_set, zirk_str_slice,
 };
 
 /// Initializes the runtime before running `main`.

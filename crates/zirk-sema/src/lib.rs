@@ -26,7 +26,7 @@ pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, PendingType, Type, TypeParamInfo, is_ffi_safe, pending_type,
+    IntWidth, MethodInfo, PendingType, TupleType, Type, TypeParamInfo, is_ffi_safe, pending_type,
 };
 
 /// Diagnostic codes of the checker.

@@ -54,12 +54,12 @@ Zirk 1.x has exactly five decorator targets:
 | Target | Applies to | Important boundary |
 | --- | --- | --- |
 | `class` | Concrete and abstract class declarations | Module, controller, service, component, and entity remain framework roles expressed by class decorators. |
-| `attribute` | Stored attributes, including record and value-class storage | Zirk has no property/accessor target; controlled access uses ordinary `get_` and `set_` methods. |
+| `attribute` | Stored attributes, including record storage | Zirk has no property/accessor target; controlled access uses ordinary `get_` and `set_` methods. |
 | `function` | Free functions | May inspect, augment compatible API, or wrap execution. |
 | `method` | Concrete methods and bodyless abstract/interface/trait signatures | A bodyless signature can be inspected but not wrapped. |
 | `parameter` | Function, method, lambda, and initialization parameters | This expresses initialization injection and parameter binding. |
 
-There are no `module`, `abstract_class`, `interface`, `trait`, `record`, `value_class`, `enum`, `enum_case`, `property`, `accessor`, or `construct` targets. Meaningful member behavior uses the five targets. Class decorators may generate typed factories.
+There are no `module`, `abstract_class`, `interface`, `trait`, `record`, `enum`, `enum_case`, `property`, `accessor`, or `construct` targets. Meaningful member behavior uses the five targets. Class decorators may generate typed factories.
 
 ## 4. Expansion phases
 

@@ -1,0 +1,13 @@
+fn main(): Void {
+    mut a: Char = 'a';
+    mut d: Char = '5';
+    mut s: Char = ' ';
+    stdout.println(a.is_uppercase());
+    stdout.println(a.is_lowercase());
+    stdout.println(a.is_letter());
+    stdout.println(a.is_digit());
+    stdout.println(d.is_digit());
+    stdout.println(s.is_whitespace());
+    stdout.println(a.to_uppercase());
+    stdout.println('Z'.to_lowercase());
+}
