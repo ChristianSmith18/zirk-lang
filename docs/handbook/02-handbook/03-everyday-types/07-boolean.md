@@ -35,6 +35,29 @@ condition. There is no implicit conversion from `0`, `1`, `"true"`, or an
 empty/non-empty value. The intentionally small API contains `to_string()`,
 `type`, equality and formatting inherited through common contracts.
 
+## API
+
+### Properties
+
+`Boolean` exposes no public properties beyond the universal `type`.
+
+### Methods
+
+| Signature | Returns | Description | Status |
+| --- | --- | --- | --- |
+| `value.to_string()` | `String` | `"true"` or `"false"` | implemented |
+
+`Boolean` supports `!`, `==`/`!=`, and short-circuit `&&`/`||`. It has no
+arithmetic, ordering, or conversion from numbers or text.
+
+### Examples
+
+```zirk
+inmut ready: Boolean = items.length > 0;
+ready.to_string();              // "true" or "false"
+if user != null && user.is_active { }
+```
+
 ---
 
 **Previous:** [← Overflow and Arithmetic Safety](06-overflow-and-arithmetic-safety.md) · **Next:** [ Char](08-char.md)

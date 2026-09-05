@@ -22,6 +22,35 @@ removed, subsumed alternatives collapse, and `Never` disappears when another
 member exists. Diagnostics print the canonical form so equivalent unions do
 not look different because they were written in another order.
 
+## API
+
+A union admits a value of any listed alternative; `T?` is `T | Null`. The
+compiler normalizes unions (order, duplicates, subsumption, `Never` removal).
+
+### Members
+
+Only members valid for **every** alternative with a compatible result are
+available before narrowing:
+
+| Member | Type | Description | Status |
+| --- | --- | --- | --- |
+| `type` | `Type` | Universal member | implemented |
+| `to_string()` | `String` | Available when every member provides it | implemented |
+
+Narrow with `match`, a type pattern, or proven flow analysis. Zirk does not
+select an alternative dynamically to rescue an invalid operator.
+
+### Examples
+
+```zirk
+fn normalize(value: String | Int32): String {
+    return match value {
+        String(text) => text,
+        Int32(number) => "{number}",
+    };
+}
+```
+
 ---
 
-**Previous:** [← Type Aliases](06-type-aliases.md) · **Next:** [ Class, Record, or Value Class?](08-class-record-value-class.md)
+**Previous:** [← Type Aliases](06-type-aliases.md) · **Next:** [ Class or Record?](08-class-or-record.md)

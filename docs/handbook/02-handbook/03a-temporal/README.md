@@ -26,4 +26,4 @@ composition, operators, parsing, DST and errors across the family.
 
 ---
 
-**Previous:** [← Duration Has Moved](../03-everyday-types/11-duration.md) · **Next:** [ Choosing a Temporal Type](01-choosing-a-temporal-type.md)
+**Previous:** [← Regex](../03-everyday-types/12-regex.md) · **Next:** [ Choosing a Temporal Type](01-choosing-a-temporal-type.md)

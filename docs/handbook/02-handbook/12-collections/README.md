@@ -6,6 +6,14 @@ This unit covers arrays, fixed arrays, lists, maps, sets, ranges, indexing, slic
 
 `Array`, `List`, `Map`, and `Set` are shared native reference types. Assignment creates an alias. `inmut` prevents rebinding while still allowing permitted referent mutation; `inmut::strict` freezes the reachable collection and forbids mutable aliases. Use `clone()` for an independent deep copy. Element and key types must satisfy each operation's generic contracts.
 
+`List<T>` and `Array<T>` also expose eager, chainable transformations such as
+`map`, `filter`, `flat_map`, `reduce`, `take`, `skip`, and `reverse` directly on
+the collection, as well as terminal conversions like `to_list`, `to_array`, and
+`to_set`. The last method in the chain determines the result family. For lazy,
+single-pass pipelines, use `.iterator()` and `collect()`.
+
+> **Implementation status:** `Array<T>` (fixed-capacity) and `List<T>` (resizable) are delivered by `array-list-tuple-duration-regex` as collector-tracked native reference collections with bounds-checked indexing, `length`/`is_empty`, and `for ... in` through `Iterable<T>`. `Range<T>`, `Map<K,V>`, and `Set<T>` remain pending.
+
 ---
 
-**Previous:** [← Class, Record, or Value Class?](../10-data-types/08-class-record-value-class.md) · **Next:** [ Arrays](01-arrays.md)
+**Previous:** [← Class or Record?](../10-data-types/08-class-or-record.md) · **Next:** [ Arrays](01-arrays.md)

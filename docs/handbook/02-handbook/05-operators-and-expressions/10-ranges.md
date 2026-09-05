@@ -15,28 +15,33 @@ for index in 0..10 {
 0..=10; // 0 through 10
 ```
 
-Ranges are lazy `Range<T>` values. A step changes the distance between produced
-values, and a descending pair walks toward its end:
+Ranges are `Range<T>` values: `start`, `end` and `step` are readable, and the
+element type `T` is numeric or `Duration`. A third `..` operand supplies the
+step, which may be negative to walk down:
 
 ```zirk
-0..10.step(2); // 0, 2, 4, 6, 8
-10..0;         // 10 down to 1
-10..=0;        // 10 down to 0
+0..10..2;   // 0, 2, 4, 6, 8
+5..0..-1;   // 5, 4, 3, 2, 1
+0s..5s..1s; // five Duration values: 0s, 1s, 2s, 3s, 4s
 ```
 
-A computed bound may use `{}` in an inline range expression:
+A range is a value, so it can be stored, passed and sliced (`r[lo:hi:step]`
+slices the element sequence, returning a new `Range`); `.reverse()` returns
+the same elements produced last to first:
 
 ```zirk
-inmut number = 10;
-for index in 0..{number}.step(1) {
-    stdout.println(index);
+mut r: Range<Int32> = 2..9;
+for i in r.reverse() {
+    // 8 down to 2
+}
+for i in r[2:5] {
+    // 4, 5, 6
 }
 ```
 
-The direction follows the bounds. `step` is a positive distance; use
-`.reverse()` to invert an already constructed range. Ranges implement
-`Iterable<T>` and work with iteration and functional operations without first
-allocating an array.
+A step of `0` can never advance and throws `InvalidStepError`. Ranges implement
+`Iterable<T>`: `for x in range` iterates them directly, whether the range is a
+literal or a stored value.
 
 ---
 

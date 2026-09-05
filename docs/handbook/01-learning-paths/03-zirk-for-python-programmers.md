@@ -18,7 +18,7 @@ There is no universal `None`-like inhabitant and no `undefined`. `null` is valid
 
 ## Objects have declared contracts
 
-Classes, interfaces, traits, records, value classes, and enums serve different purposes. Prefer algebraic enums and `match` when the set of variants is closed. Prefer an interface or trait when multiple types share a behavior contract. Do not rely on accidental duck typing.
+Classes, interfaces, traits, records, and enums serve different purposes. Prefer algebraic enums and `match` when the set of variants is closed. Prefer an interface or trait when multiple types share a behavior contract. Do not rely on accidental duck typing.
 
 Slices accept Python-shaped omitted components, including `[::]`, `[n:w]`, and
 `[::-1]`, but explicit out-of-range bounds are errors rather than clamped. A

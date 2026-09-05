@@ -121,6 +121,60 @@ The native API includes `length`, `byte_length`, `is_empty()`, `contains()`,
 `clone()` and `to_string()`. Transforming methods return a String/value or view
 as documented; mutation occurs only through explicit assignment/mutating APIs.
 
+## API
+
+`String` is the native mutable grapheme-indexed reference. `length` counts
+graphemes; `byte_length` counts encoded bytes.
+
+### Properties
+
+| Member | Type | Description | Status |
+| --- | --- | --- | --- |
+| `length` | `Int32` | Grapheme count | implemented |
+| `byte_length` | `Int32` | Encoded byte count | implemented |
+
+### Methods
+
+| Signature | Returns | Description | Status |
+| --- | --- | --- | --- |
+| `text.is_empty()` | `Boolean` | `length == 0` | implemented |
+| `text.contains(needle)` | `Boolean` | Substring test | implemented |
+| `text.starts_with(prefix)` | `Boolean` | Prefix test | implemented |
+| `text.ends_with(suffix)` | `Boolean` | Suffix test | implemented |
+| `text.find(needle)` | `Int32?` | First grapheme index of `needle`, or `null` | implemented |
+| `text.replace(needle, replacement)` | `String` | New string with all occurrences replaced | implemented |
+| `text.trim()` | `String` | Removes Unicode whitespace at both ends | implemented |
+| `text.trim_start()` / `text.trim_end()` | `String` | One-sided trims | implemented |
+| `text.to_lowercase()` | `String` | Unicode-aware lowercase | implemented |
+| `text.to_uppercase()` | `String` | Unicode-aware uppercase | implemented |
+| `text.split(separator)` | `List<String>` | Split, preserving empty fields unless `remove_empty: true` | specified — pending `List<T>` |
+| `text.split_whitespace()` | `List<String>` | Unicode-whitespace split | specified |
+| `text.lines()` | `List<String>` | Line terminators removed; meaningful empty lines kept | specified |
+| `text.substring(start, end?)` | `String` | Grapheme-range copy; bounds checked | implemented |
+| `text.normalize(form)` | `String` | `form: UnicodeNormalization` | implemented |
+| `text.bytes()` | `Iterator<UInt8>` | Byte view | specified |
+| `text.codepoints()` | `Iterator<UInt32>` | Scalar view | specified |
+| `text.chars()` | `Iterator<Char>` | Grapheme view | specified |
+| `text.clone()` | `String` | Independent logical copy | implemented |
+| `text.to_string()` | `String` | Identity | implemented |
+| `String(value)` | `String` | Explicit conversion; also establishes a deep conversion context over a concatenation tree | implemented |
+
+> Indexing `text[i]` yields `Char`; slicing `text[start:end:step]` copies.
+> Negative indices count from the end and every bound is checked — Zirk never
+> clamps silently. Slice assignment requires equal grapheme counts on both
+> sides.
+
+### Examples
+
+```zirk
+mut text = "hola";
+text[0] = 'H';                  // "Hola"
+text.contains("ol");            // true
+text.substring(0, 2);           // "Ho"
+"ja" * 3;                       // "jajaja"
+stdout.println("len={\"πa\".length}");  // graphemes, not bytes
+```
+
 ---
 
 **Previous:** [← Char](08-char.md) · **Next:** [ Void, Never, Null, and Object](10-void-never-null-object.md)

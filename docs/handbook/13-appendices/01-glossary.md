@@ -30,7 +30,6 @@
   writes commit together or roll back on controlled pre-commit failure.
 - **Commit boundary:** explicit region that publishes reversible writes before
   an external, volatile, native, or otherwise irreversible effect.
-- **Value class:** distinct value abstraction without observable identity.
 - **Normative:** required by the final specification rather than historical discussion.
 - **Implementation status:** evidence-based availability in a repository revision.
 - **Compiler primitive:** compiler-recognized closed type whose public behavior still follows contracts.
@@ -55,7 +54,13 @@
 - **Contextual conversion:** an explicit outer constructor, such as `Float(...)`, that supplies a conversion context to a compatible contained operator tree.
 - **Controlled error:** specified failure that cannot become undefined behavior or silent corruption.
 - **Instant:** an absolute timeline position independent of presentation zone.
-- **Duration:** signed exact elapsed nanoseconds; unlike a `Period`, it has context-free magnitude and ordering.
+- **Duration:** signed exact elapsed nanoseconds; unlike a `Period`, it has context-free magnitude and ordering. Written with literal suffixes such as `250ms` or `1.5s`.
+- **Tuple:** fixed-size heterogeneous value product type `Tuple(A, B, ...)`, built with `(a, b, ...)`, indexed only by a compile-time constant, and destructureable at binding sites and in `match`.
+- **Array:** `Array<T>`, a contiguous fixed-capacity native reference collection with bounds-checked indexed read/write and `for ... in` iteration.
+- **List:** `List<T>`, a resizable native reference collection with `add`/`insert`/`remove`, indexed access, and `for ... in` iteration.
+- **Range:** `Range<T>`, a finite arithmetic value sequence with `start`, `end`, `step`, `reverse()`, and slicing.
+- **Regex:** a compiled regular expression, written `re'pattern'` or built dynamically with `Regex.parse`; exposes `matches`, `find`, `replace`, `split`, and capture groups through `Regex.Match`.
+- **Type alias:** a `type` declaration that gives an existing type another name; it resolves transparently to its target throughout the pipeline.
 - **Period:** calendar quantity in years, months, weeks, and days whose exact elapsed length needs an anchor and calendar/zone context.
 
 ---

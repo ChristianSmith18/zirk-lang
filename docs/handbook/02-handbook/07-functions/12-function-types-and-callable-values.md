@@ -72,6 +72,56 @@ inmut partial = add(2)                                     // no partial applica
 inmut same = add == add                                    // no callable equality
 ```
 
+## API
+
+`Fn` is the preferred exact alias of `Function`. Named functions, lambdas,
+bound methods, unbound methods, and explicitly callable objects adapt to the
+same type when the complete signature matches — callable compatibility, not
+overload resolution. Parameters are contravariant, results covariant.
+
+> **Delivery caveat (Phase 4d):** `Fn`/`Function` are parseable and checked in
+> every position; a named function or capture-less lambda interchanges freely;
+> a single capturing literal at a local initializer or a `return` escapes its
+> frame (D14); `is` compares identity (D15). Pending: polymorphism across
+> differently-captured closures (D13), `.clone()` on a closure, shared-cell
+> captured writes, capturing literals at parameters/fields/arguments.
+
+### Methods
+
+| Signature | Returns | Description | Status |
+| --- | --- | --- | --- |
+| `f(args...)` | `R` | Invocation | implemented |
+| `f.clone()` | `Fn(P...) => R` | Deep independent environment when all captured parts are cloneable | specified — explicitly pending |
+| `f.to_string()` | `String` | Universal member | implemented |
+| `f is g` | `Boolean` | Callable identity (no structural `==` for behavior) | implemented |
+
+Signature components: labels participate in named calls, `?` marks optional
+parameters, `...` marks a variadic tail. Reading `stdout.println` as a value
+binds the receiver (bound method); an unbound reference takes the receiver
+first. Zirk does not partially apply — wrap in a lambda. Expected failure lives
+in the return type (`Fn(String) => Result<User, ParseError>`); `Fn` does not
+imply purity.
+
+### Examples
+
+```zirk
+inmut parser: Fn(String) => Result<User, ParseError> = parse_user;
+inmut printer: Fn(String) => Void = stdout.println;
+
+inmut add: Fn(Int, Int) => Int = (left, right) => left + right;
+inmut add_two: Fn(Int) => Int = value => add(value, 2);
+
+inmut decode: Fn(source: String, radix?: Int, ...flags: String)
+    => Result<Int, ParseError>;
+```
+
+```zirk
+// invalid forms
+inmut bad: Fn(Int) => Int = (value: String) => value.length; // parameter mismatch
+inmut partial = add(2);                                      // no partial application
+inmut same = add == add;                                     // no callable equality
+```
+
 ---
 
 **Previous:** [← Never-Returning Functions](11-never-returning-functions.md) · **Next:** [Generics →](../11-generics/README.md)
