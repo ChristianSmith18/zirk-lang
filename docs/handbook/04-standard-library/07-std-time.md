@@ -4,8 +4,10 @@
 periods and clock sources. Every value is immutable; transformations return new
 values. The detailed arithmetic contract belongs to the temporal-type chapters.
 
-> **Implementation status:** accepted Zirk 1.x contract. IANA data, virtual
-> clocks and some timers may be ahead of the current runtime.
+> **Implementation status:** accepted Zirk 1.x contract. `Duration` literals,
+> arithmetic, comparison and `to_string()` are delivered by
+> `array-list-tuple-duration-regex`; the civil/zone temporal types, IANA data,
+> virtual clocks and timers remain ahead of the current runtime.
 
 ## Getting the current time
 

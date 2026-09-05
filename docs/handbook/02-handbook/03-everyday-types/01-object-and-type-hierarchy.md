@@ -14,7 +14,6 @@ Object
 │   ├── Char
 │   ├── Temporal
 │   ├── Record
-│   ├── ValueClass
 │   └── Enum
 ├── Reference
 │   ├── String
@@ -33,7 +32,7 @@ the combinations defined by their contracts compile.
 
 ## Semantics are not layout
 
-An `Int32`, record, value class, or temporal value may be stored inline. A
+An `Int32`, record, or temporal value may be stored inline. A
 `String`, collection, or class instance has reference semantics. The compiler
 may still specialize, move, box, cache, or allocate values when observable
 behavior remains unchanged. Only an ABI document can make physical layout part
@@ -50,9 +49,10 @@ inmut broad: Object = count;
 by `Object` until a safe check narrows it. Zirk never searches for an operation
 dynamically merely because the runtime value happens to support it.
 
-Continue with [Type Categories](./01a-type-categories.md) before choosing an
-individual built-in type.
+Continue with [How Values Live and Share](./00-how-values-live-and-share.md) for
+the memory-behavior spectrum, then [Type Categories](./01a-type-categories.md)
+before choosing an individual built-in type.
 
 ---
 
-**Previous:** [← Everyday Types](README.md) · **Next:** [ Type Categories](01a-type-categories.md)
+**Previous:** [← How Values Live and Share](00-how-values-live-and-share.md) · **Next:** [ Type Categories](01a-type-categories.md)

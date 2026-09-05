@@ -12,6 +12,7 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | temporal family | component and identity properties | construction, parse/format, arithmetic, replacement, boundary and zone operations | [Temporal Reference](./14-temporal-reference.md) |
 | collections | `length`, `is_empty` | access, mutation, cloning, iteration and type-specific search/update operations | [Collections](../02-handbook/12-collections/README.md) |
 | callable values | — | invocation, `clone()`, `to_string()`; identity via `is` | [Function Types](../02-handbook/07-functions/12-function-types-and-callable-values.md) |
+| `Regex` | pattern | `matches()`, `find()`, `replace()`, `split()`; `parse()` for dynamic patterns; `Regex.Match` exposes `group()`/`start`/`end`/`text` | [`std.text`](../04-standard-library/05a-std-text.md) |
 | `Result<T,E>` | variant state | inspection, nullable extraction, fallback, map/chaining, unwrap, `or_throw` | [Result](../02-handbook/15-errors/01-result.md) |
 | `Throwable` | immutable identity | `message()`, `code()`, `cause()`, `suppressed()`, `stack_trace()` | [Exceptions](../02-handbook/15-errors/04-exceptions.md) |
 | `Resource<E>` | `is_closed()` | `close()`; type-specific transfer/duplicate operations | [Resources](../02-handbook/16-resources/README.md) |
@@ -22,7 +23,7 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | `Task<T>` | completion state through API | `cancel()`, aggregation through `Task.all/first/settled`, await | [Tasks](../02-handbook/18-concurrency/02-tasks.md) |
 | `Channel<T>` | `is_closed`, `capacity`, `length` | `send()`, `receive()`, `try_send()`, `try_receive()`, `close()` | [Channels](../02-handbook/18-concurrency/07-channels.md) |
 | synchronization | type-specific | scoped lock access, permits/barriers/once, supported atomic operations | [`std.sync`](../04-standard-library/10-std-sync.md) |
-| tuples | `length` | constant `[]`, destructuring, derived capabilities | [Tuples](../02-handbook/10-data-types/00-tuples.md) |
+| tuples | `length` | constant `[N]` indexing, destructuring, derived capabilities | [Tuples](../02-handbook/10-data-types/00-tuples.md) |
 | domain values | `type` plus declared attributes | declared methods and satisfied contract members | [Data Types](../02-handbook/10-data-types/README.md) |
 
 Members such as equality, hashing, ordering, iteration, indexing, arithmetic, and cloning are capability-gated. Their presence must not be inferred merely from `Object`.

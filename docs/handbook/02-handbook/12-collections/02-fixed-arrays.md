@@ -18,6 +18,20 @@ length.
 
 Fixed size does not waive bounds checking in safe code.
 
+## API
+
+`T[N]` is the canonical explicit-size form of the same fixed array — the size is
+part of the visible type/declaration contract (`Array<T, N>` equivalent).
+A statically known size mismatch is a compile-time error. Fixed size does not
+waive bounds checking. The member surface is the `Array<T>` table on the
+[Arrays](01-arrays.md) page.
+
+```zirk
+fn checksum(bytes: UInt8[16]): UInt32 { ... }
+mut header: UInt8[16] = ...;
+checksum(header);               // valid
+```
+
 ---
 
 **Previous:** [← Arrays](01-arrays.md) · **Next:** [ Lists](03-lists.md)

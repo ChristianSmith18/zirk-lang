@@ -20,8 +20,11 @@ packages. `Map`/`Set` remain deterministic without separate public hash/ordered
 families. Hashing uses a per-process defensive seed while iteration preserves
 insertion order.
 
-> **Implementation status:** accepted Zirk 1.x collection contract; current
-> compiler support may be partial.
+> **Implementation status:** accepted Zirk 1.x collection contract.
+> `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end..step`,
+> `.reverse()`, slicing and `Iterable<T>` for numeric `T` and `Duration`)
+> are delivered by `array-list-tuple-duration-regex`; `Map<K,V>`, `Set<T>`
+> and the wider eager/lazy API remain ahead of the current compiler.
 
 ## Reference, mutation and copying
 
@@ -63,20 +66,35 @@ capacity, reservation and shrinking remain runtime implementation details.
 `clear()` is a logical operation and makes no observable capacity promise.
 
 Map/Set keys require coherent `Hash` and `Equal`; equal values must hash equally.
-Records, enums and value classes can request explicit compiler derivation.
+Records and enums can request explicit compiler derivation.
 Sets include union, intersection, difference, symmetric difference and subset,
 superset/disjoint queries.
 
 ## Eager and lazy transformation
 
-Collection operations are eager and preserve the collection family where the
-result permits it:
+`List<T>` and `Array<T>` support eager, chainable `map`, `filter`, `flat_map`,
+`reduce`, `take`, `skip`, and `reverse` directly. The last transform in the
+chain returns the same collection family, and a terminal conversion such as
+`to_array()`, `to_list()` or `to_set()` selects the result family:
 
 ```zirk
-inmut names: List<String> = users.map((user) => user.name);
+inmut names: List<String> = users
+    .filter((user) => user.active)
+    .map((user) => user.name);
+
+inmut unique: Set<String> = users
+    .filter((user) => user.active)
+    .map((user) => user.name)
+    .to_set();
 ```
 
-Iterator transformations are lazy and allocate only at an explicit terminal:
+This is the default idiom for in-memory collections: it is readable, the
+intermediate collections are explicit, and the type of the final expression is
+clear from the last method.
+
+Iterator transformations are lazy and allocate only at an explicit terminal.
+Use them when you want single-pass streaming or to avoid intermediate
+allocations:
 
 ```zirk
 inmut names: List<String> = users

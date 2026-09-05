@@ -11,9 +11,9 @@ and `protected`. Manifest control includes
 `cancelled`, and `default` are contextual words in the applicable task/select
 forms rather than general reserved values.
 
-`strict` and `value` are contextual identifiers, not reserved keywords. They
-acquire special meaning only in `inmut::strict` and `value class`; ordinary
-bindings such as `mut strict = true;` and `mut value = 1;` remain valid.
+`strict` is a contextual identifier, not a reserved keyword. It acquires
+special meaning only in `inmut::strict`; ordinary bindings such as
+`mut strict = true;` remain valid.
 
 Reserved literals/types include `true`, `false`, `null`, `Void`, `Never`, `Null`, and `Object`. The formal lexer remains authoritative; historical words excluded from 1.x—such as `async fn`, `worker`, `comptime`, and general `defer`—are not usable features.
 

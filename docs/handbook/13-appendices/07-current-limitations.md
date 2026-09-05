@@ -2,8 +2,11 @@
 
 Zirk's final 1.x semantics are broader than the current compiler. The repository
 has a precedence table, stable diagnostic-code policy, and normative detail for
-ranges, slicing, traditional `for`, patterns, value classes, generators, and
-callable types. Their existence in documentation does not imply every pipeline
+ranges, slicing, traditional `for`, patterns, generators, and callable types.
+Tuples, `Duration` literals, `Regex` literals with `matches`/`find`/`replace`,
+the `String` mutation/search surface, `Char` classification/normalization, and
+`type` alias lowering are now delivered; `value class` was removed (use
+`record`). Their existence in documentation does not imply every pipeline
 stage implements them.
 
 Current high-impact delivery limits include:
@@ -34,7 +37,7 @@ Current high-impact delivery limits include:
   every field is itself `Clone`, preserving internal sharing and cycles
   through a runtime memoization map, and rejected at compile time when the
   field graph reaches a `Pointer<T>`, `Resource`, or other non-`Clone`
-  member. `record`/`value class` and enum-typed fields do not yet derive
+  member. `record` and enum-typed fields do not yet derive
   `Clone` (records have no identity of their own; a pre-existing codegen
   gap leaves an enum's inactive-variant fields uninitialized in a way the
   shared field-offset walk would read unconditionally). `Dependent<T>` lifetime
@@ -65,15 +68,17 @@ Current high-impact delivery limits include:
   shape only) known extent against the real underlying storage; using an
   already-constructed view needs no `unsafe`, with bounds checks active on
   every index; the `Pointer<T>` escape rule now also covers both view
-  types. Read-only `String[index]` returning a `Char` is now supported,
-  with bounds checking and negative-index rejection; `String[index] = c` is
-  rejected. Delivering this also meant adding `expr[index]` as a genuine new
+  types. `String[index]` returning a `Char` is supported, with bounds
+  checking and negative-index rejection, and `array-list-tuple-duration-regex`
+  adds the `String[index] = c` write, `[start:end:step]` slicing, and the
+  `trim`/`search`/`contains`/`starts_with`/`ends_with`/`substring` methods
+  (`split` returns `List<String>` and lands with `List<T>`). Delivering
+  indexing also meant adding `expr[index]` as a genuine new
   postfix expression grammar (`Expr::Index`) — indexing did not exist
   anywhere in the compiler before, and is now dispatched by receiver type
-  (today: `String`, `NativeSlice<T>`/`NativeSliceMut<T>`) so Phase 7's
-  `Array<T>`/
-  `List<T>` can register their own support later without another grammar
-  change. Volatile access, untagged native-union access (no union type
+  (today: `String`, `NativeSlice<T>`/`NativeSliceMut<T>`) so the
+  `Array<T>`/`List<T>` of `array-list-tuple-duration-regex` register their
+  own support without another grammar change. Volatile access, untagged native-union access (no union type
   exists), weak atomic ordering (`Atomic<T>` is Phase 5), a
   native-library-linking manifest, and general provenance tracking for a
   view's known extent beyond the one recognized syntactic shape also
@@ -88,9 +93,9 @@ Current high-impact delivery limits include:
   hierarchy ordering that ignored `implements`) and a pre-existing diagnostic
   bug (`MISSING_OVERRIDE` reported instead of `MISSING_IMPLEMENTATION` when no
   override at all was supplied). Derived structural equality for
-  `record`/`value class` is also delivered (`fase-3-structural-equality`):
-  `==`/`!=` compares every field, recursing into a nested `record`/`value
-  class` field, and short-circuits on the first difference — a `class`-typed
+  `record` is also delivered (`fase-3-structural-equality`):
+  `==`/`!=` compares every field, recursing into a nested `record` field,
+  and short-circuits on the first difference — a `class`-typed
   field compares by its own existing rule (its `_equals` if declared,
   otherwise `is`). A field whose type doesn't fit a scalar, nested-value,
   or object shape (for example `T?` or an algebraic enum payload) still
@@ -111,8 +116,8 @@ Current high-impact delivery limits include:
   enum's own name. `fase-3-recursive-enums` closed the declaration-order
   half of that: an enum and a class (or two enums) can now reference each
   other regardless of order, the same way two classes already could. A
-  genuinely self-referential enum field (`enum IntList { Nil, Cons(head:
-  Int32, tail: IntList) }`) still cannot be constructed or used — every
+  genuinely self-referential enum field (`enum IntList { Nil; Cons(head:
+  Int32; tail: IntList); }`) still cannot be constructed or used — every
   enum lowers to an inline-flattened struct with no indirection anywhere
   in the pipeline, so such a field asks for an infinitely-sized type. That
   implementation attempt found this crashed the compiler with a real stack
@@ -131,12 +136,29 @@ Current high-impact delivery limits include:
   value type's own method is compiled expecting `this` by value, but
   `CallContract` always calls through a pointer, so pointing a contract
   table straight at the value's own method silently miscompiled — fixed
-  with a small per-method unboxing thunk, needed only for a value type's
-  own method bodies (a trait's inherited default already expects a
-  pointer receiver). `value class` cannot exercise this yet: its own
-  compact declaration grammar has no `implements` clause or method-body
-  syntax at all, independent of this feature — extending that grammar is
-  its own, separate future work. Still required: user generic contracts.
+  with a small per-method unboxing thunk, needed for a `record`'s own
+  method bodies (a trait's inherited default already expects a pointer
+  receiver). Still required: user generic contracts.
+- `array-list-tuple-duration-regex` delivers the everyday data surface:
+  `Tuple(A, B, ...)` values with constant indexing and destructuring,
+  `Duration` as an `i64`-nanosecond primitive with `ns`–`w` literal
+  suffixes, and `Regex` as a native reference type with `re'...'`
+  literals, `matches`, `find` (a `Regex.Match?` with positional and named
+  `group`), and `replace`. `Array<T>` (fixed-capacity) and `List<T>`
+  (resizable) are native collector-tracked reference collections with
+  bounds-checked indexing, `length`/`is_empty`, and `for ... in`
+  iteration; their delivery is completing in parallel within the same
+  change. `value class` is removed — `record` covers its semantics.
+  Also delivered inside the change: `Regex.split` and
+  `Regex.find_all(text): List<Regex.Match>` for match iteration
+  (`matches(text)` keeps its `Boolean` meaning), `re'...'` patterns in
+  `match` arms, `Range<T>` (`start`, `end`, `step`, `reverse()`, slicing,
+  `Iterable<T>` for numeric `T` and `Duration`), derived `Clone` for
+  `record`/`enum`, `String` writes `s[i] = c` and slicing
+  `s[start:end:step]`, and lowering of user-defined generic `implements
+  Contract<T>` satisfaction for contracts whose members do not name their
+  own type parameter (a member like `fn put(x: T)` still reports
+  `NOT_LOWERED`). `String.split` remains pending.
 - `Float128` arithmetic lacks complete Windows verification. `Float128`
   `to_string()` is implemented by truncating to `Float64` first, which can
   lose precision for values not exactly representable in `f64`.

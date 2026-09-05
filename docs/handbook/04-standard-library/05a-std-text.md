@@ -5,8 +5,13 @@ safe regular expressions and Unicode algorithms. Everyday transformations stay
 on the native types; the module owns operations that need an auxiliary type or
 compiled program.
 
-> **Implementation status:** accepted Zirk 1.x contract; regex, formatting and
-> some Unicode facilities may be ahead of the current compiler/runtime.
+> **Implementation status:** accepted Zirk 1.x contract. `array-list-tuple-duration-regex`
+> delivered the `re'...'` literal, `Regex` with `matches`/`find`/`replace`
+> (including positional and named capture groups on `Regex.Match`), and the
+> native `String`/`Char` method surface. `Regex.split`, `String.split`
+> (pending `List<T>`), `matches` iteration, regex patterns in `match`,
+> formatting, and some Unicode facilities remain ahead of the current
+> compiler/runtime.
 
 ## Building text
 
@@ -65,13 +70,31 @@ inmut identifier = re'[A-Za-z_][A-Za-z0-9_]*';
 ```
 
 An invalid literal is a compile-time error. Dynamic patterns use
-`Regex.parse(pattern): Result<Regex,RegexError>`. The standard engine guarantees
-linear-time matching and excludes constructs such as backreferences or unsafe
-lookbehind that require catastrophic backtracking. Specialized engines belong
-in separate packages.
+`Regex.parse(pattern): Result<Regex, RegexError>`. The standard engine
+guarantees linear-time matching and excludes constructs such as backreferences
+or unsafe lookbehind that require catastrophic backtracking. Specialized
+engines belong in separate packages.
 
-`Regex` supports `is_match`, `find`, `find_all`, typed captures, `replace` and
-`split`. Operations expose match/input limits and never silently truncate.
+### Core operations
+
+- `regex.matches(text): Boolean` returns whether the pattern matches the whole
+text.
+- `regex.replace(text, replacement): String` returns a new string with all
+matches replaced.
+
+```zirk
+inmut digit = re'[0-9]+';
+
+if digit.matches("2026") {
+    stdout.println("yes");
+}
+
+inmut redacted = digit.replace("Room 42, floor 7", "X");
+// "Room X, floor X"
+```
+
+`find`, `find_all`, typed captures and `split` are part of the full `std.text`
+contract; only `matches` and `replace` are wired in the current delivery.
 
 ## Unicode operations
 

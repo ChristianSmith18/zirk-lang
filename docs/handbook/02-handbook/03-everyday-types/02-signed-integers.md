@@ -57,14 +57,78 @@ conversion are explicit and checked. Parsing text returns `Result`.
 
 ## API
 
-All widths expose `MIN`, `MAX`, `BITS`, `abs()`, `sign()`, `min()`, `max()`,
-`clamp()`, `is_zero()`, `is_even()`, `is_odd()`, `bit_count()`,
-`leading_zeros()`, `trailing_zeros()`, `rotate_left()`, `rotate_right()`,
-`to_string()` and typed conversion/parse operations.
+`Int` and `Integer` are exact aliases of `Int32`. All widths share the same API;
+signatures below use `Int32` as the example width. Methods that take another
+integer parameter (`min`, `max`, `clamp`, `rotate_*`, shifts) accept the same
+width unless noted.
 
-Ordinary arithmetic traps on overflow. Algorithms that deliberately need a
-different policy call `checked_*`, `wrapping_*`, or `saturating_*` operations.
+### Properties
+
+| Member | Type | Description | Status |
+| --- | --- | --- | --- |
+| `Int32.MIN` | `Int32` | Smallest representable value | implemented |
+| `Int32.MAX` | `Int32` | Largest representable value | implemented |
+| `Int32.BITS` | `Int32` | Bit width of the type (`8`, `16`, `32`, `64`, `128`) | implemented |
+
+### Methods
+
+| Signature | Returns | Description | Status |
+| --- | --- | --- | --- |
+| `value.abs()` | same as `value` | Absolute value; traps on `MIN` | implemented |
+| `value.sign()` | `Int32` | `-1`, `0`, or `1` | implemented |
+| `value.min(other)` | same as `value` | Smaller of the two values | implemented |
+| `value.max(other)` | same as `value` | Larger of the two values | implemented |
+| `value.clamp(low, high)` | same as `value` | Confines `value` to `[low, high]` | implemented |
+| `value.is_zero()` | `Boolean` | `true` when `value == 0` | implemented |
+| `value.is_even()` | `Boolean` | `true` when divisible by 2 | implemented |
+| `value.is_odd()` | `Boolean` | `true` when not divisible by 2 | implemented |
+| `value.bit_count()` | `Int32` | Number of set bits (population count) | implemented |
+| `value.leading_zeros()` | `Int32` | Zero bits above the highest set bit | implemented |
+| `value.trailing_zeros()` | `Int32` | Zero bits below the lowest set bit | implemented |
+| `value.rotate_left(n)` | same as `value` | Circular left shift by `n` | implemented |
+| `value.rotate_right(n)` | same as `value` | Circular right shift by `n` | implemented |
+| `value.checked_add(other)` | `Result<Int32, OverflowError>` | Addition that reports overflow | implemented |
+| `value.checked_sub(other)` | `Result<Int32, OverflowError>` | Subtraction that reports overflow | implemented |
+| `value.checked_mul(other)` | `Result<Int32, OverflowError>` | Multiplication that reports overflow | implemented |
+| `value.checked_div(other)` | `Result<Int32, OverflowError>` | Division reporting overflow/zero division | implemented |
+| `value.checked_rem(other)` | `Result<Int32, OverflowError>` | Remainder reporting zero division | implemented |
+| `value.checked_pow(exp)` | `Result<Int32, OverflowError>` | Power reporting overflow | specified |
+| `value.wrapping_add(other)` | same as `value` | Two's-complement wraparound addition | implemented |
+| `value.wrapping_sub(other)` | same as `value` | Wraparound subtraction | implemented |
+| `value.wrapping_mul(other)` | same as `value` | Wraparound multiplication | implemented |
+| `value.saturating_add(other)` | same as `value` | Addition clamped to `MIN`/`MAX` | implemented |
+| `value.saturating_sub(other)` | same as `value` | Subtraction clamped to `MIN`/`MAX` | implemented |
+| `value.saturating_mul(other)` | same as `value` | Multiplication clamped to `MIN`/`MAX` | implemented |
+| `Int32.parse(text)` | `Result<Int32, ParseError>` | Parses decimal text | implemented |
+| `Int32.parse(text, radix:)` | `Result<Int32, ParseError>` | Parses text in radix 2–36 | specified |
+| `value.to_string()` | `String` | Decimal rendering | implemented |
+| `value.to_string(radix:)` | `String` | Rendering in radix 2–36 | specified |
+| `Int32(value)` | `Int32` | Checked explicit conversion from any numeric type | implemented |
+
+> **Overflow policy:** ordinary `+ - * / % **` trap on overflow. The
+> `checked_*` family reports failure through `Result`; `wrapping_*` and
+> `saturating_*` express deliberate alternatives. The `checked_*`/`wrapping_*`/
+> `saturating_*` families are delivered for the core operations; less common
+> entries (e.g. `checked_pow`, `checked_neg`) are specified pending audit.
+
+### Examples
+
+```zirk
+inmut value: Int32 = -7;
+value.abs();                    // 7
+value.sign();                   // -1
+(255).rotate_left(4);           // 4080
+stdout.println(Int32.MAX);      // 2147483647
+
+mut total: Int64 = 0;
+total += value;                 // widening through explicit context
+
+match Int32.parse("42") {
+    Ok(n) => stdout.println(n),
+    Error(e) => stdout.println("invalid: {e}"),
+}
+```
 
 ---
 
-**Previous:** [← Native Operators](01e-native-operators.md) · **Next:** [ Unsigned Integers](03-unsigned-integers.md)
+**Previous:** [← Choosing a Type](01f-choosing-a-type.md) · **Next:** [ Unsigned Integers](03-unsigned-integers.md)

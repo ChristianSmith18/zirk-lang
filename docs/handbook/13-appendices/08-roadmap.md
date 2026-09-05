@@ -2,16 +2,19 @@
 
 The handbook targets normative Zirk 1.x; the detailed construction and status
 source is [`docs/init/ZIRK_ROADMAP.md`](../../init/ZIRK_ROADMAP.md). Phase 0,
-1, 2, 3, 3b, 4a, 4b, and 4c have completed scoped delivery changes. “Scoped”
-matters: final callable escape, complete resource failure composition, managed
-memory, and several later interactions remain explicitly assigned to 4d/4e or
-later phases.
+1, 2, 3, 3b, and 4a–4e have completed scoped delivery changes, and the
+`array-list-tuple-duration-regex` change delivers the everyday data surface
+(`Tuple`, `Array<T>`, `List<T>`, `Duration`, `Regex`, the `String`/`Char`
+method surface, and `type` alias lowering) while removing `value class`.
+“Scoped” matters: `Range<T>`, `Regex.split`/`String.split`, derived `Clone`
+for `record`/`enum`, and user-defined generic contract lowering remain
+explicitly assigned to the same or later changes.
 
-The remaining sequence moves through callable/binding completion, memory and
-unsafe boundaries, structured concurrency, projects/permissions, standard
-library, functional style, packaging, developer tooling, decorators,
-hardening, and eventual self-hosting. Every feature requires one owning phase,
-end-to-end tests, diagnostics, and a documentation/status update.
+The remaining sequence moves through structured concurrency,
+projects/permissions, the rest of the standard library, functional style,
+packaging, developer tooling, decorators, hardening, and eventual
+self-hosting. Every feature requires one owning phase, end-to-end tests,
+diagnostics, and a documentation/status update.
 
 Future features require an explicit specification change and compatibility
 analysis. Excluded 1.x ideas are not automatically roadmap commitments, and a

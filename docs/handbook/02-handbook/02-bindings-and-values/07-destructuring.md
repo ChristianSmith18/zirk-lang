@@ -4,6 +4,7 @@ Destructuring binds parts of a composite value by pattern. It is useful when the
 
 ```zirk
 inmut { name, version } = project_info;
+inmut (x, y) = point;
 ```
 
 Aliases use the same arrow convention as imports when the local name should differ:

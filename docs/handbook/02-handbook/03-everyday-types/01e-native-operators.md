@@ -35,4 +35,4 @@ a contract. Parenthesize when the intended grouping is not immediately clear.
 
 ---
 
-**Previous:** [← Conversions and Context](01d-conversions-and-context.md) · **Next:** [ Signed Integers](02-signed-integers.md)
+**Previous:** [← Conversions and Context](01d-conversions-and-context.md) · **Next:** [ Choosing a Type](01f-choosing-a-type.md)

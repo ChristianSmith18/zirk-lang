@@ -2,7 +2,7 @@
 
 Normal class instances have observable identity. `a is b` asks whether two references denote the same instance; `a == b` follows the type's equality contract.
 
-Identity matters for mutable entities, caches, graph nodes, and lifecycle. Do not use it for value concepts better represented as records or value classes.
+Identity matters for mutable entities, caches, graph nodes, and lifecycle. Do not use it for value concepts better represented as records.
 
 Compiler optimization must preserve every observable identity comparison.
 

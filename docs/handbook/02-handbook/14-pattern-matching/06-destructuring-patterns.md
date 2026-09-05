@@ -8,6 +8,17 @@ inmut { id, name } = user_record;
 inmut (status, count) = response_tuple;
 ```
 
+Inside `match`, tuple patterns select a branch and bind the components:
+
+```zirk
+match point {
+    (0, 0) => origin();
+    (x, 0) => axis_x(x);
+    (0, y) => axis_y(y);
+    (x, y) => point_at(x, y);
+}
+```
+
 An algebraic enum is not destructured directly. Its payload is selected and
 extracted only inside `match`; a nested record or tuple pattern may then inspect
 that payload.

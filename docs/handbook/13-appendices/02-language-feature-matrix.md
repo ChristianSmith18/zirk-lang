@@ -3,7 +3,11 @@
 | Area | Zirk 1.x contract |
 | --- | --- |
 | Types | Static with inference, unions, nullable, generics |
-| Objects | Classes, records, value classes, enums, interfaces, traits |
+| Objects | Classes, records, enums, interfaces, traits |
+| Data | Tuples, unions, `type` aliases, derived equality/`Clone` |
+| Collections | `Array<T>` fixed-capacity, `List<T>` resizable, ranges, iteration contracts |
+| Text | Grapheme `Char`, `String`, interpolation, `re'...'` `Regex` |
+| Time | `Duration` nanosecond primitive; civil/zone temporal family |
 | Failure | `Result`, exceptions, `fatalError` |
 | Memory | Automatic; no public ownership/RC semantics |
 | Concurrency | `task`, `await`, `parallel`, `thread`, channels |

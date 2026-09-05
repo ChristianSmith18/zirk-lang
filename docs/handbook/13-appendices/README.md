@@ -4,4 +4,4 @@ The appendices consolidate terminology, feature status, comparisons, limitations
 
 ---
 
-**Previous:** [← Class, Record, or Value Class?](../12-explanations/12-class-vs-record-vs-value-class.md) · **Next:** [ Glossary](01-glossary.md)
+**Previous:** [← Class or Record?](../12-explanations/12-class-or-record.md) · **Next:** [ Glossary](01-glossary.md)

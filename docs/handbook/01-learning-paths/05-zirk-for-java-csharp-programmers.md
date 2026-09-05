@@ -6,7 +6,7 @@ Zirk's classes, interfaces, static types, exceptions, generics, and brace-delimi
 
 Every value belongs semantically to a class, but the compiler may represent integers and other simple values inline. Do not infer heap allocation merely because operations are methods or contracts belong to types.
 
-Zirk adds records, value classes, traits, unions, and enums with associated values. These often model closed data more precisely than a class hierarchy:
+Zirk adds records, traits, unions, and enums with associated values. These often model closed data more precisely than a class hierarchy:
 
 ```zirk
 mut message: String = match result {
