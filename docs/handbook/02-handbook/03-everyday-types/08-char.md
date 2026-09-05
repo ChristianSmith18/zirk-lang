@@ -51,22 +51,24 @@ grapheme, so they return `String`, not `Char`.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `byte_length` | `Int32` | Encoded byte count | implemented |
-| `codepoint_count` | `Int32` | Unicode scalar count | implemented |
+| `byte_length` | `Int32` | Encoded byte count | specified |
+| `codepoint_count` | `Int32` | Unicode scalar count | specified |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `value.ascii_code()` | `Int32` | ASCII value, or `-1` when not a single ASCII scalar | implemented |
-| `value.is_ascii()` | `Boolean` | Single ASCII scalar | implemented |
-| `value.is_alphabetic()` | `Boolean` | Unicode alphabetic | implemented |
-| `value.is_numeric()` | `Boolean` | Unicode numeric | implemented |
-| `value.is_alphanumeric()` | `Boolean` | Alphabetic or numeric | implemented |
+| `value.ascii_code()` | `Int32` | ASCII value, or `-1` when not a single ASCII scalar | specified |
+| `value.is_ascii()` | `Boolean` | Single ASCII scalar | specified |
+| `value.is_alphabetic()` | `Boolean` | Unicode alphabetic | specified — the compiler ships `is_letter()` for now |
+| `value.is_letter()` | `Boolean` | Unicode letter | implemented |
+| `value.is_numeric()` | `Boolean` | Unicode numeric | specified — the compiler ships `is_digit()` for now |
+| `value.is_digit()` | `Boolean` | Unicode digit | implemented |
+| `value.is_alphanumeric()` | `Boolean` | Alphabetic or numeric | specified |
 | `value.is_whitespace()` | `Boolean` | Unicode whitespace | implemented |
 | `value.is_uppercase()` | `Boolean` | Unicode uppercase | implemented |
 | `value.is_lowercase()` | `Boolean` | Unicode lowercase | implemented |
-| `value.normalize(form)` | `String` | `form: UnicodeNormalization` — NFC/NFD/NFKC/NFKD | implemented |
+| `value.normalize(form)` | `String` | `form: UnicodeNormalization` — NFC/NFD/NFKC/NFKD | specified |
 | `value.to_uppercase()` | `String` | Unicode-aware uppercase (may expand) | implemented |
 | `value.to_lowercase()` | `String` | Unicode-aware lowercase (may expand) | implemented |
 | `value.bytes()` | `Iterator<UInt8>` | Byte-level view | specified |

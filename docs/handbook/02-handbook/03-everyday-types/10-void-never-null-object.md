@@ -55,7 +55,7 @@ to `Object` does not unlock capability-gated members.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `type` | `Type` | Runtime/static type identity; every inhabited value exposes it | implemented |
+| `type` | `Type` | Runtime/static type identity; every inhabited value exposes it | specified |
 | `o.to_string()` | `String` | Universal member | implemented |
 
 Equality, hashing, ordering, iteration, indexing, arithmetic, and cloning exist

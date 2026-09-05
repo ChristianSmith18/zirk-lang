@@ -112,9 +112,9 @@ patterns use `Regex.parse` and return a typed `Result`. The standard engine
 guarantees linear-time matching (no backreferences or unsafe lookbehind).
 
 > **Delivery caveat:** `re'...'` literals, `matches`, `find` (with positional
-> and named groups on `Regex.Match`), and `replace` are delivered.
-> `Regex.split`, `find_all`, match iteration, and `re'...'` inside `match`
-> patterns remain pending.
+> and named groups on `Regex.Match`), `replace`, `Regex.split`, `find_all`,
+> match iteration, and `re'...'` inside `match` patterns are delivered.
+> `Regex.parse` remains pending.
 
 ### Properties
 
@@ -127,12 +127,12 @@ guarantees linear-time matching (no backreferences or unsafe lookbehind).
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `re'...'` | `Regex` | Compile-time checked literal | implemented |
-| `Regex.parse(pattern)` | `Result<Regex, RegexError>` | Dynamic pattern compilation | implemented |
+| `Regex.parse(pattern)` | `Result<Regex, RegexError>` | Dynamic pattern compilation | specified |
 | `r.matches(text)` | `Boolean` | Whole-text match | implemented |
 | `r.find(text)` | `Regex.Match?` | First match, or `null` | implemented |
-| `r.find_all(text)` | `List<Regex.Match>` | All matches | specified |
+| `r.find_all(text)` | `List<Regex.Match>` | All matches | implemented |
 | `r.replace(text, replacement)` | `String` | New string with all matches replaced | implemented |
-| `r.split(text)` | `List<String>` | Split around matches | specified — pending `List<T>` |
+| `r.split(text)` | `List<String>` | Split around matches | implemented |
 | `r.to_string()` | `String` | Pattern rendering | specified |
 
 ### `Regex.Match`
@@ -142,8 +142,8 @@ guarantees linear-time matching (no backreferences or unsafe lookbehind).
 | `start` | `Int32` | Grapheme index of match start | implemented |
 | `end` | `Int32` | Grapheme index one past match end | implemented |
 | `text` | `String` | Matched substring | implemented |
-| `m.group(index)` | `String?` | Positional capture | implemented |
-| `m.group(name)` | `String?` | Named capture | implemented |
+| `m.group(index)` | `String?` | Positional capture | implemented — the current signature returns `String` |
+| `m.group(name)` | `String?` | Named capture | implemented — the current signature returns `String` |
 
 ### Examples
 

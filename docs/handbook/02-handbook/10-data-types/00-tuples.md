@@ -53,14 +53,14 @@ value semantics. Tuple literals and `[N]` indexing are delivered
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Compile-time element count | implemented |
+| `length` | `Int32` | Compile-time element count | specified |
 | `[0]`, `[1]`, … `[N]` | component type | Constant-index projection; the index must be a compile-time integer literal | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `t.to_string()` | `String` | Rendering | implemented |
+| `t.to_string()` | `String` | Rendering | specified |
 
 Tuples cannot be sliced, resized, or indexed by a runtime integer. Equality,
 hashing, ordering, and cloning exist only when **every** component satisfies

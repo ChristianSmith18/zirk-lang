@@ -21,7 +21,7 @@ dispatch (delivered by `fase-3-abstract-dispatch`).
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `type` | `Type` | Universal member | implemented |
+| `type` | `Type` | Universal member | specified |
 | declared fields | declared types | Field contract decides mutability | implemented |
 
 ### Methods

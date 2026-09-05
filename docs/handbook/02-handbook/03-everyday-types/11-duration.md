@@ -50,8 +50,8 @@ component, rounding, formatting, and `std.time` surface is documented in
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `d.abs()` | `Duration` | Magnitude | implemented |
-| `d.is_zero()` / `d.is_negative()` / `d.is_positive()` | `Boolean` | Sign tests | implemented |
+| `d.abs()` | `Duration` | Magnitude | specified |
+| `d.is_zero()` / `d.is_negative()` / `d.is_positive()` | `Boolean` | Sign tests | specified |
 | `d.to_string()` | `String` | Human-readable rendering used by `stdout.println` | implemented |
 | `Duration.parse(text)` | `Result<Duration, ParseError>` | Compact and ISO 8601 input | specified |
 

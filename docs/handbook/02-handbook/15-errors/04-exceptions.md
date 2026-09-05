@@ -41,7 +41,7 @@ identities with stable `message`, `code`, `cause`, and `stack_trace`.
 | `e.message()` | `String` | Human-readable failure description | implemented |
 | `e.code()` | `String` | Stable machine-readable code | implemented |
 | `e.cause()` | `Throwable?` | Underlying cause, or `null` | implemented |
-| `e.suppressed()` | `List<Throwable>` | Secondary failures recorded during cleanup | specified — pending `List<T>` |
+| `e.suppressed()` | `List<Throwable>` | Secondary failures recorded during cleanup | implemented — returns `Throwable?` today; the `List<Throwable>` form is specified |
 | `e.stack_trace()` | `String` | Captured trace | implemented |
 | `e.to_string()` | `String` | Default rendering | implemented |
 

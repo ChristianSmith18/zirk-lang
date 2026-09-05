@@ -28,6 +28,10 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 
 Members such as equality, hashing, ordering, iteration, indexing, arithmetic, and cloning are capability-gated. Their presence must not be inferred merely from `Object`.
 
+> **Delivery note:** this index lists the *specified* surface. Per-member
+> delivery is tracked in each linked chapter's `Status` column — a member
+> marked `specified` is not yet accepted by the compiler.
+
 ---
 
 **Previous:** [← Feature Status](12-feature-status.md) · **Next:** [ Temporal Reference](14-temporal-reference.md)

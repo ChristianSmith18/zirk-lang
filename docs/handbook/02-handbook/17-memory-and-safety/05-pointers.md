@@ -107,11 +107,11 @@ error.
 | --- | --- | --- | --- |
 | `p.read()` | `T` | Dereference read | implemented |
 | `p.write(value)` | `Void` | Dereference write | implemented |
-| `*p` / `*p = v` | `T` / `Void` | Dereference operators | implemented |
+| `*p` / `*p = v` | `T` / `Void` | Dereference operators | specified — `read()`/`write()` are the delivered forms |
 | `p + n` / `p - n` | `Pointer<T>` | Element-stride arithmetic | implemented |
 | `p.offset(n)` | `Pointer<T>` | Named element-stride offset | implemented |
 | `p.offset_bytes(n)` | `Pointer<Byte>` | Byte-granularity offset | implemented |
-| `p.cast<U>()` | `Pointer<U>` | Representation cast | implemented |
+| `p.cast<U>()` | `Pointer<U>` | Representation cast | specified |
 | `p.as_slice(length)` | `Result<NativeSlice<T>, NativeError>` | Validated bounded view (`unsafe`) | implemented |
 | `p.as_slice_mut(length)` | `Result<NativeSliceMut<T>, NativeError>` | Validated mutable view (`unsafe`) | implemented |
 | `p.read_volatile()` / `p.write_volatile(v)` | `T` / `Void` | Volatile access for memory-mapped I/O | specified — named in the member index, signature invented |
@@ -143,14 +143,14 @@ in safe code. A slice cannot outlive its owner.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Element count | implemented |
+| `length` | `UInt64` | Element count | implemented |
 | `is_empty` | `Boolean` | `length == 0` | implemented |
 
 #### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `NativeSlice<T>(base:, length:)` | `NativeSlice<T>` | Validated construction inside `unsafe` | implemented |
+| `NativeSlice<T>(base:, length:)` | `NativeSlice<T>` | Validated construction inside `unsafe` | specified — `p.as_slice(length)` is the delivered constructor |
 | `s[i]` | `T` | Bounds-checked read | implemented |
 | `s[i] = v` (`NativeSliceMut` only) | `Void` | Bounds-checked write | implemented |
 | `s.iterator()` | `Iterator<T>` | Bounded iteration | specified |
