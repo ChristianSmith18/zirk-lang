@@ -116,39 +116,34 @@ The lexer SHALL emit a diagnostic for any character that does not belong to the 
 - **WHEN** the source contains a character that does not start any valid token
 - **THEN** a diagnostic with the character's exact location is emitted
 
-### Requirement: Fractional literals and scientific notation
+### Requirement: Fractional literal suffixes match the renamed type families
 
-The lexer SHALL recognize fractional and scientific-notation literals, distinct
-from an integer followed by a member access. A fractional or scientific literal
-with no suffix SHALL be an exact-decimal `Float` literal. A fractional or
-scientific literal with a `b` suffix (`1.5b`), optionally carrying a width
-(`1.5b16`, `1.5b32`, `1.5b64`, `1.5b128`), SHALL be a `BinaryFloat` literal.
-The literal text SHALL be carried verbatim for the semantic phase.
+A fractional literal suffixed with `f` or `fN` SHALL be classified as a binary float literal and its type SHALL be the corresponding `FloatN` width (`Float64` for `f`, `Float16` for `f16`, `Float32` for `f32`, `Float128` for `f128`). A fractional literal suffixed with `d` or `dN` SHALL be classified as an exact decimal literal and its type SHALL be `Decimal`. An unsuffixed fractional literal SHALL be classified as `Decimal`. The token `b` and `bN` suffixes from the previous naming scheme SHALL NOT resolve and SHALL be rejected with a diagnostic pointing to `f`/`fN`.
 
-Without this rule, `1.5` tokenizes as `1`, `.`, and `5`, which is the worst way
-to fail: the language cannot say "not yet" about something it does not even see.
+#### Scenario: `f` suffix resolves to `Float64`
 
-#### Scenario: Fractional literal is exact decimal
+- **WHEN** the literal `1.5f` is tokenized and typed
+- **THEN** the resulting type is `Float64`
 
-- **WHEN** `1.5` is tokenized
-- **THEN** a single exact-decimal `Float` literal is produced
-- **AND** the sequence integer, dot, integer is NOT produced
+#### Scenario: `f32` suffix resolves to `Float32`
 
-#### Scenario: Scientific notation is exact decimal
+- **WHEN** the literal `1.5f32` is tokenized and typed
+- **THEN** the resulting type is `Float32`
 
-- **WHEN** `6.02e23` or `1e2` is tokenized without a suffix
-- **THEN** a single exact-decimal `Float` literal with its exponent is produced
+#### Scenario: `d` suffix resolves to `Decimal`
 
-#### Scenario: Binary-float suffix
+- **WHEN** the literal `1.5d` is tokenized and typed
+- **THEN** the resulting type is `Decimal`
 
-- **WHEN** `1.5b32` is tokenized
-- **THEN** a single `BinaryFloat` literal is produced and retains the requested
-  width for the semantic check
+#### Scenario: Unsuffixed fractional literal resolves to `Decimal`
 
-#### Scenario: Bare binary-float suffix
+- **WHEN** the literal `1.5` is tokenized and typed without context
+- **THEN** the resulting type is `Decimal`
 
-- **WHEN** `0.1b` is tokenized
-- **THEN** a `BinaryFloat64` literal is produced
+#### Scenario: Old `b` suffix is rejected
+
+- **WHEN** the literal `1.5b` is tokenized
+- **THEN** a diagnostic states that the binary suffix is now `f` and the exact decimal suffix is `d`
 
 ### Requirement: Inclusive range token
 

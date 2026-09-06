@@ -58,16 +58,16 @@ Every arithmetic operation on a numeric type, of any width and signedness, inclu
 
 ### Requirement: Conversion between integer widths
 
-The checker SHALL allow implicit conversion from one numeric type to another when the destination can represent every value of the source type without loss, and SHALL require an explicit `as` cast for narrowing or cross-family conversions that the compiler cannot prove are safe at compile time. An integer literal SHALL adopt the width of its expected type when the value fits. An integer value or literal SHALL convert implicitly and exactly to `Float`, and a `Float` literal with zero fractional part SHALL become an integer for an integer target. Conversion between `Float` and any `BinaryFloat` width SHALL require an explicit cast or constructor in both directions.
+The checker SHALL allow implicit conversion from one numeric type to another when the destination can represent every value of the source type without loss, and SHALL require an explicit `as` cast for narrowing or cross-family conversions that the compiler cannot prove are safe at compile time. An integer literal SHALL adopt the width of its expected type when the value fits. An integer value or literal SHALL convert implicitly and exactly to `Decimal`, and a `Decimal` literal with zero fractional part SHALL become an integer for an integer target. Conversion between `Decimal` and any `Float` width SHALL require an explicit cast or constructor in both directions.
 
 #### Scenario: Unambiguous implicit widening
 
 - **WHEN** an `Int8` is passed where `Int32` is expected
 - **THEN** the conversion is implicit and no cast is required
 
-#### Scenario: Integer widens to exact `Float` implicitly
+#### Scenario: Integer widens to exact `Decimal` implicitly
 
-- **WHEN** an `Int32` is passed where `Float` is expected
+- **WHEN** an `Int32` is passed where `Decimal` is expected
 - **THEN** the conversion is implicit and the value is exact at scale 0
 
 #### Scenario: Literal that does not fit is rejected
@@ -77,50 +77,42 @@ The checker SHALL allow implicit conversion from one numeric type to another whe
 
 #### Scenario: Exact and binary floats do not mix implicitly
 
-- **WHEN** a `Float` value is used where `BinaryFloat64` is expected without a cast
+- **WHEN** a `Decimal` value is used where `Float64` is expected without a cast
 - **THEN** a diagnostic is emitted naming the explicit conversion required
 
-### Requirement: `Float` family without a valid `NaN`
+### Requirement: Fractional scalar family names
 
-The type system SHALL recognize `Float` as an exact base-ten decimal scalar (see
-the `exact-decimal-arithmetic` capability) and SHALL recognize `BinaryFloat16`,
-`BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`, with `BinaryFloat` as an
-alias for `BinaryFloat64`, as the IEEE 754 binary family. For a `BinaryFloat`
-value, an operation that would produce `NaN` under IEEE 754 SHALL instead be a
-controlled runtime error at the point where it occurs, and positive and negative
-infinity SHALL be valid, observable values. `Float` SHALL have neither `NaN` nor
-infinity; a `Float` operation that would require either SHALL be a controlled
-runtime error. The spellings `Float16`, `Float32`, `Float64`, and `Float128`
-SHALL NOT resolve.
+The type system SHALL recognize `Decimal` and its alias `Dec` as the exact base-ten decimal scalar. It SHALL recognize `Float16`, `Float32`, `Float64`, and `Float128` as the IEEE 754 binary family, with `Float` as an alias for `Float64`. The spellings `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`, and `BinaryFloat` SHALL NOT resolve. The type `Decimal` SHALL have neither `NaN` nor `Infinity`; a `Decimal` operation that would require either SHALL be a controlled runtime error. For a `Float` value, `NaN` SHALL NOT be valid, but infinities are valid; an operation that would produce `NaN` under IEEE 754 SHALL be a controlled runtime error.
 
 #### Scenario: Exact-decimal division by zero
 
-- **WHEN** a `Float` is divided by `0.0`
+- **WHEN** a `Decimal` is divided by `0.0`
 - **THEN** the program raises a controlled `DivisionByZeroError` at that operation
 
 #### Scenario: Binary division by zero
 
-- **WHEN** a non-zero `BinaryFloat64` is divided by `0.0b`
+- **WHEN** a non-zero `Float64` is divided by `0.0f` or `0.0f64`
 - **THEN** the result is infinite, not an error
 
 #### Scenario: Binary indeterminate operation
 
-- **WHEN** a `BinaryFloat` operation would produce `NaN` under standard IEEE 754
-  semantics (for example, `0.0b / 0.0b`)
-- **THEN** the program terminates with a controlled error at the point of that
-  operation; it does not propagate a `NaN` value
+- **WHEN** a `Float` operation would produce `NaN` under standard IEEE 754 semantics (for example, `0.0f / 0.0f`)
+- **THEN** the program terminates with a controlled error at the point of that operation; it does not propagate a `NaN` value
 
 #### Scenario: Fractional literal without context
 
-- **WHEN** a fractional literal appears without an annotation or context that
-  fixes its type
-- **THEN** its type is `Float` (exact base-ten decimal)
+- **WHEN** a fractional literal appears without an annotation or context that fixes its type
+- **THEN** its type is `Decimal` (exact base-ten decimal)
 
 #### Scenario: Former binary spelling is redirected
 
-- **WHEN** an annotation names `Float64`
-- **THEN** a diagnostic states that the binary type is now `BinaryFloat64` and
-  the exact base-ten type is `Float`
+- **WHEN** an annotation names `BinaryFloat64`
+- **THEN** a diagnostic states that the binary type is now `Float64` and the exact base-ten type is `Decimal`
+
+#### Scenario: Former exact spelling is redirected
+
+- **WHEN** an annotation names `Float` in a context where `Decimal` is expected after the rename
+- **THEN** a diagnostic states that the exact base-ten type is now `Decimal` and the binary type is `FloatN`
 
 ### Requirement: `Char` as a Unicode grapheme
 
@@ -140,10 +132,10 @@ The type system SHALL recognize `Char` as exactly one extended Unicode grapheme,
 
 ### Requirement: Deep contextual conversion
 
-An explicit constructor of a scalar type (`Float(expr)`, `String(expr)`, etc.) SHALL establish a conversion domain for the compatible operator tree it directly contains, converting each operand before the operation is evaluated. The context SHALL NOT mutate the original operands or cross into the body of a function called within the expression.
+An explicit constructor of a scalar type (`Decimal(expr)`, `Float(expr)`, `String(expr)`, etc.) SHALL establish a conversion domain for the compatible operator tree it directly contains, converting each operand before the operation is evaluated. The context SHALL NOT mutate the original operands or cross into the body of a function called within the expression.
 
 #### Scenario: Division converted before operating
-- **WHEN** `Float(3 / 4)` is written
+- **WHEN** `Decimal(3 / 4)` is written
 - **THEN** the result is `0.75`, not `0` truncated and then converted
 
 #### Scenario: The context does not cross a function call
