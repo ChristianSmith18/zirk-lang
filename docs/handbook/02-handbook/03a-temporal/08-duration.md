@@ -76,13 +76,13 @@ years belong to `Period`.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `days` | `Int64` | Normalized day component | specified |
-| `hours` | `Int32` | Hour component (0–23) | specified |
-| `minutes` | `Int32` | Minute component (0–59) | specified |
-| `seconds` | `Int32` | Second component (0–59) | specified |
-| `milliseconds` | `Int32` | Millisecond component (0–999) | specified |
-| `microseconds` | `Int32` | Microsecond component (0–999) | specified |
-| `nanoseconds` | `Int32` | Nanosecond component (0–999) | specified |
+| `days` | `Int64` | Normalized day component | implemented |
+| `hours` | `Int32` | Hour component (0–23) | implemented |
+| `minutes` | `Int32` | Minute component (0–59) | implemented |
+| `seconds` | `Int32` | Second component (0–59) | implemented |
+| `milliseconds` | `Int32` | Millisecond component (0–999) | implemented |
+| `microseconds` | `Int32` | Microsecond component (0–999) | implemented |
+| `nanoseconds` | `Int32` | Nanosecond component (0–999) | implemented |
 
 ### Methods
 
@@ -108,8 +108,8 @@ scalar in either appropriate order; `Duration / Duration → Float64`;
 `Duration % Duration`; equality/order; compound assignment. Zero division,
 non-finite scalar, precision/range loss, and overflow are controlled errors.
 
-> **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`
-> and printing are delivered. Component properties, `total_*`/`whole_*`,
+> **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`,
+> component properties and printing are delivered. `total_*`/`whole_*`,
 > rounding, `format()`, `humanize()`, and `to_iso_string()` are specified
 > pending the Phase 7 `std.time` delivery.
 

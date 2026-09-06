@@ -571,6 +571,41 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::Int(IntWidth::I64)],
             return_type: IrType::Int(IntWidth::I32),
         },
+        ExternFn {
+            name: "zirk_duration_days".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_hours".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_duration_minutes".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_duration_seconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_duration_milliseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_duration_microseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_duration_nanoseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
         // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
         // a `Duration` is nanoseconds, an `Int32` sign-extends — and the
         // handle itself is element-agnostic, so the same seven entry points
@@ -11317,6 +11352,9 @@ impl<'a> FunctionLowering<'a> {
             && let Some(operand) = self.lower_char_property(&expr.object, &expr.name.name, span) {
                 return operand;
             }
+        if let Some(operand) = self.lower_duration_property(&expr.object, &expr.name.name, span) {
+            return operand;
+        }
         if self
             .checked
             .expr_types
@@ -11724,6 +11762,33 @@ impl<'a> FunctionLowering<'a> {
             }
             _ => return None,
         })
+    }
+
+    fn lower_duration_property(
+        &mut self,
+        object: &ast::Expr,
+        member: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let receiver = self.lower_expr(object);
+        let (callee, returns) = match member {
+            "days" => ("zirk_duration_days", IrType::Int(IntWidth::I64)),
+            "hours" => ("zirk_duration_hours", IrType::Int(IntWidth::I32)),
+            "minutes" => ("zirk_duration_minutes", IrType::Int(IntWidth::I32)),
+            "seconds" => ("zirk_duration_seconds", IrType::Int(IntWidth::I32)),
+            "milliseconds" => ("zirk_duration_milliseconds", IrType::Int(IntWidth::I32)),
+            "microseconds" => ("zirk_duration_microseconds", IrType::Int(IntWidth::I32)),
+            "nanoseconds" => ("zirk_duration_nanoseconds", IrType::Int(IntWidth::I32)),
+            _ => return None,
+        };
+        Some(self.emit(
+            InstKind::Call {
+                callee: callee.to_string(),
+                args: vec![receiver],
+            },
+            returns,
+            span,
+        ))
     }
 
     fn lower_tuple_length(&mut self, object: &ast::Expr, span: Span) -> Operand {
@@ -12210,6 +12275,23 @@ impl<'a> FunctionLowering<'a> {
             && self.type_of(&expr.object, expr.object.span()) == IrType::Range
         {
             return IrType::Range;
+        }
+        // Duration component properties (`days`, `hours`, ...).
+        if matches!(
+            expr.name.name.as_str(),
+            "days" | "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds"
+                | "nanoseconds"
+        ) && self
+            .checked
+            .expr_types
+            .get(&expr.object.span())
+            .is_some_and(|ty| matches!(ty.base, Base::Duration))
+        {
+            return if expr.name.name == "days" {
+                IrType::Int(IntWidth::I64)
+            } else {
+                IrType::Int(IntWidth::I32)
+            };
         }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
