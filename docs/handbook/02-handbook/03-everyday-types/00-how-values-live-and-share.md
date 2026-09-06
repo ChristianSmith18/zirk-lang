@@ -13,7 +13,7 @@ variations on a single idea.
 
 | Position | Copy/Share rule | Representative types | Mental model |
 |---|---|---|---|
-| Immediate value | Assignment copies the whole value | `Int32`, `Boolean`, `Char`, `Float64` | A number in a box |
+| Immediate value | Assignment copies the whole value | `Int32`, `Boolean`, `Char`, `Float` | A number in a box |
 | Native value | Assignment copies an independent semantic value | `Date`, `Duration`, `record`, `Tuple` | An immutable payload |
 | Managed reference | Assignment makes another path to the same instance | `String`, `Array<T>`, `List<T>` | A label on a shared object |
 | Borrowed / dependent view | A short-lived, non-owning view | `Weak<T>`, `Dependent<T>`, `NativeSlice<T>` | A ticket that may expire |
@@ -40,7 +40,7 @@ not meaningful for them.
 ## Position 2: Native values
 
 ```zirk
-record Point { x: Float64; y: Float64; }
+record Point { x: Float; y: Float; }
 
 inmut a = Point(x: 1.0, y: 2.0);
 inmut b = a;
@@ -100,10 +100,10 @@ native code.
 A point in space can be represented in every position:
 
 ```zirk
-record Point { x: Float64; y: Float64; }
+record Point { x: Float; y: Float; }
 
 inmut value = Point(x: 1.0, y: 2.0);          // independent copy
-mut shared = class Point2D { x: Float64; y: Float64; }; // identity, shared
+mut shared = class Point2D { x: Float; y: Float; }; // identity, shared
 mut unsafe = Pointer<Point>(...);             // raw address
 ```
 

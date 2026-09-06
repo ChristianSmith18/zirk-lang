@@ -61,7 +61,7 @@ component, rounding, formatting, and `std.time` surface is documented in
 ```zirk
 inmut total = 2h + 30m;         // 2h30m
 inmut scaled = 3 * 90s;         // 270s
-inmut ratio = 3h / 30m;         // 6.0 (Float64)
+inmut ratio = 3h / 30m;         // 6.0 (Float)
 stdout.println("wait {total}");
 ```
 

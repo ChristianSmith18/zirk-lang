@@ -7,8 +7,8 @@ implements `+` and `_subtract` implements `-`:
 
 ```zirk
 class Vector2 {
-    x: Float64;
-    y: Float64;
+    x: Float;
+    y: Float;
 
     fn _add(other: Vector2): Vector2 {
         return Vector2(x + other.x, y + other.y);

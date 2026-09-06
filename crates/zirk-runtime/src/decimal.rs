@@ -183,7 +183,11 @@ fn divrem_u256(numerator: U256, divisor: u128) -> (U256, u128) {
         // so a single subtraction restores the invariant.
         if remainder >= divisor {
             remainder -= divisor;
-            let word = if bit >= 128 { &mut quotient.hi } else { &mut quotient.lo };
+            let word = if bit >= 128 {
+                &mut quotient.hi
+            } else {
+                &mut quotient.lo
+            };
             *word |= 1u128 << (bit % 128);
         }
     }
@@ -221,11 +225,7 @@ fn round_quotient(
             remainder > complement || (remainder == complement && quotient % 2 == 1)
         }
     };
-    if round_up {
-        quotient + 1
-    } else {
-        quotient
-    }
+    if round_up { quotient + 1 } else { quotient }
 }
 
 /// Reduces `(coef, scale)` to at most `max_digits` significant digits by
@@ -288,7 +288,13 @@ fn add(a: Decimal, b: Decimal) -> Decimal {
 }
 
 fn sub(a: Decimal, b: Decimal) -> Decimal {
-    add(a, Decimal { coef: -b.coef, scale: b.scale })
+    add(
+        a,
+        Decimal {
+            coef: -b.coef,
+            scale: b.scale,
+        },
+    )
 }
 
 fn mul(a: Decimal, b: Decimal) -> Decimal {
@@ -352,19 +358,18 @@ fn div_to_scale(a: Decimal, b: Decimal, target_scale: u32, mode: RoundingMode) -
     let dividend = a.coef.unsigned_abs();
 
     // `dividend * 10^raise`, in a 256-bit intermediate when it will not fit 128.
-    let (quotient_mag, remainder) = match pow10_u128_checked(raise)
-        .and_then(|factor| dividend.checked_mul(factor))
-    {
-        Some(scaled) => (scaled / divisor, scaled % divisor),
-        None => {
-            let wide = scale_u256(dividend, raise);
-            let (q, r) = divrem_u256(wide, divisor);
-            match q.to_u128() {
-                Some(mag) => (mag, r),
-                None => overflow(),
+    let (quotient_mag, remainder) =
+        match pow10_u128_checked(raise).and_then(|factor| dividend.checked_mul(factor)) {
+            Some(scaled) => (scaled / divisor, scaled % divisor),
+            None => {
+                let wide = scale_u256(dividend, raise);
+                let (q, r) = divrem_u256(wide, divisor);
+                match q.to_u128() {
+                    Some(mag) => (mag, r),
+                    None => overflow(),
+                }
             }
-        }
-    };
+        };
 
     let rounded = round_quotient(quotient_mag, remainder, divisor, negative, mode);
     if digit_count(rounded) > MAX_COEF_DIGITS {
@@ -538,7 +543,11 @@ fn round_to_places(value: Decimal, places: i32, mode: RoundingMode) -> Decimal {
     let divisor = pow10_u128_checked(drop).unwrap_or_else(|| overflow());
     let remainder = magnitude % divisor;
     let bumped = round_quotient(magnitude / divisor, remainder, divisor, negative, mode);
-    let signed = if negative { -(bumped as i128) } else { bumped as i128 };
+    let signed = if negative {
+        -(bumped as i128)
+    } else {
+        bumped as i128
+    };
     Decimal::new(signed, places)
 }
 
@@ -561,11 +570,7 @@ fn format_decimal(value: Decimal) -> String {
         format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
     };
 
-    if negative {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if negative { format!("-{body}") } else { body }
 }
 
 /// Parses exact decimal / scientific text into a `Decimal`.
@@ -595,7 +600,10 @@ fn from_str(text: &str) -> Option<Decimal> {
         Some((i, f)) => (i, f),
         None => (rest, ""),
     };
-    if !int_part.bytes().chain(frac_part.bytes()).all(|b| b.is_ascii_digit())
+    if !int_part
+        .bytes()
+        .chain(frac_part.bytes())
+        .all(|b| b.is_ascii_digit())
         || (int_part.is_empty() && frac_part.is_empty())
     {
         return None;
@@ -714,7 +722,12 @@ pub unsafe extern "C" fn zirk_rt_decimal_sqrt(out: *mut Decimal, value: *const D
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_decimal_neg(out: *mut Decimal, value: *const Decimal) {
     let value = unsafe { *value };
-    unsafe { *out = Decimal { coef: -value.coef, scale: value.scale } };
+    unsafe {
+        *out = Decimal {
+            coef: -value.coef,
+            scale: value.scale,
+        }
+    };
 }
 
 /// `value.abs()`.
@@ -724,8 +737,17 @@ pub unsafe extern "C" fn zirk_rt_decimal_neg(out: *mut Decimal, value: *const De
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_decimal_abs(out: *mut Decimal, value: *const Decimal) {
     let value = unsafe { *value };
-    let coef = if value.coef == i128::MIN { overflow() } else { value.coef.abs() };
-    unsafe { *out = Decimal { coef, scale: value.scale } };
+    let coef = if value.coef == i128::MIN {
+        overflow()
+    } else {
+        value.coef.abs()
+    };
+    unsafe {
+        *out = Decimal {
+            coef,
+            scale: value.scale,
+        }
+    };
 }
 
 /// `a <=> b` — `-1`, `0`, `1`.
@@ -744,7 +766,11 @@ pub unsafe extern "C" fn zirk_rt_decimal_cmp(a: *const Decimal, b: *const Decima
 /// # Safety
 /// `a`/`b`/`out` as in [`zirk_rt_decimal_add`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_decimal_min(out: *mut Decimal, a: *const Decimal, b: *const Decimal) {
+pub unsafe extern "C" fn zirk_rt_decimal_min(
+    out: *mut Decimal,
+    a: *const Decimal,
+    b: *const Decimal,
+) {
     let (a, b) = (unsafe { *a }, unsafe { *b });
     unsafe { *out = if compare(a, b) <= 0 { a } else { b } };
 }
@@ -752,7 +778,11 @@ pub unsafe extern "C" fn zirk_rt_decimal_min(out: *mut Decimal, a: *const Decima
 /// # Safety
 /// `a`/`b`/`out` as in [`zirk_rt_decimal_add`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_decimal_max(out: *mut Decimal, a: *const Decimal, b: *const Decimal) {
+pub unsafe extern "C" fn zirk_rt_decimal_max(
+    out: *mut Decimal,
+    a: *const Decimal,
+    b: *const Decimal,
+) {
     let (a, b) = (unsafe { *a }, unsafe { *b });
     unsafe { *out = if compare(a, b) >= 0 { a } else { b } };
 }
@@ -895,7 +925,11 @@ pub unsafe extern "C" fn zirk_rt_decimal_parse_value(out: *mut Decimal, text: *c
 /// # Safety
 /// `text`/`len` describe a valid UTF-8 byte range; `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_decimal_from_literal(out: *mut Decimal, text: *const u8, len: usize) {
+pub unsafe extern "C" fn zirk_rt_decimal_from_literal(
+    out: *mut Decimal,
+    text: *const u8,
+    len: usize,
+) {
     let bytes = unsafe { std::slice::from_raw_parts(text, len) };
     let parsed = std::str::from_utf8(bytes)
         .ok()
@@ -941,7 +975,14 @@ pub unsafe extern "C" fn zirk_rt_decimal_from_f64(out: *mut Decimal, value: f64)
     }
     // Shortest round-trip text, then rounded into the significant-digit budget.
     let parsed = from_str(&format!("{value}"))
-        .map(|d| reduce_to_digits(d.coef, d.scale as u32, MAX_SIGNIFICANT_DIGITS, RoundingMode::HalfEven))
+        .map(|d| {
+            reduce_to_digits(
+                d.coef,
+                d.scale as u32,
+                MAX_SIGNIFICANT_DIGITS,
+                RoundingMode::HalfEven,
+            )
+        })
         .unwrap_or(Decimal::ZERO);
     unsafe { *out = parsed };
 }
@@ -1024,10 +1065,19 @@ mod tests {
     #[test]
     fn division_half_even_control() {
         // 2.345 rounded to 2 places, half-even -> 2.34
-        assert_eq!(s(round_to_places(d("2.345"), 2, RoundingMode::HalfEven)), "2.34");
+        assert_eq!(
+            s(round_to_places(d("2.345"), 2, RoundingMode::HalfEven)),
+            "2.34"
+        );
         // 2.355 -> 2.36
-        assert_eq!(s(round_to_places(d("2.355"), 2, RoundingMode::HalfEven)), "2.36");
-        assert_eq!(s(round_to_places(d("2.345"), 2, RoundingMode::HalfUp)), "2.35");
+        assert_eq!(
+            s(round_to_places(d("2.355"), 2, RoundingMode::HalfEven)),
+            "2.36"
+        );
+        assert_eq!(
+            s(round_to_places(d("2.345"), 2, RoundingMode::HalfUp)),
+            "2.35"
+        );
     }
 
     #[test]

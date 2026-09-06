@@ -16,7 +16,7 @@ Mixed integer/Float arithmetic evaluates in the Float domain:
 
 ```zirk
 3 / 4;    // 0: Int32
-3 / 4.0;  // 0.75: Float64
+3 / 4.0;  // 0.75: Float
 ```
 
 ## Deep contextual conversion

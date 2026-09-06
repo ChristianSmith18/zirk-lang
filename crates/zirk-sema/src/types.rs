@@ -473,9 +473,7 @@ impl Type {
                 }
                 // Int -> exact Float is always exact (every integer is a
                 // terminating decimal); Decimal -> Decimal is trivially exact.
-                (Base::Decimal, Base::Int(_) | Base::Decimal) => {
-                    self.nullable || !other.nullable
-                }
+                (Base::Decimal, Base::Int(_) | Base::Decimal) => self.nullable || !other.nullable,
                 _ => false,
             };
         }
@@ -1093,7 +1091,10 @@ mod tests {
     fn float_is_exact_and_binaryfloat_is_the_ieee_family() {
         // The plain name is the exact base-ten decimal type.
         assert_eq!(Type::from_name("Float"), Some(Type::FLOAT));
-        assert_eq!(Type::from_name("Float").map(|t| t.base), Some(Base::Decimal));
+        assert_eq!(
+            Type::from_name("Float").map(|t| t.base),
+            Some(Base::Decimal)
+        );
 
         // The IEEE 754 binary family is `BinaryFloat*`.
         for name in [

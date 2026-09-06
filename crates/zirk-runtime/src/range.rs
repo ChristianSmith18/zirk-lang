@@ -118,9 +118,7 @@ pub unsafe extern "C" fn zirk_range_step(handle: *const c_void) -> i64 {
 /// `handle` must come from `zirk_range_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_range_inclusive(handle: *const c_void) -> i64 {
-    unsafe { borrow(handle) }
-        .map(|r| r.inclusive)
-        .unwrap_or(0)
+    unsafe { borrow(handle) }.map(|r| r.inclusive).unwrap_or(0)
 }
 
 /// How many elements the sequence produces, in `i128` so a huge range
@@ -148,8 +146,8 @@ fn element_count(range: &ZirkRange) -> i128 {
 /// a sliced bound can legitimately sit just past `i64`'s range when the
 /// original range's own end did.
 fn element_at(range: &ZirkRange, index: i128) -> i64 {
-    (range.start as i128 + index * range.step as i128)
-        .clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    (range.start as i128 + index * range.step as i128).clamp(i64::MIN as i128, i64::MAX as i128)
+        as i64
 }
 
 /// `r.reverse()` (roadmap Phase 7): the same elements, produced last to
@@ -172,14 +170,7 @@ pub unsafe extern "C" fn zirk_range_reverse(handle: *const c_void) -> *mut c_voi
     // The reversed sequence runs `last, last - step, …, start`: a backward
     // range whose exclusive bound sits one step below the original `start`,
     // so the `current > end` walk still lands exactly on `start`.
-    unsafe {
-        zirk_range_new(
-            last,
-            range.start.saturating_sub(range.step),
-            -range.step,
-            0,
-        )
-    }
+    unsafe { zirk_range_new(last, range.start.saturating_sub(range.step), -range.step, 0) }
 }
 
 /// `r[lo:hi:st]` (roadmap Phase 7): slices the *element sequence* — `r[1:3]`
@@ -249,18 +240,11 @@ pub unsafe extern "C" fn zirk_range_slice(
 
     // The result's step is the composition of both strides: `st` positions
     // of `st_range` elements each.
-    let new_step = (range.step as i128 * step as i128)
-        .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    let new_step =
+        (range.step as i128 * step as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     // Exclusive end, one result-step past the last included element — the
     // walk's own convention (`<`/`>` by step sign) then stops exactly after
     // `last` without an extra compare at build time.
     let new_end = element_at(range, last as i128).saturating_add(new_step);
-    unsafe {
-        zirk_range_new(
-            element_at(range, first as i128),
-            new_end,
-            new_step,
-            0,
-        )
-    }
+    unsafe { zirk_range_new(element_at(range, first as i128), new_end, new_step, 0) }
 }

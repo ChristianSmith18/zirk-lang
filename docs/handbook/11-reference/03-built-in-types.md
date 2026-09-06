@@ -10,7 +10,8 @@ examples, and advice on choosing a type, begin with
 |---|---|---|---|---|
 | Signed integer | `Int8`, `Int16`, `Int32`, `Int64`, `Int128`; `Int` = `Int32` | value, fixed-width, checked arithmetic | `0` |
 | Unsigned integer | `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`; `UInt` = `UInt32` | value, fixed-width, checked arithmetic | `0` |
-| Floating point | `Float16`, `Float32`, `Float64`, `Float128`; `Float` = `Float64` | IEEE-style binary value without valid `NaN` | `0.0` |
+| Exact decimal | `Float` | base-ten value (128-bit coefficient + scale), no width family, no `NaN`/infinity; the default fractional type | `0` |
+| Binary float | `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`; `BinaryFloat` = `BinaryFloat64` | IEEE 754 binary, no valid `NaN`; `b` literal suffix | `0.0b` |
 | Logic | `Boolean` | value; only `true` or `false` | `false` |
 | Text unit | `Char` | one Unicode grapheme value | invalid without an explicit value |
 | Text | `String` | mutable, shared reference; grapheme-indexed | `""` |
@@ -24,7 +25,7 @@ examples, and advice on choosing a type, begin with
 | Synchronization | `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `Atomic<T>` | contract-controlled shared state | type-specific |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
-`Decimal*` is not a Zirk type family. Exact base-ten arithmetic may later be supplied as a distinct standard-library type; it must not be confused with `Float`.
+`Decimal*` is not a Zirk type name. Exact base-ten arithmetic is `Float` itself; `BinaryFloat*` is the opt-in IEEE 754 binary family.
 
 ## Examples by category
 
@@ -32,7 +33,7 @@ examples, and advice on choosing a type, begin with
 
 ```zirk
 inmut count: Int32 = 0;
-mut temperature: Float64 = 98.6;
+mut temperature: Float = 98.6;
 inmut flag: Boolean = true;
 inmut unit: Char = 'π';
 ```
@@ -67,7 +68,7 @@ See [String](../02-handbook/03-everyday-types/09-string.md),
 ### User-defined values and references
 
 ```zirk
-record Point { x: Float64; y: Float64; }
+record Point { x: Float; y: Float; }
 class Session { token: String; }
 ```
 
@@ -106,7 +107,7 @@ Every inhabited value exposes `type` and `to_string()`. Equality, hashing, order
 
 - Use `Int` for ordinary whole-number counters; pick an explicit width at storage, ABI, or protocol boundaries.
 - Use `UInt*` only when the domain and boundary genuinely require a non-negative binary integer.
-- Use `Float` for approximate real-number computation, never for exact money.
+- Use `Float` for everyday fractional values, money and exact base-ten domains; use `BinaryFloat*` for graphics, DSP, ML and C interop.
 - Use `Char` for one user-perceived Unicode grapheme and `String` for text.
 - Choose temporal types by meaning, not formatting: a birthday is a `Date`, an elapsed timeout is a `Duration`, and a globally scheduled event is a `ZonedDateTime` or `Instant`.
 - Use `List<T>` when the size changes, `Array<T>` or `T[n]` when it is fixed, `Pointer<T>` only inside `unsafe`, and `Weak<T>` when you do not want to keep an object alive.

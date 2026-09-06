@@ -151,7 +151,9 @@ fn shape(e: &Expr) -> String {
         ),
         Expr::Slice(s) => {
             let part = |p: &Option<Box<Expr>>| {
-                p.as_ref().map(|e| shape(e)).unwrap_or_else(|| "_".to_string())
+                p.as_ref()
+                    .map(|e| shape(e))
+                    .unwrap_or_else(|| "_".to_string())
             };
             format!(
                 "{}[{}:{}:{}]",

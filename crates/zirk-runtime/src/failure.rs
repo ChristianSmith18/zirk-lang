@@ -115,7 +115,9 @@ pub extern "C" fn zirk_rt_float_nan() -> ! {
 /// special value to produce: an out-of-domain operation is a controlled stop.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_decimal_domain() -> ! {
-    fatal("Float operation is outside its domain (for example, the square root of a negative value)")
+    fatal(
+        "Float operation is outside its domain (for example, the square root of a negative value)",
+    )
 }
 
 /// Reports a program-supplied `fatalError(message)` and terminates (roadmap

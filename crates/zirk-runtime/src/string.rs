@@ -765,10 +765,7 @@ pub unsafe extern "C" fn zirk_str_search(handle: *const c_void, pat: *const c_vo
 ///
 /// `handle` and `sep` must come from this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_str_split(
-    handle: *const c_void,
-    sep: *const c_void,
-) -> *mut c_void {
+pub unsafe extern "C" fn zirk_str_split(handle: *const c_void, sep: *const c_void) -> *mut c_void {
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
