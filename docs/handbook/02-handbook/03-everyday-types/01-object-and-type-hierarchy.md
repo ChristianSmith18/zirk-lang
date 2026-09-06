@@ -9,7 +9,7 @@ Object
 ├── Value
 │   ├── Numeric
 │   │   ├── Integer: Int8 … Int128, UInt8 … UInt128
-│   │   ├── Float (exact base-ten decimal)
+│   │   ├── Decimal (exact base-ten decimal)
 │   │   └── Float: Float16 … Float128
 │   ├── Boolean
 │   ├── Char

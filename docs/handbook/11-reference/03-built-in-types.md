@@ -11,7 +11,7 @@ examples, and advice on choosing a type, begin with
 | Signed integer | `Int8`, `Int16`, `Int32`, `Int64`, `Int128`; `Int` = `Int32` | value, fixed-width, checked arithmetic | `0` |
 | Unsigned integer | `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`; `UInt` = `UInt32` | value, fixed-width, checked arithmetic | `0` |
 | Exact decimal | `Decimal` (`Dec`) | base-ten value (128-bit coefficient + scale), no width family, no `NaN`/infinity; the default fractional type | `0` |
-| Binary float | `Float16`, `Float32`, `Float64`, `Float128`; `Float` = `Float64` | IEEE 754 binary, no valid `NaN`; `b`/`f` literal suffix | `0.0b` |
+| Binary float | `Float16`, `Float32`, `Float64`, `Float128`; `Float` = `Float64` | IEEE 754 binary, no valid `NaN`; `f` literal suffix | `0.0f` |
 | Logic | `Boolean` | value; only `true` or `false` | `false` |
 | Text unit | `Char` | one Unicode grapheme value | invalid without an explicit value |
 | Text | `String` | mutable, shared reference; grapheme-indexed | `""` |
