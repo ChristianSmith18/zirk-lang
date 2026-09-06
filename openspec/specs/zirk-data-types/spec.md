@@ -1,8 +1,7 @@
 # zirk-data-types Specification
 
 ## Purpose
-Defines tuples, records, value classes, algebraic and mapped enums, unions,
-aliases, and their value semantics.
+Defines tuples, records, enums, unions, aliases, and their value semantics.
 ## Requirements
 ### Requirement: Standard text utilities preserve native text semantics
 `std.text` SHALL provide reusable `StringBuilder`, compile-checked literal
@@ -108,7 +107,7 @@ Records SHALL be nominal immutable values with named-only construction, omitted 
 - **THEN** they contain `0`, `false`, and `""` respectively
 
 ### Requirement: Closed data-only enums
-Traditional and algebraic enums SHALL be closed data declarations and SHALL NOT contain user-defined methods. Traditional cases SHALL expose native `.name`, `.value`, `to_string()`, `from_name()`, and `from_value()` behavior without implicit mapping conversion or declaration order. Algebraic payloads SHALL be extracted only through exhaustive match.
+Traditional and algebraic enums SHALL be closed data declarations and SHALL NOT contain user-defined methods. Traditional cases SHALL expose native `.name`, `.value`, and `to_string()` behavior without implicit mapping conversion or declaration order; the enum type itself SHALL expose the built-in static members `count`, `keys()`, `values()`, `from_name()`, and `from_value()` (see `enum-static-members`). Algebraic payloads SHALL be extracted only through exhaustive match.
 
 #### Scenario: Enum method rejected
 - **WHEN** an enum body declares `fn to_celsius()`
@@ -234,4 +233,96 @@ Every invalid example in the new or expanded type chapters SHALL cite a diagnost
 #### Scenario: List mutation through an inmut::strict alias
 - **WHEN** the `List` chapter shows an invalid example
 - **THEN** the example names the expected borrow/alias error and, if the feature is not yet implemented, marks it with an implementation-status notice
+
+### Requirement: Tuple members
+
+A tuple value SHALL expose `length` (compile-time element count, `Int32`)
+and `to_string()` (readable rendering) in addition to constant indexing
+and destructuring.
+
+#### Scenario: Tuple length
+
+- **WHEN** `(1, "x", true).length` is read
+- **THEN** the result is `3`
+
+#### Scenario: Tuple rendering
+
+- **WHEN** `(1, "x").to_string()` runs
+- **THEN** the result is a `String` naming both elements
+
+### Requirement: Traditional enum case members
+
+A traditional-enum case SHALL expose `name` (declared case name,
+`String`), `value` (explicit mapping or the case name by default), and
+`to_string()` (the case name).
+
+#### Scenario: Case name
+
+- **WHEN** `Color.Red.name` is read on `enum Color { Red, Green }`
+- **THEN** the result is `"Red"`
+
+#### Scenario: Mapped value
+
+- **WHEN** `Color.Red.value` is read on a `String`-mapped enum
+- **THEN** the result is the mapped value
+
+### Requirement: Universal rendering on structured values
+
+`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL
+answer `to_string()` with a readable default rendering when the type does
+not declare its own.
+
+#### Scenario: Record default rendering
+
+- **WHEN** `Point(x: 1, y: 2).to_string()` runs on a record without a
+  declared `to_string`
+- **THEN** the result is a `String` naming the type
+
+### Requirement: Type categories updated
+
+The user-defined type categories SHALL be `class` (reference with identity), `record` (nominal immutable value), `enum` (closed nominal set), `union`, and `alias`. Documentation and diagnostics SHALL no longer mention `value class`.
+
+#### Scenario: Type category documentation
+- **WHEN** a developer consults the handbook for user-defined types
+- **THEN** `value class` is absent and `record` is the recommended value type
+
+### Requirement: Type alias lowering
+
+A `type` alias declared at module scope SHALL resolve to its underlying type throughout the compiler pipeline and SHALL be usable in executable programs without a `NOT_LOWERED` error.
+
+#### Scenario: Alias in a variable declaration
+- **WHEN** `type UserId = Int32;` and `mut x: UserId = 5;` are written
+- **THEN** the variable `x` has type `Int32` and the program compiles and runs
+
+#### Scenario: Alias to a generic type
+- **WHEN** `type IntList = List<Int32>;` and `mut l: IntList = List<Int32>();` are written
+- **THEN** the alias resolves to `List<Int32>` and `l` behaves as a `List<Int32>`
+
+### Requirement: Clone derivation for record and enum
+
+A `record` or `enum` SHALL automatically implement `Clone` when every field/associated value implements `Clone`. A record or enum containing a non-`Clone` field SHALL be rejected with the same diagnostic used for `class`.
+
+#### Scenario: Record clone
+- **WHEN** `record Point { x: Int32; y: Int32; }` is declared and `p2 = p1.clone()` is called
+- **THEN** `p2` is an independent copy of `p1`
+
+#### Scenario: Enum clone
+- **WHEN** `enum Color { Red, Green, Blue }` is declared and `c2 = c1.clone()` is called
+- **THEN** `c2` is an independent copy of `c1`
+
+#### Scenario: Non-Clone field rejected
+- **WHEN** a `record` contains a `class` field that does not implement `Clone`
+- **THEN** deriving `Clone` for the record is rejected
+
+### Requirement: Generic contract satisfaction
+
+A user-defined generic `class` or `record` that `implements` a generic contract (e.g., `Iterable<T>`) SHALL have its contract methods lowered with the type parameters substituted at each call site.
+
+#### Scenario: Generic iterable class
+- **WHEN** `class Box<T> implements Iterable<T>` declares `fn iterator(): Iterator<T>`
+- **THEN** `for x in Box<Int32>()` compiles and yields `Int32` values
+
+#### Scenario: Generic iterable record
+- **WHEN** `record Pair<T, U> implements Iterable<T>` declares a custom iterator
+- **THEN** `for x in Pair<Int32, String>()` compiles and yields the first `Int32` element
 

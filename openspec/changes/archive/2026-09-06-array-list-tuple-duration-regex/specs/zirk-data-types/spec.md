@@ -4,22 +4,6 @@
 
 Defines tuples, records, enums, unions, aliases, and their value semantics. This change removes `value class` and updates type categories accordingly.
 
-## REMOVED Requirements
-
-### Requirement: Value class declarations
-
-**Reason**: `value class` is semantically redundant with `record` and is currently half-finished. `record` already covers the same use cases with a complete feature set.
-
-**Migration**: Replace every `value class Name(field: Type);` with `record Name { field: Type; }` or `class Name { ... }` as appropriate for the desired mutability and identity semantics.
-
-#### Scenario: Old value class is rejected
-- **WHEN** `value class UserId(value: UInt64);` is written
-- **THEN** a diagnostic is emitted indicating that `value class` is not supported
-
-#### Scenario: Migration to record works
-- **WHEN** `record UserId { value: UInt64; }` is written instead
-- **THEN** the declaration is accepted and behaves as a nominal value type
-
 ## ADDED Requirements
 
 ### Requirement: Type categories updated
