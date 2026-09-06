@@ -1,0 +1,6 @@
+// `temporal-rich-api`: a `Duration` may shift a `Date`/`DateTime` forward
+// or back, but it never *subtracts* one — `2h - d` names no operation.
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    inmut x = 2h - d;
+}

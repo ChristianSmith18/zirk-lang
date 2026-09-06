@@ -1,0 +1,6 @@
+// `temporal-rich-api`: `is_before` compares a temporal value with another
+// of the *same* type — a `Time` is not a `Date`.
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    stdout.println(d.is_before(Time(14, 30)));
+}

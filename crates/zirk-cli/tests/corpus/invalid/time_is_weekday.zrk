@@ -1,0 +1,6 @@
+// `temporal-rich-api`: `is_weekday`/`is_weekend` are calendar queries —
+// a `Time` carries no date to ask about.
+fn main(): Void {
+    inmut t = Time(14, 30);
+    stdout.println(t.is_weekday());
+}

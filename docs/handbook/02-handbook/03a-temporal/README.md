@@ -9,18 +9,28 @@ Start with [Choosing a Temporal Type](./01-choosing-a-temporal-type.md), then
 read only the concrete types your application needs. The later chapters define
 composition, operators, parsing, DST and errors across the family.
 
-> **Implemented today** (`date-and-time-types`): `Date`, `Time` and
-> `DateTime` — validated `Date(y, m, d)`/`Time(h, m, s?, ns?)`/
-> `DateTime(d, t)` constructors that throw `InvalidDateError`/
-> `InvalidTimeError`, the read-only `year`/`month`/`day`/`hour`/`minute`/
-> `second`/`nanosecond` components (plus `date`/`time` on `DateTime`), ISO
-> 8601 `to_string()`, `Date ± Int`, `Date - Date`, `Time ± Duration`
-> (wrapping around midnight), `Time - Time`, `Date + Time`, total
-> same-type comparisons, and the host-clock `Date.today()`,
-> `Time.now_local()`/`now_utc()` and `DateTime.now_local()`/`now_utc()`.
-> `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, parsing, `format()`
-> and the `with_*`/`is_*` helpers these pages describe remain pending — the
-> chapters below document the target surface.
+> **Implemented today** (`date-and-time-types` + `temporal-rich-api`):
+> `Date`, `Time` and `DateTime` — validated `Date(y, m, d)`/
+> `Time(h, m, s?, ns?)`/`DateTime(d, t)` constructors that throw
+> `InvalidDateError`/`InvalidTimeError`; the `year`/`month`/`day`,
+> `hour`/`minute`/`second`, `millisecond`/`microsecond`/`nanosecond` and
+> `date`/`time` properties; the ISO calendrical `day_of_week`,
+> `day_of_year`, `week_of_year`, `quarter`, `days_in_month`,
+> `days_in_year`, `is_leap_year`; the `is_before`/`is_after`/`is_same`/
+> `is_same_or_before`/`is_same_or_after`/`is_between` queries plus
+> `is_weekday`/`is_weekend` on `Date`/`DateTime`; the validated
+> `with_*` component replacements; `start_of`/`end_of(unit)` returning
+> `Result<_, ParseError>`; strict ISO `Date.parse`/`Time.parse`/
+> `DateTime.parse`; `format(pattern)` with the `YYYY`/`MM`/`DD`/`HH`/
+> `mm`/`ss`/`SSS` tokens; `to_iso_string`/`to_string`; `Date ± Int`,
+> `Date - Date` (`Int64`), `Time ± Duration` (wrapping modulo a day),
+> `Time - Time`, `Date + Time`, `DateTime ± Duration`, `Date ± Duration`
+> (promoting to `DateTime` read at local midnight), `DateTime - DateTime`
+> (`Duration`), total same-type comparisons, and the host-clock
+> `Date.today()`, `Time.now_local()`/`now_utc()` and
+> `DateTime.now_local()`/`now_utc()`. `Instant`, `ZonedDateTime`,
+> `TimeZone`, `Period`, `TimeShift`, locales and zones remain pending —
+> the chapters below document the target surface.
 
 1. [Choosing a Temporal Type](./01-choosing-a-temporal-type.md)
 2. [Date](./02-date.md)

@@ -865,6 +865,153 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::Int(IntWidth::I128)],
             return_type: IrType::String,
         },
+        // Calendrical projections (`temporal-rich-api`): pure functions of
+        // the day count; `DateTime` delegates through `datetime_days`.
+        ExternFn {
+            name: "zirk_rt_date_day_of_week".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_day_of_year".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_week_of_year".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_quarter".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_days_in_month".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_days_in_year".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_date_is_leap".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Boolean,
+        },
+        // `start_of`/`end_of` — the `ok` probe validates the unit string,
+        // the `value` entrypoint computes the boundary on the passing
+        // branch (the `Result` halves the IR builds around them).
+        ExternFn {
+            name: "zirk_rt_date_start_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_date_start_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_date_end_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_date_end_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_time_start_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_time_start_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_time_end_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_time_end_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_start_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_start_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_end_of_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_end_of_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        // Strict ISO 8601 parsing (`ok`/`value` split like `IntN.parse`).
+        ExternFn {
+            name: "zirk_rt_date_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_date_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_time_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_time_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        // `format(pattern)` — never fails; unknown text is literal.
+        ExternFn {
+            name: "zirk_rt_date_format".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_time_format".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_format".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String],
+            return_type: IrType::String,
+        },
         // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
         // a `Duration` is nanoseconds, an `Int32` sign-extends — and the
         // handle itself is element-agnostic, so the same seven entry points
@@ -6341,6 +6488,9 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_duration_method_call(e, span) {
                     return operand;
                 }
+                if let Some(operand) = self.lower_temporal_method_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_regex_method_call(e, span) {
                     return operand;
                 }
@@ -10247,6 +10397,514 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    /// `v.<method>(...)` on a `Date`/`Time`/`DateTime` receiver
+    /// (`temporal-rich-api`): comparison queries are pure IR, `with_*`
+    /// revalidates through the constructor's own guard, `start_of`/`end_of`
+    /// and `format`/`parse` go through the runtime.
+    fn lower_temporal_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if field.safe {
+            return None;
+        }
+        let sema = self.checked.expr_types.get(&field.object.span()).copied()?;
+        let base = sema.base;
+        if !matches!(
+            base,
+            zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime
+        ) {
+            return None;
+        }
+        let name = field.name.name.as_str();
+        let value_ty = self.ir_type(sema);
+        let i64ty = IrType::Int(IntWidth::I64);
+        let i32ty = IrType::Int(IntWidth::I32);
+        match name {
+            "is_before" | "is_after" | "is_same" | "is_same_or_before" | "is_same_or_after"
+                if call.args.len() == 1 =>
+            {
+                // The argument may open blocks (a `Date(...)` construction
+                // validates through a branch), so the receiver is held in a
+                // slot — a value never crosses a block (ADR-007).
+                let receiver = self.lower_expr(&field.object);
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let right = self.lower_expr(&call.args[0].value);
+                let right_ty = self.type_of_operand(right);
+                let right = self.convert_numeric(right, right_ty, value_ty, span);
+                let right_slot = self.spill(right, value_ty, span);
+                let left = self.emit(InstKind::Load(receiver_slot), value_ty, span);
+                let right = self.emit(InstKind::Load(right_slot), value_ty, span);
+                let op = match name {
+                    "is_before" => BinaryOp::Lt,
+                    "is_after" => BinaryOp::Gt,
+                    "is_same" => BinaryOp::Eq,
+                    "is_same_or_before" => BinaryOp::LtEq,
+                    _ => BinaryOp::GtEq,
+                };
+                Some(self.emit(InstKind::Binary { op, left, right }, IrType::Boolean, span))
+            }
+            "is_between" if call.args.len() == 2 => {
+                // Same slot discipline: each operand can end in a different
+                // post-guard block, so all three cross through slots.
+                let receiver = self.lower_expr(&field.object);
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let lo = self.lower_expr(&call.args[0].value);
+                let lo = self.convert_numeric(lo, self.type_of_operand(lo), value_ty, span);
+                let lo_slot = self.spill(lo, value_ty, span);
+                let hi = self.lower_expr(&call.args[1].value);
+                let hi = self.convert_numeric(hi, self.type_of_operand(hi), value_ty, span);
+                let hi_slot = self.spill(hi, value_ty, span);
+                let receiver = self.emit(InstKind::Load(receiver_slot), value_ty, span);
+                let lo = self.emit(InstKind::Load(lo_slot), value_ty, span);
+                let hi = self.emit(InstKind::Load(hi_slot), value_ty, span);
+                let ge_lo = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::GtEq,
+                        left: receiver,
+                        right: lo,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let le_hi = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::LtEq,
+                        left: receiver,
+                        right: hi,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::And,
+                        left: ge_lo,
+                        right: le_hi,
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "is_weekday" | "is_weekend"
+                if call.args.is_empty()
+                    && matches!(base, zirk_sema::Base::Date | zirk_sema::Base::DateTime) =>
+            {
+                let receiver = self.lower_expr(&field.object);
+                let days = if matches!(base, zirk_sema::Base::DateTime) {
+                    self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_datetime_days".to_string(),
+                            args: vec![receiver],
+                        },
+                        i64ty,
+                        span,
+                    )
+                } else {
+                    receiver
+                };
+                let dow = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_date_day_of_week".to_string(),
+                        args: vec![days],
+                    },
+                    i32ty,
+                    span,
+                );
+                let (threshold, op) = if name == "is_weekday" {
+                    (5, BinaryOp::LtEq)
+                } else {
+                    (6, BinaryOp::GtEq)
+                };
+                let bound = self.emit(InstKind::ConstInt(threshold), i32ty, span);
+                Some(self.emit(
+                    InstKind::Binary {
+                        op,
+                        left: dow,
+                        right: bound,
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            "with_date" | "with_time"
+                if call.args.len() == 1 && matches!(base, zirk_sema::Base::DateTime) =>
+            {
+                let dt = self.lower_expr(&field.object);
+                let dt_slot = self.spill(dt, value_ty, span);
+                let arg = self.lower_expr(&call.args[0].value);
+                let dt = self.emit(InstKind::Load(dt_slot), value_ty, span);
+                let (days, nanos) = if name == "with_date" {
+                    let nanos = self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_datetime_nanos".to_string(),
+                            args: vec![dt],
+                        },
+                        i64ty,
+                        span,
+                    );
+                    (arg, nanos)
+                } else {
+                    let days = self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_datetime_days".to_string(),
+                            args: vec![dt],
+                        },
+                        i64ty,
+                        span,
+                    );
+                    (days, arg)
+                };
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_datetime_new".to_string(),
+                        args: vec![days, nanos],
+                    },
+                    IrType::Int(IntWidth::I128),
+                    span,
+                ))
+            }
+            "with_year" | "with_month" | "with_day" | "with_hour" | "with_minute"
+            | "with_second" | "with_nanosecond"
+                if call.args.len() == 1 =>
+            {
+                Some(self.lower_temporal_with(call, field, base, name, span))
+            }
+            "start_of" | "end_of" if call.args.len() == 1 => {
+                let kind = match base {
+                    zirk_sema::Base::Date => "date",
+                    zirk_sema::Base::Time => "time",
+                    _ => "datetime",
+                };
+                let receiver = self.lower_expr(&field.object);
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let unit = self.lower_expr(&call.args[0].value);
+                let unit_slot = self.spill(unit, IrType::String, span);
+                let unit = self.emit(InstKind::Load(unit_slot), IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_{kind}_{name}_ok"),
+                        args: vec![unit],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let value = lower.emit(InstKind::Load(receiver_slot), value_ty, span);
+                        let unit = lower.emit(InstKind::Load(unit_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_rt_{kind}_{name}_value"),
+                                args: vec![value, unit],
+                            },
+                            value_ty,
+                            span,
+                        )
+                    },
+                    "unknown temporal unit",
+                ))
+            }
+            "format" if call.args.len() == 1 => {
+                let kind = match base {
+                    zirk_sema::Base::Date => "date",
+                    zirk_sema::Base::Time => "time",
+                    _ => "datetime",
+                };
+                let receiver = self.lower_expr(&field.object);
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let pattern = self.lower_expr(&call.args[0].value);
+                let receiver = self.emit(InstKind::Load(receiver_slot), value_ty, span);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_{kind}_format"),
+                        args: vec![receiver, pattern],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "to_iso_string" if call.args.is_empty() => {
+                let kind = match base {
+                    zirk_sema::Base::Date => "date",
+                    zirk_sema::Base::Time => "time",
+                    _ => "datetime",
+                };
+                let receiver = self.lower_expr(&field.object);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_{kind}_to_string"),
+                        args: vec![receiver],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// `d.with_month(m)` and friends (`temporal-rich-api`): the components
+    /// are projected, the named one is replaced by the argument, and the
+    /// triple/quadruple revalidates through the same guarded build the
+    /// `Date`/`Time` constructors use — a `with_*` that would land on an
+    /// invalid day throws `InvalidDateError`/`InvalidTimeError`, never
+    /// clamps.
+    fn lower_temporal_with(
+        &mut self,
+        call: &ast::CallExpr,
+        field: &ast::FieldExpr,
+        base: zirk_sema::Base,
+        name: &str,
+        span: Span,
+    ) -> Operand {
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with `with_*` registered the exception hierarchy");
+        let i64ty = IrType::Int(IntWidth::I64);
+        let i32ty = IrType::Int(IntWidth::I32);
+        let receiver = self.lower_expr(&field.object);
+        // The argument may open blocks (`d.with_month(f(x))`), so the
+        // receiver crosses through a slot.
+        let receiver_slot = self.spill(receiver, self.type_of_operand(receiver), span);
+        let arg = self.lower_expr(&call.args[0].value);
+        let arg_slot = self.spill(arg, self.type_of_operand(arg), span);
+        let arg = self.emit(InstKind::Load(arg_slot), self.type_of_operand(arg), span);
+        let arg_ty = self.type_of_operand(arg);
+        let receiver = self.emit(
+            InstKind::Load(receiver_slot),
+            self.type_of_operand(receiver),
+            span,
+        );
+
+        // `dt.with_month(m)` works on the halves: rebuild the touched half,
+        // keep the other.
+        let (days_value, nanos_value) = if matches!(base, zirk_sema::Base::DateTime) {
+            let days = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_days".to_string(),
+                    args: vec![receiver],
+                },
+                i64ty,
+                span,
+            );
+            let nanos = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_nanos".to_string(),
+                    args: vec![receiver],
+                },
+                i64ty,
+                span,
+            );
+            (Some(days), Some(nanos))
+        } else {
+            (None, None)
+        };
+        let date_half = matches!(base, zirk_sema::Base::Date) || days_value.is_some();
+        let time_half = matches!(base, zirk_sema::Base::Time) || nanos_value.is_some();
+        // The half that is *not* rebuilt still feeds the final
+        // `datetime_new` — which runs after the rebuild's validity branch.
+        // Values never cross blocks (ADR-007), so both halves are held in
+        // slots and reloaded where they are combined.
+        let days_slot = days_value.map(|v| self.spill(v, i64ty, span));
+        let nanos_slot = nanos_value.map(|v| self.spill(v, i64ty, span));
+
+        let rebuilt_days = if date_half && matches!(name, "with_year" | "with_month" | "with_day") {
+            let days = days_value.unwrap_or(receiver);
+            let y = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_date_year".to_string(),
+                    args: vec![days],
+                },
+                i32ty,
+                span,
+            );
+            let mo = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_date_month".to_string(),
+                    args: vec![days],
+                },
+                i32ty,
+                span,
+            );
+            let d = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_date_day".to_string(),
+                    args: vec![days],
+                },
+                i32ty,
+                span,
+            );
+            let arg = self.convert_numeric(arg, arg_ty, i32ty, span);
+            let (y, mo, d) = match name {
+                "with_year" => (arg, mo, d),
+                "with_month" => (y, arg, d),
+                _ => (y, mo, arg),
+            };
+            self.temporal_guarded_build(
+                vec![y, mo, d],
+                "zirk_rt_date_is_valid",
+                "zirk_rt_date_days",
+                native.invalid_date,
+                "invalid date: month or day out of range",
+                i64ty,
+                span,
+            )
+        } else {
+            match days_slot {
+                Some(slot) => self.emit(InstKind::Load(slot), i64ty, span),
+                None => receiver,
+            }
+        };
+
+        let rebuilt_nanos = if time_half
+            && matches!(
+                name,
+                "with_hour" | "with_minute" | "with_second" | "with_nanosecond"
+            ) {
+            let nanos = nanos_value.unwrap_or(receiver);
+            let h = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_hour".to_string(),
+                    args: vec![nanos],
+                },
+                i32ty,
+                span,
+            );
+            let mi = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_minute".to_string(),
+                    args: vec![nanos],
+                },
+                i32ty,
+                span,
+            );
+            let s = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_second".to_string(),
+                    args: vec![nanos],
+                },
+                i32ty,
+                span,
+            );
+            let ns = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_nanosecond".to_string(),
+                    args: vec![nanos],
+                },
+                i64ty,
+                span,
+            );
+            let (h, mi, s, ns) = if name == "with_nanosecond" {
+                let arg = self.convert_numeric(arg, arg_ty, i64ty, span);
+                (h, mi, s, arg)
+            } else {
+                let arg = self.convert_numeric(arg, arg_ty, i32ty, span);
+                match name {
+                    "with_hour" => (arg, mi, s, ns),
+                    "with_minute" => (h, arg, s, ns),
+                    _ => (h, mi, arg, ns),
+                }
+            };
+            self.temporal_guarded_build(
+                vec![h, mi, s, ns],
+                "zirk_rt_time_is_valid",
+                "zirk_rt_time_nanos",
+                native.invalid_time,
+                "invalid time: component out of range",
+                i64ty,
+                span,
+            )
+        } else {
+            match nanos_slot {
+                Some(slot) => self.emit(InstKind::Load(slot), i64ty, span),
+                None => receiver,
+            }
+        };
+
+        if matches!(base, zirk_sema::Base::DateTime) {
+            self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_new".to_string(),
+                    args: vec![rebuilt_days, rebuilt_nanos],
+                },
+                IrType::Int(IntWidth::I128),
+                span,
+            )
+        } else if matches!(base, zirk_sema::Base::Time) {
+            rebuilt_nanos
+        } else {
+            rebuilt_days
+        }
+    }
+
+    /// The guarded component build shared by `with_*` and the temporal
+    /// constructors: spill the components, ask the runtime `is_valid`,
+    /// throw the native failure on the false branch, build the value on the
+    /// true one. Operands never cross blocks (ADR-007), so each side
+    /// reloads from its slot.
+    fn temporal_guarded_build(
+        &mut self,
+        parts: Vec<Operand>,
+        is_valid: &str,
+        build: &str,
+        failure: u32,
+        message: &str,
+        returns: IrType,
+        span: Span,
+    ) -> Operand {
+        let slots: Vec<(SlotId, IrType)> = parts
+            .iter()
+            .map(|&part| {
+                let ty = self.type_of_operand(part);
+                (self.spill(part, ty, span), ty)
+            })
+            .collect();
+        let load =
+            |lower: &mut Self, slot: SlotId, ty: IrType| lower.emit(InstKind::Load(slot), ty, span);
+        let args: Vec<Operand> = slots
+            .iter()
+            .map(|&(slot, ty)| load(self, slot, ty))
+            .collect();
+        let valid = self.emit(
+            InstKind::Call {
+                callee: is_valid.to_string(),
+                args,
+            },
+            IrType::Boolean,
+            span,
+        );
+
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: valid,
+            then_block: cont,
+            else_block: fail,
+        });
+
+        self.current = fail;
+        self.throw_native_failure(failure, message, span);
+
+        self.current = cont;
+        let args: Vec<Operand> = slots
+            .iter()
+            .map(|&(slot, ty)| load(self, slot, ty))
+            .collect();
+        self.emit(
+            InstKind::Call {
+                callee: build.to_string(),
+                args,
+            },
+            returns,
+            span,
+        )
+    }
+
     /// `v.<method>(...)` on an `Int`/`Float` receiver
     /// (`native-type-member-surface`): the documented scalar member surface.
     /// Integers travel to the runtime helpers as `i128` (every width fits),
@@ -11274,6 +11932,42 @@ impl<'a> FunctionLowering<'a> {
         };
         let text = self.lower_expr(&call.args[0].value);
         match target.base {
+            // `Date.parse`/`Time.parse`/`DateTime.parse`
+            // (`temporal-rich-api`): strict ISO text in, `Result<_, ParseError>`
+            // out through the shared `(ok, value)` probe.
+            zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime => {
+                let (kind, value_ty) = match target.base {
+                    zirk_sema::Base::Date => ("date", IrType::Int(IntWidth::I64)),
+                    zirk_sema::Base::Time => ("time", IrType::Int(IntWidth::I64)),
+                    _ => ("datetime", IrType::Int(IntWidth::I128)),
+                };
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_{kind}_parse_ok"),
+                        args: vec![text],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_rt_{kind}_parse_value"),
+                                args: vec![text],
+                            },
+                            value_ty,
+                            span,
+                        )
+                    },
+                    "the text is not a valid ISO 8601 temporal value",
+                ))
+            }
             zirk_sema::Base::Regex => {
                 let text_slot = self.spill(text, IrType::String, span);
                 let ok = self.emit(
@@ -13770,22 +14464,86 @@ impl<'a> FunctionLowering<'a> {
         let receiver = self.lower_expr(object);
         match ty.base {
             Base::Date => {
-                let callee = match member {
-                    "year" => "zirk_rt_date_year",
-                    "month" => "zirk_rt_date_month",
-                    "day" => "zirk_rt_date_day",
-                    _ => return None,
+                let i32_call = |this: &mut Self, callee: &str| {
+                    this.emit(
+                        InstKind::Call {
+                            callee: callee.to_string(),
+                            args: vec![receiver],
+                        },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
                 };
-                Some(self.emit(
-                    InstKind::Call {
-                        callee: callee.to_string(),
-                        args: vec![receiver],
-                    },
-                    IrType::Int(IntWidth::I32),
-                    span,
-                ))
+                Some(match member {
+                    "year" => i32_call(self, "zirk_rt_date_year"),
+                    "month" => i32_call(self, "zirk_rt_date_month"),
+                    "day" => i32_call(self, "zirk_rt_date_day"),
+                    // `temporal-rich-api` calendrical properties.
+                    "day_of_week" => i32_call(self, "zirk_rt_date_day_of_week"),
+                    "day_of_year" => i32_call(self, "zirk_rt_date_day_of_year"),
+                    "week_of_year" => i32_call(self, "zirk_rt_date_week_of_year"),
+                    "quarter" => i32_call(self, "zirk_rt_date_quarter"),
+                    "days_in_month" => i32_call(self, "zirk_rt_date_days_in_month"),
+                    "days_in_year" => i32_call(self, "zirk_rt_date_days_in_year"),
+                    "is_leap_year" => self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_date_is_leap".to_string(),
+                            args: vec![receiver],
+                        },
+                        IrType::Boolean,
+                        span,
+                    ),
+                    _ => return None,
+                })
             }
             Base::Time => {
+                // `millisecond`/`microsecond` are pure arithmetic on the
+                // sub-second nanosecond field — no runtime call.
+                if member == "millisecond" || member == "microsecond" {
+                    let i64ty = IrType::Int(IntWidth::I64);
+                    let one_billion = self.const_int_at(1_000_000_000, i64ty, span);
+                    let frac = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Rem,
+                            left: receiver,
+                            right: one_billion,
+                        },
+                        i64ty,
+                        span,
+                    );
+                    let divisor = if member == "millisecond" {
+                        1_000_000
+                    } else {
+                        1_000
+                    };
+                    let unit = self.const_int_at(divisor, i64ty, span);
+                    let total = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Div,
+                            left: frac,
+                            right: unit,
+                        },
+                        i64ty,
+                        span,
+                    );
+                    // `microsecond` is the µs within the millisecond
+                    // (0–999): take it mod 1000.
+                    let thousand = self.const_int_at(1_000, i64ty, span);
+                    let bounded = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Rem,
+                            left: total,
+                            right: thousand,
+                        },
+                        i64ty,
+                        span,
+                    );
+                    return Some(self.emit(
+                        InstKind::IntCast(bounded),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    ));
+                }
                 let (callee, returns) = match member {
                     "hour" => ("zirk_rt_time_hour", IrType::Int(IntWidth::I32)),
                     "minute" => ("zirk_rt_time_minute", IrType::Int(IntWidth::I32)),
@@ -13819,26 +14577,92 @@ impl<'a> FunctionLowering<'a> {
                     IrType::Int(IntWidth::I64),
                     span,
                 );
-                let (callee, arg, returns) = match member {
-                    "date" => return Some(days),
-                    "time" => return Some(nanos),
-                    "year" => ("zirk_rt_date_year", days, IrType::Int(IntWidth::I32)),
-                    "month" => ("zirk_rt_date_month", days, IrType::Int(IntWidth::I32)),
-                    "day" => ("zirk_rt_date_day", days, IrType::Int(IntWidth::I32)),
-                    "hour" => ("zirk_rt_time_hour", nanos, IrType::Int(IntWidth::I32)),
-                    "minute" => ("zirk_rt_time_minute", nanos, IrType::Int(IntWidth::I32)),
-                    "second" => ("zirk_rt_time_second", nanos, IrType::Int(IntWidth::I32)),
-                    "nanosecond" => ("zirk_rt_time_nanosecond", nanos, IrType::Int(IntWidth::I64)),
-                    _ => return None,
+                // Date-part members delegate to the `zirk_rt_date_*`
+                // projections over the day count; time-part members to the
+                // `zirk_rt_time_*` ones over the day's nanoseconds.
+                let i32_of = |this: &mut Self, callee: &str, arg: Operand| {
+                    this.emit(
+                        InstKind::Call {
+                            callee: callee.to_string(),
+                            args: vec![arg],
+                        },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
                 };
-                Some(self.emit(
-                    InstKind::Call {
-                        callee: callee.to_string(),
-                        args: vec![arg],
-                    },
-                    returns,
-                    span,
-                ))
+                Some(match member {
+                    "date" => days,
+                    "time" => nanos,
+                    "year" => i32_of(self, "zirk_rt_date_year", days),
+                    "month" => i32_of(self, "zirk_rt_date_month", days),
+                    "day" => i32_of(self, "zirk_rt_date_day", days),
+                    "day_of_week" => i32_of(self, "zirk_rt_date_day_of_week", days),
+                    "day_of_year" => i32_of(self, "zirk_rt_date_day_of_year", days),
+                    "week_of_year" => i32_of(self, "zirk_rt_date_week_of_year", days),
+                    "quarter" => i32_of(self, "zirk_rt_date_quarter", days),
+                    "days_in_month" => i32_of(self, "zirk_rt_date_days_in_month", days),
+                    "days_in_year" => i32_of(self, "zirk_rt_date_days_in_year", days),
+                    "is_leap_year" => self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_date_is_leap".to_string(),
+                            args: vec![days],
+                        },
+                        IrType::Boolean,
+                        span,
+                    ),
+                    "hour" => i32_of(self, "zirk_rt_time_hour", nanos),
+                    "minute" => i32_of(self, "zirk_rt_time_minute", nanos),
+                    "second" => i32_of(self, "zirk_rt_time_second", nanos),
+                    "millisecond" | "microsecond" => {
+                        // Same pure-IR derivation as the `Time` arm.
+                        let i64ty = IrType::Int(IntWidth::I64);
+                        let billion = self.const_int_at(1_000_000_000, i64ty, span);
+                        let frac = self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Rem,
+                                left: nanos,
+                                right: billion,
+                            },
+                            i64ty,
+                            span,
+                        );
+                        let divisor = if member == "millisecond" {
+                            1_000_000
+                        } else {
+                            1_000
+                        };
+                        let unit = self.const_int_at(divisor, i64ty, span);
+                        let total = self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Div,
+                                left: frac,
+                                right: unit,
+                            },
+                            i64ty,
+                            span,
+                        );
+                        let thousand = self.const_int_at(1_000, i64ty, span);
+                        let bounded = self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Rem,
+                                left: total,
+                                right: thousand,
+                            },
+                            i64ty,
+                            span,
+                        );
+                        self.emit(InstKind::IntCast(bounded), IrType::Int(IntWidth::I32), span)
+                    }
+                    "nanosecond" => self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_time_nanosecond".to_string(),
+                            args: vec![nanos],
+                        },
+                        IrType::Int(IntWidth::I64),
+                        span,
+                    ),
+                    _ => return None,
+                })
             }
             _ => None,
         }
@@ -14407,16 +15231,31 @@ impl<'a> FunctionLowering<'a> {
         // Civil temporal components (`date-and-time-types`): `d.year`,
         // `dt.date`, … — no layout slot exists on an `i64`/`i128`, so the
         // checker's recorded member type answers (`expr_types` holds the
-        // `Field` expression's own type).
+        // `Field` expression's own type). Method callees (`d.start_of`,
+        // `d.is_before`) get no `expr_types` entry of their own — like
+        // `Duration`'s, they only ever need to answer "is this a
+        // `Callable`?", which the member name's own return type settles.
         if self
             .checked
             .expr_types
             .get(&expr.object.span())
             .is_some_and(|ty| matches!(ty.base, Base::Date | Base::Time | Base::DateTime))
-            && let Some(&ty) = self.checked.expr_types.get(&expr.span)
-            && !ty.is_unknown()
         {
-            return self.ir_type(ty);
+            if let Some(&ty) = self.checked.expr_types.get(&expr.span)
+                && !ty.is_unknown()
+            {
+                return self.ir_type(ty);
+            }
+            return match expr.name.name.as_str() {
+                "is_before" | "is_after" | "is_same" | "is_same_or_before" | "is_same_or_after"
+                | "is_between" | "is_weekday" | "is_weekend" => IrType::Boolean,
+                "format" | "to_iso_string" | "to_string" => IrType::String,
+                "start_of" | "end_of" | "with_year" | "with_month" | "with_day" | "with_hour"
+                | "with_minute" | "with_second" | "with_nanosecond" | "with_date" | "with_time" => {
+                    self.type_of(&expr.object, expr.object.span())
+                }
+                _ => IrType::Int(IntWidth::I32),
+            };
         }
         // `Direction.count` and an `E.*`/`Enums.*` static callee
         // (`enum-static-members`): no layout slot exists to point at — the
@@ -17071,6 +17910,134 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I128),
                 span,
             );
+        }
+
+        // `Date`/`DateTime` (+|-) `Duration` (`temporal-rich-api`): a
+        // duration is nanoseconds, so both operands move onto the `i128`
+        // epoch-nanosecond timeline — a `Date` is read at local midnight
+        // (`days * NANOS_PER_DAY`), a `DateTime` is already there. The
+        // result is always a `DateTime`; `Duration` may only appear on the
+        // left of `+` (the checker never admits `Duration - Date`).
+        let temporal_base = left_base.or(right_base);
+        let mixes_duration = matches!(
+            temporal_base,
+            Some(zirk_sema::Base::Date | zirk_sema::Base::DateTime)
+        ) && (self.is_duration(&expr.left) || self.is_duration(&expr.right));
+        if mixes_duration && matches!(expr.op, Add | Sub) {
+            let i128ty = IrType::Int(IntWidth::I128);
+            let i64ty = IrType::Int(IntWidth::I64);
+            let (value, base, delta, negate) = if left_base.is_some() {
+                (left, left_base.unwrap(), right, expr.op == Sub)
+            } else {
+                (right, right_base.unwrap(), left, false)
+            };
+            // Plain `Binary` ops, not `emit_checked_binary`: every operand
+            // range keeps the result inside `i128` by a wide margin
+            // (`i64` days × `8.64e16` ≈ 2^120, plus an `i64` delta), and a
+            // checked helper would open a block these operands would have
+            // to cross.
+            let epoch = if base == zirk_sema::Base::Date {
+                let value = self.convert_numeric(value, i64ty, i128ty, span);
+                let per_day = self.const_int_at(86_400_000_000_000, i128ty, span);
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Mul,
+                        left: value,
+                        right: per_day,
+                    },
+                    i128ty,
+                    span,
+                )
+            } else {
+                value
+            };
+            let delta = self.convert_numeric(delta, i64ty, i128ty, span);
+            let delta = if negate {
+                let zero = self.const_int_at(0, i128ty, span);
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Sub,
+                        left: zero,
+                        right: delta,
+                    },
+                    i128ty,
+                    span,
+                )
+            } else {
+                delta
+            };
+            return self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Add,
+                    left: epoch,
+                    right: delta,
+                },
+                i128ty,
+                span,
+            );
+        }
+
+        // `DateTime - DateTime` → `Duration` (`temporal-rich-api`): the
+        // exact epoch-nanosecond difference. It is computed at `i128` and
+        // narrowed to the `i64` `Duration` — a span past ±292 years cannot
+        // be a `Duration` and throws `ArithmeticOverflowError`.
+        if expr.op == Sub
+            && left_base == Some(zirk_sema::Base::DateTime)
+            && right_base == Some(zirk_sema::Base::DateTime)
+        {
+            let i128ty = IrType::Int(IntWidth::I128);
+            let i64ty = IrType::Int(IntWidth::I64);
+            let diff = self.emit_checked_binary(binary_op(Sub), left, right, i128ty, span);
+            let diff_slot = self.spill(diff, i128ty, span);
+            let lo = self.const_int_at(i64::MIN as i128, i128ty, span);
+            let hi = self.const_int_at(i64::MAX as i128, i128ty, span);
+            let below = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Lt,
+                    left: diff,
+                    right: lo,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let above = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Gt,
+                    left: diff,
+                    right: hi,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let overflow = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Or,
+                    left: below,
+                    right: above,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let fail = self.new_block();
+            let cont = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: overflow,
+                then_block: fail,
+                else_block: cont,
+            });
+            self.current = fail;
+            let native = self
+                .checked
+                .native_exceptions
+                .expect("a program with DateTime arithmetic registered the exception hierarchy");
+            self.throw_native_failure(
+                native.arithmetic_overflow,
+                "the DateTime difference exceeds the Duration range",
+                span,
+            );
+            self.current = cont;
+            let diff = self.emit(InstKind::Load(diff_slot), i128ty, span);
+            return self.emit(InstKind::IntCast(diff), i64ty, span);
         }
 
         // `Time`(+|-)`Duration` wraps modulo one day; `Time - Time` is the

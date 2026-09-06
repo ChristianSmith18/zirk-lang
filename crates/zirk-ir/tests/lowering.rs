@@ -2946,3 +2946,149 @@ fn temporal_static_constructors_lower_to_host_clock_calls() {
         "{calls:?}"
     );
 }
+// --- Rich civil temporal API (temporal-rich-api) -----------------------------
+
+#[test]
+fn temporal_rich_properties_lower_to_runtime_calls() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut d = Date(2026, 9, 6);\n\
+         \x20   mut dt = DateTime(d, Time(14, 30));\n\
+         \x20   mut dow = d.day_of_week;\n\
+         \x20   mut doy = d.day_of_year;\n\
+         \x20   mut wk = d.week_of_year;\n\
+         \x20   mut q = d.quarter;\n\
+         \x20   mut dim = d.days_in_month;\n\
+         \x20   mut diy = d.days_in_year;\n\
+         \x20   mut leap = d.is_leap_year;\n\
+         \x20   mut dt_dow = dt.day_of_week;\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        "zirk_rt_date_day_of_week",
+        "zirk_rt_date_day_of_year",
+        "zirk_rt_date_week_of_year",
+        "zirk_rt_date_quarter",
+        "zirk_rt_date_days_in_month",
+        "zirk_rt_date_days_in_year",
+        "zirk_rt_date_is_leap",
+        "zirk_rt_datetime_days",
+    ] {
+        assert!(
+            calls.iter().any(|c| c == expected),
+            "{expected} missing in {calls:?}"
+        );
+    }
+    for name in [
+        "zirk_rt_date_day_of_week",
+        "zirk_rt_date_start_of_ok",
+        "zirk_rt_date_parse_value",
+        "zirk_rt_datetime_format",
+    ] {
+        assert!(
+            module.externs.iter().any(|e| e.name == name),
+            "extern {name} missing"
+        );
+    }
+}
+
+#[test]
+fn temporal_methods_and_boundaries_lower() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut d = Date(2026, 9, 6);\n\
+         \x20   mut t = Time(14, 30);\n\
+         \x20   mut dt = DateTime(d, t);\n\
+         \x20   mut b1 = d.is_before(d);\n\
+         \x20   mut b2 = d.is_between(d, d);\n\
+         \x20   mut we = d.is_weekend();\n\
+         \x20   mut d2 = d.with_month(12);\n\
+         \x20   mut t2 = t.with_hour(9);\n\
+         \x20   mut dt2 = dt.with_date(d);\n\
+         \x20   mut s = d.start_of(\"month\");\n\
+         \x20   mut e = t.end_of(\"hour\");\n\
+         \x20   mut sdt = dt.start_of(\"year\");\n\
+         \x20   mut f = d.format(\"YYYY\");\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        // `with_*` revalidates through the constructor guard.
+        "zirk_rt_date_is_valid",
+        "zirk_rt_date_days",
+        "zirk_rt_time_is_valid",
+        "zirk_rt_time_nanos",
+        // Boundaries use the `ok`/`value` probe pair.
+        "zirk_rt_date_start_of_ok",
+        "zirk_rt_date_start_of_value",
+        "zirk_rt_time_end_of_ok",
+        "zirk_rt_time_end_of_value",
+        "zirk_rt_datetime_start_of_ok",
+        "zirk_rt_datetime_start_of_value",
+        "zirk_rt_date_format",
+    ] {
+        assert!(
+            calls.iter().any(|c| c == expected),
+            "{expected} missing in {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn temporal_parse_and_duration_interop_lower() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut r1 = Date.parse(\"2026-09-06\");\n\
+         \x20   mut r2 = Time.parse(\"14:30\");\n\
+         \x20   mut r3 = DateTime.parse(\"2026-09-06T14:30\");\n\
+         \x20   mut d = Date(2026, 9, 6);\n\
+         \x20   mut dt = DateTime(d, Time(14, 30));\n\
+         \x20   mut a = dt + 2h;\n\
+         \x20   mut b = d + 5h;\n\
+         \x20   mut c = dt - dt;\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        "zirk_rt_date_parse_ok",
+        "zirk_rt_date_parse_value",
+        "zirk_rt_time_parse_ok",
+        "zirk_rt_datetime_parse_ok",
+        "zirk_rt_datetime_parse_value",
+    ] {
+        assert!(
+            calls.iter().any(|c| c == expected),
+            "{expected} missing in {calls:?}"
+        );
+    }
+    // `DateTime - DateTime` narrows its `i128` difference to the `i64`
+    // `Duration`.
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::IntCast(_))),
+        "the i128→i64 narrowing cast is missing"
+    );
+}

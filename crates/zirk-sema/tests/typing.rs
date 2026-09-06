@@ -5538,8 +5538,6 @@ fn invalid_temporal_construction_argument_types() {
 
 #[test]
 fn invalid_temporal_mixed_arithmetic() {
-    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d + 1h;");
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t + 2;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d - Time(1, 0);");
@@ -5552,4 +5550,157 @@ fn invalid_temporal_member_names() {
     assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
     let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t.year;");
     assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+// --- Rich civil temporal API (temporal-rich-api) -----------------------------
+
+#[test]
+fn valid_temporal_calendrical_properties() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut dow: Int32 = d.day_of_week;\n\
+         mut doy: Int32 = d.day_of_year;\n\
+         mut wk: Int32 = d.week_of_year;\n\
+         mut q: Int32 = d.quarter;\n\
+         mut dim: Int32 = d.days_in_month;\n\
+         mut diy: Int32 = d.days_in_year;\n\
+         mut leap: Boolean = d.is_leap_year;\n\
+         mut dt: DateTime = DateTime.now_utc();\n\
+         mut dt_dow: Int32 = dt.day_of_week;\n\
+         mut dt_doy: Int32 = dt.day_of_year;\n\
+         mut dt_wk: Int32 = dt.week_of_year;\n\
+         mut dt_q: Int32 = dt.quarter;\n\
+         mut dt_dim: Int32 = dt.days_in_month;\n\
+         mut dt_diy: Int32 = dt.days_in_year;\n\
+         mut dt_leap: Boolean = dt.is_leap_year;",
+    );
+}
+
+#[test]
+fn valid_temporal_subsecond_properties() {
+    accepted_body(
+        "mut t: Time = Time(14, 30, 45, 123456789);\n\
+         mut ms: Int32 = t.millisecond;\n\
+         mut us: Int32 = t.microsecond;\n\
+         mut ns: Int64 = t.nanosecond;\n\
+         mut dt: DateTime = DateTime.now_utc();\n\
+         mut dt_ms: Int32 = dt.millisecond;\n\
+         mut dt_us: Int32 = dt.microsecond;",
+    );
+}
+
+#[test]
+fn valid_temporal_query_methods() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut a: Boolean = d.is_before(Date(2026, 10, 1));\n\
+         mut b: Boolean = d.is_after(Date(2026, 9, 1));\n\
+         mut c: Boolean = d.is_same(Date(2026, 9, 6));\n\
+         mut e: Boolean = d.is_same_or_before(Date(2026, 9, 6));\n\
+         mut f: Boolean = d.is_same_or_after(Date(2026, 9, 6));\n\
+         mut g: Boolean = d.is_between(Date(2026, 1, 1), Date(2026, 12, 31));\n\
+         mut wd: Boolean = d.is_weekday();\n\
+         mut we: Boolean = d.is_weekend();\n\
+         mut t: Time = Time(14, 30);\n\
+         mut tb: Boolean = t.is_before(Time(15, 0));\n\
+         mut dt: DateTime = DateTime.now_utc();\n\
+         mut dtb: Boolean = dt.is_between(dt, dt);\n\
+         mut dtw: Boolean = dt.is_weekday();",
+    );
+}
+
+#[test]
+fn valid_temporal_with_methods() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut d2: Date = d.with_year(2030);\n\
+         mut d3: Date = d.with_month(12);\n\
+         mut d4: Date = d.with_day(15);\n\
+         mut t: Time = Time(14, 30);\n\
+         mut t2: Time = t.with_hour(9);\n\
+         mut t3: Time = t.with_minute(0);\n\
+         mut t4: Time = t.with_second(0);\n\
+         mut t5: Time = t.with_nanosecond(500);\n\
+         mut dt: DateTime = DateTime.now_utc();\n\
+         mut dt2: DateTime = dt.with_year(2030);\n\
+         mut dt3: DateTime = dt.with_hour(9);\n\
+         mut dt4: DateTime = dt.with_nanosecond(500);\n\
+         mut dt5: DateTime = dt.with_date(d);\n\
+         mut dt6: DateTime = dt.with_time(t);",
+    );
+}
+
+#[test]
+fn valid_temporal_boundaries_and_format() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut s1: Result<Date, ParseError> = d.start_of(\"year\");\n\
+         mut e1: Result<Date, ParseError> = d.end_of(\"month\");\n\
+         mut f1: String = d.format(\"YYYY-MM-DD\");\n\
+         mut t: Time = Time(14, 30);\n\
+         mut s2: Result<Time, ParseError> = t.start_of(\"hour\");\n\
+         mut dt: DateTime = DateTime.now_utc();\n\
+         mut s3: Result<DateTime, ParseError> = dt.end_of(\"day\");\n\
+         mut f3: String = dt.format(\"HH:mm\");",
+    );
+}
+
+#[test]
+fn valid_temporal_parse_statics() {
+    accepted_body(
+        "mut r1: Result<Date, ParseError> = Date.parse(\"2026-09-06\");\n\
+         mut d: Date = r1.unwrap();\n\
+         mut r2: Result<Time, ParseError> = Time.parse(\"14:30:45\");\n\
+         mut t: Time = r2.unwrap();\n\
+         mut r3: Result<DateTime, ParseError> = DateTime.parse(\"2026-09-06T14:30:45\");\n\
+         mut dt: DateTime = r3.unwrap();",
+    );
+}
+
+#[test]
+fn valid_temporal_duration_interop() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut t: Time = Time(14, 30);\n\
+         mut dt: DateTime = DateTime(d, t);\n\
+         mut a: DateTime = dt + 2h;\n\
+         mut b: DateTime = dt - 30m;\n\
+         mut c: DateTime = d + 5h;\n\
+         mut e: DateTime = d - 25h;\n\
+         mut f: DateTime = 3h + d;\n\
+         mut g: DateTime = 2h + dt;\n\
+         mut h: Duration = dt - DateTime.now_utc();",
+    );
+}
+
+#[test]
+fn invalid_temporal_method_argument_types() {
+    // A `with_*` component must be the same width family the field is.
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d.with_month(\"enero\");");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // `is_before` compares same-type operands.
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d.is_before(Time(1, 0));");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // `is_weekday`/`is_weekend` are calendar members — `Time` has none.
+    let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t.is_weekday();");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    // `start_of` takes a `String` unit.
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d.start_of(2);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_temporal_duration_interop() {
+    // `Duration` does not subtract a temporal value.
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = 2h - d;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    let output = rejected_body("mut dt: DateTime = DateTime.now_utc();\nmut x = 1h - dt;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // `Date - Time` stays rejected; only `DateTime - DateTime` yields a
+    // `Duration`.
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d - Time(1, 0);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // `Time - Time` yields `Duration`; `Time + Int` stays rejected.
+    let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t + 2;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
