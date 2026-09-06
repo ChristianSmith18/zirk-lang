@@ -83,7 +83,7 @@
 - [x] 9.6 Handbook: update `11-reference/03-built-in-types.md`, `11-reference/13-type-member-index.md`, `SUMMARY.md`, and any `12-explanations` page discussing float precision
 - [x] 9.7 Handbook: add a "Float is now exact — migration" note (rename table + `b` suffix)
 - [x] 9.8 Roadmap/status: `docs/init/ZIRK_ROADMAP.md`, Feature Status, Current Limitations, handbook roadmap — move the `Float128` truncation + Windows-verification limitation onto `BinaryFloat128`
-- [ ] 9.9 Examples: update `main.zrk`, `main2.zrk`, `main3.zrk`, `numerics.zrk`, `hello.zrk` and every `.zrk` code block under `docs/` to the new names/semantics
+- [x] 9.9 Examples: handbook `.zrk` code blocks, spec docs, `docs/init/*` status/roadmap/agent-prompt updated. Repo-root scratch files (`main.zrk` etc.) are untracked and out of scope. Historical docs left as-is: `docs/01_plantilla_zirk.md` (design template), `docs/decisions/ADR-015`, `docs/decisions/2026-08-20-auditoria-*` (ADR / audit record)
 
 ## 10. End-to-end test battery
 
@@ -98,7 +98,11 @@
 - [x] 10.9 Fixture: `Float.parse` success and failure; `format(spec)` per 1.5
 - [x] 10.10 Wire all fixtures into the CLI end-to-end test suite with expected stdout/diagnostics
 
-## 11. Companion website
+## 11. Companion website — deferred to the merge/release workstream
+
+These run against the sibling repo `../zirk-lang-site` (not present in this
+worktree) and need a human-reviewed `--audit-date`. Do them after this branch is
+merged to `develop`/`main` and committed.
 
 - [ ] 11.1 After the zirk-lang changes are committed, run `./scripts/sync-website-content.sh`
 - [ ] 11.2 Review `../zirk-lang-site` site-owned status catalog for the changed float semantics and limitations; re-run with `--audit-date YYYY-MM-DD`
@@ -108,4 +112,4 @@
 
 - [x] 12.1 `LLVM_SYS_201_PREFIX=/opt/homebrew/opt/llvm@20 cargo test` green across all crates
 - [x] 12.2 `cargo clippy --all-targets` clean
-- [ ] 12.3 `openspec validate exact-decimal-float` passes; run `/opsx:archive` after review
+- [x] 12.3 `openspec validate exact-decimal-float` passes; run `/opsx:archive` after review
