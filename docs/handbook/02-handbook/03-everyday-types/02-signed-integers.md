@@ -70,7 +70,7 @@ mut b: Int32 = Int32(300.0);  // error: does not fit in Int32
 | `Int32.parse(text)` | `Result<Int32, ParseError>` | Parses decimal text | implemented |
 | `Int32.parse(text, radix:)` | `Result<Int32, ParseError>` | Parses text in radix 2–36 | implemented |
 | `value.to_string()` | `String` | Decimal rendering | implemented |
-| `value.to_string(radix:)` | `String` | Rendering in radix 2–36 | specified |
+| `value.to_string(radix:)` | `String` | Rendering in radix 2–36 | implemented |
 | `Int32(value)` | `Int32` | Checked explicit conversion from any numeric type | implemented |
 
 > **Overflow policy:** ordinary `+ - * / % **` trap on overflow. The
