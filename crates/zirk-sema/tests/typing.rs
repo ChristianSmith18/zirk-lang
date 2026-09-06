@@ -5139,3 +5139,57 @@ fn valid_string_index_write() {
     );
 }
 
+
+// --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
+
+#[test]
+fn valid_map_and_set_types_resolve() {
+    accepted_body(
+        "mut m: Map<String, Int32> = Map();\n\
+         mut s: Set<String> = Set();",
+    );
+}
+
+#[test]
+fn invalid_set_of_an_unhashable_element() {
+    let output = rejected_body("mut s: Set<List<Int32>> = Set();");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("unhashable"), "{output}");
+}
+
+#[test]
+fn valid_map_and_set_members() {
+    accepted_body(
+        "mut m: Map<String, Int32> = Map();\n\
+         m.set(\"k\", 1);\n\
+         mut n: UInt64 = m.length;\n\
+         mut e: Boolean = m.is_empty;\n\
+         mut has: Boolean = m.contains_key(\"k\");\n\
+         mut v: Int32? = m.get_or_null(\"k\");\n\
+         mut r: Boolean = m.remove(\"k\");\n\
+         mut s: Set<String> = Set();\n\
+         s.add(\"x\");\n\
+         mut h: Boolean = s.contains(\"x\");\n\
+         mut sn: UInt64 = s.length;\n\
+         mut se: Boolean = s.is_empty;\n\
+         mut sr: Boolean = s.remove(\"x\");",
+    );
+}
+
+#[test]
+fn invalid_map_set_with_wrong_argument_types() {
+    let output = rejected_body(
+        "mut m: Map<String, Int32> = Map();\n\
+         m.set(1, \"x\");",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_set_add_with_wrong_element_type() {
+    let output = rejected_body(
+        "mut s: Set<String> = Set();\n\
+         s.add(1);",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
