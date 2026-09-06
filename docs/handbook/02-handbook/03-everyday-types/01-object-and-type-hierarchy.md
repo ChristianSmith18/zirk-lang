@@ -9,7 +9,8 @@ Object
 ├── Value
 │   ├── Numeric
 │   │   ├── Integer: Int8 … Int128, UInt8 … UInt128
-│   │   └── Float: BinaryFloat16 … BinaryFloat128
+│   │   ├── Float (exact base-ten decimal)
+│   │   └── BinaryFloat: BinaryFloat16 … BinaryFloat128
 │   ├── Boolean
 │   ├── Char
 │   ├── Temporal

@@ -147,6 +147,9 @@ on its own, not folded into this change.
   inexact results are rounded into the 28-digit budget.
 - Explicit control: `a.div(b, mode, places)`, `a.round(places, mode)`,
   `RoundingMode` = `HALF_EVEN | HALF_UP | HALF_DOWN | UP | DOWN | CEIL | FLOOR`.
+  **As delivered:** the runtime encodes all seven modes, but the surface
+  `div`/`round` take only a place count and always round half-to-even — the
+  explicit `RoundingMode` argument is deferred with `format(spec)`.
   Default mode everywhere is `HALF_EVEN` (banker's rounding — no systematic
   bias, matches SQL `NUMERIC` and IEEE decimal default).
 
@@ -231,8 +234,8 @@ bug this change removes.
 
 Exact `Float` surface: `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `floor`,
 `ceil`, `round` / `round(places[, mode])`, `truncate`, `fraction`, `pow(int)`,
-`pow(Float[, mode])`, `sqrt`, `div(other, mode, places)`, `scale` (property, the
-decimal scale), `is_integer`, `parse`, `to_string`. `format(spec)` stays
+`pow(Float)`, `sqrt`, `div(other[, places])`, `scale()` (method, the decimal
+scale), `is_integer`, `parse`, `to_string`. `format(spec)` stays
 "specified, not implemented", as it is for `Float` today. Removed vs binary:
 `is_finite`, `is_infinite`, `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `EPSILON`
 (no meaning for exact decimal). `is_negative` kept.
@@ -316,7 +319,8 @@ infinities, `is_finite`/`is_infinite`).
   `pow`) are rounded into the 28-digit budget. `MIN_DIV_SCALE = 10` guarantees
   a division computes at least 10 fractional digits before rounding (covers
   currency plus rate math).
-- **`Float.scale` is public** — a well-defined exact property, useful for
+- **`Float.scale()` is public** (a method, for surface consistency with
+  `floor()` etc.) — a well-defined exact property, useful for
   formatting and tests.
 - **No early literal-size warning** for v1. A suffix-less literal that does not
   fit 38 digits of coefficient is a hard error suggesting `b`; nothing between.
