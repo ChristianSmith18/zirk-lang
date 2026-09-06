@@ -64,7 +64,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 13] = [
+const NATIVE_FAILURE_CODES: [&str; 15] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -84,6 +84,10 @@ const NATIVE_FAILURE_CODES: [&str; 13] = [
     // `enum-static-members`: the `Result`-carried error type of
     // `EnumType.from_name`/`EnumType.from_value`.
     "E_LOOKUP",
+    // `date-and-time-types`: the errors the `Date`/`Time` constructors
+    // throw.
+    "E_INVALID_DATE",
+    "E_INVALID_TIME",
 ];
 
 const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
@@ -2832,5 +2836,113 @@ fn enum_to_string_lowers_to_the_interned_type_name() {
         strings.iter().filter(|s| s.as_str() == "Direction").count(),
         2,
         "both spellings render the type name: {strings:?}"
+    );
+}
+
+// --- Civil temporal types (date-and-time-types) ------------------------------
+
+#[test]
+fn temporal_construction_lowers_to_validated_runtime_calls() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut d = Date(2026, 9, 6);\n\
+         \x20   mut t = Time(14, 30);\n\
+         \x20   mut dt = DateTime(d, t);\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_date_is_valid"),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|c| c == "zirk_rt_date_days"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_time_is_valid"),
+        "{calls:?}"
+    );
+    assert!(calls.iter().any(|c| c == "zirk_rt_time_nanos"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_datetime_new"),
+        "{calls:?}"
+    );
+    // The invalid branch throws the native failure classes.
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|k| matches!(k, InstKind::Throw(_))),
+        "the invalid branch throws"
+    );
+}
+
+#[test]
+fn temporal_components_and_arithmetic_lower_to_runtime_and_ints() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut d = Date(2026, 9, 6);\n\
+         \x20   mut t = Time(23, 30);\n\
+         \x20   mut y = d.year;\n\
+         \x20   mut h = t.hour;\n\
+         \x20   mut wrapped = t + 2h;\n\
+         \x20   mut diff = d - Date(2026, 9, 1);\n\
+         \x20   mut dt = d + t;\n\
+         \x20   mut s = d.to_string();\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(calls.iter().any(|c| c == "zirk_rt_date_year"), "{calls:?}");
+    assert!(calls.iter().any(|c| c == "zirk_rt_time_hour"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_time_add_nanos"),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_datetime_new"),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_date_to_string"),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn temporal_static_constructors_lower_to_host_clock_calls() {
+    let module = compile(
+        "fn main(): Void {\n\
+         \x20   mut d = Date.today();\n\
+         \x20   mut t = Time.now_local();\n\
+         \x20   mut dt = DateTime.now_utc();\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let calls: Vec<String> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::Call { callee, .. } => Some(callee.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(calls.iter().any(|c| c == "zirk_rt_date_today"), "{calls:?}");
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_time_now_local"),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "zirk_rt_datetime_now_utc"),
+        "{calls:?}"
     );
 }

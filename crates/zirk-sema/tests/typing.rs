@@ -5447,3 +5447,109 @@ fn invalid_set_add_with_wrong_element_type() {
     );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
+
+// --- Civil temporal types (date-and-time-types) ------------------------------
+
+#[test]
+fn valid_temporal_constructions_and_components() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut t: Time = Time(14, 30);\n\
+         mut t2: Time = Time(14, 30, 45, 123456789);\n\
+         mut dt: DateTime = DateTime(d, t);\n\
+         mut y: Int32 = d.year;\n\
+         mut mo: Int32 = d.month;\n\
+         mut dd: Int32 = d.day;\n\
+         mut h: Int32 = t.hour;\n\
+         mut mi: Int32 = t.minute;\n\
+         mut s: Int32 = t.second;\n\
+         mut ns: Int64 = t.nanosecond;\n\
+         mut dy: Int32 = dt.day;\n\
+         mut th: Int32 = dt.hour;\n\
+         mut dd2: Date = dt.date;\n\
+         mut tt: Time = dt.time;\n\
+         mut s1: String = d.to_string();\n\
+         mut s2: String = t.to_string();\n\
+         mut s3: String = dt.to_string();",
+    );
+}
+
+#[test]
+fn valid_temporal_static_constructors() {
+    accepted_body(
+        "mut d: Date = Date.today();\n\
+         mut t: Time = Time.now_local();\n\
+         mut t2: Time = Time.now_utc();\n\
+         mut dt: DateTime = DateTime.now_local();\n\
+         mut dt2: DateTime = DateTime.now_utc();",
+    );
+}
+
+#[test]
+fn valid_temporal_arithmetic_and_comparison() {
+    accepted_body(
+        "mut d: Date = Date(2026, 9, 6);\n\
+         mut d2: Date = d + 2;\n\
+         mut d3: Date = 2 + d;\n\
+         mut d4: Date = d - 1;\n\
+         mut days: Int64 = d - Date(2026, 9, 1);\n\
+         mut t: Time = Time(23, 30);\n\
+         mut t2: Time = t + 2h;\n\
+         mut t3: Time = 2h + t;\n\
+         mut t4: Time = t - 1h;\n\
+         mut diff: Duration = t - Time(1, 0);\n\
+         mut dt: DateTime = d + t;\n\
+         mut dt2: DateTime = t + d;\n\
+         mut b1: Boolean = d < Date(2026, 10, 1);\n\
+         mut b2: Boolean = d == Date(2026, 9, 6);\n\
+         mut b3: Boolean = t > Time(0, 0);\n\
+         mut b4: Boolean = dt <= DateTime.now_utc();",
+    );
+}
+
+#[test]
+fn invalid_temporal_construction_arity() {
+    let output = rejected_body("mut d: Date = Date(2026, 9);");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+    let output = rejected_body("mut t: Time = Time(1);");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+    let output = rejected_body("mut dt: DateTime = DateTime(Date(2026, 9, 6));");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_temporal_construction_argument_types() {
+    let output = rejected_body("mut d: Date = Date(2026, \"x\", 6);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    let output = rejected_body("mut dt: DateTime = DateTime(1, 2);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    let output = rejected_body("mut dt: DateTime = DateTime(Time(1, 0), Date(2026, 9, 6));");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_temporal_mixed_arithmetic() {
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d + 1h;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t + 2;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d - Time(1, 0);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_temporal_member_names() {
+    let output = rejected_body("mut d: Date = Date(2026, 9, 6);\nmut x = d.hour;");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t.year;");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}

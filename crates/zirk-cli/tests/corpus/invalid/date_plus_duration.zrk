@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    inmut x = d + 2h;
+}

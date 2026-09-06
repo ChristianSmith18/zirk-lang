@@ -69,6 +69,11 @@ pub struct CheckedProgram {
     /// expression's span, the same shape `variant_accesses` uses for the
     /// variant cases.
     pub enum_static_accesses: std::collections::HashSet<Span>,
+    /// `Date(...)`/`Time(...)`/`DateTime(...)` validated constructions
+    /// (`date-and-time-types`), by the *call* expression's span. The callee
+    /// names a type, not a function — lowering emits the runtime validation
+    /// call instead of resolving the path as a value.
+    pub temporal_constructions: std::collections::HashSet<Span>,
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     pub type_params: Vec<TypeParamInfo>,
@@ -241,6 +246,14 @@ pub struct NativeExceptions {
     /// `Result` `EnumType.from_name`/`EnumType.from_value` return when no
     /// variant matches.
     pub lookup_error: u32,
+    /// `InvalidDateError` (`date-and-time-types`): thrown when `Date(y, m,
+    /// d)` receives a month outside `1-12` or a day that does not exist in
+    /// that month — 2026-02-30 is a construction error, not a rollover.
+    pub invalid_date: u32,
+    /// `InvalidTimeError` (`date-and-time-types`): thrown when `Time(h, m,
+    /// s, ns)` receives a component outside its range — hour `24` or a
+    /// negative nanosecond count is a construction error, not a wrap.
+    pub invalid_time: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -487,6 +500,8 @@ struct Checker<'a> {
     scalar_static_accesses: std::collections::HashSet<Span>,
     /// See [`CheckedProgram::enum_static_accesses`].
     enum_static_accesses: std::collections::HashSet<Span>,
+    /// See [`CheckedProgram::temporal_constructions`].
+    temporal_constructions: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Use sites whose written name differs from the declaration's.
@@ -727,6 +742,7 @@ impl<'a> Checker<'a> {
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
             enum_static_accesses: std::collections::HashSet::new(),
+            temporal_constructions: std::collections::HashSet::new(),
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
@@ -987,6 +1003,7 @@ impl<'a> Checker<'a> {
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
             enum_static_accesses: self.enum_static_accesses,
+            temporal_constructions: self.temporal_constructions,
             aliases: self.aliases,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -1136,7 +1153,14 @@ impl<'a> Checker<'a> {
     /// reserved-method dispatch (`_add`, `_subtract`, …) already uses.
     fn is_printable(&self, ty: Type) -> bool {
         match ty.base {
-            Base::Int(_) | Base::Boolean | Base::String | Base::Char | Base::Duration => true,
+            Base::Int(_)
+            | Base::Boolean
+            | Base::String
+            | Base::Char
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::DateTime => true,
             // `Float16` prints by widening to `Float32` first — always
             // exact, since every `f16` value is representable in `f32`
             // without loss (`Type::accepts`'s float-widening rule). `Float128`
@@ -1801,6 +1825,11 @@ impl<'a> Checker<'a> {
         // `EnumType.from_value`'s `Result` — a failed lookup is a controlled
         // failure, never a trap.
         let lookup_error = register_native_failure(&mut self.classes, "LookupError");
+        // `date-and-time-types`: the validation errors the `Date`/`Time`
+        // constructors throw — `DateTime` reuses both (its `date`/`time`
+        // components are already validated values).
+        let invalid_date = register_native_failure(&mut self.classes, "InvalidDateError");
+        let invalid_time = register_native_failure(&mut self.classes, "InvalidTimeError");
 
         self.native_exceptions = Some(NativeExceptions {
             error,
@@ -1820,6 +1849,8 @@ impl<'a> Checker<'a> {
             overflow_error,
             regex_error,
             lookup_error,
+            invalid_date,
+            invalid_time,
         });
     }
 
@@ -4423,6 +4454,11 @@ impl<'a> Checker<'a> {
                 Base::Pin(id) => (24, id),
                 Base::Duration => (25, 0),
                 Base::Regex => (26, 0),
+                // The civil temporal family sorts just after `Duration`:
+                // scalars of the same family, one key each.
+                Base::Date => (32, 0),
+                Base::Time => (33, 0),
+                Base::DateTime => (34, 0),
                 Base::Tuple(id) => (27, id),
                 Base::Array(id) => (28, id),
                 Base::List(id) => (29, id),
@@ -9938,6 +9974,36 @@ impl<'a> Checker<'a> {
             Base::Duration if member.name == "days" => {
                 return Type::of(Base::Int(IntWidth::I64));
             }
+            // Civil temporal components (`date-and-time-types`): `d.year`,
+            // `t.hour`, `dt.date`, … — read-only projections the runtime
+            // answers; `nanosecond` is `Int64` since a day's nanoseconds
+            // exceed `Int32`.
+            Base::Date if matches!(member.name.as_str(), "year" | "month" | "day") => {
+                return Type::INT32;
+            }
+            Base::Time if matches!(member.name.as_str(), "hour" | "minute" | "second") => {
+                return Type::INT32;
+            }
+            Base::Time if member.name == "nanosecond" => {
+                return Type::of(Base::Int(IntWidth::I64));
+            }
+            Base::DateTime if member.name == "date" => {
+                return Type::DATE;
+            }
+            Base::DateTime if member.name == "time" => {
+                return Type::TIME;
+            }
+            Base::DateTime
+                if matches!(
+                    member.name.as_str(),
+                    "year" | "month" | "day" | "hour" | "minute" | "second"
+                ) =>
+            {
+                return Type::INT32;
+            }
+            Base::DateTime if member.name == "nanosecond" => {
+                return Type::of(Base::Int(IntWidth::I64));
+            }
             Base::Tuple(_) if member.name == "length" => {
                 return Type::INT32;
             }
@@ -12750,6 +12816,30 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // `Date.today()` / `Time.now_local()` / `DateTime.now_local()`
+        // (`date-and-time-types`): static calls on the civil temporal type
+        // names, decided here for the same reason `Pointer.from`/`Weak.from`
+        // are — the base names a type, not a value with a member. Each
+        // records its callee in `scalar_static_accesses` so lowering emits
+        // the host-clock runtime call instead of resolving a field.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+            && expr.args.is_empty()
+        {
+            let temporal = match (base.name.as_str(), field.name.name.as_str()) {
+                ("Date", "today") => Some(Type::DATE),
+                ("Time", "now_local") | ("Time", "now_utc") => Some(Type::TIME),
+                ("DateTime", "now_local") | ("DateTime", "now_utc") => Some(Type::DATETIME),
+                _ => None,
+            };
+            if let Some(ty) = temporal {
+                self.scalar_static_accesses.insert(field.span);
+                return ty;
+            }
+        }
+
         // `Pin(obj)` (roadmap Phase 4e, `phase-4e-memory`, design D1): a
         // built-in constructor that pins a mutable reference and returns
         // `Pin<T>`. `Pin` names a type, not an ordinary function.
@@ -13694,6 +13784,18 @@ impl<'a> Checker<'a> {
             // decided here, ahead of class construction, since a native
             // scalar name can never collide with one (type names are
             // reserved).
+            // `Date(y, m, d)`, `Time(h, m, s?, ns?)` and `DateTime(date,
+            // time)` (`date-and-time-types`): validated constructors for the
+            // civil temporal types, decided here for the same reason the
+            // contextual conversions below are — a native scalar name can
+            // never collide with a class constructor.
+            if let Some(target) = Type::from_name(&callee.name)
+                && matches!(target.base, Base::Date | Base::Time | Base::DateTime)
+                && self.scopes.lookup(&callee.name).is_none()
+            {
+                return self.check_temporal_construction(target, expr);
+            }
+
             if let Some(target) = Type::from_name(&callee.name)
                 && matches!(
                     target.base,
@@ -13831,6 +13933,95 @@ impl<'a> Checker<'a> {
         }
 
         self.check_context_tree(target, &expr.args[0].value);
+        target
+    }
+
+    /// `Date(y, m, d)` / `Time(h, m, s?, ns?)` / `DateTime(date, time)`
+    /// (`date-and-time-types`): the validated constructors for the civil
+    /// temporal types. Every argument is positional and integer (`DateTime`
+    /// takes a `Date` and a `Time`); the calendar/range validation itself
+    /// happens at runtime, where it can throw `InvalidDateError`/
+    /// `InvalidTimeError` (`NativeExceptions::invalid_date`/`invalid_time`).
+    /// Recording the call's span in `temporal_constructions` is what lets
+    /// lowering emit the runtime validation call instead of resolving the
+    /// type-name callee as a value.
+    fn check_temporal_construction(&mut self, target: Type, expr: &CallExpr) -> Type {
+        let name = self.name(target);
+        // `Date`: exactly `year, month, day`. `Time`: `hour, minute` plus
+        // optional `second` and `nanosecond`. `DateTime`: `date, time`.
+        let (min, max) = match target.base {
+            Base::Date => (3, 3),
+            Base::Time => (2, 4),
+            Base::DateTime => (2, 2),
+            _ => unreachable!("the caller only dispatches temporal bases"),
+        };
+        let arity_ok = expr.args.len() >= min && expr.args.len() <= max;
+        if !arity_ok {
+            let expected = if min == max {
+                format!("{min}")
+            } else {
+                format!("{min} to {max}")
+            };
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{name}` takes {expected} argument(s)"),
+                format!("received {}", expr.args.len()),
+                Some(match target.base {
+                    Base::Date => "write `Date(year, month, day)`".into(),
+                    Base::Time => "write `Time(hour, minute, second?, nanosecond?)`".into(),
+                    _ => "write `DateTime(date, time)`".into(),
+                }),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return target;
+        }
+        if expr.args.iter().any(|a| a.name.is_some()) {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{name}` takes only positional arguments"),
+                "a named argument was written",
+                Some("write the components in order".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return target;
+        }
+
+        match target.base {
+            Base::DateTime => {
+                for (arg, expected, label) in [
+                    (&expr.args[0], Type::DATE, "the date"),
+                    (&expr.args[1], Type::TIME, "the time"),
+                ] {
+                    let actual = self.check_expr(&arg.value);
+                    if !actual.is_unknown() && !expected.accepts(actual) {
+                        self.expect_assignable(expected, actual, arg.value.span(), label);
+                    }
+                }
+            }
+            _ => {
+                for arg in &expr.args {
+                    let actual = self.check_expr(&arg.value);
+                    // Temporal components accept any integer width; the
+                    // runtime narrows them into range (a `Date` month is
+                    // 1-12, a `Time` hour 0-23) and reports the failure.
+                    if !actual.is_unknown() && !matches!(actual.base, Base::Int(_)) {
+                        self.expect_assignable(
+                            Type::INT32,
+                            actual,
+                            arg.value.span(),
+                            "the component",
+                        );
+                    }
+                }
+            }
+        }
+        self.temporal_constructions.insert(expr.span);
         target
     }
 
@@ -14464,7 +14655,16 @@ impl<'a> Checker<'a> {
         if actual.is_unknown() {
             return;
         }
-        if !actual.nullable && matches!(actual.base, Base::Int(_) | Base::Float(_) | Base::Duration)
+        if !actual.nullable
+            && matches!(
+                actual.base,
+                Base::Int(_)
+                    | Base::Float(_)
+                    | Base::Duration
+                    | Base::Date
+                    | Base::Time
+                    | Base::DateTime
+            )
         {
             return;
         }
@@ -14726,6 +14926,19 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         | (Base::Int(_) | Base::Float(_) | Base::Decimal, Base::Duration, Mul) => {
             Some(Type::DURATION)
         }
+        // Civil temporal arithmetic (`date-and-time-types`). A `Date` plus
+        // or minus a day count is a `Date`; `Date - Date` is the `Int64`
+        // number of days between them. A `Time` plus or minus a `Duration`
+        // is a `Time` (wrapping around midnight, civil-style); `Time - Time`
+        // is the `Duration` between them. `Date + Time` composes into a
+        // `DateTime`.
+        (Base::Date, Base::Int(_), Add | Sub) => Some(Type::DATE),
+        (Base::Int(_), Base::Date, Add) => Some(Type::DATE),
+        (Base::Date, Base::Date, Sub) => Some(Type::of(Base::Int(IntWidth::I64))),
+        (Base::Time, Base::Duration, Add | Sub) => Some(Type::TIME),
+        (Base::Duration, Base::Time, Add) => Some(Type::TIME),
+        (Base::Time, Base::Time, Sub) => Some(Type::DURATION),
+        (Base::Date, Base::Time, Add) | (Base::Time, Base::Date, Add) => Some(Type::DATETIME),
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, accepting any integer width; lower
