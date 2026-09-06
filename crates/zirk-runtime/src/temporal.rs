@@ -315,3 +315,477 @@ pub extern "C" fn zirk_rt_datetime_to_string(value: i128) -> *mut c_void {
     let time = format_time(zirk_rt_datetime_nanos(value));
     alloc_owned(&format!("{year:04}-{month:02}-{day:02}T{time}"))
 }
+
+// --- Calendrical properties (`temporal-rich-api`) --------------------------
+//
+// Everything below is a pure projection of the day count / nanosecond
+// representation — no allocation, no validation needed (the value was
+// already validated at construction).
+
+/// ISO 8601 weekday: `1` = Monday … `7` = Sunday. Day 0 (1970-01-01) was
+/// a Thursday, so `(days + 3) mod 7` counts from Monday.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_day_of_week(days: i64) -> i32 {
+    ((days + 3).rem_euclid(7) + 1) as i32
+}
+
+/// The 1-based ordinal day within `days`' year.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_day_of_year(days: i64) -> i32 {
+    let (year, _, _) = civil_from_days(days);
+    (days - days_from_civil(year, 1, 1) + 1) as i32
+}
+
+/// Whether an ISO year holds 53 weeks: it does when January 1 falls on a
+/// Thursday, or on a Wednesday of a leap year.
+fn weeks_in_iso_year(year: i32) -> i32 {
+    let jan1 = zirk_rt_date_day_of_week(days_from_civil(year, 1, 1));
+    if jan1 == 4 || (jan1 == 3 && is_leap_year(year)) {
+        53
+    } else {
+        52
+    }
+}
+
+/// The ISO 8601 week number: week 1 is the week containing the year's
+/// first Thursday.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_week_of_year(days: i64) -> i32 {
+    let (year, _, _) = civil_from_days(days);
+    let week = (i64::from(zirk_rt_date_day_of_year(days))
+        - i64::from(zirk_rt_date_day_of_week(days))
+        + 10)
+        / 7;
+    if week < 1 {
+        weeks_in_iso_year(year - 1)
+    } else if week > i64::from(weeks_in_iso_year(year)) {
+        1
+    } else {
+        week as i32
+    }
+}
+
+/// The quarter of `days`' month, `1..=4`.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_quarter(days: i64) -> i32 {
+    (zirk_rt_date_month(days) - 1) / 3 + 1
+}
+
+/// The length of `days`' month.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_days_in_month(days: i64) -> i32 {
+    let (year, month, _) = civil_from_days(days);
+    days_in_month(year, month)
+}
+
+/// The length of `days`' year — `366` when leap, `365` otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_days_in_year(days: i64) -> i32 {
+    if is_leap_year(civil_from_days(days).0) {
+        366
+    } else {
+        365
+    }
+}
+
+/// Whether `days`' year is leap.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_date_is_leap(days: i64) -> bool {
+    is_leap_year(civil_from_days(days).0)
+}
+
+// --- Unit boundaries -------------------------------------------------------
+//
+// `start_of`/`end_of` share the `parse` convention: an `ok` probe answers
+// whether the unit name is recognized so `zirk-ir` can build the `Error`
+// arm of the `Result`, and the `value` entrypoint computes the boundary on
+// the passing branch — it never sees an unknown unit.
+
+/// The unit names `Date` accepts for `start_of`/`end_of`.
+fn date_unit_ok(unit: &str) -> bool {
+    matches!(unit, "year" | "month" | "week" | "day")
+}
+
+/// The unit names `Time` accepts.
+fn time_unit_ok(unit: &str) -> bool {
+    matches!(unit, "day" | "hour" | "minute" | "second")
+}
+
+/// The unit names `DateTime` accepts — the union of both.
+fn datetime_unit_ok(unit: &str) -> bool {
+    date_unit_ok(unit) || time_unit_ok(unit)
+}
+
+/// Reads a `String` handle as `&str` (empty on a non-string or null).
+unsafe fn unit_str<'a>(handle: *const c_void) -> &'a str {
+    unsafe { crate::string::borrow(handle) }
+        .map(|s| unsafe { s.as_str() })
+        .unwrap_or("")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_start_of_ok(unit: *const c_void) -> bool {
+    date_unit_ok(unsafe { unit_str(unit) })
+}
+
+fn date_start_of(days: i64, unit: &str) -> i64 {
+    let (_, _, day) = civil_from_days(days);
+    match unit {
+        "year" => {
+            let (year, _, _) = civil_from_days(days);
+            days_from_civil(year, 1, 1)
+        }
+        "month" => days - i64::from(day) + 1,
+        // ISO week: back to the preceding Monday.
+        "week" => days - i64::from(zirk_rt_date_day_of_week(days)) + 1,
+        _ => days,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_start_of_value(days: i64, unit: *const c_void) -> i64 {
+    date_start_of(days, unsafe { unit_str(unit) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_end_of_ok(unit: *const c_void) -> bool {
+    unsafe { zirk_rt_date_start_of_ok(unit) }
+}
+
+fn date_end_of(days: i64, unit: &str) -> i64 {
+    let (year, month, day) = civil_from_days(days);
+    match unit {
+        "year" => days_from_civil(year, 12, 31),
+        "month" => days - i64::from(day) + i64::from(days_in_month(year, month)),
+        "week" => days + (7 - i64::from(zirk_rt_date_day_of_week(days))),
+        _ => days,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_end_of_value(days: i64, unit: *const c_void) -> i64 {
+    date_end_of(days, unsafe { unit_str(unit) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_start_of_ok(unit: *const c_void) -> bool {
+    time_unit_ok(unsafe { unit_str(unit) })
+}
+
+fn time_start_of(nanos: i64, unit: &str) -> i64 {
+    match unit {
+        "hour" => nanos - nanos % NANOS_PER_HOUR,
+        "minute" => nanos - nanos % NANOS_PER_MINUTE,
+        "second" => nanos - nanos % NANOS_PER_SECOND,
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_start_of_value(nanos: i64, unit: *const c_void) -> i64 {
+    time_start_of(nanos, unsafe { unit_str(unit) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_end_of_ok(unit: *const c_void) -> bool {
+    unsafe { zirk_rt_time_start_of_ok(unit) }
+}
+
+fn time_end_of(nanos: i64, unit: &str) -> i64 {
+    match unit {
+        "hour" => nanos - nanos % NANOS_PER_HOUR + NANOS_PER_HOUR - 1,
+        "minute" => nanos - nanos % NANOS_PER_MINUTE + NANOS_PER_MINUTE - 1,
+        "second" => nanos - nanos % NANOS_PER_SECOND + NANOS_PER_SECOND - 1,
+        _ => NANOS_PER_DAY - 1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_end_of_value(nanos: i64, unit: *const c_void) -> i64 {
+    time_end_of(nanos, unsafe { unit_str(unit) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_start_of_ok(unit: *const c_void) -> bool {
+    datetime_unit_ok(unsafe { unit_str(unit) })
+}
+
+/// The `DateTime` start-of boundary: date units zero the clock, time units
+/// keep the day.
+fn datetime_start_of(value: i128, unit: &str) -> i128 {
+    let days = zirk_rt_datetime_days(value);
+    let nanos = zirk_rt_datetime_nanos(value);
+    if date_unit_ok(unit) {
+        zirk_rt_datetime_new(date_start_of(days, unit), 0)
+    } else {
+        zirk_rt_datetime_new(days, time_start_of(nanos, unit))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_start_of_value(value: i128, unit: *const c_void) -> i128 {
+    datetime_start_of(value, unsafe { unit_str(unit) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_end_of_ok(unit: *const c_void) -> bool {
+    unsafe { zirk_rt_datetime_start_of_ok(unit) }
+}
+
+fn datetime_end_of(value: i128, unit: &str) -> i128 {
+    let days = zirk_rt_datetime_days(value);
+    let nanos = zirk_rt_datetime_nanos(value);
+    if date_unit_ok(unit) {
+        zirk_rt_datetime_new(date_end_of(days, unit), NANOS_PER_DAY - 1)
+    } else {
+        zirk_rt_datetime_new(days, time_end_of(nanos, unit))
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_end_of_value(value: i128, unit: *const c_void) -> i128 {
+    datetime_end_of(value, unsafe { unit_str(unit) })
+}
+
+// --- ISO 8601 parsing (`temporal-rich-api`) --------------------------------
+//
+// Strict canonical forms only — `YYYY-MM-DD`, `HH:MM[:SS[.frac]]`, and the
+// date-time composition with `T` or a space. The `ok`/`value` split mirrors
+// `zirk_int_parse_ok`/`zirk_int_parse_value`: the probe answers whether the
+// text parses so `zirk-ir` can build the `Error` arm, and the value
+// entrypoint re-parses on the passing branch.
+
+/// The digit-only `i64` of `text`, or `None` when a non-digit appears.
+fn digits(text: &str) -> Option<i64> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// `YYYY-MM-DD` — strict: exactly ten bytes, dashes at 4 and 7, and the
+/// constructor's own range validation.
+fn parse_date_text(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let year = digits(&text[0..4])? as i32;
+    let month = digits(&text[5..7])? as i32;
+    let day = digits(&text[8..10])? as i32;
+    zirk_rt_date_is_valid(year, month, day).then(|| days_from_civil(year, month, day))
+}
+
+/// `HH:MM[:SS[.fffffffff]]` — the fraction accepts one to nine digits.
+fn parse_time_text(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    if b.len() < 5 || b[2] != b':' {
+        return None;
+    }
+    let hour = digits(&text[0..2])? as i32;
+    let minute = digits(&text[3..5])? as i32;
+    let (second, nanos) = if b.len() == 5 {
+        (0, 0)
+    } else if b.len() >= 8 && b[5] == b':' {
+        let second = digits(&text[6..8])? as i32;
+        let nanos = if b.len() == 8 {
+            0
+        } else if b[8] == b'.' && b.len() <= 18 {
+            let frac = &text[9..];
+            let mut v = digits(frac)?;
+            // Right-pad the fraction to nanosecond digits.
+            for _ in frac.len()..9 {
+                v *= 10;
+            }
+            v
+        } else {
+            return None;
+        };
+        (second, nanos)
+    } else {
+        return None;
+    };
+    zirk_rt_time_is_valid(hour, minute, second, nanos)
+        .then(|| zirk_rt_time_nanos(hour, minute, second, nanos))
+}
+
+/// `YYYY-MM-DD[T ]HH:MM[:SS[.frac]]`.
+fn parse_datetime_text(text: &str) -> Option<i128> {
+    let b = text.as_bytes();
+    if b.len() < 16 || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let days = parse_date_text(&text[..10])?;
+    let nanos = parse_time_text(&text[11..])?;
+    Some(zirk_rt_datetime_new(days, nanos))
+}
+
+/// `Date.parse(text)` — `ok` flag: the text is a strict `YYYY-MM-DD`.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_parse_ok(text: *const c_void) -> bool {
+    parse_date_text(unsafe { unit_str(text) }).is_some()
+}
+
+/// `Date.parse(text)` — the day count; only read when the `ok` probe passed.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_parse_value(text: *const c_void) -> i64 {
+    parse_date_text(unsafe { unit_str(text) }).unwrap_or(0)
+}
+
+/// `Time.parse(text)` — `ok` flag.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_parse_ok(text: *const c_void) -> bool {
+    parse_time_text(unsafe { unit_str(text) }).is_some()
+}
+
+/// `Time.parse(text)` — the day's nanoseconds.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_parse_value(text: *const c_void) -> i64 {
+    parse_time_text(unsafe { unit_str(text) }).unwrap_or(0)
+}
+
+/// `DateTime.parse(text)` — `ok` flag.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_parse_ok(text: *const c_void) -> bool {
+    parse_datetime_text(unsafe { unit_str(text) }).is_some()
+}
+
+/// `DateTime.parse(text)` — the civil timestamp.
+///
+/// # Safety
+///
+/// `text` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_parse_value(text: *const c_void) -> i128 {
+    parse_datetime_text(unsafe { unit_str(text) }).unwrap_or(0)
+}
+
+// --- Pattern formatting ----------------------------------------------------
+
+/// Renders the civil components under `pattern`. Recognized tokens are
+/// `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss` and `SSS` (milliseconds); any
+/// other text passes through literally — `format` never fails.
+fn format_pattern(
+    pattern: &str,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+    nanos: i64,
+) -> String {
+    const TOKENS: [&str; 7] = ["YYYY", "SSS", "MM", "DD", "HH", "mm", "ss"];
+    let mut out = String::new();
+    let mut i = 0;
+    while i < pattern.len() {
+        let rest = &pattern[i..];
+        match TOKENS.iter().find(|t| rest.starts_with(**t)) {
+            Some(&"YYYY") => out.push_str(&format!("{year:04}")),
+            Some(&"SSS") => out.push_str(&format!("{:03}", nanos / 1_000_000)),
+            Some(&"MM") => out.push_str(&format!("{month:02}")),
+            Some(&"DD") => out.push_str(&format!("{day:02}")),
+            Some(&"HH") => out.push_str(&format!("{hour:02}")),
+            Some(&"mm") => out.push_str(&format!("{minute:02}")),
+            Some(&"ss") => out.push_str(&format!("{second:02}")),
+            _ => {
+                // Literal text: copy the whole (possibly multi-byte) char.
+                let ch = rest.chars().next().expect("rest is not empty");
+                out.push(ch);
+                i += ch.len_utf8();
+                continue;
+            }
+        }
+        i += TOKENS
+            .iter()
+            .find(|t| rest.starts_with(**t))
+            .expect("matched above")
+            .len();
+    }
+    out
+}
+
+/// `d.format(pattern)` — the pattern applied to the date fields; time
+/// tokens render `00`.
+///
+/// # Safety
+///
+/// `pattern` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_date_format(days: i64, pattern: *const c_void) -> *mut c_void {
+    let (year, month, day) = civil_from_days(days);
+    alloc_owned(&format_pattern(
+        unsafe { unit_str(pattern) },
+        year,
+        month,
+        day,
+        0,
+        0,
+        0,
+        0,
+    ))
+}
+
+/// `t.format(pattern)` — the pattern applied to the time fields; date
+/// tokens render `00`/`0000`.
+///
+/// # Safety
+///
+/// `pattern` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_time_format(nanos: i64, pattern: *const c_void) -> *mut c_void {
+    alloc_owned(&format_pattern(
+        unsafe { unit_str(pattern) },
+        0,
+        0,
+        0,
+        zirk_rt_time_hour(nanos),
+        zirk_rt_time_minute(nanos),
+        zirk_rt_time_second(nanos),
+        zirk_rt_time_nanosecond(nanos),
+    ))
+}
+
+/// `dt.format(pattern)` — the pattern applied to all fields.
+///
+/// # Safety
+///
+/// `pattern` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_format(
+    value: i128,
+    pattern: *const c_void,
+) -> *mut c_void {
+    let (year, month, day) = civil_from_days(zirk_rt_datetime_days(value));
+    let nanos = zirk_rt_datetime_nanos(value);
+    alloc_owned(&format_pattern(
+        unsafe { unit_str(pattern) },
+        year,
+        month,
+        day,
+        zirk_rt_time_hour(nanos),
+        zirk_rt_time_minute(nanos),
+        zirk_rt_time_second(nanos),
+        zirk_rt_time_nanosecond(nanos),
+    ))
+}

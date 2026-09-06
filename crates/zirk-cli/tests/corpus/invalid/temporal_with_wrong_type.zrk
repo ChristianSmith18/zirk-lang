@@ -1,0 +1,6 @@
+// `temporal-rich-api`: a `with_*` component takes the component's own
+// type — `with_month` is an `Int32`, never a `String`.
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    inmut x = d.with_month("enero");
+}

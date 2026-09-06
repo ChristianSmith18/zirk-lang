@@ -1,0 +1,52 @@
+// Rich civil temporal API (`temporal-rich-api`): calendrical properties,
+// comparison queries, `with_*` mutation-by-copy, unit boundaries, strict
+// ISO parsing, pattern formatting and `Duration` interop — all on the
+// fixed `Date`/`Time`/`DateTime` representations.
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    stdout.println(d.day_of_week);
+    stdout.println(d.day_of_year);
+    stdout.println(d.week_of_year);
+    stdout.println(d.quarter);
+    stdout.println(d.days_in_month);
+    stdout.println(d.days_in_year);
+    stdout.println(d.is_leap_year);
+    stdout.println(d.is_weekday());
+    stdout.println(d.is_weekend());
+    stdout.println(d.is_before(Date(2026, 10, 1)));
+    stdout.println(d.is_between(Date(2026, 1, 1), Date(2026, 12, 31)));
+    stdout.println(d.with_year(2030));
+    stdout.println(d.with_month(12));
+    stdout.println(d.with_day(15));
+    stdout.println(d.start_of("year").unwrap());
+    stdout.println(d.end_of("month").unwrap());
+    stdout.println(d.start_of("week").unwrap());
+    stdout.println(d.format("DD/MM/YYYY"));
+    stdout.println(Date.parse("2024-02-29").unwrap());
+    stdout.println(Date.parse("2026-02-29").is_error());
+    inmut t = Time(14, 30, 45, 123456789);
+    stdout.println(t.millisecond);
+    stdout.println(t.microsecond);
+    stdout.println(t.nanosecond);
+    stdout.println(t.with_hour(9));
+    stdout.println(t.start_of("hour").unwrap());
+    stdout.println(t.end_of("minute").unwrap());
+    stdout.println(t.format("HH:mm:ss.SSS"));
+    stdout.println(Time.parse("23:59:59.5").unwrap());
+    inmut dt = DateTime(d, t);
+    stdout.println(dt.day_of_week);
+    stdout.println(dt + 2h);
+    stdout.println(dt - 12h);
+    stdout.println(d + 5h);
+    stdout.println(d - 25h);
+    stdout.println(3h + d);
+    stdout.println(dt - DateTime(Date(2026, 9, 6), Time(0, 0)));
+    stdout.println(dt.with_year(2030));
+    stdout.println(dt.with_time(Time(0, 0)));
+    stdout.println(dt.start_of("month").unwrap());
+    stdout.println(dt.end_of("hour").unwrap());
+    stdout.println(dt.format("YYYY-MM-DD HH:mm"));
+    stdout.println(DateTime.parse("2026-09-06T14:30:45").unwrap());
+    stdout.println(DateTime.parse("nope").is_error());
+    stdout.println(d.start_of("nope").is_error());
+}

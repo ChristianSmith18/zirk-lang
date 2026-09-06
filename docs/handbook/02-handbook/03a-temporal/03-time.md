@@ -18,18 +18,12 @@ a signed Duration under their same-day interpretation.
 
 ## Crossing midnight
 
-Adding/subtracting Duration returns `TimeShift` so lost days are visible:
+`Time ± Duration` wraps modulo one day — `Time(23, 30) + 2h` is `01:30`. The
+current phase returns the wrapped `Time` directly; a `TimeShift` carrying the
+visible `day_offset` is specified for a later phase:
 
 ```zirk
-inmut shifted = Time(23, 30) + 2h;
-shifted.time;       // Time(1, 30)
-shifted.day_offset; // 1
-```
-
-A negative shift can produce `day_offset == -1`. Apply it to a Date explicitly:
-
-```zirk
-inmut result = date.add(Period.days(shifted.day_offset)).at(shifted.time);
+inmut shifted = Time(23, 30) + 2h; // 01:30 — day carry is dropped
 ```
 
 `Time + Period` and `Time + TimeZone` are invalid: neither operation has enough
@@ -43,26 +37,31 @@ A local clock reading without date or zone, validated at construction.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `hour` | `Int32` | 0–23 | specified |
-| `minute` | `Int32` | 0–59 | specified |
-| `second` | `Int32` | 0–59 (leap seconds per temporal policy) | specified |
-| `millisecond` | `Int32` | 0–999 | specified |
-| `microsecond` | `Int32` | 0–999 | specified |
-| `nanosecond` | `Int32` | 0–999 | specified |
+| `hour` | `Int32` | 0–23 | implemented |
+| `minute` | `Int32` | 0–59 | implemented |
+| `second` | `Int32` | 0–59 (leap seconds per temporal policy) | implemented |
+| `millisecond` | `Int32` | Milliseconds within the second, 0–999 | implemented |
+| `microsecond` | `Int32` | Microseconds within the millisecond, 0–999 | implemented |
+| `nanosecond` | `Int64` | Sub-second nanosecond fraction, 0–999_999_999 | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `Time(hour, minute, second?, nanosecond?)` | `Time` | Validated construction; `Time(25, 0)` is `InvalidTime` | specified |
-| `Time.parse(text, format?)` | `Result<Time, ParseError>` | Explicit parsing | specified |
-| `t.with_hour(h)` / `with_minute` / `with_second` / `with_nanosecond` | `Time` | Component replacement | specified |
-| `t + duration` / `t - duration` | `TimeShift` | Wraps across midnight; exposes `time` and `day_offset` | specified |
-| `t - other` | `Duration` | Signed same-day difference | specified |
-| `t.is_before(other)` / `is_after` / `is_same` | `Boolean` | Local ordering | specified |
-| `t.format(pattern, locale?)` | `String` | Presentation formatting | specified |
-| `t.to_iso_string()` | `String` | Canonical ISO time | specified |
-| `t.to_string()` | `String` | Default rendering | specified |
+| `Time(hour, minute, second?, nanosecond?)` | `Time` | Validated construction; `Time(25, 0)` throws `InvalidTimeError` | implemented |
+| `Time.parse(text)` | `Result<Time, ParseError>` | Strict ISO `HH:MM[:SS[.frac]]` parsing | implemented |
+| `Time.parse(text, format?)` | `Result<Time, ParseError>` | Explicit-pattern parsing | specified (Phase 7) |
+| `t.with_hour(h)` / `with_minute` / `with_second` / `with_nanosecond` | `Time` | Component replacement; an invalid result throws `InvalidTimeError` | implemented |
+| `t + duration` / `t - duration` | `Time` | Wraps modulo one day | implemented |
+| `t + duration` → `TimeShift` | `TimeShift` | Wraps and exposes `time`/`day_offset` | specified (Phase 7) |
+| `t - other` | `Duration` | Signed same-day difference | implemented |
+| `t.is_before(other)` / `is_after` / `is_same` | `Boolean` | Local ordering | implemented |
+| `t.is_same_or_before` / `is_same_or_after` / `is_between` | `Boolean` | Inclusive ordering and range | implemented |
+| `t.start_of(unit)` / `t.end_of(unit)` | `Result<Time, ParseError>` | Boundary of `unit` — `"day"`, `"hour"`, `"minute"`, `"second"` | implemented |
+| `t.format(pattern)` | `String` | Pattern formatting (`YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`, `SSS`); unrecognized text is literal | implemented |
+| `t.format(pattern, locale)` | `String` | Localized formatting | specified (Phase 7) |
+| `t.to_iso_string()` | `String` | Canonical ISO time | implemented |
+| `t.to_string()` | `String` | Default rendering (the ISO form) | implemented |
 
 `Time + Period` and `Time + TimeZone` are invalid: neither operation has enough
 calendar information.
@@ -77,11 +76,9 @@ calendar information.
 ### Examples
 
 ```zirk
-inmut shifted = Time(23, 30) + 2h;
-shifted.time;        // Time(1, 30)
-shifted.day_offset;  // 1
-
-inmut result = date.add(Period.days(shifted.day_offset)).at(shifted.time);
+inmut shifted = Time(23, 30) + 2h;   // 01:30 — wraps modulo one day
+inmut bounds = shifted.start_of("hour").unwrap(); // 01:00
+shifted.is_between(Time(0, 0), Time(6, 0));       // true
 ```
 
 ---

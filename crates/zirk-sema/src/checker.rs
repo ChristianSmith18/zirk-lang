@@ -9981,7 +9981,30 @@ impl<'a> Checker<'a> {
             Base::Date if matches!(member.name.as_str(), "year" | "month" | "day") => {
                 return Type::INT32;
             }
-            Base::Time if matches!(member.name.as_str(), "hour" | "minute" | "second") => {
+            // Calendrical properties (`temporal-rich-api`): `day_of_week`
+            // is the ISO `Int32` (1 = Monday … 7 = Sunday).
+            Base::Date
+                if matches!(
+                    member.name.as_str(),
+                    "day_of_week"
+                        | "day_of_year"
+                        | "week_of_year"
+                        | "quarter"
+                        | "days_in_month"
+                        | "days_in_year"
+                ) =>
+            {
+                return Type::INT32;
+            }
+            Base::Date if member.name == "is_leap_year" => {
+                return Type::BOOLEAN;
+            }
+            Base::Time
+                if matches!(
+                    member.name.as_str(),
+                    "hour" | "minute" | "second" | "millisecond" | "microsecond"
+                ) =>
+            {
                 return Type::INT32;
             }
             Base::Time if member.name == "nanosecond" => {
@@ -9996,10 +10019,26 @@ impl<'a> Checker<'a> {
             Base::DateTime
                 if matches!(
                     member.name.as_str(),
-                    "year" | "month" | "day" | "hour" | "minute" | "second"
+                    "year"
+                        | "month"
+                        | "day"
+                        | "hour"
+                        | "minute"
+                        | "second"
+                        | "day_of_week"
+                        | "day_of_year"
+                        | "week_of_year"
+                        | "quarter"
+                        | "days_in_month"
+                        | "days_in_year"
+                        | "millisecond"
+                        | "microsecond"
                 ) =>
             {
                 return Type::INT32;
+            }
+            Base::DateTime if member.name == "is_leap_year" => {
+                return Type::BOOLEAN;
             }
             Base::DateTime if member.name == "nanosecond" => {
                 return Type::of(Base::Int(IntWidth::I64));
@@ -12758,8 +12797,17 @@ impl<'a> Checker<'a> {
             let target = if base.name == "Regex" {
                 Some(Type::REGEX)
             } else {
-                Type::from_name(&base.name)
-                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal))
+                Type::from_name(&base.name).filter(|t| {
+                    matches!(
+                        t.base,
+                        Base::Int(_)
+                            | Base::Float(_)
+                            | Base::Decimal
+                            | Base::Date
+                            | Base::Time
+                            | Base::DateTime
+                    )
+                })
             };
             if let Some(target) = target {
                 // `parse(text)` and `parse(text, radix: n)` — the radix form
@@ -13392,6 +13440,154 @@ impl<'a> Checker<'a> {
                         return Type::STRING;
                     }
                     _ => {}
+                }
+            }
+
+            // Civil temporal methods (`temporal-rich-api`): comparison
+            // queries, validated `with_*` replacement, unit boundaries,
+            // parsing-formatting. Recognized by receiver type and lowered
+            // to runtime calls or pure comparisons — `d.is_before(x)`
+            // names no declared method.
+            if matches!(object.base, Base::Date | Base::Time | Base::DateTime)
+                && !field.safe
+                && !object.nullable
+            {
+                let temporal = match field.name.name.as_str() {
+                    "is_before" | "is_after" | "is_same" | "is_same_or_before"
+                    | "is_same_or_after"
+                        if expr.args.len() == 1 =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && arg != object {
+                            self.expect_assignable(
+                                object,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
+                        }
+                        Some(Type::BOOLEAN)
+                    }
+                    "is_between" if expr.args.len() == 2 => {
+                        for arg in &expr.args {
+                            let t = self.check_expr(&arg.value);
+                            if !t.is_unknown() && t != object {
+                                self.expect_assignable(object, t, arg.value.span(), "the bound");
+                            }
+                        }
+                        Some(Type::BOOLEAN)
+                    }
+                    "is_weekday" | "is_weekend"
+                        if expr.args.is_empty()
+                            && matches!(object.base, Base::Date | Base::DateTime) =>
+                    {
+                        Some(Type::BOOLEAN)
+                    }
+                    "with_year" | "with_month" | "with_day"
+                        if expr.args.len() == 1
+                            && matches!(object.base, Base::Date | Base::DateTime) =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::INT32,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the component",
+                            );
+                        }
+                        Some(object)
+                    }
+                    "with_hour" | "with_minute" | "with_second"
+                        if expr.args.len() == 1
+                            && matches!(object.base, Base::Time | Base::DateTime) =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::INT32,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the component",
+                            );
+                        }
+                        Some(object)
+                    }
+                    "with_nanosecond"
+                        if expr.args.len() == 1
+                            && matches!(object.base, Base::Time | Base::DateTime) =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::of(Base::Int(IntWidth::I64)),
+                                arg,
+                                expr.args[0].value.span(),
+                                "the component",
+                            );
+                        }
+                        Some(object)
+                    }
+                    "with_date"
+                        if expr.args.len() == 1 && matches!(object.base, Base::DateTime) =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::DATE,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the date",
+                            );
+                        }
+                        Some(Type::DATETIME)
+                    }
+                    "with_time"
+                        if expr.args.len() == 1 && matches!(object.base, Base::DateTime) =>
+                    {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::TIME,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the time",
+                            );
+                        }
+                        Some(Type::DATETIME)
+                    }
+                    "start_of" | "end_of" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the unit",
+                            );
+                        }
+                        let native = self
+                            .native_exceptions
+                            .expect("the exception hierarchy is registered");
+                        Some(self.native_result_with(object, native.parse_error))
+                    }
+                    "format" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() {
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the pattern",
+                            );
+                        }
+                        Some(Type::STRING)
+                    }
+                    "to_iso_string" if expr.args.is_empty() => Some(Type::STRING),
+                    _ => None,
+                };
+                if let Some(ty) = temporal {
+                    return ty;
                 }
             }
 
@@ -14939,6 +15135,15 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         (Base::Duration, Base::Time, Add) => Some(Type::TIME),
         (Base::Time, Base::Time, Sub) => Some(Type::DURATION),
         (Base::Date, Base::Time, Add) | (Base::Time, Base::Date, Add) => Some(Type::DATETIME),
+        // Duration interop (`temporal-rich-api`): a `DateTime` shifts its
+        // local components by the exact quantity; a `Date` promotes to
+        // `DateTime` read at local midnight — `Date + 5h` is `05:00` the
+        // same day, never a silently truncated `Date`.
+        (Base::DateTime, Base::Duration, Add | Sub) => Some(Type::DATETIME),
+        (Base::Duration, Base::DateTime, Add) => Some(Type::DATETIME),
+        (Base::Date, Base::Duration, Add | Sub) => Some(Type::DATETIME),
+        (Base::Duration, Base::Date, Add) => Some(Type::DATETIME),
+        (Base::DateTime, Base::DateTime, Sub) => Some(Type::DURATION),
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, accepting any integer width; lower

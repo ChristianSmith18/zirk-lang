@@ -4,7 +4,7 @@
 “2026-08-15 at 14:30” as entered locally, not one universal instant.
 
 ```zirk
-inmut local = DateTime(2026, 8, 15, 14, 30);
+inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
 inmut composed = Date(2026, 8, 15) + Time(14, 30);
 ```
 
@@ -14,10 +14,10 @@ It exposes `date`, `time` and their component properties through nanoseconds.
 
 ## Arithmetic
 
-DateTime accepts exact Duration and calendar Period arithmetic. The former
-moves local components by a fixed quantity; the latter applies calendar rules.
-Subtracting two DateTime values yields a local component Duration, not a
-globally meaningful elapsed time across zones.
+`DateTime ± Duration` moves the local components by the exact quantity and
+`DateTime - DateTime` yields the local-component `Duration` — not a globally
+meaningful elapsed time across zones. Calendar `Period` arithmetic is
+specified for a later phase.
 
 ## Acquiring a zone
 
@@ -40,33 +40,44 @@ A `Date` + `Time` pair, deliberately without a zone.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `date` | `Date` | Date part | specified |
-| `time` | `Time` | Time part | specified |
-| `year` … `nanosecond` | `Int32` | All `Date`/`Time` component properties | specified |
+| `date` | `Date` | Date part | implemented |
+| `time` | `Time` | Time part | implemented |
+| `year` … `second` | `Int32` | All `Date`/`Time` component properties | implemented |
+| `day_of_week` … `days_in_year` | `Int32` | All `Date` calendrical properties | implemented |
+| `is_leap_year` | `Boolean` | Leap-year test | implemented |
+| `millisecond` / `microsecond` | `Int32` | Sub-second components | implemented |
+| `nanosecond` | `Int64` | Sub-second nanosecond fraction | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `DateTime(y, m, d, h, min, s?, ns?)` | `DateTime` | Component construction | specified |
-| `DateTime(date, time)` / `date + time` | `DateTime` | Composition | specified |
-| `DateTime.parse(text, format?)` | `Result<DateTime, ParseError>` | Explicit parsing | specified |
-| `dt.with_date(date)` / `dt.with_time(time)` | `DateTime` | Part replacement | specified |
-| `dt.with_*(component)` | `DateTime` | Component replacement | specified |
-| `dt.start_of(unit)` / `dt.end_of(unit)` | `DateTime` | Boundary of the unit | specified |
-| `dt ± Duration` | `DateTime` | Exact local-component shift | specified |
-| `dt ± Period` | `DateTime` | Calendar arithmetic preserving local clock | specified |
-| `dt - other` | `Duration` | Local component difference — not a global elapsed time | specified |
-| `dt.in_zone(zone, policy?)` | `Result<ZonedDateTime, TemporalError>` | Localization; fails without an explicit DST policy on gap/overlap | specified |
-| `dt.format(pattern, locale?)` | `String` | Presentation formatting | specified |
-| `dt.to_iso_string()` / `dt.to_string()` | `String` | Machine/default rendering | specified |
+| `DateTime(date, time)` | `DateTime` | Composition construction | implemented |
+| `DateTime.parse(text)` | `Result<DateTime, ParseError>` | Strict ISO parsing | implemented |
+| `date + time` | `DateTime` | Composition | implemented |
+| `DateTime.parse(text, format)` | `Result<DateTime, ParseError>` | Explicit-pattern parsing | specified (Phase 7) |
+| `dt.with_date(date)` / `dt.with_time(time)` | `DateTime` | Part replacement | implemented |
+| `dt.with_year`/`with_month`/`with_day` | `DateTime` | Date-component replacement; invalid result throws `InvalidDateError` | implemented |
+| `dt.with_hour`/`with_minute`/`with_second`/`with_nanosecond` | `DateTime` | Time-component replacement; invalid result throws `InvalidTimeError` | implemented |
+| `dt.start_of(unit)` / `dt.end_of(unit)` | `Result<DateTime, ParseError>` | Boundary of `unit` — date units (`"year"`, `"month"`, `"week"`, `"day"`) and clock units (`"hour"`, `"minute"`, `"second"`) | implemented |
+| `dt ± Duration` | `DateTime` | Exact local-component shift | implemented |
+| `dt ± Period` | `DateTime` | Calendar arithmetic preserving local clock | specified (Phase 7) |
+| `dt - other` | `Duration` | Local component difference — not a global elapsed time | implemented |
+| `dt.in_zone(zone, policy?)` | `Result<ZonedDateTime, TemporalError>` | Localization; fails without an explicit DST policy on gap/overlap | specified (Phase 7) |
+| `dt.format(pattern)` | `String` | Pattern formatting (`YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`/`SSS`); unrecognized text is literal | implemented |
+| `dt.format(pattern, locale)` | `String` | Localized formatting | specified (Phase 7) |
+| `dt.to_iso_string()` / `dt.to_string()` | `String` | Machine/default rendering (the ISO form) | implemented |
+| `dt.is_before`/`is_after`/`is_same`/`is_same_or_before`/`is_same_or_after`/`is_between` | `Boolean` | Local ordering and range | implemented |
+| `dt.is_weekday()` / `dt.is_weekend()` | `Boolean` | Weekday classification | implemented |
 
 ### Examples
 
 ```zirk
-inmut local = DateTime(2026, 8, 15, 14, 30);
+inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
 inmut composed = Date(2026, 8, 15) + Time(14, 30);
-inmut zoned = local.in_zone(TimeZone("America/Santiago"));
+local.start_of("month").unwrap();   // 2026-08-01T00:00
+local + 2h;                         // 2026-08-15T16:30
+// `local.in_zone(...)`: specified — `TimeZone` arrives in Phase 7.
 ```
 
 ---
