@@ -26,7 +26,8 @@ pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, PendingType, TupleType, Type, TypeNames, TypeParamInfo, describe,
+    IntWidth, MethodInfo, PendingType, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
+    describe,
     is_ffi_safe, pending_type,
 };
 

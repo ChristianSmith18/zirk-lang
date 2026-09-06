@@ -79,15 +79,15 @@ built-in static members; user-defined methods are not allowed.
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `case.to_string()` | `String` | Case name | implemented |
-| `Direction.keys()` | `List<String>` | All case names in declaration order | specified |
-| `Direction.values()` | `List<Direction>` | All case values in declaration order | specified |
-| `Direction.count` | `Int32` | Number of cases | specified |
-| `Direction.from_name(name)` | `Result<Direction, LookupError>` | Name lookup; controlled failure | specified |
-| `Direction.from_value(value)` | `Result<Direction, LookupError>` | Mapped-value lookup; mappings must be unique | specified |
+| `Direction.keys()` | `List<String>` | All case names in declaration order | implemented |
+| `Direction.values()` | `List<Direction>` | All case values in declaration order | implemented |
+| `Direction.count` | `Int32` | Number of cases | implemented |
+| `Direction.from_name(name)` | `Result<Direction, LookupError>` | Name lookup; controlled failure | implemented |
+| `Direction.from_value(value)` | `Result<Direction, LookupError>` | Mapped-value lookup; mappings must be unique | implemented |
 | `Direction.to_string()` | `String` | Renders the enum type name | specified |
-| `Enums.keys(enum_type)` | `List<String>` | Generic helper, equivalent to `T.keys()` | specified |
-| `Enums.values(enum_type)` | `List<T>` | Generic helper, equivalent to `T.values()` | specified |
-| `Enums.count(enum_type)` | `Int32` | Generic helper, equivalent to `T.count` | specified |
+| `Enums.keys(enum_type)` | `List<String>` | Generic helper, equivalent to `T.keys()` | implemented |
+| `Enums.values(enum_type)` | `List<T>` | Generic helper, equivalent to `T.values()` | implemented |
+| `Enums.count(enum_type)` | `Int32` | Generic helper, equivalent to `T.count` | implemented |
 
 Cases support equality within the same enum; ordering exists only through an
 explicit ordering contract. `match` is exhaustive.

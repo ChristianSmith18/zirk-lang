@@ -45,9 +45,10 @@ or several typed values.
 Two enum values are equal when they have the same variant and equal associated values. Equality can be derived only when every payload supports it. Ordering is never inferred from declaration order. Each `match` arm narrows its payload types.
 
 Algebraic enums may be generic. Their variants are ordinary typed constructors.
-The enum type exposes built-in static members such as `keys()`, `values()`,
-`count`, `from_name()`, and `from_value()`; it cannot declare user-defined
-methods. Clone and equality are available only when every reachable payload
+The enum type exposes the built-in static members `keys()` and `count`;
+`values()`, `from_name()`, and `from_value()` apply to traditional enums
+only — a payload case cannot be materialized out of nothing. An enum cannot
+declare user-defined methods. Clone and equality are available only when every reachable payload
 satisfies the corresponding contract. Payload extraction is legal only inside
 `match`; direct enum destructuring is deliberately rejected.
 

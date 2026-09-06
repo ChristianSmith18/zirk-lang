@@ -16,7 +16,7 @@ use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, describe, EnumType,
     EnumVariantInfo, FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth,
-    MethodInfo, ParamInfo, TupleType, Type, TypeNames,
+    MethodInfo, ParamInfo, TupleType, Type, TypeNames, VariantMapping,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -1567,6 +1567,9 @@ fn synthesize_native_failure_bodies<'a>(
         (native.parse_error, "E_PARSE"),
         (native.overflow_error, "E_OVERFLOW"),
         (native.regex_error, "E_REGEX"),
+        // `enum-static-members`: `LookupError`, the `Error` half of the
+        // `Result` `EnumType.from_name`/`EnumType.from_value` produce.
+        (native.lookup_error, "E_LOOKUP"),
     ];
 
     for (class_id, code) in classes {
@@ -5797,6 +5800,13 @@ impl<'a> FunctionLowering<'a> {
                 // have to be lowered before any lookup that would try to
                 // resolve their base name as a variable or contract method
                 // (`Int32.parse(...)` / `Int32.MAX.to_string()`).
+                // `enum-static-members`: `Direction.keys()`/`values()`/
+                // `from_name`/`from_value` and the `Enums.*` helpers are
+                // lowered ahead of the native statics for the same reason —
+                // their base is a type name no value lookup can resolve.
+                if let Some(operand) = self.lower_enum_static_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_native_static_call(e, span) {
                     return operand;
                 }
@@ -7561,6 +7571,7 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.parse_error
                 || id == n.overflow_error
                 || id == n.regex_error
+                || id == n.lookup_error
         })
     }
 
@@ -10362,6 +10373,261 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    /// `E.keys()`/`E.values()`/`E.from_name`/`E.from_value` and the
+    /// `Enums.keys/values/count(E)` helpers (`enum-static-members`). The
+    /// checker recorded the callee's span in `enum_static_accesses`;
+    /// everything but the lookups is a compile-time constant shape.
+    fn lower_enum_static_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !self.checked.enum_static_accesses.contains(&field.span) {
+            return None;
+        }
+        // `E.member` names the enum as the callee's object; `Enums.member(E)`
+        // passes it as the only argument — a type reference in argument
+        // position, never lowered as a value.
+        let ast::Expr::Path(base) = &*field.object else {
+            unreachable!("the checker only records a path base")
+        };
+        let enum_ident = if base.name == "Enums" {
+            let ast::Expr::Path(arg) = &call.args[0].value else {
+                unreachable!("the checker required an enum type name")
+            };
+            arg
+        } else {
+            base
+        };
+        let enum_id = self.enum_id_of(enum_ident);
+        let variant_names: Vec<String> = self.checked.enums[enum_id as usize]
+            .variants
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
+
+        match field.name.name.as_str() {
+            "count" => Some(self.emit(
+                InstKind::ConstInt(variant_names.len() as i128),
+                IrType::Int(IntWidth::I32),
+                span,
+            )),
+            "keys" | "values" => {
+                let ty = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .copied()
+                    .expect("the checker recorded this call's List type");
+                let Base::List(list_id) = ty.base else {
+                    unreachable!("keys/values always type to a List")
+                };
+                let list_ty = IrType::List(list_id);
+                let element_ty = self.module.list_types[list_id as usize];
+                let list = self.emit(InstKind::ListNew { element_id: list_id }, list_ty, span);
+                if variant_names.is_empty() {
+                    return Some(list);
+                }
+                let list_slot = self.spill(list, list_ty, span);
+                for (i, name) in variant_names.iter().enumerate() {
+                    let receiver = self.emit(InstKind::Load(list_slot), list_ty, span);
+                    // `values()` is a traditional-enum-only member (the
+                    // checker rejects it on payloads), so each element is
+                    // the case's `Int32` discriminant — its index.
+                    let value = if field.name.name == "keys" {
+                        let name = self.module.intern_string(name);
+                        self.emit(InstKind::ConstString(name), IrType::String, span)
+                    } else {
+                        self.emit(
+                            InstKind::ConstInt(i as i128),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        )
+                    };
+                    debug_assert_eq!(element_ty, self.type_of_operand(value));
+                    self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span);
+                }
+                Some(self.emit(InstKind::Load(list_slot), list_ty, span))
+            }
+            "from_name" | "from_value" => Some(self.lower_enum_lookup(
+                call,
+                field,
+                enum_id,
+                span,
+            )),
+            _ => unreachable!("the checker only records the declared static members"),
+        }
+    }
+
+    /// `E.from_name(name)`/`E.from_value(value)` (`enum-static-members`):
+    /// the run-time half of the surface, expanded to the same comparison
+    /// chain an exhaustive `match` would take — each block tests the
+    /// argument against one case's key, and the miss side falls through to
+    /// the `Err(LookupError)` tail.
+    ///
+    /// ```text
+    ///   test₁ ──(no)──▶ test₂ ──(no)──▶ … ──▶ Err(LookupError)
+    ///     │(yes)          │(yes)
+    ///     ▼               ▼
+    ///   Ok(case₁)       Ok(case₂) ──▶ continue ◀── …
+    /// ```
+    fn lower_enum_lookup(
+        &mut self,
+        call: &ast::CallExpr,
+        field: &ast::FieldExpr,
+        enum_id: u32,
+        span: Span,
+    ) -> Operand {
+        let by_name = field.name.name == "from_name";
+        let variants = &self.checked.enums[enum_id as usize].variants;
+        // The key type is the one `Checker::enum_mapped_value_type` decided:
+        // `String` when any `->` mapping is text, `Int32` otherwise.
+        let by_text = by_name
+            || variants
+                .iter()
+                .any(|v| matches!(v.mapping, Some(VariantMapping::Text(_))));
+        let key_ty = if by_text {
+            IrType::String
+        } else {
+            IrType::Int(IntWidth::I32)
+        };
+        // The key each case is compared against, resolved now but emitted
+        // inside its own test block later — an IR value never crosses a
+        // block boundary.
+        let keys: Vec<Key> = variants
+            .iter()
+            .enumerate()
+            .map(|(i, variant)| {
+                if by_text {
+                    let text = match &variant.mapping {
+                        Some(VariantMapping::Text(text)) if !by_name => text.clone(),
+                        // `from_name` always looks the declared name up, and
+                        // a case without a `->` mapping keeps its name as
+                        // its value in a string-mapped enum.
+                        _ => variant.name.clone(),
+                    };
+                    Key::Text(text)
+                } else {
+                    let value = match &variant.mapping {
+                        Some(VariantMapping::Int(value)) => *value as i128,
+                        // A case without a mapping keeps its discriminant —
+                        // the index `EnumType.discriminant` already reports.
+                        _ => i as i128,
+                    };
+                    Key::Int(value)
+                }
+            })
+            .collect();
+
+        // `Result<E, LookupError>`'s IR type and the `LookupError` class id
+        // both come from the checker's own record of this call — the same
+        // extraction `build_result_from_flag` performs.
+        let result_sema = self
+            .checked
+            .expr_types
+            .get(&call.span)
+            .copied()
+            .expect("the checker recorded this call's Result type");
+        let result_ty = self.ir_type(result_sema);
+        let IrType::Enum(result_enum) = result_ty else {
+            unreachable!("Result<T,E> always lowers to IrType::Enum")
+        };
+        let Base::EnumInstance(instance_id) = result_sema.base else {
+            unreachable!("from_name/from_value always type to a Result instance")
+        };
+        let error_class = match self.checked.enum_instances[instance_id as usize].args[1].base {
+            Base::Class(id) => id,
+            _ => unreachable!("the checker interned the error class"),
+        };
+
+        let argument = self.lower_expr_as(&call.args[0].value, key_ty);
+        let arg_slot = self.spill(argument, key_ty, span);
+        let result_slot = self.declare_slot("<result>", result_ty, span);
+        let continue_block = self.new_block();
+
+        for (i, key) in keys.into_iter().enumerate() {
+            let matched = self.new_block();
+            let next = self.new_block();
+            let argument = self.emit(InstKind::Load(arg_slot), key_ty, span);
+            let key = match key {
+                Key::Text(text) => {
+                    let id = self.module.intern_string(&text);
+                    self.emit(InstKind::ConstString(id), IrType::String, span)
+                }
+                Key::Int(value) => {
+                    self.emit(InstKind::ConstInt(value), IrType::Int(IntWidth::I32), span)
+                }
+            };
+            let found = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: argument,
+                    right: key,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: found,
+                then_block: matched,
+                else_block: next,
+            });
+
+            self.current = matched;
+            // `Ok` is declared before `Error`, so its variant is always 0 —
+            // the same order `build_result_from_flag` relies on.
+            let value = self.emit(
+                InstKind::ConstInt(i as i128),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let ok = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: result_enum,
+                    variant: 0,
+                    fields: vec![value],
+                },
+                result_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result_slot, ok), span);
+            self.terminate(Terminator::Jump(continue_block));
+
+            self.current = next;
+        }
+
+        let enum_name = self.checked.enums[enum_id as usize].name.clone();
+        let error_object = self.build_native_failure(
+            error_class,
+            &format!("no `{enum_name}` variant matches the lookup"),
+            span,
+        );
+        let error_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 1,
+                fields: vec![error_object],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, error_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), result_ty, span)
+    }
+
+    /// Whether `call` is an `E.keys()`/`E.from_*`/`Enums.*` static —
+    /// consulted by `is_callable_call` so the callee is never type-queried
+    /// as a field, the same reason `is_native_static_call` exists.
+    fn is_enum_static_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(
+            &*call.callee,
+            ast::Expr::Field(field)
+                if self.checked.enum_static_accesses.contains(&field.span)
+        )
+    }
+
     /// `r.reverse()` on a `Range<T>` (roadmap Phase 7): the same elements
     /// produced last to first — a new `Range`, the receiver untouched.
     fn lower_range_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
@@ -11810,6 +12076,24 @@ impl<'a> FunctionLowering<'a> {
             }
         }
 
+        // `Direction.count` (`enum-static-members`): a static member on the
+        // enum's own type name — the path names a type, not a value to read
+        // a field from, so this answers before any `type_of` on
+        // `expr.object`, the same ordering the `variant_accesses` branch
+        // below keeps for `Direction.North`.
+        if self.checked.enum_static_accesses.contains(&expr.span) {
+            let ast::Expr::Path(enum_name) = &*expr.object else {
+                unreachable!("an enum static access names its enum")
+            };
+            let enum_id = self.enum_id_of(enum_name);
+            let count = self.checked.enums[enum_id as usize].variants.len();
+            return self.emit(
+                InstKind::ConstInt(count as i128),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+        }
+
         // `native-type-member-surface` field/property lowering.
         //
         // Static scalar constants, `String`/`Char` metadata, `Tuple.length`,
@@ -12387,16 +12671,36 @@ impl<'a> FunctionLowering<'a> {
         }
 
         // For a runtime `Enum` value, emit a switch over the discriminant.
+        // A traditional enum *is* its `Int32` discriminant once lowered —
+        // `value` answers the operand itself and `name`/`to_string` still
+        // switch over it; only an algebraic value needs `Discriminant`.
         let receiver = self.lower_expr(object);
-        let IrType::Enum(enum_id) = self.type_of(object, object.span()) else {
-            unreachable!("an enum value lowers to IrType::Enum")
+        let receiver_ty = self.type_of(object, object.span());
+        let (enum_id, disc) = match receiver_ty {
+            IrType::Enum(enum_id) => (
+                enum_id,
+                self.emit(
+                    InstKind::Discriminant(receiver),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ),
+            ),
+            IrType::Int(_) => {
+                let Base::Enum(enum_id) = sema.base else {
+                    unreachable!("a non-payload enum value lowers to its Int32 discriminant")
+                };
+                if name == "value" {
+                    return Some(receiver);
+                }
+                (enum_id, receiver)
+            }
+            _ => unreachable!("an enum value lowers to IrType::Enum or its Int32 discriminant"),
         };
         let result = self.declare_slot("<enum_prop>", if name == "value" { IrType::Int(IntWidth::I32) } else { IrType::String }, span);
-        let disc = self.emit(
-            InstKind::Discriminant(receiver),
-            IrType::Int(IntWidth::I32),
-            span,
-        );
+        // Each arm's test runs in a block of its own, and an IR value never
+        // crosses a block boundary — the discriminant goes through a slot
+        // and is reloaded per test.
+        let disc_slot = self.spill(disc, IrType::Int(IntWidth::I32), span);
 
         let variants = self.checked.enums[enum_id as usize].variants.clone();
         let continue_block = self.new_block();
@@ -12404,6 +12708,11 @@ impl<'a> FunctionLowering<'a> {
         for (i, variant) in variants.iter().enumerate() {
             let arm = self.new_block();
             self.current = current;
+            let disc = self.emit(
+                InstKind::Load(disc_slot),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
             let index = self.emit(InstKind::ConstInt(i as i128), IrType::Int(IntWidth::I32), span);
             let test = self.emit(
                 InstKind::Binary {
@@ -12839,6 +13148,23 @@ impl<'a> FunctionLowering<'a> {
             } else {
                 IrType::Int(IntWidth::I32)
             };
+        }
+        // `Direction.count` and an `E.*`/`Enums.*` static callee
+        // (`enum-static-members`): no layout slot exists to point at — the
+        // checker recorded the member's type for `count`, and a call's
+        // callee is only ever asked here whether it is `Callable` (it is
+        // not). This precedes the `variant_accesses` branch below: the
+        // callee spans share that set, but `Enums` names no enum —
+        // `enum_id_of` would not resolve it.
+        if self.checked.enum_static_accesses.contains(&expr.span) {
+            return self
+                .checked
+                .expr_types
+                .get(&expr.span)
+                .copied()
+                .filter(|ty| !ty.is_unknown())
+                .map(|ty| self.ir_type(ty))
+                .unwrap_or(IrType::Int(IntWidth::I32));
         }
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
@@ -14795,6 +15121,15 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        // `enum-static-members`: `Direction.keys()`/`Enums.values(E)` — the
+        // callee's base names a type, not a value, so every probe below
+        // (`exception_intrinsic_type`, `method_of`, the `type_of`
+        // fallthrough on the callee itself) would ask for the type of
+        // something that is not one — exactly the failure mode the
+        // `Pointer.from` guard below names.
+        if self.is_enum_static_call(call) {
+            return false;
+        }
         // A method or `super` call is not a callable call, and asking for the
         // type of its callee would ask for the type of a method — which is not
         // a value. Neither is `myScalar.to_string()` — asking for the type of
@@ -15630,6 +15965,16 @@ struct NativeSliceConstruction {
     element: IrType,
     mutable: bool,
     known_length: Option<u64>,
+}
+
+/// The key one `from_name`/`from_value` comparison tests the argument
+/// against (`enum-static-members`) — resolved ahead of the block chain it
+/// is emitted into, since an IR value cannot cross blocks.
+enum Key {
+    /// A declared name or a `-> "text"` mapping.
+    Text(String),
+    /// A `-> n` mapping or the case's own discriminant.
+    Int(i128),
 }
 
 /// Where a value waits while a later expression is lowered.

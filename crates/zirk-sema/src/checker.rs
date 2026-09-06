@@ -11,8 +11,8 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe,
-    pending_type,
+    IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
+    describe, is_ffi_safe, pending_type,
 };
 use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
@@ -61,6 +61,14 @@ pub struct CheckedProgram {
     /// type, not a value — lowering emits the constant or the static call
     /// without ever evaluating the path.
     pub scalar_static_accesses: std::collections::HashSet<Span>,
+    /// Member accesses and calls on an enum *type name* that resolved to a
+    /// built-in static member rather than a variant (`enum-static-members`):
+    /// `Direction.count`, `Direction.keys()`, `Direction.values()`,
+    /// `Direction.from_name(n)`, `Direction.from_value(v)` and the
+    /// `Enums.keys(E)`/`values(E)`/`count(E)` helpers — by the field
+    /// expression's span, the same shape `variant_accesses` uses for the
+    /// variant cases.
+    pub enum_static_accesses: std::collections::HashSet<Span>,
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     pub type_params: Vec<TypeParamInfo>,
@@ -229,6 +237,10 @@ pub struct NativeExceptions {
     /// `RegexError`: the `Error` half of the `Result` `Regex.parse`
     /// returns.
     pub regex_error: u32,
+    /// `LookupError` (`enum-static-members`): the `Error` half of the
+    /// `Result` `EnumType.from_name`/`EnumType.from_value` return when no
+    /// variant matches.
+    pub lookup_error: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -473,6 +485,8 @@ struct Checker<'a> {
     matches: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
     scalar_static_accesses: std::collections::HashSet<Span>,
+    /// See [`CheckedProgram::enum_static_accesses`].
+    enum_static_accesses: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Use sites whose written name differs from the declaration's.
@@ -712,6 +726,7 @@ impl<'a> Checker<'a> {
             matches: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
+            enum_static_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
@@ -971,6 +986,7 @@ impl<'a> Checker<'a> {
             matches: self.matches,
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
+            enum_static_accesses: self.enum_static_accesses,
             aliases: self.aliases,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -1309,11 +1325,13 @@ impl<'a> Checker<'a> {
                         name: "value".into(),
                         ty: Type::of(Base::Param(iteration_t)),
                     }],
+                    mapping: None,
                     span: at,
                 },
                 EnumVariantInfo {
                     name: "Done".into(),
                     associated: Vec::new(),
+                    mapping: None,
                     span: at,
                 },
             ],
@@ -1463,6 +1481,7 @@ impl<'a> Checker<'a> {
                         name: "value".into(),
                         ty: Type::of(Base::Param(t)),
                     }],
+                    mapping: None,
                     span: at,
                 },
                 EnumVariantInfo {
@@ -1471,6 +1490,7 @@ impl<'a> Checker<'a> {
                         name: "error".into(),
                         ty: Type::of(Base::Param(e)),
                     }],
+                    mapping: None,
                     span: at,
                 },
             ],
@@ -1770,6 +1790,10 @@ impl<'a> Checker<'a> {
         let parse_error = register_native_failure(&mut self.classes, "ParseError");
         let overflow_error = register_native_failure(&mut self.classes, "OverflowError");
         let regex_error = register_native_failure(&mut self.classes, "RegexError");
+        // `enum-static-members`: the `Error` half of `EnumType.from_name`/
+        // `EnumType.from_value`'s `Result` — a failed lookup is a controlled
+        // failure, never a trap.
+        let lookup_error = register_native_failure(&mut self.classes, "LookupError");
 
         self.native_exceptions = Some(NativeExceptions {
             error,
@@ -1788,6 +1812,7 @@ impl<'a> Checker<'a> {
             parse_error,
             overflow_error,
             regex_error,
+            lookup_error,
         });
     }
 
@@ -1926,6 +1951,7 @@ impl<'a> Checker<'a> {
                         name: "body".into(),
                         ty: Type::of(Base::Param(body_error)),
                     }],
+                    mapping: None,
                     span: at,
                 },
                 EnumVariantInfo {
@@ -1934,6 +1960,7 @@ impl<'a> Checker<'a> {
                         name: "close".into(),
                         ty: Type::of(Base::Param(close_error)),
                     }],
+                    mapping: None,
                     span: at,
                 },
                 EnumVariantInfo {
@@ -1948,6 +1975,7 @@ impl<'a> Checker<'a> {
                             ty: Type::of(Base::Param(close_error)),
                         },
                     ],
+                    mapping: None,
                     span: at,
                 },
             ],
@@ -3916,7 +3944,10 @@ impl<'a> Checker<'a> {
                 });
             }
 
-            if let Some(mapping) = &variant.mapping {
+            // `-> value` (`enum-static-members`): the mapping resolves here,
+            // once — `EnumType.from_value` compares against it at run time
+            // and `lower.rs` never sees the expression it was written as.
+            let mapping = variant.mapping.as_ref().map(|mapping| {
                 let ty = self.check_expr(mapping);
                 if !ty.is_unknown() && ty != Type::STRING && ty != Type::INT32 {
                     let name = self.name(ty);
@@ -3928,11 +3959,13 @@ impl<'a> Checker<'a> {
                         Some("write a string or an integer literal".into()),
                     );
                 }
-            }
+                self.variant_mapping_literal(mapping)
+            });
 
             variants.push(EnumVariantInfo {
                 name: variant.name.name.clone(),
                 associated,
+                mapping,
                 span: variant.span,
             });
         }
@@ -3953,6 +3986,46 @@ impl<'a> Checker<'a> {
         self.leave_type_params();
 
         self.enums[id].variants = variants;
+    }
+
+    /// The literal a variant's `-> value` mapping resolves to
+    /// (`enum-static-members`). The type check above already narrowed the
+    /// mapping to `String` or `Int32`; this resolves the literal itself, so
+    /// `EnumType.from_value` has a value to compare against at run time
+    /// without `lower.rs` ever seeing the expression it was written as.
+    fn variant_mapping_literal(&mut self, expr: &Expr) -> VariantMapping {
+        let literal = match expr {
+            Expr::Int(lit) => Some(lit.value),
+            Expr::Unary(unary) if unary.op == UnaryOp::Neg => match &*unary.operand {
+                Expr::Int(lit) => Some(lit.value.wrapping_neg()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(value) = literal {
+            if value > i64::MAX as i128 || value < i64::MIN as i128 {
+                self.error(
+                    codes::INTEGER_OUT_OF_RANGE,
+                    expr.span(),
+                    format!("`{value}` is out of range for a mapping"),
+                    "a mapping is a string or an integer literal",
+                    None,
+                );
+                return VariantMapping::Int(0);
+            }
+            return VariantMapping::Int(value as i64);
+        }
+        if let Expr::Str(lit) = expr {
+            return VariantMapping::Text(lit.value.clone());
+        }
+        self.error(
+            codes::TYPE_MISMATCH,
+            expr.span(),
+            "a mapping must be a string or an integer literal",
+            "`EnumType.from_value` compares against it at run time, so it cannot be computed",
+            None,
+        );
+        VariantMapping::Int(0)
     }
 
     fn declare_function(&mut self, f: &FnDecl) {
@@ -9431,7 +9504,19 @@ impl<'a> Checker<'a> {
         // consulted here.
         if let Expr::Path(base) = &*expr.object {
             let resolved = self.resolved_name(&base.name, base.span);
-            if self.enums.iter().any(|e| e.name == resolved) {
+            if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
+                // `Direction.count` (`enum-static-members`): the one static
+                // member spelled without parentheses — `keys`/`values`/
+                // `from_name`/`from_value` are calls and are decided in
+                // `check_call`, ahead of the same variant-construction
+                // dispatch this falls through to.
+                if expr.name.name == "count" {
+                    let declared = self.enums[enum_id].span;
+                    let shared = self.enums[enum_id].shared;
+                    self.require_visible(declared, shared, base, "enum");
+                    self.enum_static_accesses.insert(expr.span);
+                    return Type::INT32;
+                }
                 let variant = VariantExpr {
                     enum_name: base.clone(),
                     variant: expr.name.clone(),
@@ -10090,6 +10175,209 @@ impl<'a> Checker<'a> {
         let instance = self.intern_enum_instance(GenericEnumInstance { enum_id, args });
         self.variant_constructions.insert(expr.span, instance);
         Type::of(Base::EnumInstance(instance))
+    }
+
+    /// `E.keys()`/`E.values()`/`E.from_name(name)`/`E.from_value(value)` on
+    /// an enum type path (`enum-static-members`). `None` when the member is
+    /// none of those — the caller falls through to variant construction,
+    /// whose "unknown variant" diagnostic is the right answer for anything
+    /// else. `count` is the one member spelled without parentheses; it is
+    /// decided in `check_field` instead.
+    ///
+    /// The callee's span goes into both `variant_accesses` (so lowering's
+    /// own "the object names a type, not a value" guards short-circuit on
+    /// it) and `enum_static_accesses` (which is what actually dispatches
+    /// the member there).
+    fn check_enum_static_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        enum_id: u32,
+    ) -> Option<Type> {
+        let member = field.name.name.as_str();
+        if !matches!(member, "keys" | "values" | "from_name" | "from_value") {
+            return None;
+        }
+        self.enum_static_accesses.insert(field.span);
+        self.variant_accesses.insert(field.span);
+
+        let declared = self.enums[enum_id as usize].span;
+        let shared = self.enums[enum_id as usize].shared;
+        let Expr::Path(base) = &*field.object else {
+            unreachable!("the caller already required a path base")
+        };
+        self.require_visible(declared, shared, base, "enum");
+
+        let takes_argument = matches!(member, "from_name" | "from_value");
+        let expected_arity = usize::from(takes_argument);
+        if expr.args.len() != expected_arity {
+            let enum_name = self.enums[enum_id as usize].name.clone();
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{enum_name}.{member}` takes {expected_arity} argument(s)"),
+                format!("received {}", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Some(Type::UNKNOWN);
+        }
+
+        if takes_argument {
+            // `from_name` looks a case up by its declared name;
+            // `from_value` by the `->` mapping — a string or an integer,
+            // whichever the enum's own mappings declared (a variant without
+            // one keeps its default: its name for a string enum, its
+            // discriminant for an integer one).
+            let expected_arg = if member == "from_name" {
+                Type::STRING
+            } else {
+                self.enum_mapped_value_type(field, enum_id)
+            };
+            if expected_arg.is_unknown() {
+                return Some(Type::UNKNOWN);
+            }
+            let arg = self.check_expr(&expr.args[0].value);
+            if !arg.is_unknown() && !expected_arg.accepts(arg) {
+                self.expect_assignable(
+                    expected_arg,
+                    arg,
+                    expr.args[0].value.span(),
+                    "the argument",
+                );
+            }
+        }
+
+        Some(self.enum_static_member_type(field, enum_id, member))
+    }
+
+    /// `Enums.keys(E)`/`Enums.values(E)`/`Enums.count(E)`
+    /// (`enum-static-members`): the generic helpers for when the enum type
+    /// is not known statically. The argument is the enum's *name* — a type
+    /// reference in argument position, resolved against `self.enums` the
+    /// same way a `TypeName.member` base is.
+    fn check_enums_helper_call(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        let member = field.name.name.as_str();
+        if expr.args.len() != 1 {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`Enums.{member}` takes one argument"),
+                format!("received {}", expr.args.len()),
+                Some("pass the enum type: `Enums.keys(Direction)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let Expr::Path(path) = &expr.args[0].value else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                format!("`Enums.{member}` takes an enum type name"),
+                "the argument is a type, not a value",
+                Some("write the enum's name: `Enums.keys(Direction)`".into()),
+            );
+            self.check_expr(&expr.args[0].value);
+            return Type::UNKNOWN;
+        };
+        let resolved = self.resolved_name(&path.name, path.span);
+        let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                path.span,
+                format!("`{}` is not a declared enum", path.name),
+                format!("`Enums.{member}` only works on an enum type"),
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+
+        let declared = self.enums[enum_id].span;
+        let shared = self.enums[enum_id].shared;
+        self.require_visible(declared, shared, path, "enum");
+
+        self.enum_static_accesses.insert(field.span);
+        self.variant_accesses.insert(field.span);
+        self.enum_static_member_type(field, enum_id as u32, member)
+    }
+
+    /// The return type of `E`'s static `member` (`enum-static-members`),
+    /// once the call's own arguments checked out: `Int32` for `count`,
+    /// `List<String>` for `keys`, `List<E>` for `values`, and
+    /// `Result<E, LookupError>` for the lookups.
+    ///
+    /// `values()` and the `from_*` lookups are rejected on an enum whose
+    /// variants carry associated data: a payload case cannot be
+    /// materialized out of nothing — `Shape.Circle(radius)` needs its
+    /// `radius` — and `from_value` has no observable value to compare
+    /// against.
+    fn enum_static_member_type(&mut self, field: &FieldExpr, enum_id: u32, member: &str) -> Type {
+        match member {
+            "count" => Type::INT32,
+            "keys" => Type::of(Base::List(self.intern_list_type(Type::STRING))),
+            "values" | "from_name" | "from_value" => {
+                let has_payload = self.enums[enum_id as usize]
+                    .variants
+                    .iter()
+                    .any(|v| !v.associated.is_empty());
+                if has_payload {
+                    let enum_name = self.enums[enum_id as usize].name.clone();
+                    self.error(
+                        codes::UNKNOWN_MEMBER,
+                        field.name.span,
+                        format!("`{enum_name}` has no `{member}`"),
+                        "an enum whose variants carry associated data cannot be enumerated or looked up — a payload needs its arguments",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                let enum_ty = Type::of(Base::Enum(enum_id));
+                if member == "values" {
+                    Type::of(Base::List(self.intern_list_type(enum_ty)))
+                } else {
+                    let native = self
+                        .native_exceptions
+                        .expect("the exception hierarchy is registered");
+                    self.native_result_with(enum_ty, native.lookup_error)
+                }
+            }
+            _ => unreachable!("the caller only ever names a declared static member"),
+        }
+    }
+
+    /// The type `E.from_value(value)` compares `value` against
+    /// (`enum-static-members`): `String` when the enum's `->` mappings are
+    /// strings, `Int32` when they are integers — or when the enum declares
+    /// none at all, in which case the discriminant each case's `.value`
+    /// already reports is what a lookup matches. Mixed mappings are
+    /// rejected: a single argument type cannot name both.
+    fn enum_mapped_value_type(&mut self, field: &FieldExpr, enum_id: u32) -> Type {
+        let mut has_text = false;
+        let mut has_int = false;
+        for variant in &self.enums[enum_id as usize].variants {
+            match &variant.mapping {
+                Some(VariantMapping::Text(_)) => has_text = true,
+                Some(VariantMapping::Int(_)) => has_int = true,
+                None => {}
+            }
+        }
+        if has_text && has_int {
+            let enum_name = self.enums[enum_id as usize].name.clone();
+            self.error(
+                codes::TYPE_MISMATCH,
+                field.name.span,
+                format!("`{enum_name}` mixes string and integer mappings"),
+                "every mapping in one enum must share a type for `from_value` to look a case up",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        if has_text { Type::STRING } else { Type::INT32 }
     }
 
     /// Walks a block for `Self::check_recursive_reference`, statement by
@@ -12097,9 +12385,29 @@ impl<'a> Checker<'a> {
         {
             let resolved = self.resolved_name(&base.name, base.span);
             if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
+                // `enum-static-members`: `E.keys()`/`E.values()`/
+                // `E.from_name`/`E.from_value` are built-in static members,
+                // decided ahead of the variant lookup — `Direction.keys`
+                // names no variant.
+                if let Some(ty) = self.check_enum_static_call(expr, field, enum_id as u32) {
+                    return ty;
+                }
                 self.variant_accesses.insert(field.span);
                 return self.check_variant_construction(expr, field, enum_id as u32, expected);
             }
+        }
+
+        // `Enums.keys(Direction)`/`values`/`count` (`enum-static-members`):
+        // `Enums` is a compiler-known helper whose argument is a *type
+        // name*, not a value — decided here for the same reason
+        // `Pointer.from`/`Weak.from` below are.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Enums"
+            && self.scopes.lookup(&base.name).is_none()
+            && matches!(field.name.name.as_str(), "keys" | "values" | "count")
+        {
+            return self.check_enums_helper_call(expr, field);
         }
 
         // `Ok(...)` and `Error(...)` are the unqualified forms of the built-in
