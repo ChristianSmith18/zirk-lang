@@ -3320,10 +3320,15 @@ impl<'a> Parser<'a> {
                     // `from` is `Keyword::From` everywhere else (`implements
                     // X from Y`), but unambiguously a field name right after
                     // `.`/`?.` — nothing else can follow the access operator.
-                    let name = if let TokenKind::Keyword(Keyword::From) = self.peek() {
+                    // The same applies to the universal `.type` member.
+                    let name = if let TokenKind::Keyword(Keyword::From | Keyword::Type) = self.peek() {
                         let span = self.peek_span();
+                        let text = match self.peek() {
+                            TokenKind::Keyword(k) => k.as_str().to_string(),
+                            _ => unreachable!("matched above"),
+                        };
                         self.pos += 1;
-                        Ident::new("from", span)
+                        Ident::new(text, span)
                     } else {
                         self.expect_identifier("after the access operator")?
                     };
