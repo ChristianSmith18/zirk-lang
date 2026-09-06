@@ -9345,6 +9345,11 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
+        // Universal `.type` member: a `String` with the type's display name.
+        if member.name == "type" {
+            return Type::STRING;
+        }
+
         // `Pin<T>` dereferences automatically for field and method access
         // (roadmap Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);

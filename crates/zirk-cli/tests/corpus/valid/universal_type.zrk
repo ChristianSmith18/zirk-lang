@@ -1,0 +1,19 @@
+class Point {
+    x: Int32;
+    y: Int32;
+    construct(x: Int32, y: Int32) {
+        this.x = x;
+        this.y = y;
+    }
+}
+
+fn main(): Void {
+    inmut n = 42;
+    inmut s = "hola";
+    inmut d = 5m;
+    inmut p = Point(1, 2);
+    stdout.println(n.type);
+    stdout.println(s.type);
+    stdout.println(d.type);
+    stdout.println(p.type);
+}

@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
-    AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
-    FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
-    ParamInfo, TupleType, Type,
+    AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, describe, EnumType,
+    EnumVariantInfo, FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth,
+    MethodInfo, ParamInfo, TupleType, Type, TypeNames,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -2278,6 +2278,91 @@ struct LoopTargets {
     unsafe_depth: usize,
 }
 
+/// Resolver for [`zirk_sema::describe`] used to materialise the `value.type`
+/// name at lowering time.
+struct TypeNamesResolver<'a>(&'a CheckedProgram);
+
+impl<'a> TypeNames for TypeNamesResolver<'a> {
+    fn enum_name(&self, id: u32) -> String {
+        self.0.enums[id as usize].name.clone()
+    }
+    fn function_type(&self, id: u32) -> String {
+        let f = &self.0.fn_types[id as usize];
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| describe(*p, self))
+            .collect();
+        format!("Fn({}) -> {}", params.join(", "), describe(f.returns, self))
+    }
+    fn class_name(&self, id: u32) -> String {
+        self.0.classes[id as usize].name.clone()
+    }
+    fn contract_name(&self, id: u32) -> String {
+        self.0.contracts[id as usize].name.clone()
+    }
+    fn type_param_name(&self, id: u32) -> String {
+        self.0.type_params[id as usize].name.clone()
+    }
+    fn instance_name(&self, id: u32) -> String {
+        let i = &self.0.generic_instances[id as usize];
+        let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
+        format!("{}<{}>", self.0.classes[i.class as usize].name, args.join(", "))
+    }
+    fn contract_instance_name(&self, id: u32) -> String {
+        let i = &self.0.contract_instances[id as usize];
+        let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
+        format!("{}<{}>", self.0.contracts[i.contract as usize].name, args.join(", "))
+    }
+    fn enum_instance_name(&self, id: u32) -> String {
+        let i = &self.0.enum_instances[id as usize];
+        let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
+        format!("{}<{}>", self.0.enums[i.enum_id as usize].name, args.join(", "))
+    }
+    fn union_name(&self, id: u32) -> String {
+        let parts: Vec<String> = self.0.unions[id as usize]
+            .iter()
+            .map(|b| describe(Type::of(*b), self))
+            .collect();
+        format!("Union<{}>", parts.join(" | "))
+    }
+    fn pointer_element(&self, id: u32) -> Type {
+        self.0.pointer_types[id as usize]
+    }
+    fn weak_element(&self, id: u32) -> Type {
+        self.0.weak_types[id as usize]
+    }
+    fn native_slice_element(&self, id: u32) -> Type {
+        self.0.native_slice_types[id as usize]
+    }
+    fn native_slice_mut_element(&self, id: u32) -> Type {
+        self.0.native_slice_mut_types[id as usize]
+    }
+    fn dependent_element(&self, id: u32) -> Type {
+        self.0.dependent_types[id as usize]
+    }
+    fn pin_element(&self, id: u32) -> Type {
+        self.0.pin_types[id as usize]
+    }
+    fn tuple_name(&self, id: u32) -> String {
+        let e: Vec<String> = self.0.tuple_types[id as usize]
+            .elements
+            .iter()
+            .map(|t| describe(*t, self))
+            .collect();
+        format!("({})", e.join(", "))
+    }
+    fn array_element(&self, id: u32) -> Type {
+        self.0.array_types[id as usize]
+    }
+    fn list_element(&self, id: u32) -> Type {
+        self.0.list_types[id as usize]
+    }
+    fn range_element(&self, id: u32) -> Type {
+        self.0.range_types[id as usize]
+    }
+}
+
 impl<'a> FunctionLowering<'a> {
     fn new(
         module: &'a mut Module,
@@ -2324,6 +2409,11 @@ impl<'a> FunctionLowering<'a> {
             self.enum_instance_base,
             self.checked,
         )
+    }
+
+    /// Human-readable name for a semantic `Type`, used for `value.type`.
+    fn type_name(&self, ty: Type) -> String {
+        describe(ty, &TypeNamesResolver(self.checked))
     }
 
     // --- Construction helpers ---------------------------------------------
@@ -11404,6 +11494,19 @@ impl<'a> FunctionLowering<'a> {
     /// The checker already decided which one it is and recorded the answer, so
     /// this reads the decision rather than repeating it with the same tables.
     fn lower_field(&mut self, expr: &ast::FieldExpr, span: Span) -> Operand {
+        // Universal `.type` member: materialise the type's name as a `String`.
+        if expr.name.name == "type" {
+            let ty = self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .copied()
+                .unwrap_or(Type::UNKNOWN);
+            let name = self.type_name(ty);
+            let id = self.module.intern_string(&name);
+            return self.emit(InstKind::ConstString(id), IrType::String, span);
+        }
+
         if expr.name.name == "is_null"
             && matches!(
                 self.type_of(&expr.object, expr.object.span()),
@@ -12252,6 +12355,11 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        // Universal `.type` member: a `String` with the value's type name.
+        if expr.name.name == "type" {
+            return IrType::String;
+        }
+
         // `.is_null` (roadmap Phase 4e) — the one `Pointer<T>` operation
         // that needs no `unsafe` (`Checker::member_type`'s own matching
         // branch).
