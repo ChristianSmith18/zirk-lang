@@ -33,14 +33,14 @@
 
 - [ ] 4.1 `zirk-lexer`: lex a suffix-less fractional/scientific literal as an exact-decimal `Float` token (text preserved); lex `b`/`b16`/`b32`/`b64`/`b128` as a `BinaryFloat` token with width
 - [ ] 4.2 `zirk-lexer`: reject a suffix-less fractional literal whose exact form needs more than the coefficient digit budget, with a diagnostic suggesting a `b` suffix
-- [ ] 4.3 `zirk-ast`: add `DecimalLit { text }`; rename `FloatLit` usage to represent `BinaryFloatLit { text, width }`
+- [ ] 4.3 `zirk-ast`: add an exact-decimal literal node; the existing float-literal node keeps its Rust name and now carries the `b`-suffix width (surface `BinaryFloat`)
 - [ ] 4.4 `zirk-parser`: parse both literal kinds; retain the operator tree for `Float(expr)` and add `BinaryFloat(expr)` contextual constructor
 - [ ] 4.5 Parser + lexer tests: literal inference, suffix widths, oversized-literal diagnostic, contextual constructor trees
 
 ## 5. Type system (`zirk-sema`)
 
-- [ ] 5.1 `types.rs`: rename `Base::Float(FloatWidth)` -> `Base::BinaryFloat(BinaryFloatWidth)`; add `Base::Decimal` for exact `Float`; add `Type::FLOAT` (= `Decimal`) and `Type::BINARY_FLOAT64`
-- [ ] 5.2 `types.rs` `from_name`: `Float` -> exact decimal; `BinaryFloat`/`BinaryFloat16..128` -> binary; `Float16/32/64/128` -> `None`
+- [ ] 5.1 `types.rs`: add `Base::Decimal` (exact `Float`, no width); add `Type::FLOAT` (= `Decimal`). `Base::Float(FloatWidth)` keeps its Rust name (surface name `BinaryFloat*`) — doc note only (per design D2)
+- [ ] 5.2 `types.rs` `from_name`: `Float` -> `Base::Decimal`; `BinaryFloat`/`BinaryFloat16..128` -> `Base::Float(width)`; `Float16/32/64/128` -> `None`; `FloatWidth::name()` returns `BinaryFloat*`
 - [ ] 5.3 `types.rs`: remove `Float*` from the pending list; keep `Decimal*`/`Dec` in the "not a type" list; update the `accepts` rules — `Int -> Decimal` implicit exact, `Decimal <-> BinaryFloat` explicit only, no `Decimal`/`BinaryFloat` mixing
 - [ ] 5.4 `checker.rs`: infer suffix-less fractional literal as exact `Float`; mixed `Int`/`Float` arithmetic -> exact `Float`; reject `Float`/`BinaryFloat` mixed arithmetic with a fix-it naming the conversion
 - [ ] 5.5 `checker.rs`: redirect diagnostic for `Float16/32/64/128` -> `BinaryFloat*` and `Float`
@@ -51,8 +51,8 @@
 
 ## 6. IR + lowering (`zirk-ir`)
 
-- [ ] 6.1 `ir.rs`: rename `IrType::Float` -> `IrType::BinaryFloat`, `IrExpr::ConstFloat` -> `ConstBinaryFloat`; add `IrType::Decimal` and `IrExpr::ConstDecimal(String)`
-- [ ] 6.2 `ir.rs`: add conversion instructions `IntToDecimal`, `DecimalToInt`, `DecimalToBinaryFloat`, `BinaryFloatToDecimal`
+- [ ] 6.1 `ir.rs`: add `IrType::Decimal` and `InstKind::ConstDecimal(String)`. `IrType::Float` / `InstKind::ConstFloat` keep their Rust names (surface `BinaryFloat`) — doc note only (per design D2)
+- [ ] 6.2 `ir.rs`: add conversion instructions `IntToDecimal`, `DecimalToInt`, `DecimalToFloat` (decimal->binary), `FloatToDecimal` (binary->decimal)
 - [ ] 6.3 `lower.rs`: lower `Decimal` arithmetic/comparison/rounding/parse/format to `zirk_rt_decimal_*` calls
 - [ ] 6.4 `lower.rs`: emit the zero-divisor guard before `Decimal` `/` and `%` (mirror `Duration` division lowering)
 - [ ] 6.5 `lower.rs`: lower integer operand -> exact `Float` at scale 0 in mixed arithmetic; lower the two contextual-constructor domains
@@ -64,7 +64,7 @@
 - [ ] 7.1 `emit.rs`: emit `IrType::Decimal` as `{ i128, i8 }` aggregate; pass/return by pointer across the runtime boundary (mirror `STR_FROM_I128`)
 - [ ] 7.2 `emit.rs`: emit `ConstDecimal` from the parsed `{coef, scale}` directly, never via a binary float
 - [ ] 7.3 `emit.rs`: emit calls for every decimal runtime helper and the four conversion instructions
-- [ ] 7.4 `emit.rs`: keep `IrType::BinaryFloat` emission identical to today's `Float` (LLVM `f16/f32/f64/f128`, explicit `NaN` guard)
+- [ ] 7.4 `emit.rs`: `IrType::Float` (surface `BinaryFloat`) emission unchanged (LLVM `f16/f32/f64/f128`, explicit `NaN` guard)
 - [ ] 7.5 `runtime.rs`: register every `zirk_rt_decimal_*`, `zirk_str_from_decimal`, `zirk_rt_decimal_parse_*`, and conversion symbol
 - [ ] 7.6 `zirk-codegen-llvm` tests (`emission.rs`): decimal constant, decimal arithmetic dispatch, by-pointer ABI, binary-width mapping unchanged
 

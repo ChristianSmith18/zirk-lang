@@ -4234,6 +4234,8 @@ impl<'a> Checker<'a> {
                 Base::Int(width) => (1, width as u32),
                 // Same idea, one group over for the float family.
                 Base::Float(width) => (2, width as u32),
+                // The exact base-ten type sorts just after the binary family.
+                Base::Decimal => (2, u32::MAX),
                 Base::Char => (3, 0),
                 Base::Boolean => (4, 0),
                 Base::String => (5, 0),
