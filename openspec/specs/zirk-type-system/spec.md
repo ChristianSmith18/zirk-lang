@@ -462,43 +462,42 @@ The language SHALL distinguish compiler primitives, native reference types, user
 - **WHEN** an `Int32` value invokes `abs()` or `to_string()`
 - **THEN** the operation resolves through its native capabilities without boxing being observable
 
-### Requirement: Float family replaces Decimal family
+### Requirement: Fractional scalar family names
 
-`Float` SHALL be an exact base-ten decimal scalar and SHALL be the inferred type
-of an ordinary fractional literal. IEEE 754 binary floating point SHALL be the
-`BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128` family, with
-`BinaryFloat` aliasing `BinaryFloat64`. `NaN` SHALL NOT be a valid Zirk value;
-indeterminate `BinaryFloat` operations SHALL produce controlled errors, and
-`Float` SHALL have neither `NaN` nor infinity.
+`Decimal` and its abbreviation `Dec` SHALL be the exact base-ten decimal scalar
+and SHALL be the inferred type of an ordinary fractional literal. IEEE 754
+binary floating point SHALL be the `Float16`, `Float32`, `Float64`, `Float128`
+family, with `Float` aliasing `Float64`. For a `Float` value, `NaN` SHALL NOT be
+valid, but infinities are valid; an operation that would produce `NaN` under IEEE
+754 SHALL be a controlled runtime error. `Decimal` SHALL have neither `NaN` nor
+`Infinity`; a `Decimal` operation that would require either SHALL be a controlled
+runtime error.
 
-`Decimal16`, `Decimal32`, `Decimal64`, `Decimal128`, `Dec` and `Decimal` SHALL
-NOT be recognized as types of the language, nor announced as types of a future
-phase; the exact base-ten behavior they described is delivered under the `Float`
-name. The spellings `Float16`, `Float32`, `Float64`, `Float128` SHALL NOT
-resolve; the checker SHALL emit a diagnostic naming the `BinaryFloat`
-replacement.
+The spellings `BinaryFloat`, `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`,
+`BinaryFloat128` SHALL NOT resolve. The spellings `Float16`, `Float32`,
+`Float64`, `Float128` SHALL resolve to the corresponding binary widths.
 
 #### Scenario: Default fractional literal
 
 - **WHEN** `1.5` has no contextual type
-- **THEN** its inferred type is `Float` (exact base-ten decimal)
+- **THEN** its inferred type is `Decimal` (exact base-ten decimal)
 
-#### Scenario: Indeterminate infinity operation on `BinaryFloat`
+#### Scenario: Indeterminate infinity operation on `Float`
 
-- **WHEN** positive infinity is subtracted from positive infinity on `BinaryFloat64`
+- **WHEN** positive infinity is subtracted from positive infinity on `Float64`
 - **THEN** a controlled arithmetic error is produced instead of `NaN`
-
-#### Scenario: Withdrawn Decimal family
-
-- **WHEN** an annotation names `Decimal64`
-- **THEN** an unknown-type diagnostic is emitted
-- **AND** no arrival phase is announced for that name
 
 #### Scenario: Former binary spelling is redirected
 
-- **WHEN** an annotation names `Float32`
-- **THEN** a diagnostic states that the binary type is `BinaryFloat32` and the
-  exact base-ten type is `Float`
+- **WHEN** an annotation names `BinaryFloat32`
+- **THEN** a diagnostic states that the binary type is now `Float32` and the
+  exact base-ten type is `Decimal`
+
+#### Scenario: Former exact spelling is redirected
+
+- **WHEN** an annotation names `Float` where `Decimal` is expected after the rename
+- **THEN** a diagnostic states that the exact base-ten type is now `Decimal` and
+  the binary type is `FloatN`
 
 ### Requirement: Deep contextual conversion
 An explicit numeric or String constructor around an operator expression SHALL establish the target domain for the contained compatible arithmetic or concatenation tree, converting operands before those operators execute. The context SHALL NOT mutate operands or propagate through a called function's body.
@@ -549,7 +548,7 @@ For reference types, `mut` SHALL permit binding reassignment and referent mutati
 - **THEN** a controlled invalid-count error is produced
 
 ### Requirement: Native operator contracts by type
-Each native type SHALL expose only its documented operator set. Integer division SHALL truncate toward zero, remainder SHALL preserve the dividend sign, mixed integer/Float arithmetic SHALL produce Float, Boolean SHALL have no truthiness, and unsupported operations SHALL fail at type checking.
+Each native type SHALL expose only its documented operator set. Integer division SHALL truncate toward zero, remainder SHALL preserve the dividend sign, mixed integer/Decimal arithmetic SHALL produce Decimal, mixed integer/FloatN arithmetic SHALL produce the corresponding FloatN, Boolean SHALL have no truthiness, and unsupported operations SHALL fail at type checking.
 
 #### Scenario: Signed remainder
 - **WHEN** `-10 % 3` is evaluated
@@ -559,26 +558,31 @@ Each native type SHALL expose only its documented operator set. Integer division
 - **WHEN** application code attempts `true + false`
 - **THEN** type checking rejects the operation
 
-### Requirement: `Float` family and temporal types recognized as pending
+### Requirement: Fractional and temporal family names
 
-The checker SHALL recognize `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`,
-`BinaryFloat128`, `BinaryFloat`, the unimplemented integer widths, `Char`, and
-the temporal types `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`,
-`TimeZone`, `Duration`, and `Period` as language types (pending or implemented)
-that carry a clear diagnostic. `Float` SHALL be a fully recognized, implemented
-type. An annotation naming a former binary spelling (`Float16`, `Float32`,
-`Float64`, `Float128`) SHALL produce a redirect diagnostic, not a
-nonexistent-type diagnostic.
+The checker SHALL recognize `Decimal`, `Dec`, `Float16`, `Float32`, `Float64`,
+`Float128`, and `Float` as fully recognized, implemented fractional types. The
+spellings `BinaryFloat`, `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, and
+`BinaryFloat128` SHALL NOT resolve and SHALL produce a redirect diagnostic naming
+the corresponding `FloatN` replacement. The unimplemented integer widths, `Char`,
+and the temporal types `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`,
+`TimeZone`, `Duration`, and `Period` SHALL be recognized as language types
+(pending or implemented) that carry a clear diagnostic.
 
-#### Scenario: Annotation with the exact `Float` type
+#### Scenario: Annotation with the exact `Decimal` type
 
-- **WHEN** `mut ratio: Float = 0;` is declared
+- **WHEN** `mut ratio: Decimal = 0;` is declared
 - **THEN** it compiles and `ratio` holds the exact decimal `0`
+
+#### Scenario: Annotation with the `Dec` alias
+
+- **WHEN** `mut ratio: Dec = 0;` is declared
+- **THEN** it compiles and `ratio` has type `Decimal`
 
 #### Scenario: Annotation with a former binary spelling
 
-- **WHEN** `mut ratio: Float64 = 0;` is declared
-- **THEN** the diagnostic names `BinaryFloat64` as the replacement and `Float` as
+- **WHEN** `mut ratio: BinaryFloat64 = 0;` is declared
+- **THEN** the diagnostic names `Float64` as the replacement and `Decimal` as
   the exact type
 - **AND** it is NOT reported as a nonexistent type
 
@@ -853,28 +857,24 @@ the order they appear.
 - **WHEN** the interpolated expression has a type without `to_string()`
 - **THEN** the same diagnostic is emitted as passing that value directly to `println`
 
-### Requirement: Fractional literal context and mixed arithmetic
+### Requirement: Conversion rules use new scalar names
 
-An unannotated fractional literal SHALL have type `Float` (exact base-ten
-decimal), and an arithmetic operation between an integer type and a `Float`
-SHALL produce an exact `Float`. An operation mixing a `Float` operand and a
-`BinaryFloat` operand SHALL be a type error naming the explicit conversion
-required.
+The checker SHALL allow implicit conversion from one numeric type to another when the destination can represent every value of the source type without loss, and SHALL require an explicit `as` cast for narrowing or cross-family conversions that the compiler cannot prove are safe at compile time. An integer literal SHALL adopt the width of its expected type when the value fits. An integer value or literal SHALL convert implicitly and exactly to `Decimal`, and a `Decimal` literal with zero fractional part SHALL become an integer for an integer target. Conversion between `Decimal` and any `Float` width SHALL require an explicit cast or constructor in both directions.
 
-#### Scenario: Unannotated fractional literal
+#### Scenario: Integer widens to exact `Decimal` implicitly
 
-- **WHEN** `mut x = 1.5;` is written without a type annotation
-- **THEN** `x` has type `Float`
+- **WHEN** an `Int32` is passed where `Decimal` is expected
+- **THEN** the conversion is implicit and the value is exact at scale 0
 
-#### Scenario: Mixed integer and `Float` arithmetic
+#### Scenario: Exact and binary floats do not mix implicitly
 
-- **WHEN** an `Int32` and a `Float` are added
-- **THEN** the result has type `Float` and is exact
+- **WHEN** a `Decimal` value is used where `Float64` is expected without a cast
+- **THEN** a diagnostic is emitted naming the explicit conversion required
 
-#### Scenario: Mixed exact and binary float arithmetic
+#### Scenario: Fractional literal infers `Decimal` by default
 
-- **WHEN** a `Float` and a `BinaryFloat64` are added
-- **THEN** type checking rejects the operation and names the explicit conversion
+- **WHEN** a fractional literal without context is assigned to `mut a = 0.1`
+- **THEN** the inferred type is `Decimal`
 
 ### Requirement: `Never` is the bottom type
 

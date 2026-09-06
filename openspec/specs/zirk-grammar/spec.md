@@ -368,21 +368,21 @@ The parser SHALL accept traditional enum cases without mappings and cases mapped
 ### Requirement: Contextual constructor expressions
 
 The grammar SHALL retain the complete contained operator tree of
-`Float(expression)`, `BinaryFloat(expression)`, and `String(expression)` so
+`Decimal(expression)`, `Float(expression)`, and `String(expression)` so
 semantic analysis can apply explicit deep contextual conversion before evaluating
-compatible contained arithmetic or concatenation operators. `Float(expression)`
-SHALL establish an exact-decimal domain; `BinaryFloat(expression)` SHALL
-establish a binary domain.
+compatible contained arithmetic or concatenation operators. `Decimal(expression)`
+SHALL establish an exact-decimal domain; `Float(expression)` SHALL establish a
+binary domain.
 
 #### Scenario: Nested contextual arithmetic
 
-- **WHEN** `Float((a + 1) / (b * 2))` is parsed
+- **WHEN** `Decimal((a + 1) / (b * 2))` is parsed
 - **THEN** the constructor contains the entire nested arithmetic tree rather than
   an already-evaluated integer result
 
 #### Scenario: Binary contextual constructor
 
-- **WHEN** `BinaryFloat(3 / 4)` is parsed
+- **WHEN** `Float(3 / 4)` is parsed
 - **THEN** the constructor retains the division tree for a binary-domain conversion
 
 ### Requirement: Native String repetition syntax
@@ -645,6 +645,26 @@ The parser SHALL recognize `record`, value classes, enum variants with associate
 - **WHEN** `type Id = Int32;` is parsed
 - **THEN** an alias declaration is produced
 
+### Requirement: Type names are valid identifiers
+
+The grammar SHALL accept `Decimal` and `Dec` as type names for the exact base-ten decimal scalar. It SHALL accept `Float16`, `Float32`, `Float64`, `Float128`, and `Float` as type names for the IEEE 754 binary family. The spellings `BinaryFloat`, `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, and `BinaryFloat128` SHALL NOT be accepted as type names and SHALL be rejected with a diagnostic.
+
+#### Scenario: New exact decimal type name
+- **WHEN** a type annotation or type expression uses `Decimal`
+- **THEN** it is parsed as the exact base-ten decimal type
+
+#### Scenario: New exact decimal alias
+- **WHEN** a type annotation or type expression uses `Dec`
+- **THEN** it is parsed as an alias for the exact base-ten decimal type
+
+#### Scenario: New binary float type name
+- **WHEN** a type annotation or type expression uses `Float64`
+- **THEN** it is parsed as the 64-bit IEEE 754 binary floating-point type
+
+#### Scenario: Old binary name is rejected
+- **WHEN** a type annotation uses `BinaryFloat64`
+- **THEN** the parser emits a diagnostic naming `Float64` as the replacement
+
 ### Requirement: Phase 3 does not yet parse the final function type
 
 Phase 3's parser SHALL NOT yet accept the final syntax
@@ -678,14 +698,17 @@ The parser SHALL recognize the postfix form `expr as T` and the prefix form `<T>
 - **WHEN** a cast that requires `unsafe` is parsed
 - **THEN** a diagnostic indicating that the low-level tier arrives in a later phase is emitted
 
-### Requirement: Integer-width and `Float` literals
+### Requirement: Integer-width and fractional literals
 
 The grammar SHALL recognize an integer literal as any of the signed or unsigned
 widths when the context determines it. The grammar SHALL recognize a fractional
 literal (with optional scientific notation) and no suffix as an exact-decimal
-`Float` literal, and the same form with a `b`, `b16`, `b32`, `b64`, or `b128`
-suffix as a `BinaryFloat` literal. `_` SHALL be accepted as a visual separator
-in all numeric literals.
+`Decimal` literal, the same form with an `f`, `f16`, `f32`, `f64`, or `f128`
+suffix as a `FloatN` literal, and the same form with a `d` or `dN` suffix as a
+`Decimal` literal. The old `b` and `bN` suffixes SHALL NOT resolve and SHALL be
+rejected with a diagnostic pointing to `f`/`fN` for binary floats and `d` for
+exact decimals. `_` SHALL be accepted as a visual separator in all numeric
+literals.
 
 #### Scenario: Visual separator in a wide literal
 
@@ -695,12 +718,12 @@ in all numeric literals.
 #### Scenario: Scientific notation is exact
 
 - **WHEN** `1e2` is written
-- **THEN** it is lexed as an exact-decimal `Float` literal with value `100`
+- **THEN** it is lexed as an exact-decimal `Decimal` literal with value `100`
 
 #### Scenario: Binary-float literal
 
-- **WHEN** `1.5b32` is written
-- **THEN** it is lexed as a `BinaryFloat32` literal
+- **WHEN** `1.5f32` is written
+- **THEN** it is lexed as a `Float32` literal
 
 ### Requirement: `Char` literal
 
