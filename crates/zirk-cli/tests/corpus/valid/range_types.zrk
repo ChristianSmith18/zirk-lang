@@ -1,0 +1,22 @@
+fn main(): Void {
+    inmut big: Range<Int64> = 1 as Int64 .. 5 as Int64;
+    mut total: Int64 = 0;
+    for x in big {
+        total = total + x;
+    }
+    stdout.println(total.to_string());
+
+    inmut d: Range<Duration> = 0s .. 3s .. 1s;
+    mut count: Int32 = 0;
+    for t in d {
+        count = count + 1;
+    }
+    stdout.println(count.to_string());
+
+    inmut u: Range<UInt16> = 0 as UInt16 .. 3 as UInt16;
+    mut sum: UInt32 = 0 as UInt32;
+    for y in u {
+        sum = sum + y as UInt32;
+    }
+    stdout.println(sum.to_string());
+}

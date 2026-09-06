@@ -364,6 +364,44 @@ fn format_duration(nanos: i64) -> String {
     unreachable!("the `ns` unit always renders a nanosecond count")
 }
 
+/// Renders a nanosecond count as an ISO 8601 duration, e.g. `PT1H30M5.123S`.
+fn format_duration_iso(nanos: i64) -> String {
+    if nanos == 0 {
+        return "PT0S".to_string();
+    }
+    let sign = if nanos < 0 { "-" } else { "" };
+    let m = (nanos as i128).wrapping_abs();
+    let days = m / NANOS_PER_DAY;
+    let m = m % NANOS_PER_DAY;
+    let hours = m / NANOS_PER_HOUR;
+    let m = m % NANOS_PER_HOUR;
+    let minutes = m / NANOS_PER_MINUTE;
+    let m = m % NANOS_PER_MINUTE;
+    let seconds = m / NANOS_PER_SECOND;
+    let subsecond = (m % NANOS_PER_SECOND) as i64;
+    let mut text = if days > 0 {
+        format!("{sign}P{days}DT{hours}H{minutes}M{seconds}")
+    } else {
+        format!("{sign}PT{hours}H{minutes}M{seconds}")
+    };
+    if subsecond == 0 {
+        text.push('S');
+    } else {
+        let frac = format!("{subsecond:09}");
+        let frac = frac.trim_end_matches('0');
+        text.push('.');
+        text.push_str(frac);
+        text.push('S');
+    }
+    text
+}
+
+/// `d.to_iso_string()` — ISO 8601 duration representation.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_to_iso_string(nanos: i64) -> *mut c_void {
+    alloc_owned(&format_duration_iso(nanos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

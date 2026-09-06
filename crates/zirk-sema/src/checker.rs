@@ -4631,16 +4631,21 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         let element = self.resolve_type(&reference.arguments[0]);
-        if !element.is_unknown()
-            && !matches!(element.base, Base::Int(_) | Base::Duration)
-        {
+        let ok = if let Base::Int(w) = element.base {
+            // `i64` is the runtime's range word. Reject `Int128`/`UInt128`
+            // and `UInt64`, which do not fit safely inside a signed `i64`.
+            w.bits() <= 64 && (w.signed() || w.bits() < 64)
+        } else {
+            matches!(element.base, Base::Duration)
+        };
+        if !element.is_unknown() && !ok {
             let found = self.name(element);
             self.error(
                 codes::TYPE_MISMATCH,
                 reference.arguments[0].span,
                 format!("`Range<{found}>` is not a range type"),
-                "a range's element is numeric or `Duration` — it is the sequence's step amount",
-                Some("write `Range<Int32>` or `Range<Duration>`".into()),
+                "a range's element is a signed/unsigned integer up to 32 bits, `Int64`, or `Duration`",
+                Some("write `Range<Int32>`, `Range<Int64>` or `Range<Duration>`".into()),
             );
         }
         let id = self.intern_range_type(element);
@@ -8167,9 +8172,11 @@ impl<'a> Checker<'a> {
                 expr.step.as_ref().unwrap().span(),
                 "the step of a range",
             );
+            self.expect_assignable(start, step_ty, expr.step.as_ref().unwrap().span(), "the step");
         }
+        self.expect_assignable(start, end, expr.end.span(), "the end");
 
-        let id = self.intern_range_type(Type::INT32);
+        let id = self.intern_range_type(start);
         Type::of(Base::Range(id))
     }
 
@@ -12303,6 +12310,9 @@ impl<'a> Checker<'a> {
                         }
                         return Type::DURATION;
                     }
+                    "to_iso_string" if expr.args.is_empty() => {
+                        return Type::STRING;
+                    }
                     _ => {}
                 }
             }
@@ -13364,7 +13374,9 @@ impl<'a> Checker<'a> {
     /// own endpoints were not written as (roadmap Phase 3b — a range over
     /// another width is future work, not a rename of this check).
     fn expect_numeric_value(&mut self, actual: Type, span: Span, context: &str) {
-        if Type::INT32.accepts(actual) {
+        if actual.is_unknown()
+            || matches!(actual.base, Base::Int(_) | Base::Duration)
+        {
             return;
         }
 
@@ -13372,7 +13384,7 @@ impl<'a> Checker<'a> {
         self.error(
             codes::TYPE_MISMATCH,
             span,
-            format!("{context} must be Int32"),
+            format!("{context} must be an integer or Duration"),
             format!("a value of type {found} was found"),
             None,
         );
