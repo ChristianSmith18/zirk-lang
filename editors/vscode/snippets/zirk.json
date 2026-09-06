@@ -1,0 +1,62 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:arg}: ${3:Int32}): ${4:Void} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "If / Else": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "} else {",
+      "\t",
+      "}"
+    ],
+    "description": "If / else statement"
+  },
+  "If / Else If / Else": {
+    "prefix": "elif",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "} else if ${2:condition} {",
+      "\t",
+      "} else {",
+      "\t",
+      "}"
+    ],
+    "description": "If / else-if / else statement"
+  },
+  "For Loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:collection} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "For-in loop over a collection"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "\t${2:field}: ${3:Type};",
+      "",
+      "\tconstruct(${4}) {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Class declaration with constructor"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": "import { ${1:stdout} } from ${2:std.io};",
+    "description": "Import names from a module"
+  }
+}
