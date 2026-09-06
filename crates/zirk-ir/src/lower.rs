@@ -945,27 +945,51 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         // `i128`; `bits` and `signed` carry the receiver's width semantics.
         ExternFn {
             name: "zirk_int_abs".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_sign".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I32),
         },
         ExternFn {
             name: "zirk_int_min".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_max".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_clamp".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
@@ -1000,42 +1024,80 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         },
         ExternFn {
             name: "zirk_int_rotate_left".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_rotate_right".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_wrapping_add".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_wrapping_sub".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_wrapping_mul".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_saturating_add".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_saturating_sub".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_saturating_mul".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
@@ -1047,82 +1109,160 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         // `value` call — lowering builds the `Result` from the pair.
         ExternFn {
             name: "zirk_int_checked_add_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_add_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_checked_sub_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_sub_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_checked_mul_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_mul_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_checked_div_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_div_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_checked_rem_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_rem_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_checked_pow_ok".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_checked_pow_value".to_string(),
-            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I128),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_parse_ok".to_string(),
-            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_parse_value".to_string(),
-            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         ExternFn {
             name: "zirk_int_parse_radix_ok".to_string(),
-            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Boolean,
         },
         ExternFn {
             name: "zirk_int_parse_radix_value".to_string(),
-            params: vec![IrType::String, IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32), IrType::Int(IntWidth::I32)],
+            params: vec![
+                IrType::String,
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
             return_type: IrType::Int(IntWidth::I128),
         },
         // Float helpers — `f64` is the widest helper signature; lowering
@@ -1275,6 +1415,84 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: f64,
         },
     ]);
+
+    // Exact base-ten `Float` runtime helpers. The IR models a `Float` value
+    // as by-value `IrType::Decimal`; codegen lowers each of these to the
+    // by-pointer C ABI (`{ i128, i8 }` out-parameter), the same way it does
+    // for `Int128`.
+    {
+        let dec = IrType::Decimal;
+        let i32 = IrType::Int(IntWidth::I32);
+        module.externs.extend([
+            decimal_binop_extern("zirk_rt_decimal_add", dec),
+            decimal_binop_extern("zirk_rt_decimal_sub", dec),
+            decimal_binop_extern("zirk_rt_decimal_mul", dec),
+            decimal_binop_extern("zirk_rt_decimal_div", dec),
+            decimal_binop_extern("zirk_rt_decimal_rem", dec),
+            decimal_binop_extern("zirk_rt_decimal_pow", dec),
+            decimal_binop_extern("zirk_rt_decimal_min", dec),
+            decimal_binop_extern("zirk_rt_decimal_max", dec),
+            ExternFn {
+                name: "zirk_rt_decimal_pow_i".to_string(),
+                params: vec![dec, IrType::Int(IntWidth::I64)],
+                return_type: dec,
+            },
+            // `zirk_rt_decimal_div_ex(a, b, mode, places)`.
+            ExternFn {
+                name: "zirk_rt_decimal_div_ex".to_string(),
+                params: vec![dec, dec, i32, i32],
+                return_type: dec,
+            },
+            // `zirk_rt_decimal_round(value, places, mode)`.
+            ExternFn {
+                name: "zirk_rt_decimal_round".to_string(),
+                params: vec![dec, i32, i32],
+                return_type: dec,
+            },
+            ExternFn {
+                name: "zirk_rt_decimal_clamp".to_string(),
+                params: vec![dec, dec, dec],
+                return_type: dec,
+            },
+            decimal_unop_extern("zirk_rt_decimal_neg", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_abs", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_sqrt", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_floor", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_ceil", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_truncate", dec, dec),
+            decimal_unop_extern("zirk_rt_decimal_fraction", dec, dec),
+            decimal_binop_extern("zirk_rt_decimal_cmp", i32),
+            decimal_unop_extern("zirk_rt_decimal_sign", dec, i32),
+            decimal_unop_extern("zirk_rt_decimal_scale", dec, i32),
+            decimal_unop_extern("zirk_rt_decimal_is_zero", dec, IrType::Boolean),
+            decimal_unop_extern("zirk_rt_decimal_is_negative", dec, IrType::Boolean),
+            decimal_unop_extern("zirk_rt_decimal_is_integer", dec, IrType::Boolean),
+            decimal_unop_extern("zirk_str_from_decimal", dec, IrType::String),
+            decimal_unop_extern("zirk_rt_decimal_to_f64", dec, f64),
+            ExternFn {
+                name: "zirk_rt_decimal_from_i128".to_string(),
+                params: vec![IrType::Int(IntWidth::I128)],
+                return_type: dec,
+            },
+            decimal_unop_extern(
+                "zirk_rt_decimal_to_i128_checked",
+                dec,
+                IrType::Int(IntWidth::I128),
+            ),
+            ExternFn {
+                name: "zirk_rt_decimal_from_f64".to_string(),
+                params: vec![f64],
+                return_type: dec,
+            },
+            ExternFn {
+                name: "zirk_rt_decimal_from_literal".to_string(),
+                params: vec![IrType::String],
+                return_type: dec,
+            },
+            decimal_unop_extern("zirk_rt_decimal_parse_ok", IrType::String, IrType::Boolean),
+            decimal_unop_extern("zirk_rt_decimal_parse_value", IrType::String, dec),
+        ]);
+    }
 
     // `Regex.split`/`Regex.find_all` return `List<T>`s whose element types
     // the checker only interns when the methods are called; register the
@@ -1993,11 +2211,29 @@ const fn sema_int_width(width: IntWidth) -> SemaIntWidth {
 /// A float literal's width, from its optional suffix — mirrors the checker's
 /// own `check_float_literal`, since lowering re-derives a literal's type from
 /// the tree rather than re-checking it.
+/// `fn(Decimal, Decimal) -> ret` — most `zirk_rt_decimal_*` helpers.
+fn decimal_binop_extern(name: &str, ret: IrType) -> ExternFn {
+    ExternFn {
+        name: name.to_string(),
+        params: vec![IrType::Decimal, IrType::Decimal],
+        return_type: ret,
+    }
+}
+
+/// `fn(arg) -> ret`.
+fn decimal_unop_extern(name: &str, arg: IrType, ret: IrType) -> ExternFn {
+    ExternFn {
+        name: name.to_string(),
+        params: vec![arg],
+        return_type: ret,
+    }
+}
+
 fn float_literal_width(lit: &ast::FloatLit) -> FloatWidth {
     match lit.width.as_deref() {
-        Some("f16") => FloatWidth::F16,
-        Some("f32") => FloatWidth::F32,
-        Some("f128") => FloatWidth::F128,
+        Some("b16") => FloatWidth::F16,
+        Some("b32") => FloatWidth::F32,
+        Some("b128") => FloatWidth::F128,
         _ => FloatWidth::F64,
     }
 }
@@ -2050,6 +2286,7 @@ fn ir_type(
         Base::Never => IrType::Never,
         Base::Int(width) => IrType::Int(ir_int_width(width)),
         Base::Float(width) => IrType::Float(ir_float_width(width)),
+        Base::Decimal => IrType::Decimal,
         Base::Boolean => IrType::Boolean,
         Base::String => IrType::String,
         Base::Duration => IrType::Int(IntWidth::I64),
@@ -3163,12 +3400,21 @@ impl<'a> FunctionLowering<'a> {
             (IrType::Float(_), IrType::Float(_)) => self.emit(InstKind::FloatCast(value), to, span),
             (IrType::Int(_), IrType::Float(_)) => self.emit(InstKind::IntToFloat(value), to, span),
             (IrType::Float(_), IrType::Int(_)) => self.emit(InstKind::FloatToInt(value), to, span),
+            // Exact base-ten `Float` conversions.
+            (IrType::Int(_), IrType::Decimal) => self.emit(InstKind::IntToDecimal(value), to, span),
+            (IrType::Decimal, IrType::Int(_)) => self.emit(InstKind::DecimalToInt(value), to, span),
+            (IrType::Float(_), IrType::Decimal) => {
+                self.emit(InstKind::FloatToDecimal(value), to, span)
+            }
+            (IrType::Decimal, IrType::Float(_)) => {
+                self.emit(InstKind::DecimalToFloat(value), to, span)
+            }
             _ => value,
         }
     }
 
     const fn is_numeric_ir_type(ty: IrType) -> bool {
-        matches!(ty, IrType::Int(_) | IrType::Float(_))
+        matches!(ty, IrType::Int(_) | IrType::Float(_) | IrType::Decimal)
     }
 
     /// The smallest IR numeric type that can represent every value of `left`
@@ -3178,6 +3424,7 @@ impl<'a> FunctionLowering<'a> {
             match ir {
                 IrType::Int(w) => Some(Type::of(Base::Int(sema_int_width(w)))),
                 IrType::Float(w) => Some(Type::of(Base::Float(sema_float_width(w)))),
+                IrType::Decimal => Some(Type::FLOAT),
                 _ => None,
             }
         };
@@ -3448,6 +3695,7 @@ impl<'a> FunctionLowering<'a> {
             IrType::Float(width) => {
                 self.emit(InstKind::ConstFloat(width, "0".to_string()), ty, span)
             }
+            IrType::Decimal => self.emit(InstKind::ConstDecimal("0".to_string()), ty, span),
             IrType::Boolean => self.emit(InstKind::ConstBool(false), ty, span),
             IrType::String => {
                 let id = self.module.intern_string("");
@@ -4111,8 +4359,7 @@ impl<'a> FunctionLowering<'a> {
                 // length — so the write lowers to a fresh `String` stored
                 // back into the variable the checker required the receiver
                 // to be.
-                if self.type_of(&index_expr.receiver, index_expr.receiver.span())
-                    == IrType::String
+                if self.type_of(&index_expr.receiver, index_expr.receiver.span()) == IrType::String
                 {
                     // `Char` and `String` share one runtime representation
                     // (ADR-014): whichever the checker accepted is already
@@ -4129,10 +4376,15 @@ impl<'a> FunctionLowering<'a> {
                 if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
                     let index_operand =
                         self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::I64));
-                    let index_slot = self.spill(index_operand, IrType::Int(IntWidth::I64), stmt.span);
+                    let index_slot =
+                        self.spill(index_operand, IrType::Int(IntWidth::I64), stmt.span);
                     let element_ty = self.array_list_element_type(receiver_ty);
                     let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, stmt.span);
-                    let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), stmt.span);
+                    let index = self.emit(
+                        InstKind::Load(index_slot),
+                        IrType::Int(IntWidth::I64),
+                        stmt.span,
+                    );
                     let value = self.lower_expr_as(&stmt.value, element_ty);
                     self.emit_effect(
                         InstKind::ArrayListStore {
@@ -4206,7 +4458,11 @@ impl<'a> FunctionLowering<'a> {
         let offset_slot = self.spill(offset, IrType::Int(IntWidth::I64), span);
 
         let minus_one = self.const_i64(-1, span);
-        let offset = self.emit(InstKind::Load(offset_slot), IrType::Int(IntWidth::I64), span);
+        let offset = self.emit(
+            InstKind::Load(offset_slot),
+            IrType::Int(IntWidth::I64),
+            span,
+        );
         let is_out = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Eq,
@@ -4230,11 +4486,19 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .native_exceptions
             .expect("a program indexing a string registered the exception hierarchy");
-        self.throw_native_failure(native.index_out_of_bounds, "string index out of bounds", span);
+        self.throw_native_failure(
+            native.index_out_of_bounds,
+            "string index out of bounds",
+            span,
+        );
 
         self.current = cont;
         let string = self.emit(InstKind::Load(string_slot), IrType::String, span);
-        let offset = self.emit(InstKind::Load(offset_slot), IrType::Int(IntWidth::I64), span);
+        let offset = self.emit(
+            InstKind::Load(offset_slot),
+            IrType::Int(IntWidth::I64),
+            span,
+        );
         let length = self.emit(
             InstKind::GraphemeLenAt { string, offset },
             IrType::Int(IntWidth::I64),
@@ -4542,11 +4806,7 @@ impl<'a> FunctionLowering<'a> {
             .native_exceptions
             .expect("a program constructing a range registered the exception hierarchy")
             .invalid_step;
-        self.throw_native_failure(
-            invalid_step,
-            "a range's step cannot be zero",
-            stmt.span,
-        );
+        self.throw_native_failure(invalid_step, "a range's step cannot be zero", stmt.span);
         self.terminate(Terminator::Jump(ok_block));
         self.current = ok_block;
 
@@ -4565,7 +4825,11 @@ impl<'a> FunctionLowering<'a> {
         // picks one.
         let within = self.emit(
             InstKind::Binary {
-                op: if inclusive { BinaryOp::LtEq } else { BinaryOp::Lt },
+                op: if inclusive {
+                    BinaryOp::LtEq
+                } else {
+                    BinaryOp::Lt
+                },
                 left: current,
                 right: bound,
             },
@@ -4574,7 +4838,11 @@ impl<'a> FunctionLowering<'a> {
         );
         let within_back = self.emit(
             InstKind::Binary {
-                op: if inclusive { BinaryOp::GtEq } else { BinaryOp::Gt },
+                op: if inclusive {
+                    BinaryOp::GtEq
+                } else {
+                    BinaryOp::Gt
+                },
                 left: current,
                 right: bound,
             },
@@ -4592,7 +4860,14 @@ impl<'a> FunctionLowering<'a> {
             IrType::Boolean,
             stmt.span,
         );
-        let backward = self.emit(InstKind::Unary { op: UnaryOp::Not, operand: forward }, IrType::Boolean, stmt.span);
+        let backward = self.emit(
+            InstKind::Unary {
+                op: UnaryOp::Not,
+                operand: forward,
+            },
+            IrType::Boolean,
+            stmt.span,
+        );
         let keep_forward = self.emit(
             InstKind::Binary {
                 op: BinaryOp::And,
@@ -4715,11 +4990,7 @@ impl<'a> FunctionLowering<'a> {
             .native_exceptions
             .expect("a program constructing a range registered the exception hierarchy")
             .invalid_step;
-        self.throw_native_failure(
-            invalid_step,
-            "a range's step cannot be zero",
-            stmt.span,
-        );
+        self.throw_native_failure(invalid_step, "a range's step cannot be zero", stmt.span);
         self.terminate(Terminator::Jump(ok_block));
         self.current = ok_block;
 
@@ -4735,29 +5006,48 @@ impl<'a> FunctionLowering<'a> {
         let bound = self.emit(InstKind::Load(limit), element, stmt.span);
         let inclusive = self.emit(InstKind::Load(incl), IrType::Boolean, stmt.span);
         let exclusive = self.emit(
-            InstKind::Unary { op: UnaryOp::Not, operand: inclusive },
+            InstKind::Unary {
+                op: UnaryOp::Not,
+                operand: inclusive,
+            },
             IrType::Boolean,
             stmt.span,
         );
 
         // Within the bound, forward: `incl ? cur <= end : cur < end`.
         let lt = self.emit(
-            InstKind::Binary { op: BinaryOp::Lt, left: current, right: bound },
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: current,
+                right: bound,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let le = self.emit(
-            InstKind::Binary { op: BinaryOp::LtEq, left: current, right: bound },
+            InstKind::Binary {
+                op: BinaryOp::LtEq,
+                left: current,
+                right: bound,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let incl_le = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: inclusive, right: le },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: inclusive,
+                right: le,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let excl_lt = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: exclusive, right: lt },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: exclusive,
+                right: lt,
+            },
             IrType::Boolean,
             stmt.span,
         );
@@ -4773,22 +5063,38 @@ impl<'a> FunctionLowering<'a> {
 
         // Within the bound, backward: `incl ? cur >= end : cur > end`.
         let gt = self.emit(
-            InstKind::Binary { op: BinaryOp::Gt, left: current, right: bound },
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: current,
+                right: bound,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let ge = self.emit(
-            InstKind::Binary { op: BinaryOp::GtEq, left: current, right: bound },
+            InstKind::Binary {
+                op: BinaryOp::GtEq,
+                left: current,
+                right: bound,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let incl_ge = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: inclusive, right: ge },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: inclusive,
+                right: ge,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let excl_gt = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: exclusive, right: gt },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: exclusive,
+                right: gt,
+            },
             IrType::Boolean,
             stmt.span,
         );
@@ -4806,7 +5112,11 @@ impl<'a> FunctionLowering<'a> {
         let stride_value = self.emit(InstKind::Load(stride), element, stmt.span);
         let zero = self.const_int_at(0, element, stmt.span);
         let forward = self.emit(
-            InstKind::Binary { op: BinaryOp::Gt, left: stride_value, right: zero },
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: stride_value,
+                right: zero,
+            },
             IrType::Boolean,
             stmt.span,
         );
@@ -4819,12 +5129,20 @@ impl<'a> FunctionLowering<'a> {
             stmt.span,
         );
         let keep_fwd = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: forward, right: within_fwd },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: forward,
+                right: within_fwd,
+            },
             IrType::Boolean,
             stmt.span,
         );
         let keep_bwd = self.emit(
-            InstKind::Binary { op: BinaryOp::And, left: backward, right: within_bwd },
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: backward,
+                right: within_bwd,
+            },
             IrType::Boolean,
             stmt.span,
         );
@@ -4904,7 +5222,11 @@ impl<'a> FunctionLowering<'a> {
             stmt.binding.span,
         );
         let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), stmt.span);
-        let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), stmt.span);
+        let zero = self.emit(
+            InstKind::IntCast(zero),
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
         self.emit_effect(InstKind::Store(counter, zero), stmt.span);
 
         let header = self.new_block();
@@ -4920,7 +5242,11 @@ impl<'a> FunctionLowering<'a> {
             IrType::Int(IntWidth::U64),
             stmt.span,
         );
-        let bound = self.emit(InstKind::Load(length_slot), IrType::Int(IntWidth::U64), stmt.span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
         let keep_going = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Lt,
@@ -4945,7 +5271,11 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = body_block;
         let iterable_value = self.emit(InstKind::Load(iterable_slot), iterable_ty, stmt.span);
-        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), stmt.span);
+        let index = self.emit(
+            InstKind::Load(counter),
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
         let element = self.emit(
             InstKind::ArrayListLoad {
                 receiver: iterable_value,
@@ -4968,7 +5298,11 @@ impl<'a> FunctionLowering<'a> {
             stmt.span,
         );
         let one = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), stmt.span);
-        let one = self.emit(InstKind::IntCast(one), IrType::Int(IntWidth::U64), stmt.span);
+        let one = self.emit(
+            InstKind::IntCast(one),
+            IrType::Int(IntWidth::U64),
+            stmt.span,
+        );
         let next = self.emit(
             InstKind::Binary {
                 op: BinaryOp::Add,
@@ -5435,6 +5769,9 @@ impl<'a> FunctionLowering<'a> {
                     IrType::Float(w) => {
                         self.emit(InstKind::ConstFloat(w, lit.text.clone()), ty, span)
                     }
+                    IrType::Decimal => {
+                        self.emit(InstKind::ConstDecimal(lit.text.clone()), ty, span)
+                    }
                     _ => {
                         let width = float_literal_width(lit);
                         self.emit(
@@ -5503,6 +5840,14 @@ impl<'a> FunctionLowering<'a> {
                         let zero = self.const_int_at(0, ty, span);
                         self.emit_checked_binary(BinaryOp::Sub, zero, operand, ty, span)
                     }
+                    ast::UnaryOp::Neg if ty == IrType::Decimal => self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_neg".to_string(),
+                            args: vec![operand],
+                        },
+                        IrType::Decimal,
+                        span,
+                    ),
                     ast::UnaryOp::Neg => self.emit(
                         InstKind::Unary {
                             op: UnaryOp::Neg,
@@ -5714,6 +6059,10 @@ impl<'a> FunctionLowering<'a> {
                         _ => (left, right, left_ty),
                     }
                 };
+
+                if operand_type == IrType::Decimal {
+                    return self.lower_decimal_binary(op, left, right, span);
+                }
 
                 self.emit_checked_binary(op, left, right, operand_type, span)
             }
@@ -7142,7 +7491,13 @@ impl<'a> FunctionLowering<'a> {
         // reads (`lower_match`'s `Pattern::Regex` arm), since values do not
         // cross blocks (ADR-007).
         if let ast::Pattern::Regex(r) = pattern {
-            return self.lower_regex_pattern_test(r, scrutinee, scrutinee_type, narrowed_type, span);
+            return self.lower_regex_pattern_test(
+                r,
+                scrutinee,
+                scrutinee_type,
+                narrowed_type,
+                span,
+            );
         }
         let expected = match pattern {
             ast::Pattern::Int(lit) => self.emit(
@@ -7979,7 +8334,7 @@ impl<'a> FunctionLowering<'a> {
             .expect("a program with Float arithmetic registered the exception hierarchy");
         self.throw_native_failure(
             native.float_nan,
-            "Float operation produced an indeterminate result (NaN)",
+            "BinaryFloat operation produced an indeterminate result (NaN)",
             span,
         );
 
@@ -8346,9 +8701,7 @@ impl<'a> FunctionLowering<'a> {
         match pattern {
             ast::Pattern::Binding(ident) => ident.name == name,
             ast::Pattern::Variant(v) => v.bindings.iter().any(|p| Self::pattern_binds(p, name)),
-            ast::Pattern::Regex(r) => {
-                r.binding.as_ref().is_some_and(|b| b.name == name)
-            }
+            ast::Pattern::Regex(r) => r.binding.as_ref().is_some_and(|b| b.name == name),
             _ => false,
         }
     }
@@ -9058,8 +9411,7 @@ impl<'a> FunctionLowering<'a> {
             .list_types
             .iter()
             .position(|&t| t == Type::of(Base::Class(self.checked.regex_match_class)))
-            .expect("the checker interned `List<Regex.Match>` for `Regex.find_all`")
-            as u32
+            .expect("the checker interned `List<Regex.Match>` for `Regex.find_all`") as u32
     }
 
     /// `Regex.Match.group(n)` / `Regex.Match.group(name)`: built-in runtime
@@ -9153,15 +9505,16 @@ impl<'a> FunctionLowering<'a> {
         };
         let receiver = self.lower_expr(&field.object);
         match field.name.name.as_str() {
-            "trim" | "trim_start" | "trim_end" | "to_lowercase" | "to_uppercase"
-            | "clone" => Some(self.emit(
-                InstKind::Call {
-                    callee: format!("zirk_str_{}", field.name.name),
-                    args: vec![receiver],
-                },
-                IrType::String,
-                span,
-            )),
+            "trim" | "trim_start" | "trim_end" | "to_lowercase" | "to_uppercase" | "clone" => {
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_str_{}", field.name.name),
+                        args: vec![receiver],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
             "is_empty" => Some(self.emit(
                 InstKind::Call {
                     callee: "zirk_str_is_empty".to_string(),
@@ -9170,16 +9523,14 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Boolean,
                 span,
             )),
-            "split_whitespace" | "lines" | "chars" | "bytes" | "codepoints" => {
-                Some(self.emit(
-                    InstKind::Call {
-                        callee: format!("zirk_str_{}", field.name.name),
-                        args: vec![receiver],
-                    },
-                    result_ty(self),
-                    span,
-                ))
-            }
+            "split_whitespace" | "lines" | "chars" | "bytes" | "codepoints" => Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_str_{}", field.name.name),
+                    args: vec![receiver],
+                },
+                result_ty(self),
+                span,
+            )),
             "find" => {
                 // `Int64?` — `-1` from the runtime maps to `null`.
                 let arg = self.lower_expr(&call.args[0].value);
@@ -9191,13 +9542,10 @@ impl<'a> FunctionLowering<'a> {
                     IrType::Int(IntWidth::I64),
                     span,
                 );
-                let index_slot = self.declare_slot("<find_index>", IrType::Int(IntWidth::I64), span);
+                let index_slot =
+                    self.declare_slot("<find_index>", IrType::Int(IntWidth::I64), span);
                 self.emit_effect(InstKind::Store(index_slot, index), span);
-                let minus_one = self.emit(
-                    InstKind::ConstInt(-1),
-                    IrType::Int(IntWidth::I64),
-                    span,
-                );
+                let minus_one = self.emit(InstKind::ConstInt(-1), IrType::Int(IntWidth::I64), span);
                 let absent = self.emit(
                     InstKind::Binary {
                         op: BinaryOp::Eq,
@@ -9218,7 +9566,11 @@ impl<'a> FunctionLowering<'a> {
                     else_block: some_block,
                 });
                 self.current = null_block;
-                let null = self.emit(InstKind::NullValue(Nullable::Int(IntWidth::I64)), nullable, span);
+                let null = self.emit(
+                    InstKind::NullValue(Nullable::Int(IntWidth::I64)),
+                    nullable,
+                    span,
+                );
                 self.emit_effect(InstKind::Store(result_slot, null), span);
                 self.terminate(Terminator::Jump(continue_block));
                 self.current = some_block;
@@ -9448,11 +9800,7 @@ impl<'a> FunctionLowering<'a> {
                 span,
             )),
             "is_zero" | "is_positive" | "is_negative" => {
-                let zero = self.emit(
-                    InstKind::ConstInt(0),
-                    IrType::Int(IntWidth::I64),
-                    span,
-                );
+                let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I64), span);
                 let op = match field.name.name.as_str() {
                     "is_zero" => BinaryOp::Eq,
                     "is_positive" => BinaryOp::Gt,
@@ -9579,8 +9927,8 @@ impl<'a> FunctionLowering<'a> {
 
     /// Maps a semantic integer width to the IR's own `IntWidth`.
     fn ir_int_width(&self, width: zirk_sema::IntWidth) -> IntWidth {
-        use zirk_sema::IntWidth as S;
         use IntWidth;
+        use zirk_sema::IntWidth as S;
         match width {
             S::I8 => IntWidth::I8,
             S::I16 => IntWidth::I16,
@@ -9597,8 +9945,8 @@ impl<'a> FunctionLowering<'a> {
 
     /// Maps a semantic float width to the IR's own `FloatWidth`.
     fn ir_float_width(&self, width: zirk_sema::FloatWidth) -> FloatWidth {
-        use zirk_sema::FloatWidth as S;
         use FloatWidth;
+        use zirk_sema::FloatWidth as S;
         match width {
             S::F16 => FloatWidth::F16,
             S::F32 => FloatWidth::F32,
@@ -9631,7 +9979,216 @@ impl<'a> FunctionLowering<'a> {
                 let width = self.ir_float_width(width);
                 self.lower_float_method_call(call, field, width, name, span)
             }
+            zirk_sema::Base::Decimal => self.lower_decimal_method_call(call, field, name, span),
             _ => None,
+        }
+    }
+
+    /// Exact base-ten `Float` receiver methods — see `lower_scalar_method_call`.
+    fn lower_decimal_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        field: &ast::FieldExpr,
+        name: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let dec = IrType::Decimal;
+        let receiver = self.lower_expr(&field.object);
+
+        let unary = |this: &mut Self, callee: &str, ret: IrType| {
+            this.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args: vec![receiver],
+                },
+                ret,
+                span,
+            )
+        };
+
+        Some(match (name, call.args.len()) {
+            ("abs", 0) => unary(self, "zirk_rt_decimal_abs", dec),
+            ("floor", 0) => unary(self, "zirk_rt_decimal_floor", dec),
+            ("ceil", 0) => unary(self, "zirk_rt_decimal_ceil", dec),
+            ("truncate", 0) => unary(self, "zirk_rt_decimal_truncate", dec),
+            ("fraction", 0) => unary(self, "zirk_rt_decimal_fraction", dec),
+            ("sqrt", 0) => unary(self, "zirk_rt_decimal_sqrt", dec),
+            ("sign", 0) => unary(self, "zirk_rt_decimal_sign", IrType::Int(IntWidth::I32)),
+            ("scale", 0) => unary(self, "zirk_rt_decimal_scale", IrType::Int(IntWidth::I32)),
+            ("is_zero", 0) => unary(self, "zirk_rt_decimal_is_zero", IrType::Boolean),
+            ("is_negative", 0) => unary(self, "zirk_rt_decimal_is_negative", IrType::Boolean),
+            ("is_integer", 0) => unary(self, "zirk_rt_decimal_is_integer", IrType::Boolean),
+            ("round", 0) => {
+                let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                let mode = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_round".to_string(),
+                        args: vec![receiver, zero, mode],
+                    },
+                    dec,
+                    span,
+                )
+            }
+            ("round", 1) => {
+                let places = self.lower_decimal_place_arg(&call.args[0].value, span);
+                let mode = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_round".to_string(),
+                        args: vec![receiver, places, mode],
+                    },
+                    dec,
+                    span,
+                )
+            }
+            ("pow", 1)
+                if self
+                    .checked
+                    .expr_types
+                    .get(&call.args[0].value.span())
+                    .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Int(_))) =>
+            {
+                // An integer exponent takes the exact repeated-multiply path
+                // (`zirk_rt_decimal_pow_i`), not the f64-precision
+                // `zirk_rt_decimal_pow`. This is what makes `(1.5) ** 2`
+                // exactly `2.25` and `2 ** -3` exactly `0.125`.
+                //
+                // Spill the base first: the exponent may be a `**` whose
+                // lowering splits blocks, and values do not cross blocks.
+                let base_slot = self.spill(receiver, dec, span);
+                let raw = self.lower_expr(&call.args[0].value);
+                let raw_ty = self.type_of_operand(raw);
+                let n = if raw_ty == IrType::Int(IntWidth::I64) {
+                    raw
+                } else {
+                    self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I64), span)
+                };
+                let base = self.emit(InstKind::Load(base_slot), dec, span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_pow_i".to_string(),
+                        args: vec![base, n],
+                    },
+                    dec,
+                    span,
+                )
+            }
+            ("min" | "max" | "pow", 1) => {
+                let other = self.lower_decimal_arg(&call.args[0].value, span);
+                let callee = match name {
+                    "min" => "zirk_rt_decimal_min",
+                    "max" => "zirk_rt_decimal_max",
+                    _ => "zirk_rt_decimal_pow",
+                };
+                self.emit(
+                    InstKind::Call {
+                        callee: callee.to_string(),
+                        args: vec![receiver, other],
+                    },
+                    dec,
+                    span,
+                )
+            }
+            ("clamp", 2) => {
+                let low = self.lower_decimal_arg(&call.args[0].value, span);
+                let high = self.lower_decimal_arg(&call.args[1].value, span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_clamp".to_string(),
+                        args: vec![receiver, low, high],
+                    },
+                    dec,
+                    span,
+                )
+            }
+            ("div", 1) => {
+                let other = self.lower_decimal_arg(&call.args[0].value, span);
+                self.decimal_guarded_div(receiver, other, None, span)
+            }
+            ("div", 2) => {
+                let other = self.lower_decimal_arg(&call.args[0].value, span);
+                let places = self.lower_decimal_place_arg(&call.args[1].value, span);
+                self.decimal_guarded_div(receiver, other, Some(places), span)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Lowers a `Float`-typed argument, converting an integer literal/value.
+    fn lower_decimal_arg(&mut self, expr: &ast::Expr, span: Span) -> Operand {
+        let value = self.lower_expr(expr);
+        let actual = self.type_of_operand(value);
+        self.convert_numeric(value, actual, IrType::Decimal, span)
+    }
+
+    /// Lowers a place-count argument to `Int32`.
+    fn lower_decimal_place_arg(&mut self, expr: &ast::Expr, span: Span) -> Operand {
+        let value = self.lower_expr(expr);
+        let actual = self.type_of_operand(value);
+        self.convert_numeric(value, actual, IrType::Int(IntWidth::I32), span)
+    }
+
+    /// `a.div(b[, places])` with the same zero-divisor guard `/` gets.
+    fn decimal_guarded_div(
+        &mut self,
+        left: Operand,
+        right: Operand,
+        places: Option<Operand>,
+        span: Span,
+    ) -> Operand {
+        let dec = IrType::Decimal;
+        let left_slot = self.spill(left, dec, span);
+        let right_slot = self.spill(right, dec, span);
+        let places_slot = places.map(|p| self.spill(p, IrType::Int(IntWidth::I32), span));
+
+        let divisor = self.emit(InstKind::Load(right_slot), dec, span);
+        let is_zero = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_decimal_is_zero".to_string(),
+                args: vec![divisor],
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let ok = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: is_zero,
+            then_block: fail,
+            else_block: ok,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a program with division registered the exception hierarchy");
+        self.throw_native_failure(native.division_by_zero, "division by zero", span);
+        self.current = ok;
+
+        let left = self.emit(InstKind::Load(left_slot), dec, span);
+        let right = self.emit(InstKind::Load(right_slot), dec, span);
+        match places_slot {
+            None => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_decimal_div".to_string(),
+                    args: vec![left, right],
+                },
+                dec,
+                span,
+            ),
+            Some(slot) => {
+                let places = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I32), span);
+                let mode = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_div_ex".to_string(),
+                        args: vec![left, right, mode, places],
+                    },
+                    dec,
+                    span,
+                )
+            }
         }
     }
 
@@ -9645,18 +10202,47 @@ impl<'a> FunctionLowering<'a> {
             return false;
         }
         const INT0: &[&str] = &[
-            "abs", "sign", "bit_count", "leading_zeros", "trailing_zeros", "is_zero",
-            "is_even", "is_odd",
+            "abs",
+            "sign",
+            "bit_count",
+            "leading_zeros",
+            "trailing_zeros",
+            "is_zero",
+            "is_even",
+            "is_odd",
         ];
         const INT1: &[&str] = &[
-            "min", "max", "rotate_left", "rotate_right", "wrapping_add", "wrapping_sub",
-            "wrapping_mul", "saturating_add", "saturating_sub", "saturating_mul",
-            "checked_add", "checked_sub", "checked_mul", "checked_div", "checked_rem",
+            "min",
+            "max",
+            "rotate_left",
+            "rotate_right",
+            "wrapping_add",
+            "wrapping_sub",
+            "wrapping_mul",
+            "saturating_add",
+            "saturating_sub",
+            "saturating_mul",
+            "checked_add",
+            "checked_sub",
+            "checked_mul",
+            "checked_div",
+            "checked_rem",
             "checked_pow",
+            "pow",
         ];
         const FLOAT0: &[&str] = &[
-            "abs", "sign", "is_zero", "floor", "ceil", "round", "truncate", "fraction",
-            "is_finite", "is_infinite", "is_negative", "sqrt",
+            "abs",
+            "sign",
+            "is_zero",
+            "floor",
+            "ceil",
+            "round",
+            "truncate",
+            "fraction",
+            "is_finite",
+            "is_infinite",
+            "is_negative",
+            "sqrt",
         ];
         const FLOAT1: &[&str] = &["min", "max", "pow"];
         let Some(sema) = self.checked.expr_types.get(&field.object.span()) else {
@@ -9670,13 +10256,37 @@ impl<'a> FunctionLowering<'a> {
                     || (name == "clamp" && call.args.len() == 2)
                     || (name == "to_string"
                         && call.args.len() == 1
-                        && call.args[0].name.as_ref().is_some_and(|n| n.name == "radix"))
+                        && call.args[0]
+                            .name
+                            .as_ref()
+                            .is_some_and(|n| n.name == "radix"))
             }
             zirk_sema::Base::Float(_) => {
                 (FLOAT0.contains(&name) && call.args.is_empty())
                     || (FLOAT1.contains(&name) && call.args.len() == 1)
                     || (name == "clamp" && call.args.len() == 2)
                     || (name == "format" && call.args.len() == 1)
+            }
+            zirk_sema::Base::Decimal => {
+                const DEC0: &[&str] = &[
+                    "abs",
+                    "floor",
+                    "ceil",
+                    "truncate",
+                    "fraction",
+                    "sqrt",
+                    "sign",
+                    "scale",
+                    "is_zero",
+                    "is_negative",
+                    "is_integer",
+                    "round",
+                ];
+                const DEC1: &[&str] = &["min", "max", "pow", "round", "div"];
+                (DEC0.contains(&name) && call.args.is_empty())
+                    || (DEC1.contains(&name) && call.args.len() == 1)
+                    || (name == "clamp" && call.args.len() == 2)
+                    || (name == "div" && call.args.len() == 2)
             }
             _ => false,
         }
@@ -9785,9 +10395,18 @@ impl<'a> FunctionLowering<'a> {
                         span,
                     );
                     self.current = ok;
-                    let wide = self.emit(InstKind::Load(wide_slot), IrType::Int(IntWidth::I128), span);
-                    let bits_op = self.emit(InstKind::ConstInt(bits as i128), IrType::Int(IntWidth::I32), span);
-                    let signed_op = self.emit(InstKind::ConstInt(signed as i128), IrType::Int(IntWidth::I32), span);
+                    let wide =
+                        self.emit(InstKind::Load(wide_slot), IrType::Int(IntWidth::I128), span);
+                    let bits_op = self.emit(
+                        InstKind::ConstInt(bits as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    );
+                    let signed_op = self.emit(
+                        InstKind::ConstInt(signed as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    );
                     let result = self.emit(
                         InstKind::Call {
                             callee: "zirk_int_abs".to_string(),
@@ -9801,9 +10420,7 @@ impl<'a> FunctionLowering<'a> {
                 let result = call_i128(self, "zirk_int_abs", vec![]);
                 Some(self.int_from_i128(result, width, span))
             }
-            "sign" | "bit_count" | "leading_zeros" | "trailing_zeros"
-                if call.args.is_empty() =>
-            {
+            "sign" | "bit_count" | "leading_zeros" | "trailing_zeros" if call.args.is_empty() => {
                 let callee = match name {
                     "sign" => "zirk_int_sign",
                     _ => &format!("zirk_int_{name}"),
@@ -9834,8 +10451,8 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Boolean,
                 span,
             )),
-            "min" | "max" | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
-            | "saturating_add" | "saturating_sub" | "saturating_mul"
+            "min" | "max" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "saturating_add"
+            | "saturating_sub" | "saturating_mul"
                 if call.args.len() == 1 =>
             {
                 let other = arg_i128(self, &call.args[0].value);
@@ -9848,11 +10465,7 @@ impl<'a> FunctionLowering<'a> {
                 let n = if raw_ty == IrType::Int(IntWidth::I64) {
                     raw
                 } else {
-                    self.emit(
-                        InstKind::IntCast(raw),
-                        IrType::Int(IntWidth::I64),
-                        span,
-                    )
+                    self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I64), span)
                 };
                 let result = self.emit(
                     InstKind::Call {
@@ -9870,8 +10483,8 @@ impl<'a> FunctionLowering<'a> {
                 let result = call_i128(self, "zirk_int_clamp", vec![lo, hi]);
                 Some(self.int_from_i128(result, width, span))
             }
-            "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
-            | "checked_rem" | "checked_pow"
+            "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
+            | "checked_pow"
                 if call.args.len() == 1 =>
             {
                 let other = arg_i128(self, &call.args[0].value);
@@ -9886,13 +10499,30 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 Some(self.build_result_from_flag(
-                    call, span,
+                    call,
+                    span,
                     ok,
                     move |lower| {
-                        let wide = lower.emit(InstKind::Load(wide_slot), IrType::Int(IntWidth::I128), span);
-                        let other = lower.emit(InstKind::Load(other_slot), IrType::Int(IntWidth::I128), span);
-                        let bits_op = lower.emit(InstKind::ConstInt(bits as i128), IrType::Int(IntWidth::I32), span);
-                        let signed_op = lower.emit(InstKind::ConstInt(signed as i128), IrType::Int(IntWidth::I32), span);
+                        let wide = lower.emit(
+                            InstKind::Load(wide_slot),
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        );
+                        let other = lower.emit(
+                            InstKind::Load(other_slot),
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        );
+                        let bits_op = lower.emit(
+                            InstKind::ConstInt(bits as i128),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        );
+                        let signed_op = lower.emit(
+                            InstKind::ConstInt(signed as i128),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        );
                         let value = lower.emit(
                             InstKind::Call {
                                 callee: format!("zirk_int_{name}_value"),
@@ -9908,18 +10538,17 @@ impl<'a> FunctionLowering<'a> {
             }
             "to_string"
                 if call.args.len() == 1
-                    && call.args[0].name.as_ref().is_some_and(|n| n.name == "radix") =>
+                    && call.args[0]
+                        .name
+                        .as_ref()
+                        .is_some_and(|n| n.name == "radix") =>
             {
                 let raw = self.lower_expr(&call.args[0].value);
                 let raw_ty = self.type_of_operand(raw);
                 let radix = if raw_ty == IrType::Int(IntWidth::I32) {
                     raw
                 } else {
-                    self.emit(
-                        InstKind::IntCast(raw),
-                        IrType::Int(IntWidth::I32),
-                        span,
-                    )
+                    self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I32), span)
                 };
                 Some(self.emit(
                     InstKind::Call {
@@ -9929,6 +10558,122 @@ impl<'a> FunctionLowering<'a> {
                     IrType::String,
                     span,
                 ))
+            }
+            // `n.pow(k)` — the desugaring of `n ** k`
+            // (`exponentiation-operator`). When the checker widened the result
+            // to exact `Float` (a statically negative literal exponent), the
+            // base becomes a `Decimal` at scale 0 and the exponent an `i64`,
+            // routed to the exact repeated-multiply helper. Otherwise the
+            // result stays integer: `zirk_int_checked_pow_ok` gates the
+            // operation and an unrepresentable result throws
+            // `ArithmeticOverflowError`, like every other integer operation.
+            "pow" if call.args.len() == 1 => {
+                let widens_to_decimal = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Decimal));
+
+                // Spill the base before lowering the exponent: the exponent
+                // may itself be a `**` (`2 ** 3 ** 2`), whose lowering splits
+                // blocks, and values do not cross blocks in this IR.
+                let base_slot = self.spill(wide, IrType::Int(IntWidth::I128), span);
+                let exp_raw = self.lower_expr(&call.args[0].value);
+                let exp_ty = self.type_of_operand(exp_raw);
+                let exp_i64 = if exp_ty == IrType::Int(IntWidth::I64) {
+                    exp_raw
+                } else {
+                    self.emit(InstKind::IntCast(exp_raw), IrType::Int(IntWidth::I64), span)
+                };
+                let exp_slot = self.spill(exp_i64, IrType::Int(IntWidth::I64), span);
+
+                let bits_of = |lower: &mut Self| {
+                    lower.emit(
+                        InstKind::ConstInt(bits as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                let signed_of = |lower: &mut Self| {
+                    lower.emit(
+                        InstKind::ConstInt(signed as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+
+                if widens_to_decimal {
+                    let base = self.emit(
+                        InstKind::Load(base_slot),
+                        IrType::Int(IntWidth::I128),
+                        span,
+                    );
+                    let base_dec = self.convert_numeric(
+                        base,
+                        IrType::Int(IntWidth::I128),
+                        IrType::Decimal,
+                        span,
+                    );
+                    let exp = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                    return Some(self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_pow_i".to_string(),
+                            args: vec![base_dec, exp],
+                        },
+                        IrType::Decimal,
+                        span,
+                    ));
+                }
+
+                let base = self.emit(
+                    InstKind::Load(base_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
+                let bits_op = bits_of(self);
+                let signed_op = signed_of(self);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_int_checked_pow_ok".to_string(),
+                        args: vec![base, exp, bits_op, signed_op],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let fail = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: ok,
+                    then_block: cont,
+                    else_block: fail,
+                });
+                self.current = fail;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("a program with integer arithmetic registered the exception hierarchy");
+                self.throw_native_failure(native.arithmetic_overflow, "arithmetic overflow", span);
+                self.current = cont;
+                let base = self.emit(
+                    InstKind::Load(base_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
+                let bits_op = bits_of(self);
+                let signed_op = signed_of(self);
+                let value = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_int_checked_pow_value".to_string(),
+                        args: vec![base, exp, bits_op, signed_op],
+                    },
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                Some(self.int_from_i128(value, width, span))
             }
             _ => None,
         }
@@ -9989,9 +10734,7 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I32),
                 span,
             )),
-            "is_zero" | "is_finite" | "is_infinite" | "is_negative"
-                if call.args.is_empty() =>
-            {
+            "is_zero" | "is_finite" | "is_infinite" | "is_negative" if call.args.is_empty() => {
                 Some(self.emit(
                     InstKind::Call {
                         callee: format!("zirk_float_{name}"),
@@ -10005,7 +10748,11 @@ impl<'a> FunctionLowering<'a> {
                 // A negative argument has no real answer and Zirk's `Float`
                 // family has no `NaN` to give back — `FloatNanError`, the
                 // same failure an indeterminate operation raises.
-                let zero = self.emit(InstKind::ConstFloat(FloatWidth::F64, "0.0".to_string()), f64_ty, span);
+                let zero = self.emit(
+                    InstKind::ConstFloat(FloatWidth::F64, "0.0".to_string()),
+                    f64_ty,
+                    span,
+                );
                 let negative = self.emit(
                     InstKind::Binary {
                         op: BinaryOp::Lt,
@@ -10028,11 +10775,7 @@ impl<'a> FunctionLowering<'a> {
                     .checked
                     .native_exceptions
                     .expect("the checker registered the exception hierarchy");
-                self.throw_native_failure(
-                    native.float_nan,
-                    "sqrt of a negative value",
-                    span,
-                );
+                self.throw_native_failure(native.float_nan, "sqrt of a negative value", span);
                 self.current = ok;
                 let wide = self.emit(InstKind::Load(wide_slot), f64_ty, span);
                 let result = self.emit(
@@ -10059,11 +10802,7 @@ impl<'a> FunctionLowering<'a> {
                     let n = if raw_ty == IrType::Int(IntWidth::I64) {
                         raw
                     } else {
-                        self.emit(
-                            InstKind::IntCast(raw),
-                            IrType::Int(IntWidth::I64),
-                            span,
-                        )
+                        self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I64), span)
                     };
                     let result = self.emit(
                         InstKind::Call {
@@ -10230,7 +10969,8 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 Some(self.build_result_from_flag(
-                    call, span,
+                    call,
+                    span,
                     ok,
                     move |lower| {
                         let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
@@ -10268,18 +11008,10 @@ impl<'a> FunctionLowering<'a> {
                     if raw_ty == IrType::Int(IntWidth::I32) {
                         raw
                     } else {
-                        self.emit(
-                            InstKind::IntCast(raw),
-                            IrType::Int(IntWidth::I32),
-                            span,
-                        )
+                        self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I32), span)
                     }
                 } else {
-                    self.emit(
-                        InstKind::ConstInt(10),
-                        IrType::Int(IntWidth::I32),
-                        span,
-                    )
+                    self.emit(InstKind::ConstInt(10), IrType::Int(IntWidth::I32), span)
                 };
                 let suffix = if call.args.len() == 2 { "_radix" } else { "" };
                 let ok_args = if call.args.len() == 2 {
@@ -10298,13 +11030,26 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 Some(self.build_result_from_flag(
-                    call, span,
+                    call,
+                    span,
                     ok,
                     move |lower| {
                         let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
-                        let radix = lower.emit(InstKind::Load(radix_slot), IrType::Int(IntWidth::I32), span);
-                        let bits = lower.emit(InstKind::ConstInt(bits_value), IrType::Int(IntWidth::I32), span);
-                        let signed = lower.emit(InstKind::ConstInt(signed_flag), IrType::Int(IntWidth::I32), span);
+                        let radix = lower.emit(
+                            InstKind::Load(radix_slot),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        );
+                        let bits = lower.emit(
+                            InstKind::ConstInt(bits_value),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        );
+                        let signed = lower.emit(
+                            InstKind::ConstInt(signed_flag),
+                            IrType::Int(IntWidth::I32),
+                            span,
+                        );
                         let value = lower.emit(
                             InstKind::Call {
                                 callee: format!("zirk_int_parse{suffix}_value"),
@@ -10322,6 +11067,34 @@ impl<'a> FunctionLowering<'a> {
                     "invalid integer literal or out of range for the width",
                 ))
             }
+            zirk_sema::Base::Decimal => {
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_parse_ok".to_string(),
+                        args: vec![text],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_rt_decimal_parse_value".to_string(),
+                                args: vec![text],
+                            },
+                            IrType::Decimal,
+                            span,
+                        )
+                    },
+                    "invalid decimal literal",
+                ))
+            }
             zirk_sema::Base::Float(width) => {
                 let width = self.ir_float_width(width);
                 let text_slot = self.spill(text, IrType::String, span);
@@ -10334,7 +11107,8 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 Some(self.build_result_from_flag(
-                    call, span,
+                    call,
+                    span,
                     ok,
                     move |lower| {
                         let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
@@ -10349,11 +11123,7 @@ impl<'a> FunctionLowering<'a> {
                         if width == FloatWidth::F64 {
                             value
                         } else {
-                            lower.emit(
-                                InstKind::FloatCast(value),
-                                IrType::Float(width),
-                                span,
-                            )
+                            lower.emit(InstKind::FloatCast(value), IrType::Float(width), span)
                         }
                     },
                     "invalid float literal",
@@ -10774,17 +11544,17 @@ impl<'a> FunctionLowering<'a> {
         match (field.name.name.as_str(), call.args.len(), receiver_ty) {
             ("add", 1, IrType::List(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
-                Some(self.emit(
-                    InstKind::ListAdd { receiver, value },
-                    IrType::Void,
-                    span,
-                ))
+                Some(self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span))
             }
             ("insert", 2, IrType::List(_)) => {
                 let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
                 let value = self.lower_expr_as(&call.args[1].value, element_ty);
                 Some(self.emit(
-                    InstKind::ListInsert { receiver, index, value },
+                    InstKind::ListInsert {
+                        receiver,
+                        index,
+                        value,
+                    },
                     IrType::Void,
                     span,
                 ))
@@ -10802,11 +11572,7 @@ impl<'a> FunctionLowering<'a> {
                     ))
                 } else if matches!(arg_ty, IrType::Int(_)) {
                     let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
-                    Some(self.emit(
-                        InstKind::ListRemove { receiver, index },
-                        IrType::Void,
-                        span,
-                    ))
+                    Some(self.emit(InstKind::ListRemove { receiver, index }, IrType::Void, span))
                 } else {
                     let value = self.lower_expr_as(&call.args[0].value, element_ty);
                     Some(self.emit(
@@ -10966,9 +11732,13 @@ impl<'a> FunctionLowering<'a> {
                 if call.args.len() == 1 {
                     // `Array<T>(capacity)` — the single-argument form keeps
                     // its historical meaning as an empty array with room.
-                    let capacity = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::U64));
+                    let capacity =
+                        self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::U64));
                     return Some(self.emit(
-                        InstKind::ArrayNew { element_id: id, capacity },
+                        InstKind::ArrayNew {
+                            element_id: id,
+                            capacity,
+                        },
                         IrType::Array(id),
                         span,
                     ));
@@ -10981,7 +11751,10 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 let array = self.emit(
-                    InstKind::ArrayNew { element_id: id, capacity },
+                    InstKind::ArrayNew {
+                        element_id: id,
+                        capacity,
+                    },
                     IrType::Array(id),
                     span,
                 );
@@ -10996,18 +11769,18 @@ impl<'a> FunctionLowering<'a> {
                     );
                     let value = self.lower_expr_as(&arg.value, element_ty);
                     self.emit_effect(
-                        InstKind::ArrayListStore { receiver, index, value },
+                        InstKind::ArrayListStore {
+                            receiver,
+                            index,
+                            value,
+                        },
                         span,
                     );
                 }
                 Some(self.emit(InstKind::Load(array_slot), IrType::Array(id), span))
             }
             ("List", Base::List(id)) => {
-                let list = self.emit(
-                    InstKind::ListNew { element_id: id },
-                    IrType::List(id),
-                    span,
-                );
+                let list = self.emit(InstKind::ListNew { element_id: id }, IrType::List(id), span);
                 if call.args.is_empty() {
                     return Some(list);
                 }
@@ -11016,11 +11789,7 @@ impl<'a> FunctionLowering<'a> {
                 for arg in call.args.iter() {
                     let receiver = self.emit(InstKind::Load(list_slot), IrType::List(id), span);
                     let value = self.lower_expr_as(&arg.value, element_ty);
-                    self.emit(
-                        InstKind::ListAdd { receiver, value },
-                        IrType::Void,
-                        span,
-                    );
+                    self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span);
                 }
                 Some(self.emit(InstKind::Load(list_slot), IrType::List(id), span))
             }
@@ -11089,7 +11858,11 @@ impl<'a> FunctionLowering<'a> {
             return None;
         }
         let target = Type::from_name(&callee.name)?;
-        matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String).then_some(target)
+        matches!(
+            target.base,
+            Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String
+        )
+        .then_some(target)
     }
 
     /// Whether `call` is `fatalError(...)` (roadmap Phase 4a) — checked the
@@ -11602,6 +12375,8 @@ impl<'a> FunctionLowering<'a> {
 
                 if is_string {
                     self.emit(InstKind::Concat { left, right }, IrType::String, span)
+                } else if target == IrType::Decimal {
+                    self.lower_decimal_binary(binary_op(b.op), left, right, span)
                 } else {
                     let op = binary_op(b.op);
                     self.emit_checked_binary(op, left, right, target, span)
@@ -11612,6 +12387,15 @@ impl<'a> FunctionLowering<'a> {
                 if matches!(target, IrType::Int(_)) {
                     let zero = self.const_int_at(0, target, span);
                     self.emit_checked_binary(BinaryOp::Sub, zero, operand, target, span)
+                } else if target == IrType::Decimal {
+                    self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_neg".to_string(),
+                            args: vec![operand],
+                        },
+                        IrType::Decimal,
+                        span,
+                    )
                 } else {
                     self.emit(
                         InstKind::Unary {
@@ -11660,6 +12444,9 @@ impl<'a> FunctionLowering<'a> {
             }
             (IrType::Float(_), IrType::Int(_)) => {
                 self.emit(InstKind::FloatToInt(operand), target, span)
+            }
+            (_, IrType::Decimal) | (IrType::Decimal, _) => {
+                self.convert_numeric(operand, actual, target, span)
             }
             (_, IrType::String) => self.lower_to_string_expr(expr, operand, span),
             _ => unreachable!("the checker validated this conversion"),
@@ -11933,6 +12720,15 @@ impl<'a> FunctionLowering<'a> {
         if let (IrType::Float(_), IrType::Int(_)) = (actual_ty, target_ty) {
             return self.emit(InstKind::FloatToInt(value), target_ty, span);
         }
+        // Exact `Float` <-> integer / `BinaryFloat` `as` casts route through
+        // the `convert_numeric` conversion instructions.
+        if matches!(
+            (actual_ty, target_ty),
+            (IrType::Decimal, _) | (_, IrType::Decimal)
+        ) && (Self::is_numeric_ir_type(actual_ty) && Self::is_numeric_ir_type(target_ty))
+        {
+            return self.convert_numeric(value, actual_ty, target_ty, span);
+        }
         // `ptr as Pointer<U>` — `.cast<U>()`'s spelling (design D8, tasks.md
         // 6.2's decision note): an LLVM pointer bitcast, unchecked.
         if let (IrType::Pointer(_), IrType::Pointer(_)) = (actual_ty, target_ty) {
@@ -12151,13 +12947,15 @@ impl<'a> FunctionLowering<'a> {
         }
 
         if self.type_of(&expr.object, expr.object.span()) == IrType::String
-            && let Some(operand) = self.lower_string_property(&expr.object, &expr.name.name, span) {
-                return operand;
-            }
+            && let Some(operand) = self.lower_string_property(&expr.object, &expr.name.name, span)
+        {
+            return operand;
+        }
         if self.type_of(&expr.object, expr.object.span()) == IrType::Char
-            && let Some(operand) = self.lower_char_property(&expr.object, &expr.name.name, span) {
-                return operand;
-            }
+            && let Some(operand) = self.lower_char_property(&expr.object, &expr.name.name, span)
+        {
+            return operand;
+        }
         if let Some(operand) = self.lower_duration_property(&expr.object, &expr.name.name, span) {
             return operand;
         }
@@ -12412,12 +13210,7 @@ impl<'a> FunctionLowering<'a> {
 
     /// `Int32.MAX`, `Float64.EPSILON`, etc. — the value is a constant the
     /// checker already validated (`native-type-member-surface`).
-    fn lower_scalar_static(
-        &mut self,
-        object: &ast::Expr,
-        member: &str,
-        span: Span,
-    ) -> Operand {
+    fn lower_scalar_static(&mut self, object: &ast::Expr, member: &str, span: Span) -> Operand {
         let ast::Expr::Path(base) = object else {
             unreachable!("a scalar static access names a type")
         };
@@ -12425,8 +13218,12 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("the checker only records existing scalar types")
         };
         match ty.base {
-            zirk_sema::Base::Int(width) => self.lower_int_constant(self.ir_int_width(width), member, span),
-            zirk_sema::Base::Float(width) => self.lower_float_constant(self.ir_float_width(width), member, span),
+            zirk_sema::Base::Int(width) => {
+                self.lower_int_constant(self.ir_int_width(width), member, span)
+            }
+            zirk_sema::Base::Float(width) => {
+                self.lower_float_constant(self.ir_float_width(width), member, span)
+            }
             _ => unreachable!("the checker only records scalar types"),
         }
     }
@@ -12592,17 +13389,15 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I32),
                 span,
             ),
-            "is_ascii" | "is_alphabetic" | "is_numeric" | "is_alphanumeric"
-            | "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter" | "is_whitespace" => {
-                self.emit(
-                    InstKind::Call {
-                        callee: format!("zirk_char_{member}"),
-                        args: vec![receiver],
-                    },
-                    IrType::Boolean,
-                    span,
-                )
-            }
+            "is_ascii" | "is_alphabetic" | "is_numeric" | "is_alphanumeric" | "is_uppercase"
+            | "is_lowercase" | "is_digit" | "is_letter" | "is_whitespace" => self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_char_{member}"),
+                    args: vec![receiver],
+                },
+                IrType::Boolean,
+                span,
+            ),
             _ => return None,
         })
     }
@@ -12675,7 +13470,9 @@ impl<'a> FunctionLowering<'a> {
             };
             let enum_id = self.enum_id_of(enum_name);
             let discriminant = self.discriminant(enum_name, &variant_expr.name.name) as usize;
-            let variant_name = self.checked.enums[enum_id as usize].variants[discriminant].name.clone();
+            let variant_name = self.checked.enums[enum_id as usize].variants[discriminant]
+                .name
+                .clone();
             return if name == "value" {
                 Some(self.emit(
                     InstKind::ConstInt(discriminant as i128),
@@ -12713,7 +13510,15 @@ impl<'a> FunctionLowering<'a> {
             }
             _ => unreachable!("an enum value lowers to IrType::Enum or its Int32 discriminant"),
         };
-        let result = self.declare_slot("<enum_prop>", if name == "value" { IrType::Int(IntWidth::I32) } else { IrType::String }, span);
+        let result = self.declare_slot(
+            "<enum_prop>",
+            if name == "value" {
+                IrType::Int(IntWidth::I32)
+            } else {
+                IrType::String
+            },
+            span,
+        );
         // Each arm's test runs in a block of its own, and an IR value never
         // crosses a block boundary — the discriminant goes through a slot
         // and is reloaded per test.
@@ -12748,7 +13553,11 @@ impl<'a> FunctionLowering<'a> {
             });
             self.current = arm;
             let value = if name == "value" {
-                self.emit(InstKind::ConstInt(i as i128), IrType::Int(IntWidth::I32), span)
+                self.emit(
+                    InstKind::ConstInt(i as i128),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                )
             } else {
                 self.const_string(&variant.name, span)
             };
@@ -12765,7 +13574,15 @@ impl<'a> FunctionLowering<'a> {
         self.emit_effect(InstKind::Store(result, fallback), span);
         self.terminate(Terminator::Jump(continue_block));
         self.current = continue_block;
-        Some(self.emit(InstKind::Load(result), if name == "value" { IrType::Int(IntWidth::I32) } else { IrType::String }, span))
+        Some(self.emit(
+            InstKind::Load(result),
+            if name == "value" {
+                IrType::Int(IntWidth::I32)
+            } else {
+                IrType::String
+            },
+            span,
+        ))
     }
 
     /// Which body a safe method call (`u?.greet()`) reaches, once the
@@ -13012,7 +13829,12 @@ impl<'a> FunctionLowering<'a> {
         if matches!(expr.name.name.as_str(), "length" | "is_empty")
             && matches!(
                 self.type_of(&expr.object, expr.object.span()),
-                IrType::NativeSlice(_) | IrType::NativeSliceMut(_) | IrType::Array(_) | IrType::List(_) | IrType::Map(_) | IrType::Set(_)
+                IrType::NativeSlice(_)
+                    | IrType::NativeSliceMut(_)
+                    | IrType::Array(_)
+                    | IrType::List(_)
+                    | IrType::Map(_)
+                    | IrType::Set(_)
             )
         {
             match expr.name.name.as_str() {
@@ -13066,9 +13888,10 @@ impl<'a> FunctionLowering<'a> {
         // `c.codepoint_count` / `c.ascii_code` — the runtime-provided
         // property surface.
         if matches!(expr.name.name.as_str(), "length" | "byte_length")
-            && self.type_of(&expr.object, expr.object.span()) == IrType::String {
-                return IrType::Int(IntWidth::I32);
-            }
+            && self.type_of(&expr.object, expr.object.span()) == IrType::String
+        {
+            return IrType::Int(IntWidth::I32);
+        }
         if matches!(
             expr.name.name.as_str(),
             "byte_length" | "codepoint_count" | "ascii_code"
@@ -13758,7 +14581,12 @@ impl<'a> FunctionLowering<'a> {
             let end = self.emit(InstKind::Load(end), i64_ty, span);
             let step = self.emit(InstKind::Load(step), i64_ty, span);
             return self.emit(
-                InstKind::ArraySlice { receiver, start, end, step },
+                InstKind::ArraySlice {
+                    receiver,
+                    start,
+                    end,
+                    step,
+                },
                 receiver_ty,
                 span,
             );
@@ -14038,14 +14866,18 @@ impl<'a> FunctionLowering<'a> {
     fn lower_clone_value(&mut self, value: Operand, ty: IrType, span: Span) -> Operand {
         match ty {
             IrType::Nullable(inner) => {
-                let inner_op =
-                    self.emit(InstKind::Unwrap(value), inner.inner(), span);
+                let inner_op = self.emit(InstKind::Unwrap(value), inner.inner(), span);
                 let cloned = self.lower_clone_value(inner_op, inner.inner(), span);
-                self.emit(InstKind::Wrap { base: inner, value: cloned }, ty, span)
+                self.emit(
+                    InstKind::Wrap {
+                        base: inner,
+                        value: cloned,
+                    },
+                    ty,
+                    span,
+                )
             }
-            IrType::Object(_) | IrType::Callable(_) => {
-                self.emit(InstKind::Clone(value), ty, span)
-            }
+            IrType::Object(_) | IrType::Callable(_) => self.emit(InstKind::Clone(value), ty, span),
             IrType::Value(id) => {
                 let field_tys: Vec<IrType> = self.module.values[id as usize]
                     .fields
@@ -14077,7 +14909,13 @@ impl<'a> FunctionLowering<'a> {
     /// discriminant so only the *active* variant's payload is read — an
     /// inactive variant's fields are undefined bits (`BuildEnum`'s own
     /// contract), which is why this cannot be a whole-value copy.
-    fn lower_clone_enum(&mut self, value: Operand, enum_id: u32, ty: IrType, span: Span) -> Operand {
+    fn lower_clone_enum(
+        &mut self,
+        value: Operand,
+        enum_id: u32,
+        ty: IrType,
+        span: Span,
+    ) -> Operand {
         let source = self.spill(value, ty, span);
         let result = self.declare_slot("<clone>", ty, span);
         let variants: Vec<(Vec<u32>, Vec<IrType>)> = self.module.enums[enum_id as usize]
@@ -14424,9 +15262,13 @@ impl<'a> FunctionLowering<'a> {
 
         if let IrType::Value(id) = ty {
             let has_method = (id as usize) < self.checked.classes.len()
-                && self.checked.classes[id as usize].method("to_string").is_some();
+                && self.checked.classes[id as usize]
+                    .method("to_string")
+                    .is_some();
             if has_method {
-                let method = self.checked.classes[id as usize].method("to_string").unwrap();
+                let method = self.checked.classes[id as usize]
+                    .method("to_string")
+                    .unwrap();
                 let name = body_symbol(self.checked, method);
                 let virtual_index = method.overridden.then_some(method.index as u32);
                 return match virtual_index {
@@ -14454,15 +15296,17 @@ impl<'a> FunctionLowering<'a> {
             // not declare their own `to_string`.
             let layout_name = self.module.values[id as usize].name.clone();
             let is_tuple = layout_name.starts_with("Tuple(");
-            let prefix = if is_tuple { "(" } else { &format!("{layout_name}(") };
+            let prefix = if is_tuple {
+                "("
+            } else {
+                &format!("{layout_name}(")
+            };
             let fields: Vec<_> = self.module.values[id as usize]
                 .fields
                 .iter()
                 .map(|f| (f.name.clone(), f.ty))
                 .collect();
-            return self.lower_default_render_to_string(
-                operand, prefix, &fields, is_tuple, span,
-            );
+            return self.lower_default_render_to_string(operand, prefix, &fields, is_tuple, span);
         }
 
         if let IrType::Object(id) = ty {
@@ -14497,7 +15341,11 @@ impl<'a> FunctionLowering<'a> {
                 .map(|f| (f.name.clone(), f.ty))
                 .collect();
             return self.lower_default_render_to_string(
-                operand, &format!("{layout_name}("), &fields, false, span,
+                operand,
+                &format!("{layout_name}("),
+                &fields,
+                false,
+                span,
             );
         }
 
@@ -14549,7 +15397,10 @@ impl<'a> FunctionLowering<'a> {
             if i > 0 {
                 let sep = self.const_string(", ", span);
                 result = self.emit(
-                    InstKind::Concat { left: result, right: sep },
+                    InstKind::Concat {
+                        left: result,
+                        right: sep,
+                    },
                     IrType::String,
                     span,
                 );
@@ -14557,7 +15408,10 @@ impl<'a> FunctionLowering<'a> {
             if !is_tuple {
                 let label = self.const_string(&format!("{field_name}: "), span);
                 result = self.emit(
-                    InstKind::Concat { left: result, right: label },
+                    InstKind::Concat {
+                        left: result,
+                        right: label,
+                    },
                     IrType::String,
                     span,
                 );
@@ -14572,14 +15426,20 @@ impl<'a> FunctionLowering<'a> {
             );
             let rendered = self.lower_to_string(field, *field_ty, span);
             result = self.emit(
-                InstKind::Concat { left: result, right: rendered },
+                InstKind::Concat {
+                    left: result,
+                    right: rendered,
+                },
                 IrType::String,
                 span,
             );
         }
         let close = self.const_string(")", span);
         self.emit(
-            InstKind::Concat { left: result, right: close },
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
             IrType::String,
             span,
         )
@@ -14992,12 +15852,14 @@ impl<'a> FunctionLowering<'a> {
             return false;
         }
         match self.type_of(&field.object, field.object.span()) {
-            IrType::Object(id) => {
-                self.checked.classes[id as usize].method("to_string").is_none()
-            }
+            IrType::Object(id) => self.checked.classes[id as usize]
+                .method("to_string")
+                .is_none(),
             IrType::Value(id) => {
                 (id as usize) >= self.checked.classes.len()
-                    || self.checked.classes[id as usize].method("to_string").is_none()
+                    || self.checked.classes[id as usize]
+                        .method("to_string")
+                        .is_none()
             }
             IrType::Contract(_) => false,
             _ => true,
@@ -15473,28 +16335,28 @@ impl<'a> FunctionLowering<'a> {
                     return IrType::String;
                 }
                 if self.is_regex_method_call(e)
-                    && let ast::Expr::Field(field) = &*e.callee {
-                        return match field.name.name.as_str() {
-                            "matches" => IrType::Boolean,
-                            "replace" => IrType::String,
-                            "find" => {
-                                IrType::Nullable(Nullable::Object(self.checked.regex_match_class))
-                            }
-                            "split" => {
-                                let id = self
-                                    .checked
-                                    .list_types
-                                    .iter()
-                                    .position(|&t| t == Type::STRING)
-                                    .expect(
-                                        "the checker interned `List<String>` for `Regex.split`",
-                                    ) as u32;
-                                IrType::List(id)
-                            }
-                            "find_all" => IrType::List(self.regex_match_list_id()),
-                            _ => unreachable!("checked by `is_regex_method_call`"),
-                        };
-                    }
+                    && let ast::Expr::Field(field) = &*e.callee
+                {
+                    return match field.name.name.as_str() {
+                        "matches" => IrType::Boolean,
+                        "replace" => IrType::String,
+                        "find" => {
+                            IrType::Nullable(Nullable::Object(self.checked.regex_match_class))
+                        }
+                        "split" => {
+                            let id = self
+                                .checked
+                                .list_types
+                                .iter()
+                                .position(|&t| t == Type::STRING)
+                                .expect("the checker interned `List<String>` for `Regex.split`")
+                                as u32;
+                            IrType::List(id)
+                        }
+                        "find_all" => IrType::List(self.regex_match_list_id()),
+                        _ => unreachable!("checked by `is_regex_method_call`"),
+                    };
+                }
                 if self.is_regex_match_group_call(e) {
                     return IrType::String;
                 }
@@ -15502,31 +16364,34 @@ impl<'a> FunctionLowering<'a> {
                     return IrType::Range;
                 }
                 if self.is_string_method_call(e)
-                    && let ast::Expr::Field(field) = &*e.callee {
-                        return match field.name.name.as_str() {
-                            "trim" | "substring" => IrType::String,
-                            "contains" | "starts_with" | "ends_with" => IrType::Boolean,
-                            "search" => IrType::Int(IntWidth::I64),
-                            _ => unreachable!("checked by `is_string_method_call`"),
-                        };
-                    }
+                    && let ast::Expr::Field(field) = &*e.callee
+                {
+                    return match field.name.name.as_str() {
+                        "trim" | "substring" => IrType::String,
+                        "contains" | "starts_with" | "ends_with" => IrType::Boolean,
+                        "search" => IrType::Int(IntWidth::I64),
+                        _ => unreachable!("checked by `is_string_method_call`"),
+                    };
+                }
                 if self.is_char_method_call(e)
-                    && let ast::Expr::Field(field) = &*e.callee {
-                        return match field.name.name.as_str() {
-                            "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter"
-                            | "is_whitespace" => IrType::Boolean,
-                            "to_uppercase" | "to_lowercase" => IrType::String,
-                            _ => unreachable!("checked by `is_char_method_call`"),
-                        };
-                    }
+                    && let ast::Expr::Field(field) = &*e.callee
+                {
+                    return match field.name.name.as_str() {
+                        "is_uppercase" | "is_lowercase" | "is_digit" | "is_letter"
+                        | "is_whitespace" => IrType::Boolean,
+                        "to_uppercase" | "to_lowercase" => IrType::String,
+                        _ => unreachable!("checked by `is_char_method_call`"),
+                    };
+                }
                 if self.is_duration_method_call(e)
-                    && let ast::Expr::Field(field) = &*e.callee {
-                        return match field.name.name.as_str() {
-                            "abs" => IrType::Int(IntWidth::I64),
-                            "sign" => IrType::Int(IntWidth::I32),
-                            _ => IrType::Boolean,
-                        };
-                    }
+                    && let ast::Expr::Field(field) = &*e.callee
+                {
+                    return match field.name.name.as_str() {
+                        "abs" => IrType::Int(IntWidth::I64),
+                        "sign" => IrType::Int(IntWidth::I32),
+                        _ => IrType::Boolean,
+                    };
+                }
                 if let Some((name, t, e_ty)) = self.result_method(e) {
                     return match name {
                         "is_ok" | "is_error" => IrType::Boolean,
@@ -15769,9 +16634,11 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
-            // A `Float` scalar needs the runtime: the result is a
-            // nanosecond count again, which no float instruction answers.
-            IrType::Float(_) => {
+            // A `Float`/exact-`Float` scalar needs the runtime: the result is
+            // a nanosecond count again, which no float instruction answers.
+            // The exact `Float` is converted to `f64` first (`Duration`
+            // arithmetic with a fractional scalar is already approximate).
+            IrType::Float(_) | IrType::Decimal => {
                 let scalar = self.convert_numeric(
                     scalar,
                     scalar_actual,
@@ -15888,6 +16755,95 @@ impl<'a> FunctionLowering<'a> {
                 args: vec![nanos, scalar],
             },
             i64_ty,
+            span,
+        )
+    }
+
+    /// Lowers a binary operator whose operands are both exact base-ten
+    /// `Float`. Arithmetic goes to `zirk_rt_decimal_*` calls; `/` and `%`
+    /// first branch to `DivisionByZeroError` when the divisor is zero, the
+    /// same guard integer and `Duration` division get. A comparison lowers
+    /// to `zirk_rt_decimal_cmp` and then the plain integer comparison of its
+    /// `-1`/`0`/`1` result against zero.
+    fn lower_decimal_binary(
+        &mut self,
+        op: BinaryOp,
+        left: Operand,
+        right: Operand,
+        span: Span,
+    ) -> Operand {
+        let dec = IrType::Decimal;
+
+        let callee = match op {
+            BinaryOp::Add => Some("zirk_rt_decimal_add"),
+            BinaryOp::Sub => Some("zirk_rt_decimal_sub"),
+            BinaryOp::Mul => Some("zirk_rt_decimal_mul"),
+            BinaryOp::Div => Some("zirk_rt_decimal_div"),
+            BinaryOp::Rem => Some("zirk_rt_decimal_rem"),
+            _ => None,
+        };
+
+        if let Some(callee) = callee {
+            let (left, right) = if matches!(op, BinaryOp::Div | BinaryOp::Rem) {
+                let left_slot = self.spill(left, dec, span);
+                let right_slot = self.spill(right, dec, span);
+                let divisor = self.emit(InstKind::Load(right_slot), dec, span);
+                let is_zero = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_is_zero".to_string(),
+                        args: vec![divisor],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let fail = self.new_block();
+                let ok = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_zero,
+                    then_block: fail,
+                    else_block: ok,
+                });
+                self.current = fail;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("a program with division registered the exception hierarchy");
+                self.throw_native_failure(native.division_by_zero, "division by zero", span);
+                self.current = ok;
+                (
+                    self.emit(InstKind::Load(left_slot), dec, span),
+                    self.emit(InstKind::Load(right_slot), dec, span),
+                )
+            } else {
+                (left, right)
+            };
+            return self.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args: vec![left, right],
+                },
+                dec,
+                span,
+            );
+        }
+
+        // A comparison: `cmp(left, right) <op> 0`.
+        let ordering = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_decimal_cmp".to_string(),
+                args: vec![left, right],
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        self.emit(
+            InstKind::Binary {
+                op,
+                left: ordering,
+                right: zero,
+            },
+            IrType::Boolean,
             span,
         )
     }

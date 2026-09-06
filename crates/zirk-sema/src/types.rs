@@ -158,13 +158,19 @@ impl FloatWidth {
         }
     }
 
+    /// The surface name of this width.
+    ///
+    /// The Rust identifiers in this module keep the name `Float` for the
+    /// binary IEEE 754 family, but the language surface calls it `BinaryFloat*`
+    /// — the plain name `Float` is the exact base-ten decimal type
+    /// ([`Base::Decimal`]).
     pub const fn name(self) -> &'static str {
         use FloatWidth::*;
         match self {
-            F16 => "Float16",
-            F32 => "Float32",
-            F64 => "Float64",
-            F128 => "Float128",
+            F16 => "BinaryFloat16",
+            F32 => "BinaryFloat32",
+            F64 => "BinaryFloat64",
+            F128 => "BinaryFloat128",
         }
     }
 
@@ -208,9 +214,15 @@ pub enum Base {
     /// `Int8`…`UInt128` (roadmap Phase 3b) — `Int`/`Integer` alias `Int32`,
     /// `Type::INT32` is `Int(IntWidth::I32)`.
     Int(IntWidth),
-    /// `Float16`…`Float128` (roadmap Phase 3b) — `Float` aliases `Float64`,
-    /// `Type::FLOAT64` is `Float(FloatWidth::F64)`.
+    /// The IEEE 754 binary floating family. Surface name: `BinaryFloat16`…
+    /// `BinaryFloat128`, with `BinaryFloat` aliasing `BinaryFloat64`
+    /// (`Type::BINARY_FLOAT64`). The Rust identifier keeps the name `Float`
+    /// from before the exact type existed; see [`FloatWidth::name`].
     Float(FloatWidth),
+    /// The exact base-ten decimal type. Surface name: `Float` (`Type::FLOAT`).
+    /// A value is a signed 128-bit coefficient and a decimal scale; there is
+    /// no width family and no `NaN`/infinity. Backed by `zirk_rt_decimal_*`.
+    Decimal,
     /// Exactly one Unicode grapheme (roadmap Phase 3b) — represented exactly
     /// like `String` at runtime (ADR-014), but a distinct static type: no
     /// mutation methods, and no identity (`is` is rejected, unlike `String`).
@@ -369,7 +381,11 @@ pub enum Base {
 impl Type {
     pub const VOID: Type = Type::of(Base::Void);
     pub const INT32: Type = Type::of(Base::Int(IntWidth::I32));
+    /// The IEEE 754 binary `BinaryFloat64` (surface name), `BinaryFloat`'s
+    /// target. The constant keeps its old name.
     pub const FLOAT64: Type = Type::of(Base::Float(FloatWidth::F64));
+    /// The exact base-ten decimal type — surface name `Float`.
+    pub const FLOAT: Type = Type::of(Base::Decimal);
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
     pub const DURATION: Type = Type::of(Base::Duration);
@@ -456,11 +472,14 @@ impl Type {
                 (Base::Float(dst), Base::Float(src)) => {
                     dst.bits() >= src.bits() && (self.nullable || !other.nullable)
                 }
-                // Int -> Float is safe when every source value is exactly
+                // Int -> BinaryFloat is safe when every source value is exactly
                 // representable in the target float.
                 (Base::Float(dst), Base::Int(src)) => {
                     src.fits_exactly_in_float(dst) && (self.nullable || !other.nullable)
                 }
+                // Int -> exact Float is always exact (every integer is a
+                // terminating decimal); Decimal -> Decimal is trivially exact.
+                (Base::Decimal, Base::Int(_) | Base::Decimal) => self.nullable || !other.nullable,
                 _ => false,
             };
         }
@@ -481,6 +500,11 @@ impl Type {
             return None;
         }
 
+        // The exact `Float` is only a *common* type when one operand already
+        // is one — two integers never promote to it (that would make
+        // `i128 + u128` silently exact-decimal instead of "no common type").
+        let decimal_in_play = matches!(self.base, Decimal) || matches!(other.base, Decimal);
+
         let candidates = [
             Type::of(Int(IntWidth::I8)),
             Type::of(Int(IntWidth::U8)),
@@ -492,6 +516,10 @@ impl Type {
             Type::of(Int(IntWidth::U64)),
             Type::of(Int(IntWidth::I128)),
             Type::of(Int(IntWidth::U128)),
+            // The exact decimal type is the common type of an integer and a
+            // `Float`; it never joins with a `BinaryFloat` (its `accepts` has
+            // no `Decimal`/`Float` arm), so ordering it here is safe.
+            Type::FLOAT,
             Type::of(Float(FloatWidth::F16)),
             Type::of(Float(FloatWidth::F32)),
             Type::of(Float(FloatWidth::F64)),
@@ -500,6 +528,7 @@ impl Type {
 
         candidates
             .into_iter()
+            .filter(|candidate| !matches!(candidate.base, Decimal) || decimal_in_play)
             .find(|candidate| candidate.accepts(self) && candidate.accepts(other))
     }
 
@@ -566,7 +595,7 @@ impl Type {
         }
         matches!(
             self.base,
-            Base::Int(_) | Base::Float(_) | Base::Boolean | Base::String
+            Base::Int(_) | Base::Float(_) | Base::Decimal | Base::Boolean | Base::String
         ) && !matches!(self.base, Base::Tuple(_))
     }
 
@@ -606,10 +635,14 @@ impl Type {
             // design D2) — `Pointer<Byte>` is how the native-interoperability
             // examples in `MEMORY_AND_UNSAFE_SEMANTICS.md` already spell it.
             "Byte" => Type::of(Base::Int(U8)),
-            "Float64" | "Float" => Type::FLOAT64,
-            "Float16" => Type::of(Base::Float(FloatWidth::F16)),
-            "Float32" => Type::of(Base::Float(FloatWidth::F32)),
-            "Float128" => Type::of(Base::Float(FloatWidth::F128)),
+            // The plain name is the exact base-ten type. The former binary
+            // spellings `Float16/32/64/128` no longer resolve — the checker
+            // turns them into a redirect diagnostic.
+            "Float" => Type::FLOAT,
+            "BinaryFloat64" | "BinaryFloat" => Type::FLOAT64,
+            "BinaryFloat16" => Type::of(Base::Float(FloatWidth::F16)),
+            "BinaryFloat32" => Type::of(Base::Float(FloatWidth::F32)),
+            "BinaryFloat128" => Type::of(Base::Float(FloatWidth::F128)),
             "Char" => Type::of(Base::Char),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
@@ -651,6 +684,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Void => "Void".to_string(),
         Base::Int(width) => width.name().to_string(),
         Base::Float(width) => width.name().to_string(),
+        Base::Decimal => "Float".to_string(),
         Base::Char => "Char".to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
@@ -1089,15 +1123,32 @@ mod tests {
     }
 
     #[test]
-    fn valid_every_float_width_resolves() {
-        for name in ["Float", "Float16", "Float32", "Float64", "Float128"] {
+    fn float_is_exact_and_binaryfloat_is_the_ieee_family() {
+        // The plain name is the exact base-ten decimal type.
+        assert_eq!(Type::from_name("Float"), Some(Type::FLOAT));
+        assert_eq!(
+            Type::from_name("Float").map(|t| t.base),
+            Some(Base::Decimal)
+        );
+
+        // The IEEE 754 binary family is `BinaryFloat*`.
+        for name in [
+            "BinaryFloat",
+            "BinaryFloat16",
+            "BinaryFloat32",
+            "BinaryFloat64",
+            "BinaryFloat128",
+        ] {
             assert!(Type::from_name(name).is_some(), "`{name}` should resolve");
-            assert!(
-                pending_type(name).is_none(),
-                "`{name}` should not be pending"
-            );
+            assert!(pending_type(name).is_none());
         }
-        assert_eq!(Type::from_name("Float"), Some(Type::FLOAT64));
+        assert_eq!(Type::from_name("BinaryFloat"), Some(Type::FLOAT64));
+
+        // The former binary spellings no longer resolve (the checker turns
+        // them into a redirect diagnostic).
+        for name in ["Float16", "Float32", "Float64", "Float128"] {
+            assert_eq!(Type::from_name(name), None, "`{name}` must not resolve");
+        }
     }
 
     #[test]

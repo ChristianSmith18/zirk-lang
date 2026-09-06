@@ -339,6 +339,15 @@ fn llvm_type_in<'ctx>(
             ir::FloatWidth::F64 => context.f64_type().into(),
             ir::FloatWidth::F128 => context.f128_type().into(),
         },
+        // The exact base-ten `Float`: a `{ i128, i8 }` aggregate by value in
+        // SSA, spilled to a stack slot whenever it crosses the runtime
+        // boundary (which every operation on it does).
+        ir::IrType::Decimal => context
+            .struct_type(
+                &[context.i128_type().into(), context.i8_type().into()],
+                false,
+            )
+            .into(),
         // `Boolean` is `i1`: LLVM's natural type for a condition, and what a
         // conditional branch expects.
         ir::IrType::Boolean => context.bool_type().into(),
@@ -421,7 +430,9 @@ fn llvm_type_in<'ctx>(
         }
         // `Array<T>`/`List<T>`/`Map`/`Set` are opaque GC-managed object
         // handles, exactly like `String`/`Object`.
-        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range | ir::IrType::Map(_) | ir::IrType::Set(_) => context.ptr_type(AddressSpace::default()).into(),
+        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range | ir::IrType::Map(_) | ir::IrType::Set(_) => {
+            context.ptr_type(AddressSpace::default()).into()
+        }
     })
 }
 
@@ -778,6 +789,40 @@ fn declare_function<'ctx>(
 /// native symbol name — unlike an ordinary Zirk function, which gets
 /// [`FUNCTION_PREFIX`] and a `define`. Resolving it at link time is left
 /// entirely to the system linker, per ADR-015.
+/// Parses an exact-decimal literal (`"0.1"`, `"6.25e-2"`, `"1e3"`) into its
+/// `(coefficient, scale)` pair for a `{ i128, i8 }` struct constant.
+///
+/// The checker already rejected any literal that needs more than 38
+/// significant digits, so an `i128` always holds the coefficient here.
+fn parse_decimal_literal(text: &str) -> (i128, u8) {
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i64>().unwrap_or(0)),
+        None => (text, 0),
+    };
+    let (negative, rest) = match mantissa.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, mantissa.strip_prefix('+').unwrap_or(mantissa)),
+    };
+    let (int_part, frac_part) = rest.split_once('.').unwrap_or((rest, ""));
+    let digits: String = format!("{int_part}{frac_part}");
+    let mut coef: i128 = digits.trim_start_matches('0').parse().unwrap_or(0);
+    // scale = fractional digits minus the scientific exponent.
+    let mut scale: i64 = frac_part.len() as i64 - exponent;
+    while scale < 0 {
+        coef = coef.saturating_mul(10);
+        scale += 1;
+    }
+    // Normalize trailing zeros so the constant matches the runtime's form.
+    while scale > 0 && coef % 10 == 0 {
+        coef /= 10;
+        scale -= 1;
+    }
+    if negative {
+        coef = -coef;
+    }
+    (coef, scale.clamp(0, 38) as u8)
+}
+
 fn declare_extern_fn<'ctx>(
     context: &'ctx Context,
     llvm: &LlvmModule<'ctx>,
@@ -786,19 +831,46 @@ fn declare_extern_fn<'ctx>(
     values: &[ir::ValueLayout],
     enums: &[ir::EnumLayout],
 ) -> FunctionValue<'ctx> {
-    let params: Vec<BasicMetadataTypeEnum> = extern_fn
-        .params
-        .iter()
-        .map(|&ty| {
-            llvm_type_in(context, ty, closures, values, enums)
-                .expect("an extern parameter cannot be Void")
-                .into()
-        })
-        .collect();
+    // The exact-`Float` runtime helpers cross the C boundary with every
+    // `Decimal` (and every 128-bit integer) passed by pointer, and a
+    // `Decimal`/`i128` *result* returned through a leading out-pointer — the
+    // same reason `zirk_str_from_i128` takes its argument by pointer. Their
+    // LLVM declaration is `ptr`-shaped accordingly; `emit_decimal_call`
+    // materializes the matching call sites.
+    let is_decimal_helper =
+        extern_fn.name.starts_with("zirk_rt_decimal_") || extern_fn.name == "zirk_str_from_decimal";
+    let ptr = context.ptr_type(AddressSpace::default());
+    let by_pointer = |ty: ir::IrType| {
+        matches!(
+            ty,
+            ir::IrType::Decimal | ir::IrType::Int(ir::IntWidth::I128 | ir::IntWidth::U128)
+        )
+    };
 
-    let signature = match llvm_type_in(context, extern_fn.return_type, closures, values, enums) {
-        Some(ty) => ty.fn_type(&params, false),
-        None => context.void_type().fn_type(&params, false),
+    let mut params: Vec<BasicMetadataTypeEnum> = Vec::new();
+    let returns_by_pointer = is_decimal_helper && by_pointer(extern_fn.return_type);
+    if returns_by_pointer {
+        params.push(ptr.into());
+    }
+    for &ty in &extern_fn.params {
+        if is_decimal_helper && by_pointer(ty) {
+            params.push(ptr.into());
+        } else {
+            params.push(
+                llvm_type_in(context, ty, closures, values, enums)
+                    .expect("an extern parameter cannot be Void")
+                    .into(),
+            );
+        }
+    }
+
+    let signature = if returns_by_pointer {
+        context.void_type().fn_type(&params, false)
+    } else {
+        match llvm_type_in(context, extern_fn.return_type, closures, values, enums) {
+            Some(ty) => ty.fn_type(&params, false),
+            None => context.void_type().fn_type(&params, false),
+        }
     };
 
     let declared = llvm.add_function(&extern_fn.name, signature, None);
@@ -1067,9 +1139,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     /// Alignment of `ty` in bytes, as an LLVM `i64` value.
     fn byte_align_of(&self, ty: ir::IrType) -> inkwell::values::IntValue<'ctx> {
-        let llvm = self
-            .llvm_type(ty)
-            .expect("a sized target is not Void");
+        let llvm = self.llvm_type(ty).expect("a sized target is not Void");
         let bits = llvm.get_alignment();
         self.builder
             .build_int_z_extend(bits, self.context.i64_type(), "align")
@@ -1121,7 +1191,9 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .llvm_type(element)
             .expect("an element type has an LLVM representation");
         let slot = self.builder.build_alloca(ty, "list_value").expect("alloca");
-        self.builder.build_store(slot, value).expect("store element");
+        self.builder
+            .build_store(slot, value)
+            .expect("store element");
         slot
     }
 
@@ -1702,6 +1774,123 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(converted.into())
             }
 
+            // An exact base-ten `Float` literal: the digits are parsed once,
+            // here, into the `{ i128, i8 }` aggregate — never through a
+            // binary float.
+            ir::InstKind::ConstDecimal(text) => {
+                let (coef, scale) = parse_decimal_literal(text);
+                let i128_ty = self.context.i128_type();
+                let i8_ty = self.context.i8_type();
+                let lo = (coef as u64) as u128;
+                let hi = ((coef >> 64) as u64) as u128;
+                let coef_const = i128_ty.const_int_arbitrary_precision(&[lo as u64, hi as u64]);
+                let scale_const = i8_ty.const_int(scale as u64, false);
+                Some(
+                    self.context
+                        .struct_type(&[i128_ty.into(), i8_ty.into()], false)
+                        .const_named_struct(&[coef_const.into(), scale_const.into()])
+                        .into(),
+                )
+            }
+
+            ir::InstKind::IntToDecimal(operand) => {
+                let value = self.operand(*operand).into_int_value();
+                // Widen to a signed i128 first (the runtime helper takes the
+                // integer by pointer).
+                let i128_ty = self.context.i128_type();
+                let signed = self.is_signed(self.value_types[&operand.0]);
+                let wide = if value.get_type().get_bit_width() == 128 {
+                    value
+                } else if signed {
+                    self.builder
+                        .build_int_s_extend(value, i128_ty, "sext.i128")
+                        .expect("sign-extend to i128")
+                } else {
+                    self.builder
+                        .build_int_z_extend(value, i128_ty, "zext.i128")
+                        .expect("zero-extend to i128")
+                };
+                Some(self.emit_decimal_call(
+                    "zirk_rt_decimal_from_i128",
+                    &[(wide.into(), ir::IrType::Int(ir::IntWidth::I128))],
+                    ir::IrType::Decimal,
+                ))
+            }
+
+            ir::InstKind::DecimalToInt(operand) => {
+                let value = self.operand(*operand);
+                let wide = self.emit_decimal_call(
+                    "zirk_rt_decimal_to_i128_checked",
+                    &[(value, ir::IrType::Decimal)],
+                    ir::IrType::Int(ir::IntWidth::I128),
+                );
+                let ir::IrType::Int(target) = instruction.ty else {
+                    unreachable!("DecimalToInt declares an integer destination")
+                };
+                let target_ty = self
+                    .context
+                    .custom_width_int_type(
+                        std::num::NonZeroU32::new(target.bits()).expect("nonzero width"),
+                    )
+                    .expect("valid width");
+                let narrowed = self
+                    .builder
+                    .build_int_truncate_or_bit_cast(wide.into_int_value(), target_ty, "trunc")
+                    .expect("narrow the checked i128");
+                Some(narrowed.into())
+            }
+
+            ir::InstKind::DecimalToFloat(operand) => {
+                let value = self.operand(*operand);
+                let as_f64 = self
+                    .emit_decimal_call(
+                        "zirk_rt_decimal_to_f64",
+                        &[(value, ir::IrType::Decimal)],
+                        ir::IrType::Float(ir::FloatWidth::F64),
+                    )
+                    .into_float_value();
+                let ir::IrType::Float(target) = instruction.ty else {
+                    unreachable!("DecimalToFloat declares a BinaryFloat destination")
+                };
+                let target_ty = self.float_type(target);
+                let converted = match target.bits().cmp(&64) {
+                    std::cmp::Ordering::Equal => as_f64,
+                    std::cmp::Ordering::Less => self
+                        .builder
+                        .build_float_trunc(as_f64, target_ty, "fptrunc")
+                        .expect("narrow from f64"),
+                    std::cmp::Ordering::Greater => self
+                        .builder
+                        .build_float_ext(as_f64, target_ty, "fpext")
+                        .expect("widen from f64"),
+                };
+                Some(converted.into())
+            }
+
+            ir::InstKind::FloatToDecimal(operand) => {
+                let value = self.operand(*operand).into_float_value();
+                let source = self.value_types[&operand.0];
+                let ir::IrType::Float(source_width) = source else {
+                    unreachable!("FloatToDecimal converts a BinaryFloat")
+                };
+                let as_f64 = if source_width.bits() == 64 {
+                    value
+                } else if source_width.bits() < 64 {
+                    self.builder
+                        .build_float_ext(value, self.context.f64_type(), "fpext.f64")
+                        .expect("widen to f64")
+                } else {
+                    self.builder
+                        .build_float_trunc(value, self.context.f64_type(), "fptrunc.f64")
+                        .expect("narrow to f64")
+                };
+                Some(self.emit_decimal_call(
+                    "zirk_rt_decimal_from_f64",
+                    &[(as_f64.into(), ir::IrType::Float(ir::FloatWidth::F64))],
+                    ir::IrType::Decimal,
+                ))
+            }
+
             ir::InstKind::CallVirtual {
                 object,
                 index,
@@ -2246,12 +2435,22 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Call { callee, args } => {
-                let arguments: Vec<_> = args.iter().map(|a| self.operand(*a).into()).collect();
-                let call = self
-                    .builder
-                    .build_call(self.functions[callee], &arguments, "call")
-                    .expect("function call");
-                call.try_as_basic_value().basic()
+                // The exact-`Float` helpers cross the boundary by pointer;
+                // `emit_decimal_call` handles their spill/out-parameter shape.
+                if callee.starts_with("zirk_rt_decimal_") || callee == "zirk_str_from_decimal" {
+                    let typed: Vec<_> = args
+                        .iter()
+                        .map(|a| (self.operand(*a), self.value_types[&a.0]))
+                        .collect();
+                    Some(self.emit_decimal_call(callee, &typed, instruction.ty))
+                } else {
+                    let arguments: Vec<_> = args.iter().map(|a| self.operand(*a).into()).collect();
+                    let call = self
+                        .builder
+                        .build_call(self.functions[callee], &arguments, "call")
+                        .expect("function call");
+                    call.try_as_basic_value().basic()
+                }
             }
 
             // Converts a native scalar to `String` (roadmap Phase 3b, task
@@ -2269,6 +2468,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 // no runtime call at all.
                 if self.value_types[&operand.0] == ir::IrType::Char {
                     Some(self.operand(*operand))
+                } else if self.value_types[&operand.0] == ir::IrType::Decimal {
+                    // The exact `Float` renders its coefficient and scale
+                    // directly through the runtime, by pointer.
+                    let value = self.operand(*operand);
+                    Some(self.emit_decimal_call(
+                        "zirk_str_from_decimal",
+                        &[(value, ir::IrType::Decimal)],
+                        ir::IrType::String,
+                    ))
                 } else {
                     let mut value = self.operand(*operand);
                     let converter = match self.value_types[&operand.0] {
@@ -2823,7 +3031,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `Array<T>(capacity)` / `List<T>()` allocation.
-            ir::InstKind::ArrayNew { element_id, capacity } => {
+            ir::InstKind::ArrayNew {
+                element_id,
+                capacity,
+            } => {
                 let element = self.module.array_types[*element_id as usize];
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
@@ -2883,7 +3094,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let receiver = self.operand(*receiver).into_pointer_value();
                 let call = self
                     .builder
-                    .build_call(self.runtime.array_length, &[receiver.into()], "array_length")
+                    .build_call(
+                        self.runtime.array_length,
+                        &[receiver.into()],
+                        "array_length",
+                    )
                     .expect("array length");
                 call.try_as_basic_value().basic()
             }
@@ -2922,9 +3137,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
                     .expect("element pointer")
                     .into_pointer_value();
-                let llvm_element = self
-                    .llvm_type(element)
-                    .expect("an element is never Void");
+                let llvm_element = self.llvm_type(element).expect("an element is never Void");
                 Some(
                     self.builder
                         .build_load(llvm_element, ptr, "array_list_load")
@@ -2933,7 +3146,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `array[i] = value` / `list[i] = value`.
-            ir::InstKind::ArrayListStore { receiver, index, value } => {
+            ir::InstKind::ArrayListStore {
+                receiver,
+                index,
+                value,
+            } => {
                 let value_operand = self.operand(*value);
                 let element_ty = self.value_types[&value.0];
                 let receiver_value = self.operand(*receiver);
@@ -2991,7 +3208,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
             // `list.insert(index, value)`.
-            ir::InstKind::ListInsert { receiver, index, value } => {
+            ir::InstKind::ListInsert {
+                receiver,
+                index,
+                value,
+            } => {
                 let receiver_ty = self.value_types[&receiver.0];
                 let (_, element, _) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);
@@ -3294,7 +3515,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
             }
             // `array[start:end:step]` — shallow copy of the selected elements.
-            ir::InstKind::ArraySlice { receiver, start, end, step } => {
+            ir::InstKind::ArraySlice {
+                receiver,
+                start,
+                end,
+                step,
+            } => {
                 let receiver_ty = self.value_types[&receiver.0];
                 let (_, element, _) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);
@@ -3803,6 +4029,87 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     /// which never matters: only an integer operand ever asks.
     fn is_signed(&self, ty: ir::IrType) -> bool {
         matches!(ty, ir::IrType::Int(width) if width.signed())
+    }
+
+    /// A stack slot with 16-byte alignment — what a `{ i128, i8 }` `Decimal`
+    /// (and a bare `i128`) needs, since Rust's `read`/`write` on those debug-
+    /// checks the pointer alignment.
+    fn aligned_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let slot = self
+            .builder
+            .build_alloca(ty, name)
+            .expect("aligned stack slot");
+        slot.as_instruction()
+            .expect("an alloca is an instruction")
+            .set_alignment(16)
+            .expect("16 is a valid alignment");
+        slot
+    }
+
+    /// Whether an exact-`Float` helper carries `ty` across the C boundary by
+    /// pointer — every `Decimal` and every 128-bit integer.
+    fn decimal_helper_by_pointer(ty: ir::IrType) -> bool {
+        matches!(
+            ty,
+            ir::IrType::Decimal | ir::IrType::Int(ir::IntWidth::I128 | ir::IntWidth::U128)
+        )
+    }
+
+    /// Calls a `zirk_rt_decimal_*` / `zirk_str_from_decimal` helper, spilling
+    /// each by-pointer argument to a stack slot and routing a by-pointer
+    /// result through a leading out-parameter — matching
+    /// [`declare_extern_fn`]'s `ptr`-shaped declaration.
+    fn emit_decimal_call(
+        &mut self,
+        callee: &str,
+        args: &[(BasicValueEnum<'ctx>, ir::IrType)],
+        return_ty: ir::IrType,
+    ) -> BasicValueEnum<'ctx> {
+        let mut actual: Vec<BasicMetadataValueEnum> = Vec::new();
+        let returns_by_pointer = Self::decimal_helper_by_pointer(return_ty);
+
+        let out_slot = if returns_by_pointer {
+            let ty = self
+                .llvm_type(return_ty)
+                .expect("a by-pointer decimal result is never Void");
+            let slot = self.aligned_alloca(ty, "dec.out");
+            actual.push(slot.into());
+            Some((slot, ty))
+        } else {
+            None
+        };
+
+        for (value, ty) in args {
+            if Self::decimal_helper_by_pointer(*ty) {
+                let slot = self.aligned_alloca(value.get_type(), "dec.arg");
+                self.builder
+                    .build_store(slot, *value)
+                    .expect("store a decimal helper argument");
+                actual.push(slot.into());
+            } else {
+                actual.push((*value).into());
+            }
+        }
+
+        let call = self
+            .builder
+            .build_call(self.functions[callee], &actual, "dec.call")
+            .expect("call to a decimal helper");
+
+        match out_slot {
+            Some((slot, ty)) => self
+                .builder
+                .build_load(ty, slot, "dec.result")
+                .expect("load a decimal helper result"),
+            None => call
+                .try_as_basic_value()
+                .basic()
+                .expect("this decimal helper returns a value"),
+        }
     }
 
     /// LLVM's native float type for a given IR width.

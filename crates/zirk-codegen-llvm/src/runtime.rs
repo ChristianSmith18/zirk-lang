@@ -782,7 +782,15 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     // `Array<T>` / `List<T>` runtime helpers.
     let array_new = module.add_function(
         symbols::ARRAY_NEW,
-        ptr.fn_type(&[i64.into(), i64.into(), i64.into(), context.bool_type().into()], false),
+        ptr.fn_type(
+            &[
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
         external,
     );
     let list_new = module.add_function(

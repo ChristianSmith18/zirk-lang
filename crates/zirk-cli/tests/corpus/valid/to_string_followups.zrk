@@ -2,7 +2,7 @@
 // deliberately pending: explicit `value.to_string()` on a native scalar
 // (outside of `println`/interpolation, which already reached it implicitly),
 // `to_string()` dispatched through a contract reference rather than a
-// concrete class, and `Float16` printing (fixed by widening to `Float32`
+// concrete class, and `BinaryFloat16` printing (fixed by widening to `BinaryFloat32`
 // first, always exact).
 interface Printable {
     fn to_string(): String;
@@ -27,7 +27,7 @@ fn main(): Void {
     mut a: Int32 = 42;
     stdout.println(a.to_string());
 
-    mut b: Float64 = 3.14;
+    mut b: BinaryFloat64 = 3.14;
     stdout.println(b.to_string());
 
     mut c: Char = 'z';
@@ -39,7 +39,7 @@ fn main(): Void {
     mut e: String = "already".to_string();
     stdout.println(e);
 
-    mut f: Float16 = 1.5f16;
+    mut f: BinaryFloat16 = 1.5b16;
     stdout.println(f);
     stdout.println(f.to_string());
 

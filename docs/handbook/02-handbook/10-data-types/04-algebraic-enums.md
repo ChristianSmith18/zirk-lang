@@ -5,7 +5,7 @@ An algebraic enum defines variants that may carry different typed data.
 ```zirk
 enum LoadState {
     Idle;
-    Loading(progress: Float64);
+    Loading(progress: Float);
     Ready(value: Document);
     Failed(error: LoadError);
 }
@@ -18,7 +18,7 @@ Consider the object-shaped alternative:
 ```zirk
 record LooseLoadState {
     loading: Boolean;
-    progress: Float64?;
+    progress: Float?;
     document: Document?;
     error: LoadError?;
 }
@@ -86,7 +86,7 @@ only when every payload supports it. Ordering is never inferred.
 ```zirk
 enum LoadState {
     Idle;
-    Loading(progress: Float64);
+    Loading(progress: Float);
     Ready(value: Document);
     Failed(error: LoadError);
 }

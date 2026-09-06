@@ -24,8 +24,10 @@ Distributable package: `.zpkg`
 > **Authorial type-system checkpoint — 15 August 2026.** Zirk distinguishes
 > compiler primitives, native value types, native reference types,
 > user-defined value/reference types and special types under the conceptual
-> `Object` root. The binary floating family is `Float16`–`Float128` with
-> `Float == Float64`; `NaN` is not a valid value. Explicit `Float(...)` and
+> `Object` root. `Float` is an exact base-ten decimal (the default fractional
+> type, no `NaN`, no infinity); the IEEE 754 binary family is
+> `BinaryFloat16`–`BinaryFloat128` with `BinaryFloat == BinaryFloat64` and a
+> `b` literal suffix, also with no valid `NaN`. Explicit `Float(...)` and
 > `String(...)` constructors establish deep contextual evaluation for their
 > contained arithmetic or concatenation tree. `Char` is exactly one Unicode
 > grapheme. `String` is a mutable shared reference governed by `mut`, `inmut`
