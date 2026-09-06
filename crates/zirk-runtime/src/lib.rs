@@ -36,6 +36,7 @@ mod array;
 mod char;
 mod clone;
 mod collector;
+mod decimal;
 mod duration;
 mod exceptions;
 mod failure;

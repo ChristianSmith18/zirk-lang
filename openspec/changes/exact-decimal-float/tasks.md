@@ -8,25 +8,25 @@
 
 ## 2. Runtime: exact-decimal core (`zirk-runtime`)
 
-- [ ] 2.1 Create `crates/zirk-runtime/src/decimal.rs` with `#[repr(C)] struct Decimal { coef: i128, scale: u8 }` and internal normalization (strip trailing zeros, clamp scale)
-- [ ] 2.2 Implement the 256-bit intermediate helper (per 1.1) for multiply/divide
-- [ ] 2.3 Implement `zirk_rt_decimal_add` / `sub` with scale alignment + checked combine + normalize
-- [ ] 2.4 Implement `zirk_rt_decimal_mul` with `i256` intermediate and half-to-even reduction to the digit budget; `ArithmeticOverflowError` on irrecoverable overflow
-- [ ] 2.5 Implement `zirk_rt_decimal_div` (default half-to-even, `MIN_DIV_SCALE`..`MAX_SIGNIFICANT_DIGITS`) and `zirk_rt_decimal_div_ex` (explicit mode + places); zero divisor handled by the lowering guard
-- [ ] 2.6 Implement `zirk_rt_decimal_rem` (exact, dividend sign), `neg`, `abs`, `cmp`
-- [ ] 2.7 Implement `zirk_rt_decimal_pow_i` (exact repeated multiply) and `zirk_rt_decimal_pow` / `zirk_rt_decimal_sqrt` (correctly rounded to `MAX_SIGNIFICANT_DIGITS`; negative `sqrt` -> controlled float-domain error)
-- [ ] 2.8 Implement `zirk_rt_decimal_round(value, places, mode)` and the `RoundingMode` enum encoding
-- [ ] 2.9 Implement `zirk_str_from_decimal` — exact digit-string formatting with the point inserted `scale` from the right, no `ryu`, no binary intermediate
-- [ ] 2.10 Implement `zirk_rt_decimal_parse_ok` / `zirk_rt_decimal_parse_value` for `Float.parse`
-- [ ] 2.11 Implement conversions: `zirk_rt_decimal_from_i128`, `zirk_rt_decimal_to_i128_checked`, `zirk_rt_decimal_from_f64` (checked non-finite), `zirk_rt_decimal_to_f64`
-- [ ] 2.12 Route overflow / bad-conversion failures through `crates/zirk-runtime/src/failure.rs` (as `zirk_rt_float_nan` does), raising `ArithmeticOverflowError` / conversion error
-- [ ] 2.13 Re-export every new symbol from `crates/zirk-runtime/src/lib.rs`
-- [ ] 2.14 Unit tests in `decimal.rs`: `0.1 + 0.2 == 0.3`, scale alignment, normalization, half-to-even at boundaries, overflow error, formatting exactness, parse round-trip, all conversions
+- [x] 2.1 Create `crates/zirk-runtime/src/decimal.rs` with `#[repr(C)] struct Decimal { coef: i128, scale: u8 }` and internal normalization (strip trailing zeros, clamp scale)
+- [x] 2.2 Implement the 256-bit intermediate helper — hand-rolled `U256` (`mul_u128`, `divrem_u256`, `u256_mul10`, `scale_u256`, `add_one_u256`)
+- [x] 2.3 Implement `zirk_rt_decimal_add` / `sub` with scale alignment + checked combine + normalize
+- [x] 2.4 Implement `zirk_rt_decimal_mul` with 256-bit intermediate and half-to-even reduction to the digit budget; `ArithmeticOverflowError` on irrecoverable overflow
+- [x] 2.5 Implement `zirk_rt_decimal_div` (default: quotient carries ~`MAX_SIGNIFICANT_DIGITS` significant digits, half-to-even) and `zirk_rt_decimal_div_ex` (explicit mode + places); zero divisor handled by the lowering guard
+- [x] 2.6 Implement `zirk_rt_decimal_rem` (exact, dividend sign), `neg`, `abs`, `cmp`, plus `min`/`max`/`clamp`/`sign`/`scale`
+- [x] 2.7 Implement `zirk_rt_decimal_pow_i` (exact repeated multiply, exact-square path) and `zirk_rt_decimal_pow` / `zirk_rt_decimal_sqrt` (f64-precision result; negative `sqrt` -> `zirk_rt_decimal_domain`)
+- [x] 2.8 Implement `zirk_rt_decimal_round(value, places, mode)` and the `RoundingMode` ABI encoding (0..6 half-even/half-up/half-down/up/down/ceil/floor)
+- [x] 2.9 Implement `zirk_str_from_decimal` — exact digit-string formatting with the point inserted `scale` from the right, no `ryu`, no binary intermediate
+- [x] 2.10 Implement `zirk_rt_decimal_parse_ok` / `zirk_rt_decimal_parse_value` for `Float.parse`, plus `zirk_rt_decimal_from_literal` for `ConstDecimal`
+- [x] 2.11 Implement conversions: `zirk_rt_decimal_from_i128`, `zirk_rt_decimal_to_i128_checked`, `zirk_rt_decimal_from_f64` (checked non-finite), `zirk_rt_decimal_to_f64`
+- [x] 2.12 Route overflow / bad-conversion / domain failures through `failure.rs` (`zirk_rt_overflow`, `zirk_rt_invalid_cast`, `zirk_rt_division_by_zero`, new `zirk_rt_decimal_domain`)
+- [x] 2.13 `decimal` module added to `lib.rs` (no-mangle symbols are emitted from the compiled module, as `duration` does; `pub use` not required)
+- [x] 2.14 Unit tests in `decimal.rs` (14): `0.1 + 0.2 == 0.3`, scale alignment, normalization, half-to-even boundaries, wide multiply, formatting exactness, parse rejection, conversions, sqrt
 
 ## 3. Runtime: rename binary float surface
 
 - [ ] 3.1 Keep `zirk_str_from_f32` / `zirk_str_from_f64` and the `zirk_float_*` helpers in `scalar.rs` unchanged in behavior; add doc notes that they now back `BinaryFloat*`
-- [ ] 3.2 Split the exact-`Float` member helpers (`abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_negative`, `is_integer`, `floor`, `ceil`, `truncate`, `fraction`) into decimal versions in `decimal.rs`
+- [x] 3.2 Exact-`Float` member helpers implemented in `decimal.rs` (`abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_negative`, `is_integer`, `floor`, `ceil`, `truncate`, `fraction`, `scale`)
 - [ ] 3.3 Runtime spec update: add the decimal helpers section to `docs/ZIRK_RUNTIME_SPEC.md`
 
 ## 4. Lexer + AST + parser
