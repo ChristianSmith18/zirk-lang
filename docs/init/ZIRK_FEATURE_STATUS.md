@@ -114,8 +114,8 @@ Last updated with `array-list-tuple-duration-regex`, **2026-09-05**.
 | String interpolation | yes | yes | yes | yes | yes | yes | `to_string()` contract. |
 | `Float128` on Windows | yes | yes | yes | yes | partial | partial | Excluded from Windows corpus; crashes the MSVC linker due to soft-float lib calls. |
 | Contextual numeric literal typing / mixed-width arithmetic | yes | yes | yes | yes | yes | yes | Every width resolves; literals take the context type; binary operators promote to the smallest common numeric type. `Float128` `to_string()` prints by truncating to `Float64` (lossy for values not exactly representable in `f64`). |
-| `String` methods and mutation | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `s[i] = c` write with grapheme-cache invalidation, `[start:end:step]` slicing, `trim`, `search`, `contains`, `starts_with`, `ends_with`, `substring`. `split(separator): List<String>` lands with `List<T>`. |
-| `Char` classification and normalization | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `is_uppercase`, `is_lowercase`, `is_digit`, `is_whitespace`, `is_letter`, `is_alphanumeric`, `to_uppercase`, `to_lowercase`. |
+| `String` methods and mutation | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`: `s[i] = c` write with grapheme-cache invalidation, `[start:end:step]` slicing, `trim`/`search`/`contains`/`starts_with`/`ends_with`/`substring`, `length`/`byte_length`/`is_empty`, `find()`, `replace()`, `trim_start()`/`trim_end()`, `to_lowercase()`/`to_uppercase()`, `normalize()`, `split()`/`split_whitespace()`/`lines()`, `bytes()`/`codepoints()`/`chars()` views, `clone()`, and `to_string()`. |
+| `Char` classification and normalization | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`; `byte_length`, `codepoint_count`, `ascii_code()`, `is_ascii()`, `is_alphabetic()`, `is_numeric()`, `is_alphanumeric()`, `is_letter()`/`is_digit()` aliases, `is_whitespace()`, `is_uppercase()`, `is_lowercase()`, `to_uppercase()`, `to_lowercase()`, `normalize()`, and `to_string()`. |
 
 ## Phase 4a — Expected errors
 
@@ -198,9 +198,9 @@ Last updated with `array-list-tuple-duration-regex`, **2026-09-05**.
 | `Array<T>`, `List<T>` | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` + `native-type-member-surface`: `Array(e0, …)`/`List(e0, …)` literals, negative indexing, `Array` slicing (`[start:end:step]`), `clone()`, `to_string()`, and `List.remove(value)` added alongside `add`/`insert`/`remove(index)`. |
 | `Map<K,V>`, `Set<T>` | yes | no | no | no | no | no | `pending_type` Phase 7; concrete collection objects are not implemented. |
 | `Range<T>` | yes | no | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — `start`, `end`, `step`, `reverse()`, slicing, and `Iterable<T>` for numeric/`Duration` `T`. |
-| `Duration` (literals, arithmetic, printing) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; exact signed nanosecond duration with suffixes `ns`–`w`. |
+| `Duration` (literals, arithmetic, printing) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; exact signed nanosecond duration with suffixes `ns`–`w`. `native-type-member-surface` added `abs()`, `sign()`, `is_zero()`, `is_positive()`, and `is_negative()`. |
 | Other temporal family (`Date`, `Time`, `DateTime`, ...) | yes | no | no | no | no | no | `pending_type` Phase 7; civil/zone types beyond `Duration` are not yet available. |
-| `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; `re'...'` literal, `matches`, `find` (returns `Regex.Match?` with `group(n)`/`group(name)`/`start`/`end`/`text`), and `replace` delivered. `split` is pending `List<T>`; `matches(text): Iterable<Regex.Match>` iteration and `match`-expression pattern integration remain. |
+| `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`; `re'...'` literal, `matches`, `find` (returns `Regex.Match?` with `group(n)`/`group(name)`/`start`/`end`/`text`), `replace`, `split()`, `find_all()`, `Regex.parse()`, and `match`-expression pattern integration delivered. |
 
 ## Phase 7b — Functional style
 

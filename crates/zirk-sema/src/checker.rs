@@ -1086,9 +1086,11 @@ impl<'a> Checker<'a> {
             // prints by truncating to `Float64`; this can lose precision for
             // values that are not exactly representable in `f64`.
             Base::Float(_) => true,
-            Base::Class(id) => self.classes[id as usize]
-                .method("to_string")
-                .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
+            // Every class, record, tuple, enum, weak reference and callable
+            // value has a compiler-provided default `to_string()` rendering
+            // unless it declares its own (`native-type-member-surface`).
+            Base::Class(_) | Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
+            | Base::Function(_) | Base::Weak(_) => true,
             // A value reached through a contract that itself declares
             // `to_string()` — every implementer supplies one (either its own
             // or the contract's default body), so the dispatch table always
@@ -9478,13 +9480,16 @@ impl<'a> Checker<'a> {
             Base::Tuple(_) if member.name == "length" => {
                 return Type::INT32;
             }
-            // A traditional-enum case: `name` (the declared case name) and
-            // `value` (the mapping, the name today) are `String`s. Algebraic
-            // `EnumInstance` payloads have their own field names instead.
+            // A traditional-enum case: `name` is the declared case name, and
+            // `value` is its `Int32` discriminant. Algebraic `EnumInstance`
+            // payloads have their own field names instead.
             Base::Enum(_) | Base::EnumInstance(_)
                 if matches!(member.name.as_str(), "name" | "value") =>
             {
-                return Type::STRING;
+                if member.name == "name" {
+                    return Type::STRING;
+                }
+                return Type::INT32;
             }
             _ => {}
         }
@@ -11831,10 +11836,11 @@ impl<'a> Checker<'a> {
 
             // Default `to_string()` for structured values without a declared
             // one (`native-type-member-surface`): tuples, enum cases,
-            // records, `Weak<T>` and callable values answer a readable
-            // default rendering. A `class` that *does* declare `to_string`
-            // still reaches `check_method_call_on` below — this branch only
-            // covers receivers `is_printable` and the method table reject.
+            // records, classes, `Weak<T>` and callable values answer a
+            // readable default rendering. A `class` that *does* declare
+            // `to_string` still reaches `check_method_call_on` below — this
+            // branch only covers receivers `is_printable` and the method table
+            // reject.
             if field.name.name == "to_string"
                 && !field.safe
                 && !object.nullable
@@ -11842,11 +11848,7 @@ impl<'a> Checker<'a> {
                 && match object.base {
                     Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
                     | Base::Function(_) | Base::Weak(_) => true,
-                    Base::Class(id) => {
-                        let class = &self.classes[id as usize];
-                        matches!(class.kind, zirk_ast::ClassKind::Record)
-                            && class.method("to_string").is_none()
-                    }
+                    Base::Class(id) => self.classes[id as usize].method("to_string").is_none(),
                     _ => false,
                 }
             {

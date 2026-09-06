@@ -85,3 +85,7 @@ mut b: Int32 = Int32(300.0);  // error: does not fit in Int32
 - Division and remainder trap on zero.
 - Mixed-width arithmetic requires an explicit cast; there is no implicit
   widening.
+
+---
+
+**Previous:** [← Choosing a Type](01f-choosing-a-type.md) · **Next:** [Unsigned Integers](03-unsigned-integers.md)

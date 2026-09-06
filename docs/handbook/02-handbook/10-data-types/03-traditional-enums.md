@@ -71,14 +71,14 @@ built-in static members; user-defined methods are not allowed.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `case.name` | `String` | Declared case name | specified |
-| `case.value` | mapped type (`String` or integer) | Explicit mapping or the case name by default | specified |
+| `case.name` | `String` | Declared case name | implemented |
+| `case.value` | `Int32` (or mapped type) | Discriminant / explicit mapping value | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `case.to_string()` | `String` | Case name | specified |
+| `case.to_string()` | `String` | Case name | implemented |
 | `Direction.keys()` | `List<String>` | All case names in declaration order | specified |
 | `Direction.values()` | `List<Direction>` | All case values in declaration order | specified |
 | `Direction.count` | `Int32` | Number of cases | specified |

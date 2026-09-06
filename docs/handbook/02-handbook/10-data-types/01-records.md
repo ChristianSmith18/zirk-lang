@@ -59,7 +59,7 @@ hashable).
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `Point(x:, y:)` | `Point` | Named-only construction; omitted fields take the declared default | implemented |
-| `r.to_string()` | `String` | Universal member | specified |
+| `r.to_string()` | `String` | Universal member | implemented |
 | `r.clone()` | `Point` | Derived `Clone` when every field is `Clone` | specified — derived `Clone` for `record` is pending |
 | user `fn` members | varies | Non-mutating computed methods only | implemented |
 
