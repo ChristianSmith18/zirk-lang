@@ -11968,6 +11968,14 @@ impl<'a> FunctionLowering<'a> {
                         self.type_of(&ast::Expr::Binary(e.clone()), e.span),
                         IrType::Int(_) | IrType::Float(_)
                     ))
+                    // `String * Int` routes through `checked_repeat`, whose
+                    // negative-count guard emits a `fail`/`cont` split exactly
+                    // like the integer overflow checks above — a sibling
+                    // operand emitted first has to cross that branch through a
+                    // slot, not a plain value.
+                    || (matches!(e.op, ast::BinaryOp::Mul)
+                        && self.type_of(&ast::Expr::Binary(e.clone()), e.span)
+                            == IrType::String)
                     || self.opens_blocks(&e.left)
                     || self.opens_blocks(&e.right)
             }

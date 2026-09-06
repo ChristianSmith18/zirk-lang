@@ -443,6 +443,20 @@ fn string_repetition_with_int8_count_lowers_to_repeat() {
 }
 
 #[test]
+fn string_repetition_inside_a_larger_expression_still_verifies() {
+    // Regression: `checked_repeat`'s negative-count guard opens a
+    // `fail`/`cont` split, but `opens_blocks` did not recognize `String * Int`
+    // as block-opening — a sibling operand emitted first (the `"x: "` below,
+    // or a call argument before the repeat) was left referencing a value from
+    // a dead block, and `verify` rejected the whole function.
+    let f = main_body("mut s = \"x: \" + \"ab\" * 3;");
+    let has_concat = instructions(&f)
+        .iter()
+        .any(|i| matches!(i, InstKind::Concat { .. }));
+    assert!(has_concat, "the surrounding concatenation must still be emitted");
+}
+
+#[test]
 fn comparison_produces_a_boolean() {
     let f = main_body("mut x: Boolean = 1 < 2;");
 
