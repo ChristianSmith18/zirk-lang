@@ -30,5 +30,5 @@
 ## 5. Docs and site
 
 - [x] 5.1 Update `docs/init/ZIRK_FEATURE_STATUS.md` and the enum handbook pages (mark members implemented).
-- [ ] 5.2 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` and commit `../zirk-lang-site`.
+- [x] 5.2 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` and commit `../zirk-lang-site`.
 - [ ] 5.3 Archive the change when the user confirms.
