@@ -2199,7 +2199,7 @@ impl<'a> Checker<'a> {
                     // them): the type arguments replace its own `<T>` before
                     // comparing what the class wrote against what is
                     // required, the same way `Box<Int32>` would for a class.
-                    let (subst, instance) = self.resolve_implements_args(contract, named);
+                    let (subst, instance) = self.resolve_implements_args(id, contract, named);
                     self.require_conformance(id, contract, named.span, &subst);
                     satisfied.push(contract);
                     if let Some(instance) = instance {
@@ -2262,6 +2262,7 @@ impl<'a> Checker<'a> {
     /// `implements` equivalent of [`Self::resolve_contract_reference`].
     fn resolve_implements_args(
         &mut self,
+        class: u32,
         contract: u32,
         reference: &TypeRef,
     ) -> (Vec<(u32, Type)>, Option<u32>) {
@@ -2328,15 +2329,12 @@ impl<'a> Checker<'a> {
         // binding's own concrete class, never through a `Resource`-typed
         // reference).
         //
-        // Any other generic contract lowers when none of its declared
-        // members actually name its own type parameter (roadmap Phase 7):
-        // a contract's dispatch table is keyed by the contract id and the
-        // method index alone — `ContractTable` never carries the type
-        // arguments — so a marker like `interface Tagged<T>` or a contract
-        // whose methods use only concrete types needs no specialization at
-        // all. A member that does name `T` (`fn put(x: T)`, `fn get(): T`)
-        // still needs the substitution pass `lower_contract_call` does not
-        // build, and stays gated.
+        // A generic contract whose members name its own type parameter now
+        // lowers for `class`/`record` adopters as long as the `implements`
+        // arguments are directly substitutable: either concrete types, or
+        // the adopter's own type parameters. Nested generic arguments
+        // (`Container<List<T>>`) still need a more complete substitution pass
+        // and stay gated with a precise diagnostic.
         let params_in_members = {
             let declared = &self.contracts[contract as usize];
             declared.methods.iter().any(|m| {
@@ -2350,11 +2348,16 @@ impl<'a> Checker<'a> {
             .native_iteration
             .is_some_and(|n| contract == n.iterable || contract == n.iterator)
             || self.native_resource.is_some_and(|n| contract == n.resource);
-        if params_in_members && !native {
+        let class_params = &self.classes[class as usize].type_params;
+        let directly_lowerable = args.iter().all(|arg| {
+            !self.type_references_any_param(*arg, class_params)
+                || matches!(arg.base, Base::Param(pid) if class_params.contains(&pid))
+        });
+        if params_in_members && !native && !directly_lowerable {
             self.not_lowered(
                 reference.span,
-                "an implementation of a generic contract whose members name its type parameter",
-                "declare the contract's members with concrete types, or implement it manually per concrete type for now",
+                "an implementation of a generic contract with a nested type argument",
+                "use the adopter's own type parameter or a concrete type directly",
             );
         }
 
@@ -2778,11 +2781,11 @@ impl<'a> Checker<'a> {
     /// See [`Self::check_generic_class_lowering`].
     fn generic_class_is_directly_specializable(&self, id: u32) -> bool {
         let class = &self.classes[id as usize];
-        // `extends` and `implements` both stay out of scope for this pass:
-        // a specialized copy's own dispatch tables (its method table for
-        // `extends`, a contract table for `implements`) are a separate
-        // concern this pass does not build.
-        if class.base.is_some() || !class.contracts.is_empty() || !class.abstract_bases.is_empty() {
+        // `extends` is still out of scope for generic specialization; a
+        // contract table is now built per instantiation (fase-3-dispatch-
+        // generico), so `implements` no longer blocks a directly-specializable
+        // generic `class`.
+        if class.base.is_some() || !class.abstract_bases.is_empty() {
             return false;
         }
 

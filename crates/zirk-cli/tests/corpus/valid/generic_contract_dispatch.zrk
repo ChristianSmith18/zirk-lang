@@ -1,0 +1,25 @@
+interface Container<T> {
+    fn get(): T;
+}
+
+class IntBox implements Container<Int32> {
+    value: Int32;
+    construct(v: Int32) { this.value = v; }
+    fn get(): Int32 { return this.value; }
+}
+
+class StrBox implements Container<String> {
+    value: String;
+    construct(v: String) { this.value = v; }
+    fn get(): String { return this.value; }
+}
+
+fn value_int(c: Container<Int32>): Int32 { return c.get(); }
+fn value_str(c: Container<String>): String { return c.get(); }
+
+fn main(): Void {
+    mut i = IntBox(5);
+    mut s = StrBox("hello");
+    stdout.println(value_int(i));
+    stdout.println(value_str(s));
+}

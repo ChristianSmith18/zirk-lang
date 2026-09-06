@@ -79,3 +79,11 @@ constraint verification and merges independently.
 
 - Whether generic `enum` adopters of contracts are in scope (default: yes if
   enums can declare `implements` today; otherwise document the exclusion).
+- Generic `class` instances (`Box<Int32>`) are not yet implicitly assignable to
+  a generic contract reference (`Container<Int32>`): `is_subclass_of` would
+  need to substitute the class's own `implements` contract arguments with the
+  instantiation's concrete types before comparing `Base::Instance` to
+  `Base::ContractInstance`.
+- Trait default bodies for generic contracts are not specialized per
+  instantiation; a class that relies on a trait default for a `T`-bearing
+  contract method still hits an `unreachable!` in lowering.
