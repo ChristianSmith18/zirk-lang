@@ -55,18 +55,17 @@ Decimal((a + 1) / (b * 2));
 
 For graphics, DSP, machine learning, or C ABI interop, use the binary family:
 `Float16`, `Float32`, `Float64`, `Float128`, with `Float` aliasing `Float64`.
-Write a binary literal with a `b` suffix (the new `f` suffix is also accepted
-and preferred in new code):
+Write a binary literal with an `f` suffix:
 
 ```zirk
-inmut fast: Float64 = 1.5b;
-inmut compact = 1.5b32;                 // Float32
-inmut wide: Float128 = 1e-20b128;
+inmut fast: Float64 = 1.5f;
+inmut compact = 1.5f32;                 // Float32
+inmut wide: Float128 = 1e-20f128;
 ```
 
 `Float` keeps every IEEE behavior: `Float64.POSITIVE_INFINITY` /
 `NEGATIVE_INFINITY` are valid values, `NaN` is not (a `NaN`-producing operation
-is a controlled error), and `Float64 / 0.0b` is an infinity, not an error.
+is a controlled error), and `Float64 / 0.0f` is an infinity, not an error.
 `Float128` formatting still truncates to `Float64` precision, and Windows
 verification is pending.
 
@@ -117,8 +116,8 @@ replacement:
 | `Float` (binary alias) | `Float64` |
 | `BinaryFloat` (binary alias) | `Float64` |
 | `BinaryFloat16` / `BinaryFloat32` / `BinaryFloat64` / `BinaryFloat128` | `Float16` / `Float32` / `Float64` / `Float128` |
-| `1.5b32` literal | `1.5b32` or `1.5f32` |
-| `1.5b` literal | `1.5b` or `1.5f` |
+| `1.5b32` literal | `1.5f32` |
+| `1.5b` literal | `1.5f` |
 | `1.5` where `Float` was exact | `1.5` (now `Decimal`) or `1.5d` |
 
 ### Examples
