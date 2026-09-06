@@ -2174,6 +2174,18 @@ impl<'a> Checker<'a> {
                 .map(|b| self.classes[b as usize].contract_instances.clone())
                 .unwrap_or_default();
 
+            // `implements Container<T>` inside `class Box<T>` must see `T` as
+            // the class's own type parameter while resolving the contract's
+            // arguments.
+            let class_type_params = self.classes[id as usize].type_params.clone();
+            if !class_type_params.is_empty() {
+                let scope = class_type_params
+                    .iter()
+                    .map(|&p| (self.type_params[p as usize].name.clone(), p))
+                    .collect();
+                self.type_param_scope.push(scope);
+            }
+
             for named in &decl.implements {
                 let resolved = self.resolved_name(&named.name, named.span);
 
@@ -2247,6 +2259,10 @@ impl<'a> Checker<'a> {
                     "`implements` names an interface, a trait or an abstract class",
                     None,
                 );
+            }
+
+            if !class_type_params.is_empty() {
+                self.type_param_scope.pop();
             }
 
             self.classes[id as usize].contracts = satisfied;
@@ -3172,15 +3188,16 @@ impl<'a> Checker<'a> {
                 // class's (below too), so `CallVirtual` has a shared index to
                 // read regardless of which concrete adopter is behind it.
             }
-            // A record lowers to an inline value (roadmap task 11.5) —
-            // but only a non-generic one: combining that with
-            // per-instantiation specialization (11.1) is a separate concern
-            // this pass does not build.
-            ClassKind::Record if !decl.type_params.is_empty() => {
+            // A generic record with no contract still cannot lower: its
+            // inline value representation needs per-instantiation
+            // specialization. Once it implements a generic contract we need
+            // it to be monomorphized like a generic class so the boxed
+            // contract table can be built (fase-3-dispatch-generico).
+            ClassKind::Record if !decl.type_params.is_empty() && decl.implements.is_empty() => {
                 self.not_lowered(
                     decl.name.span,
                     &format!("a generic {}", decl.kind.as_str()),
-                    "model it as an ordinary `class` for now, with a `construct` that sets every field",
+                    "model it as an ordinary `class` for now, or implement a generic contract",
                 );
             }
             ClassKind::Record => {}
@@ -3502,6 +3519,64 @@ impl<'a> Checker<'a> {
         self.leave_type_params();
     }
 
+    /// Whether `actual` becomes `expected` after replacing a type parameter
+    /// from a class instantiation. Does not intern new instantiations.
+    fn type_matches_with_subst(&self, actual: Type, expected: Type, subst: &[(u32, Type)]) -> bool {
+        let mut base = actual.base;
+        let mut nullable = actual.nullable;
+        if let Base::Param(id) = base {
+            if let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id) {
+                let replacement = if actual.nullable {
+                    replacement.as_nullable()
+                } else {
+                    replacement.without_null()
+                };
+                base = replacement.base;
+                nullable = replacement.nullable;
+            }
+        }
+        if nullable != expected.nullable {
+            return false;
+        }
+
+        match (base, expected.base) {
+            (Base::ContractInstance(actual_id), Base::ContractInstance(expected_id)) => {
+                let actual_inst = &self.contract_instances[actual_id as usize];
+                let expected_inst = &self.contract_instances[expected_id as usize];
+                actual_inst.contract == expected_inst.contract
+                    && actual_inst.args.len() == expected_inst.args.len()
+                    && actual_inst
+                        .args
+                        .iter()
+                        .zip(&expected_inst.args)
+                        .all(|(a, b)| self.type_matches_with_subst(*a, *b, subst))
+            }
+            (Base::EnumInstance(actual_id), Base::EnumInstance(expected_id)) => {
+                let actual_inst = &self.enum_instances[actual_id as usize];
+                let expected_inst = &self.enum_instances[expected_id as usize];
+                actual_inst.enum_id == expected_inst.enum_id
+                    && actual_inst.args.len() == expected_inst.args.len()
+                    && actual_inst
+                        .args
+                        .iter()
+                        .zip(&expected_inst.args)
+                        .all(|(a, b)| self.type_matches_with_subst(*a, *b, subst))
+            }
+            (Base::Instance(actual_id), Base::Instance(expected_id)) => {
+                let actual_inst = &self.generic_instances[actual_id as usize];
+                let expected_inst = &self.generic_instances[expected_id as usize];
+                actual_inst.class == expected_inst.class
+                    && actual_inst.args.len() == expected_inst.args.len()
+                    && actual_inst
+                        .args
+                        .iter()
+                        .zip(&expected_inst.args)
+                        .all(|(a, b)| self.type_matches_with_subst(*a, *b, subst))
+            }
+            (a, b) => a == b,
+        }
+    }
+
     /// Whether a value of one type may stand where another is expected
     /// because it is a subclass of it.
     ///
@@ -3516,8 +3591,19 @@ impl<'a> Checker<'a> {
             return false;
         }
 
-        let Base::Class(current) = actual.base else {
-            return false;
+        let (current, subst) = match actual.base {
+            Base::Class(id) => (id, Vec::new()),
+            Base::Instance(id) => {
+                let instance = &self.generic_instances[id as usize];
+                let subst: Vec<(u32, Type)> = self.classes[instance.class as usize]
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                (instance.class, subst)
+            }
+            _ => return false,
         };
 
         match expected.base {
@@ -3527,11 +3613,18 @@ impl<'a> Checker<'a> {
             // (`Iterable<Int32>`, task 6.9) the same way, but has to match
             // the specific arguments too: implementing `Iterable<Int32>`
             // does not make a class assignable to `Iterable<String>`.
+            // For a generic class instance (`Box<Int32>`) the contract's
+            // own arguments are substituted with the class's instantiation
+            // before comparing.
             Base::ContractInstance(target) => self.classes[current as usize]
                 .contract_instances
                 .iter()
                 .any(|&id| {
-                    self.contract_instances[id as usize] == self.contract_instances[target as usize]
+                    self.type_matches_with_subst(
+                        Type::of(Base::ContractInstance(id)),
+                        Type::of(Base::ContractInstance(target)),
+                        &subst,
+                    )
                 }),
             // A class satisfies an `abstract class` the same way it
             // satisfies a contract: by naming it in `implements`. Its own
@@ -12020,16 +12113,29 @@ impl<'a> Checker<'a> {
                 variadic: false,
             })
             .collect();
+        let type_params = class.type_params.clone();
         let signature = Signature {
             name: class_name,
             params,
             returns: Type::of(Base::Class(id)),
             shared: class.shared,
             span: class.span,
-            type_params: Vec::new(),
+            type_params: type_params.clone(),
             throws: Vec::new(),
         };
-        self.check_direct_call(expr, &signature)
+        let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
+
+        if type_params.is_empty() {
+            return Type::of(Base::Class(id));
+        }
+
+        let args: Vec<Type> = type_params
+            .iter()
+            .map(|pid| substitution.get(pid).copied().unwrap_or(Type::UNKNOWN))
+            .collect();
+        let instance = self.intern_instance(GenericInstance { class: id, args });
+        self.generic_constructions.insert(expr.span, instance);
+        Type::of(Base::Instance(instance))
     }
 
     /// Rejects a `Result<T,E>` produced by an expression statement and
