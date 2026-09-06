@@ -1230,6 +1230,11 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: IrType::String,
         },
         ExternFn {
+            name: "zirk_duration_to_iso_string".to_string(),
+            params: vec![nanos],
+            return_type: IrType::String,
+        },
+        ExternFn {
             name: "zirk_rt_duration_mul_f64".to_string(),
             params: vec![nanos, f64],
             return_type: nanos,
@@ -9291,6 +9296,7 @@ impl<'a> FunctionLowering<'a> {
                 | ("floor", 1)
                 | ("ceil", 1)
                 | ("truncate", 1)
+                | ("to_iso_string", 0)
         ) || field.safe
         {
             return None;
@@ -9406,6 +9412,14 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 ))
             }
+            "to_iso_string" => Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_duration_to_iso_string".to_string(),
+                    args: vec![receiver],
+                },
+                IrType::String,
+                span,
+            )),
             _ => unreachable!("name checked above"),
         }
     }
@@ -9444,6 +9458,7 @@ impl<'a> FunctionLowering<'a> {
                 | ("floor", 1)
                 | ("ceil", 1)
                 | ("truncate", 1)
+                | ("to_iso_string", 0)
         ) || field.safe
         {
             return false;

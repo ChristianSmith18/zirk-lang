@@ -100,7 +100,7 @@ years belong to `Period`.
 | `d.round(unit)` / `floor(unit)` / `ceil(unit)` / `truncate(unit)` | `Duration` | Unit rounding | implemented |
 | `d.format(template)` | `String` | Typed-template presentation | specified |
 | `d.humanize(locale:, max_units:)` | `String` | Locale-aware readable form; presentation only, never parse input | specified |
-| `d.to_iso_string()` | `String` | ISO 8601 duration | specified |
+| `d.to_iso_string()` | `String` | ISO 8601 duration | implemented |
 | `d.to_string()` | `String` | Human-readable default used by `stdout.println` | implemented |
 
 Operators: unary sign; `Duration ± Duration`; `×`/`÷` by integer or Float
@@ -110,7 +110,7 @@ non-finite scalar, precision/range loss, and overflow are controlled errors.
 
 > **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`,
 > component properties, `total_*`/`whole_*`, rounding and printing are delivered.
-> `format()`, `humanize()`, and `to_iso_string()` are specified
+> `to_iso_string()` is delivered; `format()` and `humanize()` are specified
 > pending the Phase 7 `std.time` delivery.
 
 ### Examples

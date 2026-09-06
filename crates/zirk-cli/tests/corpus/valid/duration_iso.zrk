@@ -1,0 +1,7 @@
+fn main(): Void {
+    stdout.println(0s.to_iso_string());
+    stdout.println((1h + 30m + 5s).to_iso_string());
+    stdout.println(3661s.to_iso_string());
+    stdout.println((-(1d + 2h + 3m)).to_iso_string());
+    stdout.println((1s + 150ms).to_iso_string());
+}
