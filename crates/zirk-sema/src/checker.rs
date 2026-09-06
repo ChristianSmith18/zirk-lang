@@ -1146,7 +1146,7 @@ impl<'a> Checker<'a> {
     /// it — those two have no stable Rust primitive the runtime can format
     /// through yet (`zirk-runtime/src/string.rs`'s own doc comment on the
     /// gap), consistent with `Float128` arithmetic's own tracked portability
-    /// gap on Windows. A class, record or value class satisfies it the same
+    /// gap on Windows. A class, record satisfies it the same
     /// way it supplies any other operator (decision D6): by declaring the
     /// method itself, `fn to_string(): String`, checked structurally rather
     /// than through a registered contract — the same shape `native_arithmetic`'s
@@ -1215,7 +1215,7 @@ impl<'a> Checker<'a> {
         let help = if ty.nullable {
             "use `?? <fallback>` to provide a value to print"
         } else {
-            "implement `fn to_string(): String` for a class, record or value class"
+            "implement `fn to_string(): String` for a class, record"
         };
 
         self.error(
@@ -2059,7 +2059,6 @@ impl<'a> Checker<'a> {
         // the same way `register_enum` already does for an enum's own
         // parameters.
         let type_params = self.mint_type_param_ids(&decl.type_params);
-        self.report_declared_variance(&decl.type_params);
         self.type_param_scope.push(
             decl.type_params
                 .iter()
@@ -2096,6 +2095,21 @@ impl<'a> Checker<'a> {
                 throws,
             });
         }
+
+        let (contract_inputs, contract_outputs): (Vec<Type>, Vec<Type>) = methods.iter().fold(
+            (Vec::new(), Vec::new()),
+            |(mut inputs, mut outputs), m| {
+                inputs.extend(m.params.iter().map(|p| p.ty));
+                outputs.push(m.returns);
+                (inputs, outputs)
+            },
+        );
+        self.check_declared_variance(
+            &decl.type_params,
+            &contract_inputs,
+            &contract_outputs,
+            &[],
+        );
 
         self.leave_type_params();
 
@@ -2134,7 +2148,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
 
-            // A record or value class implementing a contract dispatches
+            // A record implementing a contract dispatches
             // through it by boxing (`fase-3-value-type-contract-dispatch`,
             // design D1): the value's fields are copied into an ordinary,
             // collector-tracked allocation carrying a real descriptor,
@@ -2717,7 +2731,6 @@ impl<'a> Checker<'a> {
             // Whether this class's own `T` lowers per instantiation is
             // decided once its members exist (`Self::check_generic_class_lowering`,
             // which needs field and method types, not yet available here).
-            self.report_declared_variance(&decl.type_params);
 
             self.type_param_scope.push(
                 decl.type_params
@@ -2817,30 +2830,60 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Reports each `in`/`out` on a list of type parameters, once.
-    ///
-    /// Its own diagnostic rather than folding it into `not_lowered`: task 7.5
-    /// of the generics slice asks for variance to say so distinctly, since
-    /// subtyping between instantiations — what variance would mean — needs
-    /// more than "generics do not lower yet" to explain.
-    fn report_declared_variance(&mut self, params: &[TypeParam]) {
+    /// Checks that each declared `in`/`out` parameter only appears in the
+    /// positional roles it is allowed: `out` in output positions (return types
+    /// and immutable fields), `in` in input positions (parameter types), and
+    /// invariance for any mutable attribute.
+    fn check_declared_variance(
+        &mut self,
+        params: &[TypeParam],
+        inputs: &[Type],
+        outputs: &[Type],
+        mutables: &[Type],
+    ) {
         for p in params {
-            let keyword = match p.variance {
-                Variance::Invariant => continue,
-                Variance::In => "in",
-                Variance::Out => "out",
+            let Some(&id) = self.type_param_ids.get(&p.span) else {
+                continue;
             };
-            self.error(
-                codes::PENDING_FEATURE,
-                p.span,
-                "declared variance is not verified yet",
-                format!(
-                    "`{keyword} {}` parses, but the checker treats every parameter as invariant",
-                    p.name.name
-                ),
-                Some("remove the `in`/`out`, or accept that it is not enforced yet".into()),
-            );
+            let param_name = self.type_params[id as usize].name.clone();
+            match p.variance {
+                Variance::Invariant => continue,
+                Variance::Out => {
+                    if inputs.iter().any(|t| self.type_uses_param(*t, id))
+                        || mutables.iter().any(|t| self.type_uses_param(*t, id))
+                    {
+                        self.error(
+                            codes::INVALID_VARIANCE,
+                            p.span,
+                            format!("`out {param_name}` appears in an input position"),
+                            "an `out` parameter may only occur in return types and immutable fields",
+                            Some("remove `out` or make the parameter invariant".into()),
+                        );
+                    }
+                }
+                Variance::In => {
+                    if outputs.iter().any(|t| self.type_uses_param(*t, id))
+                        || mutables.iter().any(|t| self.type_uses_param(*t, id))
+                    {
+                        self.error(
+                            codes::INVALID_VARIANCE,
+                            p.span,
+                            format!("`in {param_name}` appears in an output position"),
+                            "an `in` parameter may only occur in parameter types",
+                            Some("remove `in` or make the parameter invariant".into()),
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    /// Whether `ty` is the exact type parameter `id`, ignoring nullability.
+    ///
+    /// Nested generic arguments and function types are not walked: their own
+    /// variance rules apply (in particular, `Fn` keeps its intrinsic variance).
+    fn type_uses_param(&self, ty: Type, id: u32) -> bool {
+        ty.base == Base::Param(id)
     }
 
     /// Resolves every `extends`, rejecting a base that is not a class and any
@@ -3111,7 +3154,7 @@ impl<'a> Checker<'a> {
         };
         self.enter_type_params(&decl.type_params);
 
-        // The grammar and the type rules for a record, value class or
+        // The grammar and the type rules for a record or
         // abstract class exist from here on (construction or conformance,
         // equality, immutability).
         match decl.kind {
@@ -3181,7 +3224,7 @@ impl<'a> Checker<'a> {
                 );
             }
 
-            // A record or value class is a value: every field is immutable by
+            // A record is a value: every field is immutable by
             // default, the same way `class`'s own `public mut` default does not
             // apply to it. Writing `mut` explicitly says so, which is worth
             // its own diagnostic rather than a silently ignored modifier.
@@ -3347,6 +3390,13 @@ impl<'a> Checker<'a> {
                 throws,
                 is_mut: method.is_mut,
             };
+            let method_inputs: Vec<Type> = resolved.params.iter().map(|p| p.ty).collect();
+            self.check_declared_variance(
+                &method.type_params,
+                &method_inputs,
+                &[resolved.returns],
+                &[],
+            );
             self.leave_type_params();
 
             match methods.iter().position(|m| m.name == method.name.name) {
@@ -3411,6 +3461,33 @@ impl<'a> Checker<'a> {
         self.classes[id as usize].fields = fields;
         self.classes[id as usize].constructors = constructors;
         self.classes[id as usize].methods = methods;
+
+        let (inputs, outputs, mutables) = {
+            let class = &self.classes[id as usize];
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            let mut mutables = Vec::new();
+            for constructor in &class.constructors {
+                for p in constructor {
+                    inputs.push(p.ty);
+                }
+            }
+            for method in &class.methods {
+                for p in &method.params {
+                    inputs.push(p.ty);
+                }
+                outputs.push(method.returns);
+            }
+            for field in &class.fields {
+                if field.mutability == Mutability::Mutable {
+                    mutables.push(field.ty);
+                } else {
+                    outputs.push(field.ty);
+                }
+            }
+            (inputs, outputs, mutables)
+        };
+        self.check_declared_variance(&decl.type_params, &inputs, &outputs, &mutables);
 
         // The base now knows one of its methods is redefined, which is what
         // decides whether a call to it can be direct.
@@ -3940,7 +4017,6 @@ impl<'a> Checker<'a> {
                 .map(|(p, &tid)| (p.name.name.clone(), tid))
                 .collect(),
         );
-        self.report_declared_variance(&decl.type_params);
         for (p, &tid) in decl.type_params.iter().zip(&type_params) {
             let constraints: Vec<Type> =
                 p.constraints.iter().map(|c| self.resolve_type(c)).collect();
@@ -4056,6 +4132,12 @@ impl<'a> Checker<'a> {
             );
         }
 
+        let enum_outputs: Vec<Type> = variants
+            .iter()
+            .flat_map(|v| v.associated.iter().map(|a| a.ty))
+            .collect();
+        self.check_declared_variance(&decl.type_params, &[], &enum_outputs, &[]);
+
         self.leave_type_params();
 
         self.enums[id].variants = variants;
@@ -4120,6 +4202,8 @@ impl<'a> Checker<'a> {
             span: f.name.span,
             throws,
         };
+        let param_types: Vec<Type> = signature.params.iter().map(|p| p.ty).collect();
+        self.check_declared_variance(&f.type_params, &param_types, &[signature.returns], &[]);
         self.leave_type_params();
 
         if let Some(previous) = self.functions.get(&signature.name).cloned() {
@@ -4296,14 +4380,6 @@ impl<'a> Checker<'a> {
                 "a generic type parameter",
                 "declare it without `<...>` for now, or instantiate it manually per concrete type",
             );
-        }
-
-        if !newly_created.is_empty() {
-            let declared: Vec<TypeParam> = newly_created
-                .iter()
-                .map(|&(i, _)| params[i].clone())
-                .collect();
-            self.report_declared_variance(&declared);
         }
 
         // Constraints are resolved only the first time a `TypeParam` is seen;
@@ -6165,7 +6241,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Whether `ty` has reference semantics, so the strict-alias matrix
-    /// applies to it. Records and value classes are inline (task 11.5), so
+    /// applies to it. Records are inline (task 11.5), so
     /// they carry no aliasing to police.
     fn is_reference_type(&self, ty: Type) -> bool {
         match ty.base {
@@ -6173,7 +6249,7 @@ impl<'a> Checker<'a> {
             // A generic class's specialized instance is reached through its
             // address exactly the way an ordinary class's is (roadmap task
             // 11.1) — the strict-aliasing matrix (D11, task 5.15) applies
-            // the same way; a record or value class's own `Base::Instance`
+            // the same way; a record's own `Base::Instance`
             // never reaches this arm to begin with, since one is inline and
             // never `is_reference_type` regardless of `T` (roadmap 11.5).
             Base::Instance(id) => {
@@ -8382,14 +8458,14 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        // A record or value class always has one: equality is derived from
+        // A record always has one: equality is derived from
         // every field, per `ZIRK_LANGUAGE_SPEC.md` section 7, not opted into
         // with a reserved method the way a plain class's is (`fase-3-
         // structural-equality`, design D1/D2). `zirk-ir`'s
         // `FunctionLowering::lower_structural_equality` lowers it to a
         // conjunction of per-field comparisons — but only for a field type
         // that comparison chain knows how to compare (a scalar/`String`/
-        // `Char`, a nested `record`/`value class` recursively, or a
+        // `Char`, a nested `record` recursively, or a
         // `class` reference via its own `_equals`-or-identity rule, D2).
         // A residual unsupported field type (`T?`, a closure, a contract,
         // an algebraic enum with payload, …) keeps the same
@@ -8403,7 +8479,7 @@ impl<'a> Checker<'a> {
                 self.not_lowered(
                     expr.span,
                     &format!(
-                        "structural equality on a record or value class with a field of type `{name}`"
+                        "structural equality on a record with a field of type `{name}`"
                     ),
                     "compare its fields individually for now",
                 );
@@ -8434,7 +8510,7 @@ impl<'a> Checker<'a> {
 
     /// Whether `ty` is a field type derived structural equality's own
     /// lowering (`zirk-ir`'s `lower_structural_equality`) knows how to
-    /// compare, checked recursively for a nested `record`/`value class`
+    /// compare, checked recursively for a nested `record`
     /// field — returns the first unsupported type found, if any.
     ///
     /// A scalar (`Int*`/`Float*`/`Boolean`/`Char`), `String`, and a
@@ -11911,7 +11987,7 @@ impl<'a> Checker<'a> {
     /// type's default (`ZIRK_LANGUAGE_SPEC.md` section 7).
     ///
     /// Dispatched from [`Self::check_construction`] instead of matching
-    /// arity against `class.constructors`: a record or value class never has
+    /// arity against `class.constructors`: a record never has
     /// one, its whole field list is the signature.
     fn check_record_construction(&mut self, expr: &CallExpr, id: u32) -> Type {
         let class = self.classes[id as usize].clone();

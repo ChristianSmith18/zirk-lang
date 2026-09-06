@@ -714,7 +714,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `value class Name(field: Type, field: Type, ...);`
+    /// `record Name(field: Type, field: Type, ...);`
     /// `interface Name { ... }` or `trait Name { ... }`
     fn parse_contract(&mut self, shared: bool) -> Option<ContractDecl> {
         let start = self.peek_span();
