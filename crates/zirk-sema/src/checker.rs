@@ -4343,8 +4343,8 @@ impl<'a> Checker<'a> {
     /// calls must agree on `T`'s id or a field's declared type would never
     /// equal the type of the value assigned to it in its own constructor.
     ///
-    /// Verifying `from` at the use site and inside the body (roadmap tasks
-    /// 7.2 and 7.4) is not implemented yet: `constraints` is only recorded.
+    /// `from` constraints recorded here are verified at the use site and
+    /// bound for the body check by the call sites of this function.
     fn enter_type_params(&mut self, params: &[TypeParam]) -> Vec<u32> {
         let mut frame = HashMap::new();
         let mut newly_created = Vec::new();
