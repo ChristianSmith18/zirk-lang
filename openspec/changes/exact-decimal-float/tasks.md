@@ -25,9 +25,9 @@
 
 ## 3. Runtime: rename binary float surface
 
-- [ ] 3.1 Keep `zirk_str_from_f32` / `zirk_str_from_f64` and the `zirk_float_*` helpers in `scalar.rs` unchanged in behavior; add doc notes that they now back `BinaryFloat*`
+- [x] 3.1 Keep `zirk_str_from_f32` / `zirk_str_from_f64` and the `zirk_float_*` helpers in `scalar.rs` unchanged in behavior; add doc notes that they now back `BinaryFloat*`
 - [x] 3.2 Exact-`Float` member helpers implemented in `decimal.rs` (`abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_negative`, `is_integer`, `floor`, `ceil`, `truncate`, `fraction`, `scale`)
-- [ ] 3.3 Runtime spec update: add the decimal helpers section to `docs/ZIRK_RUNTIME_SPEC.md`
+- [x] 3.3 Runtime spec update: add the decimal helpers section to `docs/ZIRK_RUNTIME_SPEC.md`
 
 ## 4. Lexer + AST + parser
 
@@ -77,8 +77,8 @@
 
 - [x] 9.1 `docs/ZIRK_LANGUAGE_SPEC.md`: rewrite the numeric-families section (§3) — `Float` exact, `BinaryFloat*` binary, literal forms, `NaN`/infinity scoping
 - [x] 9.2 `docs/ZIRK_STDLIB_SPEC.md`: rewrite the float section — exact `Float` member surface + `BinaryFloat` member surface
-- [ ] 9.3 `docs/ZIRK_COMPILER_SPEC.md` and `docs/CORE_LANGUAGE_SEMANTICS.md`: pipeline + semantics notes for the exact type and the rename
-- [ ] 9.4 `docs/ZIRK_RUNTIME_SPEC.md`: decimal runtime helpers (also covered by 3.3)
+- [x] 9.3 `docs/ZIRK_COMPILER_SPEC.md` and `docs/CORE_LANGUAGE_SEMANTICS.md`: pipeline + semantics notes for the exact type and the rename
+- [x] 9.4 `docs/ZIRK_RUNTIME_SPEC.md`: decimal runtime helpers (also covered by 3.3)
 - [x] 9.5 Handbook: rewrite `02-handbook/03-everyday-types/04-decimals.md` as "Exact decimals (`Float`)"; add a `BinaryFloat` page; update `05-numeric-literals.md`, that chapter's `README.md`
 - [x] 9.6 Handbook: update `11-reference/03-built-in-types.md`, `11-reference/13-type-member-index.md`, `SUMMARY.md`, and any `12-explanations` page discussing float precision
 - [x] 9.7 Handbook: add a "Float is now exact — migration" note (rename table + `b` suffix)
@@ -90,13 +90,13 @@
 - [x] 10.1 Fixture: `0.1 + 0.2 == 0.3` prints `true`; `(0.1).to_string()` is `"0.1"`; sum prints `"0.3"`
 - [x] 10.2 Fixture: exact `+ - *` across differing scales; integer `**`; normalization (`1.0 == 1.00`, `2.50 == 2.5`)
 - [x] 10.3 Fixture: `1.0 / 3.0` rounds half-to-even at `MAX_SIGNIFICANT_DIGITS`; `a.div(b, mode, places)` variants; `round(places[, mode])` at tie boundaries
-- [ ] 10.4 Fixture: `%` sign, `sqrt` exact + negative error, `pow` fractional rounding
-- [ ] 10.5 Fixture: coefficient overflow raises catchable `ArithmeticOverflowError`; `Float / 0.0` raises catchable `DivisionByZeroError`
-- [ ] 10.6 Fixture: `Int -> Float` implicit; `Float -> Int` checked cast error on fractional; `Float(binaryValue)` and `x as BinaryFloat64` explicit; `Float + BinaryFloat64` is a type error
+- [x] 10.4 Fixture: `%` sign, `sqrt` exact + negative error, `pow` fractional rounding
+- [x] 10.5 Fixture: coefficient overflow raises catchable `ArithmeticOverflowError`; `Float / 0.0` raises catchable `DivisionByZeroError`
+- [x] 10.6 Fixture: `Int -> Float` implicit; `Float -> Int` checked cast error on fractional; `Float(binaryValue)` and `x as BinaryFloat64` explicit; `Float + BinaryFloat64` is a type error
 - [x] 10.7 Fixture: `1.5b`, `1.5b32`, `0.1b128` type and behave as the old `Float*`; `0.0b / 0.0b` catchable `FloatNanError`; non-zero `/ 0.0b` is infinity
-- [ ] 10.8 Fixture: `Float64` annotation emits the redirect diagnostic; oversized suffix-less literal emits the digit-budget diagnostic
-- [ ] 10.9 Fixture: `Float.parse` success and failure; `format(spec)` per 1.5
-- [ ] 10.10 Wire all fixtures into the CLI end-to-end test suite with expected stdout/diagnostics
+- [x] 10.8 Fixture: `Float64` annotation emits the redirect diagnostic; oversized suffix-less literal emits the digit-budget diagnostic
+- [x] 10.9 Fixture: `Float.parse` success and failure; `format(spec)` per 1.5
+- [x] 10.10 Wire all fixtures into the CLI end-to-end test suite with expected stdout/diagnostics
 
 ## 11. Companion website
 
@@ -106,6 +106,6 @@
 
 ## 12. Close-out
 
-- [ ] 12.1 `LLVM_SYS_201_PREFIX=/opt/homebrew/opt/llvm@20 cargo test` green across all crates
-- [ ] 12.2 `cargo clippy --all-targets` clean
+- [x] 12.1 `LLVM_SYS_201_PREFIX=/opt/homebrew/opt/llvm@20 cargo test` green across all crates
+- [x] 12.2 `cargo clippy --all-targets` clean
 - [ ] 12.3 `openspec validate exact-decimal-float` passes; run `/opsx:archive` after review

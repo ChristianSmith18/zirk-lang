@@ -7221,6 +7221,18 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
+        // Exact `Float` <-> integer (checked) and `Float` <-> `BinaryFloat`
+        // (explicit) `as` casts lower to the `zirk_rt_decimal_*` conversion
+        // helpers.
+        if matches!(
+            (target.base, actual.base),
+            (Base::Decimal, Base::Int(_))
+                | (Base::Int(_), Base::Decimal)
+                | (Base::Decimal, Base::Float(_))
+                | (Base::Float(_), Base::Decimal)
+        ) {
+            return true;
+        }
         matches!(actual.base, Base::Class(_) | Base::Contract(_))
             && matches!(target.base, Base::Class(_))
     }
@@ -7251,6 +7263,16 @@ impl<'a> Checker<'a> {
         if matches!(
             (actual_bare.base, target_bare.base),
             (Base::Int(_), Base::Float(_)) | (Base::Float(_), Base::Int(_))
+        ) {
+            return true;
+        }
+        // Exact `Float` <-> integer, and `Float` <-> `BinaryFloat`.
+        if matches!(
+            (actual_bare.base, target_bare.base),
+            (Base::Decimal, Base::Int(_))
+                | (Base::Int(_), Base::Decimal)
+                | (Base::Decimal, Base::Float(_))
+                | (Base::Float(_), Base::Decimal)
         ) {
             return true;
         }
@@ -11867,7 +11889,7 @@ impl<'a> Checker<'a> {
                 Some(Type::REGEX)
             } else {
                 Type::from_name(&base.name)
-                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)))
+                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal))
             };
             if let Some(target) = target {
                 // `parse(text)` and `parse(text, radix: n)` — the radix form

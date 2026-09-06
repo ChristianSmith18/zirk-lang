@@ -29,4 +29,17 @@ fn main(): Void {
     // binary and its own division by zero is an infinity, not an error.
     inmut binary: BinaryFloat64 = 1.0b / 0.0b;
     stdout.println(binary.is_infinite().to_string());
+
+    // Conversions: Int -> Float implicit; Float <-> BinaryFloat explicit.
+    inmut whole: Int32 = 7;
+    inmut widened: Float = whole;
+    stdout.println(widened.to_string());
+    stdout.println((widened as BinaryFloat64).to_string());
+    stdout.println(Float(0.5b).to_string());
+
+    // Parse returns a Result.
+    stdout.println(Float.parse("3.14").unwrap().to_string());
+
+    // Scientific literal is exact.
+    stdout.println((6.25e-2 == 0.0625).to_string());
 }

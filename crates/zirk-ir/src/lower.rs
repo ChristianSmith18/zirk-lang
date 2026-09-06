@@ -10485,6 +10485,34 @@ impl<'a> FunctionLowering<'a> {
                     "invalid integer literal or out of range for the width",
                 ))
             }
+            zirk_sema::Base::Decimal => {
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_parse_ok".to_string(),
+                        args: vec![text],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_rt_decimal_parse_value".to_string(),
+                                args: vec![text],
+                            },
+                            IrType::Decimal,
+                            span,
+                        )
+                    },
+                    "invalid decimal literal",
+                ))
+            }
             zirk_sema::Base::Float(width) => {
                 let width = self.ir_float_width(width);
                 let text_slot = self.spill(text, IrType::String, span);
@@ -10843,7 +10871,11 @@ impl<'a> FunctionLowering<'a> {
             return None;
         }
         let target = Type::from_name(&callee.name)?;
-        matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String).then_some(target)
+        matches!(
+            target.base,
+            Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String
+        )
+        .then_some(target)
     }
 
     /// Whether `call` is `fatalError(...)` (roadmap Phase 4a) — checked the
@@ -11700,6 +11732,15 @@ impl<'a> FunctionLowering<'a> {
         }
         if let (IrType::Float(_), IrType::Int(_)) = (actual_ty, target_ty) {
             return self.emit(InstKind::FloatToInt(value), target_ty, span);
+        }
+        // Exact `Float` <-> integer / `BinaryFloat` `as` casts route through
+        // the `convert_numeric` conversion instructions.
+        if matches!(
+            (actual_ty, target_ty),
+            (IrType::Decimal, _) | (_, IrType::Decimal)
+        ) && (Self::is_numeric_ir_type(actual_ty) && Self::is_numeric_ir_type(target_ty))
+        {
+            return self.convert_numeric(value, actual_ty, target_ty, span);
         }
         // `ptr as Pointer<U>` — `.cast<U>()`'s spelling (design D8, tasks.md
         // 6.2's decision note): an LLVM pointer bitcast, unchecked.

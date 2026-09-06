@@ -205,6 +205,29 @@ fn invalid_exact_float_has_no_infinity_member() {
 }
 
 #[test]
+fn valid_exact_float_conversions() {
+    // Int -> Float is implicit and exact; Float -> Int and Float <-> BinaryFloat
+    // are explicit.
+    accepted_body("mut i: Int32 = 5;\nmut f: Float = i;");
+    accepted_body("mut f: Float = 2.5;\nmut i: Int32 = f as Int32;");
+    accepted_body("mut f: Float = 2.5;\nmut g: BinaryFloat64 = f as BinaryFloat64;");
+    accepted_body("mut g: BinaryFloat64 = 2.5b;\nmut f: Float = Float(g);");
+}
+
+#[test]
+fn valid_exact_float_parse_returns_a_result() {
+    accepted_body(
+        "mut r: Result<Float, ParseError> = Float.parse(\"0.1\");\n\
+         mut v: Float = r.unwrap();",
+    );
+}
+
+#[test]
+fn valid_exact_float_scientific_literal_is_exact() {
+    accepted_body("mut a: Float = 6.25e-2;\nmut b: Boolean = a == 0.0625;");
+}
+
+#[test]
 fn valid_safe_widening_between_float_widths() {
     accepted_body(
         "mut a: BinaryFloat16 = 1.5b16;\nmut b: BinaryFloat32 = a;\nmut c: BinaryFloat64 = b;",
