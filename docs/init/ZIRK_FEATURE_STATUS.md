@@ -89,7 +89,7 @@ Last updated with `exact-decimal-float`, **2026-09-06**.
 | Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`override`. |
 | `interface`/`trait` | yes | yes | yes | yes | yes | yes | `Keyword::Interface`/`Trait` in subset. |
 | `implements` | yes | yes | yes | yes | yes | yes | — |
-| Generics with `from` constraints | yes | yes | yes | partial | partial | partial | User generic *class*/`enum` instantiation works for flat cases; generic contract/enum dispatch still pending. |
+| Generics with `from` constraints | yes | yes | yes | yes | partial | partial | `fase-3-verificacion-constraints`; `from` verified at use and in the body, declared variance verified positionally; generic contract/enum dispatch still pending. |
 | Records | yes | yes | yes | yes | yes | yes | — |
 | Tuples (literals, `.N` indexing, `match` destructuring) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`. |
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |

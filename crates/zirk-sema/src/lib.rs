@@ -229,4 +229,7 @@ pub mod codes {
     /// A `Pointer.from(place).as_slice(n)`/`as_slice_mut(n)` length that
     /// exceeds the statically known extent of `place`.
     pub const NATIVE_SLICE_EXTENT_EXCEEDED: Code = Code::new("E0458");
+    /// A type parameter declared `in` or `out` appears in a position that
+    /// contradicts the declared variance.
+    pub const INVALID_VARIANCE: Code = Code::new("E0461");
 }

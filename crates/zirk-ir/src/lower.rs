@@ -78,7 +78,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // The layouts come first: a function that builds an object needs the
     // layout it allocates, and a field access needs its offsets.
     //
-    // A record or value class lives in `values`, not `objects` — its
+    // A record lives in `values`, not `objects` — its
     // `ObjectLayout` entry here is an empty placeholder that is never read
     // (`IrType::Value`, not `Object`, is what a value-kind class resolves
     // to; see `ir_type`) *unless* it implements at least one contract
@@ -192,7 +192,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 let supplied = class
                                     .method(&required.name)
                                     .expect("the checker verified conformance");
-                                // A record/value class's own body takes
+                                // A record's own body takes
                                 // `this` by value (`Self::run_method`) — it
                                 // needs the box-unboxing wrapper
                                 // (`box_thunk_symbol`) rather than its own
@@ -220,7 +220,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         })
         .collect();
 
-    // A record or value class's own layout — indexed the same way `objects`
+    // A record's own layout — indexed the same way `objects`
     // is, sharing `checked.classes`' id space (roadmap task 11.5); an
     // ordinary class's or a still-generic template's entry here is the
     // empty placeholder, symmetric with `objects` above.
@@ -1951,7 +1951,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
     // A boxed value's contract-table wrapper (`fase-3-value-type-contract-
     // dispatch`, design D1/D2, `box_thunk_symbol`'s own doc comment): one
-    // per own-body method a record/value class supplies to satisfy a
+    // per own-body method a record supplies to satisfy a
     // contract, unboxing `this` and forwarding into the real by-value body.
     // Skipped for a still-generic template the same way its own methods
     // are, and for a method inherited from a trait's default body
@@ -2440,7 +2440,7 @@ pub fn contract_method_symbol(contract: &str, method: &str) -> String {
 /// The name a boxed value's contract-table entry for one of its own methods
 /// is emitted under (`fase-3-value-type-contract-dispatch`, design D1/D2).
 ///
-/// A `record`/`value class`'s own method (`Self::method_symbol`) receives
+/// A `record`'s own method (`Self::method_symbol`) receives
 /// `this` by value (roadmap task 11.5) — `CallContract`'s existing dispatch
 /// always passes the receiver as a pointer (design D2's own premise: it
 /// "cannot distinguish" a boxed value's descriptor from a class's), so a
@@ -2600,7 +2600,7 @@ fn ir_type(
         // representation of its own (roadmap task 11.3).
         Base::Enum(id) if enum_has_payload(checked, id) => IrType::Enum(id),
         Base::Enum(_) => IrType::Int(IntWidth::I32),
-        // A record or value class is a value, not a reference: neither has
+        // A record is a value, not a reference: neither has
         // identity (roadmap task 11.5). An ordinary class is reached through
         // its address, which is its identity.
         Base::Class(id) if matches!(checked.classes[id as usize].kind, ast::ClassKind::Record) => {
@@ -3608,7 +3608,7 @@ impl<'a> FunctionLowering<'a> {
             } else if let IrType::Value(id) = actual
                 && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
             {
-                // A `record`/`value class` widened directly into `T??`'s
+                // A `record` widened directly into `T??`'s
                 // present half where `T` is a contract it implements
                 // (design D1): box first, exactly like the non-nullable
                 // path below, then retag if the box's own id is not
@@ -3638,7 +3638,7 @@ impl<'a> FunctionLowering<'a> {
             return value;
         }
 
-        // The checker already proved this is a `record`/`value class`
+        // The checker already proved this is a `record`
         // implementing the contract expected here (design D1,
         // `fase-3-value-type-contract-dispatch`): unlike a class instance,
         // whose address already *is* the shape a contract-typed reference
@@ -3679,7 +3679,7 @@ impl<'a> FunctionLowering<'a> {
         value
     }
 
-    /// Boxes a `record`/`value class` value into a fresh, collector-tracked
+    /// Boxes a `record` value into a fresh, collector-tracked
     /// allocation (`fase-3-value-type-contract-dispatch`, design D1) — the
     /// one step that lets it be held through a contract-typed reference.
     ///
@@ -4084,7 +4084,7 @@ impl<'a> FunctionLowering<'a> {
         self.current = entry;
         self.scopes.push(HashMap::new());
 
-        // A record or value class's method receives `this` by value too
+        // A record's method receives `this` by value too
         // (roadmap task 11.5): there is nothing to point at.
         let this_ty = self.ir_type(Type::of(Base::Class(id)));
         let this = self.declare_slot("this", this_ty, class.name.span);
@@ -6229,7 +6229,7 @@ impl<'a> FunctionLowering<'a> {
 
             // `x == y` / `x != y` where both operands are a `record`/`value
             // class` (`fase-3-structural-equality`, design D1): a `record`/
-            // `value class` never defines `_equals` (the check just above
+            // `record` never defines `_equals` (the check just above
             // only ever matches `IrType::Object`, never `IrType::Value`),
             // so this is the only place its comparison is built — a
             // conjunction of per-field comparisons, generated at this call
@@ -6722,7 +6722,7 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Lowers `x == y` / `x != y` between two values of the same `record`/
-    /// `value class` type (`fase-3-structural-equality`, design D1): both
+    /// `record` type (`fase-3-structural-equality`, design D1): both
     /// operands are lowered once, then compared field by field through
     /// [`Self::lower_field_conjunction`]; `!=` is the same comparison
     /// negated, the same split every other `Eq`/`NotEq` lowering in this
@@ -6733,7 +6733,7 @@ impl<'a> FunctionLowering<'a> {
         let left = self.reload(held, expr.left.span());
 
         let IrType::Value(id) = self.type_of(&expr.left, expr.left.span()) else {
-            unreachable!("this arm only ever matches a `record`/`value class` left operand")
+            unreachable!("this arm only ever matches a `record` left operand")
         };
 
         let result = self.lower_field_conjunction(id, left, right, span);
@@ -6835,11 +6835,11 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), IrType::Boolean, span)
     }
 
-    /// One field's own equality, as part of a `record`/`value class`'s
+    /// One field's own equality, as part of a `record`'s
     /// derived comparison — `left`/`right` are that field already loaded
     /// from both operands.
     ///
-    /// A nested `record`/`value class` field recurses the same way its own
+    /// A nested `record` field recurses the same way its own
     /// top-level `==` would (design D1); a `class` reference compares by
     /// whatever the existing rule for that class's own `==` already is —
     /// its own `_equals` if declared, `is` identity otherwise (design D2,
@@ -6852,7 +6852,7 @@ impl<'a> FunctionLowering<'a> {
     /// `Char`, or a payload-less enum) is exactly what the ordinary
     /// `Binary { op: Eq }` shape already compares correctly on its own —
     /// the same instruction the pre-existing generic `Eq`/`NotEq` lowering
-    /// arm emits for those types outside a `record`/`value class` too.
+    /// arm emits for those types outside a `record` too.
     fn lower_field_equality(
         &mut self,
         field_ty: IrType,
@@ -8170,7 +8170,7 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
         }
-        // A record or value class's own method is reached the same way an
+        // A record's own method is reached the same way an
         // ordinary class's is: `IrType::Value` only changes how the
         // receiver is represented (inline, no header), not that it resolves
         // to a `MethodInfo` the same table an object's does.
@@ -9640,7 +9640,7 @@ impl<'a> FunctionLowering<'a> {
     /// Lowers `myInt.to_string()` — the explicit spelling of the same
     /// conversion `println`/interpolation reach implicitly (roadmap Phase
     /// 3b, task 8's own follow-up) — for a native scalar only. A class,
-    /// record or value class's own `to_string()` method already goes
+    /// record's own `to_string()` method already goes
     /// through the ordinary method-call path (`lower_method_call`, tried
     /// right after this one), which is why this returns `None` for
     /// `Object`/`Value`/`Contract` receivers rather than handling them too.
@@ -9668,7 +9668,7 @@ impl<'a> FunctionLowering<'a> {
         if let Some(operand) = self.lower_exception_intrinsic_call(call, span) {
             return Some(operand);
         }
-        // A record or value class's own method call is the same shape as an
+        // A record's own method call is the same shape as an
         // ordinary object's — see `Self::method_of`. `extends` is rejected
         // for either kind, so no subclass can ever redefine one of its
         // methods: `virtual_index` below always comes out `None`, which is
@@ -12965,7 +12965,7 @@ impl<'a> FunctionLowering<'a> {
                     e.op,
                     ast::BinaryOp::Coalesce | ast::BinaryOp::And | ast::BinaryOp::Or
                 ) ||
-                // Structural equality on a `record`/`value class`
+                // Structural equality on a `record`
                 // (`fase-3-structural-equality`, design D1) opens the same
                 // per-field branch-and-join shape `&&`/`||` do — an earlier
                 // operand held across one of these must go through a slot
@@ -13575,7 +13575,7 @@ impl<'a> FunctionLowering<'a> {
         object
     }
 
-    /// Lowers `Point(x: 1, y: 2)`: a record or value class's implicit
+    /// Lowers `Point(x: 1, y: 2)`: a record's implicit
     /// construction (roadmap task 11.5), packaging every field's value in
     /// declaration order rather than obtaining storage and calling into it
     /// — there is no `construct` to call, and nothing here allocates.
@@ -15373,7 +15373,7 @@ impl<'a> FunctionLowering<'a> {
     /// `Pointer.from(place)` (design D8): the address already computed for
     /// `place`'s own storage — no allocation, just exposing it.
     ///
-    /// For a `record` or `value class` field, the chain is built from the
+    /// For a `record` field, the chain is built from the
     /// innermost lvalue out: the root slot gives a `Pointer<Root>`, each
     /// intermediate field `PointerFromField`s to the next value, and the
     /// final field is the `Pointer<T>` requested by the user.
@@ -16522,7 +16522,7 @@ impl<'a> FunctionLowering<'a> {
     ///
     /// A native scalar goes through `InstKind::ToString`, which codegen
     /// dispatches by the operand's own recorded width (`emit.rs`). A
-    /// class/record/value class with its own `to_string()` method is called
+    /// class/record with its own `to_string()` method is called
     /// directly instead — the exact shape any other method call is
     /// (`lower_method_call`), because it needs a real symbol/table lookup
     /// `InstKind::ToString` alone cannot express; the checker already
@@ -16574,7 +16574,7 @@ impl<'a> FunctionLowering<'a> {
                 };
             }
 
-            // Default rendering for tuples and records/value classes that do
+            // Default rendering for tuples and records that do
             // not declare their own `to_string`.
             let layout_name = self.module.values[id as usize].name.clone();
             let is_tuple = layout_name.starts_with("Tuple(");
