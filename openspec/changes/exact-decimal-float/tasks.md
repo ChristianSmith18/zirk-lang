@@ -70,19 +70,19 @@
 
 ## 8. CLI + diagnostics
 
-- [ ] 8.1 `zirk-diagnostics` / `zirk-cli`: wording for the `Float64`->`BinaryFloat64` redirect, the oversized-literal error, and the `Float`/`BinaryFloat` mixing error
-- [ ] 8.2 `zirk-cli` help / examples text: replace `Float64` mentions
+- [x] 8.1 `zirk-diagnostics` / `zirk-cli`: wording for the `Float64`->`BinaryFloat64` redirect, the oversized-literal error, and the `Float`/`BinaryFloat` mixing error
+- [x] 8.2 `zirk-cli` help / examples text: replace `Float64` mentions
 
 ## 9. Documentation
 
-- [ ] 9.1 `docs/ZIRK_LANGUAGE_SPEC.md`: rewrite the numeric-families section (§3) — `Float` exact, `BinaryFloat*` binary, literal forms, `NaN`/infinity scoping
-- [ ] 9.2 `docs/ZIRK_STDLIB_SPEC.md`: rewrite the float section — exact `Float` member surface + `BinaryFloat` member surface
+- [x] 9.1 `docs/ZIRK_LANGUAGE_SPEC.md`: rewrite the numeric-families section (§3) — `Float` exact, `BinaryFloat*` binary, literal forms, `NaN`/infinity scoping
+- [x] 9.2 `docs/ZIRK_STDLIB_SPEC.md`: rewrite the float section — exact `Float` member surface + `BinaryFloat` member surface
 - [ ] 9.3 `docs/ZIRK_COMPILER_SPEC.md` and `docs/CORE_LANGUAGE_SEMANTICS.md`: pipeline + semantics notes for the exact type and the rename
 - [ ] 9.4 `docs/ZIRK_RUNTIME_SPEC.md`: decimal runtime helpers (also covered by 3.3)
-- [ ] 9.5 Handbook: rewrite `02-handbook/03-everyday-types/04-decimals.md` as "Exact decimals (`Float`)"; add a `BinaryFloat` page; update `05-numeric-literals.md`, that chapter's `README.md`
-- [ ] 9.6 Handbook: update `11-reference/03-built-in-types.md`, `11-reference/13-type-member-index.md`, `SUMMARY.md`, and any `12-explanations` page discussing float precision
-- [ ] 9.7 Handbook: add a "Float is now exact — migration" note (rename table + `b` suffix)
-- [ ] 9.8 Roadmap/status: `docs/init/ZIRK_ROADMAP.md`, Feature Status, Current Limitations, handbook roadmap — move the `Float128` truncation + Windows-verification limitation onto `BinaryFloat128`
+- [x] 9.5 Handbook: rewrite `02-handbook/03-everyday-types/04-decimals.md` as "Exact decimals (`Float`)"; add a `BinaryFloat` page; update `05-numeric-literals.md`, that chapter's `README.md`
+- [x] 9.6 Handbook: update `11-reference/03-built-in-types.md`, `11-reference/13-type-member-index.md`, `SUMMARY.md`, and any `12-explanations` page discussing float precision
+- [x] 9.7 Handbook: add a "Float is now exact — migration" note (rename table + `b` suffix)
+- [x] 9.8 Roadmap/status: `docs/init/ZIRK_ROADMAP.md`, Feature Status, Current Limitations, handbook roadmap — move the `Float128` truncation + Windows-verification limitation onto `BinaryFloat128`
 - [ ] 9.9 Examples: update `main.zrk`, `main2.zrk`, `main3.zrk`, `numerics.zrk`, `hello.zrk` and every `.zrk` code block under `docs/` to the new names/semantics
 
 ## 10. End-to-end test battery

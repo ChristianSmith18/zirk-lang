@@ -430,7 +430,9 @@ fn llvm_type_in<'ctx>(
         }
         // `Array<T>`/`List<T>` are opaque GC-managed object handles, exactly
         // like `String`/`Object`.
-        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range => context.ptr_type(AddressSpace::default()).into(),
+        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range => {
+            context.ptr_type(AddressSpace::default()).into()
+        }
     })
 }
 
@@ -835,8 +837,8 @@ fn declare_extern_fn<'ctx>(
     // same reason `zirk_str_from_i128` takes its argument by pointer. Their
     // LLVM declaration is `ptr`-shaped accordingly; `emit_decimal_call`
     // materializes the matching call sites.
-    let is_decimal_helper = extern_fn.name.starts_with("zirk_rt_decimal_")
-        || extern_fn.name == "zirk_str_from_decimal";
+    let is_decimal_helper =
+        extern_fn.name.starts_with("zirk_rt_decimal_") || extern_fn.name == "zirk_str_from_decimal";
     let ptr = context.ptr_type(AddressSpace::default());
     let by_pointer = |ty: ir::IrType| {
         matches!(
@@ -1137,9 +1139,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     /// Alignment of `ty` in bytes, as an LLVM `i64` value.
     fn byte_align_of(&self, ty: ir::IrType) -> inkwell::values::IntValue<'ctx> {
-        let llvm = self
-            .llvm_type(ty)
-            .expect("a sized target is not Void");
+        let llvm = self.llvm_type(ty).expect("a sized target is not Void");
         let bits = llvm.get_alignment();
         self.builder
             .build_int_z_extend(bits, self.context.i64_type(), "align")
@@ -1191,7 +1191,9 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .llvm_type(element)
             .expect("an element type has an LLVM representation");
         let slot = self.builder.build_alloca(ty, "list_value").expect("alloca");
-        self.builder.build_store(slot, value).expect("store element");
+        self.builder
+            .build_store(slot, value)
+            .expect("store element");
         slot
     }
 
@@ -1781,10 +1783,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let i8_ty = self.context.i8_type();
                 let lo = (coef as u64) as u128;
                 let hi = ((coef >> 64) as u64) as u128;
-                let coef_const = i128_ty.const_int_arbitrary_precision(&[
-                    lo as u64,
-                    hi as u64,
-                ]);
+                let coef_const = i128_ty.const_int_arbitrary_precision(&[lo as u64, hi as u64]);
                 let scale_const = i8_ty.const_int(scale as u64, false);
                 Some(
                     self.context
@@ -2445,8 +2444,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .collect();
                     Some(self.emit_decimal_call(callee, &typed, instruction.ty))
                 } else {
-                    let arguments: Vec<_> =
-                        args.iter().map(|a| self.operand(*a).into()).collect();
+                    let arguments: Vec<_> = args.iter().map(|a| self.operand(*a).into()).collect();
                     let call = self
                         .builder
                         .build_call(self.functions[callee], &arguments, "call")
@@ -3033,7 +3031,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `Array<T>(capacity)` / `List<T>()` allocation.
-            ir::InstKind::ArrayNew { element_id, capacity } => {
+            ir::InstKind::ArrayNew {
+                element_id,
+                capacity,
+            } => {
                 let element = self.module.array_types[*element_id as usize];
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
@@ -3075,7 +3076,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let receiver = self.operand(*receiver).into_pointer_value();
                 let call = self
                     .builder
-                    .build_call(self.runtime.array_length, &[receiver.into()], "array_length")
+                    .build_call(
+                        self.runtime.array_length,
+                        &[receiver.into()],
+                        "array_length",
+                    )
                     .expect("array length");
                 call.try_as_basic_value().basic()
             }
@@ -3114,9 +3119,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
                     .expect("element pointer")
                     .into_pointer_value();
-                let llvm_element = self
-                    .llvm_type(element)
-                    .expect("an element is never Void");
+                let llvm_element = self.llvm_type(element).expect("an element is never Void");
                 Some(
                     self.builder
                         .build_load(llvm_element, ptr, "array_list_load")
@@ -3125,7 +3128,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `array[i] = value` / `list[i] = value`.
-            ir::InstKind::ArrayListStore { receiver, index, value } => {
+            ir::InstKind::ArrayListStore {
+                receiver,
+                index,
+                value,
+            } => {
                 let value_operand = self.operand(*value);
                 let element_ty = self.value_types[&value.0];
                 let receiver_value = self.operand(*receiver);
@@ -3183,7 +3190,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
             // `list.insert(index, value)`.
-            ir::InstKind::ListInsert { receiver, index, value } => {
+            ir::InstKind::ListInsert {
+                receiver,
+                index,
+                value,
+            } => {
                 let receiver_ty = self.value_types[&receiver.0];
                 let (_, element, _) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);
@@ -3291,7 +3302,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
             }
             // `array[start:end:step]` — shallow copy of the selected elements.
-            ir::InstKind::ArraySlice { receiver, start, end, step } => {
+            ir::InstKind::ArraySlice {
+                receiver,
+                start,
+                end,
+                step,
+            } => {
                 let receiver_ty = self.value_types[&receiver.0];
                 let (_, element, _) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);

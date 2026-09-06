@@ -81,17 +81,8 @@ pub extern "C" fn zirk_int_max(value: i128, other: i128, bits: i32, signed: i32)
 
 /// `v.clamp(lo, hi)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_clamp(
-    value: i128,
-    lo: i128,
-    hi: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
-    normalize(value, bits, signed).clamp(
-        normalize(lo, bits, signed),
-        normalize(hi, bits, signed),
-    )
+pub extern "C" fn zirk_int_clamp(value: i128, lo: i128, hi: i128, bits: i32, signed: i32) -> i128 {
+    normalize(value, bits, signed).clamp(normalize(lo, bits, signed), normalize(hi, bits, signed))
 }
 
 /// `v.is_zero()`.
@@ -178,12 +169,7 @@ pub extern "C" fn zirk_int_rotate_right(value: i128, n: i64, bits: i32) -> i128 
 /// `v.wrapping_add(other)` — and `sub`/`mul` below: arithmetic that wraps
 /// at the width, the deliberate form of what `+` traps on.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_add(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
+pub extern "C" fn zirk_int_wrapping_add(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_add(normalize(other, bits, signed)),
         bits,
@@ -193,12 +179,7 @@ pub extern "C" fn zirk_int_wrapping_add(
 
 /// `v.wrapping_sub(other)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_sub(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
+pub extern "C" fn zirk_int_wrapping_sub(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_sub(normalize(other, bits, signed)),
         bits,
@@ -208,12 +189,7 @@ pub extern "C" fn zirk_int_wrapping_sub(
 
 /// `v.wrapping_mul(other)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_mul(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
+pub extern "C" fn zirk_int_wrapping_mul(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_mul(normalize(other, bits, signed)),
         bits,
@@ -410,11 +386,7 @@ pub extern "C" fn zirk_int_checked_rem_value(
 ///
 /// `text` must be a `String` handle produced by this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_int_parse_ok(
-    text: *const c_void,
-    bits: i32,
-    signed: i32,
-) -> bool {
+pub unsafe extern "C" fn zirk_int_parse_ok(text: *const c_void, bits: i32, signed: i32) -> bool {
     let text = unsafe { borrow(text) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
@@ -434,11 +406,7 @@ pub unsafe extern "C" fn zirk_int_parse_ok(
 ///
 /// `text` must be a `String` handle produced by this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_int_parse_value(
-    text: *const c_void,
-    bits: i32,
-    signed: i32,
-) -> i128 {
+pub unsafe extern "C" fn zirk_int_parse_value(text: *const c_void, bits: i32, signed: i32) -> i128 {
     let text = unsafe { borrow(text) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
@@ -603,12 +571,7 @@ pub unsafe extern "C" fn zirk_int_to_string_radix(value: i128, radix: i32) -> *m
 
 /// `v.checked_pow(exp)` — `ok` flag.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_pow_ok(
-    value: i128,
-    exp: i128,
-    bits: i32,
-    signed: i32,
-) -> bool {
+pub extern "C" fn zirk_int_checked_pow_ok(value: i128, exp: i128, bits: i32, signed: i32) -> bool {
     if exp < 0 || exp > i32::MAX as i128 {
         return false;
     }
@@ -653,9 +616,7 @@ pub unsafe extern "C" fn zirk_int_parse_radix_ok(
     let parsed = if signed != 0 {
         i128::from_str_radix(text, radix).ok()
     } else {
-        u128::from_str_radix(text, radix)
-            .ok()
-            .map(|v| v as i128)
+        u128::from_str_radix(text, radix).ok().map(|v| v as i128)
     };
     checked_ok(parsed, bits, signed)
 }
@@ -742,11 +703,11 @@ fn format_float(value: f64, spec: &str) -> String {
     }
 
     let mut exp = None::<char>;
-    if let Some(&c) = chars.peek() {
-        if c == 'e' || c == 'E' {
-            exp = Some(c);
-            chars.next();
-        }
+    if let Some(&c) = chars.peek()
+        && (c == 'e' || c == 'E')
+    {
+        exp = Some(c);
+        chars.next();
     }
 
     // Ignore trailing characters; they cannot be expressed by Rust's

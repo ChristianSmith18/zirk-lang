@@ -109,8 +109,12 @@ Fundamental families:
 - signed `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, with `Int` and `Integer`
   aliasing the default `Int32`;
 - unsigned `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`;
-- binary `Float16`, `Float32`, `Float64`, `Float128`, with `Float` aliasing
-  `Float64`; an exact base-ten `Decimal` may be a later stdlib type;
+- `Float`, an exact base-ten decimal (a 128-bit integer coefficient with a
+  decimal scale, up to 38 significant digits); it is the default fractional
+  type and has no width family, no `NaN` and no infinity;
+- binary `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`,
+  with `BinaryFloat` aliasing `BinaryFloat64` — IEEE 754 for graphics, DSP,
+  numerics and C interop, written with a `b` literal suffix (`1.5b`, `1.5b32`);
 - primitive `Boolean`, exactly `true` or `false`;
 - primitive `Char`, exactly one Unicode grapheme, even when composed of
   multiple code points and bytes;
@@ -124,15 +128,25 @@ There is no numeric truthiness. `Boolean?` admits `null`; `Boolean` does not.
 There is no `undefined`.
 
 Literals admit scientific notation (`1e2`) and `_` as a separator
-(`1_000_000`). A fractional literal defaults to `Float64`. `Float` has explicit
-positive and negative infinity but no valid `NaN`; division by zero, overflow
-and indeterminate results are controlled errors. Duration suffixes are `ns`,
-`us`, `ms`, `s`, `m`, `h`, `d` and `w`; calendar months and years use `Period`.
+(`1_000_000`). A suffix-less fractional literal is an exact `Float`; a `b`
+suffix (`1.5b`, `0.1b128`) makes it a `BinaryFloat`. A suffix-less literal that
+needs more than 38 significant digits to be exact is a compile error that
+suggests the `b` suffix. `Float` `+ - *` and integer `**` are exact; `/`, `%`,
+`sqrt` and fractional `pow` round half-to-even to a 28-significant-digit
+budget. `Float` has no `NaN` and no infinity — coefficient overflow and
+division by zero are controlled errors. `BinaryFloat` keeps IEEE 754 behavior:
+explicit positive and negative infinity, no valid `NaN`, and a `NaN`-producing
+operation as a controlled error. `Float` and `BinaryFloat` never combine in one
+operation — an explicit `Float(x)` / `BinaryFloat(x)` conversion is required.
+Duration suffixes are `ns`, `us`, `ms`, `s`, `m`, `h`, `d` and `w`; calendar
+months and years use `Period`.
 
 Ordinary overflow produces a controlled error; wrapping, saturating and checked
 variants must be explicit operations. Safe widening may be implicit where
-unambiguous; signed/unsigned and lossy conversions are explicit. Mixed integer
-and Float arithmetic produces Float.
+unambiguous; signed/unsigned and lossy conversions are explicit. Every integer
+converts implicitly and exactly to `Float`; mixed integer and `Float`
+arithmetic produces `Float`, and mixed integer and `BinaryFloat` arithmetic
+produces `BinaryFloat`.
 
 An explicit constructor may establish a deep contextual domain for the
 compatible operator tree directly inside it. `Float(3 / 4)` converts operands

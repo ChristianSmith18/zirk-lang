@@ -550,7 +550,9 @@ fn exact_float_literal_is_a_struct_constant_not_a_binary_float() {
 
 #[test]
 fn exact_float_addition_calls_the_decimal_runtime_by_pointer() {
-    let ir = llvm_ir(&in_main("mut a: Float = 0.1;\nmut b = 0.2;\nmut c = a + b;"));
+    let ir = llvm_ir(&in_main(
+        "mut a: Float = 0.1;\nmut b = 0.2;\nmut c = a + b;",
+    ));
     assert!(
         ir.contains("call void @zirk_rt_decimal_add(ptr"),
         "`a + b` is a by-pointer call to the decimal-add helper:\n{ir}"

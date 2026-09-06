@@ -206,7 +206,9 @@ fn invalid_exact_float_has_no_infinity_member() {
 
 #[test]
 fn valid_safe_widening_between_float_widths() {
-    accepted_body("mut a: BinaryFloat16 = 1.5b16;\nmut b: BinaryFloat32 = a;\nmut c: BinaryFloat64 = b;");
+    accepted_body(
+        "mut a: BinaryFloat16 = 1.5b16;\nmut b: BinaryFloat32 = a;\nmut c: BinaryFloat64 = b;",
+    );
 }
 
 #[test]
@@ -222,7 +224,9 @@ fn valid_explicit_float_narrowing_with_as() {
 
 #[test]
 fn valid_explicit_conversion_between_int_and_float() {
-    accepted_body("mut a: Int32 = 5;\nmut b: BinaryFloat64 = a as BinaryFloat64;\nmut c: Int32 = b as Int32;");
+    accepted_body(
+        "mut a: Int32 = 5;\nmut b: BinaryFloat64 = a as BinaryFloat64;\nmut c: Int32 = b as Int32;",
+    );
 }
 
 #[test]
@@ -3357,7 +3361,9 @@ fn valid_type_alias_to_a_declared_class() {
 fn valid_type_alias_lowers() {
     // The `NOT_LOWERED` gate this used to assert is gone (roadmap Phase 7,
     // task 12.1): an alias resolves to its target and lowers.
-    accepted("type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; mut other: Int32 = id; }");
+    accepted(
+        "type UserId = Int32;\nfn main(): Void { mut id: UserId = 5; mut other: Int32 = id; }",
+    );
 }
 
 #[test]
@@ -5178,4 +5184,3 @@ fn valid_string_index_write() {
          }",
     );
 }
-

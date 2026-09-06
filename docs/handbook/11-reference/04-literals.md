@@ -3,7 +3,8 @@
 | Kind | Examples | Inference and validation |
 |---|---|---|
 | integer | `0`, `42`, `0xff`, `0b1010`, `1_000` | `Int` when representable unless context or suffix selects a width |
-| Float | `1.0`, `6.02e23`, `1.5f32` | `Float` (`Float64`) unless context or suffix selects a width |
+| Float (exact) | `1.0`, `6.02e23` | `Float` — exact base-ten decimal |
+| Binary float | `1.5b`, `1.5b32`, `0.1b128` | `BinaryFloat*` — IEEE 754, width from the `b` suffix |
 | Boolean | `true`, `false` | strict `Boolean` |
 | Char | `'a'`, `'π'`, `'👨‍👩‍👧‍👦'` | exactly one Unicode grapheme or compile error |
 | String | `"hello"`, `"value={value}"` | `String`; escapes and interpolation are validated |

@@ -3452,9 +3452,7 @@ impl<'a> Parser<'a> {
         } else {
             Some(self.parse_expr()?)
         };
-        let step = if self.eat(&TokenKind::Colon)
-            && !matches!(self.peek(), TokenKind::RBracket)
-        {
+        let step = if self.eat(&TokenKind::Colon) && !matches!(self.peek(), TokenKind::RBracket) {
             Some(self.parse_expr()?)
         } else {
             None
@@ -3565,11 +3563,12 @@ fn duration_nanos(text: &str, unit: DurationUnit) -> i64 {
     // values. A literal beyond `i64` nanoseconds saturates — the same ceiling
     // `Duration`'s own arithmetic keeps.
     if !text.contains(['.', 'e', 'E'].as_slice())
-        && let Ok(value) = text.parse::<i128>() {
-            return value
-                .saturating_mul(multiplier as i128)
-                .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
-        }
+        && let Ok(value) = text.parse::<i128>()
+    {
+        return value
+            .saturating_mul(multiplier as i128)
+            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    }
     let value = text.parse::<f64>().unwrap_or(0.0);
     (value * multiplier as f64) as i64
 }

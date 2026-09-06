@@ -9,7 +9,7 @@ Object
 ├── Value
 │   ├── Numeric
 │   │   ├── Integer: Int8 … Int128, UInt8 … UInt128
-│   │   └── Float: Float16 … Float128
+│   │   └── Float: BinaryFloat16 … BinaryFloat128
 │   ├── Boolean
 │   ├── Char
 │   ├── Temporal
@@ -26,7 +26,7 @@ Object
 ```
 
 The tree is a learning model, not automatic subtype permission. `Int32` and
-`Float64` share numeric capabilities, but a function accepting `Int32` does not
+`Float` share numeric capabilities, but a function accepting `Int32` does not
 accept every numeric value. `Date` and `Duration` are both temporal, but only
 the combinations defined by their contracts compile.
 

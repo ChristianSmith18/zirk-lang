@@ -1092,8 +1092,12 @@ impl<'a> Checker<'a> {
             // Every class, record, tuple, enum, weak reference and callable
             // value has a compiler-provided default `to_string()` rendering
             // unless it declares its own (`native-type-member-surface`).
-            Base::Class(_) | Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
-            | Base::Function(_) | Base::Weak(_) => true,
+            Base::Class(_)
+            | Base::Tuple(_)
+            | Base::Enum(_)
+            | Base::EnumInstance(_)
+            | Base::Function(_)
+            | Base::Weak(_) => true,
             // A value reached through a contract that itself declares
             // `to_string()` — every implementer supplies one (either its own
             // or the contract's default body), so the dispatch table always
@@ -2231,9 +2235,7 @@ impl<'a> Checker<'a> {
         let native = self
             .native_iteration
             .is_some_and(|n| contract == n.iterable || contract == n.iterator)
-            || self
-                .native_resource
-                .is_some_and(|n| contract == n.resource);
+            || self.native_resource.is_some_and(|n| contract == n.resource);
         if params_in_members && !native {
             self.not_lowered(
                 reference.span,
@@ -4636,9 +4638,7 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         let element = self.resolve_type(&reference.arguments[0]);
-        if !element.is_unknown()
-            && !matches!(element.base, Base::Int(_) | Base::Duration)
-        {
+        if !element.is_unknown() && !matches!(element.base, Base::Int(_) | Base::Duration) {
             let found = self.name(element);
             self.error(
                 codes::TYPE_MISMATCH,
@@ -5593,7 +5593,9 @@ impl<'a> Checker<'a> {
 
         if self_recursive {
             self.declare_local(Binding {
-                name: binding_name.expect("checked by `self_recursive` above").to_string(),
+                name: binding_name
+                    .expect("checked by `self_recursive` above")
+                    .to_string(),
                 ty: annotated.expect("checked by `self_recursive` above"),
                 mutability: stmt.mutability,
                 span: pattern_span,
@@ -5676,7 +5678,13 @@ impl<'a> Checker<'a> {
         }
 
         if let Some(init) = &stmt.init {
-            self.check_strict_alias(init, ty, stmt.mutability, binding_name.unwrap_or("_"), pattern_span);
+            self.check_strict_alias(
+                init,
+                ty,
+                stmt.mutability,
+                binding_name.unwrap_or("_"),
+                pattern_span,
+            );
         }
 
         // `check_pattern` validates the pattern and collects the bindings it
@@ -5685,7 +5693,13 @@ impl<'a> Checker<'a> {
         let mut covered = Vec::new();
         let mut has_wildcard = false;
         let mut bindings = Vec::new();
-        self.check_pattern(&stmt.pattern, ty, &mut covered, &mut has_wildcard, &mut bindings);
+        self.check_pattern(
+            &stmt.pattern,
+            ty,
+            &mut covered,
+            &mut has_wildcard,
+            &mut bindings,
+        );
 
         for binding in &mut bindings {
             binding.mutability = stmt.mutability;
@@ -6042,7 +6056,12 @@ impl<'a> Checker<'a> {
     /// enum's id is tagged with `ENUM_TAG` so the two id spaces cannot
     /// collide in one list (a recursive enum, `enum Node { Done, More(Node) }`,
     /// resolves `true` provisionally exactly like a recursive class does).
-    fn enum_is_clone(&mut self, id: u32, subst: &[(u32, Type)], in_progress: &mut Vec<u32>) -> bool {
+    fn enum_is_clone(
+        &mut self,
+        id: u32,
+        subst: &[(u32, Type)],
+        in_progress: &mut Vec<u32>,
+    ) -> bool {
         const ENUM_TAG: u32 = 1 << 31;
         let tag = id | ENUM_TAG;
         if in_progress.contains(&tag) {
@@ -6210,9 +6229,7 @@ impl<'a> Checker<'a> {
                         // A `Char` or a single-grapheme `String` is what the
                         // spec allows; both share `String`'s representation
                         // (ADR-014), so either handle is accepted here.
-                        if !value.is_unknown()
-                            && !matches!(value.base, Base::Char | Base::String)
-                        {
+                        if !value.is_unknown() && !matches!(value.base, Base::Char | Base::String) {
                             let found = self.name(value);
                             self.error(
                                 codes::TYPE_MISMATCH,
@@ -8266,9 +8283,7 @@ impl<'a> Checker<'a> {
         .flatten()
         .collect();
 
-        let any_duration = parts
-            .iter()
-            .any(|(t, _)| matches!(t.base, Base::Duration));
+        let any_duration = parts.iter().any(|(t, _)| matches!(t.base, Base::Duration));
         if any_duration {
             for (part, span) in &parts {
                 if !part.is_unknown() && !matches!(part.base, Base::Duration) {
@@ -8320,22 +8335,23 @@ impl<'a> Checker<'a> {
         }
 
         if let Some(expected) = expected
-            && let Base::Tuple(_) = expected.base {
-                let actual = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
-                    elements: elements.clone(),
-                })));
-                if !actual.without_null().accepts(expected.without_null()) {
-                    let found = self.name(actual);
-                    let exp_name = self.name(expected);
-                    self.error(
-                        codes::TYPE_MISMATCH,
-                        tuple.span,
-                        format!("expected `{exp_name}`, found `{found}`"),
-                        "the tuple's elements do not match the declared type",
-                        None,
-                    );
-                }
+            && let Base::Tuple(_) = expected.base
+        {
+            let actual = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
+                elements: elements.clone(),
+            })));
+            if !actual.without_null().accepts(expected.without_null()) {
+                let found = self.name(actual);
+                let exp_name = self.name(expected);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    tuple.span,
+                    format!("expected `{exp_name}`, found `{found}`"),
+                    "the tuple's elements do not match the declared type",
+                    None,
+                );
             }
+        }
 
         let id = self.intern_tuple_type(TupleType { elements });
         Type::of(Base::Tuple(id))
@@ -11029,7 +11045,10 @@ impl<'a> Checker<'a> {
         };
 
         let element = if let Base::Array(id) = expected.base {
-            self.array_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+            self.array_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN)
         } else {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -11081,7 +11100,12 @@ impl<'a> Checker<'a> {
                 }
                 let arg_ty = self.check_expr(&arg.value);
                 if !element.is_unknown() && !arg_ty.is_unknown() {
-                    self.expect_assignable(element, arg_ty, arg.value.span(), "array literal element");
+                    self.expect_assignable(
+                        element,
+                        arg_ty,
+                        arg.value.span(),
+                        "array literal element",
+                    );
                 }
             }
         }
@@ -11110,7 +11134,10 @@ impl<'a> Checker<'a> {
         };
 
         let element = if let Base::List(id) = expected.base {
-            self.list_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+            self.list_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN)
         } else {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -11846,7 +11873,10 @@ impl<'a> Checker<'a> {
                 // `parse(text)` and `parse(text, radix: n)` — the radix form
                 // only exists on the integer family.
                 let radix = expr.args.len() == 2
-                    && expr.args[1].name.as_ref().is_some_and(|n| n.name == "radix")
+                    && expr.args[1]
+                        .name
+                        .as_ref()
+                        .is_some_and(|n| n.name == "radix")
                     && matches!(target.base, Base::Int(_));
                 if expr.args.len() != 1 && !radix {
                     self.error(
@@ -11973,8 +12003,11 @@ impl<'a> Checker<'a> {
                 && !object.nullable
                 && expr.args.is_empty()
                 && match object.base {
-                    Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
-                    | Base::Function(_) | Base::Weak(_) => true,
+                    Base::Tuple(_)
+                    | Base::Enum(_)
+                    | Base::EnumInstance(_)
+                    | Base::Function(_)
+                    | Base::Weak(_) => true,
                     Base::Class(id) => self.classes[id as usize].method("to_string").is_none(),
                     _ => false,
                 }
@@ -12151,8 +12184,7 @@ impl<'a> Checker<'a> {
                         "the argument",
                     );
                 }
-                let id =
-                    self.intern_list_type(Type::of(Base::Class(self.regex_match_class)));
+                let id = self.intern_list_type(Type::of(Base::Class(self.regex_match_class)));
                 return Type::of(Base::List(id));
             }
 
@@ -12194,8 +12226,8 @@ impl<'a> Checker<'a> {
             // calls.
             if matches!(object.base, Base::String) && !field.safe && !object.nullable {
                 match field.name.name.as_str() {
-                    "trim" | "trim_start" | "trim_end" | "to_lowercase"
-                    | "to_uppercase" | "clone"
+                    "trim" | "trim_start" | "trim_end" | "to_lowercase" | "to_uppercase"
+                    | "clone"
                         if expr.args.is_empty() =>
                     {
                         return Type::STRING;
@@ -12410,8 +12442,8 @@ impl<'a> Checker<'a> {
                         return Type::BOOLEAN;
                     }
                     "min" | "max" | "rotate_left" | "rotate_right" | "wrapping_add"
-                    | "wrapping_sub" | "wrapping_mul" | "saturating_add"
-                    | "saturating_sub" | "saturating_mul"
+                    | "wrapping_sub" | "wrapping_mul" | "saturating_add" | "saturating_sub"
+                    | "saturating_mul"
                         if expr.args.len() == 1 =>
                     {
                         self.check_int_argument(expr, object);
@@ -12434,7 +12466,10 @@ impl<'a> Checker<'a> {
                     }
                     "to_string"
                         if expr.args.len() == 1
-                            && expr.args[0].name.as_ref().is_some_and(|n| n.name == "radix") =>
+                            && expr.args[0]
+                                .name
+                                .as_ref()
+                                .is_some_and(|n| n.name == "radix") =>
                     {
                         self.check_int_argument(expr, object);
                         return Type::STRING;
@@ -12449,8 +12484,7 @@ impl<'a> Checker<'a> {
                 && !object.nullable
             {
                 match field.name.name.as_str() {
-                    "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction"
-                    | "sqrt"
+                    "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction" | "sqrt"
                         if expr.args.is_empty() =>
                     {
                         return object;
@@ -12464,15 +12498,18 @@ impl<'a> Checker<'a> {
                     "format" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
                         if !arg.is_unknown() && !arg.accepts(Type::STRING) {
-                            self.expect_assignable(Type::STRING, arg, expr.args[0].value.span(), "the argument");
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
                         }
                         return Type::STRING;
                     }
                     "min" | "max" | "pow" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
-                        if !arg.is_unknown()
-                            && !matches!(arg.base, Base::Int(_) | Base::Float(_))
-                        {
+                        if !arg.is_unknown() && !matches!(arg.base, Base::Int(_) | Base::Float(_)) {
                             self.expect_assignable(
                                 object,
                                 arg,
@@ -12486,12 +12523,7 @@ impl<'a> Checker<'a> {
                         for arg in &expr.args {
                             let t = self.check_expr(&arg.value);
                             if !t.is_unknown() && !object.accepts(t) {
-                                self.expect_assignable(
-                                    object,
-                                    t,
-                                    arg.value.span(),
-                                    "the argument",
-                                );
+                                self.expect_assignable(object, t, arg.value.span(), "the argument");
                             }
                         }
                         return object;
@@ -13325,24 +13357,19 @@ impl<'a> Checker<'a> {
                     while pos < slots.len() && matches!(slots[pos], ArgSlot::Given { .. }) {
                         pos += 1;
                     }
-                    slots
-                        .get(pos)
-                        .and(signature.params.get(pos))
-                        .map(|p| p.ty)
+                    slots.get(pos).and(signature.params.get(pos)).map(|p| p.ty)
                 }
             };
             // Only a bare numeric literal (or its negation) should be steered
             // by the parameter type — anything else keeps its own type and is
             // checked against the parameter afterward.
-            let arg_is_numeric_literal = matches!(
-                &arg.value,
-                Expr::Float(_) | Expr::Int(_)
-            ) || matches!(
-                &arg.value,
-                Expr::Unary(u)
-                    if u.op == UnaryOp::Neg
-                        && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_))
-            );
+            let arg_is_numeric_literal = matches!(&arg.value, Expr::Float(_) | Expr::Int(_))
+                || matches!(
+                    &arg.value,
+                    Expr::Unary(u)
+                        if u.op == UnaryOp::Neg
+                            && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_))
+                );
             self.expected_type = hint.filter(|t| {
                 arg_is_numeric_literal
                     && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)

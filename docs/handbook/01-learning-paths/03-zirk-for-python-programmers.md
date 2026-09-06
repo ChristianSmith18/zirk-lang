@@ -5,7 +5,7 @@ Zirk favors readable code and strong tooling, but its program model differs fund
 ## Types exist before execution
 
 ```zirk
-fn total(prices: List<Float64>): Float64 {
+fn total(prices: List<Float>): Float {
     return prices.reduce(0.0, (sum, price) => sum + price);
 }
 ```

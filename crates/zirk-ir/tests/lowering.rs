@@ -2585,4 +2585,3 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
         }
     }
 }
-

@@ -51,10 +51,9 @@ mod resource;
 mod scalar;
 mod string;
 
+pub use array::*;
 pub use char::*;
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
-pub use array::*;
-pub use list::*;
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
     zirk_rt_index_out_of_bounds, zirk_rt_overflow,
@@ -63,14 +62,16 @@ pub use io::zirk_io_println;
 pub use journal::{
     zirk_rt_journal_begin, zirk_rt_journal_commit, zirk_rt_journal_record, zirk_rt_journal_rollback,
 };
+pub use list::*;
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
 pub use range::{
-    zirk_range_end, zirk_range_inclusive, zirk_range_new, zirk_range_reverse,
-    zirk_range_slice, zirk_range_start, zirk_range_step,
+    zirk_range_end, zirk_range_inclusive, zirk_range_new, zirk_range_reverse, zirk_range_slice,
+    zirk_range_start, zirk_range_step,
 };
 pub use regex::{
-    zirk_regex_find, zirk_regex_find_all, zirk_regex_from_pattern, zirk_regex_is_match, zirk_regex_match_group_name,
-    zirk_regex_match_group_pos, zirk_regex_replace, zirk_regex_split, zirk_regex_to_string,
+    zirk_regex_find, zirk_regex_find_all, zirk_regex_from_pattern, zirk_regex_is_match,
+    zirk_regex_match_group_name, zirk_regex_match_group_pos, zirk_regex_replace, zirk_regex_split,
+    zirk_regex_to_string,
 };
 pub use resource::{zirk_rt_is_cancelled, zirk_rt_resource_close_group, zirk_rt_resource_transfer};
 pub use string::{
