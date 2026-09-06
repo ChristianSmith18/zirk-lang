@@ -105,7 +105,17 @@ pub extern "C" fn zirk_rt_invalid_cast() -> ! {
 /// operation that produced it.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_float_nan() -> ! {
-    fatal("Float operation produced an indeterminate result (NaN)")
+    fatal("BinaryFloat operation produced an indeterminate result (NaN)")
+}
+
+/// Reports an exact-decimal `Float` operation outside its domain — a negative
+/// `sqrt`, or a `pow` whose result is not a finite real — and terminates.
+///
+/// `Float` has no `NaN` and no infinity, so unlike `BinaryFloat` there is no
+/// special value to produce: an out-of-domain operation is a controlled stop.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_decimal_domain() -> ! {
+    fatal("Float operation is outside its domain (for example, the square root of a negative value)")
 }
 
 /// Reports a program-supplied `fatalError(message)` and terminates (roadmap
