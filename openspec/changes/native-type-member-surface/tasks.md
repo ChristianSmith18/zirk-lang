@@ -2,22 +2,22 @@
 
 ## 1. Integer statics and value methods
 
-- [ ] 1.1 Checker: `IntN.MIN`/`MAX`/`BITS` resolved in expression position for every width (signed and unsigned)
-- [ ] 1.2 Checker + lowering + runtime: `IntN.parse(text)` → `Result<IntN, ParseError>`; unsigned rejects `-`
-- [ ] 1.3 Checker + lowering + runtime: `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_even`, `is_odd` (width-correct, `abs` traps on `MIN`)
-- [ ] 1.4 Checker + lowering + runtime: `bit_count`, `leading_zeros`, `trailing_zeros`, `rotate_left`, `rotate_right` (width-scoped)
-- [ ] 1.5 `checked_add/sub/mul/div/rem` → `Result<T, OverflowError>` reusing existing overflow detection
-- [ ] 1.6 `wrapping_add/sub/mul` and `saturating_add/sub/mul`
-- [ ] 1.7 Corpus fixture `int_members.zrk` covering several widths + invalid fixture for `abs` on `MIN` behavior
+- [x] 1.1 Checker: `IntN.MIN`/`MAX`/`BITS` resolved in expression position for every width (signed and unsigned)
+- [x] 1.2 Checker + lowering + runtime: `IntN.parse(text)` → `Result<IntN, ParseError>`; unsigned rejects `-`
+- [x] 1.3 Checker + lowering + runtime: `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_even`, `is_odd` (width-correct, `abs` traps on `MIN`)
+- [x] 1.4 Checker + lowering + runtime: `bit_count`, `leading_zeros`, `trailing_zeros`, `rotate_left`, `rotate_right` (width-scoped)
+- [x] 1.5 `checked_add/sub/mul/div/rem` → `Result<T, OverflowError>` reusing existing overflow detection
+- [x] 1.6 `wrapping_add/sub/mul` and `saturating_add/sub/mul`
+- [x] 1.7 Corpus fixture `int_members.zrk` covering several widths + invalid fixture for `abs` on `MIN` behavior
 - [ ] 1.8 Handbook: `02-signed-integers.md`/`03-unsigned-integers.md` statuses back to `implemented`
 
 ## 2. Float members
 
-- [ ] 2.1 `FloatN.MIN`/`MAX`/`LOWEST`/`EPSILON`/`POSITIVE_INFINITY`/`NEGATIVE_INFINITY`
-- [ ] 2.2 `FloatN.parse(text)` → `Result<FloatN, ParseError>`
-- [ ] 2.3 `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_finite`, `is_infinite`, `is_negative`
-- [ ] 2.4 `floor`, `ceil`, `round`, `truncate`, `fraction`, `pow`, `sqrt` (negative `sqrt` is a controlled error)
-- [ ] 2.5 Corpus fixture `float_members.zrk`
+- [x] 2.1 `FloatN.MIN`/`MAX`/`LOWEST`/`EPSILON`/`POSITIVE_INFINITY`/`NEGATIVE_INFINITY`
+- [x] 2.2 `FloatN.parse(text)` → `Result<FloatN, ParseError>`
+- [x] 2.3 `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_finite`, `is_infinite`, `is_negative`
+- [x] 2.4 `floor`, `ceil`, `round`, `truncate`, `fraction`, `pow`, `sqrt` (negative `sqrt` is a controlled error)
+- [x] 2.5 Corpus fixture `float_members.zrk`
 - [ ] 2.6 Handbook: `04-decimals.md` statuses
 
 ## 3. Char members
@@ -46,9 +46,9 @@
 
 ## 6. Regex.parse
 
-- [ ] 6.1 Checker: `Regex.parse` static call → `Result<Regex, RegexError>`
-- [ ] 6.2 Runtime `zirk_regex_compile` returning handle-or-null + `RegexError`
-- [ ] 6.3 Corpus fixture `regex_parse.zrk`
+- [x] 6.1 Checker: `Regex.parse` static call → `Result<Regex, RegexError>`
+- [x] 6.2 Runtime `zirk_regex_compile` returning handle-or-null + `RegexError`
+- [x] 6.3 Corpus fixture `regex_parse.zrk`
 - [ ] 6.4 Handbook: `12-regex.md` status
 
 ## 7. Collections
@@ -75,5 +75,5 @@
 - [ ] 9.2 Handbook statuses updated for every delivered member; `13-type-member-index.md` delivery note removed where fully delivered
 - [x] 9.3 `12-feature-status.md` updated; `openspec validate --all --strict` green
 - [ ] 9.4 Website re-sync (`yarn content:sync` in zirk-lang-site) after committing handbook sources
-- [ ] 9.5 Commit(s) in zirk-lang and zirk-lang-site
+- [x] 9.5 Commit(s) in zirk-lang and zirk-lang-site
 - [ ] 9.6 Archive change when the user confirms
