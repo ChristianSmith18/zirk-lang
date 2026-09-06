@@ -2949,6 +2949,24 @@ fn invalid_enums_helper_on_a_non_enum_name() {
 }
 
 #[test]
+fn invalid_enum_variants_sharing_a_lookup_key() {
+    // `from_value` compares against the effective key — the `->` mapping,
+    // or the name/discriminant a case without one keeps — so a repeated
+    // mapping, or one colliding with a bare case's own key, is ambiguous.
+    for source in [
+        "enum ExitCode { Success -> 0, Failure -> 0 }",
+        "enum ExitCode { Success, Failure -> 0 }",
+        "enum Role { Admin -> \"Guest\", Guest }",
+    ] {
+        let output = rejected(&format!("{source}\nfn main(): Void {{ }}"));
+        assert!(
+            output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+            "for `{source}`:\n{output}"
+        );
+    }
+}
+
+#[test]
 fn invalid_enum_mixing_string_and_integer_mappings_has_no_lookup_type() {
     let output = rejected(
         "enum Mixed { A -> \"x\", B -> 1 }
