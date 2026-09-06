@@ -2711,3 +2711,27 @@ fn from_value_compares_against_the_mapping() {
         .count();
     assert_eq!(comparisons, 2, "one test per mapped case");
 }
+
+#[test]
+fn enum_to_string_lowers_to_the_interned_type_name() {
+    let module = compile(
+        "enum Direction { North, South }
+         fn main(): Void {
+             mut a = Direction.to_string;
+             mut b = Direction.to_string();
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let strings: Vec<_> = instructions(main)
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::ConstString(id) => Some(module.strings[id.0 as usize].clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        strings.iter().filter(|s| s.as_str() == "Direction").count(),
+        2,
+        "both spellings render the type name: {strings:?}"
+    );
+}

@@ -10411,6 +10411,12 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I32),
                 span,
             )),
+            // `E.to_string()` — the call spelling of the `E.to_string`
+            // property — renders the enum type name.
+            "to_string" => {
+                let name = self.checked.enums[enum_id as usize].name.clone();
+                Some(self.const_string(&name, span))
+            }
             "keys" | "values" => {
                 let ty = self
                     .checked
@@ -12076,22 +12082,33 @@ impl<'a> FunctionLowering<'a> {
             }
         }
 
-        // `Direction.count` (`enum-static-members`): a static member on the
-        // enum's own type name — the path names a type, not a value to read
-        // a field from, so this answers before any `type_of` on
-        // `expr.object`, the same ordering the `variant_accesses` branch
-        // below keeps for `Direction.North`.
+        // `Direction.count`/`Direction.to_string` (`enum-static-members`):
+        // a static member on the enum's own type name — the path names a
+        // type, not a value to read a field from, so this answers before
+        // any `type_of` on `expr.object`, the same ordering the
+        // `variant_accesses` branch below keeps for `Direction.North`.
         if self.checked.enum_static_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("an enum static access names its enum")
             };
             let enum_id = self.enum_id_of(enum_name);
-            let count = self.checked.enums[enum_id as usize].variants.len();
-            return self.emit(
-                InstKind::ConstInt(count as i128),
-                IrType::Int(IntWidth::I32),
-                span,
-            );
+            return match expr.name.name.as_str() {
+                "count" => {
+                    let count = self.checked.enums[enum_id as usize].variants.len();
+                    self.emit(
+                        InstKind::ConstInt(count as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                }
+                // `E.to_string` renders the enum type name — a constant
+                // string known since the declaration resolved.
+                "to_string" => {
+                    let name = self.checked.enums[enum_id as usize].name.clone();
+                    self.const_string(&name, span)
+                }
+                _ => unreachable!("the checker only records `count`/`to_string` here"),
+            };
         }
 
         // `native-type-member-surface` field/property lowering.

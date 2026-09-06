@@ -84,7 +84,7 @@ built-in static members; user-defined methods are not allowed.
 | `Direction.count` | `Int32` | Number of cases | implemented |
 | `Direction.from_name(name)` | `Result<Direction, LookupError>` | Name lookup; controlled failure | implemented |
 | `Direction.from_value(value)` | `Result<Direction, LookupError>` | Mapped-value lookup; mappings must be unique | implemented |
-| `Direction.to_string()` | `String` | Renders the enum type name | specified |
+| `Direction.to_string()` | `String` | Renders the enum type name | implemented |
 | `Enums.keys(enum_type)` | `List<String>` | Generic helper, equivalent to `T.keys()` | implemented |
 | `Enums.values(enum_type)` | `List<T>` | Generic helper, equivalent to `T.values()` | implemented |
 | `Enums.count(enum_type)` | `Int32` | Generic helper, equivalent to `T.count` | implemented |
