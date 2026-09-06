@@ -1375,6 +1375,16 @@ pub enum InstKind {
     ListNew {
         element_id: u32,
     },
+    /// `Map<K, V>()` allocates an empty map. Result type is
+    /// `IrType::Map(map_id)`.
+    MapNew {
+        map_id: u32,
+    },
+    /// `Set<T>()` allocates an empty set. Result type is
+    /// `IrType::Set(set_id)`.
+    SetNew {
+        set_id: u32,
+    },
     /// `array[i]` / `list[i]` read: returns the element at `index`. The
     /// instruction's own `ty` is the element type.
     ArrayListLoad {
@@ -1417,6 +1427,52 @@ pub enum InstKind {
     ListClone {
         receiver: Operand,
     },
+
+    /// `map.length()` — returns `UInt64`.
+    MapLength(Operand),
+    /// `map.is_empty()` — returns `Boolean`.
+    MapIsEmpty(Operand),
+    /// `map.set(key, value)` — returns `Void`.
+    MapSet {
+        receiver: Operand,
+        key: Operand,
+        value: Operand,
+    },
+    /// `map.contains_key(key)` — returns `Boolean`.
+    MapContainsKey {
+        receiver: Operand,
+        key: Operand,
+    },
+    /// `map.get_or_null(key)` — returns `V?`.
+    MapGet {
+        receiver: Operand,
+        key: Operand,
+    },
+    /// `map.remove(key)` — returns `Boolean`.
+    MapRemove {
+        receiver: Operand,
+        key: Operand,
+    },
+    /// `set.length()` — returns `UInt64`.
+    SetLength(Operand),
+    /// `set.is_empty()` — returns `Boolean`.
+    SetIsEmpty(Operand),
+    /// `set.add(value)` — returns `Void`.
+    SetAdd {
+        receiver: Operand,
+        value: Operand,
+    },
+    /// `set.contains(value)` — returns `Boolean`.
+    SetContains {
+        receiver: Operand,
+        value: Operand,
+    },
+    /// `set.remove(value)` — returns `Boolean`.
+    SetRemove {
+        receiver: Operand,
+        value: Operand,
+    },
+
     /// `array[start:end:step]`: returns a new `Array<T>` with the selected
     /// elements, following the same bound/negative/step rules as `String` slicing.
     ArraySlice {

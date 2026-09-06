@@ -2780,6 +2780,32 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::List(id));
         }
 
+        // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
+        // treatment — the checker already interned every shape.
+        if reference.name == "Map" {
+            let key = self.resolve_written_type(&reference.arguments[0]);
+            let value = self.resolve_written_type(&reference.arguments[1]);
+            let id = self
+                .checked
+                .map_types
+                .iter()
+                .position(|t| t.key == key && t.value == value)
+                .expect("the checker interned every Map<K, V> it type-checked")
+                as u32;
+            return Type::of(Base::Map(id));
+        }
+        if reference.name == "Set" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .set_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Set<T> it type-checked")
+                as u32;
+            return Type::of(Base::Set(id));
+        }
+
         // `Range<T>` (roadmap Phase 7): same interned-by-content treatment —
         // the element type the checker stored is resolved and matched back
         // against `checked.range_types`.
@@ -5806,6 +5832,9 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_array_list_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_map_set_method_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
@@ -10531,6 +10560,123 @@ impl<'a> FunctionLowering<'a> {
     /// `Array<T>(capacity)` and `List<T>()` are lowered to dedicated
     /// allocation instructions; the element type comes from the checker's
     /// recorded semantic type.
+    /// `Map<K, V>` and `Set<T>` built-in methods: `length`, `is_empty`,
+    /// `set`, `contains_key`, `add`, `contains`.
+    fn lower_map_set_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return None;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        if !matches!(receiver_ty, IrType::Map(_) | IrType::Set(_)) {
+            return None;
+        }
+        let receiver = self.lower_expr(&field.object);
+        let (key_ty, value_ty, element_ty) = match receiver_ty {
+            IrType::Map(id) => {
+                let (k, v) = self
+                    .module
+                    .map_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or((IrType::Void, IrType::Void));
+                (k, v, IrType::Void)
+            }
+            IrType::Set(id) => {
+                let e = self
+                    .module
+                    .set_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(IrType::Void);
+                (IrType::Void, IrType::Void, e)
+            }
+            _ => return None,
+        };
+
+        match (field.name.name.as_str(), call.args.len(), receiver_ty) {
+            ("length", 0, IrType::Map(_)) => {
+                Some(self.emit(InstKind::MapLength(receiver), IrType::Int(IntWidth::U64), span))
+            }
+            ("length", 0, IrType::Set(_)) => {
+                Some(self.emit(InstKind::SetLength(receiver), IrType::Int(IntWidth::U64), span))
+            }
+            ("is_empty", 0, IrType::Map(_)) => {
+                Some(self.emit(InstKind::MapIsEmpty(receiver), IrType::Boolean, span))
+            }
+            ("is_empty", 0, IrType::Set(_)) => {
+                Some(self.emit(InstKind::SetIsEmpty(receiver), IrType::Boolean, span))
+            }
+            ("set", 2, IrType::Map(_)) => {
+                let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let value = self.lower_expr_as(&call.args[1].value, value_ty);
+                Some(self.emit(
+                    InstKind::MapSet { receiver, key, value },
+                    IrType::Void,
+                    span,
+                ))
+            }
+            ("contains_key", 1, IrType::Map(_)) => {
+                let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                Some(self.emit(
+                    InstKind::MapContainsKey { receiver, key },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            ("add", 1, IrType::Set(_)) => {
+                let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                Some(self.emit(
+                    InstKind::SetAdd { receiver, value },
+                    IrType::Void,
+                    span,
+                ))
+            }
+            ("contains", 1, IrType::Set(_)) => {
+                let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                Some(self.emit(
+                    InstKind::SetContains { receiver, value },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            ("get_or_null", 1, IrType::Map(_)) => {
+                let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let nullable = Nullable::of(value_ty)?;
+                Some(self.emit(
+                    InstKind::MapGet { receiver, key },
+                    IrType::Nullable(nullable),
+                    span,
+                ))
+            }
+            ("remove", 1, IrType::Map(_)) => {
+                let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                Some(self.emit(
+                    InstKind::MapRemove { receiver, key },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            ("remove", 1, IrType::Set(_)) => {
+                let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                Some(self.emit(
+                    InstKind::SetRemove { receiver, value },
+                    IrType::Boolean,
+                    span,
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn lower_array_list_construction(
         &mut self,
         call: &ast::CallExpr,
@@ -10539,7 +10685,7 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Path(callee) = &*call.callee else {
             return None;
         };
-        if !matches!(callee.name.as_str(), "Array" | "List") {
+        if !matches!(callee.name.as_str(), "Array" | "List" | "Map" | "Set") {
             return None;
         }
         let &ty = self.checked.expr_types.get(&call.span)?;
@@ -10605,6 +10751,12 @@ impl<'a> FunctionLowering<'a> {
                     );
                 }
                 Some(self.emit(InstKind::Load(list_slot), IrType::List(id), span))
+            }
+            ("Map", Base::Map(id)) if call.args.is_empty() => {
+                Some(self.emit(InstKind::MapNew { map_id: id }, IrType::Map(id), span))
+            }
+            ("Set", Base::Set(id)) if call.args.is_empty() => {
+                Some(self.emit(InstKind::SetNew { set_id: id }, IrType::Set(id), span))
             }
             _ => None,
         }
@@ -11799,6 +11951,43 @@ impl<'a> FunctionLowering<'a> {
             }
         }
 
+        // `.length`/`.is_empty` on `Map<K, V>`/`Set<T>`.
+        if matches!(expr.name.name.as_str(), "length" | "is_empty")
+            && matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Map(_) | IrType::Set(_)
+            )
+        {
+            let receiver = self.lower_expr(&expr.object);
+            let is_set = matches!(self.type_of(&expr.object, expr.object.span()), IrType::Set(_));
+            let length = self.emit(
+                if is_set {
+                    InstKind::SetLength(receiver)
+                } else {
+                    InstKind::MapLength(receiver)
+                },
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+            match expr.name.name.as_str() {
+                "length" => return length,
+                "is_empty" => {
+                    let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
+                    let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), span);
+                    return self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: length,
+                            right: zero,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+
         if self.checked.variant_accesses.contains(&expr.span) {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
@@ -12497,7 +12686,7 @@ impl<'a> FunctionLowering<'a> {
         if matches!(expr.name.name.as_str(), "length" | "is_empty")
             && matches!(
                 self.type_of(&expr.object, expr.object.span()),
-                IrType::NativeSlice(_) | IrType::NativeSliceMut(_) | IrType::Array(_) | IrType::List(_)
+                IrType::NativeSlice(_) | IrType::NativeSliceMut(_) | IrType::Array(_) | IrType::List(_) | IrType::Map(_) | IrType::Set(_)
             )
         {
             match expr.name.name.as_str() {
@@ -13837,6 +14026,12 @@ impl<'a> FunctionLowering<'a> {
                     let _ = result;
                 }
             }
+            // `map.set(...)`, `set.add(...)`, etc.
+            ast::Expr::Call(e) if self.is_map_set_method_call(e) => {
+                if let Some(result) = self.lower_map_set_method_call(e, expr.span()) {
+                    let _ = result;
+                }
+            }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
@@ -14573,6 +14768,22 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    /// Whether `call` is a built-in `Map<K, V>`/`Set<T>` method call.
+    fn is_map_set_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Map(_) | IrType::Set(_)
+        )
+    }
+
     /// Whether `call` is a recursive lambda calling itself by its own
     /// binding name (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d)
     /// — see `Self::recursive_call`'s own doc comment.
@@ -14634,6 +14845,7 @@ impl<'a> FunctionLowering<'a> {
             || self.is_regex_method_call(call)
             || self.is_regex_match_group_call(call)
             || self.is_array_list_method_call(call)
+            || self.is_map_set_method_call(call)
             || self.result_method(call).is_some()
         {
             return false;
@@ -14652,6 +14864,7 @@ impl<'a> FunctionLowering<'a> {
             || self.is_scalar_method_call(call)
             || self.is_native_static_call(call)
             || self.is_array_list_method_call(call)
+            || self.is_map_set_method_call(call)
             || self.result_method(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
@@ -15010,7 +15223,8 @@ impl<'a> FunctionLowering<'a> {
                         || self.is_string_method_call(e)
                         || self.is_char_method_call(e)
                         || self.is_native_to_string_call(e)
-                        || self.is_array_list_method_call(e))
+                        || self.is_array_list_method_call(e)
+                        || self.is_map_set_method_call(e))
                 {
                     return self.ir_type(ty);
                 }

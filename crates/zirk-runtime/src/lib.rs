@@ -42,18 +42,22 @@ mod failure;
 mod io;
 mod journal;
 mod list;
+mod map;
 mod memory;
 mod native_slice;
 mod range;
 mod regex;
 mod resource;
 mod scalar;
+mod set;
 mod string;
 
 pub use char::*;
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
 pub use array::*;
 pub use list::*;
+pub use map::*;
+pub use set::*;
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
     zirk_rt_index_out_of_bounds, zirk_rt_overflow,
