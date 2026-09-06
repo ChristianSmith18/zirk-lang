@@ -49,7 +49,11 @@ system closure work that must land before Phase 5.
 - `zirk-type-system`: remove `value class` mentions, keep `record` wording.
 - `zirk-grammar`: remove `value class` mention.
 - `zirk-lexical-syntax`: remove `value class` mention.
-- `zirk-collections`: remove `value class` mention.
+- `zirk-data-types`: remove the `Value classes` requirement and the
+  `value class` mention in `Pointer.from`.
+- `zirk-contracts`: remove `value class` from the derivation requirement.
+- `zirk-native-codegen`: replace `value class` scenarios/wording with
+  `record`.
 
 ## Impact
 
