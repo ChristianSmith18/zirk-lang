@@ -1,19 +1,10 @@
-class Counter {
-    mut value: Int32;
-    construct(value: Int32) { this.value = value; }
-    fn inc(n: Int32): Int32 {
-        this.value = this.value + n;
-        return this.value;
-    }
-}
-
 fn main(): Void {
-    mut c = Counter(0);
-    inmut inc = (n: Int32): Int32 => c.inc(n);
-    inmut inc_clone = inc.clone();
-    stdout.println(inc(5));
-    stdout.println(inc(5));
-    stdout.println(inc_clone(1));
-    stdout.println(inc_clone(2));
-    stdout.println(inc(2));
+    inmut f = (): Int32 => 42;
+    inmut g = f.clone();
+    stdout.println(g().to_string());
+
+    inmut n = 7;
+    inmut h = (x: Int32): Int32 => x + n;
+    inmut i = h.clone();
+    stdout.println(i(3).to_string());
 }
