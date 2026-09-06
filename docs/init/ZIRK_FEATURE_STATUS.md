@@ -196,7 +196,7 @@ Last updated with `array-list-tuple-duration-regex`, **2026-09-05**.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `Array<T>`, `List<T>` | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` + `native-type-member-surface`: `Array(e0, …)`/`List(e0, …)` literals, negative indexing, `Array` slicing (`[start:end:step]`), `clone()`, `to_string()`, and `List.remove(value)` added alongside `add`/`insert`/`remove(index)`. |
-| `Map<K,V>`, `Set<T>` | yes | no | no | no | no | no | `pending_type` Phase 7; concrete collection objects are not implemented. |
+| `Map<K,V>`, `Set<T>` | yes | yes | yes | yes | partial | yes | `map-set-collections`; constructors, `.length`/`.is_empty`, `Map.set`/`contains_key`/`get_or_null`/`remove`, `Set.add`/`contains`/`remove`, and end-to-end fixtures. Runtime is a minimal i64 hash map/set; it does not trace GC references yet. |
 | `Range<T>` | yes | no | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — `start`, `end`, `step`, `reverse()`, slicing, and `Iterable<T>` for numeric/`Duration` `T`. |
 | `Duration` (literals, arithmetic, printing) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; exact signed nanosecond duration with suffixes `ns`–`w`. `native-type-member-surface` added `abs()`, `sign()`, `is_zero()`, `is_positive()`, and `is_negative()`. |
 | Other temporal family (`Date`, `Time`, `DateTime`, ...) | yes | no | no | no | no | no | `pending_type` Phase 7; civil/zone types beyond `Duration` are not yet available. |
