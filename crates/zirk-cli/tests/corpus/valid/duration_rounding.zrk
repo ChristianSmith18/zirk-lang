@@ -1,0 +1,13 @@
+fn main(): Void {
+    inmut d = 150m;
+    stdout.println(d.round(1h).to_string());
+    stdout.println(d.floor(1h).to_string());
+    stdout.println(d.ceil(1h).to_string());
+    stdout.println(d.truncate(1h).to_string());
+
+    inmut neg = -150m;
+    stdout.println(neg.round(1h).to_string());
+    stdout.println(neg.floor(1h).to_string());
+    stdout.println(neg.ceil(1h).to_string());
+    stdout.println(neg.truncate(1h).to_string());
+}

@@ -686,6 +686,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::Int(IntWidth::I64)],
             return_type: IrType::Int(IntWidth::I64),
         },
+        ExternFn {
+            name: "zirk_duration_round".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_floor".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_ceil".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_truncate".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
         // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
         // a `Duration` is nanoseconds, an `Int32` sign-extends — and the
         // handle itself is element-agnostic, so the same seven entry points
@@ -9177,6 +9197,10 @@ impl<'a> FunctionLowering<'a> {
                 | ("whole_milliseconds", 0)
                 | ("whole_microseconds", 0)
                 | ("whole_nanoseconds", 0)
+                | ("round", 1)
+                | ("floor", 1)
+                | ("ceil", 1)
+                | ("truncate", 1)
         ) || field.safe
         {
             return None;
@@ -9281,6 +9305,17 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I64),
                 span,
             )),
+            op if matches!(op, "round" | "floor" | "ceil" | "truncate") => {
+                let unit = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_duration_{op}"),
+                        args: vec![receiver, unit],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                ))
+            }
             _ => unreachable!("name checked above"),
         }
     }
@@ -9315,6 +9350,10 @@ impl<'a> FunctionLowering<'a> {
                 | ("whole_milliseconds", 0)
                 | ("whole_microseconds", 0)
                 | ("whole_nanoseconds", 0)
+                | ("round", 1)
+                | ("floor", 1)
+                | ("ceil", 1)
+                | ("truncate", 1)
         ) || field.safe
         {
             return false;

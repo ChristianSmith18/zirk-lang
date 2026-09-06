@@ -209,6 +209,89 @@ pub extern "C" fn zirk_duration_whole_nanoseconds(nanos: i64) -> i64 {
     nanos
 }
 
+/// `d.round(unit)`, `d.floor(unit)`, `d.ceil(unit)` and `d.truncate(unit)`.
+/// All take the current nanosecond count and the `unit` as nanoseconds.
+fn divide_rounded(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let q = n / u;
+    let r = n % u;
+    let q = if 2 * r.abs() >= u.abs() {
+        q + r.signum()
+    } else {
+        q
+    };
+    q as i64
+}
+
+fn divide_floored(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let mut q = n / u;
+    let r = n % u;
+    if r != 0 && (n < 0) != (u < 0) {
+        q -= 1;
+    }
+    (q * u) as i64
+}
+
+fn divide_ceiled(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let mut q = n / u;
+    let r = n % u;
+    if r != 0 && (n < 0) == (u < 0) {
+        q += 1;
+    }
+    (q * u) as i64
+}
+
+fn divide_truncated(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let q = n / u;
+    (q * u) as i64
+}
+
+/// `d.round(unit)` — nearest multiple of `unit`, halves away from zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_round(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    (divide_rounded(nanos, unit) as i128 * unit as i128) as i64
+}
+
+/// `d.floor(unit)` — largest multiple of `unit` not greater than the value.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_floor(nanos: i64, unit: i64) -> i64 {
+    divide_floored(nanos, unit)
+}
+
+/// `d.ceil(unit)` — smallest multiple of `unit` not less than the value.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_ceil(nanos: i64, unit: i64) -> i64 {
+    divide_ceiled(nanos, unit)
+}
+
+/// `d.truncate(unit)` — multiple of `unit` toward zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_truncate(nanos: i64, unit: i64) -> i64 {
+    divide_truncated(nanos, unit)
+}
+
 /// Renders a nanosecond count as a normalized duration literal.
 fn format_duration(nanos: i64) -> String {
     // Largest first: the first unit the magnitude reaches is the one the

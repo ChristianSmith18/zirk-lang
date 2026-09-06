@@ -12291,6 +12291,13 @@ impl<'a> Checker<'a> {
                     {
                         return Type::of(Base::Int(IntWidth::I64));
                     }
+                    "round" | "floor" | "ceil" | "truncate" if expr.args.len() == 1 => {
+                        let t = self.check_expr(&expr.args[0].value);
+                        if !t.is_unknown() {
+                            self.expect_assignable(Type::DURATION, t, expr.args[0].value.span(), "the unit");
+                        }
+                        return Type::DURATION;
+                    }
                     _ => {}
                 }
             }
