@@ -9,6 +9,19 @@ Start with [Choosing a Temporal Type](./01-choosing-a-temporal-type.md), then
 read only the concrete types your application needs. The later chapters define
 composition, operators, parsing, DST and errors across the family.
 
+> **Implemented today** (`date-and-time-types`): `Date`, `Time` and
+> `DateTime` — validated `Date(y, m, d)`/`Time(h, m, s?, ns?)`/
+> `DateTime(d, t)` constructors that throw `InvalidDateError`/
+> `InvalidTimeError`, the read-only `year`/`month`/`day`/`hour`/`minute`/
+> `second`/`nanosecond` components (plus `date`/`time` on `DateTime`), ISO
+> 8601 `to_string()`, `Date ± Int`, `Date - Date`, `Time ± Duration`
+> (wrapping around midnight), `Time - Time`, `Date + Time`, total
+> same-type comparisons, and the host-clock `Date.today()`,
+> `Time.now_local()`/`now_utc()` and `DateTime.now_local()`/`now_utc()`.
+> `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, parsing, `format()`
+> and the `with_*`/`is_*` helpers these pages describe remain pending — the
+> chapters below document the target surface.
+
 1. [Choosing a Temporal Type](./01-choosing-a-temporal-type.md)
 2. [Date](./02-date.md)
 3. [Time](./03-time.md)

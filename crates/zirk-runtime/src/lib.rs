@@ -52,6 +52,7 @@ mod resource;
 mod scalar;
 mod set;
 mod string;
+mod temporal;
 
 pub use array::*;
 pub use char::*;

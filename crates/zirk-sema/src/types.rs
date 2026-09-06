@@ -226,6 +226,15 @@ pub enum Base {
     String,
     /// An exact elapsed-time value, stored as nanoseconds.
     Duration,
+    /// A calendar date (roadmap Phase 7, `date-and-time-types`): stored as a
+    /// day count since 1970-01-01 in the proleptic Gregorian calendar.
+    Date,
+    /// A clock time of day (roadmap Phase 7, `date-and-time-types`): stored as
+    /// nanoseconds since midnight.
+    Time,
+    /// A civil date and time without a zone (roadmap Phase 7,
+    /// `date-and-time-types`): stored as epoch nanoseconds in an `i128`.
+    DateTime,
     /// A compiled regular expression, represented as an opaque runtime handle.
     Regex,
     /// The type of the `null` literal, assignable to any nullable type.
@@ -384,6 +393,12 @@ impl Type {
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
     pub const DURATION: Type = Type::of(Base::Duration);
+    /// A calendar date — a day count since 1970-01-01.
+    pub const DATE: Type = Type::of(Base::Date);
+    /// A clock time of day — nanoseconds since midnight.
+    pub const TIME: Type = Type::of(Base::Time);
+    /// A civil date and time without a zone — epoch nanoseconds in an `i128`.
+    pub const DATETIME: Type = Type::of(Base::DateTime);
     pub const REGEX: Type = Type::of(Base::Regex);
     pub const NULL: Type = Type::of(Base::Null);
 
@@ -644,6 +659,9 @@ impl Type {
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
             "Duration" => Type::DURATION,
+            "Date" => Type::DATE,
+            "Time" => Type::TIME,
+            "DateTime" => Type::DATETIME,
             "Regex" => Type::REGEX,
             "Never" => Type::of(Base::Never),
             _ => return None,
@@ -686,6 +704,9 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
         Base::Duration => "Duration".to_string(),
+        Base::Date => "Date".to_string(),
+        Base::Time => "Time".to_string(),
+        Base::DateTime => "DateTime".to_string(),
         Base::Regex => "Regex".to_string(),
         Base::Null => "Null".to_string(),
         Base::Range(id) => format!("Range<{}>", describe(names.range_element(id), names)),
@@ -1053,9 +1074,8 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // families. They are compiler-known native types, not library objects:
     // what that phase adds is their implementation, not their existence.
     const PHASE_7: &[&str] = &[
-        "Date",
-        "Time",
-        "DateTime",
+        // `Date`/`Time`/`DateTime` are implemented (`Type::from_name`,
+        // `date-and-time-types`); the zone-aware family stays pending.
         "Instant",
         "ZonedDateTime",
         "TimeZone",
@@ -1176,22 +1196,25 @@ mod tests {
     }
 
     #[test]
-    fn the_temporal_family_is_pending_not_unknown() {
-        for name in [
-            "Date",
-            "Time",
-            "DateTime",
-            "Instant",
-            "ZonedDateTime",
-            "TimeZone",
-            "Period",
-        ] {
+    fn the_zone_aware_temporal_family_is_pending_not_unknown() {
+        // `Date`/`Time`/`DateTime` are implemented (`date-and-time-types`);
+        // the zone-aware half of the family stays pending.
+        for name in ["Instant", "ZonedDateTime", "TimeZone", "Period"] {
             assert_eq!(
                 pending_type(name).map(|t| t.phase),
                 Some(Phase::SEVEN),
                 "`{name}` should announce its phase"
             );
         }
+        assert!(pending_type("Date").is_none(), "`Date` is implemented");
+        assert!(pending_type("Time").is_none(), "`Time` is implemented");
+        assert!(
+            pending_type("DateTime").is_none(),
+            "`DateTime` is implemented"
+        );
+        assert_eq!(Type::from_name("Date"), Some(Type::DATE));
+        assert_eq!(Type::from_name("Time"), Some(Type::TIME));
+        assert_eq!(Type::from_name("DateTime"), Some(Type::DATETIME));
     }
 
     #[test]

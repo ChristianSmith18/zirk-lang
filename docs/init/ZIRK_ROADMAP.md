@@ -434,8 +434,12 @@ distinction changes who implements them:
   `ZonedDateTime`, `TimeZone`, `Duration` and `Period` — are compiler-known
   native immutable values with their own literals, operators and type rules.
   `Duration` (literals, arithmetic and printing) is already implemented in
-  `array-list-tuple-duration-regex`; this phase completes the remaining
-  civil/zone types, their IANA data, and the `std.time` API.
+  `array-list-tuple-duration-regex`, and the civil subset — `Date`, `Time`
+  and `DateTime`, with validated constructors, component properties, ISO
+  8601 `to_string()`, civil arithmetic and the host-clock `today`/`now_*`
+  statics — is implemented in `date-and-time-types`. This phase completes
+  the remaining zone-aware types (`Instant`, `ZonedDateTime`, `TimeZone`,
+  `Period`), their IANA data, and the `std.time` API.
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
   native reference types under the same rule. `Array<T>` (fixed-capacity) and
   `List<T>` (resizable) are implemented in `array-list-tuple-duration-regex`;

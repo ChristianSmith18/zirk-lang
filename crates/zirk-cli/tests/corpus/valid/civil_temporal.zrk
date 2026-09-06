@@ -1,0 +1,40 @@
+fn main(): Void {
+    inmut d = Date(2026, 9, 6);
+    stdout.println(d);
+    stdout.println(d.year);
+    stdout.println(d.month);
+    stdout.println(d.day);
+    stdout.println(d + 2);
+    stdout.println(Date(2026, 1, 31) + 2);
+    stdout.println(d - Date(2026, 9, 1));
+    stdout.println(d < Date(2026, 10, 1));
+    stdout.println(d == Date(2026, 9, 6));
+    inmut t = Time(14, 30, 45);
+    stdout.println(t);
+    stdout.println(t.hour);
+    stdout.println(t.minute);
+    stdout.println(t.second);
+    stdout.println(Time(23, 30) + 2h);
+    stdout.println(Time(1, 0) - Time(23, 0));
+    stdout.println(Time(9, 5, 3, 123456789));
+    inmut dt = DateTime(d, t);
+    stdout.println(dt);
+    stdout.println(dt.date);
+    stdout.println(dt.time);
+    stdout.println(dt.hour);
+    stdout.println(d + t);
+    try {
+        inmut bad = Date(2026, 2, 29);
+        stdout.println(bad);
+    } catch InvalidDateError(e) {
+        stdout.println(e.code());
+    }
+    try {
+        inmut bad = Time(25, 0);
+        stdout.println(bad);
+    } catch InvalidTimeError(e) {
+        stdout.println(e.code());
+    }
+    inmut leap = Date(2024, 2, 29);
+    stdout.println(leap);
+}
