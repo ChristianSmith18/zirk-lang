@@ -2544,3 +2544,48 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
     }
 }
 
+
+// --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
+
+#[test]
+fn empty_map_and_set_constructors_lower_to_new_instructions() {
+    let module = compile(
+        "fn main(): Void {\n\
+             mut m: Map<String, Int32> = Map();\n\
+             mut s: Set<String> = Set();\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::MapNew { .. })),
+        "MapNew was not emitted"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::SetNew { .. })),
+        "SetNew was not emitted"
+    );
+    assert!(!module.map_types.is_empty());
+    assert!(!module.set_types.is_empty());
+}
+
+#[test]
+fn map_and_set_methods_lower_to_dedicated_instructions() {
+    let main = main_body(
+        "mut m: Map<String, Int32> = Map();\n\
+         m.set(\"k\", 1);\n\
+         mut b = m.contains_key(\"k\");\n\
+         mut v: Int32? = m.get_or_null(\"k\");\n\
+         mut s: Set<String> = Set();\n\
+         s.add(\"x\");\n\
+         mut c = s.contains(\"x\");\n\
+         mut r = s.remove(\"x\");",
+    );
+    let kinds = instructions(&main);
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapSet { .. })), "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapContainsKey { .. })), "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapGet { .. })), "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetAdd { .. })), "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetContains { .. })), "{kinds:?}");
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetRemove { .. })), "{kinds:?}");
+}

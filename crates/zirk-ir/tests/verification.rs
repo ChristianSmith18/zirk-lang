@@ -38,6 +38,8 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         pin_types: Vec::new(),
         array_types: Vec::new(),
         list_types: Vec::new(),
+        map_types: Vec::new(),
+        set_types: Vec::new(),
         externs: Vec::new(),
     }
 }
@@ -303,6 +305,8 @@ fn a_binary_operation_between_different_types_is_rejected() {
         pin_types: Vec::new(),
         array_types: Vec::new(),
         list_types: Vec::new(),
+        map_types: Vec::new(),
+        set_types: Vec::new(),
         externs: Vec::new(),
     };
 
@@ -517,4 +521,77 @@ fn a_string_outside_the_module_table_is_rejected() {
         errors.iter().any(|e| e.contains("module table")),
         "{errors:?}"
     );
+}
+
+// --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
+
+/// A module whose `main` body is the given instruction list, with the given
+/// map/set type tables.
+fn module_with_collections(
+    instructions: Vec<Instruction>,
+    map_types: Vec<(IrType, IrType)>,
+    set_types: Vec<IrType>,
+) -> Module {
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions,
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![],
+    );
+    module.map_types = map_types;
+    module.set_types = set_types;
+    module
+}
+
+#[test]
+fn map_new_declares_its_interned_map_type() {
+    let module = module_with_collections(
+        vec![value(
+            0,
+            InstKind::MapNew { map_id: 0 },
+            IrType::Map(0),
+        )],
+        vec![(IrType::String, IrType::Int(IntWidth::I32))],
+        vec![],
+    );
+    assert!(verify(&module).is_ok());
+}
+
+#[test]
+fn set_new_declares_its_interned_set_type() {
+    let module = module_with_collections(
+        vec![value(0, InstKind::SetNew { set_id: 0 }, IrType::Set(0))],
+        vec![],
+        vec![IrType::String],
+    );
+    assert!(verify(&module).is_ok());
+}
+
+#[test]
+fn map_new_with_the_wrong_declared_type_is_rejected() {
+    let module = module_with_collections(
+        vec![value(
+            0,
+            InstKind::MapNew { map_id: 0 },
+            IrType::String,
+        )],
+        vec![(IrType::String, IrType::Int(IntWidth::I32))],
+        vec![],
+    );
+    let errors = errors_of(&module);
+    assert!(errors.iter().any(|e| e.contains("MapNew")), "{errors:?}");
+}
+
+#[test]
+fn set_new_with_the_wrong_declared_type_is_rejected() {
+    let module = module_with_collections(
+        vec![value(0, InstKind::SetNew { set_id: 0 }, IrType::String)],
+        vec![],
+        vec![IrType::String],
+    );
+    let errors = errors_of(&module);
+    assert!(errors.iter().any(|e| e.contains("SetNew")), "{errors:?}");
 }
