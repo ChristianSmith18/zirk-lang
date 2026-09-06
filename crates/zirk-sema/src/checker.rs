@@ -7021,7 +7021,7 @@ impl<'a> Checker<'a> {
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
             Expr::Path(ident) => self.check_path(ident),
-            Expr::Unary(e) => self.check_unary(e),
+            Expr::Unary(e) => self.check_unary(e, expected),
             Expr::Binary(e) => self.check_binary(e, expected),
             Expr::Call(e) => self.check_call(e, expected),
             // `a..b` is a `Range<T>` value (roadmap Phase 7) — stored,
@@ -7791,7 +7791,16 @@ impl<'a> Checker<'a> {
         });
     }
 
-    fn check_unary(&mut self, expr: &UnaryExpr) -> Type {
+    fn check_unary(&mut self, expr: &UnaryExpr, expected: Option<Type>) -> Type {
+        // `-<literal>` in a typed context takes that context, so
+        // `binaryValue == -0.75` reads `-0.75` as the binary width, not the
+        // exact `Float` a bare literal defaults to.
+        if expr.op == UnaryOp::Neg
+            && matches!(&*expr.operand, Expr::Float(_) | Expr::Int(_))
+            && let Some(hint) = expected
+        {
+            self.expected_type = Some(hint);
+        }
         let operand = self.check_expr(&expr.operand);
 
         match expr.op {
@@ -7803,7 +7812,7 @@ impl<'a> Checker<'a> {
                 // signed nanosecond count, so it negates too.
                 let ok = !operand.nullable
                     && (matches!(operand.base, Base::Int(w) if w.signed())
-                        || matches!(operand.base, Base::Float(_))
+                        || matches!(operand.base, Base::Float(_) | Base::Decimal)
                         || operand.base == Base::Duration);
                 if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
@@ -7858,10 +7867,38 @@ impl<'a> Checker<'a> {
             .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)));
 
         let saved = self.expected_type;
+        // For an unhinted operator, let a bare numeric literal on one side
+        // adopt the concrete numeric type of the other — `binaryValue == 0.75`
+        // types the `0.75` as `BinaryFloat64`, not the exact `Float` it would
+        // default to. Only a literal is steered; a `Duration` literal or any
+        // non-numeric operand is left alone.
+        let is_num_literal = |e: &Expr| {
+            matches!(e, Expr::Float(_) | Expr::Int(_))
+                || matches!(e, Expr::Unary(u)
+                    if u.op == UnaryOp::Neg
+                        && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_)))
+        };
+        let numeric_hint = |t: Type| {
+            (!t.is_unknown() && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal))
+                .then_some(t)
+        };
+
         self.expected_type = operand_expected;
-        let left = self.check_expr(&expr.left);
-        self.expected_type = operand_expected;
+        let mut left = self.check_expr(&expr.left);
+
+        self.expected_type = operand_expected.or_else(|| {
+            is_num_literal(&expr.right).then(|| numeric_hint(left)).flatten()
+        });
         let right = self.check_expr(&expr.right);
+
+        if operand_expected.is_none()
+            && is_num_literal(&expr.left)
+            && let Some(hint) = numeric_hint(right)
+            && left != hint
+        {
+            self.expected_type = Some(hint);
+            left = self.check_expr(&expr.left);
+        }
         self.expected_type = saved;
 
         use BinaryOp::*;
@@ -13263,8 +13300,48 @@ impl<'a> Checker<'a> {
             .collect();
 
         let mut next_position = 0usize;
+        let saved_expected = self.expected_type;
 
         for arg in &expr.args {
+            // Propagate the target parameter's own type as the expected type
+            // for this argument, so a bare numeric literal adopts it (a
+            // `5.0` argument to a `BinaryFloat64` parameter is that width,
+            // not the exact `Float` a context-free literal defaults to).
+            // Only a fully concrete numeric hint is used — a generic
+            // parameter's own inference must not be steered by it.
+            let hint = match &arg.name {
+                Some(name) => signature
+                    .params
+                    .iter()
+                    .find(|p| p.name == name.name)
+                    .map(|p| p.ty),
+                None => {
+                    let mut pos = next_position;
+                    while pos < slots.len() && matches!(slots[pos], ArgSlot::Given { .. }) {
+                        pos += 1;
+                    }
+                    slots
+                        .get(pos)
+                        .and(signature.params.get(pos))
+                        .map(|p| p.ty)
+                }
+            };
+            // Only a bare numeric literal (or its negation) should be steered
+            // by the parameter type — anything else keeps its own type and is
+            // checked against the parameter afterward.
+            let arg_is_numeric_literal = matches!(
+                &arg.value,
+                Expr::Float(_) | Expr::Int(_)
+            ) || matches!(
+                &arg.value,
+                Expr::Unary(u)
+                    if u.op == UnaryOp::Neg
+                        && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_))
+            );
+            self.expected_type = hint.filter(|t| {
+                arg_is_numeric_literal
+                    && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+            });
             let ty = self.check_expr(&arg.value);
 
             if let Some(name) = &arg.name {
@@ -13325,6 +13402,7 @@ impl<'a> Checker<'a> {
             }
         }
 
+        self.expected_type = saved_expected;
         slots
     }
 
@@ -13706,8 +13784,10 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         // `Duration` arithmetic.
         (Base::Duration, Base::Duration, Add | Sub) => Some(Type::DURATION),
         (Base::Duration, Base::Duration, Div) => Some(Type::FLOAT64),
-        (Base::Duration, Base::Int(_) | Base::Float(_), Mul | Div)
-        | (Base::Int(_) | Base::Float(_), Base::Duration, Mul) => Some(Type::DURATION),
+        (Base::Duration, Base::Int(_) | Base::Float(_) | Base::Decimal, Mul | Div)
+        | (Base::Int(_) | Base::Float(_) | Base::Decimal, Base::Duration, Mul) => {
+            Some(Type::DURATION)
+        }
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, accepting any integer width; lower

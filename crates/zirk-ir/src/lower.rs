@@ -5304,6 +5304,14 @@ impl<'a> FunctionLowering<'a> {
                         let zero = self.const_int_at(0, ty, span);
                         self.emit_checked_binary(BinaryOp::Sub, zero, operand, ty, span)
                     }
+                    ast::UnaryOp::Neg if ty == IrType::Decimal => self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_neg".to_string(),
+                            args: vec![operand],
+                        },
+                        IrType::Decimal,
+                        span,
+                    ),
                     ast::UnaryOp::Neg => self.emit(
                         InstKind::Unary {
                             op: UnaryOp::Neg,
@@ -7773,7 +7781,7 @@ impl<'a> FunctionLowering<'a> {
             .expect("a program with Float arithmetic registered the exception hierarchy");
         self.throw_native_failure(
             native.float_nan,
-            "Float operation produced an indeterminate result (NaN)",
+            "BinaryFloat operation produced an indeterminate result (NaN)",
             span,
         );
 
@@ -11075,6 +11083,8 @@ impl<'a> FunctionLowering<'a> {
 
                 if is_string {
                     self.emit(InstKind::Concat { left, right }, IrType::String, span)
+                } else if target == IrType::Decimal {
+                    self.lower_decimal_binary(binary_op(b.op), left, right, span)
                 } else {
                     let op = binary_op(b.op);
                     self.emit_checked_binary(op, left, right, target, span)
@@ -11085,6 +11095,15 @@ impl<'a> FunctionLowering<'a> {
                 if matches!(target, IrType::Int(_)) {
                     let zero = self.const_int_at(0, target, span);
                     self.emit_checked_binary(BinaryOp::Sub, zero, operand, target, span)
+                } else if target == IrType::Decimal {
+                    self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_neg".to_string(),
+                            args: vec![operand],
+                        },
+                        IrType::Decimal,
+                        span,
+                    )
                 } else {
                     self.emit(
                         InstKind::Unary {
@@ -11133,6 +11152,9 @@ impl<'a> FunctionLowering<'a> {
             }
             (IrType::Float(_), IrType::Int(_)) => {
                 self.emit(InstKind::FloatToInt(operand), target, span)
+            }
+            (_, IrType::Decimal) | (IrType::Decimal, _) => {
+                self.convert_numeric(operand, actual, target, span)
             }
             (_, IrType::String) => self.lower_to_string_expr(expr, operand, span),
             _ => unreachable!("the checker validated this conversion"),
@@ -15030,9 +15052,11 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
-            // A `Float` scalar needs the runtime: the result is a
-            // nanosecond count again, which no float instruction answers.
-            IrType::Float(_) => {
+            // A `Float`/exact-`Float` scalar needs the runtime: the result is
+            // a nanosecond count again, which no float instruction answers.
+            // The exact `Float` is converted to `f64` first (`Duration`
+            // arithmetic with a fractional scalar is already approximate).
+            IrType::Float(_) | IrType::Decimal => {
                 let scalar = self.convert_numeric(
                     scalar,
                     scalar_actual,

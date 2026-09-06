@@ -251,7 +251,7 @@ fn mixed_uint8_and_int32_converts_both_to_float64() {
 #[test]
 fn mixed_int32_and_float64_converts_int_to_float() {
     let ir = llvm_ir(&in_main(
-        "mut a: Int32 = 1;\nmut b: Float64 = 2.5;\nmut c = a + b;",
+        "mut a: Int32 = 1;\nmut b: BinaryFloat64 = 2.5;\nmut c = a + b;",
     ));
     assert!(
         ir.contains("sitofp i32"),

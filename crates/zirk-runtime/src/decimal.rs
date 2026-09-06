@@ -67,7 +67,7 @@ pub enum RoundingMode {
 }
 
 impl RoundingMode {
-    fn from_abi(raw: u8) -> RoundingMode {
+    fn from_abi(raw: i32) -> RoundingMode {
         match raw {
             0 => RoundingMode::HalfEven,
             1 => RoundingMode::HalfUp,
@@ -303,15 +303,15 @@ fn mul(a: Decimal, b: Decimal) -> Decimal {
     let mut wide = mul_u128(a.coef.unsigned_abs(), b.coef.unsigned_abs());
     let mut scale = scale;
     loop {
-        if let Some(magnitude) = wide.to_u128() {
-            if digit_count(magnitude) <= MAX_COEF_DIGITS {
-                let signed = if negative {
-                    -(magnitude as i128)
-                } else {
-                    magnitude as i128
-                };
-                return Decimal::new(signed, scale);
-            }
+        if let Some(magnitude) = wide.to_u128()
+            && digit_count(magnitude) <= MAX_COEF_DIGITS
+        {
+            let signed = if negative {
+                -(magnitude as i128)
+            } else {
+                magnitude as i128
+            };
+            return Decimal::new(signed, scale);
         }
         if scale == 0 {
             overflow();
@@ -673,7 +673,7 @@ pub unsafe extern "C" fn zirk_rt_decimal_div_ex(
     out: *mut Decimal,
     a: *const Decimal,
     b: *const Decimal,
-    mode: u8,
+    mode: i32,
     places: i32,
 ) {
     let a = unsafe { *a };
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn zirk_rt_decimal_round(
     out: *mut Decimal,
     value: *const Decimal,
     places: i32,
-    mode: u8,
+    mode: i32,
 ) {
     let value = unsafe { *value };
     unsafe { *out = round_to_places(value, places, RoundingMode::from_abi(mode)) };
