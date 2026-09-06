@@ -124,10 +124,15 @@ pub enum IrType {
     /// natively, so nothing downstream needs a different *shape* per width,
     /// only the right one substituted in.
     Int(IntWidth),
-    /// `Float16`…`Float128` (roadmap Phase 3b) — same reasoning as `Int`
-    /// above, minus the signedness: LLVM's `FloatType` is already
-    /// parameterized by width alone.
+    /// The IEEE 754 binary floating family (surface name `BinaryFloat16`…
+    /// `BinaryFloat128`). Same reasoning as `Int` above, minus the
+    /// signedness: LLVM's `FloatType` is parameterized by width alone. The
+    /// Rust identifier keeps the name `Float` from before the exact type.
     Float(FloatWidth),
+    /// The exact base-ten decimal type (surface name `Float`). A `{ i128, i8 }`
+    /// aggregate at the ABI, passed by pointer; every operation is a
+    /// `zirk_rt_decimal_*` runtime call. No `NaN`, no infinity.
+    Decimal,
     Boolean,
     /// Opaque handle to a string. Its layout belongs to the runtime
     /// (`docs/decisions/ADR-005-representacion-string.md`).
@@ -332,6 +337,7 @@ impl IrType {
             IrType::Never => "Never",
             IrType::Int(width) => width.as_str(),
             IrType::Float(width) => width.as_str(),
+            IrType::Decimal => "Float",
             IrType::Boolean => "Boolean",
             IrType::String => "String",
             IrType::Regex => "Regex",
@@ -1009,6 +1015,26 @@ pub enum InstKind {
     /// between float and integer, and is accepted on the same footing as
     /// every other explicit conversion in this family (roadmap Phase 3b).
     FloatToInt(Operand),
+    /// An exact base-ten `Float` literal (surface name `Float`). The digits,
+    /// point and exponent are carried verbatim; the runtime parses them into
+    /// a `{ i128, i8 }` at codegen through `zirk_rt_decimal_from_literal`.
+    ConstDecimal(String),
+    /// An integer operand converted to an exact `Float` — always exact
+    /// (every integer is a terminating decimal). Emitted for `Int -> Float`
+    /// assignment/argument and for the integer operand of mixed
+    /// `Int`/`Float` arithmetic. Lowers to `zirk_rt_decimal_from_i128`.
+    IntToDecimal(Operand),
+    /// `value as <an integer width>` from an exact `Float` — checked: a
+    /// non-integer or out-of-range value is a controlled runtime error.
+    /// Lowers to `zirk_rt_decimal_to_i128_checked` then an integer cast.
+    DecimalToInt(Operand),
+    /// `BinaryFloat(x)` / `x as BinaryFloat*` from an exact `Float` — may
+    /// lose precision. Lowers to `zirk_rt_decimal_to_f64` then a float cast.
+    DecimalToFloat(Operand),
+    /// `Float(x)` / `x as Float` from a `BinaryFloat` — checked: a
+    /// non-finite input is a controlled runtime error. Lowers to
+    /// `zirk_rt_decimal_from_f64`.
+    FloatToDecimal(Operand),
     /// `String + String`.
     Concat {
         left: Operand,

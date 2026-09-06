@@ -266,7 +266,7 @@ fn mixed_uint8_and_int32_promotes_to_float64() {
         .count();
     assert_eq!(
         int_to_float, 2,
-        "both operands must be converted to Float64"
+        "both operands must be converted to BinaryFloat64"
     );
 
     let add = f
@@ -288,14 +288,14 @@ fn mixed_uint8_and_int32_promotes_to_float64() {
 
 #[test]
 fn mixed_int32_and_float64_promotes_to_float64() {
-    let f = main_body("mut a: Int32 = 1;\nmut b: Float64 = 2.5;\nmut c = a + b;");
+    let f = main_body("mut a: Int32 = 1;\nmut b: BinaryFloat64 = 2.5;\nmut c = a + b;");
 
     let has_int_to_float = instructions(&f)
         .iter()
         .any(|i| matches!(i, InstKind::IntToFloat(_)));
     assert!(
         has_int_to_float,
-        "the Int32 operand must be converted to Float64"
+        "the Int32 operand must be converted to BinaryFloat64"
     );
 
     let add = f
@@ -313,6 +313,48 @@ fn mixed_int32_and_float64_promotes_to_float64() {
         })
         .expect("there must be an addition");
     assert_eq!(add.ty, IrType::Float(FloatWidth::F64));
+}
+
+#[test]
+fn exact_float_addition_lowers_to_a_decimal_runtime_call() {
+    let f = main_body("mut a: Float = 0.1;\nmut b = 0.2;\nmut c = a + b;");
+    let kinds = instructions(&f);
+    assert!(
+        kinds
+            .iter()
+            .any(|i| matches!(i, InstKind::ConstDecimal(t) if t == "0.1")),
+        "the literal `0.1` lowers to a ConstDecimal"
+    );
+    assert!(
+        kinds.iter().any(|i| matches!(
+            i,
+            InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_add"
+        )),
+        "`a + b` lowers to a decimal-add runtime call, not an IR Binary"
+    );
+}
+
+#[test]
+fn exact_float_division_guards_a_zero_divisor() {
+    let f = main_body("mut a: Float = 1.0;\nmut b: Float = 3.0;\nmut c = a / b;");
+    let kinds = instructions(&f);
+    assert!(kinds.iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_is_zero"
+    )));
+    assert!(kinds.iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_div"
+    )));
+}
+
+#[test]
+fn exact_float_equality_goes_through_cmp() {
+    let f = main_body("mut a: Float = 0.1;\nmut b = 0.2;\nmut c: Boolean = (a + b) == 0.3;");
+    assert!(instructions(&f).iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_cmp"
+    )));
 }
 
 #[test]

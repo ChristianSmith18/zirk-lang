@@ -490,6 +490,64 @@ fn verify_instruction(
             }
         }
 
+        InstKind::ConstDecimal(_) => {
+            expect(inst.ty, IrType::Decimal, position, "ConstDecimal", report)
+        }
+        InstKind::IntToDecimal(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Int(_))
+            {
+                report(format!(
+                    "{position}: IntToDecimal converts {}, which is not an integer",
+                    ty.as_str()
+                ));
+            }
+            expect(inst.ty, IrType::Decimal, position, "IntToDecimal", report);
+        }
+        InstKind::FloatToDecimal(operand) => {
+            if let Some(ty) = type_of(operand)
+                && !matches!(ty, IrType::Float(_))
+            {
+                report(format!(
+                    "{position}: FloatToDecimal converts {}, which is not a BinaryFloat",
+                    ty.as_str()
+                ));
+            }
+            expect(inst.ty, IrType::Decimal, position, "FloatToDecimal", report);
+        }
+        InstKind::DecimalToInt(operand) => {
+            if let Some(ty) = type_of(operand)
+                && ty != IrType::Decimal
+            {
+                report(format!(
+                    "{position}: DecimalToInt converts {}, which is not a Float",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Int(_)) {
+                report(format!(
+                    "{position}: DecimalToInt declares {}, which is not an integer",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::DecimalToFloat(operand) => {
+            if let Some(ty) = type_of(operand)
+                && ty != IrType::Decimal
+            {
+                report(format!(
+                    "{position}: DecimalToFloat converts {}, which is not a Float",
+                    ty.as_str()
+                ));
+            }
+            if !matches!(inst.ty, IrType::Float(_)) {
+                report(format!(
+                    "{position}: DecimalToFloat declares {}, which is not a BinaryFloat",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
         InstKind::BuildValue { class, fields } => match module.values.get(*class as usize) {
             None => report(format!(
                 "{position}: builds value layout {class}, which is not in the module table"
@@ -1788,10 +1846,14 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Undefined => vec![],
         InstKind::Retype(operand) => vec![*operand],
         InstKind::IntCast(operand) => vec![*operand],
-        InstKind::ConstFloat(_, _) => Vec::new(),
+        InstKind::ConstFloat(_, _) | InstKind::ConstDecimal(_) => Vec::new(),
         InstKind::FloatCast(operand)
         | InstKind::IntToFloat(operand)
-        | InstKind::FloatToInt(operand) => vec![*operand],
+        | InstKind::FloatToInt(operand)
+        | InstKind::IntToDecimal(operand)
+        | InstKind::DecimalToInt(operand)
+        | InstKind::DecimalToFloat(operand)
+        | InstKind::FloatToDecimal(operand) => vec![*operand],
         InstKind::StringGraphemeOffset { string, index } => vec![*string, *index],
         InstKind::GraphemeLenAt { string, offset } => vec![*string, *offset],
         InstKind::GraphemeSlice {
