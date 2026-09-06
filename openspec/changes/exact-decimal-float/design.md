@@ -76,25 +76,36 @@ _Alternatives considered:_
   to denominator blow-up and expensive comparison, and it is not "decimal". Out
   of scope.
 
-### D2: `BinaryFloat` family = today's `Float` family, renamed
+### D2: `BinaryFloat` family = today's `Float` family, re-surfaced
 
-Introduce `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`,
-with `BinaryFloat` aliasing `BinaryFloat64`. Implementation: rename the
-`zirk-sema` `Base::Float(FloatWidth)` to `Base::BinaryFloat(BinaryFloatWidth)`
-(keeping the enum), the IR `IrType::Float` to `IrType::BinaryFloat`,
-`IrExpr::ConstFloat` to `ConstBinaryFloat`, and reuse the existing codegen and
-runtime paths unchanged. All current semantics carry over: exact IEEE widths,
+At the **language surface** the IEEE 754 binary family is `BinaryFloat16`,
+`BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`, with `BinaryFloat` aliasing
+`BinaryFloat64`. All current semantics carry over: exact IEEE widths,
 `POSITIVE_INFINITY`/`NEGATIVE_INFINITY`, no valid `NaN`, `NaN`-would-be
 operations as controlled runtime errors, `Float128` text truncation to `f64`
 precision, and the pending Windows verification for `Float128`.
 
-The name `Float64` (and `Float16/32/128`) no longer resolves. `Type::from_name`
-returns `None` for them and the checker emits a dedicated diagnostic: _"`Float64`
-is now `BinaryFloat64`; the exact base-ten type is `Float`"_.
+**Implementation choice — the internal Rust identifiers keep the name `Float`.**
+`zirk-sema`'s `Base::Float(FloatWidth)`, `zirk-ir`'s `IrType::Float` /
+`InstKind::ConstFloat` / `IntToFloat` / `FloatCast` / `FloatToInt`, and the
+`zirk-codegen-llvm` / `zirk-runtime` `zirk_*_f32/f64` symbols are unchanged: they
+now denote the binary family, whose surface name is `BinaryFloat*`. A wholesale
+rename of ~30 files and every golden test was judged pure churn against the
+behavioural goal; OpenSpec specs govern language behaviour, not Rust
+identifiers. Each of those types/modules gains a doc line stating "surface name:
+`BinaryFloat*`". The exact type is the genuinely new one and is named
+`Decimal` internally (`Base::Decimal`, `IrType::Decimal`,
+`InstKind::ConstDecimal`), surface name `Float`.
 
-_Alternative considered:_ keep `Float64` as an alias of `BinaryFloat64`.
-Rejected — it would leave two spellings for the binary type and keep the
-misleading "the plain one" reading of `Float64`.
+The names `Float16`, `Float32`, `Float64`, `Float128` no longer resolve:
+`Type::from_name` returns `None` and the checker emits a redirect diagnostic —
+_"`Float64` is now `BinaryFloat64`; the exact base-ten type is `Float`"_.
+`"BinaryFloat"` and `"BinaryFloat16..128"` resolve to `Base::Float(width)`;
+`"Float"` resolves to `Base::Decimal`.
+
+_Alternative considered:_ the full internal rename per the original task list.
+Deferred to a separate mechanical pass — it is behaviour-neutral and safest done
+on its own, not folded into this change.
 
 ### D3: Literals
 
