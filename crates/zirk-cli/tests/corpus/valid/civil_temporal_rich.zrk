@@ -33,6 +33,10 @@ fn main(): Void {
     stdout.println(t.end_of("minute").unwrap());
     stdout.println(t.format("HH:mm:ss.SSS"));
     stdout.println(Time.parse("23:59:59.5").unwrap());
+    // `Time(...) - Duration` with an inline construction: the wrapped
+    // negation opens no block the receiver would cross (ADR-007).
+    stdout.println(Time(1, 0) - 2h);
+    stdout.println(Time(23, 30) + 2h);
     inmut dt = DateTime(d, t);
     stdout.println(dt.day_of_week);
     stdout.println(dt + 2h);

@@ -10713,7 +10713,9 @@ impl<'a> FunctionLowering<'a> {
         let days_slot = days_value.map(|v| self.spill(v, i64ty, span));
         let nanos_slot = nanos_value.map(|v| self.spill(v, i64ty, span));
 
-        let rebuilt_days = if date_half && matches!(name, "with_year" | "with_month" | "with_day") {
+        // `None` means "the untouched half" — it is resolved at the
+        // combine, after whichever guard opened blocks (ADR-007).
+        let rebuilt_days: Option<Operand> = if date_half && matches!(name, "with_year" | "with_month" | "with_day") {
             let days = days_value.unwrap_or(receiver);
             let y = self.emit(
                 InstKind::Call {
@@ -10745,7 +10747,7 @@ impl<'a> FunctionLowering<'a> {
                 "with_month" => (y, arg, d),
                 _ => (y, mo, arg),
             };
-            self.temporal_guarded_build(
+            Some(self.temporal_guarded_build(
                 vec![y, mo, d],
                 "zirk_rt_date_is_valid",
                 "zirk_rt_date_days",
@@ -10753,15 +10755,12 @@ impl<'a> FunctionLowering<'a> {
                 "invalid date: month or day out of range",
                 i64ty,
                 span,
-            )
+            ))
         } else {
-            match days_slot {
-                Some(slot) => self.emit(InstKind::Load(slot), i64ty, span),
-                None => receiver,
-            }
+            None
         };
 
-        let rebuilt_nanos = if time_half
+        let rebuilt_nanos: Option<Operand> = if time_half
             && matches!(
                 name,
                 "with_hour" | "with_minute" | "with_second" | "with_nanosecond"
@@ -10810,7 +10809,7 @@ impl<'a> FunctionLowering<'a> {
                     _ => (h, mi, arg, ns),
                 }
             };
-            self.temporal_guarded_build(
+            Some(self.temporal_guarded_build(
                 vec![h, mi, s, ns],
                 "zirk_rt_time_is_valid",
                 "zirk_rt_time_nanos",
@@ -10818,27 +10817,42 @@ impl<'a> FunctionLowering<'a> {
                 "invalid time: component out of range",
                 i64ty,
                 span,
-            )
+            ))
         } else {
-            match nanos_slot {
-                Some(slot) => self.emit(InstKind::Load(slot), i64ty, span),
-                None => receiver,
-            }
+            None
         };
 
         if matches!(base, zirk_sema::Base::DateTime) {
+            // The untouched half reloads from its slot — here, in the
+            // post-guard block.
+            let days = match rebuilt_days {
+                Some(v) => v,
+                None => self.emit(
+                    InstKind::Load(days_slot.expect("a DateTime has its day half")),
+                    i64ty,
+                    span,
+                ),
+            };
+            let nanos = match rebuilt_nanos {
+                Some(v) => v,
+                None => self.emit(
+                    InstKind::Load(nanos_slot.expect("a DateTime has its clock half")),
+                    i64ty,
+                    span,
+                ),
+            };
             self.emit(
                 InstKind::Call {
                     callee: "zirk_rt_datetime_new".to_string(),
-                    args: vec![rebuilt_days, rebuilt_nanos],
+                    args: vec![days, nanos],
                 },
                 IrType::Int(IntWidth::I128),
                 span,
             )
         } else if matches!(base, zirk_sema::Base::Time) {
-            rebuilt_nanos
+            rebuilt_nanos.expect("a `with_*` on Time always rebuilds the clock")
         } else {
-            rebuilt_days
+            rebuilt_days.expect("a `with_*` on Date always rebuilds the day")
         }
     }
 
@@ -18062,11 +18076,17 @@ impl<'a> FunctionLowering<'a> {
                         (right, left, false)
                     };
                     let nanos = if negate {
+                        // `0 - delta` plain: the negated count is only ever
+                        // read modulo one day by `zirk_rt_time_add_nanos`,
+                        // so the wrap on `i64::MIN` is unobservable — and a
+                        // plain op opens no block `time_op` would cross.
                         let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
-                        self.emit_checked_binary(
-                            binary_op(Sub),
-                            zero,
-                            duration_op,
+                        self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Sub,
+                                left: zero,
+                                right: duration_op,
+                            },
                             IrType::Int(IntWidth::I64),
                             span,
                         )
