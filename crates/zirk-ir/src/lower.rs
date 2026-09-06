@@ -386,6 +386,21 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .iter()
         .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
         .collect();
+    module.map_types = checked
+        .map_types
+        .iter()
+        .map(|t| {
+            (
+                ir_type(t.key, instance_base, enum_instance_base, checked),
+                ir_type(t.value, instance_base, enum_instance_base, checked),
+            )
+        })
+        .collect();
+    module.set_types = checked
+        .set_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
 
     // `Regex.split` returns `List<String>` and `Regex.find_all` returns
     // `List<Regex.Match>`; the checker interns each element type only when
@@ -2127,9 +2142,11 @@ fn ir_type(
 
         Base::Array(id) => IrType::Array(id),
         Base::List(id) => IrType::List(id),
-        // `Map<K, V>` and `Set<T>` (roadmap Phase 7) — runtime handles,
-        // element-agnostic, kept element types in `checked.map_types`/`set_types`.
-        Base::Map(_) | Base::Set(_) => todo!(),
+        // `Map<K, V>` and `Set<T>` (roadmap Phase 7) — runtime handles.
+        // The `module.map_types` and `module.set_types` are populated in the
+        // same order as the checker tables, so the id is preserved.
+        Base::Map(id) => IrType::Map(id),
+        Base::Set(id) => IrType::Set(id),
         // `Range<T>` (roadmap Phase 7): the runtime handle its constructor
         // extern `zirk_range_new` produces — the element type lives only in
         // `checked.range_types`, the handle itself is element-agnostic.
@@ -3450,9 +3467,11 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Dependent(_)
             | IrType::Pin(_)
             | IrType::Regex
-            // `Array<T>`/`List<T>` are managed references with no default.
+            // `Array<T>`/`List<T>`/`Map`/`Set` are managed references with no default.
             | IrType::Array(_)
-            | IrType::List(_) => {
+            | IrType::List(_)
+            | IrType::Map(_)
+            | IrType::Set(_) => {
                 return None;
             }
         })

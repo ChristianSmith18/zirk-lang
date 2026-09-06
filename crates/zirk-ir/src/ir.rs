@@ -262,6 +262,12 @@ pub enum IrType {
     /// part is an `i64` (a `Duration` is nanoseconds, an `Int32` sign-
     /// extended), so the handle carries no parameter.
     Range,
+    /// `Map<K, V>` (roadmap Phase 7): a hash map, held as an opaque
+    /// runtime handle. The element types live in `module.map_types`.
+    Map(u32),
+    /// `Set<T>` (roadmap Phase 7): a hash set, held as an opaque runtime
+    /// handle. The element type lives in `module.set_types`.
+    Set(u32),
 }
 
 /// The types that have a nullable form.
@@ -369,6 +375,8 @@ impl IrType {
             IrType::Pin(_) => "Pin",
             IrType::Array(_) => "Array",
             IrType::List(_) => "List",
+            IrType::Map(_) => "Map",
+            IrType::Set(_) => "Set",
         }
     }
 
@@ -418,7 +426,9 @@ impl IrType {
             | IrType::Char
             | IrType::Array(_)
             | IrType::List(_)
-            | IrType::Range => true,
+            | IrType::Range
+            | IrType::Map(_)
+            | IrType::Set(_) => true,
             IrType::Nullable(n) => n.inner().is_managed_reference(module),
             IrType::Value(id) => module.values[id as usize]
                 .fields
@@ -508,6 +518,12 @@ pub struct Module {
     /// Interned `List<T>` element types, indexed by the id [`IrType::List`]
     /// carries.
     pub list_types: Vec<IrType>,
+    /// Interned `Map<K, V>` element types, indexed by the id
+    /// [`IrType::Map`] carries. Stored as a `(key, value)` pair.
+    pub map_types: Vec<(IrType, IrType)>,
+    /// Interned `Set<T>` element types, indexed by the id [`IrType::Set`]
+    /// carries.
+    pub set_types: Vec<IrType>,
     /// `extern "C" fn` declarations (roadmap Phase 4e, design D7,
     /// `ADR-015`) — lowered to an LLVM `declare`, never a `define`: there is
     /// no Zirk-authored body.

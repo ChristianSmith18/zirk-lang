@@ -419,9 +419,9 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Dependent(_) | ir::IrType::Pin(_) => {
             context.ptr_type(AddressSpace::default()).into()
         }
-        // `Array<T>`/`List<T>` are opaque GC-managed object handles, exactly
-        // like `String`/`Object`.
-        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range => context.ptr_type(AddressSpace::default()).into(),
+        // `Array<T>`/`List<T>`/`Map`/`Set` are opaque GC-managed object
+        // handles, exactly like `String`/`Object`.
+        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range | ir::IrType::Map(_) | ir::IrType::Set(_) => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
