@@ -1,14 +1,16 @@
 # Numeric Literals
 
 Whole literals default to `Int32` and a suffix-less fractional/scientific
-literal is an exact `Float`. A `b` suffix makes it a `BinaryFloat`.
+literal is an exact `Decimal`. A `b` or `f` suffix makes it a `Float`.
 
 ```zirk
 inmut count = 42;          // Int32
-inmut ratio = 0.5;         // Float (exact base-ten)
-inmut scale = 1e3;         // Float
-inmut fast = 1.5b;         // BinaryFloat64
-inmut compact = 1.5b32;    // BinaryFloat32
+inmut ratio = 0.5;         // Decimal (exact base-ten)
+inmut scale = 1e3;         // Decimal
+inmut fast = 1.5b;         // Float64
+inmut faster = 1.5f;       // Float64
+inmut compact = 1.5b32;    // Float32
+inmut compact2 = 1.5f32;   // Float32
 inmut mask: UInt16 = 65_535;
 ```
 
@@ -17,7 +19,8 @@ Use constructors rather than suffixes to request integer widths:
 ```zirk
 Int8(10)
 UInt64(1_000)
-BinaryFloat32(3.14)   // or the literal 3.14b32
+Float32(3.14)   // or the literal 3.14b32 / 3.14f32
+Decimal(3.14)   // exact base-ten
 ```
 
 `_` may group digits without changing the value. It cannot appear first, last,

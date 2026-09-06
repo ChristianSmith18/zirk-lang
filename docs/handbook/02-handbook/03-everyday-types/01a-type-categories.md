@@ -20,7 +20,7 @@ inmut unit: Char = 'π';
 ```
 
 - signed and unsigned integers;
-- `Float` (exact base-ten decimal) and the binary `BinaryFloat16` … `BinaryFloat128`;
+- `Float` (exact base-ten decimal) and the binary `Float16` … `Float128`;
 - `Boolean`;
 - `Char`;
 - exact `Duration`.

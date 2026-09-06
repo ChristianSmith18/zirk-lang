@@ -159,8 +159,8 @@ Current high-impact delivery limits include:
   Contract<T>` satisfaction for contracts whose members do not name their
   own type parameter (a member like `fn put(x: T)` still reports
   `NOT_LOWERED`). `String.split` remains pending.
-- `BinaryFloat128` arithmetic lacks complete Windows verification. `BinaryFloat128`
-  `to_string()` is implemented by truncating to `BinaryFloat64` first, which can
+- `Float128` arithmetic lacks complete Windows verification. `Float128`
+  `to_string()` is implemented by truncating to `Float64` first, which can
   lose precision for values not exactly representable in `f64`.
 - Exact `Float` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full
