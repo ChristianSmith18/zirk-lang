@@ -7886,13 +7886,18 @@ impl<'a> Checker<'a> {
         self.expected_type = operand_expected;
         let mut left = self.check_expr(&expr.left);
 
+        // Steer the right literal only from a concrete-typed *non-literal*
+        // sibling — two bare literals keep their own defaults and combine.
         self.expected_type = operand_expected.or_else(|| {
-            is_num_literal(&expr.right).then(|| numeric_hint(left)).flatten()
+            (is_num_literal(&expr.right) && !is_num_literal(&expr.left))
+                .then(|| numeric_hint(left))
+                .flatten()
         });
         let right = self.check_expr(&expr.right);
 
         if operand_expected.is_none()
             && is_num_literal(&expr.left)
+            && !is_num_literal(&expr.right)
             && let Some(hint) = numeric_hint(right)
             && left != hint
         {

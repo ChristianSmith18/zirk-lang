@@ -3802,6 +3802,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         matches!(ty, ir::IrType::Int(width) if width.signed())
     }
 
+    /// A stack slot with 16-byte alignment — what a `{ i128, i8 }` `Decimal`
+    /// (and a bare `i128`) needs, since Rust's `read`/`write` on those debug-
+    /// checks the pointer alignment.
+    fn aligned_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let slot = self
+            .builder
+            .build_alloca(ty, name)
+            .expect("aligned stack slot");
+        slot.as_instruction()
+            .expect("an alloca is an instruction")
+            .set_alignment(16)
+            .expect("16 is a valid alignment");
+        slot
+    }
+
     /// Whether an exact-`Float` helper carries `ty` across the C boundary by
     /// pointer — every `Decimal` and every 128-bit integer.
     fn decimal_helper_by_pointer(ty: ir::IrType) -> bool {
@@ -3828,10 +3847,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             let ty = self
                 .llvm_type(return_ty)
                 .expect("a by-pointer decimal result is never Void");
-            let slot = self
-                .builder
-                .build_alloca(ty, "dec.out")
-                .expect("out slot for a decimal helper");
+            let slot = self.aligned_alloca(ty, "dec.out");
             actual.push(slot.into());
             Some((slot, ty))
         } else {
@@ -3840,10 +3856,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
         for (value, ty) in args {
             if Self::decimal_helper_by_pointer(*ty) {
-                let slot = self
-                    .builder
-                    .build_alloca(value.get_type(), "dec.arg")
-                    .expect("arg slot for a decimal helper");
+                let slot = self.aligned_alloca(value.get_type(), "dec.arg");
                 self.builder
                     .build_store(slot, *value)
                     .expect("store a decimal helper argument");
