@@ -418,7 +418,7 @@ User-defined types SHALL implement language operator contracts through reserved 
 - **THEN** the checker rejects reopening the native type
 
 ### Requirement: Value, enum, array, iteration, and generator semantics
-Records SHALL be immutable with structural field equality; value classes SHALL be distinct domain types without observable identity and SHALL be storable inline; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
+Records SHALL be immutable with structural field equality; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
 
 #### Scenario: Enum default and explicit mapping
 - **WHEN** `Direction.North` has no mapping and `Code.North` maps to `"N"`
@@ -429,11 +429,11 @@ Records SHALL be immutable with structural field equality; value classes SHALL b
 - **THEN** its length is fixed at three and append/remove operations are rejected
 
 #### Scenario: Structural field equality compares every field
-- **WHEN** `==` compares two values of the same `record` or `value class` type
-- **THEN** the result is the conjunction of each field's own equality, recursing into a nested `record`/`value class` field
+- **WHEN** `==` compares two values of the same `record` type
+- **THEN** the result is the conjunction of each field's own equality, recursing into a nested `record` field
 
 #### Scenario: Structural field equality short-circuits on the first difference
-- **WHEN** two `record`/`value class` values differ in their first field
+- **WHEN** two `record` values differ in their first field
 - **THEN** `==` evaluates `false` without necessarily comparing the remaining fields
 
 #### Scenario: A contract-typed view of a record grants no new identity
@@ -697,7 +697,7 @@ Transferability and shareability SHALL be compiler-derived, non-forgeable proper
 
 ### Requirement: Nominal types and subtyping
 
-The checker SHALL treat every class, record, value class and enum as a distinct nominal type, and SHALL accept a value where one of its superclasses or an implemented contract is expected.
+The checker SHALL treat every class, record and enum as a distinct nominal type, and SHALL accept a value where one of its superclasses or an implemented contract is expected.
 
 #### Scenario: Subclass where base is expected
 - **WHEN** an instance of `Admin` is passed to a parameter of type `User`

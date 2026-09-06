@@ -623,7 +623,7 @@ The parser SHALL recognize type parameters `<T>` in declarations, type arguments
 
 ### Requirement: Data type syntax
 
-The parser SHALL recognize `record`, value classes, enum variants with associated data, unions `A | B`, and aliases with `type`.
+The parser SHALL recognize `record`, enum variants with associated data, unions `A | B`, and aliases with `type`.
 
 #### Scenario: Enum with associated data
 - **WHEN** `enum Shape { Circle(Int32), Rect(Int32, Int32) }` is parsed
