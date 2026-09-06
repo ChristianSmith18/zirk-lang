@@ -34,6 +34,20 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // is where `Base::Instance(id)` always lands: `instance_base + id`.
     let instance_base = checked.classes.len() as u32;
     let mut checked = checked.clone();
+    // `String.chars()`/`bytes()`/`codepoints()` and `split_whitespace()`/`lines()`
+    // need their concrete `List<T>` id in extern signatures even when a small
+    // program only uses one of them; pre-populate the table so every id is
+    // stable and known.
+    for element in [
+        Type::of(Base::String),
+        Type::of(Base::Char),
+        Type::of(Base::Int(SemaIntWidth::U8)),
+        Type::of(Base::Int(SemaIntWidth::U32)),
+    ] {
+        if !checked.list_types.contains(&element) {
+            checked.list_types.push(element);
+        }
+    }
     let specialized: Vec<ClassType> = checked
         .generic_instances
         .clone()
@@ -381,6 +395,21 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .list_types
         .iter()
         .position(|&t| t == Type::STRING)
+        .map(|index| index as u32);
+    let list_char_id = checked
+        .list_types
+        .iter()
+        .position(|&t| t == Type::of(Base::Char))
+        .map(|index| index as u32);
+    let list_u8_id = checked
+        .list_types
+        .iter()
+        .position(|&t| t == Type::of(Base::Int(SemaIntWidth::U8)))
+        .map(|index| index as u32);
+    let list_u32_id = checked
+        .list_types
+        .iter()
+        .position(|&t| t == Type::of(Base::Int(SemaIntWidth::U32)))
         .map(|index| index as u32);
     let list_regex_match_id = checked
         .list_types
@@ -730,27 +759,27 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         ExternFn {
             name: "zirk_str_split_whitespace".to_string(),
             params: vec![IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_string_id.unwrap_or(0)),
         },
         ExternFn {
             name: "zirk_str_lines".to_string(),
             params: vec![IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_string_id.unwrap_or(0)),
         },
         ExternFn {
             name: "zirk_str_chars".to_string(),
             params: vec![IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_char_id.unwrap_or(0)),
         },
         ExternFn {
             name: "zirk_str_bytes".to_string(),
             params: vec![IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_u8_id.unwrap_or(0)),
         },
         ExternFn {
             name: "zirk_str_codepoints".to_string(),
             params: vec![IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_u32_id.unwrap_or(0)),
         },
         // `native-type-member-surface`: integer helpers. Values travel as
         // `i128`; `bits` and `signed` carry the receiver's width semantics.
@@ -8836,6 +8865,8 @@ impl<'a> FunctionLowering<'a> {
                     IrType::Int(IntWidth::I64),
                     span,
                 );
+                let index_slot = self.declare_slot("<find_index>", IrType::Int(IntWidth::I64), span);
+                self.emit_effect(InstKind::Store(index_slot, index), span);
                 let minus_one = self.emit(
                     InstKind::ConstInt(-1),
                     IrType::Int(IntWidth::I64),
@@ -8865,6 +8896,7 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_effect(InstKind::Store(result_slot, null), span);
                 self.terminate(Terminator::Jump(continue_block));
                 self.current = some_block;
+                let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
                 let wrapped = self.emit(
                     InstKind::Wrap {
                         base: Nullable::Int(IntWidth::I64),

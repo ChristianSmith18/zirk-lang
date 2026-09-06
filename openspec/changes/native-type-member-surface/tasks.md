@@ -9,7 +9,7 @@
 - [x] 1.5 `checked_add/sub/mul/div/rem` → `Result<T, OverflowError>` reusing existing overflow detection
 - [x] 1.6 `wrapping_add/sub/mul` and `saturating_add/sub/mul`
 - [x] 1.7 Corpus fixture `int_members.zrk` covering several widths + invalid fixture for `abs` on `MIN` behavior
-- [ ] 1.8 Handbook: `02-signed-integers.md`/`03-unsigned-integers.md` statuses back to `implemented`
+- [x] 1.8 Handbook: `02-signed-integers.md`/`03-unsigned-integers.md` statuses back to `implemented`
 
 ## 2. Float members
 
@@ -18,38 +18,38 @@
 - [x] 2.3 `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`, `is_finite`, `is_infinite`, `is_negative`
 - [x] 2.4 `floor`, `ceil`, `round`, `truncate`, `fraction`, `pow`, `sqrt` (negative `sqrt` is a controlled error)
 - [x] 2.5 Corpus fixture `float_members.zrk`
-- [ ] 2.6 Handbook: `04-decimals.md` statuses
+- [x] 2.6 Handbook: `04-decimals.md` statuses
 
 ## 3. Char members
 
-- [ ] 3.1 `byte_length`, `codepoint_count`, `ascii_code`, `is_ascii`
-- [ ] 3.2 `is_alphabetic`, `is_numeric`, `is_alphanumeric` (+ keep `is_letter`/`is_digit` aliases), `normalize(form)` with `UnicodeNormalization`
-- [ ] 3.3 Corpus fixture updates in `char_methods.zrk`
-- [ ] 3.4 Handbook: `08-char.md` statuses
+- [x] 3.1 `byte_length`, `codepoint_count`, `ascii_code`, `is_ascii`
+- [x] 3.2 `is_alphabetic`, `is_numeric`, `is_alphanumeric` (+ keep `is_letter`/`is_digit` aliases), `normalize(form)` with `UnicodeNormalization`
+- [x] 3.3 Corpus fixture updates in `char_methods.zrk`
+- [x] 3.4 Handbook: `08-char.md` statuses
 
 ## 4. String members
 
-- [ ] 4.1 `length` (graphemes), `byte_length`, `is_empty()`
-- [ ] 4.2 `find(needle): Int64?`, `replace(needle, replacement)`
-- [ ] 4.3 `trim_start`, `trim_end`, `to_lowercase`, `to_uppercase`
-- [ ] 4.4 `normalize(form)`, `clone`, `split_whitespace`, `lines`
-- [ ] 4.5 `bytes()`/`codepoints()`/`chars()` views (`List`-backed iteration is acceptable)
+- [x] 4.1 `length` (graphemes), `byte_length`, `is_empty()`
+- [x] 4.2 `find(needle): Int64?`, `replace(needle, replacement)`
+- [x] 4.3 `trim_start`, `trim_end`, `to_lowercase`, `to_uppercase`
+- [x] 4.4 `normalize(form)`, `clone`, `split_whitespace`, `lines`
+- [x] 4.5 `bytes()`/`codepoints()`/`chars()` views (`List`-backed iteration is acceptable)
 - [x] 4.6 Negative indexing for `String` (`s[-1]`, slices) resolved as `length + index`
-- [ ] 4.7 Corpus fixture updates in `string_methods.zrk`
-- [ ] 4.8 Handbook: `09-string.md` statuses
+- [x] 4.7 Corpus fixture updates in `string_methods.zrk`
+- [x] 4.8 Handbook: `09-string.md` statuses
 
 ## 5. Duration members
 
 - [x] 5.1 `abs`, `sign`, `is_zero`, `is_positive`, `is_negative`
-- [ ] 5.2 Corpus fixture updates in `duration_literals_and_arithmetic.zrk`
-- [ ] 5.3 Handbook: `11-duration.md` + `03a-temporal/08-duration.md` statuses
+- [x] 5.2 Corpus fixture updates in `duration_literals_and_arithmetic.zrk`
+- [x] 5.3 Handbook: `11-duration.md` + `03a-temporal/08-duration.md` statuses
 
 ## 6. Regex.parse
 
 - [x] 6.1 Checker: `Regex.parse` static call → `Result<Regex, RegexError>`
 - [x] 6.2 Runtime `zirk_regex_compile` returning handle-or-null + `RegexError`
 - [x] 6.3 Corpus fixture `regex_parse.zrk`
-- [ ] 6.4 Handbook: `12-regex.md` status
+- [x] 6.4 Handbook: `12-regex.md` status
 
 ## 7. Collections
 

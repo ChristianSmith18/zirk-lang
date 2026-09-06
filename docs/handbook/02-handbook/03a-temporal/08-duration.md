@@ -91,9 +91,9 @@ years belong to `Period`.
 | `Duration(hours:, minutes:, seconds:, …)` | `Duration` | Named-component construction | specified |
 | `Duration.parse(text)` | `Result<Duration, ParseError>` | Compact (`"2h 30m"`) input | specified |
 | `Duration(text)` | `Duration` | ISO 8601 input (`"PT2H30M"`) | specified |
-| `d.abs()` | `Duration` | Magnitude | specified |
-| `d.sign()` | `Int32` | `-1`, `0`, `1` | specified |
-| `d.is_zero()` / `is_positive()` / `is_negative()` | `Boolean` | Sign tests | specified |
+| `d.abs()` | `Duration` | Magnitude | implemented |
+| `d.sign()` | `Int32` | `-1`, `0`, `1` | implemented |
+| `d.is_zero()` / `is_positive()` / `is_negative()` | `Boolean` | Sign tests | implemented |
 | `d.min(other)` / `d.max(other)` / `d.clamp(lo, hi)` | `Duration` | Bounds | specified |
 | `d.total_weeks()` … `d.total_nanoseconds()` | `Float64` | Complete quantity; may be fractional (`90m.total_hours() == 1.5`) | specified |
 | `d.whole_weeks()` … `d.whole_nanoseconds()` | integer | Truncated-toward-zero whole units | specified |
@@ -108,10 +108,10 @@ scalar in either appropriate order; `Duration / Duration → Float64`;
 `Duration % Duration`; equality/order; compound assignment. Zero division,
 non-finite scalar, precision/range loss, and overflow are controlled errors.
 
-> **Status note:** literals, the operator set, sign tests, `abs()`, and
-> printing are delivered. Component properties, `total_*`/`whole_*`, rounding,
-> `format()`, `humanize()`, and `to_iso_string()` are specified pending the
-> Phase 7 `std.time` delivery.
+> **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`
+> and printing are delivered. Component properties, `total_*`/`whole_*`,
+> rounding, `format()`, `humanize()`, and `to_iso_string()` are specified
+> pending the Phase 7 `std.time` delivery.
 
 ### Examples
 

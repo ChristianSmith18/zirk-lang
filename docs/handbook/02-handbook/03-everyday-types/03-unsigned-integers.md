@@ -51,9 +51,9 @@ unary negation and `abs()`/`sign()`, which do not exist on unsigned values.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `UInt32.MIN` | `UInt32` | Always `0` | specified |
-| `UInt32.MAX` | `UInt32` | `2ⁿ−1` for the width | specified |
-| `UInt32.BITS` | `Int32` | Bit width of the type | specified |
+| `UInt32.MIN` | `UInt32` | Always `0` | implemented |
+| `UInt32.MAX` | `UInt32` | `2ⁿ−1` for the width | implemented |
+| `UInt32.BITS` | `Int32` | Bit width of the type | implemented |
 
 ### Methods
 
@@ -61,10 +61,10 @@ Identical to the signed table above, with these differences:
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `value.is_zero()` … `value.rotate_right(n)` | see signed | Zero/parity tests, bit inspection, rotation | specified |
-| `value.checked_sub(other)` | `Result<UInt32, OverflowError>` | Subtraction reporting underflow | specified |
-| `value.wrapping_*` / `value.saturating_*` | same as `value` | Deliberate underflow/overflow policies | specified |
-| `UInt32.parse(text)` | `Result<UInt32, ParseError>` | Parses text; rejects leading `-` | specified |
+| `value.is_zero()` … `value.rotate_right(n)` | see signed | Zero/parity tests, bit inspection, rotation | implemented |
+| `value.checked_sub(other)` | `Result<UInt32, OverflowError>` | Subtraction reporting underflow | implemented |
+| `value.wrapping_*` / `value.saturating_*` | same as `value` | Deliberate underflow/overflow policies | implemented |
+| `UInt32.parse(text)` | `Result<UInt32, ParseError>` | Parses text; rejects leading `-` | implemented |
 | `UInt32(signed_value)` | `UInt32` | Checked sign/width conversion; range failure is a controlled error | implemented |
 
 > There is no `abs()`, `sign()`, or unary `-` on unsigned integers; apply an

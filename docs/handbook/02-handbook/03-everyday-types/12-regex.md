@@ -113,8 +113,8 @@ guarantees linear-time matching (no backreferences or unsafe lookbehind).
 
 > **Delivery caveat:** `re'...'` literals, `matches`, `find` (with positional
 > and named groups on `Regex.Match`), `replace`, `Regex.split`, `find_all`,
-> match iteration, and `re'...'` inside `match` patterns are delivered.
-> `Regex.parse` remains pending.
+> match iteration, `Regex.parse`, and `re'...'` inside `match` patterns are
+> delivered.
 
 ### Properties
 
@@ -127,13 +127,13 @@ guarantees linear-time matching (no backreferences or unsafe lookbehind).
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `re'...'` | `Regex` | Compile-time checked literal | implemented |
-| `Regex.parse(pattern)` | `Result<Regex, RegexError>` | Dynamic pattern compilation | specified |
+| `Regex.parse(pattern)` | `Result<Regex, RegexError>` | Dynamic pattern compilation | implemented |
 | `r.matches(text)` | `Boolean` | Whole-text match | implemented |
 | `r.find(text)` | `Regex.Match?` | First match, or `null` | implemented |
 | `r.find_all(text)` | `List<Regex.Match>` | All matches | implemented |
 | `r.replace(text, replacement)` | `String` | New string with all matches replaced | implemented |
 | `r.split(text)` | `List<String>` | Split around matches | implemented |
-| `r.to_string()` | `String` | Pattern rendering | specified |
+| `r.to_string()` | `String` | Pattern rendering | implemented |
 
 ### `Regex.Match`
 
@@ -163,7 +163,7 @@ match Regex.parse(user_pattern) {
     Ok(r) => r.matches(input),
 }
 
-// regex literals in match patterns — specified, pending:
+// regex literals in match patterns — implemented
 match input {
     re'^[0-9]+$' => stdout.println("digits"),
     _ => stdout.println("other"),
@@ -174,8 +174,8 @@ match input {
 
 > `array-list-tuple-duration-regex` delivered `re'...'` literals, `Regex` with
 > `matches`, `find` (including `Regex.Match` positional and named groups), and
-> `replace`. `Regex.split`, `String.split`, match iteration, and `re'...'` in
-> full pattern-matching integration remain pending.
+> `replace`. `native-type-member-surface` added `Regex.parse`, `Regex.split`,
+> `find_all` match iteration, and `re'...'` in `match` patterns.
 
 ---
 
