@@ -8,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use crate::string::alloc_owned;
+use crate::string::{alloc_owned, borrow};
 
 /// Multiplies a `Duration` by an `f64` scalar.
 #[unsafe(no_mangle)]
@@ -400,6 +400,137 @@ fn format_duration_iso(nanos: i64) -> String {
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_to_iso_string(nanos: i64) -> *mut c_void {
     alloc_owned(&format_duration_iso(nanos))
+}
+
+/// `d.format(template)` — typed `%` placeholders for the duration's
+/// components. Supported: `%w` weeks, `%d` days, `%h` hours, `%m` minutes,
+/// `%s` seconds, `%ms` milliseconds, `%us` microseconds, `%ns` nanoseconds,
+/// `%%` a literal `%`. All component values are from the magnitude.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_format(nanos: i64, template: *const c_void) -> *mut c_void {
+    let template = unsafe { borrow(template) }.expect("a valid string handle");
+    let template = unsafe { template.as_str() };
+    let sign = if nanos < 0 { "-" } else { "" };
+    let m = (nanos as i128).wrapping_abs();
+    let days_total = m / NANOS_PER_DAY;
+    let m = m % NANOS_PER_DAY;
+    let hours = m / NANOS_PER_HOUR;
+    let m = m % NANOS_PER_HOUR;
+    let minutes = m / NANOS_PER_MINUTE;
+    let m = m % NANOS_PER_MINUTE;
+    let seconds = m / NANOS_PER_SECOND;
+    let m = m % NANOS_PER_SECOND;
+    let ms = m / NANOS_PER_MILLI;
+    let m = m % NANOS_PER_MILLI;
+    let us = m / NANOS_PER_MICRO;
+    let ns = m % NANOS_PER_MICRO;
+
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('%') => {
+                out.push('%');
+                chars.next();
+            }
+            Some('w') => {
+                out.push_str(&(days_total / 7).to_string());
+                chars.next();
+            }
+            Some('d') => {
+                out.push_str(&days_total.to_string());
+                chars.next();
+            }
+            Some('h') => {
+                out.push_str(&hours.to_string());
+                chars.next();
+            }
+            Some('m') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&ms.to_string());
+                    chars.next();
+                } else {
+                    out.push_str(&minutes.to_string());
+                }
+            }
+            Some('s') => {
+                out.push_str(&seconds.to_string());
+                chars.next();
+            }
+            Some('u') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&us.to_string());
+                    chars.next();
+                } else {
+                    out.push('?');
+                }
+            }
+            Some('n') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&ns.to_string());
+                    chars.next();
+                } else {
+                    out.push('?');
+                }
+            }
+            _ => out.push('?'),
+        }
+    }
+    let text = format!("{sign}{out}");
+    alloc_owned(&text)
+}
+
+/// `d.humanize(locale, max_units)` — readable, multi-unit description.
+/// The `locale` is currently ignored and English-style labels are used.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_humanize(
+    nanos: i64,
+    _locale: *const c_void,
+    max_units: i32,
+) -> *mut c_void {
+    if nanos == 0 {
+        return alloc_owned("0s");
+    }
+    let sign = if nanos < 0 { "-" } else { "" };
+    let mut m = (nanos as i128).wrapping_abs();
+    const UNITS: &[(&str, i128)] = &[
+        ("w", 604_800_000_000_000),
+        ("d", 86_400_000_000_000),
+        ("h", 3_600_000_000_000),
+        ("m", 60_000_000_000),
+        ("s", 1_000_000_000),
+        ("ms", 1_000_000),
+        ("us", 1_000),
+        ("ns", 1),
+    ];
+    let mut parts = Vec::new();
+    for &(name, unit) in UNITS {
+        if m == 0 {
+            break;
+        }
+        let whole = m / unit;
+        if whole == 0 {
+            continue;
+        }
+        m %= unit;
+        parts.push(format!("{}{name}", whole));
+        if max_units > 0 && parts.len() == max_units as usize {
+            break;
+        }
+    }
+    let text = if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        format!("{sign}{}", parts.join(" "))
+    };
+    alloc_owned(&text)
 }
 
 #[cfg(test)]

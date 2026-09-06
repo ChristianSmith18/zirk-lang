@@ -1,0 +1,9 @@
+fn main(): Void {
+    inmut d = 1h + 30m + 5s + 150ms;
+    stdout.println(d.format("%h:%m:%s"));
+    stdout.println(d.format("%d days %h hours %ms ms"));
+    stdout.println((-(1d + 2h)).format("%d %h"));
+    stdout.println(d.humanize("es", 2));
+    stdout.println(d.humanize("es", 4));
+    stdout.println(0s.humanize("es", 2));
+}

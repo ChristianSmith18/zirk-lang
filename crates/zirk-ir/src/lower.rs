@@ -1235,6 +1235,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: IrType::String,
         },
         ExternFn {
+            name: "zirk_duration_format".to_string(),
+            params: vec![nanos, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_duration_humanize".to_string(),
+            params: vec![nanos, IrType::String, IrType::Int(IntWidth::I32)],
+            return_type: IrType::String,
+        },
+        ExternFn {
             name: "zirk_rt_duration_mul_f64".to_string(),
             params: vec![nanos, f64],
             return_type: nanos,
@@ -9297,6 +9307,8 @@ impl<'a> FunctionLowering<'a> {
                 | ("ceil", 1)
                 | ("truncate", 1)
                 | ("to_iso_string", 0)
+                | ("format", 1)
+                | ("humanize", 2)
         ) || field.safe
         {
             return None;
@@ -9420,6 +9432,29 @@ impl<'a> FunctionLowering<'a> {
                 IrType::String,
                 span,
             )),
+            "format" => {
+                let template = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_duration_format".to_string(),
+                        args: vec![receiver, template],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
+            "humanize" => {
+                let locale = self.lower_expr(&call.args[0].value);
+                let max_units = self.lower_expr(&call.args[1].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_duration_humanize".to_string(),
+                        args: vec![receiver, locale, max_units],
+                    },
+                    IrType::String,
+                    span,
+                ))
+            }
             _ => unreachable!("name checked above"),
         }
     }
@@ -9459,6 +9494,8 @@ impl<'a> FunctionLowering<'a> {
                 | ("ceil", 1)
                 | ("truncate", 1)
                 | ("to_iso_string", 0)
+                | ("format", 1)
+                | ("humanize", 2)
         ) || field.safe
         {
             return false;
