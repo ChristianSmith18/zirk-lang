@@ -4,7 +4,6 @@
 Defines the sealed temporal family, exact and calendar arithmetic, time zones,
 comparison domains, parsing, formatting, and temporal errors.
 ## Requirements
-
 ### Requirement: Current-time APIs separate values from clock sources
 `Instant`, `Date`, `Time`, `DateTime`, and `ZonedDateTime` SHALL expose friendly
 current-value construction with an optional injectable clock; civil values
@@ -26,6 +25,7 @@ than enqueueing an unbounded backlog.
 - **WHEN** a ticker consumer resumes after multiple scheduled intervals
 - **THEN** the next tick reports its scheduled and observed instants plus the
   missed count
+
 ### Requirement: Distinct temporal value types
 Zirk SHALL define `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`, and `Period` as distinct immutable value types in a sealed `Temporal` capability family. Membership in that family SHALL NOT make unsupported cross-type operations valid.
 
@@ -91,3 +91,67 @@ Every temporal type SHALL provide appropriate ISO serialization, explicit-patter
 #### Scenario: ISO duration
 - **WHEN** `Duration("PT2H30M")` is parsed
 - **THEN** the result equals two hours and thirty minutes
+
+### Requirement: Duration sign and magnitude members
+
+A `Duration` SHALL expose `abs()`, `sign()`, `is_zero()`, `is_positive()`,
+and `is_negative()` in addition to its existing literal/arithmetic surface.
+
+#### Scenario: Magnitude
+
+- **WHEN** `(-5s).abs()` is evaluated
+- **THEN** the result is `5s`
+
+#### Scenario: Sign tests
+
+- **WHEN** `(-1s).is_negative()`, `(0s).is_zero()`, and
+  `(2s).is_positive()` run
+- **THEN** all produce `true`
+
+#### Scenario: Sign value
+
+- **WHEN** `(-3s).sign()` is evaluated
+- **THEN** the result is `-1` as `Int32`
+
+### Requirement: Duration primitive
+
+`Duration` SHALL be a compiler primitive representing an exact span of time with nanosecond precision. It SHALL support literal suffixes, arithmetic, comparison, and `to_string()`. `Duration` SHALL be distinct from integer counts of time and SHALL avoid calendar ambiguity.
+
+#### Scenario: Duration literals
+- **WHEN** `inmut d: Duration = 250ms;` is declared
+- **THEN** `d` represents 250 milliseconds
+
+- **WHEN** `inmut d: Duration = 1.5s;` is declared
+- **THEN** `d` represents 1500 milliseconds
+
+- **WHEN** `inmut d: Duration = 2h;` is declared
+- **THEN** `d` represents two hours in nanoseconds
+
+### Requirement: Duration arithmetic and comparison
+
+`Duration` SHALL support addition, subtraction, negation, multiplication by a scalar, and division by a scalar and by another `Duration`. Division of two `Duration` values SHALL yield a `Float64`. Comparisons SHALL be total.
+
+#### Scenario: Duration arithmetic
+- **WHEN** `1s + 500ms` is evaluated
+- **THEN** the result is `1500ms`
+
+#### Scenario: Duration ratio
+- **WHEN** `1s / 250ms` is evaluated
+- **THEN** the result is `4.0` as `Float64`
+
+### Requirement: Duration formatting
+
+`Duration.to_string()` SHALL produce a human-readable representation. It SHALL be lossless for exact nanosecond values and SHALL normalize larger units when possible.
+
+#### Scenario: Duration to_string
+- **WHEN** `(1500ms).to_string()` is evaluated
+- **THEN** the result is `"1.5s"` or an equivalent normalized form
+
+### Requirement: Out-of-scope temporal types
+
+`Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, and `Period` SHALL remain unimplemented in this change. Syntactic names MAY be gated to a future phase.
+
+#### Scenario: Date usage is rejected
+- **WHEN** `Date(2026, 9, 4)` is written
+- **THEN** a diagnostic indicates that `Date` is not yet available
+
