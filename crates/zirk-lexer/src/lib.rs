@@ -402,6 +402,8 @@ impl<'a> Lexer<'a> {
             };
         }
 
+        // A `b`/`b16`/`b32`/`b64`/`b128` suffix marks a binary `BinaryFloat`
+        // literal — on a fractional or an integer-valued mantissa alike.
         if FLOAT_WIDTHS.contains(&suffix.as_str()) {
             return Some(TokenKind::Float(NumberLit::new(text).with_width(suffix)));
         }
@@ -417,7 +419,7 @@ impl<'a> Lexer<'a> {
             format!("invalid suffix on numeric literal: `{suffix}`"),
         );
         self.emit(
-            d.with_cause("it is neither a width (`f32`) nor a duration unit (`ms`)")
+            d.with_cause("it is neither a binary-float suffix (`b32`) nor a duration unit (`ms`)")
                 .with_help("separate the number from the identifier with a space or an operator"),
         );
         None

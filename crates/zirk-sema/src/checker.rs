@@ -1086,6 +1086,9 @@ impl<'a> Checker<'a> {
             // prints by truncating to `Float64`; this can lose precision for
             // values that are not exactly representable in `f64`.
             Base::Float(_) => true,
+            // The exact base-ten `Float` renders its coefficient and scale
+            // directly — always exact, never a binary artifact.
+            Base::Decimal => true,
             // Every class, record, tuple, enum, weak reference and callable
             // value has a compiler-provided default `to_string()` rendering
             // unless it declares its own (`native-type-member-surface`).
@@ -4781,6 +4784,24 @@ impl<'a> Checker<'a> {
             };
         }
 
+        // The former binary spellings were renamed, not removed.
+        if matches!(
+            reference.name.as_str(),
+            "Float16" | "Float32" | "Float64" | "Float128"
+        ) {
+            let binary = format!("Binary{}", reference.name);
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                format!("`{}` is no longer a type name", reference.name),
+                format!(
+                    "the IEEE 754 binary type is now `{binary}`; the plain `Float` is the exact base-ten decimal type"
+                ),
+                Some(format!("write `{binary}` for binary, or `Float` for exact decimal")),
+            );
+            return Type::UNKNOWN;
+        }
+
         match pending_type(&reference.name) {
             Some(pending) => self.error(
                 codes::UNKNOWN_TYPE,
@@ -7374,14 +7395,18 @@ impl<'a> Checker<'a> {
     /// represent, so there is no `f64`-based bound for it.
     fn check_float_literal(&mut self, lit: &FloatLit, expected: Option<Type>) -> Type {
         use FloatWidth::*;
-        let explicit_width = match lit.width.as_deref() {
+        // A `b*` suffix forces the IEEE 754 binary family; no suffix leaves the
+        // literal exact base-ten `Float` unless a `BinaryFloat` annotation
+        // pulls it into a binary width contextually.
+        let explicit_binary = match lit.width.as_deref() {
             None => None,
-            Some("f16") => Some(F16),
-            Some("f32") => Some(F32),
-            Some("f64") => Some(F64),
-            Some("f128") => Some(F128),
+            Some("b" | "b64") => Some(F64),
+            Some("b16") => Some(F16),
+            Some("b32") => Some(F32),
+            Some("b128") => Some(F128),
             Some(_) => None,
         };
+        let is_binary_literal = lit.width.is_some();
 
         let value: f64 = lit.text.parse().unwrap_or(f64::NAN);
 
@@ -7415,16 +7440,74 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        let width = explicit_width.unwrap_or_else(|| {
-            expected
-                .map(Type::without_null)
+        let expected_bare = expected.map(Type::without_null).filter(|t| !t.is_unknown());
+
+        // No suffix and no binary context -> the exact base-ten `Float`.
+        // A suffix-less literal still adopts a `BinaryFloat` width when the
+        // annotation asks for one (contextual typing of a literal is not a
+        // `Float`/`BinaryFloat` value mix).
+        if !is_binary_literal {
+            let contextual_binary = expected_bare.and_then(|t| match t.base {
+                Base::Float(w) => Some(w),
+                _ => None,
+            });
+            match contextual_binary {
+                None => {
+                    if value.is_nan() {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!("the literal {} is not a finite number", lit.text),
+                            "a `Float` literal must be a finite decimal",
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    if Self::decimal_text_needs_too_many_digits(&lit.text) {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!(
+                                "the literal {} needs more than 38 significant digits to be exact",
+                                lit.text
+                            ),
+                            "add a `b` suffix to store it as a `BinaryFloat` instead",
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    return Type::FLOAT;
+                }
+                Some(w) => {
+                    return self.finish_binary_float_literal(lit, w, value);
+                }
+            }
+        }
+
+        let width = explicit_binary.unwrap_or_else(|| {
+            expected_bare
                 .and_then(|t| match t.base {
                     Base::Float(w) => Some(w),
                     _ => None,
                 })
                 .unwrap_or(F64)
         });
+        self.finish_binary_float_literal(lit, width, value)
+    }
 
+    /// Whether an exact-decimal literal's coefficient exceeds 38 digits.
+    fn decimal_text_needs_too_many_digits(text: &str) -> bool {
+        let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+        mantissa.chars().filter(|c| c.is_ascii_digit()).count() > 38
+    }
+
+    /// Range- and finiteness-checks a `BinaryFloat` literal, then types it.
+    fn finish_binary_float_literal(
+        &mut self,
+        lit: &FloatLit,
+        width: FloatWidth,
+        value: f64,
+    ) -> Type {
         if let Some(bound) = width.literal_bound() {
             if value.is_nan() || value.abs() > bound {
                 self.error(
@@ -7441,7 +7524,7 @@ impl<'a> Checker<'a> {
                 codes::INTEGER_OUT_OF_RANGE,
                 lit.span,
                 format!("the literal {} is not a finite number", lit.text),
-                "Float128 literals must be finite",
+                "BinaryFloat128 literals must be finite",
                 None,
             );
             return Type::UNKNOWN;
@@ -12375,6 +12458,72 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // Exact `Float` (base-ten decimal) value methods
+            // (`exact-decimal-arithmetic`). No `is_finite`/`is_infinite`
+            // (no infinity); `format` stays specified-not-implemented, as on
+            // the binary family. Explicit `RoundingMode` for `div`/`round` is
+            // deferred with `format`; both default to half-to-even.
+            if matches!(object.base, Base::Decimal) && !field.safe && !object.nullable {
+                // Every argument named below is a `Float` (`min`/`max`/`pow`/
+                // `clamp`/`div` first arg) or an integer place count
+                // (`round`/`div` second arg); check them uniformly.
+                let check_decimal_args = |this: &mut Self, from: usize, to: usize| {
+                    for arg in expr.args.iter().take(to).skip(from) {
+                        let t = this.check_expr(&arg.value);
+                        if !t.is_unknown() && !object.accepts(t) {
+                            this.expect_assignable(object, t, arg.value.span(), "the argument");
+                        }
+                    }
+                };
+                let check_place_arg = |this: &mut Self, idx: usize| {
+                    if let Some(arg) = expr.args.get(idx) {
+                        let t = this.check_expr(&arg.value);
+                        if !t.is_unknown() && !matches!(t.base, Base::Int(_)) {
+                            this.expect_assignable(
+                                Type::INT32,
+                                t,
+                                arg.value.span(),
+                                "the place count",
+                            );
+                        }
+                    }
+                };
+                match field.name.name.as_str() {
+                    "abs" | "floor" | "ceil" | "truncate" | "fraction" | "sqrt"
+                        if expr.args.is_empty() =>
+                    {
+                        return object;
+                    }
+                    "round" if expr.args.is_empty() => return object,
+                    "round" if expr.args.len() == 1 => {
+                        check_place_arg(self, 0);
+                        return object;
+                    }
+                    "sign" | "scale" if expr.args.is_empty() => return Type::INT32,
+                    "is_zero" | "is_negative" | "is_integer" if expr.args.is_empty() => {
+                        return Type::BOOLEAN;
+                    }
+                    "min" | "max" | "pow" if expr.args.len() == 1 => {
+                        check_decimal_args(self, 0, 1);
+                        return object;
+                    }
+                    "clamp" if expr.args.len() == 2 => {
+                        check_decimal_args(self, 0, 2);
+                        return object;
+                    }
+                    "div" if expr.args.len() == 1 => {
+                        check_decimal_args(self, 0, 1);
+                        return object;
+                    }
+                    "div" if expr.args.len() == 2 => {
+                        check_decimal_args(self, 0, 1);
+                        check_place_arg(self, 1);
+                        return object;
+                    }
+                    _ => {}
+                }
+            }
+
             // `Throwable.stack_trace()` / `Throwable.suppressed()` are
             // compiler intrinsics answered by the runtime, not user-overridable
             // methods. They take no arguments and require a `Throwable` receiver.
@@ -13543,9 +13692,12 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         // can represent every value of both operands without loss. The
         // checker already guaranteed the common type exists; lower widens.
         (_, _, Add | Sub | Mul | Div | Rem)
-            if matches!(left.base, Base::Int(_) | Base::Float(_))
-                && matches!(right.base, Base::Int(_) | Base::Float(_)) =>
+            if matches!(left.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+                && matches!(right.base, Base::Int(_) | Base::Float(_) | Base::Decimal) =>
         {
+            // `common_numeric` yields `None` for a `Float`/`BinaryFloat` mix
+            // (its `accepts` has no cross arm), which surfaces as the
+            // "not available" diagnostic — the two never combine implicitly.
             left.common_numeric(right)
         }
         // `Duration` arithmetic.

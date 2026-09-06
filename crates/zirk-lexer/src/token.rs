@@ -373,8 +373,11 @@ impl DurationUnit {
     }
 }
 
-/// Widths a float literal may name in a suffix.
-pub const FLOAT_WIDTHS: &[&str] = &["f16", "f32", "f64", "f128"];
+/// Suffixes that make a fractional literal an IEEE 754 binary `BinaryFloat`.
+///
+/// A suffix-less fractional literal is the exact base-ten `Float` instead.
+/// `b` alone means `BinaryFloat64`.
+pub const FLOAT_WIDTHS: &[&str] = &["b", "b16", "b32", "b64", "b128"];
 
 /// Class of token produced by the lexer.
 #[derive(Debug, Clone, PartialEq)]
