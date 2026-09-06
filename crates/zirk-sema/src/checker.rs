@@ -12277,6 +12277,20 @@ impl<'a> Checker<'a> {
                     "is_zero" | "is_positive" | "is_negative" if expr.args.is_empty() => {
                         return Type::BOOLEAN;
                     }
+                    "total_weeks" | "total_days" | "total_hours" | "total_minutes"
+                    | "total_seconds" | "total_milliseconds" | "total_microseconds"
+                    | "total_nanoseconds"
+                        if expr.args.is_empty() =>
+                    {
+                        return Type::FLOAT64;
+                    }
+                    "whole_weeks" | "whole_days" | "whole_hours" | "whole_minutes"
+                    | "whole_seconds" | "whole_milliseconds" | "whole_microseconds"
+                    | "whole_nanoseconds"
+                        if expr.args.is_empty() =>
+                    {
+                        return Type::of(Base::Int(IntWidth::I64));
+                    }
                     _ => {}
                 }
             }

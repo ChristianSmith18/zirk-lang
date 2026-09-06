@@ -1,0 +1,19 @@
+fn main(): Void {
+    inmut d = 90m;
+    stdout.println(d.total_hours().to_string());
+    stdout.println(d.total_minutes().to_string());
+    stdout.println(d.total_seconds().to_string());
+    stdout.println(d.whole_hours().to_string());
+    stdout.println(d.whole_minutes().to_string());
+    stdout.println(d.whole_seconds().to_string());
+
+    inmut neg = -90m;
+    stdout.println(neg.total_hours().to_string());
+    stdout.println(neg.whole_hours().to_string());
+
+    inmut tiny = 1500ms;
+    stdout.println(tiny.total_milliseconds().to_string());
+    stdout.println(tiny.whole_milliseconds().to_string());
+    stdout.println(tiny.total_nanoseconds().to_string());
+    stdout.println(tiny.whole_nanoseconds().to_string());
+}

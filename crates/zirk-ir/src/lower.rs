@@ -606,6 +606,86 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::Int(IntWidth::I64)],
             return_type: IrType::Int(IntWidth::I32),
         },
+        ExternFn {
+            name: "zirk_duration_total_weeks".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_days".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_hours".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_minutes".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_seconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_milliseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_microseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_total_nanoseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Float(FloatWidth::F64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_weeks".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_days".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_hours".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_minutes".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_seconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_milliseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_microseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_duration_whole_nanoseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
         // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
         // a `Duration` is nanoseconds, an `Int32` sign-extends — and the
         // handle itself is element-agnostic, so the same seven entry points
@@ -9081,6 +9161,22 @@ impl<'a> FunctionLowering<'a> {
                 | ("is_zero", 0)
                 | ("is_positive", 0)
                 | ("is_negative", 0)
+                | ("total_weeks", 0)
+                | ("total_days", 0)
+                | ("total_hours", 0)
+                | ("total_minutes", 0)
+                | ("total_seconds", 0)
+                | ("total_milliseconds", 0)
+                | ("total_microseconds", 0)
+                | ("total_nanoseconds", 0)
+                | ("whole_weeks", 0)
+                | ("whole_days", 0)
+                | ("whole_hours", 0)
+                | ("whole_minutes", 0)
+                | ("whole_seconds", 0)
+                | ("whole_milliseconds", 0)
+                | ("whole_microseconds", 0)
+                | ("whole_nanoseconds", 0)
         ) || field.safe
         {
             return None;
@@ -9169,6 +9265,22 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 ))
             }
+            total if total.starts_with("total_") => Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_duration_{total}"),
+                    args: vec![receiver],
+                },
+                IrType::Float(FloatWidth::F64),
+                span,
+            )),
+            whole if whole.starts_with("whole_") => Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_duration_{whole}"),
+                    args: vec![receiver],
+                },
+                IrType::Int(IntWidth::I64),
+                span,
+            )),
             _ => unreachable!("name checked above"),
         }
     }
@@ -9187,6 +9299,22 @@ impl<'a> FunctionLowering<'a> {
                 | ("is_zero", 0)
                 | ("is_positive", 0)
                 | ("is_negative", 0)
+                | ("total_weeks", 0)
+                | ("total_days", 0)
+                | ("total_hours", 0)
+                | ("total_minutes", 0)
+                | ("total_seconds", 0)
+                | ("total_milliseconds", 0)
+                | ("total_microseconds", 0)
+                | ("total_nanoseconds", 0)
+                | ("whole_weeks", 0)
+                | ("whole_days", 0)
+                | ("whole_hours", 0)
+                | ("whole_minutes", 0)
+                | ("whole_seconds", 0)
+                | ("whole_milliseconds", 0)
+                | ("whole_microseconds", 0)
+                | ("whole_nanoseconds", 0)
         ) || field.safe
         {
             return false;

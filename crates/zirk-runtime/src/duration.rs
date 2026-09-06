@@ -59,6 +59,7 @@ pub extern "C" fn zirk_duration_sign(nanos: i64) -> i32 {
     nanos.signum() as i32
 }
 
+const NANOS_PER_WEEK: i128 = 7 * NANOS_PER_DAY;
 const NANOS_PER_DAY: i128 = 86_400_000_000_000;
 const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
 const NANOS_PER_MINUTE: i128 = 60_000_000_000;
@@ -110,6 +111,102 @@ pub extern "C" fn zirk_duration_microseconds(nanos: i64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_nanoseconds(nanos: i64) -> i32 {
     ((magnitude(nanos) % NANOS_PER_SECOND) % 1000) as i32
+}
+
+/// `d.total_weeks()` — the value as a fractional number of weeks.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_weeks(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_WEEK as f64
+}
+
+/// `d.total_days()` — the value as a fractional number of days.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_days(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_DAY as f64
+}
+
+/// `d.total_hours()` — the value as a fractional number of hours.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_hours(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_HOUR as f64
+}
+
+/// `d.total_minutes()` — the value as a fractional number of minutes.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_minutes(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_MINUTE as f64
+}
+
+/// `d.total_seconds()` — the value as a fractional number of seconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_seconds(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_SECOND as f64
+}
+
+/// `d.total_milliseconds()` — the value as a fractional number of milliseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_milliseconds(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_MILLI as f64
+}
+
+/// `d.total_microseconds()` — the value as a fractional number of microseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_microseconds(nanos: i64) -> f64 {
+    nanos as f64 / NANOS_PER_MICRO as f64
+}
+
+/// `d.total_nanoseconds()` — the value as nanoseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_total_nanoseconds(nanos: i64) -> f64 {
+    nanos as f64
+}
+
+/// `d.whole_weeks()` — the value truncated toward zero in whole weeks.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_weeks(nanos: i64) -> i64 {
+    nanos / NANOS_PER_WEEK as i64
+}
+
+/// `d.whole_days()` — the value truncated toward zero in whole days.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_days(nanos: i64) -> i64 {
+    nanos / NANOS_PER_DAY as i64
+}
+
+/// `d.whole_hours()` — the value truncated toward zero in whole hours.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_hours(nanos: i64) -> i64 {
+    nanos / NANOS_PER_HOUR as i64
+}
+
+/// `d.whole_minutes()` — the value truncated toward zero in whole minutes.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_minutes(nanos: i64) -> i64 {
+    nanos / NANOS_PER_MINUTE as i64
+}
+
+/// `d.whole_seconds()` — the value truncated toward zero in whole seconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_seconds(nanos: i64) -> i64 {
+    nanos / NANOS_PER_SECOND as i64
+}
+
+/// `d.whole_milliseconds()` — the value truncated toward zero in whole milliseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_milliseconds(nanos: i64) -> i64 {
+    nanos / NANOS_PER_MILLI as i64
+}
+
+/// `d.whole_microseconds()` — the value truncated toward zero in whole microseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_microseconds(nanos: i64) -> i64 {
+    nanos / NANOS_PER_MICRO as i64
+}
+
+/// `d.whole_nanoseconds()` — the value truncated toward zero in whole nanoseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_whole_nanoseconds(nanos: i64) -> i64 {
+    nanos
 }
 
 /// Renders a nanosecond count as a normalized duration literal.
