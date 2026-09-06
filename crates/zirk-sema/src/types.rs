@@ -496,6 +496,11 @@ impl Type {
             return None;
         }
 
+        // The exact `Float` is only a *common* type when one operand already
+        // is one — two integers never promote to it (that would make
+        // `i128 + u128` silently exact-decimal instead of "no common type").
+        let decimal_in_play = matches!(self.base, Decimal) || matches!(other.base, Decimal);
+
         let candidates = [
             Type::of(Int(IntWidth::I8)),
             Type::of(Int(IntWidth::U8)),
@@ -519,6 +524,7 @@ impl Type {
 
         candidates
             .into_iter()
+            .filter(|candidate| !matches!(candidate.base, Decimal) || decimal_in_play)
             .find(|candidate| candidate.accepts(self) && candidate.accepts(other))
     }
 

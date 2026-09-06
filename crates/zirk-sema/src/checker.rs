@@ -12723,7 +12723,10 @@ impl<'a> Checker<'a> {
             // scalar name can never collide with one (type names are
             // reserved).
             if let Some(target) = Type::from_name(&callee.name)
-                && matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String)
+                && matches!(
+                    target.base,
+                    Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String
+                )
             {
                 return self.check_context_conversion(target, expr);
             }
@@ -12868,7 +12871,7 @@ impl<'a> Checker<'a> {
     /// check it, again in `zirk-ir/lower.rs`'s `lower_context_tree` to
     /// lower it) — task 7.3's "does not mutate operands" the same way.
     fn check_context_tree(&mut self, target: Type, expr: &Expr) {
-        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_));
+        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
         let is_string = matches!(target.base, Base::String);
 
         let compatible_op = |op: BinaryOp| {
@@ -12904,8 +12907,8 @@ impl<'a> Checker<'a> {
         if actual.is_unknown() || target == actual {
             return;
         }
-        let numeric_target = matches!(target.base, Base::Int(_) | Base::Float(_));
-        let numeric_actual = matches!(actual.base, Base::Int(_) | Base::Float(_));
+        let numeric_target = matches!(target.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
+        let numeric_actual = matches!(actual.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
         if !actual.nullable && numeric_target && numeric_actual {
             return;
         }
