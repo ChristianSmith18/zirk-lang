@@ -90,18 +90,25 @@ fn valid_the_four_types_of_the_subset() {
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
     // `Int64`/`Float64`/`Char` and the rest of the scalars in this phase's
-    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1) — `UInt` is
-    // still genuinely pending: the spec never names it as an alias the way
-    // `Int`/`Integer` name `Int32`.
-    let output = rejected_body("mut x: UInt = 1;");
+    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1) — `Task` is a
+    // genuinely pending name from Phase 5.
+    let output = rejected_body("mut x: Task = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
-    assert!(output.contains("Phase 3b"), "{output}");
+    assert!(output.contains("Phase 5"), "{output}");
 }
 
 #[test]
 fn valid_short_aliases_of_the_default_integer() {
     // `Int` and `Integer` name `Int32`, which has existed since Phase 1.
     accepted_body("mut a: Int = 1;\nmut b: Integer = 2;\nmut c: Int32 = a + b;");
+}
+
+#[test]
+fn valid_short_aliases_of_the_default_unsigned_integer() {
+    // `UInt` and `UInteger` name `UInt32` exactly the way `Int`/`Integer`
+    // name `Int32` (spec: `zirk-scalars`, "Complete family of integer
+    // widths").
+    accepted_body("mut a: UInt = 1;\nmut b: UInteger = 2;\nmut c: UInt32 = a + b;");
 }
 
 // --- Integer widths (roadmap Phase 3b) ---------------------------------------

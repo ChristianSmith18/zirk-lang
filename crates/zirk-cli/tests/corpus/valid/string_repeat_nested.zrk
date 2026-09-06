@@ -1,0 +1,15 @@
+fn shout(s: String, n: Int32): Void {
+    stdout.println(s + n.to_string());
+}
+
+fn main(): Void {
+    // `String * Int` abre una rama de guardia: los operandos evaluados antes
+    // deben cruzarla por slot. Esto fallaba con IR inválido.
+    stdout.println("repetir: " + "ab" * 3);
+    shout("ab" * 2, 7);
+    inmut x = "z" * 2 + "!";
+    stdout.println(x);
+    stdout.println(3 * "ja");
+    inmut n = 2;
+    stdout.println("n=" + "q" * n);
+}

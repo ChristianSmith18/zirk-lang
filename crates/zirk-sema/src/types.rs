@@ -609,9 +609,10 @@ impl Type {
     ///
     /// `Int` and `Integer` resolve here rather than being deferred, because an
     /// alias *is* its target: both name `Int32`, which has existed since the
-    /// first phase. Deferring them deferred a spelling, not a capability, and
-    /// after resolution nothing distinguishes them — which is what being an
-    /// alias means. `UInt` is not here because `UInt32` is not implemented.
+    /// first phase. `UInt` and `UInteger` name `UInt32` the same way.
+    /// Deferring them deferred a spelling, not a capability, and after
+    /// resolution nothing distinguishes them — which is what being an alias
+    /// means.
     pub fn from_name(name: &str) -> Option<Self> {
         use IntWidth::*;
         Some(match name {
@@ -623,7 +624,7 @@ impl Type {
             "Int128" => Type::of(Base::Int(I128)),
             "UInt8" => Type::of(Base::Int(U8)),
             "UInt16" => Type::of(Base::Int(U16)),
-            "UInt32" => Type::of(Base::Int(U32)),
+            "UInt32" | "UInt" | "UInteger" => Type::of(Base::Int(U32)),
             "UInt64" => Type::of(Base::Int(U64)),
             "UInt128" => Type::of(Base::Int(U128)),
             // `Byte` is a recognized alias of `UInt8` (roadmap Phase 4e,
@@ -1039,10 +1040,9 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     const PHASE_3: &[&str] = &["Object"];
     // Phase 3b brings the rest of the scalars. The integer widths, the
     // binary floating family and `Char` are all implemented (`Type::from_name`,
-    // checked ahead of this list) — `UInt` stays here on its own: the spec
-    // never names it as an alias the way `Int`/`Integer` name `Int32`, so it
-    // resolves to nothing even once every explicit width does.
-    const PHASE_3B: &[&str] = &["UInt"];
+    // checked ahead of this list) — `UInt`/`UInteger` name `UInt32` the way
+    // `Int`/`Integer` name `Int32`, so nothing is left pending here.
+    const PHASE_3B: &[&str] = &[];
     // Phase 4 brings errors and resources. `Result<T,E>` and `Pointer<T>` are
     // resolved by name; `Resource<E>` is registered as a native contract in
     // `checker.rs` and is no longer pending here.
@@ -1157,15 +1157,15 @@ mod tests {
     }
 
     #[test]
-    fn the_alias_of_an_unimplemented_type_stays_pending() {
-        // `UInt` is `UInt32`, which does not exist yet.
-        assert_eq!(Type::from_name("UInt"), None);
-        assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
+    fn the_unsigned_aliases_of_uint32_resolve() {
+        // `UInt`/`UInteger` are `UInt32` the way `Int`/`Integer` are `Int32`.
+        assert_eq!(Type::from_name("UInt"), Type::from_name("UInt32"));
+        assert_eq!(Type::from_name("UInteger"), Type::from_name("UInt32"));
+        assert!(pending_type("UInt").is_none());
     }
 
     #[test]
     fn types_from_later_phases_declare_their_phase() {
-        assert_eq!(pending_type("UInt").map(|t| t.phase), Some(Phase::THREE_B));
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Task").map(|t| t.phase), Some(Phase::FIVE));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
