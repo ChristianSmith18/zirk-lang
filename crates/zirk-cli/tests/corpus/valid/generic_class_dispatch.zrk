@@ -1,0 +1,19 @@
+interface Container<T> {
+    fn get(): T;
+}
+
+class Box<T> implements Container<T> {
+    value: T;
+    construct(v: T) { this.value = v; }
+    fn get(): T { return this.value; }
+}
+
+fn value_int(c: Container<Int32>): Int32 { return c.get(); }
+fn value_str(c: Container<String>): String { return c.get(); }
+
+fn main(): Void {
+    mut i: Box<Int32> = Box(5);
+    mut s: Box<String> = Box("hello");
+    stdout.println(value_int(i));
+    stdout.println(value_str(s));
+}

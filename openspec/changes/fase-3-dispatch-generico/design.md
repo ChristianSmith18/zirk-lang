@@ -23,11 +23,12 @@ constraint verification and merges independently.
 ## Goals / Non-Goals
 
 **Goals:**
-- `class Box<T> implements Iterable<T>` and record equivalents lower and
+- `class Box<T> implements Container<T>` and `record` equivalents lower and
   dispatch correctly per concrete instantiation.
 - Contract method offsets remain stable across instantiations of the same
   generic type (vtable layout stability per spec).
-- Trait default bodies lower correctly under generic substitution.
+- Trait default bodies lower correctly under generic substitution (partial:
+  class/record must still supply the method; default bodies are pending).
 - Recursion in generic substitution produces a controlled diagnostic, not a
   stack overflow.
 
@@ -56,9 +57,11 @@ constraint verification and merges independently.
    existing signature-compatibility check (`E0403`) runs on the substituted
    signature.
 
-3. **Bounded substitution.** A substitution depth/visited-set guard covers
-   mutually recursive generic `implements` clauses; exceeding it emits a
-   controlled diagnostic per "Recursion cap on generic substitution".
+3. **Bounded substitution.** Nested generic `implements` arguments
+   (`Container<Box<T>>`) stay gated with `E0423 NOT_LOWERED`, preventing the
+   unbounded recursion that would otherwise arise during monomorphization.
+   A finer depth/visited-set guard inside `substitute_type` itself is left as
+   future work.
 
 4. **Keep `E0423` for uncovered shapes.** If a construct still cannot lower
    (e.g., a shape outside this change's scope), the diagnostic stays precise
@@ -79,11 +82,11 @@ constraint verification and merges independently.
 
 - Whether generic `enum` adopters of contracts are in scope (default: yes if
   enums can declare `implements` today; otherwise document the exclusion).
-- Generic `class` instances (`Box<Int32>`) are not yet implicitly assignable to
-  a generic contract reference (`Container<Int32>`): `is_subclass_of` would
-  need to substitute the class's own `implements` contract arguments with the
-  instantiation's concrete types before comparing `Base::Instance` to
-  `Base::ContractInstance`.
 - Trait default bodies for generic contracts are not specialized per
   instantiation; a class that relies on a trait default for a `T`-bearing
   contract method still hits an `unreachable!` in lowering.
+- A dedicated recursion depth guard for `substitute_type` /
+  `substitute_generic_type` is not wired separately; the checker currently
+  rejects nested generic `implements` arguments (`Container<Box<T>>`) with
+  `E0423 NOT_LOWERED`, which prevents the stack overflow but is not a
+  fine-grained recursion cap.
