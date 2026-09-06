@@ -1,5 +1,5 @@
 fn main(): Void {
-    inmut a: Float = 0.1;
-    inmut b: BinaryFloat64 = 0.2b;
+    inmut a: Decimal = 0.1;
+    inmut b: Float64 = 0.2b;
     inmut c = a + b;
 }

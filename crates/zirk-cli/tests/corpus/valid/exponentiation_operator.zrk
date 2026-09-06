@@ -1,7 +1,7 @@
 // The infix `**` operator (`exponentiation-operator`): `a ** b` is `a.pow(b)`
 // across the numeric families. Integer power stays integer and checks
 // overflow; a negative literal exponent widens an integer base to exact
-// `Float`; `Float` and `BinaryFloat` bases keep their own type.
+// `Float`; `Float` and `Float` bases keep their own type.
 fn main(): Void {
     // Integer power.
     stdout.println((2 ** 3).to_string());
@@ -20,8 +20,8 @@ fn main(): Void {
     inmut base: Float = 1.5;
     stdout.println((base ** 2).to_string());
 
-    // BinaryFloat base.
-    inmut bin: BinaryFloat64 = 2.0b;
+    // Float base.
+    inmut bin: Float64 = 2.0b;
     stdout.println((bin ** 10).to_string());
 
     // Compound form.

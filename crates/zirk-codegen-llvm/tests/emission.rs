@@ -251,7 +251,7 @@ fn mixed_uint8_and_int32_converts_both_to_float64() {
 #[test]
 fn mixed_int32_and_float64_converts_int_to_float() {
     let ir = llvm_ir(&in_main(
-        "mut a: Int32 = 1;\nmut b: BinaryFloat64 = 2.5;\nmut c = a + b;",
+        "mut a: Int32 = 1;\nmut b: Float64 = 2.5;\nmut c = a + b;",
     ));
     assert!(
         ir.contains("sitofp i32"),
@@ -537,11 +537,11 @@ fn a_reference_typed_local_is_pushed_as_a_gc_root() {
     );
 }
 
-// --- Exact base-ten `Float` -----------------------------------------------
+// --- Exact base-ten `Decimal` ---------------------------------------------
 
 #[test]
 fn exact_float_literal_is_a_struct_constant_not_a_binary_float() {
-    let ir = llvm_ir(&in_main("mut a: Float = 0.1;"));
+    let ir = llvm_ir(&in_main("mut a: Decimal = 0.1;"));
     assert!(
         ir.contains("i128 1, i8 1"),
         "the `0.1` literal is the struct constant {{ 1, 1 }}:\n{ir}"
@@ -551,7 +551,7 @@ fn exact_float_literal_is_a_struct_constant_not_a_binary_float() {
 #[test]
 fn exact_float_addition_calls_the_decimal_runtime_by_pointer() {
     let ir = llvm_ir(&in_main(
-        "mut a: Float = 0.1;\nmut b = 0.2;\nmut c = a + b;",
+        "mut a: Decimal = 0.1;\nmut b = 0.2;\nmut c = a + b;",
     ));
     assert!(
         ir.contains("call void @zirk_rt_decimal_add(ptr"),
@@ -561,20 +561,20 @@ fn exact_float_addition_calls_the_decimal_runtime_by_pointer() {
 
 #[test]
 fn exact_float_to_string_calls_the_decimal_formatter() {
-    let ir = llvm_ir(&in_main("mut a: Float = 0.1;\nstdout.println(a);"));
+    let ir = llvm_ir(&in_main("mut a: Decimal = 0.1;\nstdout.println(a);"));
     assert!(
         ir.contains("@zirk_str_from_decimal(ptr"),
-        "printing an exact Float goes through the decimal formatter:\n{ir}"
+        "printing an exact Decimal goes through the decimal formatter:\n{ir}"
     );
 }
 
 #[test]
 fn binary_float_arithmetic_is_still_a_native_fadd() {
     let ir = llvm_ir(&in_main(
-        "mut a: BinaryFloat64 = 1.5;\nmut b: BinaryFloat64 = 2.5;\nmut c = a + b;",
+        "mut a: Float64 = 1.5;\nmut b: Float64 = 2.5;\nmut c = a + b;",
     ));
     assert!(
         ir.contains("fadd double"),
-        "BinaryFloat64 arithmetic stays a native LLVM fadd:\n{ir}"
+        "Float64 arithmetic stays a native LLVM fadd:\n{ir}"
     );
 }

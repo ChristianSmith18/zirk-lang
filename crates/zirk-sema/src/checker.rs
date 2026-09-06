@@ -5045,20 +5045,18 @@ impl<'a> Checker<'a> {
             };
         }
 
-        // The former binary spellings were renamed, not removed.
-        if matches!(
-            reference.name.as_str(),
-            "Float16" | "Float32" | "Float64" | "Float128"
-        ) {
-            let binary = format!("Binary{}", reference.name);
+        // The former `BinaryFloat*` and `Float` (exact) spellings were
+        // renamed. `BinaryFloat*` is now `Float*`; the old exact `Float` is
+        // now `Decimal`.
+        if let Some(stripped) = reference.name.as_str().strip_prefix("Binary") {
             self.error(
                 codes::UNKNOWN_TYPE,
                 reference.span,
                 format!("`{}` is no longer a type name", reference.name),
                 format!(
-                    "the IEEE 754 binary type is now `{binary}`; the plain `Float` is the exact base-ten decimal type"
+                    "the IEEE 754 binary type is now `{stripped}`; the plain `Float` is now the exact base-ten `Decimal`"
                 ),
-                Some(format!("write `{binary}` for binary, or `Float` for exact decimal")),
+                Some(format!("write `{stripped}` for binary, or `Decimal` for exact decimal")),
             );
             return Type::UNKNOWN;
         }
