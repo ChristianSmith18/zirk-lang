@@ -31,42 +31,42 @@
 
 ## 4. Lexer + AST + parser
 
-- [ ] 4.1 `zirk-lexer`: lex a suffix-less fractional/scientific literal as an exact-decimal `Float` token (text preserved); lex `b`/`b16`/`b32`/`b64`/`b128` as a `BinaryFloat` token with width
-- [ ] 4.2 `zirk-lexer`: reject a suffix-less fractional literal whose exact form needs more than the coefficient digit budget, with a diagnostic suggesting a `b` suffix
-- [ ] 4.3 `zirk-ast`: add an exact-decimal literal node; the existing float-literal node keeps its Rust name and now carries the `b`-suffix width (surface `BinaryFloat`)
-- [ ] 4.4 `zirk-parser`: parse both literal kinds; retain the operator tree for `Float(expr)` and add `BinaryFloat(expr)` contextual constructor
-- [ ] 4.5 Parser + lexer tests: literal inference, suffix widths, oversized-literal diagnostic, contextual constructor trees
+- [x] 4.1 `zirk-lexer`: lex a suffix-less fractional/scientific literal as an exact-decimal `Float` token (text preserved); lex `b`/`b16`/`b32`/`b64`/`b128` as a `BinaryFloat` token with width
+- [x] 4.2 `zirk-lexer`: reject a suffix-less fractional literal whose exact form needs more than the coefficient digit budget, with a diagnostic suggesting a `b` suffix
+- [x] 4.3 `zirk-ast`: add an exact-decimal literal node; the existing float-literal node keeps its Rust name and now carries the `b`-suffix width (surface `BinaryFloat`)
+- [x] 4.4 `zirk-parser`: parse both literal kinds; retain the operator tree for `Float(expr)` and add `BinaryFloat(expr)` contextual constructor
+- [x] 4.5 Parser + lexer tests: literal inference, suffix widths, oversized-literal diagnostic, contextual constructor trees
 
 ## 5. Type system (`zirk-sema`)
 
-- [ ] 5.1 `types.rs`: add `Base::Decimal` (exact `Float`, no width); add `Type::FLOAT` (= `Decimal`). `Base::Float(FloatWidth)` keeps its Rust name (surface name `BinaryFloat*`) — doc note only (per design D2)
-- [ ] 5.2 `types.rs` `from_name`: `Float` -> `Base::Decimal`; `BinaryFloat`/`BinaryFloat16..128` -> `Base::Float(width)`; `Float16/32/64/128` -> `None`; `FloatWidth::name()` returns `BinaryFloat*`
-- [ ] 5.3 `types.rs`: remove `Float*` from the pending list; keep `Decimal*`/`Dec` in the "not a type" list; update the `accepts` rules — `Int -> Decimal` implicit exact, `Decimal <-> BinaryFloat` explicit only, no `Decimal`/`BinaryFloat` mixing
-- [ ] 5.4 `checker.rs`: infer suffix-less fractional literal as exact `Float`; mixed `Int`/`Float` arithmetic -> exact `Float`; reject `Float`/`BinaryFloat` mixed arithmetic with a fix-it naming the conversion
-- [ ] 5.5 `checker.rs`: redirect diagnostic for `Float16/32/64/128` -> `BinaryFloat*` and `Float`
-- [ ] 5.6 `checker.rs`: member-surface resolution — exact `Float` members per spec (no `EPSILON`/infinity/`is_finite`/`is_infinite`; add `scale`, `is_integer`, `round(places[,mode])`, `div(other,mode,places)`); `BinaryFloat` members = today's `Float` members
-- [ ] 5.7 `checker.rs`: `Float(expr)` establishes exact-decimal deep context; `BinaryFloat(expr)` establishes binary deep context
-- [ ] 5.8 `checker.rs`: scope the `NaN`-would-be error to `BinaryFloat`; add coefficient-overflow and checked-conversion error paths for `Float`
-- [ ] 5.9 `zirk-sema` tests (`typing.rs`): every rule above, including `0.1 + 0.2` typing, redirect diagnostics, conversion matrix, member surfaces
+- [x] 5.1 `types.rs`: add `Base::Decimal` (exact `Float`, no width); add `Type::FLOAT` (= `Decimal`). `Base::Float(FloatWidth)` keeps its Rust name (surface name `BinaryFloat*`) — doc note only (per design D2)
+- [x] 5.2 `types.rs` `from_name`: `Float` -> `Base::Decimal`; `BinaryFloat`/`BinaryFloat16..128` -> `Base::Float(width)`; `Float16/32/64/128` -> `None`; `FloatWidth::name()` returns `BinaryFloat*`
+- [x] 5.3 `types.rs`: remove `Float*` from the pending list; keep `Decimal*`/`Dec` in the "not a type" list; update the `accepts` rules — `Int -> Decimal` implicit exact, `Decimal <-> BinaryFloat` explicit only, no `Decimal`/`BinaryFloat` mixing
+- [x] 5.4 `checker.rs`: infer suffix-less fractional literal as exact `Float`; mixed `Int`/`Float` arithmetic -> exact `Float`; reject `Float`/`BinaryFloat` mixed arithmetic with a fix-it naming the conversion
+- [x] 5.5 `checker.rs`: redirect diagnostic for `Float16/32/64/128` -> `BinaryFloat*` and `Float`
+- [x] 5.6 `checker.rs`: member-surface resolution — exact `Float` members per spec (no `EPSILON`/infinity/`is_finite`/`is_infinite`; add `scale`, `is_integer`, `round(places[,mode])`, `div(other,mode,places)`); `BinaryFloat` members = today's `Float` members
+- [x] 5.7 `checker.rs`: `Float(expr)` establishes exact-decimal deep context; `BinaryFloat(expr)` establishes binary deep context
+- [x] 5.8 `checker.rs`: scope the `NaN`-would-be error to `BinaryFloat`; add coefficient-overflow and checked-conversion error paths for `Float`
+- [x] 5.9 `zirk-sema` tests (`typing.rs`): every rule above, including `0.1 + 0.2` typing, redirect diagnostics, conversion matrix, member surfaces
 
 ## 6. IR + lowering (`zirk-ir`)
 
-- [ ] 6.1 `ir.rs`: add `IrType::Decimal` and `InstKind::ConstDecimal(String)`. `IrType::Float` / `InstKind::ConstFloat` keep their Rust names (surface `BinaryFloat`) — doc note only (per design D2)
-- [ ] 6.2 `ir.rs`: add conversion instructions `IntToDecimal`, `DecimalToInt`, `DecimalToFloat` (decimal->binary), `FloatToDecimal` (binary->decimal)
-- [ ] 6.3 `lower.rs`: lower `Decimal` arithmetic/comparison/rounding/parse/format to `zirk_rt_decimal_*` calls
-- [ ] 6.4 `lower.rs`: emit the zero-divisor guard before `Decimal` `/` and `%` (mirror `Duration` division lowering)
-- [ ] 6.5 `lower.rs`: lower integer operand -> exact `Float` at scale 0 in mixed arithmetic; lower the two contextual-constructor domains
-- [ ] 6.6 `lower.rs`: keep `BinaryFloat` lowering identical to today's `Float` lowering, including the `NaN` guard
-- [ ] 6.7 `zirk-ir` tests (`lowering.rs`): decimal op lowering, divide-by-zero guard, no `NaN` check on `Decimal`, conversions, both contextual domains
+- [x] 6.1 `ir.rs`: add `IrType::Decimal` and `InstKind::ConstDecimal(String)`. `IrType::Float` / `InstKind::ConstFloat` keep their Rust names (surface `BinaryFloat`) — doc note only (per design D2)
+- [x] 6.2 `ir.rs`: add conversion instructions `IntToDecimal`, `DecimalToInt`, `DecimalToFloat` (decimal->binary), `FloatToDecimal` (binary->decimal)
+- [x] 6.3 `lower.rs`: lower `Decimal` arithmetic/comparison/rounding/parse/format to `zirk_rt_decimal_*` calls
+- [x] 6.4 `lower.rs`: emit the zero-divisor guard before `Decimal` `/` and `%` (mirror `Duration` division lowering)
+- [x] 6.5 `lower.rs`: lower integer operand -> exact `Float` at scale 0 in mixed arithmetic; lower the two contextual-constructor domains
+- [x] 6.6 `lower.rs`: keep `BinaryFloat` lowering identical to today's `Float` lowering, including the `NaN` guard
+- [x] 6.7 `zirk-ir` tests (`lowering.rs`): decimal op lowering, divide-by-zero guard, no `NaN` check on `Decimal`, conversions, both contextual domains
 
 ## 7. Codegen (`zirk-codegen-llvm`)
 
-- [ ] 7.1 `emit.rs`: emit `IrType::Decimal` as `{ i128, i8 }` aggregate; pass/return by pointer across the runtime boundary (mirror `STR_FROM_I128`)
-- [ ] 7.2 `emit.rs`: emit `ConstDecimal` from the parsed `{coef, scale}` directly, never via a binary float
-- [ ] 7.3 `emit.rs`: emit calls for every decimal runtime helper and the four conversion instructions
-- [ ] 7.4 `emit.rs`: `IrType::Float` (surface `BinaryFloat`) emission unchanged (LLVM `f16/f32/f64/f128`, explicit `NaN` guard)
-- [ ] 7.5 `runtime.rs`: register every `zirk_rt_decimal_*`, `zirk_str_from_decimal`, `zirk_rt_decimal_parse_*`, and conversion symbol
-- [ ] 7.6 `zirk-codegen-llvm` tests (`emission.rs`): decimal constant, decimal arithmetic dispatch, by-pointer ABI, binary-width mapping unchanged
+- [x] 7.1 `emit.rs`: emit `IrType::Decimal` as `{ i128, i8 }` aggregate; pass/return by pointer across the runtime boundary (mirror `STR_FROM_I128`)
+- [x] 7.2 `emit.rs`: emit `ConstDecimal` from the parsed `{coef, scale}` directly, never via a binary float
+- [x] 7.3 `emit.rs`: emit calls for every decimal runtime helper and the four conversion instructions
+- [x] 7.4 `emit.rs`: `IrType::Float` (surface `BinaryFloat`) emission unchanged (LLVM `f16/f32/f64/f128`, explicit `NaN` guard)
+- [x] 7.5 decimal helpers registered as `ExternFn`s in `zirk-ir` lowering; `declare_extern_fn` emits their `ptr`-shaped C signature (out-pointer for a `Decimal`/`i128` result) — no `runtime.rs` `Runtime` struct entry needed
+- [x] 7.6 `zirk-codegen-llvm` tests (`emission.rs`): decimal constant, decimal arithmetic dispatch, by-pointer ABI, binary-width mapping unchanged
 
 ## 8. CLI + diagnostics
 
@@ -87,13 +87,13 @@
 
 ## 10. End-to-end test battery
 
-- [ ] 10.1 Fixture: `0.1 + 0.2 == 0.3` prints `true`; `(0.1).to_string()` is `"0.1"`; sum prints `"0.3"`
-- [ ] 10.2 Fixture: exact `+ - *` across differing scales; integer `**`; normalization (`1.0 == 1.00`, `2.50 == 2.5`)
-- [ ] 10.3 Fixture: `1.0 / 3.0` rounds half-to-even at `MAX_SIGNIFICANT_DIGITS`; `a.div(b, mode, places)` variants; `round(places[, mode])` at tie boundaries
+- [x] 10.1 Fixture: `0.1 + 0.2 == 0.3` prints `true`; `(0.1).to_string()` is `"0.1"`; sum prints `"0.3"`
+- [x] 10.2 Fixture: exact `+ - *` across differing scales; integer `**`; normalization (`1.0 == 1.00`, `2.50 == 2.5`)
+- [x] 10.3 Fixture: `1.0 / 3.0` rounds half-to-even at `MAX_SIGNIFICANT_DIGITS`; `a.div(b, mode, places)` variants; `round(places[, mode])` at tie boundaries
 - [ ] 10.4 Fixture: `%` sign, `sqrt` exact + negative error, `pow` fractional rounding
 - [ ] 10.5 Fixture: coefficient overflow raises catchable `ArithmeticOverflowError`; `Float / 0.0` raises catchable `DivisionByZeroError`
 - [ ] 10.6 Fixture: `Int -> Float` implicit; `Float -> Int` checked cast error on fractional; `Float(binaryValue)` and `x as BinaryFloat64` explicit; `Float + BinaryFloat64` is a type error
-- [ ] 10.7 Fixture: `1.5b`, `1.5b32`, `0.1b128` type and behave as the old `Float*`; `0.0b / 0.0b` catchable `FloatNanError`; non-zero `/ 0.0b` is infinity
+- [x] 10.7 Fixture: `1.5b`, `1.5b32`, `0.1b128` type and behave as the old `Float*`; `0.0b / 0.0b` catchable `FloatNanError`; non-zero `/ 0.0b` is infinity
 - [ ] 10.8 Fixture: `Float64` annotation emits the redirect diagnostic; oversized suffix-less literal emits the digit-budget diagnostic
 - [ ] 10.9 Fixture: `Float.parse` success and failure; `format(spec)` per 1.5
 - [ ] 10.10 Wire all fixtures into the CLI end-to-end test suite with expected stdout/diagnostics
