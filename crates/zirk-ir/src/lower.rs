@@ -2256,13 +2256,13 @@ fn specialize_class(
                     .collect(),
                 returns: substitute(m.returns),
                 owner: specialized_id,
-                from_contract: None,
+                from_contract: m.from_contract,
                 overridden: false,
                 ..m.clone()
             })
             .collect(),
-        contracts: Vec::new(),
-        abstract_bases: Vec::new(),
+        contracts: original.contracts.clone(),
+        abstract_bases: original.abstract_bases.clone(),
         contract_instances: Vec::new(),
         type_params: Vec::new(),
         shared: original.shared,
@@ -9612,7 +9612,14 @@ impl<'a> FunctionLowering<'a> {
             .filter(|ty| !ty.is_unknown())
             .map(|ty| self.ir_type(ty))
             .unwrap_or_else(|| self.ir_type(method.returns));
-        let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
+        // The parameter types are similarly the concrete types the checker
+        // saw at the call site, so `T` in `put(x: T)` becomes the
+        // instantiated `Int32`/`String`/etc. for this receiver.
+        let params: Vec<IrType> = call
+            .args
+            .iter()
+            .map(|arg| self.type_of(&arg.value, arg.value.span()))
+            .collect();
 
         let receiver = self.lower_expr(&field.object);
         let mut args = Vec::new();

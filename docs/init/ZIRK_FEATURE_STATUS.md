@@ -101,7 +101,7 @@ Last updated with `exact-decimal-float`, **2026-09-06**.
 | `type` alias lowering | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; an alias resolves to its underlying type through the whole pipeline and is usable in executable programs. |
 | `value class` | n/a | n/a | n/a | n/a | n/a | n/a | **Removed** by `array-list-tuple-duration-regex`; migrate to `record` (or `class` when identity/mutability is wanted). |
 | Derived `Clone` for `record`/`enum` | n/a | n/a | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — every field must be `Clone`. |
-| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — native `Iterable<T>` satisfaction works, user-defined generic `implements` does not lower yet. |
+| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | partial | partial | partial | `fase-3-dispatch-generico`: user-defined `class` generic `implements Contract<T>` lowers and dispatches; generic `record` and trait default bodies remain pending. |
 
 ## Phase 3b — Scalars and text
 
