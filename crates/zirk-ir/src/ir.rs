@@ -178,7 +178,7 @@ pub enum IrType {
     /// which class is behind it is what a contract exists not to say, and the
     /// object already carries its own descriptor to answer that at the call.
     Contract(u32),
-    /// A record or value class, identified by its layout in the module.
+    /// A record, identified by its layout in the module.
     ///
     /// A value and not a reference: neither has identity (`is` is rejected
     /// for both, task 8.5/8.6), so nothing observes whether two equal ones
@@ -486,7 +486,7 @@ pub struct Module {
     pub closures: Vec<ClosureLayout>,
     /// Object layouts, indexed by the id [`IrType::Object`] carries.
     pub objects: Vec<ObjectLayout>,
-    /// Record and value class layouts, indexed by the id [`IrType::Value`]
+    /// Record layouts, indexed by the id [`IrType::Value`]
     /// carries — its own table because they share no shape with
     /// [`ObjectLayout`]: no header, no dispatch table, no allocation
     /// (roadmap task 11.5).
@@ -616,7 +616,7 @@ pub struct ObjectField {
     pub ty: IrType,
 }
 
-/// What one record or value class holds — its fields, in declaration order,
+/// What one record holds — its fields, in declaration order,
 /// and nothing else: no header, no dispatch table (roadmap task 11.5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueLayout {
@@ -938,8 +938,8 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
-    /// Builds a record or value class value from its fields, in declaration
-    /// order — no allocation, no header (roadmap task 11.5): a value class's
+    /// Builds a record value from its fields, in declaration
+    /// order — no allocation, no header (roadmap task 11.5): a record's
     /// construction is packaging, not obtaining storage, so it has no
     /// `Alloc` counterpart.
     BuildValue {

@@ -269,11 +269,11 @@ keywords of the whole language.
 Recognizing them is what allows `interface User { }` to produce "not
 implemented yet" instead of a syntax error on an identifier.
 
-`strict` and `value` SHALL NOT be reserved words. Both appear in the language
-only in a fixed position — `inmut::strict` and `value class` — and reserving
-them would invalidate `mut value = 1;` and `match r { Ok(value) => ... }`,
-which are ordinary Zirk and appear in the spec's own examples. They are
-recognized by position.
+`strict` and `value` SHALL NOT be reserved words. `strict` appears only in
+the fixed position `inmut::strict`, and `value` has no reserved use;
+reserving them would invalidate `mut value = 1;` and
+`match r { Ok(value) => ... }`, which are ordinary Zirk and appear in the
+spec's own examples.
 
 #### Scenario: Contract from a later phase
 - **WHEN** `interface` or `trait` is tokenized

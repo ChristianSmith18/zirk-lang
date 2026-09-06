@@ -108,8 +108,8 @@ The backend SHALL translate a type with identity into a structure whose header p
 - **WHEN** a base class and a subclass are translated
 - **THEN** the prefix of the subclass's structure matches that of the base
 
-#### Scenario: Inline value class
-- **WHEN** a value class is a field of another declaration
+#### Scenario: Inline record field
+- **WHEN** a `record` is a field of another declaration
 - **THEN** it is translated without an intermediate pointer
 
 ### Requirement: Method tables
@@ -182,11 +182,11 @@ The backend SHALL emit, for every site where `println`/`print`/an interpolation 
 - **THEN** the call goes through the same table as any other virtual method of the object
 
 ### Requirement: Native code generation supports value-type field pointers
-The LLVM backend SHALL emit `getelementptr` over `ValueLayout` for `PointerFromField` when the container is a pointer to a `record` or `value class`.
+The LLVM backend SHALL emit `getelementptr` over `ValueLayout` for `PointerFromField` when the container is a pointer to a `record`.
 
-#### Scenario: PointerFromField over value class
+#### Scenario: PointerFromField over record
 - **WHEN** the IR contains `PointerFromField { object: Pointer<Value>, index: n }`
-- **THEN** the backend emits a GEP using the `ValueLayout` of the value class, with no object header offset
+- **THEN** the backend emits a GEP using the `ValueLayout` of the record, with no object header offset
 
 #### Scenario: PointerFromField over object unchanged
 - **WHEN** the IR contains `PointerFromField { object: Object(id), index: n }`
