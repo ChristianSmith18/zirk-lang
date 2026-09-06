@@ -1,0 +1,11 @@
+fn main(): Void {
+    stdout.println(255.to_string(radix: 16));
+    stdout.println(255.to_string(radix: 2));
+    stdout.println(255.to_string(radix: 8));
+    stdout.println(255.to_string(radix: 10));
+    stdout.println((-255).to_string(radix: 10));
+    stdout.println(255.to_string(radix: 36));
+    stdout.println(0.to_string(radix: 2));
+    stdout.println(255.to_string(radix: 1));
+    stdout.println(255.to_string(radix: 37));
+}

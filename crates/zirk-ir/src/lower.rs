@@ -14217,7 +14217,10 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             return false;
         };
-        if field.name.name != "to_string" || self.checked.variant_accesses.contains(&field.span) {
+        if field.name.name != "to_string"
+            || !call.args.is_empty()
+            || self.checked.variant_accesses.contains(&field.span)
+        {
             return false;
         }
         match self.type_of(&field.object, field.object.span()) {
