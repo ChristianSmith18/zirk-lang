@@ -91,7 +91,7 @@ overload resolution. Parameters are contravariant, results covariant.
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `f(args...)` | `R` | Invocation | implemented |
-| `f.clone()` | `Fn(P...) => R` | Deep independent environment when all captured parts are cloneable | specified — explicitly pending |
+| `f.clone()` | `Fn(P...) => R` | Deep independent environment when all captured parts are cloneable | implemented |
 | `f.to_string()` | `String` | Universal member | implemented |
 | `f is g` | `Boolean` | Callable identity (no structural `==` for behavior) | implemented |
 
