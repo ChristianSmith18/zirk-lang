@@ -236,21 +236,22 @@ pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
     alloc_owned(&text)
 }
 
-/// Converts a `Float32` into a `String`.
+/// Converts a `BinaryFloat32` (surface name) into a `String`.
 ///
-/// `Float16`/`Float128` have no equivalent: neither is a stable Rust
-/// primitive type (`f16`/`f128` are unstable as of this compiler's toolchain
-/// pin), so there is no `Display` implementation to reach for either without
-/// a hand-rolled decimal conversion this task does not build. Printing
-/// either width is a known, tracked gap (roadmap Phase 3b, task 8.3),
-/// consistent with `Float128` arithmetic's own portability gap on Windows.
+/// `BinaryFloat16`/`BinaryFloat128` have no equivalent: neither is a stable
+/// Rust primitive type (`f16`/`f128` are unstable as of this compiler's
+/// toolchain pin), so there is no `Display` implementation to reach for
+/// either without a hand-rolled decimal conversion this task does not build.
+/// Printing either width is a known, tracked gap, consistent with
+/// `BinaryFloat128` arithmetic's own portability gap on Windows. The exact
+/// base-ten `Float` has its own exact formatter, `zirk_str_from_decimal`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
     let text = value.to_string();
     alloc_owned(&text)
 }
 
-/// Converts a `Float64` into a `String`.
+/// Converts a `BinaryFloat64` (surface name) into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f64(value: f64) -> *mut c_void {
     let text = value.to_string();
@@ -765,10 +766,7 @@ pub unsafe extern "C" fn zirk_str_search(handle: *const c_void, pat: *const c_vo
 ///
 /// `handle` and `sep` must come from this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_str_split(
-    handle: *const c_void,
-    sep: *const c_void,
-) -> *mut c_void {
+pub unsafe extern "C" fn zirk_str_split(handle: *const c_void, sep: *const c_void) -> *mut c_void {
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");

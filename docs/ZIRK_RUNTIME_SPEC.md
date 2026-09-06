@@ -10,6 +10,16 @@ initialized lazily where possible.
 Zirk exposes no global event loop. The runtime may internally use one or more
 event reactors.
 
+The exact base-ten `Float` type is a value (a 128-bit coefficient plus a
+decimal scale) with no heap allocation and no participation in garbage
+collection, the same class as `Duration`. Operations an integer instruction
+cannot express — scale alignment, half-to-even rounding, exact formatting,
+parsing, and conversion to or from a `BinaryFloat` — are `extern "C"`
+`zirk_rt_decimal_*` helpers; every `Float` and 128-bit integer crosses that
+boundary by pointer, and a `Float`/`i128` result returns through a leading
+out-pointer. Coefficient overflow, a negative `sqrt`, and division by zero
+raise the same controlled failures the rest of the language uses.
+
 ## 2. Application lifecycle
 
 Normative order:

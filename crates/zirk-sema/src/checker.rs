@@ -1143,11 +1143,18 @@ impl<'a> Checker<'a> {
             // prints by truncating to `Float64`; this can lose precision for
             // values that are not exactly representable in `f64`.
             Base::Float(_) => true,
+            // The exact base-ten `Float` renders its coefficient and scale
+            // directly — always exact, never a binary artifact.
+            Base::Decimal => true,
             // Every class, record, tuple, enum, weak reference and callable
             // value has a compiler-provided default `to_string()` rendering
             // unless it declares its own (`native-type-member-surface`).
-            Base::Class(_) | Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
-            | Base::Function(_) | Base::Weak(_) => true,
+            Base::Class(_)
+            | Base::Tuple(_)
+            | Base::Enum(_)
+            | Base::EnumInstance(_)
+            | Base::Function(_)
+            | Base::Weak(_) => true,
             // A value reached through a contract that itself declares
             // `to_string()` — every implementer supplies one (either its own
             // or the contract's default body), so the dispatch table always
@@ -2297,9 +2304,7 @@ impl<'a> Checker<'a> {
         let native = self
             .native_iteration
             .is_some_and(|n| contract == n.iterable || contract == n.iterator)
-            || self
-                .native_resource
-                .is_some_and(|n| contract == n.resource);
+            || self.native_resource.is_some_and(|n| contract == n.resource);
         if params_in_members && !native {
             self.not_lowered(
                 reference.span,
@@ -4385,6 +4390,8 @@ impl<'a> Checker<'a> {
                 Base::Int(width) => (1, width as u32),
                 // Same idea, one group over for the float family.
                 Base::Float(width) => (2, width as u32),
+                // The exact base-ten type sorts just after the binary family.
+                Base::Decimal => (2, u32::MAX),
                 Base::Char => (3, 0),
                 Base::Boolean => (4, 0),
                 Base::String => (5, 0),
@@ -5036,6 +5043,24 @@ impl<'a> Checker<'a> {
             } else {
                 ty
             };
+        }
+
+        // The former binary spellings were renamed, not removed.
+        if matches!(
+            reference.name.as_str(),
+            "Float16" | "Float32" | "Float64" | "Float128"
+        ) {
+            let binary = format!("Binary{}", reference.name);
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                format!("`{}` is no longer a type name", reference.name),
+                format!(
+                    "the IEEE 754 binary type is now `{binary}`; the plain `Float` is the exact base-ten decimal type"
+                ),
+                Some(format!("write `{binary}` for binary, or `Float` for exact decimal")),
+            );
+            return Type::UNKNOWN;
         }
 
         match pending_type(&reference.name) {
@@ -5829,7 +5854,9 @@ impl<'a> Checker<'a> {
 
         if self_recursive {
             self.declare_local(Binding {
-                name: binding_name.expect("checked by `self_recursive` above").to_string(),
+                name: binding_name
+                    .expect("checked by `self_recursive` above")
+                    .to_string(),
                 ty: annotated.expect("checked by `self_recursive` above"),
                 mutability: stmt.mutability,
                 span: pattern_span,
@@ -5912,7 +5939,13 @@ impl<'a> Checker<'a> {
         }
 
         if let Some(init) = &stmt.init {
-            self.check_strict_alias(init, ty, stmt.mutability, binding_name.unwrap_or("_"), pattern_span);
+            self.check_strict_alias(
+                init,
+                ty,
+                stmt.mutability,
+                binding_name.unwrap_or("_"),
+                pattern_span,
+            );
         }
 
         // `check_pattern` validates the pattern and collects the bindings it
@@ -5921,7 +5954,13 @@ impl<'a> Checker<'a> {
         let mut covered = Vec::new();
         let mut has_wildcard = false;
         let mut bindings = Vec::new();
-        self.check_pattern(&stmt.pattern, ty, &mut covered, &mut has_wildcard, &mut bindings);
+        self.check_pattern(
+            &stmt.pattern,
+            ty,
+            &mut covered,
+            &mut has_wildcard,
+            &mut bindings,
+        );
 
         for binding in &mut bindings {
             binding.mutability = stmt.mutability;
@@ -6278,7 +6317,12 @@ impl<'a> Checker<'a> {
     /// enum's id is tagged with `ENUM_TAG` so the two id spaces cannot
     /// collide in one list (a recursive enum, `enum Node { Done, More(Node) }`,
     /// resolves `true` provisionally exactly like a recursive class does).
-    fn enum_is_clone(&mut self, id: u32, subst: &[(u32, Type)], in_progress: &mut Vec<u32>) -> bool {
+    fn enum_is_clone(
+        &mut self,
+        id: u32,
+        subst: &[(u32, Type)],
+        in_progress: &mut Vec<u32>,
+    ) -> bool {
         const ENUM_TAG: u32 = 1 << 31;
         let tag = id | ENUM_TAG;
         if in_progress.contains(&tag) {
@@ -6446,9 +6490,7 @@ impl<'a> Checker<'a> {
                         // A `Char` or a single-grapheme `String` is what the
                         // spec allows; both share `String`'s representation
                         // (ADR-014), so either handle is accepted here.
-                        if !value.is_unknown()
-                            && !matches!(value.base, Base::Char | Base::String)
-                        {
+                        if !value.is_unknown() && !matches!(value.base, Base::Char | Base::String) {
                             let found = self.name(value);
                             self.error(
                                 codes::TYPE_MISMATCH,
@@ -7257,7 +7299,7 @@ impl<'a> Checker<'a> {
             Expr::Bool(_) => Type::BOOLEAN,
             Expr::Null(_) => Type::NULL,
             Expr::Path(ident) => self.check_path(ident),
-            Expr::Unary(e) => self.check_unary(e),
+            Expr::Unary(e) => self.check_unary(e, expected),
             Expr::Binary(e) => self.check_binary(e, expected),
             Expr::Call(e) => self.check_call(e, expected),
             // `a..b` is a `Range<T>` value (roadmap Phase 7) — stored,
@@ -7440,6 +7482,18 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
+        // Exact `Float` <-> integer (checked) and `Float` <-> `BinaryFloat`
+        // (explicit) `as` casts lower to the `zirk_rt_decimal_*` conversion
+        // helpers.
+        if matches!(
+            (target.base, actual.base),
+            (Base::Decimal, Base::Int(_))
+                | (Base::Int(_), Base::Decimal)
+                | (Base::Decimal, Base::Float(_))
+                | (Base::Float(_), Base::Decimal)
+        ) {
+            return true;
+        }
         matches!(actual.base, Base::Class(_) | Base::Contract(_))
             && matches!(target.base, Base::Class(_))
     }
@@ -7470,6 +7524,16 @@ impl<'a> Checker<'a> {
         if matches!(
             (actual_bare.base, target_bare.base),
             (Base::Int(_), Base::Float(_)) | (Base::Float(_), Base::Int(_))
+        ) {
+            return true;
+        }
+        // Exact `Float` <-> integer, and `Float` <-> `BinaryFloat`.
+        if matches!(
+            (actual_bare.base, target_bare.base),
+            (Base::Decimal, Base::Int(_))
+                | (Base::Int(_), Base::Decimal)
+                | (Base::Decimal, Base::Float(_))
+                | (Base::Float(_), Base::Decimal)
         ) {
             return true;
         }
@@ -7631,14 +7695,18 @@ impl<'a> Checker<'a> {
     /// represent, so there is no `f64`-based bound for it.
     fn check_float_literal(&mut self, lit: &FloatLit, expected: Option<Type>) -> Type {
         use FloatWidth::*;
-        let explicit_width = match lit.width.as_deref() {
+        // A `b*` suffix forces the IEEE 754 binary family; no suffix leaves the
+        // literal exact base-ten `Float` unless a `BinaryFloat` annotation
+        // pulls it into a binary width contextually.
+        let explicit_binary = match lit.width.as_deref() {
             None => None,
-            Some("f16") => Some(F16),
-            Some("f32") => Some(F32),
-            Some("f64") => Some(F64),
-            Some("f128") => Some(F128),
+            Some("b" | "b64") => Some(F64),
+            Some("b16") => Some(F16),
+            Some("b32") => Some(F32),
+            Some("b128") => Some(F128),
             Some(_) => None,
         };
+        let is_binary_literal = lit.width.is_some();
 
         let value: f64 = lit.text.parse().unwrap_or(f64::NAN);
 
@@ -7672,16 +7740,74 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        let width = explicit_width.unwrap_or_else(|| {
-            expected
-                .map(Type::without_null)
+        let expected_bare = expected.map(Type::without_null).filter(|t| !t.is_unknown());
+
+        // No suffix and no binary context -> the exact base-ten `Float`.
+        // A suffix-less literal still adopts a `BinaryFloat` width when the
+        // annotation asks for one (contextual typing of a literal is not a
+        // `Float`/`BinaryFloat` value mix).
+        if !is_binary_literal {
+            let contextual_binary = expected_bare.and_then(|t| match t.base {
+                Base::Float(w) => Some(w),
+                _ => None,
+            });
+            match contextual_binary {
+                None => {
+                    if value.is_nan() {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!("the literal {} is not a finite number", lit.text),
+                            "a `Float` literal must be a finite decimal",
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    if Self::decimal_text_needs_too_many_digits(&lit.text) {
+                        self.error(
+                            codes::INTEGER_OUT_OF_RANGE,
+                            lit.span,
+                            format!(
+                                "the literal {} needs more than 38 significant digits to be exact",
+                                lit.text
+                            ),
+                            "add a `b` suffix to store it as a `BinaryFloat` instead",
+                            None,
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    return Type::FLOAT;
+                }
+                Some(w) => {
+                    return self.finish_binary_float_literal(lit, w, value);
+                }
+            }
+        }
+
+        let width = explicit_binary.unwrap_or_else(|| {
+            expected_bare
                 .and_then(|t| match t.base {
                     Base::Float(w) => Some(w),
                     _ => None,
                 })
                 .unwrap_or(F64)
         });
+        self.finish_binary_float_literal(lit, width, value)
+    }
 
+    /// Whether an exact-decimal literal's coefficient exceeds 38 digits.
+    fn decimal_text_needs_too_many_digits(text: &str) -> bool {
+        let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+        mantissa.chars().filter(|c| c.is_ascii_digit()).count() > 38
+    }
+
+    /// Range- and finiteness-checks a `BinaryFloat` literal, then types it.
+    fn finish_binary_float_literal(
+        &mut self,
+        lit: &FloatLit,
+        width: FloatWidth,
+        value: f64,
+    ) -> Type {
         if let Some(bound) = width.literal_bound() {
             if value.is_nan() || value.abs() > bound {
                 self.error(
@@ -7698,7 +7824,7 @@ impl<'a> Checker<'a> {
                 codes::INTEGER_OUT_OF_RANGE,
                 lit.span,
                 format!("the literal {} is not a finite number", lit.text),
-                "Float128 literals must be finite",
+                "BinaryFloat128 literals must be finite",
                 None,
             );
             return Type::UNKNOWN;
@@ -7965,7 +8091,16 @@ impl<'a> Checker<'a> {
         });
     }
 
-    fn check_unary(&mut self, expr: &UnaryExpr) -> Type {
+    fn check_unary(&mut self, expr: &UnaryExpr, expected: Option<Type>) -> Type {
+        // `-<literal>` in a typed context takes that context, so
+        // `binaryValue == -0.75` reads `-0.75` as the binary width, not the
+        // exact `Float` a bare literal defaults to.
+        if expr.op == UnaryOp::Neg
+            && matches!(&*expr.operand, Expr::Float(_) | Expr::Int(_))
+            && let Some(hint) = expected
+        {
+            self.expected_type = Some(hint);
+        }
         let operand = self.check_expr(&expr.operand);
 
         match expr.op {
@@ -7977,7 +8112,7 @@ impl<'a> Checker<'a> {
                 // signed nanosecond count, so it negates too.
                 let ok = !operand.nullable
                     && (matches!(operand.base, Base::Int(w) if w.signed())
-                        || matches!(operand.base, Base::Float(_))
+                        || matches!(operand.base, Base::Float(_) | Base::Decimal)
                         || operand.base == Base::Duration);
                 if !ok && !operand.is_unknown() {
                     let found = self.name(operand);
@@ -8032,10 +8167,43 @@ impl<'a> Checker<'a> {
             .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)));
 
         let saved = self.expected_type;
+        // For an unhinted operator, let a bare numeric literal on one side
+        // adopt the concrete numeric type of the other — `binaryValue == 0.75`
+        // types the `0.75` as `BinaryFloat64`, not the exact `Float` it would
+        // default to. Only a literal is steered; a `Duration` literal or any
+        // non-numeric operand is left alone.
+        let is_num_literal = |e: &Expr| {
+            matches!(e, Expr::Float(_) | Expr::Int(_))
+                || matches!(e, Expr::Unary(u)
+                    if u.op == UnaryOp::Neg
+                        && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_)))
+        };
+        let numeric_hint = |t: Type| {
+            (!t.is_unknown() && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal))
+                .then_some(t)
+        };
+
         self.expected_type = operand_expected;
-        let left = self.check_expr(&expr.left);
-        self.expected_type = operand_expected;
+        let mut left = self.check_expr(&expr.left);
+
+        // Steer the right literal only from a concrete-typed *non-literal*
+        // sibling — two bare literals keep their own defaults and combine.
+        self.expected_type = operand_expected.or_else(|| {
+            (is_num_literal(&expr.right) && !is_num_literal(&expr.left))
+                .then(|| numeric_hint(left))
+                .flatten()
+        });
         let right = self.check_expr(&expr.right);
+
+        if operand_expected.is_none()
+            && is_num_literal(&expr.left)
+            && !is_num_literal(&expr.right)
+            && let Some(hint) = numeric_hint(right)
+            && left != hint
+        {
+            self.expected_type = Some(hint);
+            left = self.check_expr(&expr.left);
+        }
         self.expected_type = saved;
 
         use BinaryOp::*;
@@ -8398,9 +8566,7 @@ impl<'a> Checker<'a> {
         .flatten()
         .collect();
 
-        let any_duration = parts
-            .iter()
-            .any(|(t, _)| matches!(t.base, Base::Duration));
+        let any_duration = parts.iter().any(|(t, _)| matches!(t.base, Base::Duration));
         if any_duration {
             for (part, span) in &parts {
                 if !part.is_unknown() && !matches!(part.base, Base::Duration) {
@@ -8454,22 +8620,23 @@ impl<'a> Checker<'a> {
         }
 
         if let Some(expected) = expected
-            && let Base::Tuple(_) = expected.base {
-                let actual = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
-                    elements: elements.clone(),
-                })));
-                if !actual.without_null().accepts(expected.without_null()) {
-                    let found = self.name(actual);
-                    let exp_name = self.name(expected);
-                    self.error(
-                        codes::TYPE_MISMATCH,
-                        tuple.span,
-                        format!("expected `{exp_name}`, found `{found}`"),
-                        "the tuple's elements do not match the declared type",
-                        None,
-                    );
-                }
+            && let Base::Tuple(_) = expected.base
+        {
+            let actual = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
+                elements: elements.clone(),
+            })));
+            if !actual.without_null().accepts(expected.without_null()) {
+                let found = self.name(actual);
+                let exp_name = self.name(expected);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    tuple.span,
+                    format!("expected `{exp_name}`, found `{found}`"),
+                    "the tuple's elements do not match the declared type",
+                    None,
+                );
             }
+        }
 
         let id = self.intern_tuple_type(TupleType { elements });
         Type::of(Base::Tuple(id))
@@ -11406,7 +11573,10 @@ impl<'a> Checker<'a> {
         };
 
         let element = if let Base::Array(id) = expected.base {
-            self.array_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+            self.array_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN)
         } else {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -11458,7 +11628,12 @@ impl<'a> Checker<'a> {
                 }
                 let arg_ty = self.check_expr(&arg.value);
                 if !element.is_unknown() && !arg_ty.is_unknown() {
-                    self.expect_assignable(element, arg_ty, arg.value.span(), "array literal element");
+                    self.expect_assignable(
+                        element,
+                        arg_ty,
+                        arg.value.span(),
+                        "array literal element",
+                    );
                 }
             }
         }
@@ -11487,7 +11662,10 @@ impl<'a> Checker<'a> {
         };
 
         let element = if let Base::List(id) = expected.base {
-            self.list_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+            self.list_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN)
         } else {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -12517,13 +12695,16 @@ impl<'a> Checker<'a> {
                 Some(Type::REGEX)
             } else {
                 Type::from_name(&base.name)
-                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_)))
+                    .filter(|t| matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal))
             };
             if let Some(target) = target {
                 // `parse(text)` and `parse(text, radix: n)` — the radix form
                 // only exists on the integer family.
                 let radix = expr.args.len() == 2
-                    && expr.args[1].name.as_ref().is_some_and(|n| n.name == "radix")
+                    && expr.args[1]
+                        .name
+                        .as_ref()
+                        .is_some_and(|n| n.name == "radix")
                     && matches!(target.base, Base::Int(_));
                 if expr.args.len() != 1 && !radix {
                     self.error(
@@ -12659,8 +12840,11 @@ impl<'a> Checker<'a> {
                 && !object.nullable
                 && expr.args.is_empty()
                 && match object.base {
-                    Base::Tuple(_) | Base::Enum(_) | Base::EnumInstance(_)
-                    | Base::Function(_) | Base::Weak(_) => true,
+                    Base::Tuple(_)
+                    | Base::Enum(_)
+                    | Base::EnumInstance(_)
+                    | Base::Function(_)
+                    | Base::Weak(_) => true,
                     Base::Class(id) => self.classes[id as usize].method("to_string").is_none(),
                     _ => false,
                 }
@@ -12837,8 +13021,7 @@ impl<'a> Checker<'a> {
                         "the argument",
                     );
                 }
-                let id =
-                    self.intern_list_type(Type::of(Base::Class(self.regex_match_class)));
+                let id = self.intern_list_type(Type::of(Base::Class(self.regex_match_class)));
                 return Type::of(Base::List(id));
             }
 
@@ -12880,8 +13063,8 @@ impl<'a> Checker<'a> {
             // calls.
             if matches!(object.base, Base::String) && !field.safe && !object.nullable {
                 match field.name.name.as_str() {
-                    "trim" | "trim_start" | "trim_end" | "to_lowercase"
-                    | "to_uppercase" | "clone"
+                    "trim" | "trim_start" | "trim_end" | "to_lowercase" | "to_uppercase"
+                    | "clone"
                         if expr.args.is_empty() =>
                     {
                         return Type::STRING;
@@ -13146,8 +13329,8 @@ impl<'a> Checker<'a> {
                         return Type::BOOLEAN;
                     }
                     "min" | "max" | "rotate_left" | "rotate_right" | "wrapping_add"
-                    | "wrapping_sub" | "wrapping_mul" | "saturating_add"
-                    | "saturating_sub" | "saturating_mul"
+                    | "wrapping_sub" | "wrapping_mul" | "saturating_add" | "saturating_sub"
+                    | "saturating_mul"
                         if expr.args.len() == 1 =>
                     {
                         self.check_int_argument(expr, object);
@@ -13155,6 +13338,19 @@ impl<'a> Checker<'a> {
                     }
                     "clamp" if expr.args.len() == 2 => {
                         self.check_int_argument(expr, object);
+                        return object;
+                    }
+                    // `n.pow(k)` — the desugaring of `n ** k`
+                    // (`exponentiation-operator`). The exponent is an integer;
+                    // the result stays in the receiver's integer type with
+                    // checked overflow, *except* when the exponent is a
+                    // statically negative integer literal, where the result
+                    // widens to exact `Float` so `2 ** -1` is `0.5`.
+                    "pow" if expr.args.len() == 1 => {
+                        self.check_int_argument(expr, object);
+                        if matches!(&expr.args[0].value, Expr::Int(lit) if lit.value < 0) {
+                            return Type::FLOAT;
+                        }
                         return object;
                     }
                     "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
@@ -13170,7 +13366,10 @@ impl<'a> Checker<'a> {
                     }
                     "to_string"
                         if expr.args.len() == 1
-                            && expr.args[0].name.as_ref().is_some_and(|n| n.name == "radix") =>
+                            && expr.args[0]
+                                .name
+                                .as_ref()
+                                .is_some_and(|n| n.name == "radix") =>
                     {
                         self.check_int_argument(expr, object);
                         return Type::STRING;
@@ -13185,8 +13384,7 @@ impl<'a> Checker<'a> {
                 && !object.nullable
             {
                 match field.name.name.as_str() {
-                    "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction"
-                    | "sqrt"
+                    "abs" | "floor" | "ceil" | "round" | "truncate" | "fraction" | "sqrt"
                         if expr.args.is_empty() =>
                     {
                         return object;
@@ -13200,15 +13398,18 @@ impl<'a> Checker<'a> {
                     "format" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
                         if !arg.is_unknown() && !arg.accepts(Type::STRING) {
-                            self.expect_assignable(Type::STRING, arg, expr.args[0].value.span(), "the argument");
+                            self.expect_assignable(
+                                Type::STRING,
+                                arg,
+                                expr.args[0].value.span(),
+                                "the argument",
+                            );
                         }
                         return Type::STRING;
                     }
                     "min" | "max" | "pow" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
-                        if !arg.is_unknown()
-                            && !matches!(arg.base, Base::Int(_) | Base::Float(_))
-                        {
+                        if !arg.is_unknown() && !matches!(arg.base, Base::Int(_) | Base::Float(_)) {
                             self.expect_assignable(
                                 object,
                                 arg,
@@ -13222,14 +13423,75 @@ impl<'a> Checker<'a> {
                         for arg in &expr.args {
                             let t = self.check_expr(&arg.value);
                             if !t.is_unknown() && !object.accepts(t) {
-                                self.expect_assignable(
-                                    object,
-                                    t,
-                                    arg.value.span(),
-                                    "the argument",
-                                );
+                                self.expect_assignable(object, t, arg.value.span(), "the argument");
                             }
                         }
+                        return object;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Exact `Float` (base-ten decimal) value methods
+            // (`exact-decimal-arithmetic`). No `is_finite`/`is_infinite`
+            // (no infinity); `format` stays specified-not-implemented, as on
+            // the binary family. Explicit `RoundingMode` for `div`/`round` is
+            // deferred with `format`; both default to half-to-even.
+            if matches!(object.base, Base::Decimal) && !field.safe && !object.nullable {
+                // Every argument named below is a `Float` (`min`/`max`/`pow`/
+                // `clamp`/`div` first arg) or an integer place count
+                // (`round`/`div` second arg); check them uniformly.
+                let check_decimal_args = |this: &mut Self, from: usize, to: usize| {
+                    for arg in expr.args.iter().take(to).skip(from) {
+                        let t = this.check_expr(&arg.value);
+                        if !t.is_unknown() && !object.accepts(t) {
+                            this.expect_assignable(object, t, arg.value.span(), "the argument");
+                        }
+                    }
+                };
+                let check_place_arg = |this: &mut Self, idx: usize| {
+                    if let Some(arg) = expr.args.get(idx) {
+                        let t = this.check_expr(&arg.value);
+                        if !t.is_unknown() && !matches!(t.base, Base::Int(_)) {
+                            this.expect_assignable(
+                                Type::INT32,
+                                t,
+                                arg.value.span(),
+                                "the place count",
+                            );
+                        }
+                    }
+                };
+                match field.name.name.as_str() {
+                    "abs" | "floor" | "ceil" | "truncate" | "fraction" | "sqrt"
+                        if expr.args.is_empty() =>
+                    {
+                        return object;
+                    }
+                    "round" if expr.args.is_empty() => return object,
+                    "round" if expr.args.len() == 1 => {
+                        check_place_arg(self, 0);
+                        return object;
+                    }
+                    "sign" | "scale" if expr.args.is_empty() => return Type::INT32,
+                    "is_zero" | "is_negative" | "is_integer" if expr.args.is_empty() => {
+                        return Type::BOOLEAN;
+                    }
+                    "min" | "max" | "pow" if expr.args.len() == 1 => {
+                        check_decimal_args(self, 0, 1);
+                        return object;
+                    }
+                    "clamp" if expr.args.len() == 2 => {
+                        check_decimal_args(self, 0, 2);
+                        return object;
+                    }
+                    "div" if expr.args.len() == 1 => {
+                        check_decimal_args(self, 0, 1);
+                        return object;
+                    }
+                    "div" if expr.args.len() == 2 => {
+                        check_decimal_args(self, 0, 1);
+                        check_place_arg(self, 1);
                         return object;
                     }
                     _ => {}
@@ -13435,7 +13697,10 @@ impl<'a> Checker<'a> {
             // scalar name can never collide with one (type names are
             // reserved).
             if let Some(target) = Type::from_name(&callee.name)
-                && matches!(target.base, Base::Int(_) | Base::Float(_) | Base::String)
+                && matches!(
+                    target.base,
+                    Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String
+                )
             {
                 return self.check_context_conversion(target, expr);
             }
@@ -13586,7 +13851,7 @@ impl<'a> Checker<'a> {
     /// check it, again in `zirk-ir/lower.rs`'s `lower_context_tree` to
     /// lower it) — task 7.3's "does not mutate operands" the same way.
     fn check_context_tree(&mut self, target: Type, expr: &Expr) {
-        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_));
+        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
         let is_string = matches!(target.base, Base::String);
 
         let compatible_op = |op: BinaryOp| {
@@ -13622,8 +13887,8 @@ impl<'a> Checker<'a> {
         if actual.is_unknown() || target == actual {
             return;
         }
-        let numeric_target = matches!(target.base, Base::Int(_) | Base::Float(_));
-        let numeric_actual = matches!(actual.base, Base::Int(_) | Base::Float(_));
+        let numeric_target = matches!(target.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
+        let numeric_actual = matches!(actual.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
         if !actual.nullable && numeric_target && numeric_actual {
             return;
         }
@@ -13978,8 +14243,43 @@ impl<'a> Checker<'a> {
             .collect();
 
         let mut next_position = 0usize;
+        let saved_expected = self.expected_type;
 
         for arg in &expr.args {
+            // Propagate the target parameter's own type as the expected type
+            // for this argument, so a bare numeric literal adopts it (a
+            // `5.0` argument to a `BinaryFloat64` parameter is that width,
+            // not the exact `Float` a context-free literal defaults to).
+            // Only a fully concrete numeric hint is used — a generic
+            // parameter's own inference must not be steered by it.
+            let hint = match &arg.name {
+                Some(name) => signature
+                    .params
+                    .iter()
+                    .find(|p| p.name == name.name)
+                    .map(|p| p.ty),
+                None => {
+                    let mut pos = next_position;
+                    while pos < slots.len() && matches!(slots[pos], ArgSlot::Given { .. }) {
+                        pos += 1;
+                    }
+                    slots.get(pos).and(signature.params.get(pos)).map(|p| p.ty)
+                }
+            };
+            // Only a bare numeric literal (or its negation) should be steered
+            // by the parameter type — anything else keeps its own type and is
+            // checked against the parameter afterward.
+            let arg_is_numeric_literal = matches!(&arg.value, Expr::Float(_) | Expr::Int(_))
+                || matches!(
+                    &arg.value,
+                    Expr::Unary(u)
+                        if u.op == UnaryOp::Neg
+                            && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_))
+                );
+            self.expected_type = hint.filter(|t| {
+                arg_is_numeric_literal
+                    && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+            });
             let ty = self.check_expr(&arg.value);
 
             if let Some(name) = &arg.name {
@@ -14040,6 +14340,7 @@ impl<'a> Checker<'a> {
             }
         }
 
+        self.expected_type = saved_expected;
         slots
     }
 
@@ -14412,16 +14713,21 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         // can represent every value of both operands without loss. The
         // checker already guaranteed the common type exists; lower widens.
         (_, _, Add | Sub | Mul | Div | Rem)
-            if matches!(left.base, Base::Int(_) | Base::Float(_))
-                && matches!(right.base, Base::Int(_) | Base::Float(_)) =>
+            if matches!(left.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+                && matches!(right.base, Base::Int(_) | Base::Float(_) | Base::Decimal) =>
         {
+            // `common_numeric` yields `None` for a `Float`/`BinaryFloat` mix
+            // (its `accepts` has no cross arm), which surfaces as the
+            // "not available" diagnostic — the two never combine implicitly.
             left.common_numeric(right)
         }
         // `Duration` arithmetic.
         (Base::Duration, Base::Duration, Add | Sub) => Some(Type::DURATION),
         (Base::Duration, Base::Duration, Div) => Some(Type::FLOAT64),
-        (Base::Duration, Base::Int(_) | Base::Float(_), Mul | Div)
-        | (Base::Int(_) | Base::Float(_), Base::Duration, Mul) => Some(Type::DURATION),
+        (Base::Duration, Base::Int(_) | Base::Float(_) | Base::Decimal, Mul | Div)
+        | (Base::Int(_) | Base::Float(_) | Base::Decimal, Base::Duration, Mul) => {
+            Some(Type::DURATION)
+        }
         // `String + String` concatenates.
         (Base::String, Base::String, Add) => Some(Type::STRING),
         // `String * Integer` repeats, accepting any integer width; lower

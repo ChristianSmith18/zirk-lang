@@ -1,0 +1,45 @@
+// The exact base-ten `Float` type: `0.1 + 0.2 == 0.3` holds, arithmetic is
+// exact, `to_string` renders the exact decimal, and the type is kept apart
+// from the IEEE 754 binary `BinaryFloat` family.
+fn main(): Void {
+    inmut a, b: Float = 0.1, 0.2;
+    stdout.println(a.to_string());
+    stdout.println(b.to_string());
+    stdout.println(((a + b) == 0.3).to_string());
+
+    // Exact + - * with differing scales.
+    stdout.println((0.5 + 0.025).to_string());
+    stdout.println((1.2 * 0.5).to_string());
+    stdout.println((1 + 0.5).to_string());
+
+    // Trailing-zero normalization: scale does not affect equality.
+    stdout.println((1.0 == 1.00).to_string());
+    stdout.println((2.50).scale().to_string());
+
+    // Division rounds half-to-even; a terminating quotient stays exact.
+    stdout.println((1.0 / 4.0).to_string());
+    stdout.println((7.5).round(0).to_string());
+
+    // Member surface.
+    stdout.println((-2.5).abs().to_string());
+    stdout.println((2.3).floor().to_string());
+    stdout.println((2.0).is_integer().to_string());
+
+    // The exact type and the binary family stay separate; a `b` literal is
+    // binary and its own division by zero is an infinity, not an error.
+    inmut binary: BinaryFloat64 = 1.0b / 0.0b;
+    stdout.println(binary.is_infinite().to_string());
+
+    // Conversions: Int -> Float implicit; Float <-> BinaryFloat explicit.
+    inmut whole: Int32 = 7;
+    inmut widened: Float = whole;
+    stdout.println(widened.to_string());
+    stdout.println((widened as BinaryFloat64).to_string());
+    stdout.println(Float(0.5b).to_string());
+
+    // Parse returns a Result.
+    stdout.println(Float.parse("3.14").unwrap().to_string());
+
+    // Scientific literal is exact.
+    stdout.println((6.25e-2 == 0.0625).to_string());
+}

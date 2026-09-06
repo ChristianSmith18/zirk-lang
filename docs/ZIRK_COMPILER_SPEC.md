@@ -103,6 +103,13 @@ irreversible commit points, structured task scope, cancellation edges,
 selection guards, and compiler-derived transfer/share facts. Optimization may
 remove journals or checks only after proving the same observable safety.
 
+The exact base-ten `Float` type (surface name `Float`) is a dedicated IR type
+whose literals travel as verbatim text and whose operations lower to
+`zirk_rt_decimal_*` runtime calls, with the same zero-divisor guard integer and
+`Duration` division carry. The internal Rust identifiers keep the name `Float`
+for the IEEE 754 binary family whose surface name is `BinaryFloat*` — a
+behaviour-neutral rename of those identifiers is deferred to its own pass.
+
 A `.zpkg` conceptually contains:
 
 ```text

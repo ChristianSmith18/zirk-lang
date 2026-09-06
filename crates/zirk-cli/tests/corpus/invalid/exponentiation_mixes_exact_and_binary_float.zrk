@@ -1,0 +1,8 @@
+// `**` follows the other arithmetic operators: an exact `Float` base with a
+// `BinaryFloat` exponent is a type error naming the explicit conversion.
+fn main(): Void {
+    inmut a: Float = 2.0;
+    inmut b: BinaryFloat64 = 3.0b;
+    inmut c: Float = a ** b;
+    stdout.println(c.to_string());
+}

@@ -159,9 +159,14 @@ Current high-impact delivery limits include:
   Contract<T>` satisfaction for contracts whose members do not name their
   own type parameter (a member like `fn put(x: T)` still reports
   `NOT_LOWERED`). `String.split` remains pending.
-- `Float128` arithmetic lacks complete Windows verification. `Float128`
-  `to_string()` is implemented by truncating to `Float64` first, which can
+- `BinaryFloat128` arithmetic lacks complete Windows verification. `BinaryFloat128`
+  `to_string()` is implemented by truncating to `BinaryFloat64` first, which can
   lose precision for values not exactly representable in `f64`.
+- Exact `Float` irrational operations (`sqrt`, a fractional `pow`) carry only
+  `f64`-grade precision (~15 significant digits), not the full
+  28-digit budget the rational operations use. `Float.format(spec)` and an
+  explicit `RoundingMode` for `div` / `round` are specified but not implemented;
+  both round half-to-even by default.
 - Standard-library, structured-concurrency, packaging, developer-tooling,
   decorator, and public documentation surfaces are specified ahead of full
   compiler/runtime delivery.

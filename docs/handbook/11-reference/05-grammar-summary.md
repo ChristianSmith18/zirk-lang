@@ -42,7 +42,7 @@ patterns may destructure nested records. This summary does not replace the
 machine-readable grammar or its complete precedence and recovery rules.
 
 Type expressions include names, generic application (`List<String>`), fixed
-arrays (`Float64[4]`), tuples (`Tuple(String, Int)`), unions (`A | B`), nullable
+arrays (`Float[4]`), tuples (`Tuple(String, Int)`), unions (`A | B`), nullable
 shorthand (`T?`), and callable types (`Function(P...) => R`, preferably
 `Fn(P...) => R`). Conversion uses type construction syntax. Concrete classes
 use `extends`; interfaces, traits, and state-free abstract requirement classes

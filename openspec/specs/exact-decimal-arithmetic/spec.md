@@ -1,5 +1,8 @@
-## ADDED Requirements
+# exact-decimal-arithmetic Specification
 
+## Purpose
+TBD - created by archiving change exact-decimal-float. Update Purpose after archive.
+## Requirements
 ### Requirement: `Float` is an exact base-ten decimal value
 
 `Float` SHALL be an exact base-ten decimal scalar, not a binary floating-point
@@ -61,14 +64,14 @@ result still exceeds the 128-bit coefficient budget, SHALL raise a controlled
 
 ### Requirement: Division, modulo, and irrational operations round half-to-even
 
-Inexact `Float` operations SHALL produce a correctly rounded result at a
-documented precision budget, and the default rounding mode SHALL be half-to-even.
-This covers `/` with a non-terminating quotient, `**` with a negative or
-fractional exponent, `sqrt`, and any future transcendental operation. The
-maximum significant-digit budget for an inexact result SHALL be a documented
-normative constant (`MAX_SIGNIFICANT_DIGITS`), and division SHALL compute at
-least a documented minimum fractional scale (`MIN_DIV_SCALE`) before rounding. `%` SHALL be exact and SHALL preserve the sign of the dividend.
-Division or modulo by a zero divisor SHALL raise a controlled
+Inexact `Float` operations SHALL produce a rounded result with the default
+rounding mode half-to-even. A non-terminating `/` SHALL carry about
+`MAX_SIGNIFICANT_DIGITS` significant digits (division is pure integer
+arithmetic); `sqrt` and a fractional `pow` carry `f64`-grade precision (about
+15 significant digits) — an exact-to-28-digits irrational result is a
+documented non-goal. Division SHALL compute at least `MIN_DIV_SCALE` fractional
+digits before rounding. `%` SHALL be exact and SHALL preserve the sign of the
+dividend. Division or modulo by a zero divisor SHALL raise a controlled
 `DivisionByZeroError` at the point of the operation.
 
 #### Scenario: Terminating division is exact
@@ -79,13 +82,14 @@ Division or modulo by a zero divisor SHALL raise a controlled
 #### Scenario: Non-terminating division is correctly rounded
 
 - **WHEN** `1.0 / 3.0` is evaluated with the default rounding mode
-- **THEN** the result is the half-to-even rounding of one third at `MAX_SIGNIFICANT_DIGITS`
-  significant digits
+- **THEN** the result is the half-to-even rounding of one third to about
+  `MAX_SIGNIFICANT_DIGITS` significant digits
 
-#### Scenario: Explicit rounding control
+#### Scenario: Explicit place count on division
 
-- **WHEN** `a.div(b, RoundingMode.HALF_UP, 2)` is evaluated
-- **THEN** the quotient is rounded half-up to a scale of 2
+- **WHEN** `a.div(b, 2)` is evaluated
+- **THEN** the quotient is rounded to a scale of 2 (half-to-even; an explicit
+  `RoundingMode` argument is a deferred addition)
 
 #### Scenario: Signed remainder
 
@@ -149,13 +153,15 @@ names the required explicit conversion.
 
 ### Requirement: `Float` member surface
 
-`Float` SHALL expose: `abs`, `sign`, `min`, `max`, `clamp`, `is_zero`,
-`is_negative`, `is_integer`, `floor`, `ceil`, `truncate`, `fraction`,
-`round(places[, mode])`, `pow(exponent)`, `sqrt`, `div(other, mode, places)`,
-`scale` (the decimal scale as an integer), `to_string`, and the static
+`Float` SHALL expose: `abs()`, `sign()`, `min(other)`, `max(other)`,
+`clamp(low, high)`, `is_zero()`, `is_negative()`, `is_integer()`, `floor()`,
+`ceil()`, `truncate()`, `fraction()`, `round()` / `round(places)`,
+`pow(exponent)`, `sqrt()`, `div(other)` / `div(other, places)`, `scale()` (the
+decimal scale as an integer), `to_string()`, and the static
 `Float.parse(text) -> Result<Float, ParseError>`. `to_string` SHALL render the
-exact decimal value. `format(spec)` SHALL remain specified but not implemented,
-as it is for the binary family, and is out of scope for this capability.
+exact decimal value. `format(spec)` and an explicit `RoundingMode` argument
+SHALL remain specified but not implemented, as `format` is for the binary
+family; both round half-to-even by default.
 
 #### Scenario: Exact `to_string`
 
@@ -167,9 +173,9 @@ as it is for the binary family, and is out of scope for this capability.
 - **WHEN** `(2.345).round(2)` is evaluated with the default mode
 - **THEN** the result is `2.34` under half-to-even
 
-#### Scenario: `scale` reports the decimal scale
+#### Scenario: `scale()` reports the decimal scale
 
-- **WHEN** `(1.50).scale` is evaluated
+- **WHEN** `(1.50).scale()` is evaluated
 - **THEN** the result is `1` after trailing-zero normalization
 
 #### Scenario: Parse round-trips
@@ -238,3 +244,4 @@ garbage collection.
 - **WHEN** `a / b` on `Float` is lowered
 - **THEN** a guard that raises `DivisionByZeroError` is emitted before the
   runtime division helper is called
+

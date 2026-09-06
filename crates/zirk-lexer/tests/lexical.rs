@@ -469,17 +469,17 @@ fn valid_shifts_and_their_compound_forms() {
 }
 
 #[test]
-fn valid_power_operator_declares_its_phase() {
-    // `**` needs `Float` to define what a negative exponent means (`2 ** -1`
-    // is the mathematical result converted back), so it stays gated until
-    // `Float` itself lands — unlike bitwise/shift, which only ever needed
-    // `Int32`, already available.
+fn valid_power_operator_is_part_of_the_implemented_subset() {
+    // `**` / `**=` are delivered (`exponentiation-operator`): the parser
+    // desugars `a ** b` to `a.pow(b)` over the numeric families, and a
+    // negative literal exponent widens an integer base to exact `Float`
+    // (`2 ** -1` is `0.5`). No arrival phase is attributed.
     use TokenKind::*;
     for kind in [StarStar, StarStarEq] {
         assert_eq!(
             kind.phase(),
-            Some(Phase::THREE_B),
-            "`{}` should announce its phase",
+            None,
+            "`{}` should not announce a phase",
             kind.symbol()
         );
     }
@@ -553,12 +553,18 @@ fn valid_scientific_notation() {
 }
 
 #[test]
-fn valid_float_width_suffix() {
+fn valid_binary_float_suffix() {
     use TokenKind::*;
     assert_eq!(
-        tokens("1.5f32"),
-        vec![Float(NumberLit::new("1.5").with_width("f32")), Eof]
+        tokens("1.5b32"),
+        vec![Float(NumberLit::new("1.5").with_width("b32")), Eof]
     );
+    assert_eq!(
+        tokens("0.1b"),
+        vec![Float(NumberLit::new("0.1").with_width("b")), Eof]
+    );
+    // A suffix-less fractional literal carries no width — it is exact `Float`.
+    assert_eq!(tokens("0.1"), vec![Float(NumberLit::new("0.1")), Eof]);
 }
 
 #[test]

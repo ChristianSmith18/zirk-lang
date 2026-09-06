@@ -59,7 +59,7 @@ and compound assignments.
 2h + 30m; // 2h30m
 3 * 2h;   // 6h
 3h / 2;   // 1h30m
-3h / 30m; // 6.0: Float64
+3h / 30m; // 6.0: Float
 65m % 1h; // 5m
 ```
 
@@ -95,7 +95,7 @@ years belong to `Period`.
 | `d.sign()` | `Int32` | `-1`, `0`, `1` | implemented |
 | `d.is_zero()` / `is_positive()` / `is_negative()` | `Boolean` | Sign tests | implemented |
 | `d.min(other)` / `d.max(other)` / `d.clamp(lo, hi)` | `Duration` | Bounds | specified |
-| `d.total_weeks()` … `d.total_nanoseconds()` | `Float64` | Complete quantity; may be fractional (`90m.total_hours() == 1.5`) | specified |
+| `d.total_weeks()` … `d.total_nanoseconds()` | `Float` | Complete quantity; may be fractional (`90m.total_hours() == 1.5`) | specified |
 | `d.whole_weeks()` … `d.whole_nanoseconds()` | integer | Truncated-toward-zero whole units | specified |
 | `d.round(unit)` / `floor(unit)` / `ceil(unit)` / `truncate(unit)` | `Duration` | Unit rounding | implemented |
 | `d.format(template)` | `String` | Typed-template presentation | implemented |
@@ -104,7 +104,7 @@ years belong to `Period`.
 | `d.to_string()` | `String` | Human-readable default used by `stdout.println` | implemented |
 
 Operators: unary sign; `Duration ± Duration`; `×`/`÷` by integer or Float
-scalar in either appropriate order; `Duration / Duration → Float64`;
+scalar in either appropriate order; `Duration / Duration → Float`;
 `Duration % Duration`; equality/order; compound assignment. Zero division,
 non-finite scalar, precision/range loss, and overflow are controlled errors.
 
