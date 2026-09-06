@@ -37,4 +37,16 @@ fn main(): Void {
     stdout.println(d.to_string());
     stdout.println(String(d));
     stdout.println("elapsed {1s + 500ms}");
+
+    // `Duration` sign/magnitude members.
+    inmut neg = -1500ms;
+    stdout.println(neg.abs().to_string());
+    stdout.println(neg.sign().to_string());
+    stdout.println(neg.is_zero().to_string());
+    stdout.println(neg.is_positive().to_string());
+    stdout.println(neg.is_negative().to_string());
+    inmut zero: Duration = 0ns;
+    stdout.println(zero.is_zero().to_string());
+    stdout.println(zero.sign().to_string());
+    stdout.println(d.is_positive().to_string());
 }

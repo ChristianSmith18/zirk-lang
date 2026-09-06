@@ -4,9 +4,28 @@ true
 true
 hel
 5
+5
+-1
+  Zirk  
+hello  
+  hello
+  hello  
+  HELLO  
+  hello  
+false
+[hello]
+[a, b, c]
+[97, 98, 99]
+[97, 98, 99]
+[a, b, c]
+  hello  
 true
 false
-a
+true
+false
+false
+A
+z
 a
 b
 c

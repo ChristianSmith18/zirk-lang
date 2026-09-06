@@ -130,40 +130,39 @@ graphemes; `byte_length` counts encoded bytes.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Grapheme count | specified |
-| `byte_length` | `Int32` | Encoded byte count | specified |
+| `length` | `Int32` | Grapheme count | implemented |
+| `byte_length` | `Int32` | Encoded byte count | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `text.is_empty()` | `Boolean` | `length == 0` | specified |
+| `text.is_empty()` | `Boolean` | `length == 0` | implemented |
 | `text.contains(needle)` | `Boolean` | Substring test | implemented |
 | `text.starts_with(prefix)` | `Boolean` | Prefix test | implemented |
 | `text.ends_with(suffix)` | `Boolean` | Suffix test | implemented |
 | `text.search(needle)` | `Int64` | First grapheme index of `needle`, or `-1` | implemented |
-| `text.find(needle)` | `Int32?` | First grapheme index of `needle`, or `null` | specified — the compiler ships `search()` for now |
-| `text.replace(needle, replacement)` | `String` | New string with all occurrences replaced | specified |
+| `text.find(needle)` | `Int64?` | First grapheme index of `needle`, or `null` | implemented |
+| `text.replace(needle, replacement)` | `String` | New string with all occurrences replaced | implemented |
 | `text.trim()` | `String` | Removes Unicode whitespace at both ends | implemented |
-| `text.trim_start()` / `text.trim_end()` | `String` | One-sided trims | specified |
-| `text.to_lowercase()` | `String` | Unicode-aware lowercase | specified |
-| `text.to_uppercase()` | `String` | Unicode-aware uppercase | specified |
+| `text.trim_start()` / `text.trim_end()` | `String` | One-sided trims | implemented |
+| `text.to_lowercase()` | `String` | Unicode-aware lowercase | implemented |
+| `text.to_uppercase()` | `String` | Unicode-aware uppercase | implemented |
 | `text.split(separator)` | `List<String>` | Split on `separator`; an empty separator yields graphemes | implemented — `remove_empty:` remains specified |
-| `text.split_whitespace()` | `List<String>` | Unicode-whitespace split | specified |
-| `text.lines()` | `List<String>` | Line terminators removed; meaningful empty lines kept | specified |
+| `text.split_whitespace()` | `List<String>` | Unicode-whitespace split | implemented |
+| `text.lines()` | `List<String>` | Line terminators removed; meaningful empty lines kept | implemented |
 | `text.substring(start, end)` | `String` | Grapheme-range copy; bounds checked | implemented — `end` is required today; the `end?` form is specified |
-| `text.normalize(form)` | `String` | `form: UnicodeNormalization` | specified |
-| `text.bytes()` | `Iterator<UInt8>` | Byte view | specified |
-| `text.codepoints()` | `Iterator<UInt32>` | Scalar view | specified |
-| `text.chars()` | `Iterator<Char>` | Grapheme view | specified |
-| `text.clone()` | `String` | Independent logical copy | specified |
+| `text.normalize(form)` | `String` | `form: UnicodeNormalization` | implemented |
+| `text.bytes()` | `List<UInt8>` | Byte view | implemented |
+| `text.codepoints()` | `List<UInt32>` | Scalar view | implemented |
+| `text.chars()` | `List<Char>` | Grapheme view | implemented |
+| `text.clone()` | `String` | Independent logical copy | implemented |
 | `text.to_string()` | `String` | Identity | implemented |
 | `String(value)` | `String` | Explicit conversion; also establishes a deep conversion context over a concatenation tree | implemented |
 
 > Indexing `text[i]` yields `Char`; slicing `text[start:end:step]` copies.
 > Every bound is checked — Zirk never clamps silently. Negative indices
-> counting from the end are specified; today an out-of-range index is a
-> controlled error. Slice assignment requires equal grapheme counts on both
+> counting from the end are implemented. Slice assignment requires equal grapheme counts on both
 > sides.
 
 ### Examples

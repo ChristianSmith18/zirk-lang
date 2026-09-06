@@ -50,8 +50,9 @@ component, rounding, formatting, and `std.time` surface is documented in
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `d.abs()` | `Duration` | Magnitude | specified |
-| `d.is_zero()` / `d.is_negative()` / `d.is_positive()` | `Boolean` | Sign tests | specified |
+| `d.abs()` | `Duration` | Magnitude | implemented |
+| `d.sign()` | `Int32` | `-1`, `0`, or `1` | implemented |
+| `d.is_zero()` / `d.is_negative()` / `d.is_positive()` | `Boolean` | Sign tests | implemented |
 | `d.to_string()` | `String` | Human-readable rendering used by `stdout.println` | implemented |
 | `Duration.parse(text)` | `Result<Duration, ParseError>` | Compact and ISO 8601 input | specified |
 
@@ -64,9 +65,10 @@ inmut ratio = 3h / 30m;         // 6.0 (Float64)
 stdout.println("wait {total}");
 ```
 
-> Literals, arithmetic, and printing are delivered. Component accessors,
-> `total_*`/`whole_*` methods, rounding, `format()`, `humanize()`, and
-> `to_iso_string()` are specified; see the temporal `Duration` page.
+> Literals, arithmetic, printing and sign/magnitude methods are delivered.
+> Component accessors, `total_*`/`whole_*` methods, rounding, `format()`,
+> `humanize()`, and `to_iso_string()` are specified; see the temporal
+> `Duration` page.
 
 ---
 

@@ -2,12 +2,25 @@ fn main(): Void {
     mut a: Char = 'a';
     mut d: Char = '5';
     mut s: Char = ' ';
+    mut pi: Char = 'π';
     stdout.println(a.is_uppercase());
     stdout.println(a.is_lowercase());
     stdout.println(a.is_letter());
+    stdout.println(a.is_alphabetic());
     stdout.println(a.is_digit());
+    stdout.println(a.is_numeric());
     stdout.println(d.is_digit());
+    stdout.println(d.is_numeric());
+    stdout.println(d.is_alphanumeric());
+    stdout.println(a.is_alphanumeric());
     stdout.println(s.is_whitespace());
     stdout.println(a.to_uppercase());
     stdout.println('Z'.to_lowercase());
+    stdout.println(pi.byte_length.to_string());
+    stdout.println(pi.codepoint_count.to_string());
+    stdout.println(a.ascii_code().to_string());
+    stdout.println(pi.ascii_code().to_string());
+    stdout.println(a.is_ascii());
+    stdout.println(pi.is_ascii());
+    stdout.println(a.normalize("NFC"));
 }
