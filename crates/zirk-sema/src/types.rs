@@ -1008,8 +1008,6 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // families. They are compiler-known native types, not library objects:
     // what that phase adds is their implementation, not their existence.
     const PHASE_7: &[&str] = &[
-        "Map",
-        "Set",
         "Date",
         "Time",
         "DateTime",
@@ -1107,7 +1105,8 @@ mod tests {
         assert_eq!(pending_type("Object").map(|t| t.phase), Some(Phase::THREE));
         assert_eq!(pending_type("Task").map(|t| t.phase), Some(Phase::FIVE));
         assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
-        assert_eq!(pending_type("Map").map(|t| t.phase), Some(Phase::SEVEN));
+        assert!(pending_type("Map").is_none(), "`Map<K, V>` is implemented");
+        assert!(pending_type("Set").is_none(), "`Set<T>` is implemented");
         assert!(pending_type("Array").is_none(), "`Array<T>` is implemented");
         assert!(pending_type("List").is_none(), "`List<T>` is implemented");
     }
