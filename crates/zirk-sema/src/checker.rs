@@ -12230,6 +12230,14 @@ impl<'a> Checker<'a> {
                     "ascii_code" if expr.args.is_empty() => {
                         return Type::of(Base::Int(IntWidth::I32));
                     }
+                    "bytes" if expr.args.is_empty() => {
+                        let id = self.intern_list_type(Type::of(Base::Int(IntWidth::U8)));
+                        return Type::of(Base::List(id));
+                    }
+                    "codepoints" if expr.args.is_empty() => {
+                        let id = self.intern_list_type(Type::of(Base::Int(IntWidth::U32)));
+                        return Type::of(Base::List(id));
+                    }
                     "normalize" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
                         if !arg.is_unknown() && !Type::STRING.accepts(arg) {

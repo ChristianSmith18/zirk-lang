@@ -194,3 +194,23 @@ pub unsafe extern "C" fn zirk_char_normalize(
 ) -> *mut c_void {
     unsafe { crate::string::zirk_str_normalize(handle, form) }
 }
+
+/// `c.bytes()` — a `List<UInt8>` of the grapheme's UTF-8 bytes.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_char_bytes(handle: *const c_void) -> *mut c_void {
+    unsafe { crate::string::zirk_str_bytes(handle) }
+}
+
+/// `c.codepoints()` — a `List<UInt32>` of the grapheme's Unicode scalars.
+///
+/// # Safety
+///
+/// `handle` must come from this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_char_codepoints(handle: *const c_void) -> *mut c_void {
+    unsafe { crate::string::zirk_str_codepoints(handle) }
+}

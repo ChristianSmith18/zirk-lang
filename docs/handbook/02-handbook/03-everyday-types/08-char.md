@@ -71,8 +71,8 @@ grapheme, so they return `String`, not `Char`.
 | `value.normalize(form)` | `String` | `form: UnicodeNormalization` — NFC/NFD/NFKC/NFKD | implemented |
 | `value.to_uppercase()` | `String` | Unicode-aware uppercase (may expand) | implemented |
 | `value.to_lowercase()` | `String` | Unicode-aware lowercase (may expand) | implemented |
-| `value.bytes()` | `Iterator<UInt8>` | Byte-level view | specified |
-| `value.codepoints()` | `Iterator<UInt32>` | Scalar-level view | specified |
+| `value.bytes()` | `List<UInt8>` | Byte-level view | implemented |
+| `value.codepoints()` | `List<UInt32>` | Scalar-level view | implemented |
 | `value.to_string()` | `String` | One-grapheme string | implemented |
 
 ### Examples
