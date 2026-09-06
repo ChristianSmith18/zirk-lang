@@ -98,8 +98,8 @@ years belong to `Period`.
 | `d.total_weeks()` … `d.total_nanoseconds()` | `Float64` | Complete quantity; may be fractional (`90m.total_hours() == 1.5`) | specified |
 | `d.whole_weeks()` … `d.whole_nanoseconds()` | integer | Truncated-toward-zero whole units | specified |
 | `d.round(unit)` / `floor(unit)` / `ceil(unit)` / `truncate(unit)` | `Duration` | Unit rounding | implemented |
-| `d.format(template)` | `String` | Typed-template presentation | specified |
-| `d.humanize(locale:, max_units:)` | `String` | Locale-aware readable form; presentation only, never parse input | specified |
+| `d.format(template)` | `String` | Typed-template presentation | implemented |
+| `d.humanize(locale:, max_units:)` | `String` | Locale-aware readable form; presentation only, never parse input | implemented |
 | `d.to_iso_string()` | `String` | ISO 8601 duration | implemented |
 | `d.to_string()` | `String` | Human-readable default used by `stdout.println` | implemented |
 
@@ -110,7 +110,7 @@ non-finite scalar, precision/range loss, and overflow are controlled errors.
 
 > **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`,
 > component properties, `total_*`/`whole_*`, rounding and printing are delivered.
-> `to_iso_string()` is delivered; `format()` and `humanize()` are specified
+> all `Duration` formatting members are delivered
 > pending the Phase 7 `std.time` delivery.
 
 ### Examples

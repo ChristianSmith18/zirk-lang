@@ -12313,6 +12313,24 @@ impl<'a> Checker<'a> {
                     "to_iso_string" if expr.args.is_empty() => {
                         return Type::STRING;
                     }
+                    "format" if expr.args.len() == 1 => {
+                        let t = self.check_expr(&expr.args[0].value);
+                        if !t.is_unknown() {
+                            self.expect_assignable(Type::STRING, t, expr.args[0].value.span(), "the template");
+                        }
+                        return Type::STRING;
+                    }
+                    "humanize" if expr.args.len() == 2 => {
+                        let locale = self.check_expr(&expr.args[0].value);
+                        if !locale.is_unknown() {
+                            self.expect_assignable(Type::STRING, locale, expr.args[0].value.span(), "the locale");
+                        }
+                        let max_units = self.check_expr(&expr.args[1].value);
+                        if !max_units.is_unknown() {
+                            self.expect_assignable(Type::INT32, max_units, expr.args[1].value.span(), "max_units");
+                        }
+                        return Type::STRING;
+                    }
                     _ => {}
                 }
             }
