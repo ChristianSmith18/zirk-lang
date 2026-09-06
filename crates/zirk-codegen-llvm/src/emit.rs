@@ -1409,26 +1409,61 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
     }
 
-    /// The signature of one contract method, taken from any class that
-    /// supplies it.
+    /// The signature of one contract method, for one concrete call.
     ///
-    /// Every implementation shares it — that is what conformance checked — so
-    /// the first one found describes them all.
-    fn contract_signature(&self, contract: u32, index: u32) -> inkwell::types::FunctionType<'ctx> {
-        let symbol = self
-            .module
-            .objects
+    /// Implementations of a generic contract (`Container<T>`) share their
+    /// method index but not their function type — `Container<Int32>.get()`
+    /// returns `Int32` while `Container<String>.get()` returns `String`.  The
+    /// call site knows the concrete return and argument types, so we find an
+    /// implementation whose function type matches them.
+    fn contract_signature(
+        &self,
+        contract: u32,
+        index: u32,
+        result: ir::IrType,
+        args: &[ir::IrType],
+    ) -> inkwell::types::FunctionType<'ctx> {
+        let expected_return = self.llvm_type(result);
+        let expected_args: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = args
             .iter()
-            .find_map(|layout| {
-                layout
-                    .contracts
-                    .iter()
-                    .find(|t| t.contract == contract)
-                    .and_then(|t| t.methods.get(index as usize))
+            .map(|&ty| {
+                self.llvm_type(ty)
+                    .expect("a contract method argument has a value type")
+                    .into()
             })
-            .expect("a verified module has an implementation of every reachable contract");
+            .collect();
 
-        self.functions[symbol].get_type()
+        let mut first = None;
+        for layout in &self.module.objects {
+            let Some(table) = layout.contracts.iter().find(|t| t.contract == contract) else {
+                continue;
+            };
+            let Some(symbol) = table.methods.get(index as usize) else {
+                continue;
+            };
+            let Some(function) = self.functions.get(symbol) else {
+                continue;
+            };
+            let ft = function.get_type();
+            if first.is_none() {
+                first = Some(ft);
+            }
+
+            let return_match = ft.get_return_type() == expected_return;
+            let param_types = ft.get_param_types();
+            let params_match = param_types.len() == expected_args.len() + 1
+                && param_types[1..]
+                    .iter()
+                    .zip(&expected_args)
+                    .all(|(a, b)| a == b);
+            if return_match && params_match {
+                return ft;
+            }
+        }
+
+        first.unwrap_or_else(|| {
+            panic!("a verified module has an implementation of every reachable contract")
+        })
     }
 
     /// The layout an object operand belongs to.
@@ -1538,7 +1573,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("load the method")
                     .into_pointer_value();
 
-                let signature = self.contract_signature(*contract, *index);
+                let result_ty = instruction.ty;
+                let arg_tys: Vec<ir::IrType> =
+                    args.iter().map(|a| self.value_types[&a.0]).collect();
+                let signature =
+                    self.contract_signature(*contract, *index, result_ty, &arg_tys);
                 let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
                 arguments.extend(
                     args.iter()
