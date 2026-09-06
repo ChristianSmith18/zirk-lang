@@ -23,4 +23,8 @@ fn main(): Void {
     stdout.println(a.is_ascii());
     stdout.println(pi.is_ascii());
     stdout.println(a.normalize("NFC"));
+    stdout.println(a.bytes().to_string());
+    stdout.println(a.codepoints().to_string());
+    stdout.println(pi.bytes().to_string());
+    stdout.println(pi.codepoints().to_string());
 }

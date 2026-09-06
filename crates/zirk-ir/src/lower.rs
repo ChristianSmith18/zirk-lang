@@ -781,6 +781,16 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::String],
             return_type: IrType::List(list_u32_id.unwrap_or(0)),
         },
+        ExternFn {
+            name: "zirk_char_bytes".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(list_u8_id.unwrap_or(0)),
+        },
+        ExternFn {
+            name: "zirk_char_codepoints".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::List(list_u32_id.unwrap_or(0)),
+        },
         // `native-type-member-surface`: integer helpers. Values travel as
         // `i128`; `bits` and `signed` carry the receiver's width semantics.
         ExternFn {
@@ -9996,6 +10006,8 @@ impl<'a> FunctionLowering<'a> {
                 | ("is_numeric", 0)
                 | ("is_alphanumeric", 0)
                 | ("ascii_code", 0)
+                | ("bytes", 0)
+                | ("codepoints", 0)
                 | ("to_uppercase", 0)
                 | ("to_lowercase", 0)
                 | ("normalize", 1)
@@ -10014,6 +10026,25 @@ impl<'a> FunctionLowering<'a> {
                     args: vec![receiver, form],
                 },
                 IrType::String,
+                span,
+            ));
+        }
+        // The `List<T>`-returning methods get their concrete element id from
+        // the checker so the IR value is type-correct for the verifier.
+        let result_ty = || {
+            self.checked
+                .expr_types
+                .get(&call.span)
+                .map(|&ty| self.ir_type(ty))
+                .unwrap_or(IrType::String)
+        };
+        if matches!(field.name.name.as_str(), "bytes" | "codepoints") {
+            return Some(self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_char_{}", field.name.name),
+                    args: vec![receiver],
+                },
+                result_ty(),
                 span,
             ));
         }
@@ -14069,6 +14100,8 @@ impl<'a> FunctionLowering<'a> {
                 | ("is_numeric", 0)
                 | ("is_alphanumeric", 0)
                 | ("ascii_code", 0)
+                | ("bytes", 0)
+                | ("codepoints", 0)
                 | ("to_uppercase", 0)
                 | ("to_lowercase", 0)
                 | ("normalize", 1)
