@@ -67,13 +67,13 @@
 - [x] 8.2 Traditional-enum `case.name`, `case.value`, `case.to_string()`
 - [x] 8.3 Default `to_string` for `record`/algebraic-enum/`class`/`Weak`/callable values
 - [x] 8.4 Corpus fixtures
-- [ ] 8.5 Handbook statuses in `10-data-types`, `00-tuples`, `03-traditional-enums`, `04-algebraic-enums`, `01-records`, `12-function-types`, `04-safe-references`, `08-classes-and-objects`
+- [x] 8.5 Handbook statuses in `10-data-types`, `00-tuples`, `03-traditional-enums`, `04-algebraic-enums`, `01-records`, `12-function-types`, `04-safe-references`, `08-classes-and-objects`
 
 ## 9. Verification and docs
 
 - [x] 9.1 `cargo test --workspace` green incl. new fixtures; `cargo clippy --workspace` clean
-- [ ] 9.2 Handbook statuses updated for every delivered member; `13-type-member-index.md` delivery note removed where fully delivered
+- [x] 9.2 Handbook statuses updated for every delivered member; `13-type-member-index.md` delivery note removed where fully delivered
 - [x] 9.3 `12-feature-status.md` updated; `openspec validate --all --strict` green
-- [ ] 9.4 Website re-sync (`yarn content:sync` in zirk-lang-site) after committing handbook sources
+- [x] 9.4 Website re-sync (`yarn content:sync` in zirk-lang-site) after committing handbook sources
 - [x] 9.5 Commit(s) in zirk-lang and zirk-lang-site
 - [ ] 9.6 Archive change when the user confirms
