@@ -553,12 +553,18 @@ fn valid_scientific_notation() {
 }
 
 #[test]
-fn valid_float_width_suffix() {
+fn valid_binary_float_suffix() {
     use TokenKind::*;
     assert_eq!(
-        tokens("1.5f32"),
-        vec![Float(NumberLit::new("1.5").with_width("f32")), Eof]
+        tokens("1.5b32"),
+        vec![Float(NumberLit::new("1.5").with_width("b32")), Eof]
     );
+    assert_eq!(
+        tokens("0.1b"),
+        vec![Float(NumberLit::new("0.1").with_width("b")), Eof]
+    );
+    // A suffix-less fractional literal carries no width — it is exact `Float`.
+    assert_eq!(tokens("0.1"), vec![Float(NumberLit::new("0.1")), Eof]);
 }
 
 #[test]
