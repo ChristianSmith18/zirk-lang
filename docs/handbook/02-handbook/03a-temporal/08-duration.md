@@ -97,7 +97,7 @@ years belong to `Period`.
 | `d.min(other)` / `d.max(other)` / `d.clamp(lo, hi)` | `Duration` | Bounds | specified |
 | `d.total_weeks()` … `d.total_nanoseconds()` | `Float64` | Complete quantity; may be fractional (`90m.total_hours() == 1.5`) | specified |
 | `d.whole_weeks()` … `d.whole_nanoseconds()` | integer | Truncated-toward-zero whole units | specified |
-| `d.round(unit)` / `floor(unit)` / `ceil(unit)` / `truncate(unit)` | `Duration` | Unit rounding | specified |
+| `d.round(unit)` / `floor(unit)` / `ceil(unit)` / `truncate(unit)` | `Duration` | Unit rounding | implemented |
 | `d.format(template)` | `String` | Typed-template presentation | specified |
 | `d.humanize(locale:, max_units:)` | `String` | Locale-aware readable form; presentation only, never parse input | specified |
 | `d.to_iso_string()` | `String` | ISO 8601 duration | specified |
@@ -109,8 +109,8 @@ scalar in either appropriate order; `Duration / Duration → Float64`;
 non-finite scalar, precision/range loss, and overflow are controlled errors.
 
 > **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`,
-> component properties, `total_*`/`whole_*` and printing are delivered.
-> Rounding, `format()`, `humanize()`, and `to_iso_string()` are specified
+> component properties, `total_*`/`whole_*`, rounding and printing are delivered.
+> `format()`, `humanize()`, and `to_iso_string()` are specified
 > pending the Phase 7 `std.time` delivery.
 
 ### Examples
