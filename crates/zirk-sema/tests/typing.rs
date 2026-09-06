@@ -89,7 +89,7 @@ fn valid_the_four_types_of_the_subset() {
 
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
-    // `Int64`/`BinaryFloat64`/`Char` and the rest of the scalars in this phase's
+    // `Int64`/`Float64`/`Char` and the rest of the scalars in this phase's
     // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1) — `UInt` is
     // still genuinely pending: the spec never names it as an alias the way
     // `Int`/`Integer` name `Int32`.
@@ -160,58 +160,59 @@ fn valid_shift_amount_may_be_a_different_width() {
 #[test]
 fn valid_float_family_resolves() {
     accepted_body(
-        "mut a: BinaryFloat64 = 1.5;\nmut b: BinaryFloat32 = 1.5b32;\nmut c: BinaryFloat16 = 1.5b16;\nmut d: BinaryFloat128 = 1.5b128;\nreturn;",
+        "mut a: Float64 = 1.5;\nmut b: Float32 = 1.5b32;\nmut c: Float16 = 1.5b16;\nmut d: Float128 = 1.5b128;\nreturn;",
     );
 }
 
 #[test]
 fn valid_exact_float_is_the_bare_fractional_literal() {
     // The plain name and a suffix-less literal are the exact base-ten type;
-    // `0.1 + 0.2 == 0.3` type-checks and the sum is exact `Float`.
-    accepted_body("mut a: Float = 0.1;\nmut b = 0.2;\nmut c: Boolean = (a + b) == 0.3;");
-    accepted_body("mut a: Int32 = 2;\nmut b = 0.5;\nmut c: Float = a + b;");
+    // `0.1 + 0.2 == 0.3` type-checks and the sum is exact `Decimal`.
+    accepted_body("mut a: Decimal = 0.1;\nmut b = 0.2;\nmut c: Boolean = (a + b) == 0.3;");
+    accepted_body("mut a: Int32 = 2;\nmut b = 0.5;\nmut c: Decimal = a + b;");
 }
 
 #[test]
 fn invalid_exact_float_and_binary_float_do_not_mix() {
-    let output = rejected_body("mut a: Float = 0.1;\nmut b: BinaryFloat64 = 0.2b;\nmut c = a + b;");
+    let output = rejected_body("mut a: Decimal = 0.1;\nmut b: Float64 = 0.2b;\nmut c = a + b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn invalid_former_binary_spelling_redirects() {
-    let output = rejected_body("mut a: Float64 = 1.5;");
+    let output = rejected_body("mut a: BinaryFloat64 = 1.5;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
-    assert!(output.contains("BinaryFloat64"));
+    assert!(output.contains("Float64"));
+    assert!(output.contains("Decimal"));
 }
 
 #[test]
 fn valid_exact_float_member_surface() {
     accepted_body(
-        "mut a: Float = 2.5;\n\
-         mut b: Float = a.abs();\n\
+        "mut a: Decimal = 2.5;\n\
+         mut b: Decimal = a.abs();\n\
          mut c: Int32 = a.sign();\n\
          mut d: Int32 = a.scale();\n\
          mut e: Boolean = a.is_integer();\n\
-         mut f: Float = a.round(1);\n\
-         mut g: Float = a.div(3.0, 4);",
+         mut f: Decimal = a.round(1);\n\
+         mut g: Decimal = a.div(3.0, 4);",
     );
 }
 
 #[test]
 fn invalid_exact_float_has_no_infinity_member() {
-    let output = rejected_body("mut a: Float = Float.POSITIVE_INFINITY;");
+    let output = rejected_body("mut a: Decimal = Decimal.POSITIVE_INFINITY;");
     assert!(!output.is_empty());
 }
 
 #[test]
 fn valid_exact_float_conversions() {
-    // Int -> Float is implicit and exact; Float -> Int and Float <-> BinaryFloat
+    // Int -> Float is implicit and exact; Float -> Int and Float <-> Float
     // are explicit.
     accepted_body("mut i: Int32 = 5;\nmut f: Float = i;");
     accepted_body("mut f: Float = 2.5;\nmut i: Int32 = f as Int32;");
-    accepted_body("mut f: Float = 2.5;\nmut g: BinaryFloat64 = f as BinaryFloat64;");
-    accepted_body("mut g: BinaryFloat64 = 2.5b;\nmut f: Float = Float(g);");
+    accepted_body("mut f: Float = 2.5;\nmut g: Float64 = f as Float64;");
+    accepted_body("mut g: Float64 = 2.5b;\nmut f: Float = Float(g);");
 }
 
 #[test]
@@ -232,12 +233,12 @@ fn valid_exponentiation_operator_result_types() {
     // `exponentiation-operator`: `a ** b` is `a.pow(b)`.
     // `Int ** Int` (non-negative) stays integer.
     accepted_body("mut x: Int32 = 2 ** 3;");
-    // `Int ** negativeLiteral` widens to exact `Float`.
-    accepted_body("mut x: Float = 2 ** -1;");
-    // exact `Float` base stays exact `Float`.
-    accepted_body("mut b: Float = 1.5;\nmut x: Float = b ** 2;");
-    // `BinaryFloat` base stays that width.
-    accepted_body("mut b: BinaryFloat64 = 2.0b;\nmut x: BinaryFloat64 = b ** 3;");
+    // `Int ** negativeLiteral` widens to exact `Decimal`.
+    accepted_body("mut x: Decimal = 2 ** -1;");
+    // exact `Decimal` base stays exact `Decimal`.
+    accepted_body("mut b: Decimal = 1.5;\nmut x: Decimal = b ** 2;");
+    // `Float` base stays that width.
+    accepted_body("mut b: Float64 = 2.0b;\nmut x: Float64 = b ** 3;");
     // a dynamic exponent stays integer.
     accepted_body("mut k: Int32 = 4;\nmut x: Int32 = 2 ** k;");
     // compound form.
@@ -254,43 +255,43 @@ fn invalid_exponentiation_widened_result_is_not_an_integer() {
 #[test]
 fn invalid_exponentiation_cannot_mix_exact_and_binary_float() {
     let output =
-        rejected_body("mut a: Float = 2.0;\nmut b: BinaryFloat64 = 3.0b;\nmut c = a ** b;");
+        rejected_body("mut a: Decimal = 2.0;\nmut b: Float64 = 3.0b;\nmut c = a ** b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn valid_safe_widening_between_float_widths() {
     accepted_body(
-        "mut a: BinaryFloat16 = 1.5b16;\nmut b: BinaryFloat32 = a;\nmut c: BinaryFloat64 = b;",
+        "mut a: Float16 = 1.5b16;\nmut b: Float32 = a;\nmut c: Float64 = b;",
     );
 }
 
 #[test]
 fn invalid_float_narrowing_is_not_implicit() {
-    let output = rejected_body("mut a: BinaryFloat64 = 1.5;\nmut b: BinaryFloat16 = a;");
+    let output = rejected_body("mut a: Float64 = 1.5;\nmut b: Float16 = a;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn valid_explicit_float_narrowing_with_as() {
-    accepted_body("mut a: BinaryFloat64 = 1.5;\nmut b: BinaryFloat16 = a as BinaryFloat16;");
+    accepted_body("mut a: Float64 = 1.5;\nmut b: Float16 = a as Float16;");
 }
 
 #[test]
 fn valid_explicit_conversion_between_int_and_float() {
     accepted_body(
-        "mut a: Int32 = 5;\nmut b: BinaryFloat64 = a as BinaryFloat64;\nmut c: Int32 = b as Int32;",
+        "mut a: Int32 = 5;\nmut b: Float64 = a as Float64;\nmut c: Int32 = b as Int32;",
     );
 }
 
 #[test]
 fn valid_mixed_integer_and_float_arithmetic_produces_float() {
-    accepted_body("mut a: Int32 = 2;\nmut b: BinaryFloat64 = 1.5;\nmut c: BinaryFloat64 = a + b;");
+    accepted_body("mut a: Int32 = 2;\nmut b: Float64 = 1.5;\nmut c: Float64 = a + b;");
 }
 
 #[test]
 fn valid_arithmetic_between_different_float_widths() {
-    accepted_body("mut a: BinaryFloat32 = 1.5b32;\nmut b: BinaryFloat64 = 1.5;\nmut c = a + b;");
+    accepted_body("mut a: Float32 = 1.5b32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
 }
 
 #[test]
@@ -307,21 +308,21 @@ fn valid_integer_literal_infers_its_contextual_width() {
 #[test]
 fn valid_float_literal_infers_its_contextual_width() {
     accepted_body(
-        "mut a: BinaryFloat16 = 1.0;\n\
-         mut b: BinaryFloat32 = 1.0;\n\
-         mut c: BinaryFloat64 = 1.0;\n\
+        "mut a: Float16 = 1.0;\n\
+         mut b: Float32 = 1.0;\n\
+         mut c: Float64 = 1.0;\n\
          mut d: Float = 1.0;\n\
-         mut e: BinaryFloat128 = 1.0;",
+         mut e: Float128 = 1.0;",
     );
 }
 
 #[test]
 fn valid_int_literal_widens_to_float_when_exact() {
     accepted_body(
-        "mut a: BinaryFloat16 = 1;\n\
-         mut b: BinaryFloat32 = 1000;\n\
-         mut c: BinaryFloat64 = 100000;\n\
-         mut d: BinaryFloat128 = 1000000000000;",
+        "mut a: Float16 = 1;\n\
+         mut b: Float32 = 1000;\n\
+         mut c: Float64 = 100000;\n\
+         mut d: Float128 = 1000000000000;",
     );
 }
 
@@ -341,10 +342,10 @@ fn valid_mixed_signedness_arithmetic_promotes_to_a_common_width() {
 fn valid_mixed_width_float_and_int_arithmetic() {
     accepted_body(
         "mut a: Int8 = 1;\n\
-         mut b: BinaryFloat16 = 2.0b16;\n\
+         mut b: Float16 = 2.0b16;\n\
          mut c = a + b;\n\
          mut d: UInt32 = 4 as UInt32;\n\
-         mut e: BinaryFloat64 = 8.0;\n\
+         mut e: Float64 = 8.0;\n\
          mut f = d + e;",
     );
 }
@@ -355,7 +356,7 @@ fn valid_increment_and_decrement_keep_narrow_widths() {
         "mut a: Int8 = 1;\n\
          a++;\n\
          --a;\n\
-         mut b: BinaryFloat16 = 1.0b16;\n\
+         mut b: Float16 = 1.0b16;\n\
          b--;",
     );
 }
@@ -378,7 +379,7 @@ fn invalid_int_literal_out_of_range_for_narrow_width() {
 
 #[test]
 fn invalid_int_literal_to_float_not_exactly_representable() {
-    let output = rejected_body("mut a: BinaryFloat16 = 100000;");
+    let output = rejected_body("mut a: Float16 = 100000;");
     assert!(output.contains(codes::INTEGER_OUT_OF_RANGE.as_str()));
 }
 
@@ -397,18 +398,18 @@ fn invalid_no_common_numeric_type() {
 
 #[test]
 fn invalid_comparison_between_integer_and_float() {
-    let output = rejected_body("mut a: Int32 = 1;\nmut b: BinaryFloat64 = 1.0;\nmut c = a < b;");
+    let output = rejected_body("mut a: Int32 = 1;\nmut b: Float64 = 1.0;\nmut c = a < b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn valid_unary_negation_on_float() {
-    accepted_body("mut a: BinaryFloat64 = 1.5;\nmut b = -a;");
+    accepted_body("mut a: Float64 = 1.5;\nmut b = -a;");
 }
 
 #[test]
 fn invalid_bitwise_not_on_float() {
-    let output = rejected_body("mut a: BinaryFloat64 = 1.5;\nmut b = ~a;");
+    let output = rejected_body("mut a: Float64 = 1.5;\nmut b = ~a;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
@@ -1039,22 +1040,22 @@ fn invalid_string_interpolation_of_a_type_without_a_text_form() {
 #[test]
 fn valid_printing_of_the_new_scalars() {
     accepted_body(
-        "mut a: Int8 = 1 as Int8;\nmut b: UInt64 = 1 as UInt64;\nmut c: BinaryFloat64 = 1.5;\nmut d: Char = 'z';\nstdout.println(a);\nstdout.println(b);\nstdout.println(c);\nstdout.println(d);",
+        "mut a: Int8 = 1 as Int8;\nmut b: UInt64 = 1 as UInt64;\nmut c: Float64 = 1.5;\nmut d: Char = 'z';\nstdout.println(a);\nstdout.println(b);\nstdout.println(c);\nstdout.println(d);",
     );
 }
 
 #[test]
 fn valid_printing_of_float16() {
-    // Prints by widening to BinaryFloat32 first — always exact, since every f16
+    // Prints by widening to Float32 first — always exact, since every f16
     // value is representable in f32 without loss.
-    accepted_body("mut a: BinaryFloat16 = 1.5b16;\nstdout.println(a);");
+    accepted_body("mut a: Float16 = 1.5b16;\nstdout.println(a);");
 }
 
 #[test]
 fn valid_printing_of_float128() {
-    // BinaryFloat128 prints by truncating to BinaryFloat64; this is accepted but can lose
+    // Float128 prints by truncating to Float64; this is accepted but can lose
     // precision for values not exactly representable in f64.
-    accepted_body("mut a: BinaryFloat128 = 1.5b128;\nstdout.println(a);");
+    accepted_body("mut a: Float128 = 1.5b128;\nstdout.println(a);");
 }
 
 #[test]
@@ -1103,7 +1104,7 @@ fn valid_to_string_through_a_contract_reference() {
 
 #[test]
 fn valid_context_conversion_over_arithmetic() {
-    accepted_body("mut a: BinaryFloat64 = BinaryFloat64(3 / 4);");
+    accepted_body("mut a: Float64 = Float64(3 / 4);");
 }
 
 #[test]
@@ -1118,26 +1119,26 @@ fn valid_context_conversion_reaches_any_numeric_target() {
 
 #[test]
 fn valid_context_conversion_over_unary_negation() {
-    accepted_body("mut a: BinaryFloat64 = BinaryFloat64(-3 / 4);");
+    accepted_body("mut a: Float64 = Float64(-3 / 4);");
 }
 
 #[test]
 fn valid_context_conversion_stops_at_a_call() {
     accepted(
         "fn half(n: Int32): Int32 { return n / 2; }
-         fn main(): Void { mut a: BinaryFloat64 = BinaryFloat64(half(3) + 0.5); }",
+         fn main(): Void { mut a: Float64 = Float64(half(3) + 0.5); }",
     );
 }
 
 #[test]
 fn invalid_context_conversion_of_an_incompatible_leaf() {
-    let output = rejected_body("mut a: BinaryFloat64 = BinaryFloat64(true + 4);");
+    let output = rejected_body("mut a: Float64 = Float64(true + 4);");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn invalid_context_conversion_wrong_argument_count() {
-    let output = rejected_body("mut a: BinaryFloat64 = BinaryFloat64(1, 2);");
+    let output = rejected_body("mut a: Float64 = Float64(1, 2);");
     assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
 }
 

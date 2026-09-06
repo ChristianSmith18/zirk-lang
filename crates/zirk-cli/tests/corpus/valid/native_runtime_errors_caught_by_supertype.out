@@ -1,2 +1,2 @@
 runtime: division by zero
-throwable: BinaryFloat operation produced an indeterminate result (NaN)
+throwable: Float operation produced an indeterminate result (NaN)

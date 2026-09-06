@@ -24,7 +24,7 @@ fn main(): Void {
     stdout.println(1s * 2.5);
     stdout.println(1s / 2.0);
 
-    // `Duration / Duration` is a `BinaryFloat64` ratio, not a duration.
+    // `Duration / Duration` is a `Float64` ratio, not a duration.
     stdout.println(1s / 250ms);
 
     // Comparisons run on the nanosecond count.

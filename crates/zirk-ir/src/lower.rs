@@ -8334,7 +8334,7 @@ impl<'a> FunctionLowering<'a> {
             .expect("a program with Float arithmetic registered the exception hierarchy");
         self.throw_native_failure(
             native.float_nan,
-            "BinaryFloat operation produced an indeterminate result (NaN)",
+            "Float operation produced an indeterminate result (NaN)",
             span,
         );
 

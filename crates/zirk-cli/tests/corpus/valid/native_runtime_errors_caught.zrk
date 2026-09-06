@@ -35,8 +35,8 @@ fn main(): Void {
     }
 
     try {
-        mut zero: BinaryFloat64 = 0.0b;
-        mut nan: BinaryFloat64 = zero / zero;
+        mut zero: Float64 = 0.0b;
+        mut nan: Float64 = zero / zero;
         stdout.println(nan);
     } catch FloatNanError(e) {
         stdout.println("nan: " + e.message());

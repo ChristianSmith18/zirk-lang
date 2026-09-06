@@ -6,46 +6,46 @@
 // (only NaN is a controlled error, design D2 — not exercised here since it
 // aborts the process, which the invalid corpus covers instead).
 //
-// `BinaryFloat128` is deliberately left out of this cross-platform corpus: LLVM
+// `Float128` is deliberately left out of this cross-platform corpus: LLVM
 // lowers `fp128` arithmetic to soft-float library calls (`__addtf3` and
 // friends) that the MSVC toolchain this project's Windows CI target links
 // against does not provide, which crashed the whole runner rather than
-// failing one assertion. `BinaryFloat128` still typechecks and its own unit tests
+// failing one assertion. `Float128` still typechecks and its own unit tests
 // in `zirk-sema` cover it; this is a documented, tracked gap in *runtime*
 // portability, not a silent omission (roadmap Phase 3b, task 5's follow-up).
 fn main(): Void {
     // Every width, its own literal suffix.
-    mut half: BinaryFloat16 = 3.5b16;
-    mut single: BinaryFloat32 = 3.5b32;
-    mut double: BinaryFloat64 = 3.5;
+    mut half: Float16 = 3.5b16;
+    mut single: Float32 = 3.5b32;
+    mut double: Float64 = 3.5;
 
     // Implicit safe widening, narrowest to widest.
-    mut w32: BinaryFloat32 = half as BinaryFloat32;
-    mut w64: BinaryFloat64 = w32;
+    mut w32: Float32 = half as Float32;
+    mut w64: Float64 = w32;
     stdout.println(w64 == double);
 
     // Explicit narrowing with `as`.
-    mut back: BinaryFloat16 = w64 as BinaryFloat16;
+    mut back: Float16 = w64 as Float16;
     stdout.println(back == half);
 
     // Mixed integer/Float arithmetic produces Float, in either order.
     mut n: Int32 = 2;
-    mut mixed_a: BinaryFloat64 = n + double;
-    mut mixed_b: BinaryFloat64 = double + n;
+    mut mixed_a: Float64 = n + double;
+    mut mixed_b: Float64 = double + n;
     stdout.println(mixed_a == mixed_b);
     stdout.println(mixed_a == 5.5);
 
     // Int <-> Float, explicit and unchecked.
-    mut as_float: BinaryFloat64 = 7 as BinaryFloat64;
+    mut as_float: Float64 = 7 as Float64;
     mut as_int: Int32 = as_float as Int32;
     stdout.println(as_int);
 
     // Unary `-`, arithmetic, comparison and remainder.
-    mut neg: BinaryFloat64 = -double;
+    mut neg: Float64 = -double;
     stdout.println(neg < 0.0);
     stdout.println(10.0 % 3.0 == 1.0);
 
     // Division producing infinity is a valid result, not an error.
-    mut inf: BinaryFloat64 = 1.0 / 0.0;
+    mut inf: Float64 = 1.0 / 0.0;
     stdout.println(inf > 1.0e300);
 }

@@ -236,14 +236,14 @@ pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
     alloc_owned(&text)
 }
 
-/// Converts a `BinaryFloat32` (surface name) into a `String`.
+/// Converts a `Float32` (surface name) into a `String`.
 ///
-/// `BinaryFloat16`/`BinaryFloat128` have no equivalent: neither is a stable
+/// `Float16`/`Float128` have no equivalent: neither is a stable
 /// Rust primitive type (`f16`/`f128` are unstable as of this compiler's
 /// toolchain pin), so there is no `Display` implementation to reach for
 /// either without a hand-rolled decimal conversion this task does not build.
 /// Printing either width is a known, tracked gap, consistent with
-/// `BinaryFloat128` arithmetic's own portability gap on Windows. The exact
+/// `Float128` arithmetic's own portability gap on Windows. The exact
 /// base-ten `Float` has its own exact formatter, `zirk_str_from_decimal`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
@@ -251,7 +251,7 @@ pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
     alloc_owned(&text)
 }
 
-/// Converts a `BinaryFloat64` (surface name) into a `String`.
+/// Converts a `Float64` (surface name) into a `String`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f64(value: f64) -> *mut c_void {
     let text = value.to_string();

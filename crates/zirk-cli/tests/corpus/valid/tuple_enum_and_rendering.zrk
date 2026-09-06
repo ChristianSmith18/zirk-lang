@@ -5,8 +5,8 @@ fn double(x: Int32): Int32 { return x * 2; }
 enum Color { Red, Green, Blue }
 
 enum Shape {
-    Circle(radius: BinaryFloat64),
-    Rectangle(width: BinaryFloat64, height: BinaryFloat64)
+    Circle(radius: Float64),
+    Rectangle(width: Float64, height: Float64)
 }
 
 class Tag {

@@ -8,13 +8,13 @@ fn half(n: Int32): Int32 {
 
 fn main(): Void {
     // Literal leaves.
-    mut a: BinaryFloat64 = BinaryFloat64(3 / 4);
+    mut a: Float64 = Float64(3 / 4);
     stdout.println(a == 0.75);
 
     // Variable leaves, same rule.
     mut b: Int32 = 3;
     mut c: Int32 = 4;
-    mut d: BinaryFloat64 = BinaryFloat64(b / c);
+    mut d: Float64 = Float64(b / c);
     stdout.println(d == 0.75);
 
     // `String("x=" + 42)`: the integer converts to text before
@@ -29,12 +29,12 @@ fn main(): Void {
     stdout.println(wide);
 
     // Unary `-` is part of the compatible tree too.
-    mut neg: BinaryFloat64 = BinaryFloat64(-3 / 4);
+    mut neg: Float64 = Float64(-3 / 4);
     stdout.println(neg == -0.75);
 
     // A call is always a boundary: `half(3)` computes `3 / 2 = 1` as its
     // own declared `Int32`, untouched by the surrounding context — only the
     // *result* is converted, at the boundary, before the addition.
-    mut boundary: BinaryFloat64 = BinaryFloat64(half(3) + 0.5);
+    mut boundary: Float64 = Float64(half(3) + 0.5);
     stdout.println(boundary == 1.5);
 }
