@@ -2921,6 +2921,33 @@ fn invalid_enum_static_call_with_the_wrong_argument_count() {
 }
 
 #[test]
+fn valid_enum_to_string_in_both_spellings_and_on_algebraic_enums() {
+    // The type-name render applies to every enum — a payload changes
+    // nothing about what the type is called.
+    accepted(
+        "enum Direction { North, South }
+         enum Shape { Circle(radius: Int32), Point }
+         fn main(): Void {
+             mut a: String = Direction.to_string;
+             mut b: String = Direction.to_string();
+             mut c: String = Shape.to_string();
+         }",
+    );
+}
+
+#[test]
+fn invalid_enum_to_string_call_with_arguments() {
+    let output = rejected(
+        "enum Direction { North, South }
+         fn main(): Void { mut r = Direction.to_string(1); }",
+    );
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
 fn invalid_from_name_with_a_non_string_argument() {
     let output = rejected(
         "enum Direction { North, South }

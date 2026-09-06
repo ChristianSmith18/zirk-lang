@@ -9542,17 +9542,23 @@ impl<'a> Checker<'a> {
         if let Expr::Path(base) = &*expr.object {
             let resolved = self.resolved_name(&base.name, base.span);
             if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
-                // `Direction.count` (`enum-static-members`): the one static
-                // member spelled without parentheses — `keys`/`values`/
-                // `from_name`/`from_value` are calls and are decided in
-                // `check_call`, ahead of the same variant-construction
-                // dispatch this falls through to.
-                if expr.name.name == "count" {
+                // `Direction.count`/`Direction.to_string`
+                // (`enum-static-members`): the static members spelled
+                // without parentheses — `keys`/`values`/`from_name`/
+                // `from_value` are calls and are decided in `check_call`,
+                // ahead of the same variant-construction dispatch this
+                // falls through to. `to_string` also answers as a call
+                // (`E.to_string()`), per the handbook's method table.
+                if matches!(expr.name.name.as_str(), "count" | "to_string") {
                     let declared = self.enums[enum_id].span;
                     let shared = self.enums[enum_id].shared;
                     self.require_visible(declared, shared, base, "enum");
                     self.enum_static_accesses.insert(expr.span);
-                    return Type::INT32;
+                    return if expr.name.name == "count" {
+                        Type::INT32
+                    } else {
+                        Type::STRING
+                    };
                 }
                 let variant = VariantExpr {
                     enum_name: base.clone(),
@@ -10214,12 +10220,13 @@ impl<'a> Checker<'a> {
         Type::of(Base::EnumInstance(instance))
     }
 
-    /// `E.keys()`/`E.values()`/`E.from_name(name)`/`E.from_value(value)` on
-    /// an enum type path (`enum-static-members`). `None` when the member is
-    /// none of those — the caller falls through to variant construction,
-    /// whose "unknown variant" diagnostic is the right answer for anything
-    /// else. `count` is the one member spelled without parentheses; it is
-    /// decided in `check_field` instead.
+    /// `E.keys()`/`E.values()`/`E.from_name(name)`/`E.from_value(value)`/
+    /// `E.to_string()` on an enum type path (`enum-static-members`). `None`
+    /// when the member is none of those — the caller falls through to
+    /// variant construction, whose "unknown variant" diagnostic is the
+    /// right answer for anything else. `count` is the one member spelled
+    /// only without parentheses; it is decided in `check_field` instead
+    /// (`to_string` answers in both spellings).
     ///
     /// The callee's span goes into both `variant_accesses` (so lowering's
     /// own "the object names a type, not a value" guards short-circuit on
@@ -10232,7 +10239,10 @@ impl<'a> Checker<'a> {
         enum_id: u32,
     ) -> Option<Type> {
         let member = field.name.name.as_str();
-        if !matches!(member, "keys" | "values" | "from_name" | "from_value") {
+        if !matches!(
+            member,
+            "keys" | "values" | "from_name" | "from_value" | "to_string"
+        ) {
             return None;
         }
         self.enum_static_accesses.insert(field.span);
@@ -10356,6 +10366,7 @@ impl<'a> Checker<'a> {
     fn enum_static_member_type(&mut self, field: &FieldExpr, enum_id: u32, member: &str) -> Type {
         match member {
             "count" => Type::INT32,
+            "to_string" => Type::STRING,
             "keys" => Type::of(Base::List(self.intern_list_type(Type::STRING))),
             "values" | "from_name" | "from_value" => {
                 let has_payload = self.enums[enum_id as usize]

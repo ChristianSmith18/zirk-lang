@@ -93,7 +93,7 @@ Last updated with `array-list-tuple-duration-regex`, **2026-09-05**.
 | Records | yes | yes | yes | yes | yes | yes | — |
 | Tuples (literals, `.N` indexing, `match` destructuring) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`. |
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |
-| Enum static members (`E.count`, `E.keys()`, `E.values()`, `E.from_name()`, `E.from_value()`, `Enums.*`) | yes | yes | yes | yes | yes | yes | `enum-static-members`; `count`/`keys`/`values` lower to constants, the lookups expand to a comparison chain returning `Result<E, LookupError>`. `values()`/`from_*` apply to traditional enums only; `E.to_string()` remains specified. |
+| Enum static members (`E.count`, `E.keys()`, `E.values()`, `E.from_name()`, `E.from_value()`, `E.to_string`, `Enums.*`) | yes | yes | yes | yes | yes | yes | `enum-static-members`; `count`/`keys`/`values`/`to_string` lower to constants, the lookups expand to a comparison chain returning `Result<E, LookupError>`. `values()`/`from_*` apply to traditional enums only. |
 | `as` casts | yes | yes | yes | yes | yes | yes | — |
 | `abstract class` dynamic dispatch | yes | yes | yes | yes | yes | yes | `fase-3-abstract-dispatch`. |
 | Structural equality on records | yes | yes | yes | yes | yes | yes | `fase-3-structural-equality`. |
