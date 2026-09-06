@@ -349,6 +349,49 @@ fn exact_float_division_guards_a_zero_divisor() {
 }
 
 #[test]
+fn integer_exponentiation_lowers_to_checked_pow() {
+    // `exponentiation-operator`: `2 ** 3` desugars to `(2).pow(3)` and lowers
+    // to the checked-pow calls with an overflow branch, not an IR Binary.
+    let f = main_body("mut x: Int32 = 2 ** 3;");
+    let kinds = instructions(&f);
+    assert!(kinds.iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_int_checked_pow_ok"
+    )));
+    assert!(kinds.iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_int_checked_pow_value"
+    )));
+}
+
+#[test]
+fn integer_exponentiation_with_a_negative_literal_lowers_to_decimal_pow() {
+    let f = main_body("mut x: Float = 2 ** -3;");
+    assert!(instructions(&f).iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_pow_i"
+    )));
+}
+
+#[test]
+fn exact_float_exponentiation_uses_the_exact_integer_power_path() {
+    let f = main_body("mut b: Float = 1.5;\nmut x: Float = b ** 2;");
+    assert!(instructions(&f).iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_pow_i"
+    )));
+}
+
+#[test]
+fn binary_float_exponentiation_uses_the_binary_pow_helper() {
+    let f = main_body("mut b: BinaryFloat64 = 2.0b;\nmut x: BinaryFloat64 = b ** 3;");
+    assert!(instructions(&f).iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_float_pow"
+    )));
+}
+
+#[test]
 fn exact_float_equality_goes_through_cmp() {
     let f = main_body("mut a: Float = 0.1;\nmut b = 0.2;\nmut c: Boolean = (a + b) == 0.3;");
     assert!(instructions(&f).iter().any(|i| matches!(

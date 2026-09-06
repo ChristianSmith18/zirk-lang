@@ -9609,6 +9609,38 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
+            ("pow", 1)
+                if self
+                    .checked
+                    .expr_types
+                    .get(&call.args[0].value.span())
+                    .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Int(_))) =>
+            {
+                // An integer exponent takes the exact repeated-multiply path
+                // (`zirk_rt_decimal_pow_i`), not the f64-precision
+                // `zirk_rt_decimal_pow`. This is what makes `(1.5) ** 2`
+                // exactly `2.25` and `2 ** -3` exactly `0.125`.
+                //
+                // Spill the base first: the exponent may be a `**` whose
+                // lowering splits blocks, and values do not cross blocks.
+                let base_slot = self.spill(receiver, dec, span);
+                let raw = self.lower_expr(&call.args[0].value);
+                let raw_ty = self.type_of_operand(raw);
+                let n = if raw_ty == IrType::Int(IntWidth::I64) {
+                    raw
+                } else {
+                    self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::I64), span)
+                };
+                let base = self.emit(InstKind::Load(base_slot), dec, span);
+                self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_decimal_pow_i".to_string(),
+                        args: vec![base, n],
+                    },
+                    dec,
+                    span,
+                )
+            }
             ("min" | "max" | "pow", 1) => {
                 let other = self.lower_decimal_arg(&call.args[0].value, span);
                 let callee = match name {
@@ -9763,6 +9795,7 @@ impl<'a> FunctionLowering<'a> {
             "checked_div",
             "checked_rem",
             "checked_pow",
+            "pow",
         ];
         const FLOAT0: &[&str] = &[
             "abs",
@@ -10092,6 +10125,122 @@ impl<'a> FunctionLowering<'a> {
                     IrType::String,
                     span,
                 ))
+            }
+            // `n.pow(k)` — the desugaring of `n ** k`
+            // (`exponentiation-operator`). When the checker widened the result
+            // to exact `Float` (a statically negative literal exponent), the
+            // base becomes a `Decimal` at scale 0 and the exponent an `i64`,
+            // routed to the exact repeated-multiply helper. Otherwise the
+            // result stays integer: `zirk_int_checked_pow_ok` gates the
+            // operation and an unrepresentable result throws
+            // `ArithmeticOverflowError`, like every other integer operation.
+            "pow" if call.args.len() == 1 => {
+                let widens_to_decimal = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Decimal));
+
+                // Spill the base before lowering the exponent: the exponent
+                // may itself be a `**` (`2 ** 3 ** 2`), whose lowering splits
+                // blocks, and values do not cross blocks in this IR.
+                let base_slot = self.spill(wide, IrType::Int(IntWidth::I128), span);
+                let exp_raw = self.lower_expr(&call.args[0].value);
+                let exp_ty = self.type_of_operand(exp_raw);
+                let exp_i64 = if exp_ty == IrType::Int(IntWidth::I64) {
+                    exp_raw
+                } else {
+                    self.emit(InstKind::IntCast(exp_raw), IrType::Int(IntWidth::I64), span)
+                };
+                let exp_slot = self.spill(exp_i64, IrType::Int(IntWidth::I64), span);
+
+                let bits_of = |lower: &mut Self| {
+                    lower.emit(
+                        InstKind::ConstInt(bits as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                let signed_of = |lower: &mut Self| {
+                    lower.emit(
+                        InstKind::ConstInt(signed as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+
+                if widens_to_decimal {
+                    let base = self.emit(
+                        InstKind::Load(base_slot),
+                        IrType::Int(IntWidth::I128),
+                        span,
+                    );
+                    let base_dec = self.convert_numeric(
+                        base,
+                        IrType::Int(IntWidth::I128),
+                        IrType::Decimal,
+                        span,
+                    );
+                    let exp = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                    return Some(self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_decimal_pow_i".to_string(),
+                            args: vec![base_dec, exp],
+                        },
+                        IrType::Decimal,
+                        span,
+                    ));
+                }
+
+                let base = self.emit(
+                    InstKind::Load(base_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
+                let bits_op = bits_of(self);
+                let signed_op = signed_of(self);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_int_checked_pow_ok".to_string(),
+                        args: vec![base, exp, bits_op, signed_op],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let fail = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: ok,
+                    then_block: cont,
+                    else_block: fail,
+                });
+                self.current = fail;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("a program with integer arithmetic registered the exception hierarchy");
+                self.throw_native_failure(native.arithmetic_overflow, "arithmetic overflow", span);
+                self.current = cont;
+                let base = self.emit(
+                    InstKind::Load(base_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
+                let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
+                let bits_op = bits_of(self);
+                let signed_op = signed_of(self);
+                let value = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_int_checked_pow_value".to_string(),
+                        args: vec![base, exp, bits_op, signed_op],
+                    },
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                Some(self.int_from_i128(value, width, span))
             }
             _ => None,
         }

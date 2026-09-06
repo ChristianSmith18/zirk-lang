@@ -2254,6 +2254,38 @@ impl<'a> Parser<'a> {
             ));
         }
 
+        // `a **= b` desugars to `a = a.pow(b)` (`exponentiation-operator`).
+        // Handled apart from `compound_op` because `**` has no `BinaryOp`
+        // variant — it is a method call, not a native binary operator.
+        if matches!(self.peek(), TokenKind::StarStarEq) {
+            let op_span = self.peek_span();
+            self.pos += 1;
+            let value = self.parse_expr()?;
+            let end = self.peek_span();
+            self.eat(&TokenKind::Semicolon);
+
+            let Some(target) = as_assignable(&expr) else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    expr.span(),
+                    "the left-hand side of a compound assignment must be a variable",
+                    "only a name can be assigned to",
+                    None,
+                );
+                return None;
+            };
+            let read = match &target {
+                AssignTarget::Name(ident) => Expr::Path(ident.clone()),
+                AssignTarget::Field(field) => Expr::Field(field.clone()),
+                AssignTarget::Index(index) => Expr::Index(index.clone()),
+            };
+            return Some(Stmt::Assign(AssignStmt {
+                target,
+                value: pow_call(read, value, op_span),
+                span: start.to(end),
+            }));
+        }
+
         // Compound assignment: `i += 1`.
         if let Some(op) = compound_op(self.peek()) {
             let op_span = self.peek_span();
@@ -2964,6 +2996,10 @@ impl<'a> Parser<'a> {
             // magnitude does not fit in `Int32` even though the value does.
             if op == UnaryOp::Neg
                 && let TokenKind::Integer(value) = self.peek().clone()
+                // `-2 ** 2` is `-(2 ** 2)`: when the literal is the base of a
+                // power, do not fold the sign into it — let the unary wrap the
+                // whole power expression, consistent with `-x ** 2`.
+                && !matches!(self.peek_at(1), TokenKind::StarStar)
             {
                 let end = self.peek_span();
                 self.pos += 1;
@@ -2986,6 +3022,14 @@ impl<'a> Parser<'a> {
         // operator table), so it is applied to the primary before anything.
         let primary = self.parse_primary()?;
         let expr = self.parse_member_chain(primary)?;
+
+        // `**` binds tighter than unary and multiplicative and is
+        // right-associative (`exponentiation-operator`). Applied here, to the
+        // postfix-complete operand, so a leading unary `-`/`!` wraps the whole
+        // power expression.
+        if matches!(self.peek(), TokenKind::StarStar) {
+            return self.parse_power_tail(expr);
+        }
 
         // `i++` and `i--` in value position: the expression is the previous
         // value and the operand is updated afterwards.
@@ -3014,6 +3058,20 @@ impl<'a> Parser<'a> {
         }
 
         Some(expr)
+    }
+
+    /// `base ** exponent` (`exponentiation-operator`): consumes the `**` and
+    /// its right operand and returns the desugared tree `base.pow(exponent)`.
+    ///
+    /// The exponent is parsed with [`Self::parse_unary`], which recurses
+    /// through this same tail — that is what makes `**` right-associative
+    /// (`2 ** 3 ** 2` is `2 ** (3 ** 2)`) and lets the exponent be a unary
+    /// expression (`2 ** -1`).
+    fn parse_power_tail(&mut self, base: Expr) -> Option<Expr> {
+        let op_span = self.peek_span();
+        self.pos += 1; // the `**`
+        let exponent = self.parse_unary()?;
+        Some(pow_call(base, exponent, op_span))
     }
 
     /// Parses `"text {expr} text"` into its literal and expression parts
@@ -3543,6 +3601,34 @@ fn increment_op(kind: &TokenKind) -> Option<IncrementOp> {
 /// The literal `1` that `++` and `--` add or subtract.
 fn one(span: Span) -> Expr {
     Expr::Int(IntLit { value: 1, span })
+}
+
+/// Desugars `base ** exponent` (and `base **= exponent`) into the method call
+/// `base.pow(exponent)` (`exponentiation-operator`). Downstream stages then
+/// see an ordinary `pow` call, so `Float` and `BinaryFloat` need no new code
+/// and the integer surface only gains a `pow` method. `op_span` (the `**`) is
+/// carried onto the synthetic member name so a diagnostic still points at the
+/// operator.
+fn pow_call(base: Expr, exponent: Expr, op_span: Span) -> Expr {
+    let span = base.span().to(exponent.span());
+    let arg_span = exponent.span();
+    Expr::Call(CallExpr {
+        callee: Box::new(Expr::Field(FieldExpr {
+            object: Box::new(base),
+            name: Ident {
+                name: "pow".to_string(),
+                span: op_span,
+            },
+            safe: false,
+            span,
+        })),
+        args: vec![Arg {
+            name: None,
+            value: exponent,
+            span: arg_span,
+        }],
+        span,
+    })
 }
 
 /// Converts a duration literal's magnitude and unit into nanoseconds.

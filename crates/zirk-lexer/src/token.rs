@@ -502,10 +502,10 @@ impl TokenKind {
             // The pipe belongs to the functional style, not to the objects of
             // Phase 3 it used to be filed under.
             PipeGt => Phase::SEVEN_B,
-            // Exponentiation needs `Float`: `2 ** -1` is defined as the
-            // mathematical result converted back, so it cannot be answered
-            // inside the integers alone. It arrives with `Float` itself.
-            StarStar | StarStarEq => Phase::THREE_B,
+            // `**` / `**=` are part of the implemented subset (Phase 3b,
+            // `exponentiation-operator`): the parser desugars `a ** b` to
+            // `a.pow(b)` over the numeric families, and a negative literal
+            // exponent widens an integer base to exact `Float`.
             _ => return None,
         })
     }

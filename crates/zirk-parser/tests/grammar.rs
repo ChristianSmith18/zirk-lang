@@ -391,6 +391,52 @@ fn invalid_incomplete_expression() {
     assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()));
 }
 
+// --- Exponentiation operator (`exponentiation-operator`) -------------------
+
+#[test]
+fn valid_power_desugars_to_pow_call() {
+    // `a ** b` is `a.pow(b)`; downstream stages never see the operator.
+    assert_eq!(shape(&expression("2 ** 3")), "2.pow(3)");
+}
+
+#[test]
+fn valid_power_is_right_associative() {
+    assert_eq!(shape(&expression("2 ** 3 ** 2")), "2.pow(3.pow(2))");
+}
+
+#[test]
+fn valid_power_binds_tighter_than_multiplication() {
+    assert_eq!(shape(&expression("3 * 2 ** 2")), "(3 * 2.pow(2))");
+}
+
+#[test]
+fn valid_unary_minus_wraps_the_power() {
+    // `-2 ** 2` is `-(2 ** 2)`: the sign is not folded into the base when the
+    // literal is a power's base.
+    assert_eq!(shape(&expression("-2 ** 2")), "(-2.pow(2))");
+}
+
+#[test]
+fn valid_power_exponent_may_be_negative() {
+    // `-1` folds to a single negative literal, as it does everywhere else.
+    assert_eq!(shape(&expression("2 ** -1")), "2.pow(-1)");
+}
+
+#[test]
+fn valid_compound_power_assignment_desugars() {
+    let Stmt::Assign(a) = statements("mut n = 2; n **= 10;").remove(1) else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(a.target.name(), "n");
+    assert_eq!(shape(&a.value), "n.pow(10)");
+}
+
+#[test]
+fn invalid_compound_power_on_a_non_place() {
+    let output = errors("fn main(): Void { 1 **= 2; }");
+    assert!(output.contains(codes::UNEXPECTED_TOKEN.as_str()));
+}
+
 // --- Conditional ------------------------------------------------------------
 
 #[test]
@@ -628,9 +674,6 @@ fn invalid_constructs_from_other_phases_say_which() {
         // (roadmap Phase 4c) are both implemented now.
         ("fn main(): Void { task { } }", "task", "Phase 5"),
         ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
-        // `**` still needs `Float` (bitwise/shift no longer belong here:
-        // they work over `Int32` now, roadmap task 3b/4.4).
-        ("fn main(): Void { mut x = 2 ** 3; }", "**", "Phase 3b"),
         // Generators belong to the functional style, not to the objects of
         // Phase 3 they used to be filed under.
         ("fn gen numbers(): Int32 { }", "gen", "Phase 7b"),

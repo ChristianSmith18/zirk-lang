@@ -1,0 +1,41 @@
+// The infix `**` operator (`exponentiation-operator`): `a ** b` is `a.pow(b)`
+// across the numeric families. Integer power stays integer and checks
+// overflow; a negative literal exponent widens an integer base to exact
+// `Float`; `Float` and `BinaryFloat` bases keep their own type.
+fn main(): Void {
+    // Integer power.
+    stdout.println((2 ** 3).to_string());
+    stdout.println((2 ** 10).to_string());
+
+    // Right-associative: `2 ** (3 ** 2)` = `2 ** 9` = 512.
+    stdout.println((2 ** 3 ** 2).to_string());
+
+    // Unary minus wraps the power: `-(2 ** 2)` = -4.
+    stdout.println((-2 ** 2).to_string());
+
+    // A negative literal exponent widens to exact `Float`.
+    stdout.println((2 ** -3).to_string());
+
+    // Exact `Float` base, integer exponent: exact.
+    inmut base: Float = 1.5;
+    stdout.println((base ** 2).to_string());
+
+    // BinaryFloat base.
+    inmut bin: BinaryFloat64 = 2.0b;
+    stdout.println((bin ** 10).to_string());
+
+    // Compound form.
+    mut n: Int32 = 2;
+    n **= 10;
+    stdout.println(n.to_string());
+
+    // Integer power overflow is a catchable error.
+    try {
+        inmut big: Int32 = 10 ** 20;
+        stdout.println(big.to_string());
+    } catch ArithmeticOverflowError(e) {
+        stdout.println("overflow: " + e.message());
+    }
+
+    stdout.println("done");
+}
