@@ -3970,6 +3970,43 @@ impl<'a> Checker<'a> {
             });
         }
 
+        // `enum-static-members`: `EnumType.from_value` looks a case up by
+        // its effective key — the `->` mapping, or the declared name /
+        // discriminant when the case declares none — so no two cases may
+        // share one. The key kind follows the same rule lowering uses:
+        // `String` when any mapping is text, `Int32` otherwise.
+        let text_keys = variants
+            .iter()
+            .any(|v| matches!(v.mapping, Some(VariantMapping::Text(_))));
+        let mut seen_keys: HashMap<String, String> = HashMap::new();
+        for (i, variant) in variants.iter().enumerate() {
+            let key = if text_keys {
+                match &variant.mapping {
+                    Some(VariantMapping::Text(text)) => format!("t:{text}"),
+                    _ => format!("t:{}", variant.name),
+                }
+            } else {
+                match &variant.mapping {
+                    Some(VariantMapping::Int(value)) => format!("i:{value}"),
+                    _ => format!("i:{i}"),
+                }
+            };
+            if let Some(first) = seen_keys.get(&key) {
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    variant.span,
+                    format!(
+                        "variant `{}` shares its lookup key with `{first}`",
+                        variant.name
+                    ),
+                    "`EnumType.from_value` would never be able to tell them apart — every mapping must be unique",
+                    None,
+                );
+            } else {
+                seen_keys.insert(key, variant.name.clone());
+            }
+        }
+
         // An enum with no variants names a type nothing can ever be. The
         // language already spells that `Never`; here it is a typo, and
         // accepting it would give the concept a second spelling.
