@@ -4660,6 +4660,27 @@ impl<'a> Checker<'a> {
         (self.range_types.len() - 1) as u32
     }
 
+    /// Interns a `Map<K, V>` key/value pair, returning the id its
+    /// [`Base::Map`] carries.
+    fn intern_map_type(&mut self, key: Type, value: Type) -> u32 {
+        let entry = MapType { key, value };
+        if let Some(index) = self.map_types.iter().position(|t| *t == entry) {
+            return index as u32;
+        }
+        self.map_types.push(entry);
+        (self.map_types.len() - 1) as u32
+    }
+
+    /// Interns a `Set<T>` element type, returning the id its [`Base::Set`]
+    /// carries.
+    fn intern_set_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.set_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.set_types.push(element);
+        (self.set_types.len() - 1) as u32
+    }
+
     /// `Range<T>` (roadmap Phase 7): resolves `T` — a numeric or `Duration`
     /// element, since the sequence is arithmetic — and interns it.
     fn resolve_range_type_ref(&mut self, reference: &TypeRef) -> Type {
@@ -4693,6 +4714,80 @@ impl<'a> Checker<'a> {
         }
         let id = self.intern_range_type(element);
         Type::of(Base::Range(id))
+    }
+
+    /// Whether a type is acceptable as the key of a `Map` or the element of a
+    /// `Set`. This is deliberately conservative: it only admits types whose
+    /// runtime representation can be hashed without special equality machinery.
+    fn is_hashable(&self, ty: Type) -> bool {
+        if ty.nullable {
+            return false;
+        }
+        matches!(
+            ty.base,
+            Base::Int(_)
+                | Base::Boolean
+                | Base::Char
+                | Base::String
+                | Base::Duration
+                | Base::Enum(_)
+        )
+    }
+
+    /// `Map<K, V>`: resolves `K` and `V`, interning the pair if `K` is
+    /// hashable.
+    fn resolve_map_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 2 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Map<K, V>` takes exactly two type arguments",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Map<K, V>` naming the key and value types".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let key = self.resolve_type(&reference.arguments[0]);
+        let value = self.resolve_type(&reference.arguments[1]);
+        if !key.is_unknown() && !self.is_hashable(key) {
+            let found = self.name(key);
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[0].span,
+                format!("`Map<{found}, ...>` has an unhashable key type"),
+                "a `Map` key must be an integer, Boolean, Char, String, Duration, or enum",
+                None,
+            );
+        }
+        let id = self.intern_map_type(key, value);
+        Type::of(Base::Map(id))
+    }
+
+    /// `Set<T>`: resolves `T`, interning it if it is hashable.
+    fn resolve_set_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Set<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Set<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        if !element.is_unknown() && !self.is_hashable(element) {
+            let found = self.name(element);
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[0].span,
+                format!("`Set<{found}>` has an unhashable element type"),
+                "a `Set` element must be an integer, Boolean, Char, String, Duration, or enum",
+                None,
+            );
+        }
+        let id = self.intern_set_type(element);
+        Type::of(Base::Set(id))
     }
 
     /// Resolves `Tuple(T...)` as an interned value type (roadmap Phase 3b).
@@ -4769,6 +4864,12 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Range" {
             return self.resolve_range_type_ref(reference);
+        }
+        if reference.name == "Map" {
+            return self.resolve_map_type_ref(reference);
+        }
+        if reference.name == "Set" {
+            return self.resolve_set_type_ref(reference);
         }
         if reference.name == "Tuple" {
             return self.resolve_tuple_type_ref(reference);
