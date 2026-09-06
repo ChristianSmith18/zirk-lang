@@ -1,0 +1,19 @@
+fn main(): Void {
+    stdout.println(Float64.MAX.to_string());
+    stdout.println(Float64.POSITIVE_INFINITY.to_string());
+    stdout.println((-3.5).abs().to_string());
+    stdout.println((-3.5).sign().to_string());
+    stdout.println((0.0).is_zero().to_string());
+    stdout.println((1.5).is_finite().to_string());
+    stdout.println((Float64.POSITIVE_INFINITY).is_infinite().to_string());
+    stdout.println((-2.0).is_negative().to_string());
+    stdout.println((2.3).floor().to_string());
+    stdout.println((2.3).ceil().to_string());
+    stdout.println((2.5).round().to_string());
+    stdout.println((2.7).truncate().to_string());
+    stdout.println((2.3).fraction().to_string());
+    stdout.println((2.0).sqrt().to_string());
+    stdout.println((2.0).pow(3).to_string());
+    stdout.println(Float64.parse("3.14").unwrap().to_string());
+    stdout.println((1.0).clamp(0.0, 0.5).to_string());
+}

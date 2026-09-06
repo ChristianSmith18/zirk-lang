@@ -1,0 +1,23 @@
+fn main(): Void {
+    stdout.println(Int32.MAX.to_string());
+    stdout.println(Int32.MIN.to_string());
+    stdout.println(Int8.MAX.to_string());
+    stdout.println(UInt8.MAX.to_string());
+    stdout.println(Int32.BITS.to_string());
+    stdout.println((-42).abs().to_string());
+    stdout.println((-1).sign().to_string());
+    stdout.println((0).sign().to_string());
+    stdout.println((5).clamp(0, 10).to_string());
+    stdout.println((15).bit_count().to_string());
+    stdout.println((1).leading_zeros().to_string());
+    stdout.println((1).trailing_zeros().to_string());
+    stdout.println((255).rotate_left(1).to_string());
+    stdout.println((15).rotate_right(1).to_string());
+    stdout.println((4).is_even().to_string());
+    stdout.println((7).is_odd().to_string());
+    stdout.println(Int32.parse("42").unwrap().to_string());
+    stdout.println(Int32.parse("ff", radix: 16).unwrap().to_string());
+    stdout.println((100).checked_add(50).unwrap().to_string());
+    stdout.println((100).wrapping_add(50).to_string());
+    stdout.println((100).saturating_add(50).to_string());
+}

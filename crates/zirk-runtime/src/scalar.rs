@@ -457,16 +457,16 @@ pub extern "C" fn zirk_float_abs(value: f64) -> f64 {
     value.abs()
 }
 
-/// `v.sign()` — `-1.0`, `0.0`, or `1.0` (there is no `NaN` in Zirk, so no
-/// fourth answer).
+/// `v.sign()` — `-1`, `0`, or `1` (there is no `NaN` in Zirk, so no
+/// fourth answer). The result is `Int32` to match the language surface.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_float_sign(value: f64) -> f64 {
+pub extern "C" fn zirk_float_sign(value: f64) -> i32 {
     if value > 0.0 {
-        1.0
+        1
     } else if value < 0.0 {
-        -1.0
+        -1
     } else {
-        0.0
+        0
     }
 }
 

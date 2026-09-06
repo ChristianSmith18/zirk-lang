@@ -1,0 +1,19 @@
+fn main(): Void {
+    mut ok = Regex.parse("a.b");
+    if ok.is_ok() {
+        stdout.println("ok");
+    } else {
+        stdout.println("bad");
+    }
+
+    mut bad = Regex.parse("[");
+    if !bad.is_ok() {
+        stdout.println("err");
+    } else {
+        stdout.println("unexpected");
+    }
+
+    mut r = ok.unwrap();
+    stdout.println(r.matches("aXb").to_string());
+    stdout.println(r.matches("ab").to_string());
+}
