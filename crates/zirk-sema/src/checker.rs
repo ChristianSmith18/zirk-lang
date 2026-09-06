@@ -12334,6 +12334,13 @@ impl<'a> Checker<'a> {
                     {
                         return Type::BOOLEAN;
                     }
+                    "format" if expr.args.len() == 1 => {
+                        let arg = self.check_expr(&expr.args[0].value);
+                        if !arg.is_unknown() && !arg.accepts(Type::STRING) {
+                            self.expect_assignable(Type::STRING, arg, expr.args[0].value.span(), "the argument");
+                        }
+                        return Type::STRING;
+                    }
                     "min" | "max" | "pow" if expr.args.len() == 1 => {
                         let arg = self.check_expr(&expr.args[0].value);
                         if !arg.is_unknown()

@@ -82,7 +82,7 @@ verification, and its formatting currently truncates to `Float64` precision.
 | `value.sqrt()` | same as `value` | Square root; negative input is a controlled error | implemented |
 | `Float64.parse(text)` | `Result<Float64, ParseError>` | Parses decimal/scientific text | implemented |
 | `value.to_string()` | `String` | Shortest round-trip decimal rendering | implemented |
-| `value.format(spec)` | `String` | Contract-driven presentation formatting | specified |
+| `value.format(spec)` | `String` | Presentation formatting; `spec` is `[0][width][.precision][e|E]`, e.g. `".2"`, `"08.2"`, `"10.4e"` | implemented |
 | `Int32(value)` / `Float64(value)` | target type | Explicit checked conversion; fails on non-finite or unrepresentable results | implemented |
 
 > `Float` omits `++`/`--` deliberately: a floating unit is not a safe discrete

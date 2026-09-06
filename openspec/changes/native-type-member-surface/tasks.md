@@ -19,6 +19,7 @@
 - [x] 2.4 `floor`, `ceil`, `round`, `truncate`, `fraction`, `pow`, `sqrt` (negative `sqrt` is a controlled error)
 - [x] 2.5 Corpus fixture `float_members.zrk`
 - [x] 2.6 Handbook: `04-decimals.md` statuses
+- [x] 2.7 `FloatN.format(spec)` with `spec` `[0][width][.precision][e|E]` and fixture `float_format.zrk`
 
 ## 3. Char members
 
