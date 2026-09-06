@@ -29,4 +29,4 @@
 
 - [x] 5.1 `ZIRK_FEATURE_STATUS.md`: move `Date`/`Time`/`DateTime` to shipped; keep `Instant`/`ZonedDateTime`/`TimeZone`/`Period` pending.
 - [x] 5.2 Handbook `03a-temporal` pages: document the civil subset.
-- [ ] 5.3 `cargo test --workspace` green, then `./scripts/sync-website-content.sh --audit-date <today>` and a separate `zirk-lang-site` commit.
+- [x] 5.3 `cargo test --workspace` green, then `./scripts/sync-website-content.sh --audit-date <today>` and a separate `zirk-lang-site` commit.
