@@ -358,6 +358,12 @@ pub enum Base {
     /// `List<T>`, identified by the index of its element type `T` in the
     /// checker's `list_types` table.
     List(u32),
+    /// `Map<K, V>`, identified by the index of its `(K, V)` entry in the
+    /// checker’s `map_types` table.
+    Map(u32),
+    /// `Set<T>`, identified by the index of its element type `T` in the
+    /// checker’s `set_types` table.
+    Set(u32),
 }
 
 impl Type {
@@ -681,6 +687,12 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Tuple(id) => names.tuple_name(id),
         Base::Array(id) => format!("Array<{}>", describe(names.array_element(id), names)),
         Base::List(id) => format!("List<{}>", describe(names.list_element(id), names)),
+        Base::Map(id) => format!(
+            "Map<{}, {}>",
+            describe(names.map_key(id), names),
+            describe(names.map_value(id), names)
+        ),
+        Base::Set(id) => format!("Set<{}>", describe(names.set_element(id), names)),
     };
 
     if ty.nullable {
@@ -711,6 +723,9 @@ pub trait TypeNames {
     fn array_element(&self, id: u32) -> Type;
     fn list_element(&self, id: u32) -> Type;
     fn range_element(&self, id: u32) -> Type;
+    fn map_key(&self, id: u32) -> Type;
+    fn map_value(&self, id: u32) -> Type;
+    fn set_element(&self, id: u32) -> Type;
 }
 
 /// The signature of a function type, for closures and declared functions.
@@ -792,6 +807,13 @@ pub struct AssociatedFieldInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleType {
     pub elements: Vec<Type>,
+}
+
+/// A `Map<K, V>` type, stored as a key/value type pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapType {
+    pub key: Type,
+    pub value: Type,
 }
 
 /// A declared class: a nominal type with fields, constructors and methods.

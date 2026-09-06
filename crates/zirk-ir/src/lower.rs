@@ -2127,6 +2127,9 @@ fn ir_type(
 
         Base::Array(id) => IrType::Array(id),
         Base::List(id) => IrType::List(id),
+        // `Map<K, V>` and `Set<T>` (roadmap Phase 7) — runtime handles,
+        // element-agnostic, kept element types in `checked.map_types`/`set_types`.
+        Base::Map(_) | Base::Set(_) => todo!(),
         // `Range<T>` (roadmap Phase 7): the runtime handle its constructor
         // extern `zirk_range_new` produces — the element type lives only in
         // `checked.range_types`, the handle itself is element-agnostic.
@@ -2375,6 +2378,15 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn range_element(&self, id: u32) -> Type {
         self.0.range_types[id as usize]
+    }
+    fn map_key(&self, id: u32) -> Type {
+        self.0.map_types[id as usize].key
+    }
+    fn map_value(&self, id: u32) -> Type {
+        self.0.map_types[id as usize].value
+    }
+    fn set_element(&self, id: u32) -> Type {
+        self.0.set_types[id as usize]
     }
 }
 
