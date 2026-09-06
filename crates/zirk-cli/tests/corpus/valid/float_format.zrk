@@ -1,0 +1,21 @@
+// Float.format(spec) for Float32/Float64/Float16/Float128.
+fn main(): Void {
+    mut x: Float64 = 3.14159265;
+    stdout.println(x.format(".2"));
+    stdout.println(x.format("8.2"));
+    stdout.println(x.format("08.2"));
+    stdout.println(x.format("e"));
+    stdout.println(x.format("10.4e"));
+
+    mut y: Float32 = 2.5;
+    stdout.println(y.format(".3"));
+
+    mut z: Float16 = 1.25;
+    stdout.println(z.format(".2"));
+
+    mut w: Float128 = 1234.5;
+    stdout.println(w.format(".2"));
+
+    stdout.println((-1234.5).format(".2"));
+    stdout.println((1234567.0).format(".2e"));
+}

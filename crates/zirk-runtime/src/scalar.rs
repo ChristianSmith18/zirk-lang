@@ -15,7 +15,7 @@
 
 use std::ffi::c_void;
 
-use crate::string::borrow;
+use crate::string::{alloc_owned, borrow};
 
 /// Masks `value` to `bits` and sign-extends when `signed` is set, so
 /// arithmetic on narrow widths observes the same wrap points the type
@@ -700,4 +700,93 @@ pub unsafe extern "C" fn zirk_float_parse_value(text: *const c_void) -> f64 {
         .unwrap_or("")
         .trim();
     text.parse::<f64>().unwrap_or(0.0)
+}
+
+/// Parses a small format spec and formats `value` accordingly.
+///
+/// Supported shape: `[0][width][.precision][e|E]`.
+/// Examples: `".2"`, `"08.2"`, `"8"`, `"e"`, `"10.4E"`.
+fn format_float(value: f64, spec: &str) -> String {
+    let spec = spec.trim();
+    let mut chars = spec.chars().peekable();
+
+    let mut zero_pad = false;
+    if chars.peek() == Some(&'0') {
+        zero_pad = true;
+        chars.next();
+    }
+
+    let mut width = 0usize;
+    while let Some(&c) = chars.peek() {
+        if let Some(d) = c.to_digit(10) {
+            width = width.saturating_mul(10).saturating_add(d as usize);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    let mut precision = None::<usize>;
+    if chars.peek() == Some(&'.') {
+        chars.next();
+        let mut p = 0usize;
+        while let Some(&c) = chars.peek() {
+            if let Some(d) = c.to_digit(10) {
+                p = p.saturating_mul(10).saturating_add(d as usize);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        precision = Some(p);
+    }
+
+    let mut exp = None::<char>;
+    if let Some(&c) = chars.peek() {
+        if c == 'e' || c == 'E' {
+            exp = Some(c);
+            chars.next();
+        }
+    }
+
+    // Ignore trailing characters; they cannot be expressed by Rust's
+    // dynamic formatting and are outside the supported subset.
+    let _ = chars;
+
+    if zero_pad {
+        match (precision, exp) {
+            (None, None) => format!("{value:0width$}"),
+            (None, Some('e')) => format!("{value:0width$e}"),
+            (None, Some('E')) => format!("{value:0width$E}"),
+            (None, Some(_)) => unreachable!(),
+            (Some(p), None) => format!("{value:0width$.p$}"),
+            (Some(p), Some('e')) => format!("{value:0width$.p$e}"),
+            (Some(p), Some('E')) => format!("{value:0width$.p$E}"),
+            (Some(_), Some(_)) => unreachable!(),
+        }
+    } else {
+        match (precision, exp) {
+            (None, None) => format!("{value:width$}"),
+            (None, Some('e')) => format!("{value:width$e}"),
+            (None, Some('E')) => format!("{value:width$E}"),
+            (None, Some(_)) => unreachable!(),
+            (Some(p), None) => format!("{value:width$.p$}"),
+            (Some(p), Some('e')) => format!("{value:width$.p$e}"),
+            (Some(p), Some('E')) => format!("{value:width$.p$E}"),
+            (Some(_), Some(_)) => unreachable!(),
+        }
+    }
+}
+
+/// `FloatN.format(spec)` — formats a float according to `spec`.
+///
+/// # Safety
+///
+/// `spec` must be a `String` handle produced by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float_format(value: f64, spec: *const c_void) -> *mut c_void {
+    let spec = unsafe { borrow(spec) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&format_float(value, spec))
 }

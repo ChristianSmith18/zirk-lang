@@ -1062,6 +1062,11 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::String],
             return_type: f64,
         },
+        ExternFn {
+            name: "zirk_float_format".to_string(),
+            params: vec![f64, IrType::String],
+            return_type: IrType::String,
+        },
         // `Regex.parse` — the `ok` half; the handle comes from the existing
         // `zirk_regex_from_pattern`.
         ExternFn {
@@ -9246,6 +9251,7 @@ impl<'a> FunctionLowering<'a> {
                 (FLOAT0.contains(&name) && call.args.is_empty())
                     || (FLOAT1.contains(&name) && call.args.len() == 1)
                     || (name == "clamp" && call.args.len() == 2)
+                    || (name == "format" && call.args.len() == 1)
             }
             _ => false,
         }
@@ -9672,6 +9678,17 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 );
                 Some(narrow(self, result))
+            }
+            "format" if call.args.len() == 1 => {
+                let spec = self.lower_expr(&call.args[0].value);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_float_format".to_string(),
+                        args: vec![wide, spec],
+                    },
+                    IrType::String,
+                    span,
+                ))
             }
             _ => None,
         }

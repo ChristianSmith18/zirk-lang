@@ -46,6 +46,8 @@ pub mod symbols {
     pub const STR_FROM_F32: &str = "zirk_str_from_f32";
     /// Converts a `Float64` into a `String`.
     pub const STR_FROM_F64: &str = "zirk_str_from_f64";
+    /// Formats a `Float64` according to a `spec` string.
+    pub const FLOAT_FORMAT: &str = "zirk_float_format";
     /// Converts a `Boolean` into a `String`.
     pub const STR_FROM_BOOL: &str = "zirk_str_from_bool";
     /// Byte offset of the `index`-th grapheme, or `-1` past the end
@@ -274,6 +276,7 @@ pub struct Runtime<'ctx> {
     pub str_from_u128: FunctionValue<'ctx>,
     pub str_from_f32: FunctionValue<'ctx>,
     pub str_from_f64: FunctionValue<'ctx>,
+    pub float_format: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
     pub str_grapheme_offset: FunctionValue<'ctx>,
     pub str_grapheme_len_at: FunctionValue<'ctx>,
@@ -473,6 +476,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let str_from_f64 = module.add_function(
         symbols::STR_FROM_F64,
         ptr.fn_type(&[context.f64_type().into()], false),
+        external,
+    );
+    let float_format = module.add_function(
+        symbols::FLOAT_FORMAT,
+        ptr.fn_type(&[context.f64_type().into(), ptr.into()], false),
         external,
     );
 
@@ -1012,6 +1020,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_from_u128,
         str_from_f32,
         str_from_f64,
+        float_format,
         str_from_bool,
         str_grapheme_offset,
         str_grapheme_len_at,
