@@ -12475,6 +12475,19 @@ impl<'a> Checker<'a> {
                         self.check_int_argument(expr, object);
                         return object;
                     }
+                    // `n.pow(k)` — the desugaring of `n ** k`
+                    // (`exponentiation-operator`). The exponent is an integer;
+                    // the result stays in the receiver's integer type with
+                    // checked overflow, *except* when the exponent is a
+                    // statically negative integer literal, where the result
+                    // widens to exact `Float` so `2 ** -1` is `0.5`.
+                    "pow" if expr.args.len() == 1 => {
+                        self.check_int_argument(expr, object);
+                        if matches!(&expr.args[0].value, Expr::Int(lit) if lit.value < 0) {
+                            return Type::FLOAT;
+                        }
+                        return object;
+                    }
                     "checked_add" | "checked_sub" | "checked_mul" | "checked_div"
                     | "checked_rem" | "checked_pow"
                         if expr.args.len() == 1 =>

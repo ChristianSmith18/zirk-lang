@@ -469,17 +469,17 @@ fn valid_shifts_and_their_compound_forms() {
 }
 
 #[test]
-fn valid_power_operator_declares_its_phase() {
-    // `**` needs `Float` to define what a negative exponent means (`2 ** -1`
-    // is the mathematical result converted back), so it stays gated until
-    // `Float` itself lands — unlike bitwise/shift, which only ever needed
-    // `Int32`, already available.
+fn valid_power_operator_is_part_of_the_implemented_subset() {
+    // `**` / `**=` are delivered (`exponentiation-operator`): the parser
+    // desugars `a ** b` to `a.pow(b)` over the numeric families, and a
+    // negative literal exponent widens an integer base to exact `Float`
+    // (`2 ** -1` is `0.5`). No arrival phase is attributed.
     use TokenKind::*;
     for kind in [StarStar, StarStarEq] {
         assert_eq!(
             kind.phase(),
-            Some(Phase::THREE_B),
-            "`{}` should announce its phase",
+            None,
+            "`{}` should not announce a phase",
             kind.symbol()
         );
     }

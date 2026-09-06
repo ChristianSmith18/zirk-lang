@@ -228,6 +228,37 @@ fn valid_exact_float_scientific_literal_is_exact() {
 }
 
 #[test]
+fn valid_exponentiation_operator_result_types() {
+    // `exponentiation-operator`: `a ** b` is `a.pow(b)`.
+    // `Int ** Int` (non-negative) stays integer.
+    accepted_body("mut x: Int32 = 2 ** 3;");
+    // `Int ** negativeLiteral` widens to exact `Float`.
+    accepted_body("mut x: Float = 2 ** -1;");
+    // exact `Float` base stays exact `Float`.
+    accepted_body("mut b: Float = 1.5;\nmut x: Float = b ** 2;");
+    // `BinaryFloat` base stays that width.
+    accepted_body("mut b: BinaryFloat64 = 2.0b;\nmut x: BinaryFloat64 = b ** 3;");
+    // a dynamic exponent stays integer.
+    accepted_body("mut k: Int32 = 4;\nmut x: Int32 = 2 ** k;");
+    // compound form.
+    accepted_body("mut n: Int32 = 2;\nn **= 10;");
+}
+
+#[test]
+fn invalid_exponentiation_widened_result_is_not_an_integer() {
+    // `2 ** -1` is exact `Float` `0.5`, not assignable to `Int32`.
+    let output = rejected_body("mut x: Int32 = 2 ** -1;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn invalid_exponentiation_cannot_mix_exact_and_binary_float() {
+    let output =
+        rejected_body("mut a: Float = 2.0;\nmut b: BinaryFloat64 = 3.0b;\nmut c = a ** b;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
 fn valid_safe_widening_between_float_widths() {
     accepted_body(
         "mut a: BinaryFloat16 = 1.5b16;\nmut b: BinaryFloat32 = a;\nmut c: BinaryFloat64 = b;",
