@@ -11,7 +11,7 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe,
+    IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, describe, is_ffi_safe,
     pending_type,
 };
 use std::collections::HashMap;
@@ -108,6 +108,12 @@ pub struct CheckedProgram {
     /// Interned `Range<T>` element types, indexed by the id their
     /// [`Base::Range`] carries (roadmap Phase 7).
     pub range_types: Vec<Type>,
+    /// Interned `Map<K, V>` types, indexed by the id their
+    /// [`Base::Map`] carries.
+    pub map_types: Vec<MapType>,
+    /// Interned `Set<T>` element types, indexed by the id their
+    /// [`Base::Set`] carries.
+    pub set_types: Vec<Type>,
     /// `module.values` records class layouts before tuple layouts; this is
     /// the index where the first tuple's `ValueLayout` lives.
     pub tuple_base: u32,
@@ -282,6 +288,8 @@ struct Names<'t> {
     array_types: &'t [Type],
     list_types: &'t [Type],
     range_types: &'t [Type],
+    map_types: &'t [MapType],
+    set_types: &'t [Type],
 }
 
 impl TypeNames for Names<'_> {
@@ -425,6 +433,27 @@ impl TypeNames for Names<'_> {
 
     fn range_element(&self, id: u32) -> Type {
         self.range_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn map_key(&self, id: u32) -> Type {
+        self.map_types
+            .get(id as usize)
+            .map(|m| m.key)
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn map_value(&self, id: u32) -> Type {
+        self.map_types
+            .get(id as usize)
+            .map(|m| m.value)
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn set_element(&self, id: u32) -> Type {
+        self.set_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -614,6 +643,12 @@ struct Checker<'a> {
     /// Interned `List<T>` element types, indexed by the id their
     /// [`Base::List`] carries.
     list_types: Vec<Type>,
+    /// Interned `Map<K, V>` types, indexed by the id their
+    /// [`Base::Map`] carries.
+    map_types: Vec<MapType>,
+    /// Interned `Set<T>` element types, indexed by the id their
+    /// [`Base::Set`] carries.
+    set_types: Vec<Type>,
     /// See [`CheckedProgram::externs`].
     externs: HashMap<String, ExternSignature>,
     /// Id of the language's own `Clone` contract, minted by
@@ -719,6 +754,8 @@ impl<'a> Checker<'a> {
             array_types: Vec::new(),
             range_types: Vec::new(),
             list_types: Vec::new(),
+            map_types: Vec::new(),
+            set_types: Vec::new(),
             externs: HashMap::new(),
             native_clone: None,
             clone_cache: HashMap::new(),
@@ -843,6 +880,8 @@ impl<'a> Checker<'a> {
                 array_types: &self.array_types,
                 list_types: &self.list_types,
                 range_types: &self.range_types,
+                map_types: &self.map_types,
+                set_types: &self.set_types,
             },
         )
     }
@@ -953,6 +992,8 @@ impl<'a> Checker<'a> {
             array_types: self.array_types,
             range_types: self.range_types,
             list_types: self.list_types,
+            map_types: self.map_types,
+            set_types: self.set_types,
             tuple_base,
             externs: self.externs,
             expr_types: self.expr_types,
@@ -4268,6 +4309,8 @@ impl<'a> Checker<'a> {
                 Base::Tuple(id) => (27, id),
                 Base::Array(id) => (28, id),
                 Base::List(id) => (29, id),
+                Base::Map(id) => (30, id),
+                Base::Set(id) => (31, id),
             }
         }
         bases.sort_by_key(key);
