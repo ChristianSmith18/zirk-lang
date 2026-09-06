@@ -1541,6 +1541,16 @@ fn verify_instruction(
                 report(format!("{position}: ListNew declares {}, expected List<{element_id}>", inst.ty.as_str()));
             }
         }
+        InstKind::MapNew { map_id } => {
+            if inst.ty != IrType::Map(*map_id) {
+                report(format!("{position}: MapNew declares {}, expected Map<{map_id}>", inst.ty.as_str()));
+            }
+        }
+        InstKind::SetNew { set_id } => {
+            if inst.ty != IrType::Set(*set_id) {
+                report(format!("{position}: SetNew declares {}, expected Set<{set_id}>", inst.ty.as_str()));
+            }
+        }
         InstKind::ArrayListLoad { receiver, index } => {
             let element = match type_of(receiver).unwrap_or(IrType::Void) {
                 IrType::Array(id) => module.array_types.get(id as usize).copied().unwrap_or(IrType::Void),
@@ -1636,6 +1646,113 @@ fn verify_instruction(
             };
             if inst.ty != expected {
                 report(format!("{position}: ListClone declares {}, expected {}", inst.ty.as_str(), expected.as_str()));
+            }
+        }
+        InstKind::MapLength(operand) => {
+            expect(inst.ty, IrType::Int(IntWidth::U64), position, "MapLength", report);
+            if type_of(operand).map(|ty| !matches!(ty, IrType::Map(_))).unwrap_or(false) {
+                report(format!("{position}: MapLength receiver is not a Map"));
+            }
+        }
+        InstKind::MapIsEmpty(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "MapIsEmpty", report);
+            if type_of(operand).map(|ty| !matches!(ty, IrType::Map(_))).unwrap_or(false) {
+                report(format!("{position}: MapIsEmpty receiver is not a Map"));
+            }
+        }
+        InstKind::MapSet { receiver, key, value } => {
+            expect(inst.ty, IrType::Void, position, "MapSet", report);
+            let (expected_key, expected_value) = if let Some(IrType::Map(id)) = type_of(receiver) {
+                module.map_types.get(id as usize).copied().unwrap_or((IrType::Void, IrType::Void))
+            } else {
+                (IrType::Void, IrType::Void)
+            };
+            if let Some(ty) = type_of(key) && ty != expected_key {
+                report(format!("{position}: MapSet key is {}, expected {}", ty.as_str(), expected_key.as_str()));
+            }
+            if let Some(ty) = type_of(value) && ty != expected_value {
+                report(format!("{position}: MapSet value is {}, expected {}", ty.as_str(), expected_value.as_str()));
+            }
+        }
+        InstKind::MapContainsKey { receiver, key } => {
+            expect(inst.ty, IrType::Boolean, position, "MapContainsKey", report);
+            let expected_key = if let Some(IrType::Map(id)) = type_of(receiver) {
+                module.map_types.get(id as usize).map(|(k, _)| *k).unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(key) && ty != expected_key {
+                report(format!("{position}: MapContainsKey key is {}, expected {}", ty.as_str(), expected_key.as_str()));
+            }
+        }
+        InstKind::SetLength(operand) => {
+            expect(inst.ty, IrType::Int(IntWidth::U64), position, "SetLength", report);
+            if type_of(operand).map(|ty| !matches!(ty, IrType::Set(_))).unwrap_or(false) {
+                report(format!("{position}: SetLength receiver is not a Set"));
+            }
+        }
+        InstKind::SetIsEmpty(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "SetIsEmpty", report);
+            if type_of(operand).map(|ty| !matches!(ty, IrType::Set(_))).unwrap_or(false) {
+                report(format!("{position}: SetIsEmpty receiver is not a Set"));
+            }
+        }
+        InstKind::SetAdd { receiver, value } => {
+            expect(inst.ty, IrType::Void, position, "SetAdd", report);
+            let expected = if let Some(IrType::Set(id)) = type_of(receiver) {
+                module.set_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(value) && ty != expected {
+                report(format!("{position}: SetAdd value is {}, expected {}", ty.as_str(), expected.as_str()));
+            }
+        }
+        InstKind::SetContains { receiver, value } => {
+            expect(inst.ty, IrType::Boolean, position, "SetContains", report);
+            let expected = if let Some(IrType::Set(id)) = type_of(receiver) {
+                module.set_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(value) && ty != expected {
+                report(format!("{position}: SetContains value is {}, expected {}", ty.as_str(), expected.as_str()));
+            }
+        }
+        InstKind::MapGet { receiver, key } => {
+            let (expected_key, expected_value) = if let Some(IrType::Map(id)) = type_of(receiver) {
+                module.map_types.get(id as usize).copied().unwrap_or((IrType::Void, IrType::Void))
+            } else {
+                (IrType::Void, IrType::Void)
+            };
+            let expected = Nullable::of(expected_value).map(IrType::Nullable);
+            if let Some(expected) = expected && inst.ty != expected {
+                report(format!("{position}: MapGet declares {}, expected {}", inst.ty.as_str(), expected.as_str()));
+            }
+            if let Some(ty) = type_of(key) && ty != expected_key {
+                report(format!("{position}: MapGet key is {}, expected {}", ty.as_str(), expected_key.as_str()));
+            }
+        }
+        InstKind::MapRemove { receiver, key } => {
+            expect(inst.ty, IrType::Boolean, position, "MapRemove", report);
+            let expected_key = if let Some(IrType::Map(id)) = type_of(receiver) {
+                module.map_types.get(id as usize).map(|(k, _)| *k).unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(key) && ty != expected_key {
+                report(format!("{position}: MapRemove key is {}, expected {}", ty.as_str(), expected_key.as_str()));
+            }
+        }
+        InstKind::SetRemove { receiver, value } => {
+            expect(inst.ty, IrType::Boolean, position, "SetRemove", report);
+            let expected = if let Some(IrType::Set(id)) = type_of(receiver) {
+                module.set_types.get(id as usize).copied().unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if let Some(ty) = type_of(value) && ty != expected {
+                report(format!("{position}: SetRemove value is {}, expected {}", ty.as_str(), expected.as_str()));
             }
         }
         InstKind::ArraySlice { receiver, start, end, step } => {
@@ -1870,14 +1987,28 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
         InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],
         InstKind::ArrayNew { capacity, .. } => vec![*capacity],
-        InstKind::ListNew { .. } => Vec::new(),
+        InstKind::ListNew { .. } | InstKind::MapNew { .. } | InstKind::SetNew { .. } => Vec::new(),
         InstKind::ArrayListLoad { receiver, index } => vec![*receiver, *index],
         InstKind::ArrayListStore { receiver, index, value } => vec![*receiver, *index, *value],
         InstKind::ListAdd { receiver, value } => vec![*receiver, *value],
         InstKind::ListInsert { receiver, index, value } => vec![*receiver, *index, *value],
         InstKind::ListRemove { receiver, index } => vec![*receiver, *index],
         InstKind::ListRemoveValue { receiver, value } => vec![*receiver, *value],
-        InstKind::ArrayClone { receiver } | InstKind::ListClone { receiver } => vec![*receiver],
+        InstKind::MapLength(receiver)
+        | InstKind::MapIsEmpty(receiver)
+        | InstKind::SetLength(receiver)
+        | InstKind::SetIsEmpty(receiver)
+        | InstKind::ArrayClone { receiver }
+        | InstKind::ListClone { receiver } => vec![*receiver],
+        InstKind::MapSet { receiver, key, value } => vec![*receiver, *key, *value],
+        InstKind::MapContainsKey { receiver, key } => vec![*receiver, *key],
+        InstKind::MapGet { receiver, key } => vec![*receiver, *key],
+        InstKind::MapRemove { receiver, key } => vec![*receiver, *key],
+        InstKind::SetAdd { receiver, value }
+        | InstKind::SetContains { receiver, value }
+        | InstKind::SetRemove { receiver, value } => {
+            vec![*receiver, *value]
+        }
         InstKind::ArraySlice { receiver, start, end, step } => vec![*receiver, *start, *end, *step],
     }
 }

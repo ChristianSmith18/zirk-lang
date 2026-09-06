@@ -9537,7 +9537,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if matches!(object.base, Base::Array(_) | Base::List(_)) {
+        if matches!(object.base, Base::Array(_) | Base::List(_) | Base::Map(_) | Base::Set(_)) {
             match member.name.as_str() {
                 "length" => return Type::of(Base::Int(IntWidth::U64)),
                 "is_empty" => return Type::BOOLEAN,
@@ -11186,6 +11186,109 @@ impl<'a> Checker<'a> {
         Type::of(Base::List(id))
     }
 
+    /// `Map<K, V>()` is a built-in constructor; the key/value types come from
+    /// the surrounding expected type.
+    fn check_map_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`Map<K, V>()` needs a known type",
+                "write `let m: Map<K, V> = Map()` or use an explicit type annotation",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let (key, value) = if let Base::Map(id) = expected.base {
+            self.map_types
+                .get(id as usize)
+                .map(|m| (m.key, m.value))
+                .unwrap_or((Type::UNKNOWN, Type::UNKNOWN))
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Map` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            return expected;
+        };
+
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Map<K, V>()` takes no arguments",
+                format!("received {}", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+
+        if key.is_unknown() || value.is_unknown() {
+            return expected;
+        }
+        let id = self.intern_map_type(key, value);
+        Type::of(Base::Map(id))
+    }
+
+    /// `Set<T>()` is a built-in constructor; the element type comes from the
+    /// surrounding expected type.
+    fn check_set_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`Set<T>()` needs a known element type",
+                "write `let s: Set<T> = Set()` or use an explicit type annotation",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let element = if let Base::Set(id) = expected.base {
+            self.set_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Set` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            return expected;
+        };
+
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Set<T>()` takes no arguments",
+                format!("received {}", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+
+        if element.is_unknown() {
+            return expected;
+        }
+        let id = self.intern_set_type(element);
+        Type::of(Base::Set(id))
+    }
+
     /// `Point(x: 1, y: 2)`: the implicit constructor of a record or value
     /// class, over every field, named-only, an omitted field taking its
     /// type's default (`ZIRK_LANGUAGE_SPEC.md` section 7).
@@ -11795,6 +11898,183 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Built-in methods on `Map<K, V>` and `Set<T>`.
+    fn check_map_set_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let (key, value, element) = match object.base {
+            Base::Map(id) => {
+                let MapType { key, value } = self
+                    .map_types
+                    .get(id as usize)
+                    .cloned()
+                    .unwrap_or(MapType {
+                        key: Type::UNKNOWN,
+                        value: Type::UNKNOWN,
+                    });
+                (key, value, Type::UNKNOWN)
+            }
+            Base::Set(id) => {
+                let element = self.set_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN);
+                (Type::UNKNOWN, Type::UNKNOWN, element)
+            }
+            _ => return None,
+        };
+
+        match field.name.name.as_str() {
+            "length" if expr.args.is_empty() => Some(Type::of(Base::Int(IntWidth::U64))),
+            "is_empty" if expr.args.is_empty() => Some(Type::BOOLEAN),
+            "set" if matches!(object.base, Base::Map(_)) => {
+                if expr.args.len() != 2 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.set` takes two arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::VOID);
+                }
+                let k = self.check_expr(&expr.args[0].value);
+                if !k.is_unknown() && !key.accepts(k) {
+                    self.expect_assignable(key, k, expr.args[0].value.span(), "the key");
+                }
+                let v = self.check_expr(&expr.args[1].value);
+                if !v.is_unknown() && !value.accepts(v) {
+                    self.expect_assignable(value, v, expr.args[1].value.span(), "the value");
+                }
+                Some(Type::VOID)
+            }
+            "contains_key" if matches!(object.base, Base::Map(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.contains_key` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::BOOLEAN);
+                }
+                let k = self.check_expr(&expr.args[0].value);
+                if !k.is_unknown() && !key.accepts(k) {
+                    self.expect_assignable(key, k, expr.args[0].value.span(), "the key");
+                }
+                Some(Type::BOOLEAN)
+            }
+            "add" if matches!(object.base, Base::Set(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Set.add` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::VOID);
+                }
+                let v = self.check_expr(&expr.args[0].value);
+                if !v.is_unknown() && !element.accepts(v) {
+                    self.expect_assignable(element, v, expr.args[0].value.span(), "the argument");
+                }
+                Some(Type::VOID)
+            }
+            "contains" if matches!(object.base, Base::Set(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Set.contains` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::BOOLEAN);
+                }
+                let v = self.check_expr(&expr.args[0].value);
+                if !v.is_unknown() && !element.accepts(v) {
+                    self.expect_assignable(element, v, expr.args[0].value.span(), "the argument");
+                }
+                Some(Type::BOOLEAN)
+            }
+            "get_or_null" if matches!(object.base, Base::Map(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.get_or_null` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(value.as_nullable());
+                }
+                let k = self.check_expr(&expr.args[0].value);
+                if !k.is_unknown() && !key.accepts(k) {
+                    self.expect_assignable(key, k, expr.args[0].value.span(), "the key");
+                }
+                Some(value.as_nullable())
+            }
+            "remove" if matches!(object.base, Base::Map(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.remove` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::BOOLEAN);
+                }
+                let k = self.check_expr(&expr.args[0].value);
+                if !k.is_unknown() && !key.accepts(k) {
+                    self.expect_assignable(key, k, expr.args[0].value.span(), "the key");
+                }
+                Some(Type::BOOLEAN)
+            }
+            "remove" if matches!(object.base, Base::Set(_)) => {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Set.remove` takes one argument",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Some(Type::BOOLEAN);
+                }
+                let v = self.check_expr(&expr.args[0].value);
+                if !v.is_unknown() && !element.accepts(v) {
+                    self.expect_assignable(element, v, expr.args[0].value.span(), "the argument");
+                }
+                Some(Type::BOOLEAN)
+            }
+            _ => None,
+        }
+    }
+
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
@@ -11960,6 +12240,15 @@ impl<'a> Checker<'a> {
                 && !field.safe
                 && !object.nullable
                 && let Some(ty) = self.check_array_list_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            // `Map<K, V>` and `Set<T>` built-in methods.
+            if matches!(object.base, Base::Map(_) | Base::Set(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_map_set_method_call(expr, field, object)
             {
                 return ty;
             }
@@ -12803,6 +13092,12 @@ impl<'a> Checker<'a> {
             }
             if callee.name == "List" && self.scopes.lookup(&callee.name).is_none() {
                 return self.check_list_construction(expr, expected);
+            }
+            if callee.name == "Map" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_map_construction(expr, expected);
+            }
+            if callee.name == "Set" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_set_construction(expr, expected);
             }
 
             // `User(1, "x")` builds an instance. There is no `new`: the type

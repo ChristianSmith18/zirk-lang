@@ -232,6 +232,32 @@ pub mod symbols {
     pub const ARRAY_NEW: &str = "zirk_rt_array_new";
     /// `zirk_rt_list_new(elem_size, elem_align, is_ref) -> *mut c_void`.
     pub const LIST_NEW: &str = "zirk_rt_list_new";
+    /// `zirk_rt_map_new() -> *mut c_void`.
+    pub const MAP_NEW: &str = "zirk_rt_map_new";
+    /// `zirk_rt_map_length(map) -> i64`.
+    pub const MAP_LENGTH: &str = "zirk_rt_map_length";
+    /// `zirk_rt_map_is_empty(map) -> i32`.
+    pub const MAP_IS_EMPTY: &str = "zirk_rt_map_is_empty";
+    /// `zirk_rt_map_set(map, key, value)`.
+    pub const MAP_SET: &str = "zirk_rt_map_set";
+    /// `zirk_rt_map_contains_key(map, key) -> i32`.
+    pub const MAP_CONTAINS_KEY: &str = "zirk_rt_map_contains_key";
+    /// `zirk_rt_map_get(map, key) -> i64`.
+    pub const MAP_GET: &str = "zirk_rt_map_get";
+    /// `zirk_rt_map_remove(map, key) -> i32`.
+    pub const MAP_REMOVE: &str = "zirk_rt_map_remove";
+    /// `zirk_rt_set_new() -> *mut c_void`.
+    pub const SET_NEW: &str = "zirk_rt_set_new";
+    /// `zirk_rt_set_length(set) -> i64`.
+    pub const SET_LENGTH: &str = "zirk_rt_set_length";
+    /// `zirk_rt_set_is_empty(set) -> i32`.
+    pub const SET_IS_EMPTY: &str = "zirk_rt_set_is_empty";
+    /// `zirk_rt_set_add(set, value)`.
+    pub const SET_ADD: &str = "zirk_rt_set_add";
+    /// `zirk_rt_set_contains(set, value) -> i32`.
+    pub const SET_CONTAINS: &str = "zirk_rt_set_contains";
+    /// `zirk_rt_set_remove(set, value) -> i32`.
+    pub const SET_REMOVE: &str = "zirk_rt_set_remove";
     /// `zirk_rt_array_length(array) -> usize`.
     pub const ARRAY_LENGTH: &str = "zirk_rt_array_length";
     /// `zirk_rt_list_length(list) -> usize`.
@@ -384,6 +410,19 @@ pub struct Runtime<'ctx> {
 
     pub array_new: FunctionValue<'ctx>,
     pub list_new: FunctionValue<'ctx>,
+    pub map_new: FunctionValue<'ctx>,
+    pub map_length: FunctionValue<'ctx>,
+    pub map_is_empty: FunctionValue<'ctx>,
+    pub map_set: FunctionValue<'ctx>,
+    pub map_contains_key: FunctionValue<'ctx>,
+    pub map_get: FunctionValue<'ctx>,
+    pub map_remove: FunctionValue<'ctx>,
+    pub set_new: FunctionValue<'ctx>,
+    pub set_length: FunctionValue<'ctx>,
+    pub set_is_empty: FunctionValue<'ctx>,
+    pub set_add: FunctionValue<'ctx>,
+    pub set_contains: FunctionValue<'ctx>,
+    pub set_remove: FunctionValue<'ctx>,
     pub array_length: FunctionValue<'ctx>,
     pub list_length: FunctionValue<'ctx>,
     pub array_element: FunctionValue<'ctx>,
@@ -751,6 +790,71 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
         external,
     );
+    let map_new = module.add_function(
+        symbols::MAP_NEW,
+        ptr.fn_type(&[], false),
+        external,
+    );
+    let map_length = module.add_function(
+        symbols::MAP_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let map_is_empty = module.add_function(
+        symbols::MAP_IS_EMPTY,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let map_set = module.add_function(
+        symbols::MAP_SET,
+        void.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
+        external,
+    );
+    let map_contains_key = module.add_function(
+        symbols::MAP_CONTAINS_KEY,
+        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let map_get = module.add_function(
+        symbols::MAP_GET,
+        i64.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let map_remove = module.add_function(
+        symbols::MAP_REMOVE,
+        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let set_new = module.add_function(
+        symbols::SET_NEW,
+        ptr.fn_type(&[], false),
+        external,
+    );
+    let set_length = module.add_function(
+        symbols::SET_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let set_is_empty = module.add_function(
+        symbols::SET_IS_EMPTY,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let set_add = module.add_function(
+        symbols::SET_ADD,
+        void.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let set_contains = module.add_function(
+        symbols::SET_CONTAINS,
+        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let set_remove = module.add_function(
+        symbols::SET_REMOVE,
+        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
     let array_length = module.add_function(
         symbols::ARRAY_LENGTH,
         i64.fn_type(&[ptr.into()], false),
@@ -1082,6 +1186,19 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
 
         array_new,
         list_new,
+        map_new,
+        map_length,
+        map_is_empty,
+        map_set,
+        map_contains_key,
+        map_get,
+        map_remove,
+        set_new,
+        set_length,
+        set_is_empty,
+        set_add,
+        set_contains,
+        set_remove,
         array_length,
         list_length,
         array_element,
