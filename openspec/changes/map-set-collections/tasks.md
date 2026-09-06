@@ -60,4 +60,4 @@
 - [x] 9.1 Update `docs/init/ZIRK_FEATURE_STATUS.md` to mark `Map` and `Set` as partially delivered.
 - [x] 9.2 Update `docs/handbook/02-handbook/12-collections/README.md` to reflect delivered `Map` and `Set`.
 - [x] 9.3 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`, review `../zirk-lang-site` diff, and commit the website changes.
-  - Left pending; requires `zirk-lang-site` and explicit audit date.
+  - Done: synced with `--audit-date 2026-09-06`, committed in `zirk-lang-site` together with the `enum-static-members` sync.
