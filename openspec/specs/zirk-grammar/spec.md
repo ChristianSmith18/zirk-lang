@@ -45,6 +45,10 @@ The parser SHALL build expressions respecting the conventional precedence and as
 
 From highest to lowest precedence: exponentiation (`**`, right-associative); unary (`!`, `-`); multiplicative (`*`, `/`, `%`); additive (`+`, `-`); comparison (`<`, `<=`, `>`, `>=`); equality (`==`, `!=`); conjunction (`&&`); disjunction (`||`).
 
+`**` SHALL be parsed as an infix operator in the implemented subset, not
+rejected as a deferred construct. Its right operand MAY be a unary expression,
+so `2 ** -1` parses with the negation as the right operand.
+
 #### Scenario: Multiplicative precedence over additive
 - **WHEN** `1 + 2 * 3` is parsed
 - **THEN** the tree represents `1 + (2 * 3)`
@@ -60,6 +64,18 @@ From highest to lowest precedence: exponentiation (`**`, right-associative); una
 #### Scenario: Conjunction over disjunction
 - **WHEN** `a || b && c` is parsed
 - **THEN** the tree represents `a || (b && c)`
+
+#### Scenario: Exponentiation is right-associative
+- **WHEN** `2 ** 3 ** 2` is parsed
+- **THEN** the tree represents `2 ** (3 ** 2)`
+
+#### Scenario: Exponentiation binds tighter than unary minus
+- **WHEN** `-2 ** 2` is parsed
+- **THEN** the tree represents `-(2 ** 2)`
+
+#### Scenario: Exponentiation binds tighter than multiplication
+- **WHEN** `3 * 2 ** 2` is parsed
+- **THEN** the tree represents `3 * (2 ** 2)`
 
 ### Requirement: Conditional statement
 
@@ -350,11 +366,24 @@ The parser SHALL accept traditional enum cases without mappings and cases mapped
 - **THEN** the enum case retains `"N"` as its explicit observable mapping
 
 ### Requirement: Contextual constructor expressions
-The grammar SHALL retain the complete contained operator tree of `Float(expression)` and `String(expression)` so semantic analysis can apply explicit deep contextual conversion before evaluating compatible contained arithmetic or concatenation operators.
+
+The grammar SHALL retain the complete contained operator tree of
+`Float(expression)`, `BinaryFloat(expression)`, and `String(expression)` so
+semantic analysis can apply explicit deep contextual conversion before evaluating
+compatible contained arithmetic or concatenation operators. `Float(expression)`
+SHALL establish an exact-decimal domain; `BinaryFloat(expression)` SHALL
+establish a binary domain.
 
 #### Scenario: Nested contextual arithmetic
+
 - **WHEN** `Float((a + 1) / (b * 2))` is parsed
-- **THEN** the constructor contains the entire nested arithmetic tree rather than an already-evaluated integer result
+- **THEN** the constructor contains the entire nested arithmetic tree rather than
+  an already-evaluated integer result
+
+#### Scenario: Binary contextual constructor
+
+- **WHEN** `BinaryFloat(3 / 4)` is parsed
+- **THEN** the constructor retains the division tree for a binary-domain conversion
 
 ### Requirement: Native String repetition syntax
 The grammar SHALL accept multiplication and compound multiplication between a String expression and an integer expression, leaving type checking to enforce operand types, non-negative counts, mutability for `*=`, and allocation bounds.
@@ -651,15 +680,27 @@ The parser SHALL recognize the postfix form `expr as T` and the prefix form `<T>
 
 ### Requirement: Integer-width and `Float` literals
 
-The grammar SHALL recognize an integer literal as any of the signed or unsigned widths when the context determines it, and a fractional literal (with optional scientific notation) as `Float`, both with `_` as a visual separator.
+The grammar SHALL recognize an integer literal as any of the signed or unsigned
+widths when the context determines it. The grammar SHALL recognize a fractional
+literal (with optional scientific notation) and no suffix as an exact-decimal
+`Float` literal, and the same form with a `b`, `b16`, `b32`, `b64`, or `b128`
+suffix as a `BinaryFloat` literal. `_` SHALL be accepted as a visual separator
+in all numeric literals.
 
 #### Scenario: Visual separator in a wide literal
+
 - **WHEN** `1_000_000` is written
 - **THEN** it is lexed as the integer `1000000`
 
-#### Scenario: Scientific notation
+#### Scenario: Scientific notation is exact
+
 - **WHEN** `1e2` is written
-- **THEN** it is lexed as a `Float` literal with value `100.0`
+- **THEN** it is lexed as an exact-decimal `Float` literal with value `100`
+
+#### Scenario: Binary-float literal
+
+- **WHEN** `1.5b32` is written
+- **THEN** it is lexed as a `BinaryFloat32` literal
 
 ### Requirement: `Char` literal
 
@@ -708,3 +749,4 @@ The parser SHALL recognize `expr '[' expr ']'` as a postfix index expression at 
 #### Scenario: Indexing an unsupported receiver type is a checker error, not a parse error
 - **WHEN** an expression whose type does not support indexing is subscripted
 - **THEN** parsing succeeds and the checker rejects the expression, naming the receiver type
+

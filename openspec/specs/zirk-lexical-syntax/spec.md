@@ -118,29 +118,37 @@ The lexer SHALL emit a diagnostic for any character that does not belong to the 
 
 ### Requirement: Fractional literals and scientific notation
 
-The lexer SHALL recognize fractional and scientific-notation literals as
-`Float` literals, distinct from an integer followed by a member access.
+The lexer SHALL recognize fractional and scientific-notation literals, distinct
+from an integer followed by a member access. A fractional or scientific literal
+with no suffix SHALL be an exact-decimal `Float` literal. A fractional or
+scientific literal with a `b` suffix (`1.5b`), optionally carrying a width
+(`1.5b16`, `1.5b32`, `1.5b64`, `1.5b128`), SHALL be a `BinaryFloat` literal.
+The literal text SHALL be carried verbatim for the semantic phase.
 
 Without this rule, `1.5` tokenizes as `1`, `.`, and `5`, which is the worst way
-to fail: the language cannot say "not yet" about something it does not even
-see.
+to fail: the language cannot say "not yet" about something it does not even see.
 
-#### Scenario: Fractional literal
+#### Scenario: Fractional literal is exact decimal
+
 - **WHEN** `1.5` is tokenized
-- **THEN** a single Float literal is produced
+- **THEN** a single exact-decimal `Float` literal is produced
 - **AND** the sequence integer, dot, integer is NOT produced
 
-#### Scenario: Scientific notation
-- **WHEN** `6.02e23` or `1e2` is tokenized
-- **THEN** a single Float literal with its exponent is produced
+#### Scenario: Scientific notation is exact decimal
 
-#### Scenario: Width suffix
-- **WHEN** `1.5f32` is tokenized
-- **THEN** the literal retains the requested width for the semantic check
+- **WHEN** `6.02e23` or `1e2` is tokenized without a suffix
+- **THEN** a single exact-decimal `Float` literal with its exponent is produced
 
-#### Scenario: Float deferred to its phase
-- **WHEN** a Float literal appears in a program of a phase that does not implement the `Float` family
-- **THEN** the diagnostic names the literal and indicates the phase in which it arrives
+#### Scenario: Binary-float suffix
+
+- **WHEN** `1.5b32` is tokenized
+- **THEN** a single `BinaryFloat` literal is produced and retains the requested
+  width for the semantic check
+
+#### Scenario: Bare binary-float suffix
+
+- **WHEN** `0.1b` is tokenized
+- **THEN** a `BinaryFloat64` literal is produced
 
 ### Requirement: Inclusive range token
 
@@ -153,12 +161,21 @@ The lexer SHALL recognize `..=` as its own token, distinct from `..` and from `.
 ### Requirement: Power tokens
 
 The lexer SHALL recognize `**` and `**=` as their own tokens, applying the
-longest-match rule before multiplication.
+longest-match rule before multiplication. These tokens belong to the
+implemented subset: the lexer SHALL NOT attribute an arrival phase to them
+and the compiler SHALL NOT defer them with a phase diagnostic.
 
 #### Scenario: Power
+
 - **WHEN** `value ** 2` or `value **= 2` is tokenized
 - **THEN** the power and compound-power tokens are produced
 - **AND** two consecutive multiplication tokens are NOT produced
+
+#### Scenario: Power tokens carry no arrival phase
+
+- **WHEN** the phase of `**` or `**=` is queried
+- **THEN** it reports that the token is part of the implemented subset, not a
+  later phase
 
 ### Requirement: Bitwise and shift operators
 
@@ -288,3 +305,4 @@ the phase the roadmap assigns to it.
 #### Scenario: Pipe operator
 - **WHEN** the phase of `|>` is queried
 - **THEN** it declares the phase of the functional style, not that of objects
+

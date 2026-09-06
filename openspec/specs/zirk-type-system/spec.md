@@ -463,22 +463,42 @@ The language SHALL distinguish compiler primitives, native reference types, user
 - **THEN** the operation resolves through its native capabilities without boxing being observable
 
 ### Requirement: Float family replaces Decimal family
-The binary floating family SHALL be `Float16`, `Float32`, `Float64`, and `Float128`, with `Float` aliasing `Float64` and ordinary fractional literals inferring `Float64`. `NaN` SHALL NOT be a valid Zirk value; indeterminate operations SHALL produce controlled errors.
 
-`Decimal16`, `Decimal32`, `Decimal64`, `Decimal128`, `Dec` and `Decimal` SHALL NOT be recognized as types of the language, nor announced as types of a future phase. An exact base-ten type may later arrive as a standard-library type, and it would be a different thing from `Float`.
+`Float` SHALL be an exact base-ten decimal scalar and SHALL be the inferred type
+of an ordinary fractional literal. IEEE 754 binary floating point SHALL be the
+`BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128` family, with
+`BinaryFloat` aliasing `BinaryFloat64`. `NaN` SHALL NOT be a valid Zirk value;
+indeterminate `BinaryFloat` operations SHALL produce controlled errors, and
+`Float` SHALL have neither `NaN` nor infinity.
+
+`Decimal16`, `Decimal32`, `Decimal64`, `Decimal128`, `Dec` and `Decimal` SHALL
+NOT be recognized as types of the language, nor announced as types of a future
+phase; the exact base-ten behavior they described is delivered under the `Float`
+name. The spellings `Float16`, `Float32`, `Float64`, `Float128` SHALL NOT
+resolve; the checker SHALL emit a diagnostic naming the `BinaryFloat`
+replacement.
 
 #### Scenario: Default fractional literal
-- **WHEN** `1.5` has no contextual type
-- **THEN** its inferred type is `Float64`
 
-#### Scenario: Indeterminate infinity operation
-- **WHEN** positive infinity is subtracted from positive infinity
+- **WHEN** `1.5` has no contextual type
+- **THEN** its inferred type is `Float` (exact base-ten decimal)
+
+#### Scenario: Indeterminate infinity operation on `BinaryFloat`
+
+- **WHEN** positive infinity is subtracted from positive infinity on `BinaryFloat64`
 - **THEN** a controlled arithmetic error is produced instead of `NaN`
 
 #### Scenario: Withdrawn Decimal family
+
 - **WHEN** an annotation names `Decimal64`
 - **THEN** an unknown-type diagnostic is emitted
 - **AND** no arrival phase is announced for that name
+
+#### Scenario: Former binary spelling is redirected
+
+- **WHEN** an annotation names `Float32`
+- **THEN** a diagnostic states that the binary type is `BinaryFloat32` and the
+  exact base-ten type is `Float`
 
 ### Requirement: Deep contextual conversion
 An explicit numeric or String constructor around an operator expression SHALL establish the target domain for the contained compatible arithmetic or concatenation tree, converting operands before those operators execute. The context SHALL NOT mutate operands or propagate through a called function's body.
@@ -541,18 +561,29 @@ Each native type SHALL expose only its documented operator set. Integer division
 
 ### Requirement: `Float` family and temporal types recognized as pending
 
-The checker SHALL recognize `Float16`, `Float32`, `Float64`, `Float128`,
-`Float`, the unimplemented integer widths, `Char`, and the temporal types
-`Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`,
-and `Period` as pending language types, each declaring the phase that
-brings it.
+The checker SHALL recognize `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`,
+`BinaryFloat128`, `BinaryFloat`, the unimplemented integer widths, `Char`, and
+the temporal types `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`,
+`TimeZone`, `Duration`, and `Period` as language types (pending or implemented)
+that carry a clear diagnostic. `Float` SHALL be a fully recognized, implemented
+type. An annotation naming a former binary spelling (`Float16`, `Float32`,
+`Float64`, `Float128`) SHALL produce a redirect diagnostic, not a
+nonexistent-type diagnostic.
 
-#### Scenario: Annotation with a Float type
+#### Scenario: Annotation with the exact `Float` type
+
+- **WHEN** `mut ratio: Float = 0;` is declared
+- **THEN** it compiles and `ratio` holds the exact decimal `0`
+
+#### Scenario: Annotation with a former binary spelling
+
 - **WHEN** `mut ratio: Float64 = 0;` is declared
-- **THEN** the diagnostic names the type and indicates the phase in which it arrives
+- **THEN** the diagnostic names `BinaryFloat64` as the replacement and `Float` as
+  the exact type
 - **AND** it is NOT reported as a nonexistent type
 
 #### Scenario: Annotation with a temporal type
+
 - **WHEN** an annotation names `Instant` or `Duration`
 - **THEN** the diagnostic indicates the phase of the temporal family
 
@@ -824,18 +855,26 @@ the order they appear.
 
 ### Requirement: Fractional literal context and mixed arithmetic
 
-An unannotated fractional literal SHALL have type `Float64`, and an arithmetic
-operation between an integer type and a `Float` type SHALL produce `Float`.
-Section 3 of `ZIRK_LANGUAGE_SPEC.md` already documented both rules; this phase
-is the first in which `Float` exists and they become verifiable.
+An unannotated fractional literal SHALL have type `Float` (exact base-ten
+decimal), and an arithmetic operation between an integer type and a `Float`
+SHALL produce an exact `Float`. An operation mixing a `Float` operand and a
+`BinaryFloat` operand SHALL be a type error naming the explicit conversion
+required.
 
 #### Scenario: Unannotated fractional literal
+
 - **WHEN** `mut x = 1.5;` is written without a type annotation
-- **THEN** `x` has type `Float64`
+- **THEN** `x` has type `Float`
 
 #### Scenario: Mixed integer and `Float` arithmetic
-- **WHEN** an `Int32` and a `Float64` are added
-- **THEN** the result has type `Float64`
+
+- **WHEN** an `Int32` and a `Float` are added
+- **THEN** the result has type `Float` and is exact
+
+#### Scenario: Mixed exact and binary float arithmetic
+
+- **WHEN** a `Float` and a `BinaryFloat64` are added
+- **THEN** type checking rejects the operation and names the explicit conversion
 
 ### Requirement: `Never` is the bottom type
 
