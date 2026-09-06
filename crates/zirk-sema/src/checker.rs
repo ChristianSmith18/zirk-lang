@@ -9477,6 +9477,18 @@ impl<'a> Checker<'a> {
             Base::Char if matches!(member.name.as_str(), "byte_length" | "codepoint_count") => {
                 return Type::INT32;
             }
+            Base::Duration
+                if matches!(
+                    member.name.as_str(),
+                    "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds"
+                        | "nanoseconds"
+                ) =>
+            {
+                return Type::INT32;
+            }
+            Base::Duration if member.name == "days" => {
+                return Type::of(Base::Int(IntWidth::I64));
+            }
             Base::Tuple(_) if member.name == "length" => {
                 return Type::INT32;
             }

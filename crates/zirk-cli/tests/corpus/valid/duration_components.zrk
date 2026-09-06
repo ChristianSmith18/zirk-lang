@@ -1,0 +1,23 @@
+fn main(): Void {
+    inmut big = 26h + 15m;
+    stdout.println(big.days.to_string());
+    stdout.println(big.hours.to_string());
+    stdout.println(big.minutes.to_string());
+    stdout.println(big.seconds.to_string());
+    stdout.println(big.milliseconds.to_string());
+    stdout.println(big.microseconds.to_string());
+    stdout.println(big.nanoseconds.to_string());
+
+    inmut sub = 1.5s;
+    stdout.println(sub.days.to_string());
+    stdout.println(sub.hours.to_string());
+    stdout.println(sub.minutes.to_string());
+    stdout.println(sub.seconds.to_string());
+    stdout.println(sub.milliseconds.to_string());
+    stdout.println(sub.microseconds.to_string());
+    stdout.println(sub.nanoseconds.to_string());
+
+    inmut tiny = 500us;
+    stdout.println(tiny.microseconds.to_string());
+    stdout.println(tiny.nanoseconds.to_string());
+}

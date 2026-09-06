@@ -59,6 +59,59 @@ pub extern "C" fn zirk_duration_sign(nanos: i64) -> i32 {
     nanos.signum() as i32
 }
 
+const NANOS_PER_DAY: i128 = 86_400_000_000_000;
+const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
+const NANOS_PER_MINUTE: i128 = 60_000_000_000;
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+const NANOS_PER_MILLI: i128 = 1_000_000;
+const NANOS_PER_MICRO: i128 = 1_000;
+
+fn magnitude(nanos: i64) -> i128 {
+    (nanos as i128).wrapping_abs()
+}
+
+/// `d.days` — the normalized day component.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_days(nanos: i64) -> i64 {
+    (magnitude(nanos) / NANOS_PER_DAY) as i64
+}
+
+/// `d.hours` — the hour component (0–23).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_hours(nanos: i64) -> i32 {
+    ((magnitude(nanos) % NANOS_PER_DAY) / NANOS_PER_HOUR) as i32
+}
+
+/// `d.minutes` — the minute component (0–59).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_minutes(nanos: i64) -> i32 {
+    ((magnitude(nanos) % NANOS_PER_HOUR) / NANOS_PER_MINUTE) as i32
+}
+
+/// `d.seconds` — the second component (0–59).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_seconds(nanos: i64) -> i32 {
+    ((magnitude(nanos) % NANOS_PER_MINUTE) / NANOS_PER_SECOND) as i32
+}
+
+/// `d.milliseconds` — the millisecond component (0–999).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_milliseconds(nanos: i64) -> i32 {
+    ((magnitude(nanos) % NANOS_PER_SECOND) / NANOS_PER_MILLI) as i32
+}
+
+/// `d.microseconds` — the microsecond component (0–999).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_microseconds(nanos: i64) -> i32 {
+    (((magnitude(nanos) % NANOS_PER_SECOND) / NANOS_PER_MICRO) % 1000) as i32
+}
+
+/// `d.nanoseconds` — the nanosecond component (0–999).
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_duration_nanoseconds(nanos: i64) -> i32 {
+    ((magnitude(nanos) % NANOS_PER_SECOND) % 1000) as i32
+}
+
 /// Renders a nanosecond count as a normalized duration literal.
 fn format_duration(nanos: i64) -> String {
     // Largest first: the first unit the magnitude reaches is the one the
