@@ -1,8 +1,8 @@
 {
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
-  "description": "Syntax highlighting and language support for the Zirk programming language",
-  "version": "0.2.0",
+  "description": "Syntax highlighting, diagnostics, build/run commands, and language support for the Zirk programming language",
+  "version": "0.4.2",
   "publisher": "ChristianSmith",
   "author": "Christian Smith",
   "icon": "images/icon.png",
@@ -18,6 +18,70 @@
     "zirk-lang"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Zirk",
+      "properties": {
+        "zirk.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the zirk or zirk-check executable. If empty, the extension searches target/debug/zirk-check, target/release/zirk-check, target/debug/zirk, target/release/zirk, and PATH."
+        },
+        "zirk.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the Zirk checker on the current file after saving."
+        },
+        "zirk.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the Zirk checker as you type (debounced)."
+        },
+        "zirk.checkDelay": {
+          "type": "number",
+          "default": 500,
+          "description": "Debounce delay in milliseconds for live checking while typing."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "zirk.check",
+        "title": "Check File",
+        "category": "Zirk"
+      },
+      {
+        "command": "zirk.build",
+        "title": "Build File",
+        "category": "Zirk"
+      },
+      {
+        "command": "zirk.run",
+        "title": "Run File",
+        "category": "Zirk"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "zirk",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "The Zirk task to run",
+            "enum": [
+              "build",
+              "run"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "The .zrk file to compile or run"
+          }
+        }
+      }
+    ],
     "languages": [
       {
         "id": "zirk",
@@ -43,6 +107,12 @@
         "language": "zirk",
         "scopeName": "source.zirk",
         "path": "./syntaxes/zirk.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "zirk",
+        "path": "./snippets/zirk.json"
       }
     ]
   }

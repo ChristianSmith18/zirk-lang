@@ -6,7 +6,7 @@ Define editor support for writing Zirk: recognition of `.zrk` files, syntax high
 
 The highlighter covers the full language defined by the specs, not just the subset the compiler implements. The split is deliberate: **the editor shows the language; the compiler says what is available.**
 
-It does not include a language server —live diagnostics, autocomplete, navigation—, which require the incremental frontend and belong to Phase 9.
+It does not include a language server —autocomplete, navigation, renaming—, which require the incremental frontend and belong to Phase 9. In the meantime, compiler diagnostics reach the editor through the `editor-cli-bridge`.
 
 ## Requirements
 
@@ -98,11 +98,22 @@ While `zirk format` does not exist, editor support MAY offer its own formatter, 
 
 ### Requirement: Scope without a language server
 
-This capability SHALL NOT include in-editor diagnostics, autocomplete, navigation, or renaming.
-
-All of that requires the LSP built on an incremental frontend, which `ZIRK_COMPILER_SPEC.md` section 10 defines and the roadmap places in Phase 9.
+This capability SHALL NOT include autocomplete, hover, navigation, or renaming provided by a language server. Compiler diagnostics SHALL be shown through the `editor-cli-bridge` while a full LSP is not available.
 
 #### Scenario: Diagnostics while editing
-- **WHEN** code with a type error is written
-- **THEN** the editor does not flag it by itself
-- **AND** the error appears when compiling with `zirk build` or `zirk run`
+- **WHEN** code with a type error is written and saved
+- **THEN** the editor flags it by invoking the CLI bridge
+- **AND** the diagnostic is shown in the editor
+
+#### Scenario: Features that still require an LSP
+- **WHEN** the user requests autocomplete, hover, go-to-definition, or rename
+- **THEN** the editor does not provide them
+- **AND** it documents that they arrive with the LSP in Phase 9
+
+### Requirement: Command palette integration
+The editor SHALL provide commands to check, build, and run the current `.zrk` file through the `editor-cli-bridge`.
+
+#### Scenario: Running Zirk commands from the editor
+- **WHEN** the user invokes `Zirk: Check File`, `Zirk: Build File`, or `Zirk: Run File`
+- **THEN** the editor invokes the appropriate CLI command
+- **AND** it displays the result in an output channel or status bar
