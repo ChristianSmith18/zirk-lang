@@ -21,7 +21,7 @@ interaction boundaries.
 - Scalars, tuples, records, enums, ranges, and declared value types copy as
   independent values. `Float` is an exact base-ten decimal scalar (the default
   fractional type, no `NaN`, no infinity); the IEEE 754 binary family is
-  `BinaryFloat16`…`BinaryFloat128` (`BinaryFloat` = `BinaryFloat64`), written
+  `Float16`…`Float128` (`Float` = `Float64`), written
   with a `b` literal suffix. The two never combine implicitly.
 - Classes, `String`, `Array`, `List`, `Map`, and `Set` are reference-backed.
   Assigning, passing, returning, or capturing a **complete variable** shares

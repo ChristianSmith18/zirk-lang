@@ -26,7 +26,7 @@ Distributable package: `.zpkg`
 > user-defined value/reference types and special types under the conceptual
 > `Object` root. `Float` is an exact base-ten decimal (the default fractional
 > type, no `NaN`, no infinity); the IEEE 754 binary family is
-> `BinaryFloat16`–`BinaryFloat128` with `BinaryFloat == BinaryFloat64` and a
+> `Float16`–`Float128` with `Float == Float64` and a
 > `b` literal suffix, also with no valid `NaN`. Explicit `Float(...)` and
 > `String(...)` constructors establish deep contextual evaluation for their
 > contained arithmetic or concatenation tree. `Char` is exactly one Unicode

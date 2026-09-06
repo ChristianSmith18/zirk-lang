@@ -243,8 +243,8 @@ name, so there is nothing for a local to shadow.
 **Zirk's scalars, conversions and text are complete.** The ten integer widths
 (`Int8`…`Int128`, `UInt8`…`UInt128`), the exact base-ten `Float` (the fractional
 default — 128-bit coefficient + scale, no `NaN`/infinity, `0.1 + 0.2 == 0.3`),
-the binary floating family (`BinaryFloat16`…`BinaryFloat128`, `BinaryFloat`
-aliasing `BinaryFloat64`, `b` literal suffix), `Char`
+the binary floating family (`Float16`…`Float128`, `Float`
+aliasing `Float64`, `b` literal suffix), `Char`
 as one Unicode extended grapheme cluster, bitwise/shift operators, deep
 contextual conversion (`Float(3 / 4)`, `String("x=" + 42)`), and a real
 `to_string()` contract that `print`/`println` and string interpolation
@@ -265,8 +265,8 @@ the phase:
   building the `Char` from that range (`zirk_str_grapheme_slice`); the loop
   itself threads the offset the same way a range loop already threads its
   own counter, needing no new IR instruction that mutates anything.
-- **`BinaryFloat16` now has `to_string()`**: it prints by widening to `BinaryFloat32`
-  first, through the same `fpext` a `BinaryFloat16 → BinaryFloat32` `as` already uses —
+- **`Float16` now has `to_string()`**: it prints by widening to `Float32`
+  first, through the same `fpext` a `Float16 → Float32` `as` already uses —
   always exact, since every `f16` value is representable in `f32` without
   loss, so `f32`'s own `Display` prints the same value `f16` held, not an
   approximation of it.
@@ -281,17 +281,17 @@ the phase:
 ### What is still pending
 
 - **Integer and Float literal width inference from a simple assignment**
-  context (`mut x: Int8 = 5;`, `mut y: BinaryFloat16 = 1.0b;`) is implemented;
+  context (`mut x: Int8 = 5;`, `mut y: Float16 = 1.0b;`) is implemented;
   the literal takes the expected width when the value fits. There is still
   no integer literal suffix syntax (only `Float` has one, e.g. `1.5f32`).
-- **`BinaryFloat128` arithmetic is unverified on Windows**: LLVM lowers `fp128`
+- **`Float128` arithmetic is unverified on Windows**: LLVM lowers `fp128`
   operations to soft-float library calls (`__addtf3` and similar) the MSVC
   toolchain this project's CI links against does not provide the way
   `glibc`/`libSystem` do on Linux/macOS — it crashed the Windows runner
   (an access violation, not a failing assertion) rather than just failing a
-  test, so `BinaryFloat128` is excluded from the cross-platform corpus.
-- **`BinaryFloat128` `to_string()` is lossy**: because `f128` is not a stable Rust
-  primitive in this toolchain, `BinaryFloat128` values are truncated to `BinaryFloat64`
+  test, so `Float128` is excluded from the cross-platform corpus.
+- **`Float128` `to_string()` is lossy**: because `f128` is not a stable Rust
+  primitive in this toolchain, `Float128` values are truncated to `Float64`
   before formatting. This means the printed decimal is an `f64` approximation
   of the original `f128` value, not an exact decimal expansion.
 - **An enum cannot implement `to_string()`.** Corrected from an earlier,

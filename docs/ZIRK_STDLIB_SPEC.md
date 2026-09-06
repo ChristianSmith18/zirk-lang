@@ -298,8 +298,8 @@ Minimum controlled errors include `InvalidDate`, `InvalidTime`,
 Native numeric types expose documented checked/wrapping/saturating arithmetic,
 comparison, conversion and formatting operations. `Float` is an exact base-ten
 decimal (128-bit coefficient + scale) with no width family, no `NaN` and no
-infinity; the IEEE 754 binary family is `BinaryFloat16`/`BinaryFloat32`/
-`BinaryFloat64`/`BinaryFloat128` (`BinaryFloat` aliases `BinaryFloat64`), also
+infinity; the IEEE 754 binary family is `Float16`/`Float32`/
+`Float64`/`Float128` (`Float` aliases `Float64`), also
 with no valid `NaN`. `Char` is one grapheme and exposes byte/code-point and
 Unicode classification methods; `ascii_code(): Int32` returns `-1` when the
 grapheme is not exactly ASCII. `String` exposes grapheme `length`, indexing,

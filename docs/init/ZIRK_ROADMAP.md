@@ -180,10 +180,10 @@ generics.
 
 **Status: complete for its scoped delivery.** The fractional default is now the
 exact base-ten `Float` (128-bit coefficient + scale, no `NaN`, no infinity);
-the IEEE 754 binary family is `BinaryFloat16`–`BinaryFloat128` (`BinaryFloat` =
-`BinaryFloat64`), written with a `b` literal suffix. `BinaryFloat128` formatting
-truncates to `BinaryFloat64` first, which can lose precision for values not
-exactly representable in `f64`. Windows `BinaryFloat128` arithmetic remains an
+the IEEE 754 binary family is `Float16`–`Float128` (`Float` =
+`Float64`), written with a `b` literal suffix. `Float128` formatting
+truncates to `Float64` first, which can lose precision for values not
+exactly representable in `f64`. Windows `Float128` arithmetic remains an
 implementation limitation.
 
 Phase 1 implemented one integer width, one Boolean and an opaque `String`.
@@ -193,8 +193,8 @@ phase. This one owns it:
 - The remaining integer widths: `Int8`, `Int16`, `Int64`, `Int128` and the whole
   `UInt*` family, with fixed width and checked arithmetic.
 - The exact base-ten `Float` (the fractional default), and the binary floating
-  family `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`, `BinaryFloat128`
-  (`BinaryFloat` = `BinaryFloat64`) with explicit infinities and no valid `NaN`
+  family `Float16`, `Float32`, `Float64`, `Float128`
+  (`Float` = `Float64`) with explicit infinities and no valid `NaN`
   — an operation that would produce one is a controlled error.
 - `Char` as exactly one Unicode grapheme, which may span several code points.
 - Deep contextual conversion: `Float(3 / 4)` converts the operands before the
