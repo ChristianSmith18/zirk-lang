@@ -239,7 +239,7 @@
       "patterns": [
         {
           "name": "storage.type.zirk",
-          "match": "\\b(Int8|Int16|Int32|Int64|Int128|Int|UInt8|UInt16|UInt32|UInt64|UInt128|UInt|Float16|Float32|Float64|Float128|Float|Boolean|Char|String|Date|Time|DateTime|Instant|ZonedDateTime|TimeZone|Duration|Period|Array|List|Set|Map|Range|Function|Fn|Tuple|Weak|Pointer|NativeSlice|NativeSliceMut|Task|TaskSettlement|Channel|Thread|Mutex|RwLock|Semaphore|Barrier|Once|Atomic|Null|Void|Never|Object|Result|Option|Throwable)\\b"
+          "match": "\\b(Int8|Int16|Int32|Int64|Int128|Int|Integer|UInt8|UInt16|UInt32|UInt64|UInt128|UInt|Byte|Float16|Float32|Float64|Float128|Float|Decimal|Dec|Boolean|Char|String|Date|Time|DateTime|Instant|ZonedDateTime|TimeZone|Duration|Period|Regex|Array|List|Set|Map|Range|Function|Fn|Tuple|Weak|Pointer|NativeSlice|NativeSliceMut|Task|TaskSettlement|Channel|Thread|Mutex|RwLock|Semaphore|Barrier|Once|Atomic|Null|Void|Never|Object|Result|Option|Throwable)\\b"
         }
       ]
     },

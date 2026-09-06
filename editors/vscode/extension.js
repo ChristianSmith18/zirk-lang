@@ -1,6 +1,66 @@
 const vscode = require('vscode');
 
+const invalidToReplacement = {
+    'BinaryFloat': 'Float',
+    'BinaryFloat16': 'Float16',
+    'BinaryFloat32': 'Float32',
+    'BinaryFloat64': 'Float64',
+    'BinaryFloat128': 'Float128',
+    'Decimal16': 'Decimal',
+    'Decimal32': 'Decimal',
+    'Decimal64': 'Decimal',
+    'Decimal128': 'Decimal'
+};
+
+const invalidTypePattern = new RegExp(
+    '\\b(' + Object.keys(invalidToReplacement).join('|') + ')\\b',
+    'g'
+);
+
 function activate(context) {
+    const diagnosticCollection = vscode.languages.createDiagnosticCollection('zirk');
+
+    function updateDiagnostics(document) {
+        if (document.languageId !== 'zirk') {
+            return;
+        }
+
+        const text = document.getText();
+        const diagnostics = [];
+
+        let match;
+        invalidTypePattern.lastIndex = 0;
+        while ((match = invalidTypePattern.exec(text)) !== null) {
+            const oldName = match[1];
+            const replacement = invalidToReplacement[oldName];
+            const start = document.positionAt(match.index);
+            const end = document.positionAt(match.index + oldName.length);
+            const range = new vscode.Range(start, end);
+            const message = `Type name "${oldName}" is no longer valid. Use "${replacement}" instead.`;
+            const diagnostic = new vscode.Diagnostic(
+                range,
+                message,
+                vscode.DiagnosticSeverity.Error
+            );
+            diagnostic.code = 'zirk-deprecated-type';
+            diagnostics.push(diagnostic);
+        }
+
+        diagnosticCollection.set(document.uri, diagnostics);
+    }
+
+    context.subscriptions.push(diagnosticCollection);
+
+    const openDisposable = vscode.workspace.onDidOpenTextDocument(updateDiagnostics);
+    const changeDisposable = vscode.workspace.onDidChangeTextDocument(event => updateDiagnostics(event.document));
+    const closeDisposable = vscode.workspace.onDidCloseTextDocument(document => diagnosticCollection.delete(document.uri));
+
+    context.subscriptions.push(openDisposable, changeDisposable, closeDisposable);
+
+    for (const document of vscode.workspace.textDocuments) {
+        updateDiagnostics(document);
+    }
+
     const formatter = vscode.languages.registerDocumentFormattingEditProvider('zirk', {
         provideDocumentFormattingEdits(document, options, token) {
             const textEdits = [];
