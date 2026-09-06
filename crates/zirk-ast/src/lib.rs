@@ -156,14 +156,13 @@ pub struct AssociatedField {
     pub span: Span,
 }
 
-/// `class User { ... }`, `record Point { ... }` or `value class UserId(...)`.
+/// `class User { ... }` or `record Point { ... }`.
 ///
-/// One AST shape for the three: they share fields, methods and construction
+/// One AST shape for the two: they share fields, methods and construction
 /// machinery, and differ only in which rules the checker applies to a given
-/// [`ClassKind`] — a record or value class rejects `extends`, a custom
-/// `construct`, and mutation, and a value class is written as a single
-/// compact declaration instead of a body (`Self::to_record_style` folds that
-/// into the same shape the parser gives a `record`).
+/// [`ClassKind`] — a record rejects `extends`, a custom `construct`, and
+/// mutation, and is written as a compact declaration (`Self::to_record_style`
+/// folds it into the same shape the parser gives a `record`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,

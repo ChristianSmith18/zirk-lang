@@ -1,0 +1,4 @@
+class Box<out T> {
+    fn take(value: T): Void { }
+}
+fn main(): Void { }

@@ -1324,7 +1324,7 @@ fn invalid_record_without_a_name() {
 
 #[test]
 fn valid_value_does_not_stop_being_an_ordinary_identifier() {
-    // `value` is an ordinary identifier: there is no `value class` form.
+    // `value` is an ordinary identifier: there is no `value` keyword.
     let stmts = statements("mut value = 1;");
     let Stmt::Let(l) = &stmts[0] else {
         panic!("expected a declaration");

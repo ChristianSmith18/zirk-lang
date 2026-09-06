@@ -2623,18 +2623,38 @@ fn invalid_type_parameter_is_out_of_scope_outside_its_declaration() {
 }
 
 #[test]
-fn invalid_declared_variance_is_not_verified_yet() {
-    // The grammar accepts `in`/`out` (`ZIRK_LANGUAGE_SPEC.md` section 7), but
-    // task 7.5 of the generics slice asks for a diagnostic of its own rather
-    // than silently treating it as invariant.
-    for source in [
-        "class Box<out T> { value: T; }\nfn main(): Void { }",
+fn valid_declared_variance_in_permitted_positions() {
+    // `out T` is allowed in an immutable field and a return type.
+    accepted(
+        "class Box<out T> { inmut value: T; fn get(): T { return this.value; } }\nfn main(): Void { }",
+    );
+    // `in T` is allowed in parameter positions.
+    accepted(
         "class Sink<in T> { fn take(value: T): Void { } }\nfn main(): Void { }",
-    ] {
-        let output = rejected(source);
-        assert!(output.contains(codes::PENDING_FEATURE.as_str()), "{output}");
-        assert!(output.contains("variance"), "{output}");
-    }
+    );
+}
+
+#[test]
+fn invalid_declared_variance_in_the_wrong_position() {
+    let output = rejected(
+        "class Box<out T> { fn take(value: T): Void { } }\nfn main(): Void { }",
+    );
+    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
+    assert!(output.contains("`out T` appears in an input position"), "{output}");
+
+    let output = rejected(
+        "class Source<in T> { fn get(): T { } }\nfn main(): Void { }",
+    );
+    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
+    assert!(output.contains("`in T` appears in an output position"), "{output}");
+}
+
+#[test]
+fn invalid_declared_variance_in_a_mutable_field() {
+    let output = rejected(
+        "class Cell<out T> { mut value: T; }\nfn main(): Void { }",
+    );
+    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
 }
 
 #[test]

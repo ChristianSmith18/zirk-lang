@@ -19,7 +19,7 @@ Interfaces MAY implement interfaces; traits MAY implement interfaces and traits;
 - **THEN** the selected default is called without declaration-order precedence
 
 ### Requirement: Explicit capability derivation
-Classes SHALL NOT derive equality, hashing, or cloning silently. Records, value classes, tuples, and enums MAY request explicit derivation only when every component satisfies the required capability; derived cloning SHALL be deep.
+Classes SHALL NOT derive equality, hashing, or cloning silently. Records, tuples, and enums MAY request explicit derivation only when every component satisfies the required capability; derived cloning SHALL be deep.
 
 #### Scenario: Uncloneable component
 - **WHEN** Clone derivation is requested for a value containing an uncloneable resource

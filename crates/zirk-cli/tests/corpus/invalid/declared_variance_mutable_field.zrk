@@ -1,0 +1,4 @@
+class Cell<out T> {
+    mut value: T;
+}
+fn main(): Void { }

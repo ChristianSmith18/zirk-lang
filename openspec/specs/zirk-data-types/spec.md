@@ -166,18 +166,6 @@ A `record` SHALL be immutable and have structural semantics, per `ZIRK_LANGUAGE_
 - **WHEN** a record's field is assigned to
 - **THEN** a diagnostic is emitted indicating that a record cannot be modified
 
-### Requirement: Value classes
-
-A value class SHALL NOT have observable identity and SHALL be storable inline.
-
-#### Scenario: No identity
-- **WHEN** the identity operator is applied to two value classes with the same content
-- **THEN** a diagnostic is emitted indicating that they have no observable identity
-
-#### Scenario: Stored without indirection
-- **WHEN** a value class is a field of another declaration
-- **THEN** it occupies its space within it, with no intermediate pointer
-
 ### Requirement: Unions and aliases
 
 `A | B` SHALL declare a union, and `type` SHALL declare an alias.
@@ -195,16 +183,12 @@ A value class SHALL NOT have observable identity and SHALL be storable inline.
 - **WHEN** `type Id = Int32;` is declared
 - **THEN** `Id` and `Int32` are interchangeable
 
-### Requirement: Pointer.from accepts record and value class lvalues
-`Pointer.from(place)` SHALL accept a `place` that is an lvalue of a `record` or `value class` slot or field, provided the final pointee type is FFI-safe.
+### Requirement: Pointer.from accepts record lvalues
+`Pointer.from(place)` SHALL accept a `place` that is an lvalue of a `record` slot or field, provided the final pointee type is FFI-safe.
 
 #### Scenario: Pointer.from(record field)
 - **WHEN** the program contains `Pointer.from(record_instance.x)` inside `unsafe`
 - **THEN** the compiler lowers it to a chain of pointer-to-field operations ending at `Pointer<T>`
-
-#### Scenario: Pointer.from(value class field)
-- **WHEN** the program contains `Pointer.from(value_class_instance.y)` inside `unsafe`
-- **THEN** the compiler lowers it to a pointer into the inline value-type storage
 
 #### Scenario: Pointer.from rejects temporary value
 - **WHEN** the program contains `Pointer.from(Foo().x)` or `Pointer.from(makePoint().y)`

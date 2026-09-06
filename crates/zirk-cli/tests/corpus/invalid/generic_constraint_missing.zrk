@@ -1,0 +1,3 @@
+interface Serializable { fn serialize(): String; }
+class Box<T from Serializable> { }
+fn main(): Void { _ = Box<Int32>(); }
