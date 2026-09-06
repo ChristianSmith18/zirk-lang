@@ -109,8 +109,8 @@ scalar in either appropriate order; `Duration / Duration → Float64`;
 non-finite scalar, precision/range loss, and overflow are controlled errors.
 
 > **Status note:** literals, the operator set, sign tests, `abs()`, `sign()`,
-> component properties and printing are delivered. `total_*`/`whole_*`,
-> rounding, `format()`, `humanize()`, and `to_iso_string()` are specified
+> component properties, `total_*`/`whole_*` and printing are delivered.
+> Rounding, `format()`, `humanize()`, and `to_iso_string()` are specified
 > pending the Phase 7 `std.time` delivery.
 
 ### Examples
