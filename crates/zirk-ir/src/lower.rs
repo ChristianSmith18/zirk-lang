@@ -11679,11 +11679,21 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_tuple_length(&mut self, object: &ast::Expr, span: Span) -> Operand {
-        let ast::Expr::Tuple(t) = object else {
-            unreachable!("the checker only types `.length` on a tuple expression")
+        let count = if let ast::Expr::Tuple(t) = object {
+            t.elements.len()
+        } else {
+            let &ty = self
+                .checked
+                .expr_types
+                .get(&object.span())
+                .expect("a typed tuple expression has a semantic type");
+            let Base::Tuple(id) = ty.base else {
+                unreachable!("the checker only types `.length` on a tuple expression")
+            };
+            self.checked.tuple_types[id as usize].elements.len()
         };
         self.emit(
-            InstKind::ConstInt(t.elements.len() as i128),
+            InstKind::ConstInt(count as i128),
             IrType::Int(IntWidth::I32),
             span,
         )
@@ -13382,30 +13392,87 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_collection_to_string(operand, ty, span);
         }
 
-        if let IrType::Object(id) | IrType::Value(id) = ty
-            && let Some(method) = self.checked.classes[id as usize].method("to_string")
-        {
-            let name = body_symbol(self.checked, method);
-            let virtual_index = method.overridden.then_some(method.index as u32);
-            return match virtual_index {
-                Some(index) => self.emit(
-                    InstKind::CallVirtual {
-                        object: operand,
-                        index,
-                        args: Vec::new(),
-                    },
-                    IrType::String,
-                    span,
-                ),
-                None => self.emit(
-                    InstKind::Call {
-                        callee: name,
-                        args: vec![operand],
-                    },
-                    IrType::String,
-                    span,
-                ),
-            };
+        if let IrType::Enum(enum_id) = ty {
+            return self.lower_enum_to_string(operand, enum_id, span);
+        }
+
+        if let IrType::Value(id) = ty {
+            let has_method = (id as usize) < self.checked.classes.len()
+                && self.checked.classes[id as usize].method("to_string").is_some();
+            if has_method {
+                let method = self.checked.classes[id as usize].method("to_string").unwrap();
+                let name = body_symbol(self.checked, method);
+                let virtual_index = method.overridden.then_some(method.index as u32);
+                return match virtual_index {
+                    Some(index) => self.emit(
+                        InstKind::CallVirtual {
+                            object: operand,
+                            index,
+                            args: Vec::new(),
+                        },
+                        IrType::String,
+                        span,
+                    ),
+                    None => self.emit(
+                        InstKind::Call {
+                            callee: name,
+                            args: vec![operand],
+                        },
+                        IrType::String,
+                        span,
+                    ),
+                };
+            }
+
+            // Default rendering for tuples and records/value classes that do
+            // not declare their own `to_string`.
+            let layout_name = self.module.values[id as usize].name.clone();
+            let is_tuple = layout_name.starts_with("Tuple(");
+            let prefix = if is_tuple { "(" } else { &format!("{layout_name}(") };
+            let fields: Vec<_> = self.module.values[id as usize]
+                .fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty))
+                .collect();
+            return self.lower_default_render_to_string(
+                operand, prefix, &fields, is_tuple, span,
+            );
+        }
+
+        if let IrType::Object(id) = ty {
+            if let Some(method) = self.checked.classes[id as usize].method("to_string") {
+                let name = body_symbol(self.checked, method);
+                let virtual_index = method.overridden.then_some(method.index as u32);
+                return match virtual_index {
+                    Some(index) => self.emit(
+                        InstKind::CallVirtual {
+                            object: operand,
+                            index,
+                            args: Vec::new(),
+                        },
+                        IrType::String,
+                        span,
+                    ),
+                    None => self.emit(
+                        InstKind::Call {
+                            callee: name,
+                            args: vec![operand],
+                        },
+                        IrType::String,
+                        span,
+                    ),
+                };
+            }
+
+            let layout_name = self.module.objects[id as usize].name.clone();
+            let fields: Vec<_> = self.module.objects[id as usize]
+                .fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty))
+                .collect();
+            return self.lower_default_render_to_string(
+                operand, &format!("{layout_name}("), &fields, false, span,
+            );
         }
 
         // A value reached through a contract that declares `to_string()`:
@@ -13429,7 +13496,121 @@ impl<'a> FunctionLowering<'a> {
             );
         }
 
+        if matches!(ty, IrType::Weak(_)) {
+            return self.const_string("<Weak>", span);
+        }
+
+        if matches!(ty, IrType::Callable(_)) {
+            return self.const_string("<Callable>", span);
+        }
+
         self.emit(InstKind::ToString(operand), IrType::String, span)
+    }
+
+    /// Renders a tuple, record, or class as `Name(f0: v0, f1: v1)` or, for
+    /// tuples, `(v0, v1)`. Each field is read with `LoadField` and converted
+    /// recursively.
+    fn lower_default_render_to_string(
+        &mut self,
+        operand: Operand,
+        prefix: &str,
+        fields: &[(String, IrType)],
+        is_tuple: bool,
+        span: Span,
+    ) -> Operand {
+        let mut result = self.const_string(prefix, span);
+        for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+            if i > 0 {
+                let sep = self.const_string(", ", span);
+                result = self.emit(
+                    InstKind::Concat { left: result, right: sep },
+                    IrType::String,
+                    span,
+                );
+            }
+            if !is_tuple {
+                let label = self.const_string(&format!("{field_name}: "), span);
+                result = self.emit(
+                    InstKind::Concat { left: result, right: label },
+                    IrType::String,
+                    span,
+                );
+            }
+            let field = self.emit(
+                InstKind::LoadField {
+                    object: operand,
+                    index: i as u32,
+                },
+                *field_ty,
+                span,
+            );
+            let rendered = self.lower_to_string(field, *field_ty, span);
+            result = self.emit(
+                InstKind::Concat { left: result, right: rendered },
+                IrType::String,
+                span,
+            );
+        }
+        let close = self.const_string(")", span);
+        self.emit(
+            InstKind::Concat { left: result, right: close },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// Default `to_string` for an algebraic enum: switch on the discriminant
+    /// and return the matching variant's name.
+    fn lower_enum_to_string(&mut self, operand: Operand, enum_id: u32, span: Span) -> Operand {
+        let result_slot = self.declare_slot("<enum_to_string>", IrType::String, span);
+
+        let disc_ty = IrType::Int(IntWidth::I32);
+        let disc = if enum_has_payload(self.checked, enum_id) {
+            self.emit(InstKind::Discriminant(operand), disc_ty, span)
+        } else {
+            operand
+        };
+        let disc_slot = self.declare_slot("<enum_disc>", disc_ty, span);
+        self.emit_effect(InstKind::Store(disc_slot, disc), span);
+
+        let continue_block = self.new_block();
+        let variants = self.checked.enums[enum_id as usize].variants.clone();
+        let mut current = self.current;
+
+        for (i, variant) in variants.iter().enumerate() {
+            let arm = self.new_block();
+            self.current = current;
+            let disc = self.emit(InstKind::Load(disc_slot), disc_ty, span);
+            let index = self.emit(InstKind::ConstInt(i as i128), disc_ty, span);
+            let test = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: disc,
+                    right: index,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let next = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: test,
+                then_block: arm,
+                else_block: next,
+            });
+            self.current = arm;
+            let name = self.const_string(&variant.name, span);
+            self.emit_effect(InstKind::Store(result_slot, name), span);
+            self.terminate(Terminator::Jump(continue_block));
+            current = next;
+        }
+
+        self.current = current;
+        let fallback = self.const_string("", span);
+        self.emit_effect(InstKind::Store(result_slot, fallback), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), IrType::String, span)
     }
 
     /// `Array<T>` / `List<T>` `to_string()`: builds `[e0, e1, ...]` by
@@ -13566,7 +13747,8 @@ impl<'a> FunctionLowering<'a> {
     /// [`Self::lower_to_string`]'s expression-aware form: `Duration` is an
     /// `Int64` at the IR level, which `ToString` would render as a raw
     /// nanosecond count, so it goes through the runtime's own duration
-    /// formatter instead.
+    /// formatter instead. A bare enum variant access (`Color.Red`) is known
+    /// at compile time, so its name is returned directly.
     fn lower_to_string_expr(&mut self, expr: &ast::Expr, operand: Operand, span: Span) -> Operand {
         if self.is_duration(expr) {
             return self.emit(
@@ -13578,6 +13760,21 @@ impl<'a> FunctionLowering<'a> {
                 span,
             );
         }
+
+        if let ast::Expr::Field(field) = expr
+            && self.checked.variant_accesses.contains(&field.span)
+            && let Some(&ty) = self.checked.expr_types.get(&expr.span())
+            && matches!(ty.base, Base::Enum(_) | Base::EnumInstance(_))
+        {
+            return self.const_string(&field.name.name, span);
+        }
+
+        if let Some(&ty) = self.checked.expr_types.get(&expr.span())
+            && let Base::Enum(enum_id) = ty.base
+        {
+            return self.lower_enum_to_string(operand, enum_id, span);
+        }
+
         let ty = self.type_of(expr, expr.span());
         self.lower_to_string(operand, ty, span)
     }
@@ -13762,12 +13959,20 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             return false;
         };
-        field.name.name == "to_string"
-            && !self.checked.variant_accesses.contains(&field.span)
-            && !matches!(
-                self.type_of(&field.object, field.object.span()),
-                IrType::Object(_) | IrType::Value(_) | IrType::Contract(_)
-            )
+        if field.name.name != "to_string" || self.checked.variant_accesses.contains(&field.span) {
+            return false;
+        }
+        match self.type_of(&field.object, field.object.span()) {
+            IrType::Object(id) => {
+                self.checked.classes[id as usize].method("to_string").is_none()
+            }
+            IrType::Value(id) => {
+                (id as usize) >= self.checked.classes.len()
+                    || self.checked.classes[id as usize].method("to_string").is_none()
+            }
+            IrType::Contract(_) => false,
+            _ => true,
+        }
     }
 
     /// Whether `call` is `regex.matches(text)` or `regex.replace(text, repl)`.

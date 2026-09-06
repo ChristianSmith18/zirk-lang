@@ -932,8 +932,7 @@ fn valid_string_interpolation_yields_string() {
 #[test]
 fn invalid_string_interpolation_of_a_type_without_a_text_form() {
     let output = rejected(
-        "class User { construct() { } }
-         fn main(): Void { mut u = User(); mut s = \"u: {u}\"; }",
+        "fn main(): Void { mut x = 42; mut p: Pointer<Int32> = unsafe { Pointer.from(x) }; mut s = \"p: {p}\"; }",
     );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
     assert!(output.contains("cannot be printed"));

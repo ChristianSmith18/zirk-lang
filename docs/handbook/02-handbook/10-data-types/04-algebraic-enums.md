@@ -68,7 +68,7 @@ a time. Generic algebraic enums are allowed (generic enum lowering delivered by
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `LoadState.Ready(doc)` | `LoadState` | Variants are ordinary typed constructors | implemented |
-| `value.to_string()` | `String` | Universal member | specified |
+| `value.to_string()` | `String` | Universal member | implemented |
 | `value.clone()` | `LoadState` | Derived `Clone` when every payload is `Clone` | specified |
 
 > Payload extraction is legal only inside `match`; direct enum destructuring is

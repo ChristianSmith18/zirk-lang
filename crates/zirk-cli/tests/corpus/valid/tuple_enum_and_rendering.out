@@ -1,0 +1,12 @@
+3
+(1, a, true)
+Red
+0
+Red
+Green
+Circle
+Point(x: 1, y: 2, name: origin, tag: Tag(label: A))
+Point(x: 1, y: 2, name: origin, tag: Tag(label: A))
+Person(name: Ana, age: 30)
+<Callable>
+<Callable>

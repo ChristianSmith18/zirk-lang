@@ -63,10 +63,10 @@
 
 ## 8. Data types
 
-- [ ] 8.1 Tuple `length`, `to_string`
-- [ ] 8.2 Traditional-enum `case.name`, `case.value`, `case.to_string()`
-- [ ] 8.3 Default `to_string` for `record`/algebraic-enum/`class`/`Weak`/callable values
-- [ ] 8.4 Corpus fixtures
+- [x] 8.1 Tuple `length`, `to_string`
+- [x] 8.2 Traditional-enum `case.name`, `case.value`, `case.to_string()`
+- [x] 8.3 Default `to_string` for `record`/algebraic-enum/`class`/`Weak`/callable values
+- [x] 8.4 Corpus fixtures
 - [ ] 8.5 Handbook statuses in `10-data-types`, `00-tuples`, `03-traditional-enums`, `04-algebraic-enums`, `01-records`, `12-function-types`, `04-safe-references`, `08-classes-and-objects`
 
 ## 9. Verification and docs

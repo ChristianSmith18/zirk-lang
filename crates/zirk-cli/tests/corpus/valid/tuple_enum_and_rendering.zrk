@@ -1,0 +1,51 @@
+// Tuple length/to_string, enum case members and default rendering for
+// records, classes, algebraic enums and callable values.
+fn double(x: Int32): Int32 { return x * 2; }
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+    Circle(radius: Float64),
+    Rectangle(width: Float64, height: Float64)
+}
+
+class Tag {
+    label: String;
+    construct(label: String) { this.label = label; }
+}
+
+record Point {
+    x: Int32;
+    y: Int32;
+    name: String;
+    tag: Tag;
+}
+
+class Person {
+    name: String;
+    age: Int32;
+    construct(name: String, age: Int32) {
+        this.name = name;
+        this.age = age;
+    }
+}
+
+fn main(): Void {
+    inmut t = (1, "a", true);
+    stdout.println(t.length.to_string());
+    stdout.println(t.to_string());
+    stdout.println(Color.Red.name);
+    stdout.println(Color.Red.value.to_string());
+    stdout.println(Color.Red.to_string());
+    inmut c = Color.Green;
+    stdout.println(c.to_string());
+    inmut s: Shape = Shape.Circle(5.0);
+    stdout.println(s.to_string());
+    inmut p = Point(x: 1, y: 2, name: "origin", tag: Tag("A"));
+    stdout.println(p.to_string());
+    stdout.println(p);
+    inmut person = Person("Ana", 30);
+    stdout.println(person.to_string());
+    stdout.println(double.to_string());
+    stdout.println(double);
+}
