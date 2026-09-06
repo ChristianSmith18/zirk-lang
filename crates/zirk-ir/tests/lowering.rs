@@ -64,7 +64,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 12] = [
+const NATIVE_FAILURE_CODES: [&str; 13] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -81,6 +81,9 @@ const NATIVE_FAILURE_CODES: [&str; 12] = [
     "E_PARSE",
     "E_OVERFLOW",
     "E_REGEX",
+    // `enum-static-members`: the `Result`-carried error type of
+    // `EnumType.from_name`/`EnumType.from_value`.
+    "E_LOOKUP",
 ];
 
 const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
@@ -2588,4 +2591,123 @@ fn map_and_set_methods_lower_to_dedicated_instructions() {
     assert!(kinds.iter().any(|k| matches!(k, InstKind::SetAdd { .. })), "{kinds:?}");
     assert!(kinds.iter().any(|k| matches!(k, InstKind::SetContains { .. })), "{kinds:?}");
     assert!(kinds.iter().any(|k| matches!(k, InstKind::SetRemove { .. })), "{kinds:?}");
+}
+
+// --- Enum static members (`enum-static-members`) ---------------------------
+
+#[test]
+fn enum_count_lowers_to_a_constant() {
+    let module = compile(
+        "enum Direction { North, South, East, West }
+         fn main(): Void { mut n = Direction.count; }",
+    );
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main).contains(&InstKind::ConstInt(4)),
+        "count is the variant count, at compile time"
+    );
+}
+
+#[test]
+fn enum_keys_lowers_to_a_list_of_names() {
+    let module = compile(
+        "enum Direction { North, South }
+         fn main(): Void { mut names = Direction.keys(); }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })), "{kinds:?}");
+    let adds = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::ListAdd { .. }))
+        .count();
+    assert_eq!(adds, 2, "one ListAdd per variant");
+    assert!(
+        module.strings.iter().any(|s| s == "North") && module.strings.iter().any(|s| s == "South"),
+        "the case names are interned: {:?}",
+        module.strings
+    );
+}
+
+#[test]
+fn enum_values_lowers_to_a_list_of_discriminants() {
+    let module = compile(
+        "enum Direction { North, South }
+         fn main(): Void { mut values = Direction.values(); }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })), "{kinds:?}");
+    // A traditional enum's value is its `Int32` discriminant — the list is
+    // two `ConstInt`s added in declaration order.
+    let adds: Vec<_> = kinds
+        .iter()
+        .filter_map(|k| match k {
+            InstKind::ListAdd { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(adds.len(), 2, "one ListAdd per variant");
+}
+
+#[test]
+fn enums_helpers_lower_like_the_direct_members() {
+    let module = compile(
+        "enum Direction { North, South }
+         fn main(): Void {
+             mut n = Enums.count(Direction);
+             mut names = Enums.keys(Direction);
+             mut values = Enums.values(Direction);
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert!(kinds.contains(&InstKind::ConstInt(2)), "Enums.count is a constant");
+    let lists = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::ListNew { .. }))
+        .count();
+    assert_eq!(lists, 2, "keys() and values() each build a list");
+}
+
+#[test]
+fn from_name_lowers_to_a_comparison_chain_producing_a_result() {
+    let module = compile(
+        "enum Direction { North, South }
+         fn main(): Void { mut r = Direction.from_name(\"North\"); }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    // One equality per case, and the two `Result` variants built at the ends
+    // of the chain: `Ok` on a match, `Err(LookupError)` on the fall-through.
+    let comparisons = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::Binary { op: BinaryOp::Eq, .. }))
+        .count();
+    assert_eq!(comparisons, 2, "one test per case");
+    let builds = kinds
+        .iter()
+        .filter(|k| matches!(k, InstKind::BuildEnum { .. }))
+        .count();
+    assert_eq!(builds, 3, "two Ok arms and the Err tail");
+    let branches = main
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
+        .count();
+    assert_eq!(branches, 2, "the chain branches once per case");
+}
+
+#[test]
+fn from_value_compares_against_the_mapping() {
+    let module = compile(
+        "enum ExitCode { Success -> 0, Failure -> 1 }
+         fn main(): Void { mut r = ExitCode.from_value(1); }",
+    );
+    let main = module.function("main").expect("main exists");
+    let comparisons = instructions(main)
+        .iter()
+        .filter(|k| matches!(k, InstKind::Binary { op: BinaryOp::Eq, .. }))
+        .count();
+    assert_eq!(comparisons, 2, "one test per mapped case");
 }

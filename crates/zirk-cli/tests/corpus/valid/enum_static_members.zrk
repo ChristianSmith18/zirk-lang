@@ -1,0 +1,51 @@
+enum Direction { North, South, East, West }
+enum ExitCode { Success -> 0, Failure -> 1 }
+enum HttpStatus { Ok -> "ok", NotFound -> "not-found" }
+
+fn main(): Void {
+    stdout.println(Direction.count);
+    stdout.println(Enums.count(ExitCode));
+
+    for name in Direction.keys() {
+        stdout.println(name);
+    }
+    for name in Enums.keys(ExitCode) {
+        stdout.println(name);
+    }
+
+    for d in Direction.values() {
+        stdout.println(d.value);
+        stdout.println(d.name);
+    }
+    for c in Enums.values(ExitCode) {
+        stdout.println(c.value);
+    }
+
+    mut found = Direction.from_name("East");
+    if found.is_ok() {
+        stdout.println(found.unwrap().value);
+    } else {
+        stdout.println("miss");
+    }
+    mut miss = Direction.from_name("Up");
+    if miss.is_error() {
+        stdout.println("miss");
+    }
+
+    mut code = ExitCode.from_value(1);
+    if code.is_ok() {
+        stdout.println(code.unwrap().name);
+    }
+    mut nomap = Direction.from_value(2);
+    if nomap.is_ok() {
+        stdout.println(nomap.unwrap().name);
+    }
+    mut bad = ExitCode.from_value(99);
+    if bad.is_error() {
+        stdout.println("miss");
+    }
+    mut text = HttpStatus.from_value("not-found");
+    if text.is_ok() {
+        stdout.println(text.unwrap().name);
+    }
+}

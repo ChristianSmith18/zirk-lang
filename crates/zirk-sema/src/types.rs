@@ -793,7 +793,22 @@ pub struct EnumVariantInfo {
     pub name: String,
     /// Empty for a traditional variant or a bare algebraic one.
     pub associated: Vec<AssociatedFieldInfo>,
+    /// The resolved value of the variant's `->` mapping (`enum-static-members`),
+    /// when it declared one. Only ever a string or integer literal — the
+    /// checker rejects any other shape — so the value is kept already
+    /// evaluated: `EnumType.from_value` compares against it at run time and
+    /// lowering needs no expression of its own to reach it.
+    pub mapping: Option<VariantMapping>,
     pub span: zirk_diagnostics::Span,
+}
+
+/// The resolved value of a traditional variant's `->` mapping
+/// (`enum-static-members`): a string or integer literal, the only two shapes
+/// the mapping grammar accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariantMapping {
+    Int(i64),
+    Text(String),
 }
 
 /// One named, typed value an algebraic variant carries.
@@ -1230,6 +1245,7 @@ mod tests {
         let variant = |name: &str| EnumVariantInfo {
             name: name.into(),
             associated: Vec::new(),
+            mapping: None,
             span: zirk_diagnostics::Span::new(0, 0),
         };
         let e = EnumType {

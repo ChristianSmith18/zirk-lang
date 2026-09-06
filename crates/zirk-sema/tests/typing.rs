@@ -2856,6 +2856,107 @@ fn invalid_literal_pattern_destructuring_a_variant_is_not_lowered_yet() {
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
+// --- Enum static members (`enum-static-members`) ------------------------------
+
+#[test]
+fn valid_enum_static_members_on_a_traditional_enum() {
+    accepted(
+        "enum Direction { North, South, East, West }
+         fn main(): Void {
+             mut n: Int32 = Direction.count;
+             mut names: List<String> = Direction.keys();
+             mut values: List<Direction> = Direction.values();
+             mut found = Direction.from_name(\"North\");
+             mut by_value = Direction.from_value(0);
+         }",
+    );
+}
+
+#[test]
+fn valid_enums_helpers_take_an_enum_type_name() {
+    accepted(
+        "enum Direction { North, South }
+         fn main(): Void {
+             mut names: List<String> = Enums.keys(Direction);
+             mut values: List<Direction> = Enums.values(Direction);
+             mut n: Int32 = Enums.count(Direction);
+         }",
+    );
+}
+
+#[test]
+fn invalid_from_value_on_an_algebraic_enum() {
+    // A payload case cannot be materialized out of nothing — `Shape.Circle`
+    // needs its `radius`.
+    for call in ["values()", "from_name(\"x\")", "from_value(0)"] {
+        let output = rejected(&format!(
+            "enum Shape {{ Circle(radius: Int32), Point }}
+             fn main(): Void {{ mut r = Shape.{call}; }}",
+        ));
+        assert!(
+            output.contains(codes::UNKNOWN_MEMBER.as_str()),
+            "for `{call}`:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn invalid_enum_static_call_with_the_wrong_argument_count() {
+    for call in [
+        "Direction.keys(1)",
+        "Direction.values(1)",
+        "Direction.from_name()",
+        "Direction.from_name(\"a\", \"b\")",
+        "Direction.from_value()",
+    ] {
+        let output = rejected(&format!(
+            "enum Direction {{ North, South }}
+             fn main(): Void {{ mut r = {call}; }}",
+        ));
+        assert!(
+            output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+            "for `{call}`:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn invalid_from_name_with_a_non_string_argument() {
+    let output = rejected(
+        "enum Direction { North, South }
+         fn main(): Void { mut r = Direction.from_name(3); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_from_value_argument_against_the_mapping_type() {
+    // `ExitCode`'s mappings are integers, so the lookup takes an `Int32`.
+    let output = rejected(
+        "enum ExitCode { Success -> 0, Failure -> 1 }
+         fn main(): Void { mut r = ExitCode.from_value(\"x\"); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_enums_helper_on_a_non_enum_name() {
+    let output = rejected(
+        "class Box { }
+         fn main(): Void { mut r = Enums.keys(Box); }",
+    );
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_enum_mixing_string_and_integer_mappings_has_no_lookup_type() {
+    let output = rejected(
+        "enum Mixed { A -> \"x\", B -> 1 }
+         fn main(): Void { mut r = Mixed.from_value(\"x\"); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
 // --- Records ------------------------------------------------------------------
 
 #[test]

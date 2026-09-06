@@ -1,0 +1,5 @@
+enum Shape { Circle(radius: Int32), Point }
+
+fn main(): Void {
+    mut r = Shape.from_value(0);
+}
