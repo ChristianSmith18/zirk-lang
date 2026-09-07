@@ -1,0 +1,7 @@
+class Math {
+    static fn add(a: Int32, b: Int32): Int32 { return a + b; }
+}
+
+fn main(): Void {
+    stdout.println(Math.add(2, 3));
+}

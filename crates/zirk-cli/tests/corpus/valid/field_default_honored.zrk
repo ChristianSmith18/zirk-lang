@@ -1,0 +1,12 @@
+class Box {
+    width: Int32 = 10;
+    height: Int32 = 20;
+
+    construct() {}
+}
+
+fn main(): Void {
+    mut b = Box();
+    stdout.println(b.width);
+    stdout.println(b.height);
+}
