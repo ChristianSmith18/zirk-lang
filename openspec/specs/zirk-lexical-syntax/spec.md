@@ -6,6 +6,7 @@ Defines the lexicon of Zirk: tokens, literals, comments, locations and lexical e
 
 The keywords of the whole language are recognized, not only those of the implemented subset, so a construct from a later phase can be told apart from a syntax error.
 ## Requirements
+
 ### Requirement: Tokenization of the subset
 
 The lexer SHALL convert `.zrk` source text into a sequence of tokens, each with its location in the source.
@@ -13,10 +14,12 @@ The lexer SHALL convert `.zrk` source text into a sequence of tokens, each with 
 The subset's tokens are: identifiers, keywords, integer literals, string literals, Boolean literals, operators, delimiters, and end of file.
 
 #### Scenario: Minimal program
+
 - **WHEN** `fn main(): Void { }` is tokenized
 - **THEN** the sequence produced is: keyword `fn`, identifier `main`, `(`, `)`, `:`, type identifier `Void`, `{`, `}`, end of file
 
 #### Scenario: Location of each token
+
 - **WHEN** any input is tokenized
 - **THEN** each token exposes its starting file, line, and column, 1-based
 - **AND** the column counts Unicode characters, not bytes
@@ -28,18 +31,22 @@ binary (`0b`) base, allowing `_` as a separator between digits, per
 `ZIRK_LANGUAGE_SPEC.md` section 3 and `docs/handbook/11-reference/04-literals.md`.
 
 #### Scenario: Simple integer
+
 - **WHEN** `42` is tokenized
 - **THEN** an integer literal with value 42 is produced
 
 #### Scenario: Thousands separator
+
 - **WHEN** `1_000_000` is tokenized
 - **THEN** an integer literal with value 1000000 is produced
 
 #### Scenario: Separator in an invalid position
+
 - **WHEN** `_1000` or `1000_` is tokenized
 - **THEN** an error diagnostic with a stable code, cause, and help is emitted
 
 #### Scenario: Hexadecimal and binary base
+
 - **WHEN** `0xff` or `0b1010` is tokenized
 - **THEN** an integer literal with value 255 and 10 respectively is produced
 - **AND** no invalid-suffix diagnostic is emitted
@@ -49,19 +56,23 @@ binary (`0b`) base, allowing `_` as a separator between digits, per
 The lexer SHALL recognize string literals delimited by double quotes, with escape sequences.
 
 #### Scenario: Simple string
+
 - **WHEN** `"Hello"` is tokenized
 - **THEN** a string literal with content `Hola` is produced
 
 #### Scenario: Escape sequences
+
 - **WHEN** a string contains `\n`, `\t`, `\"`, or `\\`
 - **THEN** the literal represents them as a newline, tab, quote, and backslash
 
 #### Scenario: Unclosed string
+
 - **WHEN** a string is not closed before the end of the line or the file
 - **THEN** a diagnostic pointing to the string's opening is emitted
 - **AND** the help indicates that the closing quote is missing
 
 #### Scenario: Unknown escape
+
 - **WHEN** a string contains an unrecognized escape sequence
 - **THEN** a diagnostic pointing to the sequence is emitted
 
@@ -70,6 +81,7 @@ The lexer SHALL recognize string literals delimited by double quotes, with escap
 The lexer SHALL recognize `true` and `false` as Boolean literals, not as identifiers.
 
 #### Scenario: Boolean values
+
 - **WHEN** `true` or `false` is tokenized
 - **THEN** a Boolean literal is produced
 
@@ -78,14 +90,17 @@ The lexer SHALL recognize `true` and `false` as Boolean literals, not as identif
 The lexer SHALL recognize line comments `//` and block comments `/* ... */`, discarding them from the token sequence.
 
 #### Scenario: Line comment
+
 - **WHEN** a line contains `// text`
 - **THEN** the content from `//` to the end of the line produces no tokens
 
 #### Scenario: Block comment
+
 - **WHEN** the source contains `/* text */`
 - **THEN** the delimited content produces no tokens
 
 #### Scenario: Unclosed block comment
+
 - **WHEN** a block comment is not closed before the end of the file
 - **THEN** a diagnostic pointing to its opening is emitted
 
@@ -96,6 +111,7 @@ The lexer SHALL recognize as keywords those of the whole language, not only thos
 Recognizing them allows the parser to distinguish an unimplemented construct from a syntax error, and makes the diagnostic understandable.
 
 #### Scenario: Keyword outside the subset
+
 - **WHEN** `class`, `for`, `match`, `task`, or another keyword of the whole language is tokenized
 - **THEN** the corresponding keyword token is produced
 - **AND** no identifier is produced
@@ -105,6 +121,7 @@ Recognizing them allows the parser to distinguish an unimplemented construct fro
 The lexer SHALL distinguish uppercase from lowercase, per `ZIRK_LANGUAGE_SPEC.md` section 1.
 
 #### Scenario: Identifier that differs only in capitalization
+
 - **WHEN** `total` and `Total` are tokenized
 - **THEN** two distinct identifiers are produced
 
@@ -113,6 +130,7 @@ The lexer SHALL distinguish uppercase from lowercase, per `ZIRK_LANGUAGE_SPEC.md
 The lexer SHALL emit a diagnostic for any character that does not belong to the lexicon, instead of silently discarding it.
 
 #### Scenario: Invalid character
+
 - **WHEN** the source contains a character that does not start any valid token
 - **THEN** a diagnostic with the character's exact location is emitted
 
@@ -122,25 +140,30 @@ A fractional literal suffixed with `f` or `fN` SHALL be classified as a binary f
 
 #### Scenario: `f` suffix resolves to `Float64`
 
+
 - **WHEN** the literal `1.5f` is tokenized and typed
 - **THEN** the resulting type is `Float64`
 
 #### Scenario: `f32` suffix resolves to `Float32`
+
 
 - **WHEN** the literal `1.5f32` is tokenized and typed
 - **THEN** the resulting type is `Float32`
 
 #### Scenario: `d` suffix resolves to `Decimal`
 
+
 - **WHEN** the literal `1.5d` is tokenized and typed
 - **THEN** the resulting type is `Decimal`
 
 #### Scenario: Unsuffixed fractional literal resolves to `Decimal`
 
+
 - **WHEN** the literal `1.5` is tokenized and typed without context
 - **THEN** the resulting type is `Decimal`
 
 #### Scenario: Old `b` suffix is rejected
+
 
 - **WHEN** the literal `1.5b` is tokenized
 - **THEN** a diagnostic states that the binary suffix is now `f` and the exact decimal suffix is `d`
@@ -150,6 +173,7 @@ A fractional literal suffixed with `f` or `fN` SHALL be classified as a binary f
 The lexer SHALL recognize `..=` as its own token, distinct from `..` and from `.`, applying longest-match.
 
 #### Scenario: Inclusive range
+
 - **WHEN** `0..=10` is tokenized
 - **THEN** the inclusive-range tokens are produced, not `..` followed by `=`
 
@@ -162,11 +186,13 @@ and the compiler SHALL NOT defer them with a phase diagnostic.
 
 #### Scenario: Power
 
+
 - **WHEN** `value ** 2` or `value **= 2` is tokenized
 - **THEN** the power and compound-power tokens are produced
 - **AND** two consecutive multiplication tokens are NOT produced
 
 #### Scenario: Power tokens carry no arrival phase
+
 
 - **WHEN** the phase of `**` or `**=` is queried
 - **THEN** it reports that the token is part of the implemented subset, not a
@@ -179,11 +205,13 @@ assignment forms, present at levels 7 through 10 and 18 of
 `docs/handbook/11-reference/02-operators-and-precedence.md`.
 
 #### Scenario: Bitwise operator
+
 - **WHEN** `flags & mask` or `value << 2` is tokenized
 - **THEN** the corresponding operator token is produced
 - **AND** no unrecognized-character diagnostic is emitted
 
 #### Scenario: Logical conjunction versus bitwise
+
 - **WHEN** `a && b` and `a & b` are tokenized
 - **THEN** two distinct tokens are produced, by longest-match
 
@@ -197,14 +225,17 @@ The lexer SHALL NOT decide whether the content is exactly one grapheme: that
 check belongs to `Char`'s semantics.
 
 #### Scenario: ASCII character
+
 - **WHEN** `'a'` is tokenized
 - **THEN** a character literal with that content is produced
 
 #### Scenario: Composite grapheme
+
 - **WHEN** a character literal contains a family emoji formed by several code points
 - **THEN** a single character literal that retains all its code points is produced
 
 #### Scenario: Unclosed character literal
+
 - **WHEN** a character literal reaches the end of the line or the file without its closing quote
 - **THEN** a diagnostic pointing to its opening is emitted
 
@@ -214,10 +245,12 @@ The lexer SHALL recognize regex literals delimited as `re'pattern'`,
 preserving escapes for the regular-expression parser.
 
 #### Scenario: Regex literal
+
 - **WHEN** the source contains `re'^[0-9]+$'`
 - **THEN** a single regex literal with the pattern text is produced
 
 #### Scenario: Unclosed regex
+
 - **WHEN** a regex literal reaches the end of the line or the file without its closing quote
 - **THEN** a diagnostic pointing to the `re'` opening is emitted
 
@@ -231,19 +264,23 @@ The same balancing rules SHALL apply to an interpolated range bound such as
 `0..{number}`.
 
 #### Scenario: Interpolated string
+
 - **WHEN** `"value={value}"` is tokenized
 - **THEN** the literal keeps the textual part and the embedded expression separately
 - **AND** the braces are NOT part of the text
 
 #### Scenario: Nested braces
+
 - **WHEN** an interpolation itself contains balanced braces
 - **THEN** the interpolation closes at its matching brace, not at the first one
 
 #### Scenario: Unclosed interpolation
+
 - **WHEN** an interpolation does not close before the end of the literal
 - **THEN** a diagnostic pointing to its opening is emitted
 
 #### Scenario: Interpolated range bound
+
 - **WHEN** the source contains `0..{number}.step(1)`
 - **THEN** the token stream retains the interpolated bound as an expression within the range
 
@@ -254,10 +291,12 @@ suffixes `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, or `w`, allowing a negative
 sign, without treating `m` as a calendar month.
 
 #### Scenario: Duration suffixes
+
 - **WHEN** the source contains `10ns`, `500ms`, `2h`, `3d`, or `-3s`
 - **THEN** each is emitted as a duration literal with its unit
 
 #### Scenario: A calendar month is not a duration
+
 - **WHEN** a developer needs a calendar month
 - **THEN** the documented form is a `Period` constructor, not a duration suffix
 
@@ -276,15 +315,18 @@ reserving them would invalidate `mut value = 1;` and
 spec's own examples.
 
 #### Scenario: Contract from a later phase
+
 - **WHEN** `interface` or `trait` is tokenized
 - **THEN** the corresponding keyword token is produced
 - **AND** no identifier is produced
 
 #### Scenario: Post-condition loop
+
 - **WHEN** `do { } while pending;` is tokenized
 - **THEN** `do` and `while` are produced as keywords
 
 #### Scenario: Contextual word as an identifier
+
 - **WHEN** `mut value = 1;` or `mut strict = true;` is tokenized
 - **THEN** `value` and `strict` are produced as identifiers
 
@@ -294,10 +336,34 @@ Every keyword and every operator outside the implemented subset SHALL declare
 the phase the roadmap assigns to it.
 
 #### Scenario: Error-handling keyword
+
 - **WHEN** the phase of `default` is queried
 - **THEN** it declares the phase of `try`/`catch`, not that of decorators
 
 #### Scenario: Pipe operator
+
 - **WHEN** the phase of `|>` is queried
 - **THEN** it declares the phase of the functional style, not that of objects
 
+### Requirement: Member marker token `#`
+
+The lexer SHALL recognize `#` as its own token, used to introduce member markers such as `#override`. `#` SHALL NOT combine with the following identifier into a single token; the marker name is a separate identifier or keyword.
+
+#### Scenario: Marker token
+
+- **WHEN** `#override` is tokenized
+- **THEN** a `#` token followed by the `override` keyword is produced
+
+#### Scenario: `#` away from a member
+
+- **WHEN** `#` appears where no member marker is legal
+- **THEN** the token is produced and the parser emits the corresponding diagnostic
+
+### Requirement: `final` is a reserved word
+
+The lexer SHALL recognize `final` as a keyword of the whole language, so it can be used as the class/member sealing modifier and produce targeted diagnostics elsewhere.
+
+#### Scenario: Final keyword
+
+- **WHEN** `final` is tokenized
+- **THEN** a keyword token is produced and no identifier is produced
