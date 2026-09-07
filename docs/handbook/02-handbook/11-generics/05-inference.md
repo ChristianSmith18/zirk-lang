@@ -13,9 +13,13 @@ Inference never chooses an arbitrary type when evidence conflicts. In that case,
 Public behavior cannot depend on which internal inference path happened to win. Diagnostics should identify the conflicting positions and unmet constraints.
 
 Explicit type arguments resolve ambiguity. Defaults apply only to trailing
-parameters after inference uses available evidence. Constructors reuse the
-type's parameters rather than declaring an independent generic list; use a
-generic factory when construction needs new type variables.
+parameters after inference uses available evidence: `<T = Int32>` is legal on
+a type declaration, `Box<>` selects the default explicitly, and the default
+is checked against the parameter's `from` constraint. Defaults on the type
+parameters of a user-defined generic function are specified but not yet
+implemented. Constructors reuse the type's parameters rather than declaring
+an independent generic list; use a generic factory when construction needs
+new type variables.
 
 ---
 

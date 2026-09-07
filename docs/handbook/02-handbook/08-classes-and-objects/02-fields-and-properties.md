@@ -17,6 +17,26 @@ private mut balance: Float;
 public inmut account_id: UInt64;
 ```
 
+An attribute may declare an initializer with `field: Type = expr;`:
+
+```zirk
+class Box {
+    width: Int32 = 10;
+    height: Int32 = 20;
+
+    construct() {}
+}
+```
+
+Initializers run in declaration order before the constructor body. An
+initializer cannot reference `this`, and for inherited fields the `super()`
+call still comes first. A constructor that assigns the field wins over the
+initializer:
+
+```zirk
+construct(w: Int32) { this.width = w; } // height keeps 20
+```
+
 An attribute without an initializer receives the default value of its declared
 type; there is no reserved `default` expression. Validation, computed access,
 and storage hiding use ordinary methods named by convention:

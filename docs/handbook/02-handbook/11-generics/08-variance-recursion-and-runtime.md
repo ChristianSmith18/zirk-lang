@@ -9,9 +9,11 @@ interface Sink<in T> { fn accept(value: T): Void; }
 class Cell<T> { mut value: T; } // invariant: reads and writes T
 ```
 
-The checker validates every occurrence. Returning an `in T`, accepting an
-`out T`, or exposing either through mutable storage is an error. Function types
-inside a generic member retain their own variance rules.
+The checker validates every occurrence positionally — this verification is
+implemented, not just specified. Returning an `in T`, accepting an `out T`,
+or exposing either through mutable storage (`mut value: T` forces invariance)
+is a compile-time error. Function types inside a generic member retain their
+own variance rules.
 
 Recursive constraints are legal when checking reaches a stable solution. A
 type cannot contain itself inline without end; managed `Box<T>` supplies finite

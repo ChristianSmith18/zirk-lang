@@ -8,7 +8,17 @@ When combined traits provide incompatible members, the type must resolve the con
 
 Traits cannot declare attributes, constructors, or stored state. Resolve a
 conflict with an explicit `override fn`; its body can select one reusable
-implementation with `TraitName.super.method()`.
+implementation with `TraitName.super.method()`:
+
+```zirk
+fn buildGreeting(): String {
+    return Greeter.super.buildGreeting() + " " + this.name;
+}
+```
+
+`TraitName.super.method()` is a direct call to that trait's default, not a
+dynamic dispatch — it names exactly which implementation runs, so declaration
+order never silently chooses semantics.
 
 ```zirk
 trait Loggable {

@@ -5,8 +5,8 @@ Core declarations and control words include `fn`, `gen`, `yield`, `class`,
 `use`, `mut`, `inmut`, `if`, `else`, `match`, `with`, `for`, `in`,
 `while`, `do`, `loop`, `break`, `continue`, `return`, `try`, `catch`, `finally`,
 `throw`, `throws`, `unsafe`, `commit`, `task`, `await`, `select`, `parallel`, `thread`, `abstract`,
-`implements`, `extends`, `override`, `from`, `as`, `is`, `public`, `private`,
-and `protected`. Manifest control includes
+`implements`, `extends`, `override`, `from`, `as`, `is`, `static`, `super`,
+`public`, `private`, and `protected`. Manifest control includes
 `requires`, `permissions`, and `during`. `scope`, `shield`, `after`,
 `cancelled`, and `default` are contextual words in the applicable task/select
 forms rather than general reserved values.

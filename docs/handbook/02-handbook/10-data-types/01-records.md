@@ -60,7 +60,7 @@ hashable).
 | --- | --- | --- | --- |
 | `Point(x:, y:)` | `Point` | Named-only construction; omitted fields take the declared default | implemented |
 | `r.to_string()` | `String` | Universal member | implemented |
-| `r.clone()` | `Point` | Derived `Clone` when every field is `Clone` | specified — derived `Clone` for `record` is pending |
+| `r.clone()` | `Point` | Derived `Clone` when every field is `Clone` | implemented |
 | user `fn` members | varies | Non-mutating computed methods only | implemented |
 
 Records cannot declare a custom `construct`, mutate an attribute, inherit from

@@ -3,7 +3,10 @@
 Zirk permits overloading only through contracts defined by the language. A type cannot invent arbitrary symbolic operators or change an operator's precedence, arity, or evaluation category.
 
 Classes implement the reserved method associated with an operator. `_add`
-implements `+` and `_subtract` implements `-`:
+implements `+` and `_subtract` implements `-`. The comparison operators are
+contracts of the same kind: `<`, `<=`, `>`, and `>=` resolve to `_less`,
+`_less_equal`, `_greater`, and `_greater_equal`, and `!=` is the negation of
+`_equals`:
 
 ```zirk
 class Vector2 {
