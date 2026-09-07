@@ -59,7 +59,7 @@ jobs:
           # plataforma que todavia no esta estable.
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # --- LLVM: Linux -----------------------------------------------------
       # apt.llvm.org publica las bibliotecas estaticas en el paquete -dev, que
