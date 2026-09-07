@@ -14,6 +14,7 @@ VS Code extension offering syntax highlighting, diagnostics, and language config
 - **Task Provider:** Provides `zirk: build` and `zirk: run` tasks that can be invoked from the `Tasks: Run Task` command or configured in `.vscode/tasks.json`.
 - **Auto-Closing Pairs:** Automatic completion of curly braces `{}`, square brackets `[]`, parentheses `()`, and quotation marks `""`.
 - **Comment Toggling:** Standard toggle for line comments (`//`) and block comments (`/* ... */`).
+- **Init File Icon:** Files named `.zkinit` (or ending in `.zkinit`) use the dedicated `zirk-init` icon (Zirk mark with a configuration gear) while keeping full Zirk syntax highlighting. They are a separate `zirk-init` language surface, so compile/check commands do not run on them.
 
 ## Installation for Local Testing
 

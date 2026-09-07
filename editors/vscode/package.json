@@ -105,6 +105,24 @@
           "light": "./images/logo.svg",
           "dark": "./images/logo.svg"
         }
+      },
+      {
+        "id": "zirk-init",
+        "aliases": [
+          "Zirk Init",
+          "zirk-init"
+        ],
+        "extensions": [
+          ".zkinit"
+        ],
+        "filenames": [
+          ".zkinit"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./images/zirk-init-gear.svg",
+          "dark": "./images/zirk-init-gear.svg"
+        }
       }
     ],
     "grammars": [
@@ -112,11 +130,20 @@
         "language": "zirk",
         "scopeName": "source.zirk",
         "path": "./syntaxes/zirk.tmLanguage.json"
+      },
+      {
+        "language": "zirk-init",
+        "scopeName": "source.zirk",
+        "path": "./syntaxes/zirk.tmLanguage.json"
       }
     ],
     "snippets": [
       {
         "language": "zirk",
+        "path": "./snippets/zirk.json"
+      },
+      {
+        "language": "zirk-init",
         "path": "./snippets/zirk.json"
       }
     ]

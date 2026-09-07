@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 48 48"
+     role="img"
+     aria-labelledby="title">
+
+  <title id="title">Zirk Configuration File</title>
+
+  <defs>
+    <linearGradient id="zirkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="40%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+
+    <linearGradient id="slashGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+
+    <linearGradient id="gearGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#93c5fd"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Zirk logo -->
+  <path
+    fill="none"
+    stroke="url(#zirkGrad)"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="5.25"
+    d="M12.8 12h20L14.4 36h20.8"
+  />
+
+  <path
+    fill="none"
+    stroke="url(#slashGrad)"
+    stroke-linecap="round"
+    stroke-width="5.25"
+    d="M16 8l16 32"
+  />
+
+  <!-- Large configuration gear -->
+  <g transform="translate(36.5 35.5)">
+    <!-- dark outline to separate it from the Z -->
+    <path
+      d="
+        M0-10
+        L3-9.3
+        L4.2-6.8
+        L7-6.5
+        L9-4
+        L7.8-1.5
+        L10 0
+        L9.3 3
+        L6.8 4.2
+        L6.5 7
+        L4 9
+        L1.5 7.8
+        L0 10
+        L-3 9.3
+        L-4.2 6.8
+        L-7 6.5
+        L-9 4
+        L-7.8 1.5
+        L-10 0
+        L-9.3-3
+        L-6.8-4.2
+        L-6.5-7
+        L-4-9
+        L-1.5-7.8
+        Z
+      "
+      fill="#111827"
+      transform="scale(.88)"
+    />
+
+    <!-- gear -->
+    <path
+      d="
+        M0-10
+        L3-9.3
+        L4.2-6.8
+        L7-6.5
+        L9-4
+        L7.8-1.5
+        L10 0
+        L9.3 3
+        L6.8 4.2
+        L6.5 7
+        L4 9
+        L1.5 7.8
+        L0 10
+        L-3 9.3
+        L-4.2 6.8
+        L-7 6.5
+        L-9 4
+        L-7.8 1.5
+        L-10 0
+        L-9.3-3
+        L-6.8-4.2
+        L-6.5-7
+        L-4-9
+        L-1.5-7.8
+        Z
+      "
+      fill="url(#gearGrad)"
+      transform="scale(.72)"
+    />
+
+    <circle
+      cx="0"
+      cy="0"
+      r="3.1"
+      fill="#111827"
+    />
+  </g>
+
+</svg>
