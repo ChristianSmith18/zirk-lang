@@ -1,5 +1,5 @@
 trait A {
-    fn a(): Int32 { return 1; }
+     a(): Int32 { return 1; }
 }
 
 trait B implements A { }

@@ -13,7 +13,7 @@ class Point {
         this.y = y;
     }
 
-    fn to_string(): String {
+     to_string(): String {
         return "({this.x}, {this.y})";
     }
 }

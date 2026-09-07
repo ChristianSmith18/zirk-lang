@@ -42,8 +42,8 @@ type; there is no reserved `default` expression. Validation, computed access,
 and storage hiding use ordinary methods named by convention:
 
 ```zirk
-fn get_balance(): Float { return this.balance; }
-fn set_balance(value: Float): Void { ... }
+get_balance(): Float { return this.balance; }
+set_balance(value: Float): Void { ... }
 ```
 
 They are called with parentheses. `inmut` fixes an attribute binding;

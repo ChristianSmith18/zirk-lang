@@ -6,7 +6,7 @@
 record Point {
     x: Int32;
     y: Int32;
-    fn lengthSquared(): Int32 { return this.x * this.x + this.y * this.y; }
+     lengthSquared(): Int32 { return this.x * this.x + this.y * this.y; }
 }
 
 fn main(): Void {

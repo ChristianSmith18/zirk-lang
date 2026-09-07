@@ -1,12 +1,12 @@
 interface Describable {
-    fn describe(): String;
+     describe(): String;
 }
 
 trait Labelled {
-    fn label(): String;
+     label(): String;
 
     // Cuerpo reutilizable: quien no lo escriba, lo adopta.
-    fn shout(): String { return this.label(); }
+     shout(): String { return this.label(); }
 }
 
 class User implements Describable, Labelled {
@@ -14,13 +14,13 @@ class User implements Describable, Labelled {
 
     construct(name: String) { this.name = name; }
 
-    fn describe(): String { return this.name; }
-    fn label(): String { return "user"; }
+     describe(): String { return this.name; }
+     label(): String { return "user"; }
 }
 
 class Robot implements Describable {
     construct() { }
-    fn describe(): String { return "beep"; }
+     describe(): String { return "beep"; }
 }
 
 // Recibe cualquiera que satisfaga el contrato.

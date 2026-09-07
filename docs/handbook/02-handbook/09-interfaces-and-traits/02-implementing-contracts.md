@@ -4,7 +4,7 @@
 
 ```zirk
 class User implements Serializable {
-    fn serialize(): String { /* ... */ }
+    serialize(): String { /* ... */ }
 }
 ```
 
@@ -19,17 +19,17 @@ the requirements of another:
 
 ```zirk
 interface A {
-    fn a(): Int32;
+    a(): Int32;
 }
 
 interface B implements A {
-    fn b(): Int32;
+    b(): Int32;
 }
 
 class C implements B {
     construct() { }
-    fn a(): Int32 { return 1; }
-    fn b(): Int32 { return 2; }
+    a(): Int32 { return 1; }
+    b(): Int32 { return 2; }
 }
 ```
 

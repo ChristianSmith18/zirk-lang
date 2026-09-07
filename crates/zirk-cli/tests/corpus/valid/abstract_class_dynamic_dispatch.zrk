@@ -3,19 +3,21 @@
 // adopter, dispatches to that adopter's own override — the same mechanism
 // the native `Throwable` hierarchy already uses for `catch Throwable(e)`.
 abstract class Shape {
-    abstract fn area(): Int32;
+    abstract  area(): Int32;
 }
 
 class Circle implements Shape {
     radius: Int32;
     construct(radius: Int32) { this.radius = radius; }
-    override fn area(): Int32 { return this.radius * this.radius * 3; }
+    #override
+      area(): Int32 { return this.radius * this.radius * 3; }
 }
 
 class Square implements Shape {
     side: Int32;
     construct(side: Int32) { this.side = side; }
-    override fn area(): Int32 { return this.side * this.side; }
+    #override
+      area(): Int32 { return this.side * this.side; }
 }
 
 fn print_area(shape: Shape): Void {

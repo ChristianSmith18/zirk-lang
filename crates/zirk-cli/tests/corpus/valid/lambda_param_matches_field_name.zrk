@@ -5,7 +5,7 @@
 class Multiplier {
     factor: Int32;
     construct(factor: Int32) { this.factor = factor; }
-    fn scaleAll(a: Int32, b: Int32): Int32 {
+     scaleAll(a: Int32, b: Int32): Int32 {
         inmut apply = (factor: Int32): Int32 => factor * this.factor;
         return apply(a) + apply(b);
     }

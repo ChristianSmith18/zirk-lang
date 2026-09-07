@@ -99,15 +99,21 @@ Omitted attribute initializers use the declared type's default.
 A concrete class `extends` at most one concrete class. It uses `super(...)` for
 base construction and `super.method()` for inherited behavior. Public and
 protected instance methods are virtual by default; private and static methods
-are not. Overrides require `override fn`, exact compatible parameters, and may
-return a covariant result.
+are not. Replacing an inherited concrete implementation — a base-class method
+or a trait default — requires the `#override` member marker, exact compatible
+parameters, and may return a covariant result. Satisfying an `abstract class`
+or `interface` requirement takes no marker. `final` seals a class against
+`extends` or a method against override, and class bodies may declare static
+nested classes, instance-capturing `inner` classes, and (inside bodies) local
+classes. Methods are written without `fn` and without `mut`; receiver mutation
+is inferred for the `inmut::strict` check.
 
 An `abstract class` is a nominal requirement set: required attributes and
 abstract functions, but no body, constructor, state, or layout. It is adopted
 with `implements`, never `extends`. Interfaces contain behavior signatures.
 Traits contain requirements and reusable bodies but no attributes,
 constructors, or state. All three compose through `implements`. Trait conflicts
-require an override and may select `TraitName.super.method()`. Derivation is
+require an explicit `#override` and may select `TraitName.super.method()`. Derivation is
 explicit and static contract requirements are deferred. `as` is a strict
 checked cast; `as?` returns a nullable cast result.
 
@@ -181,8 +187,8 @@ an operation exists.
 
 ```zirk
 enum Iteration<T> { Item(T), Done }
-interface Iterable<out T> { fn iterator(): Iterator<T> }
-interface Iterator<out T> { fn next(): Iteration<T> }
+interface Iterable<out T> { iterator(): Iterator<T> }
+interface Iterator<out T> { next(): Iteration<T> }
 ```
 
 Ordinary loops yield independent projected values. Structural mutation

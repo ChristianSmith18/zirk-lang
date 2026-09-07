@@ -7,11 +7,14 @@ Traits suit cross-cutting capabilities such as display, cloning, iteration, or s
 When combined traits provide incompatible members, the type must resolve the conflict explicitly; declaration order must not silently choose semantics.
 
 Traits cannot declare attributes, constructors, or stored state. Resolve a
-conflict with an explicit `override fn`; its body can select one reusable
-implementation with `TraitName.super.method()`:
+conflict by redeclaring the method under the `#override` member marker — a
+trait default is an inherited implementation, so replacing it requires the
+marker. Its body can select one reusable implementation with
+`TraitName.super.method()`:
 
 ```zirk
-fn buildGreeting(): String {
+#override
+buildGreeting(): String {
     return Greeter.super.buildGreeting() + " " + this.name;
 }
 ```
@@ -22,15 +25,15 @@ order never silently chooses semantics.
 
 ```zirk
 trait Loggable {
-    fn log_prefix(): String;
+    log_prefix(): String;
 
-    fn log(message: String): Void {
+    log(message: String): Void {
         stdout.println("[{this.log_prefix()}] {message}");
     }
 }
 
 class UserService implements Loggable {
-    fn log_prefix(): String {
+    log_prefix(): String {
         return "users";
     }
 }

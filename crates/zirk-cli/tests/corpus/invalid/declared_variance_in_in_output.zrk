@@ -1,4 +1,4 @@
 class Source<in T> {
-    fn get(): T { }
+     get(): T { }
 }
 fn main(): Void { }

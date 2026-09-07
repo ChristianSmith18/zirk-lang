@@ -228,7 +228,9 @@ Generated declarations do not acquire decorators implicitly. Explicit generated 
 
 A decorator expands once on a generic declaration and its constraints. The validated form then specializes normally; it is not expanded per monomorphization.
 
-An inherited, non-overridden method retains its wrapper. A new `override fn` does not inherit decorator applications and must reapply desired behavior explicitly.
+An inherited, non-overridden method retains its wrapper. A new overriding method — written under the `#override` member marker — does not inherit decorator applications and must reapply desired behavior explicitly.
+
+`#` member markers such as `#override` are a built-in surface, not decorator applications: they are never resolved through `fn dec` lookup, do not participate in expansion, and do not collide with the `@` decorator syntax described here.
 
 ## 12. Diagnostics and provenance
 
@@ -263,7 +265,7 @@ Zirk 1.x has no `runtime fn dec`, automatic decorator retention, or `Reflection.
 @Controller("/users")
 class UserController {
     @Get("/{id}")
-    fn find(
+    find(
         @Path("id") id: UserId,
         @Inject() service: UserService,
     ): Result<User, HttpError> {
@@ -289,7 +291,7 @@ HttpRouter.register(
 ```zirk
 @Service()
 class UserService {
-    fn init(@Inject() repository: UserRepository) {
+    init(@Inject() repository: UserRepository) {
         // Parameter target, not a construct target.
     }
 }

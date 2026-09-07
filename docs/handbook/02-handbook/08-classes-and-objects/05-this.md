@@ -9,7 +9,7 @@ against the surrounding instance; ambiguous capture/member cases require an
 explicitly qualified name.
 
 ```zirk
-fn rename(name: String): Void {
+rename(name: String): Void {
     this.name = name;
 }
 ```

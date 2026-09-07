@@ -181,16 +181,16 @@ to the documented cleanup grace policy.
 @suite(name: "UserService")
 class UserServiceTests {
     @before_each
-    fn prepare() {}
+    prepare() {}
 
     @test(name: "creates an active user")
-    fn creates_active_user() {}
+    creates_active_user() {}
 
     @test(name: "rejects a duplicate email")
-    fn rejects_duplicate_email() {}
+    rejects_duplicate_email() {}
 
     @after_each
-    fn cleanup() {}
+    cleanup() {}
 }
 ```
 

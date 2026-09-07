@@ -36,4 +36,4 @@ from destructured values when a new identity is intended.
 
 ---
 
-**Previous:** [← Object Identity](10-object-identity.md) · **Next:** [ Interfaces and Traits](../09-interfaces-and-traits/README.md)
+**Previous:** [← Object Identity](10-object-identity.md) · **Next:** [ Nested, Inner, and Local Classes](12-nested-classes.md)

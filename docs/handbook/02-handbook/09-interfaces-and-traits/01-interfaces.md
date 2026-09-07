@@ -4,7 +4,7 @@ An interface names a behavior contract independent of one implementation class.
 
 ```zirk
 interface Serializable {
-    fn serialize(): String;
+    serialize(): String;
 }
 ```
 

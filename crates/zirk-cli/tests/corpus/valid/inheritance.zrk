@@ -14,10 +14,10 @@ class User {
         this.id = 1;
     }
 
-    fn describe(): String { return this.name; }
+     describe(): String { return this.name; }
 
     // Nadie la redefine: se llama directo.
-    fn label(): String { return this.role; }
+     label(): String { return this.role; }
 }
 
 class Manager extends User {
@@ -31,7 +31,8 @@ class Manager extends User {
         this.team = team;
     }
 
-    override fn describe(): String {
+    #override
+      describe(): String {
         // El cuerpo heredado, sin pasar por el despacho.
         return super.describe();
     }

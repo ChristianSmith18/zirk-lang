@@ -1907,23 +1907,17 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // A constructor becomes an ordinary function whose first parameter is the
     // object being built. Emitting it once and calling it beats inlining the
     // body at every construction site, and it is the same shape a method call
-    // will need.
-    for class in &program.classes {
-        let Some(id) = checked
-            .classes
-            .iter()
-            .position(|c| c.name == class.name.name)
-        else {
-            continue;
-        };
-
+    // will need. Nested and local classes lower here too: `class_decls`
+    // resolves each one back to its `ClassDecl`.
+    let class_decls = class_decls(program, checked);
+    for (&id, &class) in &class_decls {
         // The template itself is never lowered — see the comment on its
         // (empty) `ObjectLayout` above. Each specialization below lowers
         // this same declaration's AST again, once per instantiation, under
         // its own id: the type-level substitution already happened when
         // `specialize_class` built its `ClassType`, so what changes here is
         // only which class id `this`/a field/a method resolves against.
-        if !checked.classes[id].type_params.is_empty() {
+        if !checked.classes[id as usize].type_params.is_empty() {
             continue;
         }
 
@@ -1932,7 +1926,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             checked,
             &declarations,
             class,
-            id as u32,
+            id,
             instance_base,
             enum_instance_base,
         );
@@ -1940,7 +1934,9 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
     for (index, instance) in checked.generic_instances.iter().enumerate() {
         let specialized_id = instance_base + index as u32;
-        let original = &program.classes[class_ast_index(program, checked, instance.class)];
+        let original = *class_decls
+            .get(&instance.class)
+            .expect("a checked class is declared in the program");
         lower_class_body(
             &mut module,
             checked,
@@ -2200,15 +2196,101 @@ fn lower_class_body<'a>(
     }
 }
 
-/// The AST declaration a checked class id names, by matching its name — the
-/// same lookup the ordinary (non-generic) loop above does.
-fn class_ast_index(program: &ast::Program, checked: &CheckedProgram, id: u32) -> usize {
-    let name = &checked.classes[id as usize].name;
-    program
-        .classes
-        .iter()
-        .position(|c| &c.name.name == name)
-        .expect("a checked class is declared in the program")
+/// The AST declaration a checked class id names.
+///
+/// A top-level class is looked up by name; a nested or local class is
+/// registered under a qualified (`Outer.Inner`) or mangled
+/// (`name$local$id`) name, so the lookup matches on the declaration's
+/// name *span* — unique per declaration — instead.
+fn class_decls<'a>(
+    program: &'a ast::Program,
+    checked: &CheckedProgram,
+) -> HashMap<u32, &'a ast::ClassDecl> {
+    fn register<'a>(
+        decl: &'a ast::ClassDecl,
+        checked: &CheckedProgram,
+        out: &mut HashMap<u32, &'a ast::ClassDecl>,
+    ) {
+        if let Some(id) = checked
+            .classes
+            .iter()
+            .position(|c| c.span == decl.name.span)
+        {
+            out.insert(id as u32, decl);
+        }
+        for nested in &decl.nested {
+            register(nested, checked, out);
+        }
+        for constructor in &decl.constructors {
+            walk_block(&constructor.body, checked, out);
+        }
+        for method in &decl.methods {
+            if let Some(body) = &method.body {
+                walk_block(body, checked, out);
+            }
+        }
+    }
+
+    fn walk_block<'a>(
+        block: &'a ast::Block,
+        checked: &CheckedProgram,
+        out: &mut HashMap<u32, &'a ast::ClassDecl>,
+    ) {
+        for stmt in &block.statements {
+            walk_stmt(stmt, checked, out);
+        }
+    }
+
+    fn walk_stmt<'a>(
+        stmt: &'a ast::Stmt,
+        checked: &CheckedProgram,
+        out: &mut HashMap<u32, &'a ast::ClassDecl>,
+    ) {
+        use ast::Stmt;
+        match stmt {
+            Stmt::LocalClass(decl) => register(decl, checked, out),
+            Stmt::If(s) => {
+                walk_block(&s.then_branch, checked, out);
+                let mut next = s.else_branch.as_ref();
+                while let Some(branch) = next {
+                    match branch {
+                        ast::ElseBranch::Block(b) => {
+                            walk_block(b, checked, out);
+                            next = None;
+                        }
+                        ast::ElseBranch::If(inner) => {
+                            walk_block(&inner.then_branch, checked, out);
+                            next = inner.else_branch.as_ref();
+                        }
+                    }
+                }
+            }
+            Stmt::Loop(s) => walk_block(&s.body, checked, out),
+            Stmt::ForIn(s) => walk_block(&s.body, checked, out),
+            Stmt::Block(b) => walk_block(b, checked, out),
+            Stmt::Try(s) => {
+                walk_block(&s.body, checked, out);
+                for catch in &s.catches {
+                    walk_block(&catch.body, checked, out);
+                }
+                if let Some(finally) = &s.finally {
+                    walk_block(finally, checked, out);
+                }
+            }
+            Stmt::Unsafe(s) => walk_block(&s.body, checked, out),
+            Stmt::Commit(s) => walk_block(&s.body, checked, out),
+            _ => {}
+        }
+    }
+
+    let mut out = HashMap::new();
+    for decl in &program.classes {
+        register(decl, checked, &mut out);
+    }
+    for function in &program.functions {
+        walk_block(&function.body, checked, &mut out);
+    }
+    out
 }
 
 /// One generic class's own `T` replaced by one instantiation's concrete
@@ -2296,6 +2378,9 @@ fn specialize_class(
         contract_instances: Vec::new(),
         type_params: Vec::new(),
         shared: original.shared,
+        is_final: original.is_final,
+        enclosing: original.enclosing,
+        nested: original.nested.clone(),
         span: original.span,
     }
 }
@@ -2824,6 +2909,10 @@ struct FunctionLowering<'a> {
     /// (`Self::lower_lambda`'s own doc comment on why the self-reference is
     /// never a real runtime capture).
     recursive_call: Option<(String, String, Vec<SlotId>, Vec<IrType>)>,
+    /// The class whose member body is being lowered, if any — what `this`
+    /// and, for an `inner class`, the hidden `outer` reference resolve
+    /// against.
+    current_class: Option<u32>,
 }
 
 /// One active `try`'s catches and `finally`, as [`FunctionLowering::try_stack`]
@@ -3018,6 +3107,7 @@ impl<'a> FunctionLowering<'a> {
             unsafe_stack: Vec::new(),
             next_scope_seq: 0,
             recursive_call: None,
+            current_class: None,
         }
     }
 
@@ -3920,8 +4010,40 @@ impl<'a> FunctionLowering<'a> {
         self.current = entry;
         self.scopes.push(HashMap::new());
 
+        self.current_class = Some(id);
         let this = self.declare_slot("this", IrType::Object(id), class.name.span);
         self.initialize_defaults(this, id, class.name.span);
+
+        // An `inner class`'s constructor takes the enclosing instance as a
+        // hidden first argument, bound into the `outer` field before the
+        // written body runs.
+        let mut params = vec![this];
+        if let Some(parent) = self.checked.classes[id as usize].enclosing {
+            let outer = self.declare_slot("outer", IrType::Object(parent), class.name.span);
+            params.push(outer);
+            let object = self.emit(InstKind::Load(this), IrType::Object(id), class.name.span);
+            let value = self.emit(
+                InstKind::Load(outer),
+                IrType::Object(parent),
+                class.name.span,
+            );
+            let index = self
+                .checked
+                .classes[id as usize]
+                .fields
+                .iter()
+                .filter(|f| !f.is_static)
+                .position(|f| f.name == "outer" && f.owner == id)
+                .expect("the checker declares `outer` on an inner class") as u32;
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index,
+                    value,
+                },
+                class.name.span,
+            );
+        }
 
         let resolved: Vec<IrType> = self
             .checked
@@ -3931,7 +4053,6 @@ impl<'a> FunctionLowering<'a> {
             .map(|params| params.iter().map(|p| self.ir_type(p.ty)).collect())
             .expect("the checker records every constructor");
 
-        let mut params = vec![this];
         params.extend(
             constructor
                 .params
@@ -4166,6 +4287,7 @@ impl<'a> FunctionLowering<'a> {
         let entry = self.new_block();
         self.current = entry;
         self.scopes.push(HashMap::new());
+        self.current_class = Some(id);
 
         // A record's method receives `this` by value too
         // (roadmap task 11.5): there is nothing to point at.
@@ -4475,6 +4597,10 @@ impl<'a> FunctionLowering<'a> {
             // deferred as its own D5/D6.
             ast::Stmt::Unsafe(s) => self.lower_unsafe_block(&s.body),
             ast::Stmt::Commit(s) => self.lower_commit_block(&s.body),
+            // A local class emits nothing where it is declared: its members
+            // lower as ordinary functions through `class_decls`, and its
+            // name resolves to the same layout a top-level one gets.
+            ast::Stmt::LocalClass(_) => {}
         }
     }
 
@@ -6242,6 +6368,29 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(slot) = self.try_lookup_slot(&ident.name) {
                     let ty = self.slot_type(slot);
                     self.emit(InstKind::Load(slot), ty, span)
+                } else if ident.name == "outer"
+                    && let Some(class) = self.current_class
+                    && let Some(parent) = self.checked.classes[class as usize].enclosing
+                {
+                    // `outer` reads the hidden field an `inner class`
+                    // stores its enclosing instance in.
+                    let index = self
+                        .checked
+                        .classes[class as usize]
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_static)
+                        .position(|f| f.name == "outer" && f.owner == class)
+                        .expect("the checker declares `outer` on an inner class")
+                        as u32;
+                    let this = self.lookup_slot("this");
+                    let object =
+                        self.emit(InstKind::Load(this), IrType::Object(class), span);
+                    self.emit(
+                        InstKind::LoadField { object, index },
+                        IrType::Object(parent),
+                        span,
+                    )
                 } else {
                     // A bare function name with no local shadowing it is a
                     // boxed callable value (`Checker::check_path`, roadmap
@@ -6587,6 +6736,16 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
+                }
+                // `Outer.Nested(...)` / `o.Inner(...)`: a construction whose
+                // callee is a field access. The method-call lowerers below
+                // would try `Outer`/`o` as a value first — `Outer` names a
+                // class, not a variable — so the checker-recorded resolution
+                // is consulted before any of them.
+                if let Some(&id) = self.checked.resolved_constructions.get(&e.span)
+                    && matches!(&*e.callee, ast::Expr::Field(_))
+                {
+                    return self.lower_construction(e, id, span);
                 }
                 // `native-type-member-surface` statics and native methods
                 // have to be lowered before any lookup that would try to
@@ -13734,8 +13893,16 @@ impl<'a> FunctionLowering<'a> {
     /// (`Self::checked`'s `generic_constructions`, roadmap task 11.1), and
     /// that takes priority whenever this call's span is one.
     fn construction_class_id(&self, call: &ast::CallExpr) -> Option<u32> {
+        // The checker records the class every construction resolved to —
+        // nested and local classes carry registered names the written callee
+        // does not (`Outer.Nested`, `Local$local$0`).
+        // A generic construction resolves to the specialized copy, not the
+        // template `check_construction` recorded.
         if let Some(&instance) = self.checked.generic_constructions.get(&call.span) {
             return Some(self.instance_base + instance);
+        }
+        if let Some(&id) = self.checked.resolved_constructions.get(&call.span) {
+            return Some(id);
         }
         self.class_id(&self.callee_name(call))
     }
@@ -13804,6 +13971,22 @@ impl<'a> FunctionLowering<'a> {
 
         let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
         let mut call_args = vec![object];
+
+        // An `inner class`'s constructor takes the enclosing instance as a
+        // hidden argument after `this`: the receiver of `o.Inner(...)`, or
+        // `this` itself for a bare `Inner(...)` inside the enclosing class.
+        if self.checked.inner_constructions.contains_key(&call.span) {
+            let parent = self.checked.classes[id as usize]
+                .enclosing
+                .expect("an inner construction is marked only for inner classes");
+            let outer = if let ast::Expr::Field(field) = &*call.callee {
+                self.lower_expr_as(&field.object, IrType::Object(parent))
+            } else {
+                let slot = self.lookup_slot("this");
+                self.emit(InstKind::Load(slot), IrType::Object(parent), span)
+            };
+            call_args.push(outer);
+        }
         call_args.extend(args);
 
         let name = self.module.objects[id as usize].name.clone();
@@ -17618,6 +17801,14 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        // `Outer.Nested(...)`/`o.Inner(...)`: the callee's base names a type
+        // (or is the hidden `outer` receiver), so every probe below would
+        // ask for the type of something that is not one — the same failure
+        // mode the `is_enum_static_call`/`is_class_static_call` guards name.
+        if self.checked.resolved_constructions.contains_key(&call.span) {
+            return false;
+        }
+
         // `enum-static-members`: `Direction.keys()`/`Enums.values(E)` — the
         // callee's base names a type, not a value, so every probe below
         // (`exception_intrinsic_type`, `method_of`, the `type_of`
@@ -17784,9 +17975,21 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Path(ident) => match self.try_lookup_slot(&ident.name) {
                 Some(slot) => self.slot_type(slot),
                 None => {
+                    // `outer` inside an `inner class` names the hidden field.
+                    if ident.name == "outer"
+                        && let Some(class) = self.current_class
+                        && let Some(parent) = self.checked.classes[class as usize].enclosing
+                    {
+                        return IrType::Object(parent);
+                    }
                     let (id, _) = self
                         .named_function_value(&ident.name, ident.span)
-                        .expect("a verified program only names declared variables or functions");
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "a verified program only names declared variables or functions (`{}`)",
+                                ident.name
+                            )
+                        });
                     IrType::Callable(id)
                 }
             },

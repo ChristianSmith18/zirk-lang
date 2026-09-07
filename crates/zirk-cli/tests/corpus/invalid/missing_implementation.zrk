@@ -1,5 +1,5 @@
 interface Describable {
-    fn describe(): String;
+     describe(): String;
 }
 
 class Robot implements Describable {

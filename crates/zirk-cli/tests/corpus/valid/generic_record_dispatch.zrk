@@ -1,10 +1,10 @@
 interface Container<T> {
-    fn get(): T;
+     get(): T;
 }
 
 record Pair<T> implements Container<T> {
     value: T;
-    fn get(): T { return this.value; }
+     get(): T { return this.value; }
 }
 
 fn value_int(c: Container<Int32>): Int32 { return c.get(); }

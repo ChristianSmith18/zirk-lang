@@ -346,19 +346,61 @@ positional inference. After the first named argument, every remaining argument
 must be named. Repeated labels, missing shorthand variables and shorthand on a
 member expression are compile-time errors.
 
+Inside a `class`, `abstract class`, `interface`, `trait` or `record` body a
+method is declared without `fn`: `name(params): Return { ... }`, while a field
+keeps `name: Type;`. `fn` remains only for top-level functions, function types
+(`fn(Int32): Void`), `fn dec`, `unsafe fn` and `extern "C" fn`; writing `fn`
+inside a type body is a targeted compile-time error. `mut` does not apply to
+methods either: whether a method mutates its receiver is inferred by the
+compiler — a method mutates if it writes `this.*` (directly or through a place
+rooted at `this`) or calls another inferred-mutating `this` method, computed by
+fixed point over the intra-class call graph. For an `inmut::strict` receiver,
+calling an inferred-mutating method is an error whose diagnostic shows the
+mutation chain; plain `inmut` is unaffected, and methods without an analyzable
+body (`extern "C"` callables) are conservatively treated as mutating. `mut` on
+fields and local bindings is unchanged.
+
 A concrete class may `extends` one concrete class and uses ordinary `super(...)`
 or `super.method()`. Public/protected instance methods dispatch virtually by
-default; private/static methods do not. Replacement must be written
-`override fn`, keep exact parameter contracts and may narrow the result.
-Classes are inheritable by default and `final` does not exist.
+default; private/static methods do not. Replacing an inherited concrete
+implementation — a base-class method or a trait default — requires the
+`#override` member marker, written on its own line above the method; the method
+keeps exact parameter contracts and may narrow the result. Satisfying an
+`abstract class` or `interface` requirement needs no marker, and writing
+`#override` where nothing is overridden is an error (a warning when it merely
+satisfies a signature-only requirement). `#override` applies only to instance
+methods, never to fields, constructors, nested classes or `static` members.
+
+Classes are inheritable by default, and `final` opts out: a `final class`
+cannot be extended (it may still implement contracts and be instantiated) and a
+`final` method cannot be overridden. `final` and `abstract` on the same class
+are contradictory and rejected; a `final` method inside a `final class` is
+redundant and produces a warning. `final` on fields, constructors, interfaces,
+traits or records is an error — attribute mutability is covered by
+`mut`/`inmut`/`inmut::strict` and records are already non-inheritable.
+
+A class body may also declare nested classes. `class Nested {}` is a static
+nested class: pure namespacing under the canonical name `Outer.Nested`, with no
+access to the enclosing instance, arbitrary depth, and ordinary member
+visibility. `inner class Inner {}` captures the enclosing instance through a
+hidden `outer` field and a hidden constructor parameter; inner methods may
+reference `outer` and access `private`/`protected` members of the enclosing
+class, and the outer class may access private members of its inners. An `inner`
+class may not declare `static` members. Construction binds an enclosing
+instance: `Inner()` inside `Outer` captures `this`; outside, `o.Inner()`. A
+`class` declaration is also a valid statement inside a function, method or
+constructor body: a local class is scoped to its block, receives a mangled
+canonical name and does not capture enclosing local variables. Anonymous
+classes (`Contract() { ... }`) are not part of the language — a local class or
+a closure is the idiomatic replacement.
 
 An `abstract class` is instead a nominal set of required attributes and
-`abstract fn` signatures with no constructor, body, allocated state or layout
-contribution; a class adopts it with `implements`. Interfaces contain behavior
+`abstract` method signatures with no constructor, body, allocated state or
+layout contribution; a class adopts it with `implements`. Interfaces contain behavior
 signatures only. Traits contain behavior requirements and reusable bodies but
 no attributes or constructors. Interfaces, traits and abstract classes compose
 through `implements`; cycles/incompatible requirements fail, and a class
-resolves competing trait defaults with `override fn` and
+resolves competing trait defaults with the `#override` marker and
 `TraitName.super.method()`. Capability derivation is always requested
 explicitly.
 
@@ -568,6 +610,11 @@ Applications evaluate top-to-bottom and compose outer-to-inner. Optional
 Self-reference and dependency cycles are invalid. Contiguous applications of a
 `repeatable fn dec` form one ordered expansion with explicit `applications`
 payloads and typed `application.arguments`.
+
+Member markers such as `#override` are a distinct built-in surface, not
+decorators: a `#` marker is checked directly by the compiler and is never
+resolved through `fn dec` lookup or decorator expansion, so the `#` and `@`
+surfaces do not collide.
 
 Decorators use an immutable validated Syntax API. Expansion is hygienic,
 bounded, source-mapped, deterministic and incrementally fingerprinted. External

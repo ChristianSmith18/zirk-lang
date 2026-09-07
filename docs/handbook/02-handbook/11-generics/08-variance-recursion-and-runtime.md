@@ -4,8 +4,8 @@ Generic types are invariant by default. Declare `out T` for a result-only
 covariant parameter or `in T` for an input-only contravariant parameter.
 
 ```zirk
-interface Source<out T> { fn next(): Iteration<T>; }
-interface Sink<in T> { fn accept(value: T): Void; }
+interface Source<out T> { next(): Iteration<T>; }
+interface Sink<in T> { accept(value: T): Void; }
 class Cell<T> { mut value: T; } // invariant: reads and writes T
 ```
 

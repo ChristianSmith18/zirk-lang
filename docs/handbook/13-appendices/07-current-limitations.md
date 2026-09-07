@@ -46,7 +46,8 @@ Current high-impact delivery limits include:
   supports construction with `Pin(obj)`, automatic unpin for field and method
   access, and rejects reassignment of the pinned variable. `inmut::strict`
   on a field declaration rejects writes through any projection and rejects
-  mutating method calls on a strict reference. `unsafe fn`/`unsafe {}`/
+  calls to inferred-mutating methods on a strict reference (the diagnostic
+  shows the mutation chain). `unsafe fn`/`unsafe {}`/
   `commit {}` parse and are context-checked; `Pointer<T>` (an ABI-safe
   element-type subset) supports construction/read/write/offset/cast with a
   conservative escape rule; `extern "C" fn` declares and calls a native

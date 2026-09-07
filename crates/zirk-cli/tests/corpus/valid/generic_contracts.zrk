@@ -1,26 +1,26 @@
 interface Named<T> {
-    fn name(): String;
+     name(): String;
 }
 
 record Tag implements Named<Int32> {
-    fn name(): String { return "tag"; }
+     name(): String { return "tag"; }
 }
 
 class Box2 implements Named<Int32> {
     construct() {}
-    fn name(): String { return "box"; }
+     name(): String { return "box"; }
 }
 
 fn show(n: Named<Int32>): String { return n.name(); }
 
 class Counter implements Iterable<Int32> {
     construct() {}
-    fn iterator(): Iterator<Int32> { return CounterIt(); }
+     iterator(): Iterator<Int32> { return CounterIt(); }
 }
 class CounterIt implements Iterator<Int32> {
     current: Int32;
     construct() { this.current = 0; }
-    fn next(): Iteration<Int32> {
+     next(): Iteration<Int32> {
         if (this.current >= 3) { return Iteration.Done; }
         mut v = this.current;
         this.current = this.current + 1;

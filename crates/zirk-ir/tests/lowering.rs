@@ -1036,7 +1036,7 @@ fn a_method_becomes_a_function_over_its_receiver() {
         "class Counter {
              count: Int32;
              construct() { this.count = 0; }
-             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
+              bump(): Int32 { this.count = this.count + 1; return this.count; }
          }",
         "",
     );
@@ -1058,7 +1058,7 @@ fn a_method_call_passes_the_receiver_first() {
         "class Greeter {
              prefix: String;
              construct() { this.prefix = \">\"; }
-             fn greet(name: String): String { return name; }
+             greet(name: String): String { return name; }
          }",
         "mut g = Greeter();\nmut s = g.greet(\"hola\");",
     );
@@ -1084,7 +1084,7 @@ fn a_method_without_a_body_is_not_emitted() {
         "class Counter {
              count: Int32;
              construct() { this.count = 0; }
-             fn bump(): Int32 { return this.count; }
+              bump(): Int32 { return this.count; }
          }",
         "",
     );
@@ -1101,13 +1101,15 @@ fn a_method_without_a_body_is_not_emitted() {
 const HIERARCHY: &str = "class Base {
     x: Int32;
     construct() { this.x = 0; }
-    fn overridden(): Int32 { return this.x; }
-    fn only_here(): Int32 { return this.x; }
+     overridden(): Int32 { return this.x; }
+     only_here(): Int32 { return this.x; }
 }
 class Derived extends Base {
     y: Int32;
     construct() { super(); this.y = 1; }
-    override fn overridden(): Int32 { return this.y; }
+    #override
+
+      overridden(): Int32 { return this.y; }
 }";
 
 #[test]
@@ -1215,17 +1217,21 @@ fn a_method_nobody_redefines_is_called_directly() {
 // --- `abstract class` dynamic dispatch (fase-3-abstract-dispatch) ----------
 
 const SHAPE_HIERARCHY: &str = "abstract class Shape {
-    abstract fn area(): Int32;
+    abstract  area(): Int32;
 }
 class Circle implements Shape {
     radius: Int32;
     construct(radius: Int32) { this.radius = radius; }
-    override fn area(): Int32 { return this.radius * this.radius * 3; }
+    #override
+
+      area(): Int32 { return this.radius * this.radius * 3; }
 }
 class Square implements Shape {
     side: Int32;
     construct(side: Int32) { this.side = side; }
-    override fn area(): Int32 { return this.side * this.side; }
+    #override
+
+      area(): Int32 { return this.side * this.side; }
 }";
 
 /// A call through a value statically typed as a user `abstract class` lowers
@@ -1286,19 +1292,21 @@ fn two_adopters_of_the_same_abstract_class_keep_their_own_override_at_the_same_s
 fn a_class_implementing_an_abstract_class_and_an_interface_dispatches_both() {
     let module = compile(
         "abstract class Shape {
-             abstract fn area(): Int32;
+             abstract  area(): Int32;
          }
          interface Describable {
-             fn describe(): String;
+              describe(): String;
          }
          class Circle implements Shape, Describable {
              radius: Int32;
              construct(radius: Int32) { this.radius = radius; }
-             override fn area(): Int32 { return this.radius * this.radius * 3; }
-             fn describe(): String { return \"circle\"; }
+             #override
+
+               area(): Int32 { return this.radius * this.radius * 3; }
+              describe(): String { return \"circle\"; }
          }
-         fn print_area(s: Shape): Int32 { return s.area(); }
-         fn print_description(d: Describable): String { return d.describe(); }
+          fn print_area(s: Shape): Int32 { return s.area(); }
+          fn print_description(d: Describable): String { return d.describe(); }
          fn main(): Void {
              mut c = Circle(2);
              mut a = print_area(c);
@@ -1336,10 +1344,10 @@ fn a_class_implementing_an_abstract_class_and_an_interface_dispatches_both() {
 #[test]
 fn a_call_through_a_contract_goes_through_its_table() {
     let module = compile(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          class User implements Describable {
              construct() { }
-             fn describe(): String { return \"user\"; }
+              describe(): String { return \"user\"; }
          }
          fn announce(d: Describable): String { return d.describe(); }
          fn main(): Void { mut u = User(); mut s = announce(u); }",
@@ -1359,7 +1367,7 @@ fn a_call_through_a_contract_goes_through_its_table() {
 const BOX: &str = "class Box<T> {
     value: T;
     construct(value: T) { this.value = value; }
-    fn get(): T { return this.value; }
+     get(): T { return this.value; }
 }";
 
 #[test]
@@ -1834,7 +1842,7 @@ fn safe_call_of_a_void_returning_method_compiles() {
     let module = compile(
         "class Counter { mut value: Int32;
              construct(value: Int32) { this.value = value; }
-             fn bump(): Void { this.value = this.value + 1; } }
+              bump(): Void { this.value = this.value + 1; } }
          fn main(): Void {
              mut c: Counter? = Counter(1);
              c?.bump();
@@ -2054,7 +2062,7 @@ fn a_manually_implemented_clone_method_lowers_as_an_ordinary_method_call() {
     let source = "class Node {
         mut value: Int32;
         construct(value: Int32) { this.value = value; }
-        fn clone(): Node { return Node(this.value); }
+         clone(): Node { return Node(this.value); }
     }
     fn main(): Void {
         mut a: Node = Node(1);
@@ -2081,10 +2089,12 @@ const JOURNAL_COUNTER: &str =
 
 const JOURNAL_BOOM: &str = "class Boom implements Throwable {
     construct() { }
-    override fn message(): String { return \"boom\"; }
-    override fn code(): String { return \"BOOM\"; }
-    override fn cause(): Error? { return null; }
-    override fn stack_trace(): StackTrace { return StackTrace(); }
+    #override
+
+      message(): String { return \"boom\"; }
+    #override code(): String { return \"BOOM\"; }
+    #override cause(): Error? { return null; }
+    #override stack_trace(): StackTrace { return StackTrace(); }
 }";
 
 /// An `unsafe {}` block with a managed write lowers to `JournalBegin` ->
@@ -2500,11 +2510,11 @@ fn a_native_slice_slot_is_never_a_gc_root() {
 
 // --- Value-to-contract boxing (fase-3-value-type-contract-dispatch, design D1) ---
 
-const BOXED_POINT: &str = "interface Describable { fn describe(): String; }
+const BOXED_POINT: &str = "interface Describable {  describe(): String; }
     record Point implements Describable {
         x: Int32;
         y: Int32;
-        fn describe(): String { return \"point\"; }
+         describe(): String { return \"point\"; }
     }";
 
 /// Converting a `record` value into a reference of a contract

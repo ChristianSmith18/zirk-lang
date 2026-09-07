@@ -1,5 +1,5 @@
 interface Container<T> {
-    fn get(): T;
+     get(): T;
 }
 
 class Box<T> implements Container<T> {

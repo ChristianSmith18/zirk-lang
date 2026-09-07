@@ -174,6 +174,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Static Members](./02-handbook/08-classes-and-objects/09-static-members.md)
     - [Object Identity](./02-handbook/08-classes-and-objects/10-object-identity.md)
     - [Cloning](./02-handbook/08-classes-and-objects/11-cloning.md)
+    - [Nested, Inner, and Local Classes](./02-handbook/08-classes-and-objects/12-nested-classes.md)
   - [Interfaces and Traits](./02-handbook/09-interfaces-and-traits/README.md)
     - [Interfaces](./02-handbook/09-interfaces-and-traits/01-interfaces.md)
     - [Implementing Contracts](./02-handbook/09-interfaces-and-traits/02-implementing-contracts.md)

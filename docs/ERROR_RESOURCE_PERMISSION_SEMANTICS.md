@@ -59,14 +59,14 @@ the combinator does not turn it into `Error`.
 
 ```zirk
 abstract class Error {
-    abstract fn message(): String;
-    abstract fn code(): String;
-    abstract fn cause(): Error?;
-    abstract fn suppressed(): List<Error>;
+    abstract message(): String;
+    abstract code(): String;
+    abstract cause(): Error?;
+    abstract suppressed(): List<Error>;
 }
 
 abstract class Throwable implements Error {
-    abstract fn stack_trace(): StackTrace;
+    abstract stack_trace(): StackTrace;
 }
 
 abstract class RuntimeError implements Throwable {}
@@ -130,8 +130,8 @@ free boundaries.
 
 ```zirk
 interface Resource<E from Error> {
-    fn close(): Result<Void,E>;
-    fn is_closed(): Boolean;
+    close(): Result<Void,E>;
+    is_closed(): Boolean;
 }
 ```
 

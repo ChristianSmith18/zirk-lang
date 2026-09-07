@@ -8,15 +8,18 @@ class OpenError implements Error {
         this.reason = reason;
     }
 
-    override fn message(): String {
+    #override
+      message(): String {
         return this.reason;
     }
 
-    override fn code(): String {
+    #override
+      code(): String {
         return "OPEN";
     }
 
-    override fn cause(): Error? {
+    #override
+      cause(): Error? {
         return null;
     }
 }
@@ -28,15 +31,17 @@ class StuckFile implements Resource<OpenError> {
         this.name = name;
     }
 
-    fn nothing(): Void {
+     nothing(): Void {
         return;
     }
 
-    override fn close(): Result<Void, OpenError> {
+    #override
+      close(): Result<Void, OpenError> {
         return Ok(this.nothing());
     }
 
-    override fn is_closed(): Boolean {
+    #override
+      is_closed(): Boolean {
         return false;
     }
 }

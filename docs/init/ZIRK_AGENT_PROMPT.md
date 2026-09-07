@@ -179,7 +179,7 @@ Two more, which produce no diagnostic because they are not user-visible:
 ## Phase 3 — complete
 
 **Zirk is object-oriented.** `class`, `construct`, visibility
-(`public`/`private`/`protected`), single inheritance with `super`/`override`,
+(`public`/`private`/`protected`), single inheritance with `super`/`#override`,
 interfaces and traits (with reusable default bodies), generics with `from`
 constraints (specialized per instantiation, not erased), records (inline, no
 allocation), algebraic enums with associated data, and checked casts (`as`)
@@ -210,7 +210,7 @@ reaches a backend that cannot compile it:
   `for ... in`); a user's own generic contract or enum stays gated the same
   way it was before this phase.
 - **`abstract class`** type-checks completely — a concrete class adopts its
-  requirements with `implements` and `override fn`, and conformance is
+  requirements with `implements`, and conformance is
   verified — but a value typed *through* the abstract class would need
   dynamic dispatch through whichever concrete class adopted it, and that path
   does not exist yet.

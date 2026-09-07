@@ -158,6 +158,15 @@ pub struct CheckedProgram {
     /// `Box<String>` apart the way an annotation or a field's resolved type
     /// can (roadmap task 11.1).
     pub generic_constructions: std::collections::HashMap<Span, u32>,
+    /// Calls that construct an `inner class`, keyed by the call's span and
+    /// holding the inner class's id. Lowering passes the enclosing instance
+    /// (`o` of `o.Inner(...)`, or `this` of a bare `Inner(...)` inside the
+    /// enclosing class) as the hidden `outer` argument.
+    pub inner_constructions: std::collections::HashMap<Span, u32>,
+    /// The class each construction call resolved to, keyed by the call's
+    /// span — needed because nested and local classes are registered under
+    /// qualified/mangled names the written callee does not carry.
+    pub resolved_constructions: std::collections::HashMap<Span, u32>,
     /// Which `Iteration<T>` instantiation a `for ... in` loop over a type's
     /// own `Iterable<T>` resolves to, keyed by the iterable expression's
     /// span — an id into `enum_instances` (roadmap task 13.5).
@@ -701,6 +710,38 @@ struct Checker<'a> {
     expr_types: HashMap<Span, Type>,
     /// The compiler-known `RegexMatch` record class id, minted at startup.
     regex_match_class: u32,
+    /// `ClassDecl` → class id, for classes whose registered name is not the
+    /// written one: a nested class is registered under its qualified name
+    /// (`Outer.Inner`) and a local class under a mangled one
+    /// (`enclosing$Local`), so the usual `class_id(&decl.name.name)` lookup
+    /// cannot find either.
+    class_decl_ids: HashMap<usize, u32>,
+    /// Local classes in scope: (written name, class id), in declaration
+    /// order. `check_statements` truncates this back to its entry length on
+    /// exit, so a local class is visible from its declaration to the end of
+    /// the enclosing block, nested blocks included.
+    local_class_names: Vec<(String, u32)>,
+    /// Per statement list, the index into `local_class_names` its own local
+    /// classes start at — what makes two same-named locals in the same block
+    /// a duplicate rather than a shadow.
+    local_class_marks: Vec<usize>,
+    /// Whether a contract method's default body mutates its receiver,
+    /// inferred by [`Self::infer_method_mutation`] the same way class
+    /// methods are — keyed by `(contract id, method name)` because a
+    /// `ContractMethod` has no flag field of its own.
+    contract_method_mutates: HashMap<(u32, String), bool>,
+    /// Call spans that construct an `inner class`: `o.Inner(...)` or a bare
+    /// `Inner(...)` inside the enclosing class. Lowering reads this to pass
+    /// the enclosing instance as the hidden `outer` argument.
+    inner_constructions: HashMap<Span, u32>,
+    /// Every resolved construction call, keyed by the call's span — nested
+    /// and local classes carry registered names the source text does not.
+    resolved_constructions: HashMap<Span, u32>,
+    /// `#override` markers on methods of a class with `implements`, whose
+    /// "overrides nothing" verdict waits for conformance: the target may be
+    /// a contract or abstract-class requirement declared nowhere in the
+    /// class's own chain. Validated by [`Self::require_pending_overrides`].
+    override_pending: Vec<(u32, String, Span)>,
 }
 
 /// See [`Checker::native_resource`].
@@ -709,6 +750,15 @@ struct Checker<'a> {
 struct NativeResource {
     resource: u32,
     e: u32,
+}
+
+/// What `this` denotes while a body is scanned for receiver mutation: a
+/// concrete class, or a contract (a trait default body, where `this` is the
+/// adopter and only `this.m()` calls are resolvable).
+#[derive(Debug, Clone, Copy)]
+enum ThisCtx {
+    Class(u32),
+    Contract(u32),
 }
 
 /// Ids of the contracts and enum `for ... in` checks a type against, once
@@ -792,6 +842,13 @@ impl<'a> Checker<'a> {
             clone_cache: HashMap::new(),
             expr_types: HashMap::new(),
             regex_match_class: 0,
+            class_decl_ids: HashMap::new(),
+            local_class_names: Vec::new(),
+            local_class_marks: Vec::new(),
+            contract_method_mutates: HashMap::new(),
+            inner_constructions: HashMap::new(),
+            resolved_constructions: HashMap::new(),
+            override_pending: Vec::new(),
         };
         checker.register_regex_match_class();
         checker
@@ -871,6 +928,9 @@ impl<'a> Checker<'a> {
             abstract_bases: Vec::new(),
             type_params: Vec::new(),
             shared: false,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
             span,
         };
         self.regex_match_class = class_id;
@@ -888,6 +948,24 @@ impl<'a> Checker<'a> {
         help: Option<String>,
     ) {
         let mut d = Diagnostic::error(code, message)
+            .at(self.sources.location(span))
+            .with_snippet(self.sources.snippet(span))
+            .with_cause(cause);
+        if let Some(help) = help {
+            d = d.with_help(help);
+        }
+        self.sink.emit(d);
+    }
+
+    fn warning(
+        &mut self,
+        code: Code,
+        span: Span,
+        message: impl Into<String>,
+        cause: impl Into<String>,
+        help: Option<String>,
+    ) {
+        let mut d = Diagnostic::warning(code, message)
             .at(self.sources.location(span))
             .with_snippet(self.sources.snippet(span))
             .with_cause(cause);
@@ -982,6 +1060,11 @@ impl<'a> Checker<'a> {
         self.declare_members(program);
         self.check_generic_class_lowering(program);
         self.check_conformance(program);
+        self.require_pending_overrides(program);
+        // Whether each method mutates its receiver is inferred — `mut` is no
+        // longer written — before any body is checked, since `inmut::strict`
+        // call sites consult the flags during body checking.
+        self.infer_method_mutation(program);
 
         // Signatures next, so a function can call another declared later.
         for f in &program.functions {
@@ -994,7 +1077,7 @@ impl<'a> Checker<'a> {
         self.check_entrypoint(program);
 
         self.scopes.push();
-        for c in &program.classes {
+        for c in Self::class_decls_flat(program) {
             self.check_class(c);
         }
         for f in &program.functions {
@@ -1022,6 +1105,8 @@ impl<'a> Checker<'a> {
             enum_instances: self.enum_instances,
             unions: self.unions,
             generic_constructions: self.generic_constructions,
+            inner_constructions: self.inner_constructions,
+            resolved_constructions: self.resolved_constructions,
             for_in_iteration: self.for_in_iteration,
             variant_constructions: self.variant_constructions,
             native_result: self.native_result,
@@ -1594,6 +1679,9 @@ impl<'a> Checker<'a> {
             abstract_bases: Vec::new(),
             type_params: Vec::new(),
             shared: true,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
             span: at,
         });
 
@@ -1610,7 +1698,8 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
-                is_mut: false,
+                mutates_receiver: false,
+            is_final: false,
             is_static: false,
             },
             MethodInfo {
@@ -1624,7 +1713,8 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
-                is_mut: false,
+                mutates_receiver: false,
+            is_final: false,
             is_static: false,
             },
             MethodInfo {
@@ -1638,7 +1728,8 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 overridden: true,
                 throws: Vec::new(),
-                is_mut: false,
+                mutates_receiver: false,
+            is_final: false,
             is_static: false,
             },
         ];
@@ -1654,6 +1745,9 @@ impl<'a> Checker<'a> {
             abstract_bases: Vec::new(),
             type_params: Vec::new(),
             shared: true,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
             span: at,
         });
 
@@ -1670,7 +1764,8 @@ impl<'a> Checker<'a> {
             from_contract: None,
             overridden: true,
             throws: Vec::new(),
-            is_mut: false,
+            mutates_receiver: false,
+            is_final: false,
             is_static: false,
         });
         self.classes.push(ClassType {
@@ -1685,6 +1780,9 @@ impl<'a> Checker<'a> {
             abstract_bases: vec![error],
             type_params: Vec::new(),
             shared: true,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
             span: at,
         });
 
@@ -1701,6 +1799,9 @@ impl<'a> Checker<'a> {
             abstract_bases: vec![error, throwable],
             type_params: Vec::new(),
             shared: true,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
             span: at,
         });
 
@@ -1729,7 +1830,8 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
-                    is_mut: false,
+                    mutates_receiver: false,
+            is_final: false,
             is_static: false,
                 },
                 MethodInfo {
@@ -1743,7 +1845,8 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
-                    is_mut: false,
+                    mutates_receiver: false,
+            is_final: false,
             is_static: false,
                 },
                 MethodInfo {
@@ -1757,7 +1860,8 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
-                    is_mut: false,
+                    mutates_receiver: false,
+            is_final: false,
             is_static: false,
                 },
                 MethodInfo {
@@ -1771,7 +1875,8 @@ impl<'a> Checker<'a> {
                     from_contract: None,
                     overridden: false,
                     throws: Vec::new(),
-                    is_mut: false,
+                    mutates_receiver: false,
+            is_final: false,
             is_static: false,
                 },
             ]
@@ -1819,6 +1924,9 @@ impl<'a> Checker<'a> {
                 abstract_bases: vec![runtime_error],
                 type_params: Vec::new(),
                 shared: true,
+                is_final: false,
+                enclosing: None,
+                nested: Vec::new(),
                 span: at,
             });
             id
@@ -2390,9 +2498,18 @@ impl<'a> Checker<'a> {
 
     /// Verifies that every class satisfies what it says it does.
     fn check_conformance(&mut self, program: &Program) {
-        for decl in &program.classes {
-            let Some(id) = self.class_id(&decl.name.name) else {
-                continue;
+        for decl in Self::class_decls_flat(program) {
+            self.check_conformance_decl(decl);
+        }
+    }
+
+    /// The [`Self::check_conformance`] step for one class, split out so a
+    /// local class — registered at its statement, after the program-wide
+    /// pass already ran — can go through it too.
+    fn check_conformance_decl(&mut self, decl: &ClassDecl) {
+        {
+            let Some(id) = self.class_decl_id(decl) else {
+                return;
             };
 
             // A record implementing a contract dispatches
@@ -2609,9 +2726,9 @@ impl<'a> Checker<'a> {
     /// Checks that a class supplies every required attribute and
     /// `abstract fn` an `abstract class` declares.
     ///
-    /// Unlike a contract's method, an abstract class's is only satisfied by
-    /// an explicit `override fn` — `ZIRK_LANGUAGE_SPEC.md`'s scenario for
-    /// this spells it out for both a field and a method at once.
+    /// An abstract class's member is a signature-only requirement: the
+    /// adopter supplies it with a plain method — `#override` is unnecessary
+    /// there since nothing is replaced.
     fn require_abstract_conformance(
         &mut self,
         class: u32,
@@ -2673,7 +2790,7 @@ impl<'a> Checker<'a> {
                     format!("`{class_name}` does not implement `{}`", method.name),
                     format!("`{abstract_name}` requires it"),
                     Some(format!(
-                        "add `override fn {}(...): ...` to `{class_name}`",
+                        "add `{}(...): ...` to `{class_name}`",
                         method.name
                     )),
                 );
@@ -2704,24 +2821,104 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            // Unlike a contract method, an abstract class's requirement is
-            // only satisfied by an explicit `override fn`
-            // (`ZIRK_LANGUAGE_SPEC.md`'s conformance scenario).
+            // An abstract class's requirement is signature-only: nothing is
+            // replaced, so `#override` is unnecessary there — a warning, not
+            // an obligation.
             let written_override = decl
                 .methods
                 .iter()
                 .find(|m| m.name.name == method.name)
                 .is_some_and(|m| m.is_override);
-            if !written_override {
+            if written_override {
+                self.warning(
+                    codes::UNNECESSARY_OVERRIDE,
+                    supplied.span,
+                    format!("`#override` on `{}` is unnecessary", method.name),
+                    format!("`{abstract_name}` requires a signature, not a replaced implementation"),
+                    Some("remove the marker".into()),
+                );
+            }
+        }
+    }
+
+    /// `#override` with `implements` is deferred: the marker may answer a
+    /// contract or abstract-class requirement that `declare_class_members`
+    /// could not see. Once conformance has run, a method whose name no
+    /// requirement claims overrides nothing — the mirror mistake, usually a
+    /// typo.
+    /// Also enforces the mirror rule: replacing a *trait's* default body —
+    /// a concrete implementation — without `#override`.
+    fn require_pending_overrides(&mut self, program: &Program) {
+        for decl in Self::class_decls_flat(program) {
+            let Some(id) = self.class_decl_id(decl) else {
+                continue;
+            };
+            for method in &decl.methods {
+                if method.is_override {
+                    continue;
+                }
+                let replaces_default = self.classes[id as usize]
+                    .contracts
+                    .iter()
+                    .any(|&contract| {
+                        self.contracts[contract as usize]
+                            .methods
+                            .iter()
+                            .any(|m| m.name == method.name.name && m.has_default)
+                    });
+                if replaces_default {
+                    self.error(
+                        codes::MISSING_OVERRIDE,
+                        method.name.span,
+                        format!("`{}` replaces a trait's default method", method.name.name),
+                        "a default body is a concrete implementation, and replacing one needs the marker",
+                        Some("write `#override` above the method".into()),
+                    );
+                }
+            }
+        }
+
+        let pending = std::mem::take(&mut self.override_pending);
+        for (class, name, span) in pending {
+            let mut claimed = false;
+            // A trait default has a body, so replacing it is a genuine
+            // override; an interface requirement or a bodyless trait method
+            // is signature-only, and the marker is unnecessary there.
+            for &contract in &self.classes[class as usize].contracts.clone() {
+                let required = self.contracts[contract as usize]
+                    .methods
+                    .iter()
+                    .find(|m| m.name == name)
+                    .map(|m| m.has_default);
+                let Some(has_default) = required else { continue };
+                claimed = true;
+                if !has_default {
+                    let contract_name = self.contracts[contract as usize].name.clone();
+                    self.warning(
+                        codes::UNNECESSARY_OVERRIDE,
+                        span,
+                        format!("`#override` on `{name}` is unnecessary"),
+                        format!("`{contract_name}` requires a signature, not a replaced implementation"),
+                        Some("remove the marker".into()),
+                    );
+                }
+            }
+            let claimed_by_abstract = self.classes[class as usize]
+                .abstract_bases
+                .iter()
+                .any(|&abstract_id| {
+                    self.classes[abstract_id as usize]
+                        .methods
+                        .iter()
+                        .any(|m| m.name == name)
+                });
+            if !claimed && !claimed_by_abstract {
                 self.error(
                     codes::MISSING_OVERRIDE,
-                    supplied.span,
-                    format!(
-                        "`{}` implements an abstract class's requirement",
-                        method.name
-                    ),
-                    format!("`{abstract_name}` requires it, the same as an inherited method"),
-                    Some(format!("write `override fn {}(...): ...`", method.name)),
+                    span,
+                    format!("`{name}` overrides nothing"),
+                    "no base class, contract or abstract class declares a method with that name",
+                    Some("remove `#override`, or check the spelling".into()),
                 );
             }
         }
@@ -2852,7 +3049,8 @@ impl<'a> Checker<'a> {
             overridden: false,
             from_contract: Some(contract),
             throws: method.throws.clone(),
-            is_mut: false,
+            mutates_receiver: false,
+            is_final: false,
             is_static: false,
         });
     }
@@ -2930,6 +3128,7 @@ impl<'a> Checker<'a> {
         // once every class and contract they might name is registered too.
         let type_params = self.mint_type_param_ids(&decl.type_params);
 
+        let id = self.classes.len() as u32;
         self.classes.push(ClassType {
             name: decl.name.name.clone(),
             kind: decl.kind,
@@ -2942,8 +3141,61 @@ impl<'a> Checker<'a> {
             abstract_bases: Vec::new(),
             type_params,
             shared: decl.shared,
+            is_final: decl.is_final,
+            enclosing: None,
+            nested: Vec::new(),
             span: decl.name.span,
         });
+        self.class_decl_ids
+            .insert(decl as *const ClassDecl as usize, id);
+        self.register_nested_classes(decl, id);
+    }
+
+    /// Registers the classes nested inside `parent` (`parent_id`), under
+    /// their qualified names — `Outer.Inner`, `Outer.Inner.Deeper`, and so
+    /// on — recursing into their own `nested` lists.
+    fn register_nested_classes(&mut self, parent_decl: &ClassDecl, parent_id: u32) {
+        let parent_name = self.classes[parent_id as usize].name.clone();
+        for decl in &parent_decl.nested {
+            let qualified = format!("{parent_name}.{}", decl.name.name);
+            if let Some(previous) = self.classes.iter().find(|c| c.name == qualified) {
+                let where_ = self.declared_at(previous.span, decl.name.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    decl.name.span,
+                    format!("class `{qualified}` is already defined"),
+                    format!("a previous definition exists {where_}"),
+                    Some("rename one of the two".into()),
+                );
+                continue;
+            }
+
+            let type_params = self.mint_type_param_ids(&decl.type_params);
+            let id = self.classes.len() as u32;
+            self.classes.push(ClassType {
+                name: qualified,
+                kind: decl.kind,
+                base: None,
+                fields: Vec::new(),
+                constructors: Vec::new(),
+                methods: Vec::new(),
+                contracts: Vec::new(),
+                contract_instances: Vec::new(),
+                abstract_bases: Vec::new(),
+                type_params,
+                // Member visibility, not `share`, governs whether a nested
+                // class can be named from outside its enclosing one.
+                shared: false,
+                is_final: decl.is_final,
+                enclosing: decl.is_inner.then_some(parent_id),
+                nested: Vec::new(),
+                span: decl.name.span,
+            });
+            self.classes[parent_id as usize].nested.push(id);
+            self.class_decl_ids
+                .insert(decl as *const ClassDecl as usize, id);
+            self.register_nested_classes(decl, id);
+        }
     }
 
     /// Mints an id for each `TypeParam`, without resolving its constraints.
@@ -2980,7 +3232,7 @@ impl<'a> Checker<'a> {
     /// or contract declared later in the file: this runs only after every
     /// class is registered and `resolve_bases` has run.
     fn resolve_class_type_param_constraints(&mut self, program: &Program) {
-        for decl in &program.classes {
+        for decl in Self::class_decls_flat(program) {
             if decl.type_params.is_empty() {
                 continue;
             }
@@ -3050,11 +3302,11 @@ impl<'a> Checker<'a> {
     /// generic type (`Box<T>`, `T | Int32`, `Iterable<T>`) rather than named
     /// directly, or a method with type parameters of its own — stays gated.
     fn check_generic_class_lowering(&mut self, program: &Program) {
-        for decl in &program.classes {
+        for decl in Self::class_decls_flat(program) {
             if decl.type_params.is_empty() {
                 continue;
             }
-            let Some(id) = self.class_id(&decl.name.name) else {
+            let Some(id) = self.class_decl_id(decl) else {
                 continue;
             };
             if self.generic_class_is_directly_specializable(id) {
@@ -3182,9 +3434,9 @@ impl<'a> Checker<'a> {
     /// Resolves every `extends`, rejecting a base that is not a class and any
     /// cycle in the result.
     fn resolve_bases(&mut self, program: &Program) {
-        for decl in &program.classes {
+        for decl in Self::class_decls_flat(program) {
             let Some(base) = &decl.extends else { continue };
-            let Some(id) = self.class_id(&decl.name.name) else {
+            let Some(id) = self.class_decl_id(decl) else {
                 continue;
             };
 
@@ -3220,6 +3472,17 @@ impl<'a> Checker<'a> {
             let declared = self.classes[base_id as usize].span;
             let shared = self.classes[base_id as usize].shared;
             self.require_visible(declared, shared, base, "class");
+
+            if self.classes[base_id as usize].is_final {
+                self.error(
+                    codes::FINAL_VIOLATION,
+                    base.span,
+                    format!("`{}` is `final` and cannot be extended", base.name),
+                    "a final class is sealed against inheritance",
+                    Some("remove `final` from the base, or do not extend it".into()),
+                );
+                continue;
+            }
             self.classes[id as usize].base = Some(base_id);
         }
 
@@ -3266,10 +3529,75 @@ impl<'a> Checker<'a> {
     }
 
     fn class_id(&self, name: &str) -> Option<u32> {
-        self.classes
+        // Local classes shadow everything, innermost scope first.
+        if let Some((_, id)) = self
+            .local_class_names
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+        {
+            return Some(*id);
+        }
+        if let Some(id) = self
+            .classes
             .iter()
             .position(|c| c.name == name)
             .map(|i| i as u32)
+        {
+            return Some(id);
+        }
+
+        // Inside a class body, a bare `Nested` names a class nested in the
+        // class being checked or in one of its enclosing classes —
+        // `Outer.Inner`'s own members name `Outer.Other` as `Other`.
+        if let Some(Type {
+            base: Base::Class(mut current),
+            ..
+        }) = self.this_type
+        {
+            loop {
+                let qualified = format!("{}.{}", self.classes[current as usize].name, name);
+                if let Some(id) = self
+                    .classes
+                    .iter()
+                    .position(|c| c.name == qualified)
+                    .map(|i| i as u32)
+                {
+                    return Some(id);
+                }
+                match self.nesting_parent(current) {
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+        None
+    }
+
+    /// The id a `ClassDecl` registered under, whether its registered name is
+    /// the written one (top-level classes) or a qualified/mangled one
+    /// (nested and local classes).
+    fn class_decl_id(&self, decl: &ClassDecl) -> Option<u32> {
+        self.class_decl_ids
+            .get(&(decl as *const ClassDecl as usize))
+            .copied()
+            .or_else(|| self.class_id(&decl.name.name))
+    }
+
+    /// Every `ClassDecl` of the program, nested classes included, each
+    /// parent before the classes nested inside it.
+    fn class_decls_flat(program: &Program) -> Vec<&ClassDecl> {
+        fn walk<'p>(decl: &'p ClassDecl, out: &mut Vec<&'p ClassDecl>) {
+            out.push(decl);
+            for nested in &decl.nested {
+                walk(nested, out);
+            }
+        }
+        let mut out = Vec::new();
+        for decl in &program.classes {
+            walk(decl, &mut out);
+        }
+        out
     }
 
     /// Fills in fields, constructors and methods, bases before subclasses.
@@ -3392,7 +3720,7 @@ impl<'a> Checker<'a> {
     /// earlier in the file than the abstract class it implements.
     fn in_hierarchy_order<'p>(&mut self, program: &'p Program) -> Vec<&'p ClassDecl> {
         let mut ordered: Vec<&ClassDecl> = Vec::new();
-        let mut pending: Vec<&ClassDecl> = program.classes.iter().collect();
+        let mut pending: Vec<&ClassDecl> = Self::class_decls_flat(program);
 
         // The chain is acyclic by now, so every round places at least one
         // class and the loop terminates.
@@ -3442,7 +3770,7 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_class_members(&mut self, decl: &ClassDecl) {
-        let Some(id) = self.class_id(&decl.name.name) else {
+        let Some(id) = self.class_decl_id(decl) else {
             return;
         };
         self.enter_type_params(&decl.type_params);
@@ -3490,6 +3818,24 @@ impl<'a> Checker<'a> {
                     .collect()
             })
             .unwrap_or_default();
+
+        // An `inner class` carries a hidden `outer` reference to its
+        // enclosing instance. It is the first own field — ahead of every
+        // declared one — so a field the user also calls `outer` reports as
+        // an ordinary duplicate below, and so `this.outer`'s slot is the
+        // same whoever looks.
+        if let Some(parent) = self.classes[id as usize].enclosing {
+            fields.push(FieldInfo {
+                name: "outer".to_string(),
+                ty: Type::of(Base::Class(parent)),
+                visibility: Visibility::Private,
+                mutability: Mutability::Immutable,
+                span: decl.name.span,
+                default: None,
+                is_static: false,
+                owner: id,
+            });
+        }
 
         for field in &decl.fields {
             if let Some(previous) = fields.iter().find(|f| f.name == field.name.name) {
@@ -3671,7 +4017,7 @@ impl<'a> Checker<'a> {
                     format!("`{}` has a body inside an abstract class", method.name.name),
                     "an abstract class declares signatures only, with no body of its own",
                     Some(format!(
-                        "write `abstract fn {}(...): ...;`",
+                        "write `abstract {}(...): ...;`",
                         method.name.name
                     )),
                 );
@@ -3704,9 +4050,21 @@ impl<'a> Checker<'a> {
                 overridden: decl.kind == ClassKind::Abstract,
                 from_contract: None,
                 throws,
-                is_mut: method.is_mut,
+                mutates_receiver: false,
+                is_final: method.is_final,
                 is_static: method.is_static,
             };
+            if method.is_final && self.classes[id as usize].is_final {
+                let class_name = self.classes[id as usize].name.clone();
+                self.warning(
+                    codes::REDUNDANT_FINAL,
+                    method.name.span,
+                    format!("`final` on `{}` is redundant", method.name.name),
+                    format!("`{class_name}` is `final`, so nothing can override its methods"),
+                    Some("remove it, or make the class extendable".into()),
+                );
+            }
+
             let method_inputs: Vec<Type> = resolved.params.iter().map(|p| p.ty).collect();
             self.check_declared_variance(
                 &method.type_params,
@@ -3718,18 +4076,57 @@ impl<'a> Checker<'a> {
 
             match methods.iter().position(|m| m.name == method.name.name) {
                 Some(position) if methods[position].owner != id => {
-                    // Replacing an inherited method has to say so
-                    // (`ZIRK_LANGUAGE_SPEC.md` section 7): otherwise adding a
-                    // method to a base silently changes what a subclass means.
-                    if !method.is_override {
-                        let owner = self.classes[methods[position].owner as usize].name.clone();
-                        let line = self.sources.location(methods[position].span).line;
+                    let inherited = &methods[position];
+                    // `#override` is required only when an inherited
+                    // *implementation* is replaced: a concrete base method
+                    // or a trait default. A signature-only requirement —
+                    // an `abstract class` member or an interface method —
+                    // has nothing to replace, so the marker is unnecessary
+                    // there (a warning, not an error).
+                    let owner_is_abstract =
+                        self.classes[inherited.owner as usize].kind == ClassKind::Abstract;
+                    let inherited_has_body = if let Some(contract) = inherited.from_contract {
+                        self.contracts[contract as usize]
+                            .method(&inherited.name)
+                            .is_some_and(|m| m.has_default)
+                    } else {
+                        !owner_is_abstract
+                    };
+
+                    if inherited.is_final {
+                        self.error(
+                            codes::MISSING_OVERRIDE,
+                            method.name.span,
+                            format!("`{}` is `final` and cannot be overridden", method.name.name),
+                            format!(
+                                "`{}` seals it",
+                                self.classes[inherited.owner as usize].name
+                            ),
+                            Some("remove the method, or ask the base to drop `final`".into()),
+                        );
+                    } else if inherited_has_body && !method.is_override {
+                        // Replacing an inherited implementation has to say so:
+                        // otherwise adding a method to a base silently changes
+                        // what a subclass means.
+                        let owner = self.classes[inherited.owner as usize].name.clone();
+                        let line = self.sources.location(inherited.span).line;
                         self.error(
                             codes::MISSING_OVERRIDE,
                             method.name.span,
                             format!("`{}` replaces an inherited method", method.name.name),
                             format!("`{owner}` declares it on line {line}"),
-                            Some(format!("write `override fn {}`", method.name.name)),
+                            Some(format!(
+                                "write `#override` above `{}`",
+                                method.name.name
+                            )),
+                        );
+                    } else if !inherited_has_body && method.is_override {
+                        self.warning(
+                            codes::UNNECESSARY_OVERRIDE,
+                            method.name.span,
+                            format!("`#override` on `{}` is unnecessary", method.name.name),
+                            "it implements a signature-only requirement — nothing is replaced",
+                            Some("remove the marker".into()),
                         );
                     }
 
@@ -3766,8 +4163,19 @@ impl<'a> Checker<'a> {
                             method.name.span,
                             format!("`{}` overrides nothing", method.name.name),
                             "no base class declares a method with that name and signature",
-                            Some("remove `override`, or check the spelling".into()),
+                            Some("remove `#override`, or check the spelling".into()),
                         );
+                    } else if method.is_override {
+                        // With `implements`, the marker may be satisfying a
+                        // requirement this pass cannot see yet — the verdict
+                        // is deferred to [`Self::require_pending_overrides`],
+                        // once every contract and abstract class has been
+                        // checked.
+                        self.override_pending.push((
+                            id,
+                            method.name.name.clone(),
+                            method.name.span,
+                        ));
                     }
                     let index = methods.len();
                     methods.push(MethodInfo { index, ..resolved });
@@ -4145,7 +4553,7 @@ impl<'a> Checker<'a> {
     /// what it points at is mutable, which is what makes `this.name = value`
     /// work.
     fn check_class(&mut self, decl: &ClassDecl) {
-        let Some(id) = self.classes.iter().position(|c| c.name == decl.name.name) else {
+        let Some(id) = self.class_decl_id(decl).map(|i| i as usize) else {
             // Its declaration was rejected; its bodies would report the same
             // problem again from every member.
             return;
@@ -4265,7 +4673,7 @@ impl<'a> Checker<'a> {
     /// reading a variable before it holds a value. A field is no different.
     fn require_fields_initialized(&mut self, decl: &ClassDecl, constructor: &ConstructDecl) {
         let assigned = assigned_fields(&constructor.body);
-        let Some(id) = self.class_id(&decl.name.name) else {
+        let Some(id) = self.class_decl_id(decl) else {
             return;
         };
 
@@ -4282,6 +4690,11 @@ impl<'a> Checker<'a> {
             .fields
             .iter()
             .filter(|f| !f.is_static && !f.ty.has_default() && f.default.is_none() && !assigned.contains(&f.name))
+            // The hidden `outer` of an `inner class` is supplied by the
+            // construction itself, never written by a `construct` body.
+            .filter(|f| {
+                !(f.name == "outer" && self.classes[f.owner as usize].enclosing.is_some())
+            })
             .filter(|f| !(delegates && base.is_some() && f.owner != id))
             .cloned()
             .collect();
@@ -5538,7 +5951,7 @@ impl<'a> Checker<'a> {
                 let shared = self.enums[index].shared;
                 self.require_visible(declared, shared, &named, "enum");
                 Some(self.resolve_enum_reference(index as u32, reference))
-            } else if let Some(index) = self.classes.iter().position(|c| c.name == resolved) {
+            } else if let Some(index) = self.class_id(&resolved).map(|i| i as usize) {
                 let declared = self.classes[index].span;
                 let shared = self.classes[index].shared;
                 self.require_visible(declared, shared, &named, "class");
@@ -6182,12 +6595,18 @@ impl<'a> Checker<'a> {
     }
 
     fn check_statements(&mut self, statements: &[Stmt]) -> bool {
+        // Local classes live from their declaration statement to the end of
+        // this statement list — nested lists see them, outer ones do not.
+        let locals_at_entry = self.local_class_names.len();
+        self.local_class_marks.push(locals_at_entry);
         let mut always_returns = false;
         for stmt in statements {
             if self.check_stmt(stmt) {
                 always_returns = true;
             }
         }
+        self.local_class_names.truncate(locals_at_entry);
+        self.local_class_marks.pop();
         always_returns
     }
 
@@ -6255,6 +6674,584 @@ impl<'a> Checker<'a> {
             Stmt::Try(s) => self.check_try(s),
             Stmt::Unsafe(s) => self.check_unsafe_block(s),
             Stmt::Commit(s) => self.check_commit_block(s),
+            Stmt::LocalClass(decl) => {
+                self.check_local_class(decl);
+                false
+            }
+        }
+    }
+
+    /// A `class` declaration inside a body. It is registered here, at its
+    /// statement: every type it can name already exists by the time bodies
+    /// are checked, and the statement's position is exactly where its
+    /// block scope begins.
+    fn check_local_class(&mut self, decl: &ClassDecl) {
+        // A local class may shadow an outer one; two in the same statement
+        // list — the entries since the current mark — is a duplicate.
+        let mark = self.local_class_marks.last().copied().unwrap_or(0);
+        if self.local_class_names[mark..]
+            .iter()
+            .any(|(n, _)| n == &decl.name.name)
+        {
+            self.error(
+                codes::DUPLICATE_DECLARATION,
+                decl.name.span,
+                format!("local class `{}` is already defined", decl.name.name),
+                "a class with that name was declared earlier in this block",
+                Some("rename one of the two".into()),
+            );
+        }
+        let id = self.classes.len() as u32;
+        let mangled = format!("{}$local${id}", decl.name.name);
+        let type_params = self.mint_type_param_ids(&decl.type_params);
+        self.classes.push(ClassType {
+            name: mangled,
+            kind: decl.kind,
+            base: None,
+            fields: Vec::new(),
+            constructors: Vec::new(),
+            methods: Vec::new(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params,
+            shared: false,
+            is_final: decl.is_final,
+            enclosing: None,
+            nested: Vec::new(),
+            span: decl.name.span,
+        });
+        self.class_decl_ids
+            .insert(decl as *const ClassDecl as usize, id);
+        self.local_class_names
+            .push((decl.name.name.clone(), id));
+        self.register_nested_classes(decl, id);
+
+        // `extends`, resolved the same way `resolve_bases` does it — every
+        // name it can refer to is already registered.
+        if let Some(base) = &decl.extends {
+            if decl.kind != ClassKind::Class {
+                let kind = decl.kind.as_str();
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    base.span,
+                    format!("a {kind} cannot extend anything"),
+                    format!("{kind} has no identity for inheritance to build on"),
+                    Some("remove `extends`".into()),
+                );
+            } else {
+                let resolved = self.resolved_name(&base.name, base.span);
+                match self.class_id(&resolved) {
+                    Some(base_id) => {
+                        if self.classes[base_id as usize].is_final {
+                            self.error(
+                                codes::FINAL_VIOLATION,
+                                base.span,
+                                format!("`{}` is `final` and cannot be extended", base.name),
+                                "a final class is sealed against inheritance",
+                                Some("remove `final` from the base, or do not extend it".into()),
+                            );
+                        } else {
+                            self.classes[id as usize].base = Some(base_id);
+                        }
+                    }
+                    None => {
+                        self.error(
+                            codes::UNKNOWN_TYPE,
+                            base.span,
+                            format!("`{}` is not a declared class", base.name),
+                            "a class extends a class",
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+
+        self.declare_class_members(decl);
+        self.check_conformance_decl(decl);
+        // Its own methods may be mutually recursive, so infer to a fixed
+        // point the same way the program-wide pass does.
+        while self.infer_decl_mutation(decl) {}
+        self.check_class(decl);
+    }
+
+    // --- Method receiver-mutation inference -------------------------------
+
+    /// Fills `MethodInfo::mutates_receiver` for every method: since `mut` is
+    /// no longer a written modifier, whether a method mutates its receiver is
+    /// inferred from its body — a write to a place rooted at `this`, or a
+    /// call to a method already known to mutate. Iterates to a fixed point
+    /// so `a -> b -> this.x = ...` propagates through recursion and cycles.
+    fn infer_method_mutation(&mut self, program: &Program) {
+        let class_decls = Self::class_decls_flat(program);
+        loop {
+            let mut changed = false;
+            for decl in &class_decls {
+                changed |= self.infer_decl_mutation(decl);
+            }
+            for (i, contract) in program.contracts.iter().enumerate() {
+                changed |= self.infer_contract_mutation(i as u32, contract);
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// One fixed-point step of [`Self::infer_method_mutation`] over one
+    /// class's own methods. Returns whether any flag changed.
+    fn infer_decl_mutation(&mut self, decl: &ClassDecl) -> bool {
+        let Some(id) = self.class_decl_id(decl) else {
+            return false;
+        };
+        let mut changed = false;
+        for method in &decl.methods {
+            let Some(pos) = self.classes[id as usize]
+                .methods
+                .iter()
+                .position(|m| m.name == method.name.name && m.owner == id)
+            else {
+                continue;
+            };
+            if self.classes[id as usize].methods[pos].mutates_receiver {
+                continue;
+            }
+            match &method.body {
+                Some(body) if self.body_mutates_receiver(ThisCtx::Class(id), body) => {
+                    self.classes[id as usize].methods[pos].mutates_receiver = true;
+                    changed = true;
+                }
+                // A signature with no analyzable body — an abstract method,
+                // an extern — is conservatively mutating.
+                None => {
+                    self.classes[id as usize].methods[pos].mutates_receiver = true;
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        // A trait default adopted without redeclaration: its own body
+        // decides, computed by `infer_contract_mutation`.
+        let contract_mutates = self.contract_method_mutates.clone();
+        for pos in 0..self.classes[id as usize].methods.len() {
+            let method = &self.classes[id as usize].methods[pos];
+            if method.mutates_receiver {
+                continue;
+            }
+            let Some(contract) = method.from_contract else {
+                continue;
+            };
+            if contract_mutates
+                .get(&(contract, method.name.clone()))
+                .copied()
+                .unwrap_or(false)
+            {
+                self.classes[id as usize].methods[pos].mutates_receiver = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The contract half of [`Self::infer_method_mutation`]: a trait's
+    /// default bodies mutate `this` too.
+    fn infer_contract_mutation(&mut self, contract: u32, decl: &ContractDecl) -> bool {
+        let mut changed = false;
+        for method in &decl.methods {
+            let key = (contract, method.name.name.clone());
+            if self
+                .contract_method_mutates
+                .get(&key)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(body) = &method.body else {
+                continue;
+            };
+            if self.body_mutates_receiver(ThisCtx::Contract(contract), body) {
+                self.contract_method_mutates.insert(key, true);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Whether `block` writes to a place rooted at the receiver or calls a
+    /// method already known to mutate it.
+    ///
+    /// `aliases` tracks `let a = this.f` bindings so a write to `a.g` — a
+    /// place derived from `this` — counts too. Rebinding an alias removes
+    /// it, which keeps the analysis sound rather than merely syntactic.
+    fn body_mutates_receiver(&self, ctx: ThisCtx, block: &Block) -> bool {
+        let mut aliases = HashMap::new();
+        self.stmts_mutate_receiver(ctx, &block.statements, &mut aliases)
+    }
+
+    fn stmts_mutate_receiver(
+        &self,
+        ctx: ThisCtx,
+        statements: &[Stmt],
+        aliases: &mut HashMap<String, Type>,
+    ) -> bool {
+        for stmt in statements {
+            match stmt {
+                Stmt::Let(s) => {
+                    if let Some(init) = &s.init {
+                        if self.expr_mutates_receiver(ctx, init, aliases) {
+                            return true;
+                        }
+                        if let (Some(ty), Pattern::Binding(name)) =
+                            (self.this_derived_type(ctx, init, aliases), &s.pattern)
+                        {
+                            aliases.insert(name.name.clone(), ty);
+                        }
+                    }
+                }
+                Stmt::MultiLet(s) => {
+                    for init in &s.inits {
+                        if self.expr_mutates_receiver(ctx, init, aliases) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::Assign(s) => {
+                    if self.target_is_this_derived(ctx, &s.target, aliases)
+                        || self.expr_mutates_receiver(ctx, &s.value, aliases)
+                    {
+                        return true;
+                    }
+                    if let AssignTarget::Name(name) = &s.target {
+                        aliases.remove(&name.name);
+                    }
+                }
+                Stmt::MultiAssign(s) => {
+                    for target in &s.targets {
+                        if self.target_is_this_derived(ctx, target, aliases) {
+                            return true;
+                        }
+                        if let AssignTarget::Name(name) = target {
+                            aliases.remove(&name.name);
+                        }
+                    }
+                    if s.values
+                        .iter()
+                        .any(|v| self.expr_mutates_receiver(ctx, v, aliases))
+                    {
+                        return true;
+                    }
+                }
+                Stmt::If(s) => {
+                    if self.expr_mutates_receiver(ctx, &s.condition, aliases)
+                        || self.stmts_mutate_receiver(ctx, &s.then_branch.statements, aliases)
+                    {
+                        return true;
+                    }
+                    match &s.else_branch {
+                        Some(ElseBranch::Block(b)) => {
+                            if self.stmts_mutate_receiver(ctx, &b.statements, aliases) {
+                                return true;
+                            }
+                        }
+                        Some(ElseBranch::If(inner)) => {
+                            let wrapped = Stmt::If((**inner).clone());
+                            // Reborrow through the match arm — the wrapped
+                            // statement is scanned, not evaluated.
+                            if self.stmts_mutate_receiver(
+                                ctx,
+                                std::slice::from_ref(&wrapped),
+                                aliases,
+                            ) {
+                                return true;
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Stmt::Loop(s) => {
+                    if let Some(init) = &s.init
+                        && self.stmts_mutate_receiver(
+                            ctx,
+                            std::slice::from_ref(init.as_ref()),
+                            aliases,
+                        )
+                    {
+                        return true;
+                    }
+                    if let Some(condition) = &s.condition
+                        && self.expr_mutates_receiver(ctx, condition, aliases)
+                    {
+                        return true;
+                    }
+                    if let Some(step) = &s.step
+                        && self.stmts_mutate_receiver(
+                            ctx,
+                            std::slice::from_ref(step.as_ref()),
+                            aliases,
+                        )
+                    {
+                        return true;
+                    }
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                }
+                Stmt::ForIn(s) => {
+                    if self.expr_mutates_receiver(ctx, &s.iterable, aliases)
+                        || self.stmts_mutate_receiver(ctx, &s.body.statements, aliases)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::Expr(s) => {
+                    if self.expr_mutates_receiver(ctx, &s.expr, aliases) {
+                        return true;
+                    }
+                }
+                Stmt::Return(s) => {
+                    if let Some(value) = &s.value
+                        && self.expr_mutates_receiver(ctx, value, aliases)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::Throw(s) => {
+                    if let Some(value) = &s.value
+                        && self.expr_mutates_receiver(ctx, value, aliases)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::Block(b) => {
+                    if self.stmts_mutate_receiver(ctx, &b.statements, aliases) {
+                        return true;
+                    }
+                }
+                Stmt::Try(s) => {
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                    for catch in &s.catches {
+                        if self.stmts_mutate_receiver(ctx, &catch.body.statements, aliases) {
+                            return true;
+                        }
+                    }
+                    if let Some(finally) = &s.finally
+                        && self.stmts_mutate_receiver(ctx, &finally.statements, aliases)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::Unsafe(s) => {
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                }
+                Stmt::Commit(s) => {
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                }
+                // A local class body is its own function scope: it cannot
+                // mutate the enclosing method's receiver.
+                Stmt::LocalClass(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
+            }
+        }
+        false
+    }
+
+    /// Whether an assignment target is a place rooted at the receiver.
+    fn target_is_this_derived(
+        &self,
+        ctx: ThisCtx,
+        target: &AssignTarget,
+        aliases: &HashMap<String, Type>,
+    ) -> bool {
+        match target {
+            // Rebinding a local is not a receiver mutation.
+            AssignTarget::Name(_) => false,
+            AssignTarget::Field(f) => {
+                self.this_derived_type(ctx, &f.object, aliases).is_some()
+            }
+            AssignTarget::Index(i) => {
+                self.this_derived_type(ctx, &i.receiver, aliases).is_some()
+            }
+        }
+    }
+
+    /// The type of an expression that denotes the receiver or a place
+    /// reached from it — `this`, `this.f`, `this.f.g`, or an alias bound to
+    /// one of those. `None` when the expression is not receiver-derived.
+    fn this_derived_type(
+        &self,
+        ctx: ThisCtx,
+        expr: &Expr,
+        aliases: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        match expr {
+            Expr::This(_) => match ctx {
+                ThisCtx::Class(id) => Some(Type::of(Base::Class(id))),
+                ThisCtx::Contract(id) => Some(Type::of(Base::Contract(id))),
+            },
+            Expr::Path(ident) => aliases.get(&ident.name).copied(),
+            Expr::Field(f) if !f.safe => {
+                let owner = self.this_derived_type(ctx, &f.object, aliases)?;
+                match owner.base {
+                    Base::Class(id) => self.classes[id as usize]
+                        .field(&f.name.name)
+                        .map(|field| field.ty),
+                    // A contract receiver has no fields to project.
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether an expression calls a receiver-mutating method or contains a
+    /// receiver write.
+    fn expr_mutates_receiver(
+        &self,
+        ctx: ThisCtx,
+        expr: &Expr,
+        aliases: &mut HashMap<String, Type>,
+    ) -> bool {
+        match expr {
+            Expr::Increment(i) => self.target_is_this_derived(ctx, &i.target, aliases),
+            Expr::Call(c) => {
+                // A call to a mutating method on a receiver-derived object
+                // mutates `this`'s reachable graph.
+                if let Expr::Field(f) = &*c.callee
+                    && let Some(receiver) = self.this_derived_type(ctx, &f.object, aliases)
+                {
+                    match receiver.base {
+                        Base::Class(id) => {
+                            if self.classes[id as usize]
+                                .method(&f.name.name)
+                                .is_some_and(|m| m.mutates_receiver)
+                            {
+                                return true;
+                            }
+                        }
+                        Base::Contract(id) => {
+                            if self
+                                .contract_method_mutates
+                                .get(&(id, f.name.name.clone()))
+                                .copied()
+                                .unwrap_or(false)
+                            {
+                                return true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // `super.m()` reaches the base's implementation.
+                if let Expr::Field(f) = &*c.callee
+                    && matches!(&*f.object, Expr::Super(_))
+                    && let ThisCtx::Class(id) = ctx
+                    && let Some(base) = self.classes[id as usize].base
+                    && self.classes[base as usize]
+                        .method(&f.name.name)
+                        .is_some_and(|m| m.mutates_receiver)
+                {
+                    return true;
+                }
+                self.expr_mutates_receiver(ctx, &c.callee, aliases)
+                    || c
+                        .args
+                        .iter()
+                        .any(|a| self.expr_mutates_receiver(ctx, &a.value, aliases))
+            }
+            Expr::Unary(e) => self.expr_mutates_receiver(ctx, &e.operand, aliases),
+            Expr::Binary(e) => {
+                self.expr_mutates_receiver(ctx, &e.left, aliases)
+                    || self.expr_mutates_receiver(ctx, &e.right, aliases)
+            }
+            Expr::Field(f) => self.expr_mutates_receiver(ctx, &f.object, aliases),
+            Expr::Index(i) => {
+                self.expr_mutates_receiver(ctx, &i.receiver, aliases)
+                    || self.expr_mutates_receiver(ctx, &i.index, aliases)
+            }
+            Expr::Slice(s) => {
+                self.expr_mutates_receiver(ctx, &s.receiver, aliases)
+                    || [&s.start, &s.end, &s.step]
+                        .into_iter()
+                        .flatten()
+                        .any(|e| self.expr_mutates_receiver(ctx, e, aliases))
+            }
+            Expr::Range(r) => {
+                self.expr_mutates_receiver(ctx, &r.start, aliases)
+                    || self.expr_mutates_receiver(ctx, &r.end, aliases)
+                    || r
+                        .step
+                        .as_ref()
+                        .is_some_and(|s| self.expr_mutates_receiver(ctx, s, aliases))
+            }
+            Expr::If(i) => {
+                self.expr_mutates_receiver(ctx, &i.condition, aliases)
+                    || self.stmts_mutate_receiver(ctx, &i.then_branch.statements, aliases)
+                    || match &i.else_branch {
+                        Some(ElseBranch::Block(b)) => {
+                            self.stmts_mutate_receiver(ctx, &b.statements, aliases)
+                        }
+                        Some(ElseBranch::If(inner)) => self
+                            .stmts_mutate_receiver(
+                                ctx,
+                                std::slice::from_ref(&Stmt::If((**inner).clone())),
+                                aliases,
+                            ),
+                        None => false,
+                    }
+            }
+            Expr::Ternary(t) => {
+                self.expr_mutates_receiver(ctx, &t.condition, aliases)
+                    || self.expr_mutates_receiver(ctx, &t.when_true, aliases)
+                    || self.expr_mutates_receiver(ctx, &t.when_false, aliases)
+            }
+            Expr::Match(m) => {
+                self.expr_mutates_receiver(ctx, &m.scrutinee, aliases)
+                    || m.arms.iter().any(|arm| match &arm.body {
+                        ArmBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
+                        ArmBody::Block(b) => {
+                            self.stmts_mutate_receiver(ctx, &b.statements, aliases)
+                        }
+                    })
+            }
+            Expr::Lambda(l) => match &*l.body {
+                // A lambda that mutates the receiver might be called — the
+                // conservative reading treats its capture as a mutation.
+                LambdaBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
+                LambdaBody::Block(b) => {
+                    self.stmts_mutate_receiver(ctx, &b.statements, aliases)
+                }
+            },
+            Expr::Cast(c) => self.expr_mutates_receiver(ctx, &c.expr, aliases),
+            Expr::Interpolated(i) => i.parts.iter().any(|p| match p {
+                InterpolatedPart::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
+                InterpolatedPart::Literal(_) => false,
+            }),
+            Expr::Unsafe(u) => self.stmts_mutate_receiver(ctx, &u.body.statements, aliases),
+            Expr::Commit(c) => self.stmts_mutate_receiver(ctx, &c.body.statements, aliases),
+            Expr::Transfer(t) => self.expr_mutates_receiver(ctx, &t.expr, aliases),
+            Expr::Tuple(t) => t
+                .elements
+                .iter()
+                .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
+            Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
+            Expr::Variant(_) | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Duration(_)
+            | Expr::Regex(_)
+            | Expr::Char(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Null(_)
+            | Expr::Path(_)
+            | Expr::This(_)
+            | Expr::Super(_) => false,
         }
     }
 
@@ -8432,6 +9429,20 @@ impl<'a> Checker<'a> {
                 returns: signature.returns,
             });
             return Type::of(Base::Function(id));
+        }
+
+        // `outer` inside an `inner class` member names the enclosing
+        // instance — a pseudo-binding like `this`, consulted only when no
+        // real binding shadows it.
+        if ident.name == "outer"
+            && self.scopes.lookup(&ident.name).is_none()
+            && let Some(Type {
+                base: Base::Class(current),
+                ..
+            }) = self.this_type
+            && let Some(parent) = self.classes[current as usize].enclosing
+        {
+            return Type::of(Base::Class(parent));
         }
 
         let Some(resolved) = self.scopes.resolve(&ident.name) else {
@@ -10805,7 +11816,35 @@ impl<'a> Checker<'a> {
             return true;
         }
 
+        // A nested or inner class shares the private surface of its
+        // enclosing family: `Outer` can reach `Outer.Inner`'s members and
+        // `Inner` can reach `Outer`'s.
+        if self.nesting_root(current) == self.nesting_root(owner)
+            && (self.nesting_parent(current).is_some()
+                || self.nesting_parent(owner).is_some())
+        {
+            return true;
+        }
+
         visibility == Visibility::Protected && self.inherits_from(current, owner)
+    }
+
+    /// The class that immediately contains `id`, if `id` is a nested or
+    /// inner class — the reverse of [`ClassType::nested`].
+    fn nesting_parent(&self, id: u32) -> Option<u32> {
+        self.classes
+            .iter()
+            .position(|c| c.nested.contains(&id))
+            .map(|i| i as u32)
+    }
+
+    /// The outermost class of a nesting family — the class itself when it
+    /// is not nested.
+    fn nesting_root(&self, mut id: u32) -> u32 {
+        while let Some(parent) = self.nesting_parent(id) {
+            id = parent;
+        }
+        id
     }
 
     /// Whether a class has another somewhere up its chain.
@@ -11264,6 +12303,10 @@ impl<'a> Checker<'a> {
                     AssignTarget::Name(_) => {}
                 }
                 self.check_recursive_reference(&s.value, name, nested);
+            }
+            Stmt::LocalClass(_) => {
+                // A local class body is its own function scope: it cannot
+                // capture the value being checked for recursion.
             }
             Stmt::MultiAssign(s) => {
                 for target in &s.targets {
@@ -11971,6 +13014,24 @@ impl<'a> Checker<'a> {
             {
                 return self.check_derived_clone_call(object, id, field);
             }
+            // `o.Inner(...)` constructs the `inner class` bound to `o` as
+            // its enclosing instance.
+            if self.classes[id as usize].method(&field.name.name).is_none()
+                && !field.safe
+            {
+                let qualified =
+                    format!("{}.{}", self.classes[id as usize].name, field.name.name);
+                if let Some(inner) = self
+                    .classes
+                    .iter()
+                    .position(|c| c.name == qualified)
+                    .map(|i| i as u32)
+                    && self.classes[inner as usize].enclosing == Some(id)
+                {
+                    self.inner_constructions.insert(expr.span, inner);
+                    return self.check_construction(expr, inner, &field.name);
+                }
+            }
             return self.check_method_call(expr, field, id, &[]);
         }
         if let Base::Contract(id) = object.base {
@@ -12132,9 +13193,11 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        // A `mut` method on an `inmut::strict` receiver would mutate the
-        // reachable graph the strict reference promises to freeze.
-        if method.is_mut
+        // A receiver-mutating method on an `inmut::strict` reference would
+        // mutate the reachable graph the strict reference promises to
+        // freeze. Mutation is inferred from the method's body — see
+        // `infer_method_mutation`.
+        if method.mutates_receiver
             && let Some((root_name, Mutability::Strict)) =
                 self.root_binding_mutability(&field.object)
         {
@@ -12146,7 +13209,7 @@ impl<'a> Checker<'a> {
                     method.name
                 ),
                 format!(
-                    "`{root_name}` is `inmut::strict`, and `{}` is declared `mut`",
+                    "`{root_name}` is `inmut::strict`, and `{}` mutates its receiver",
                     method.name
                 ),
                 Some(format!(
@@ -12211,6 +13274,11 @@ impl<'a> Checker<'a> {
     /// signatures by type and by argument label is the rest of the rule, and
     /// it needs the whole matching machinery that named arguments already use.
     fn check_construction(&mut self, expr: &CallExpr, id: u32, callee: &Ident) -> Type {
+        // The resolved target is recorded by span: nested and local classes
+        // are registered under qualified/mangled names the written callee
+        // does not carry, so lowering cannot rediscover this lookup.
+        self.resolved_constructions.insert(expr.span, id);
+
         let class = &self.classes[id as usize];
         let class_name = class.name.clone();
         let shared = class.shared;
@@ -13550,6 +14618,35 @@ impl<'a> Checker<'a> {
             return self.check_pin_construction(expr, callee.span);
         }
 
+        // `Outer.Nested(...)` constructs a nested class through its
+        // qualified name — the base names a class, not a value.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && self.scopes.lookup(&base.name).is_none()
+            && let Some(outer_id) = self.class_id(&base.name)
+        {
+            let qualified = format!("{}.{}", self.classes[outer_id as usize].name, field.name.name);
+            if let Some(nested_id) = self.classes.iter().position(|c| c.name == qualified) {
+                let nested_id = nested_id as u32;
+                if self.classes[nested_id as usize].enclosing.is_some() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("`{qualified}` is an `inner` class"),
+                        "an inner class is built bound to an enclosing instance",
+                        Some(format!("write `outer.{}(...)` on an `{outer}` value, or declare it without `inner`", field.name.name, outer = base.name)),
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::of(Base::Class(nested_id));
+                }
+                // A *static* nested class takes no enclosing instance; the
+                // resolution is recorded by `check_construction` itself.
+                return self.check_construction(expr, nested_id, &field.name);
+            }
+        }
+
         // `ClassName.method()` for a `static` method.
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
@@ -14723,9 +15820,32 @@ impl<'a> Checker<'a> {
             }
 
             // `User(1, "x")` builds an instance. There is no `new`: the type
-            // name is the constructor (`LANGUAGE_SPEC` section 7).
-            if let Some(id) = self.classes.iter().position(|c| c.name == declared) {
-                return self.check_construction(expr, id as u32, callee);
+            // name is the constructor (`LANGUAGE_SPEC` section 7). A nested
+            // class names itself through its enclosing one — `Nested` inside
+            // `Outer`, resolved by `class_id`'s scoped fallback — and an
+            // `inner` one binds `this` as its enclosing instance.
+            if let Some(id) = self.class_id(&declared) {
+                if self.classes[id as usize].enclosing.is_some() {
+                    if self.this_type.is_none() {
+                        let name = self.classes[id as usize].name.clone();
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            expr.span,
+                            format!("`{name}` is an `inner` class"),
+                            "it can only be built bound to an enclosing instance",
+                            Some(format!(
+                                "write `outer.{}(...)`, or move this call inside the enclosing class",
+                                callee.name
+                            )),
+                        );
+                        for arg in &expr.args {
+                            self.check_expr(&arg.value);
+                        }
+                        return Type::of(Base::Class(id));
+                    }
+                    self.inner_constructions.insert(expr.span, id);
+                }
+                return self.check_construction(expr, id, callee);
             }
 
             if let Some(id) = self.contract_id(&declared) {

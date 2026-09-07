@@ -232,4 +232,12 @@ pub mod codes {
     /// A type parameter declared `in` or `out` appears in a position that
     /// contradicts the declared variance.
     pub const INVALID_VARIANCE: Code = Code::new("E0461");
+    /// A `#override` marker where no inherited implementation is replaced —
+    /// unnecessary, not wrong.
+    pub const UNNECESSARY_OVERRIDE: Code = Code::new("W0462");
+    /// A `final class` is extended, or a `final` method is overridden.
+    pub const FINAL_VIOLATION: Code = Code::new("E0463");
+    /// A `final` modifier that adds nothing, such as a `final` method inside
+    /// a `final class`.
+    pub const REDUNDANT_FINAL: Code = Code::new("W0464");
 }

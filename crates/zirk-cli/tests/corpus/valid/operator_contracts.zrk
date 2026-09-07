@@ -4,7 +4,7 @@ class Money {
     construct(amount: Int32) { this.amount = amount; }
 
     // El contrato de operador: `+` sobre un tipo propio.
-    fn _add(other: Money): Money { return Money(this.amount + other.amount); }
+     _add(other: Money): Money { return Money(this.amount + other.amount); }
 }
 
 fn main(): Void {

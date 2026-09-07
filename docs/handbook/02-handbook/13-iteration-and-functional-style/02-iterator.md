@@ -10,7 +10,7 @@ Completion is explicit and cannot be confused with a nullable item:
 enum Iteration<T> { Item(T), Done }
 
 interface Iterator<out T> {
-    fn next(): Iteration<T>;
+    next(): Iteration<T>;
 }
 ```
 

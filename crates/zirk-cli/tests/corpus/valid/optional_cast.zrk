@@ -1,12 +1,14 @@
 // Cast nullable `as?` devuelve el subtipo cuando coincide y null cuando no.
-class Animal { construct() { } fn speak(): String { return "..."; } }
+class Animal { construct() { }  speak(): String { return "..."; } }
 class Dog extends Animal {
     construct() { super(); }
-    override fn speak(): String { return "woof"; }
+    #override
+      speak(): String { return "woof"; }
 }
 class Cat extends Animal {
     construct() { super(); }
-    override fn speak(): String { return "meow"; }
+    #override
+      speak(): String { return "meow"; }
 }
 
 fn main(): Void {

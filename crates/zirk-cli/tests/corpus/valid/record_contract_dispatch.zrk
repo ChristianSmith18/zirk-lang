@@ -9,13 +9,13 @@
 // (Only `record`'s own body form can declare `implements` and methods,
 // so it is the only value type this scenario can use today.)
 interface Describable {
-    fn describe(): String;
+     describe(): String;
 }
 
 record Point implements Describable {
     x: Int32;
     y: Int32;
-    fn describe(): String { return "a point"; }
+     describe(): String { return "a point"; }
 }
 
 fn announce(d: Describable): String {

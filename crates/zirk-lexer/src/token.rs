@@ -111,6 +111,12 @@ pub enum Keyword {
     /// is implemented as a built-in generic, while the statement form is
     /// reserved.
     Pin,
+    /// `final` seals a class against `extends` or a method against
+    /// `#override`.
+    Final,
+    /// `inner class` marks a nested class that captures a reference to its
+    /// enclosing instance.
+    Inner,
 }
 
 impl Keyword {
@@ -182,6 +188,8 @@ impl Keyword {
             "commit" => Commit,
             "extern" => Extern,
             "Pin" => Pin,
+            "final" => Final,
+            "inner" => Inner,
             _ => return None,
         })
     }
@@ -251,6 +259,8 @@ impl Keyword {
             Commit => "commit",
             Extern => "extern",
             Pin => "Pin",
+            Final => "final",
+            Inner => "inner",
         }
     }
 
@@ -492,6 +502,8 @@ pub enum TokenKind {
     DotDotDot,
     Arrow,
     FatArrow,
+    /// `#`, introducing a member marker such as `#override`.
+    Hash,
 
     /// End of file. Always the last token.
     Eof,
@@ -593,6 +605,7 @@ impl TokenKind {
             DotDotDot => "...",
             Arrow => "->",
             FatArrow => "=>",
+            Hash => "#",
             _ => "",
         }
     }

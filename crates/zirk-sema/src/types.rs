@@ -928,6 +928,13 @@ pub struct ClassType {
     pub type_params: Vec<u32>,
     /// Marked `share`, so files that import it may name it.
     pub shared: bool,
+    /// `final class` cannot be extended.
+    pub is_final: bool,
+    /// `inner class`: the enclosing class's id, when this class captures an
+    /// enclosing instance.
+    pub enclosing: Option<u32>,
+    /// Ids of the classes nested inside this one, in declaration order.
+    pub nested: Vec<u32>,
     /// Where it was declared, which is also which file owns it.
     pub span: zirk_diagnostics::Span,
 }
@@ -966,9 +973,14 @@ pub struct MethodInfo {
     /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
     /// Phase 4b) — see [`crate::scope::Signature::throws`].
     pub throws: Vec<Type>,
-    /// Written `mut fn`, marking a method that mutates its receiver.
-    pub is_mut: bool,
-    /// `static fn` has no receiver and is not dispatched virtually.
+    /// Whether the method mutates its receiver, **inferred** by the checker
+    /// from the body (a `this.*` write or a call to a mutating method) since
+    /// `mut` is no longer a written modifier. Used by the `inmut::strict`
+    /// check.
+    pub mutates_receiver: bool,
+    /// `final` forbids overriding this method in a subclass.
+    pub is_final: bool,
+    /// `static` methods have no receiver and are not dispatched virtually.
     pub is_static: bool,
 }
 

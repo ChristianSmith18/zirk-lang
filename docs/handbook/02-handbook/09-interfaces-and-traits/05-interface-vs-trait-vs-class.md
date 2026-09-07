@@ -14,13 +14,13 @@ One design can use all three deliberately:
 
 ```zirk
 interface Repository<T> {
-    fn find(id: UInt64): Result<T, RepositoryError>;
+    find(id: UInt64): Result<T, RepositoryError>;
 }
 
 trait Auditable {
-    fn audit_name(): String;
+    audit_name(): String;
 
-    fn audit(action: String): Void {
+    audit(action: String): Void {
         stdout.println("{this.audit_name()}: {action}");
     }
 }
@@ -28,11 +28,11 @@ trait Auditable {
 class UserRepository implements Repository<User>, Auditable {
     connection: DatabaseConnection;
 
-    fn audit_name(): String {
+    audit_name(): String {
         return "users";
     }
 
-    fn find(id: UInt64): Result<User, RepositoryError> {
+    find(id: UInt64): Result<User, RepositoryError> {
         this.audit("find {id}");
         return this.connection.find_user(id);
     }

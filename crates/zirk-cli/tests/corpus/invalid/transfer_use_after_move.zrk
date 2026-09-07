@@ -5,7 +5,7 @@ class FakeFile implements TransferableResource {
         this.name = name;
     }
 
-    fn read_all(): String {
+     read_all(): String {
         return "contents of " + this.name;
     }
 }

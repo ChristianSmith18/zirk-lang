@@ -15,7 +15,19 @@ use zirk_lexer::{DurationUnit, Keyword, StrPart, Token, TokenKind, tokenize};
 /// Returns the tree even when there are errors: the caller decides whether to
 /// continue by consulting `sink.has_errors()`.
 pub fn parse(source: &SourceFile, tokens: &[Token], sink: &mut DiagnosticSink) -> Program {
-    Parser::new(source, tokens, sink).parse_program()
+    // `inner` is contextual: it is a modifier only in `inner class`, and an
+    // ordinary identifier everywhere else — `o.inner` must keep working.
+    let mut tokens = tokens.to_vec();
+    for i in 0..tokens.len() {
+        if tokens[i].kind == TokenKind::Keyword(Keyword::Inner)
+            && tokens
+                .get(i + 1)
+                .is_none_or(|t| t.kind != TokenKind::Keyword(Keyword::Class))
+        {
+            tokens[i].kind = TokenKind::Identifier("inner".to_string());
+        }
+    }
+    Parser::new(source, &tokens, sink).parse_program()
 }
 
 /// How deeply expressions and blocks may nest.
@@ -49,6 +61,10 @@ struct Parser<'a> {
     /// closing nested generics means handing back the rest without moving
     /// `pos`, which still points at the original token until this is spent.
     pending_gt: Option<TokenKind>,
+    /// Nonzero while parsing an expression whose grammar is followed by a
+    /// block — `if`/`while`/`for ... in`/`match` headers — where `expr {`
+    /// is the body's brace, not an anonymous-class tail.
+    block_follows: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -60,7 +76,18 @@ impl<'a> Parser<'a> {
             pos: 0,
             depth: 0,
             pending_gt: None,
+            block_follows: 0,
         }
+    }
+
+    /// Parses an expression that the grammar follows with a `{` block —
+    /// conditions and `for ... in` iterables — so a capitalized call at its
+    /// end does not misread the block's brace as an anonymous-class tail.
+    fn parse_expr_before_block(&mut self) -> Option<Expr> {
+        self.block_follows += 1;
+        let expr = self.parse_expr();
+        self.block_follows -= 1;
+        expr
     }
 
     /// Enters one nesting level, reporting when the limit is reached.
@@ -427,8 +454,14 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            // `final` may lead a class declaration (`final class`,
+            // `final abstract class` — the combination is contradictory
+            // and rejected below). `abstract final class` is accepted too.
+            let is_final = self.eat_keyword(Keyword::Final);
+
             if self.check_keyword(Keyword::Class) {
-                if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Class) {
+                if let Some(mut c) = self.parse_class(shared_at.is_some(), ClassKind::Class) {
+                    c.is_final = is_final;
                     classes.push(c);
                 }
                 continue;
@@ -438,13 +471,42 @@ impl<'a> Parser<'a> {
             // rather than extended. Only meaningful directly in front of
             // `class` — elsewhere `abstract` still names a later phase.
             if self.check_keyword(Keyword::Abstract)
-                && self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                && (self.tokens.get(self.pos + 1).map(|t| &t.kind)
                     == Some(&TokenKind::Keyword(Keyword::Class))
+                    || (self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                        == Some(&TokenKind::Keyword(Keyword::Final))
+                        && self.tokens.get(self.pos + 2).map(|t| &t.kind)
+                            == Some(&TokenKind::Keyword(Keyword::Class))))
             {
+                let abstract_span = self.peek_span();
                 self.pos += 1; // `abstract`
+                let abstract_then_final = self.eat_keyword(Keyword::Final);
+                if is_final || abstract_then_final {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        abstract_span,
+                        "`abstract` and `final` cannot modify the same class",
+                        "an abstract class exists to be adopted; a final class cannot be",
+                        Some("keep exactly one of the two modifiers".into()),
+                    );
+                }
                 if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Abstract) {
                     classes.push(c);
                 }
+                continue;
+            }
+
+            if is_final {
+                let span = self.peek_span();
+                let found = self.peek().description();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "expected `class` after `final`",
+                    format!("found {found}"),
+                    Some("`final` applies to classes and methods only".into()),
+                );
+                self.synchronize();
                 continue;
             }
 
@@ -684,9 +746,10 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
+        let mut nested = Vec::new();
 
         while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
-            let Some(member) = self.parse_class_member(kind == ClassKind::Abstract) else {
+            let Some(member) = self.parse_class_member(kind) else {
                 self.synchronize_member();
                 continue;
             };
@@ -694,6 +757,7 @@ impl<'a> Parser<'a> {
                 ClassMember::Field(f) => fields.push(f),
                 ClassMember::Construct(c) => constructors.push(c),
                 ClassMember::Method(m) => methods.push(m),
+                ClassMember::Class(c) => nested.push(c),
             }
         }
 
@@ -709,6 +773,9 @@ impl<'a> Parser<'a> {
             fields,
             constructors,
             methods,
+            nested,
+            is_final: false,
+            is_inner: false,
             shared,
             span: start.to(end),
         })
@@ -748,7 +815,20 @@ impl<'a> Parser<'a> {
             let member_start = self.peek_span();
             let visibility = self.parse_visibility();
 
-            if !self.check_keyword(Keyword::Fn) {
+            // Contract methods carry no `fn` either. The old form still
+            // parses so the diagnostic can name the migration instead of
+            // guessing.
+            if self.check_keyword(Keyword::Fn) {
+                let span = self.peek_span();
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    format!("{} methods no longer use `fn`", kind.as_str()),
+                    "a contract method is written `name(params): Return`",
+                    Some("remove the `fn` keyword".into()),
+                );
+                self.pos += 1;
+            } else if !matches!(self.peek(), TokenKind::Identifier(_)) {
                 let span = self.peek_span();
                 let found = self.peek().description();
                 self.error(
@@ -794,9 +874,7 @@ impl<'a> Parser<'a> {
         visibility: Visibility,
         start: Span,
     ) -> Option<MethodDecl> {
-        self.eat_keyword(Keyword::Fn);
-
-        let name = self.expect_identifier("after `fn`")?;
+        let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
@@ -830,7 +908,7 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             is_override: false,
-            is_mut: false,
+            is_final: false,
             is_static: false,
             params,
             return_type,
@@ -843,14 +921,40 @@ impl<'a> Parser<'a> {
     }
 
     /// One member of a class body.
-    fn parse_class_member(&mut self, allow_abstract: bool) -> Option<ClassMember> {
+    ///
+    /// Grammar: `#`-markers first, then modifiers
+    /// (`visibility`/`static`/`abstract`/`final`/`inner`/`mut`), then the
+    /// member itself — told apart by its first tokens: `construct`, `class`,
+    /// or an identifier followed by `(` or `<` (method) or `:` (field).
+    fn parse_class_member(&mut self, enclosing: ClassKind) -> Option<ClassMember> {
+        let allow_abstract = enclosing == ClassKind::Abstract;
         let start = self.peek_span();
+
+        // `#`-markers: `#override` is the only one the language defines.
+        let mut is_override = false;
+        while matches!(self.peek(), TokenKind::Hash) {
+            let hash_span = self.peek_span();
+            self.pos += 1;
+            if self.eat_keyword(Keyword::Override) {
+                is_override = true;
+                continue;
+            }
+            let found = self.peek().description();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                hash_span.to(self.peek_span()),
+                "unknown member marker",
+                format!("found {found} after `#`"),
+                Some("`#override` is the only member marker of the language".into()),
+            );
+            return None;
+        }
 
         // The modifiers come first and apply to whatever follows.
         let visibility = self.parse_visibility();
 
-        // `static fn` and `static` fields live at class level, not in each
-        // instance, and are reached through the type name.
+        // `static` members live at class level, not in each instance, and
+        // are reached through the type name.
         let is_static = self.eat_keyword(Keyword::Static);
 
         // Only meaningful inside an `abstract class`: every member there is
@@ -873,37 +977,188 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
-        let is_override = self.eat_keyword(Keyword::Override);
-
-        // `mut fn` marks a mutating method. It must be distinguished from
-        // `mut` as a field modifier, so we only consume it when it is
-        // immediately followed by `fn`.
-        let is_mut = if self.check_keyword(Keyword::Mut)
-            && self.peek_at(1) == &TokenKind::Keyword(Keyword::Fn)
-        {
+        // Legacy `override`: it is now the `#override` member marker.
+        // Recognizing the old position lets the diagnostic name the
+        // migration instead of reading as a stray keyword.
+        if self.check_keyword(Keyword::Override) {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "`override` is now written `#override`",
+                "the marker goes on its own line above the method, without `fn`",
+                Some("write `#override` above the method instead".into()),
+            );
             self.pos += 1;
-            true
-        } else {
-            false
-        };
+            is_override = true;
+        }
+
+        let is_final = self.eat_keyword(Keyword::Final);
+        let is_inner = self.eat_keyword(Keyword::Inner);
+
+        if is_abstract && is_final {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`abstract` and `final` cannot be combined",
+                "an abstract member requires an implementation; `final` forbids it",
+                Some("drop one of the two".into()),
+            );
+        }
+
+        // `mut` before a method no longer exists: whether a method mutates
+        // its receiver is inferred for the `inmut::strict` check. `mut`
+        // still introduces a field, so only the method shape is rejected.
+        if self.check_keyword(Keyword::Mut)
+            && matches!(self.peek_at(1), TokenKind::Identifier(_))
+            && matches!(self.peek_at(2), TokenKind::LParen | TokenKind::Lt)
+        {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "`mut` no longer applies to methods",
+                "whether a method mutates its receiver is inferred from its body",
+                Some("remove `mut`; the `inmut::strict` check still applies".into()),
+            );
+            self.pos += 1;
+        }
 
         if self.check_keyword(Keyword::Construct) {
+            if is_override {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "`#override` applies only to instance methods",
+                    "constructors are not inherited, so there is nothing to override",
+                    None,
+                );
+            }
+            if is_final {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "`final` does not apply to constructors",
+                    "constructors are not inherited",
+                    None,
+                );
+            }
+            if is_inner {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "`inner` applies only to a nested `class`",
+                    "a constructor already belongs to its class's instance",
+                    None,
+                );
+            }
             return self
                 .parse_construct(visibility.unwrap_or(Visibility::Public), start)
                 .map(ClassMember::Construct);
         }
 
+        // Nested class: `class` (static nested by default), `inner class`,
+        // or `abstract class` when the enclosing class is abstract. A record
+        // cannot nest types.
+        if self.check_keyword(Keyword::Class) {
+            if enclosing == ClassKind::Record {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "a `record` cannot nest classes",
+                    "only a `class` or `abstract class` can contain a nested class",
+                    Some("move it out of the record".into()),
+                );
+                return None;
+            }
+            if is_override {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "`#override` applies only to instance methods",
+                    "a nested class is not an inherited implementation",
+                    None,
+                );
+            }
+            let kind = if is_abstract {
+                ClassKind::Abstract
+            } else {
+                ClassKind::Class
+            };
+            return self.parse_class(false, kind).map(|mut c| {
+                c.is_final = is_final;
+                c.is_inner = is_inner;
+                ClassMember::Class(c)
+            });
+        }
+
+        if is_inner {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`inner` applies only to a nested `class`",
+                "only a class member can capture the enclosing instance",
+                None,
+            );
+            return None;
+        }
+
+        // `fn` inside a type body is the old method form; it still parses
+        // so the diagnostic can name the migration.
         if self.check_keyword(Keyword::Fn) {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "methods no longer use `fn`",
+                "a method is written `name(params): Return`",
+                Some("remove the `fn` keyword".into()),
+            );
+            self.pos += 1;
+        }
+
+        // A method is `ident (` or `ident <`; a field is `ident :`.
+        if matches!(self.peek(), TokenKind::Identifier(_))
+            && matches!(self.peek_at(1), TokenKind::LParen | TokenKind::Lt)
+        {
+            if is_override && is_static {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "`#override` applies only to instance methods",
+                    "a `static` member has no inherited implementation to replace",
+                    None,
+                );
+            }
             return self
                 .parse_method(
                     visibility.unwrap_or(Visibility::Public),
                     is_abstract,
                     is_override,
-                    is_mut,
+                    is_final,
                     is_static,
                     start,
                 )
                 .map(ClassMember::Method);
+        }
+
+        if is_override {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`#override` applies only to instance methods",
+                "a field is not an inherited implementation",
+                None,
+            );
+        }
+        if is_final {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`final` does not apply to fields",
+                "attribute mutability is expressed with `inmut`",
+                Some("write `inmut` instead".into()),
+            );
         }
 
         self.parse_field(visibility, is_static, start).map(ClassMember::Field)
@@ -1002,13 +1257,11 @@ impl<'a> Parser<'a> {
         visibility: Visibility,
         is_abstract: bool,
         is_override: bool,
-        is_mut: bool,
+        is_final: bool,
         is_static: bool,
         start: Span,
     ) -> Option<MethodDecl> {
-        self.eat_keyword(Keyword::Fn);
-
-        let name = self.expect_identifier("after `fn`")?;
+        let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
@@ -1041,7 +1294,7 @@ impl<'a> Parser<'a> {
             name,
             type_params,
             is_override,
-            is_mut,
+            is_final,
             is_static,
             params,
             return_type,
@@ -1447,6 +1700,20 @@ impl<'a> Parser<'a> {
             return self.parse_function_type(name, span);
         }
 
+        // `Outer.Nested` — a nested class is named through its enclosing
+        // one, each `.` segment an identifier.
+        let mut name = name;
+        while matches!(self.peek(), TokenKind::Dot)
+            && matches!(self.peek_at(1), TokenKind::Identifier(_))
+        {
+            self.pos += 1;
+            if let TokenKind::Identifier(segment) = self.peek().clone() {
+                self.pos += 1;
+                name.push('.');
+                name.push_str(&segment);
+            }
+        }
+
         let arguments = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_type_args()?
         } else {
@@ -1743,6 +2010,25 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Commit) {
             return self.parse_commit_block().map(Stmt::Commit);
         }
+        // A local class: `class` / `final class` / `abstract class` inside a
+        // body, scoped to its block.
+        if self.check_keyword(Keyword::Class)
+            || (self.check_keyword(Keyword::Final)
+                && self.peek_at(1) == &TokenKind::Keyword(Keyword::Class))
+            || (self.check_keyword(Keyword::Abstract)
+                && self.peek_at(1) == &TokenKind::Keyword(Keyword::Class))
+        {
+            let is_final = self.eat_keyword(Keyword::Final);
+            let kind = if self.eat_keyword(Keyword::Abstract) {
+                ClassKind::Abstract
+            } else {
+                ClassKind::Class
+            };
+            return self.parse_class(false, kind).map(|mut c| {
+                c.is_final = is_final;
+                Stmt::LocalClass(c)
+            });
+        }
         if matches!(self.peek(), TokenKind::LBrace) {
             return self.parse_block().map(Stmt::Block);
         }
@@ -1758,7 +2044,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::While);
 
-        let condition = self.parse_expr()?;
+        let condition = self.parse_expr_before_block()?;
         let body = self.parse_block()?;
         let span = start.to(body.span);
 
@@ -1816,7 +2102,7 @@ impl<'a> Parser<'a> {
             {
                 self.pos += 2;
                 let binding = Ident::new(name, binding_span);
-                let iterable = self.parse_expr()?;
+                let iterable = self.parse_expr_before_block()?;
                 if parenthesized {
                     self.expect(&TokenKind::RParen, "to close the `for` header");
                 }
@@ -1852,8 +2138,10 @@ impl<'a> Parser<'a> {
         let step = if self.header_ended(parenthesized) {
             None
         } else {
-            let stmt = self.parse_simple_stmt()?;
-            Some(Box::new(stmt))
+            self.block_follows += 1;
+            let stmt = self.parse_simple_stmt();
+            self.block_follows -= 1;
+            Some(Box::new(stmt?))
         };
         if parenthesized {
             self.expect(&TokenKind::RParen, "to close the `for` header");
@@ -2072,7 +2360,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::If);
 
-        let condition = self.parse_expr()?;
+        let condition = self.parse_expr_before_block()?;
 
         // The effect-only form of `LANGUAGE_SPEC` section 5: `if closed
         // return;` governs exactly one statement.
@@ -2580,7 +2868,10 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Match);
 
-        let first_expr = self.parse_range()?;
+        self.block_follows += 1;
+        let first_expr = self.parse_range();
+        self.block_follows -= 1;
+        let first_expr = first_expr?;
 
         // `match scrutinee with binding { ... }` (roadmap Phase 4c) scopes a
         // `Resource<E>`: `binding` names whichever arm's pattern acquires
@@ -3397,14 +3688,40 @@ impl<'a> Parser<'a> {
             let end = self.peek_span();
             self.expect(&TokenKind::RParen, "to close the argument list");
 
-            return Some(Expr::Call(CallExpr {
+            // `Type(...) { ... }` reads as an anonymous class. Only a
+            // capitalized callee gets the targeted diagnostic: a `{` after
+            // a lowercase call is far more likely an `if`/`while` body.
+            let type_named = ident.name.chars().next().is_some_and(char::is_uppercase);
+            let call = Expr::Call(CallExpr {
                 span: ident.span.to(end),
                 callee: Box::new(Expr::Path(ident)),
                 args,
-            }));
+            });
+            if type_named {
+                self.reject_anonymous_class_tail();
+            }
+            return Some(call);
         }
 
         Some(Expr::Path(ident))
+    }
+
+    /// `Type(...) { ... }` reads as an anonymous class, which the language
+    /// does not have: a local class or a closure is the idiomatic form.
+    /// The body is skipped so parsing can continue.
+    fn reject_anonymous_class_tail(&mut self) {
+        if self.block_follows > 0 || !matches!(self.peek(), TokenKind::LBrace) {
+            return;
+        }
+        let span = self.peek_span();
+        self.error(
+            codes::UNEXPECTED_TOKEN,
+            span,
+            "anonymous classes are not part of the language",
+            "a call cannot be followed by a class body",
+            Some("declare a local `class` for a named implementation, or use a closure for a single-method contract".into()),
+        );
+        let _ = self.parse_block();
     }
 
     /// The postfix chain hanging off an already-parsed expression: `.name`,
@@ -3742,6 +4059,8 @@ enum ClassMember {
     Field(FieldDecl),
     Construct(ConstructDecl),
     Method(MethodDecl),
+    /// A nested class: `class` (static) or `inner class`.
+    Class(ClassDecl),
 }
 
 /// Binary operator and its precedence level.

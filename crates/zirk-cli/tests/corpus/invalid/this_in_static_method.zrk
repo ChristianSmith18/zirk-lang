@@ -1,6 +1,6 @@
 class Bad {
     name: String;
-    static fn me(): String { return this.name; }
+    static  me(): String { return this.name; }
 }
 
 fn main(): Void {}

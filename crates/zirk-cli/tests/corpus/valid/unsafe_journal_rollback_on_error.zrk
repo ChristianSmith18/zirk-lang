@@ -5,19 +5,23 @@ class ValidationError implements Throwable {
         this.reason = reason;
     }
 
-    override fn message(): String {
+    #override
+      message(): String {
         return this.reason;
     }
 
-    override fn code(): String {
+    #override
+      code(): String {
         return "VALIDATION";
     }
 
-    override fn cause(): Error? {
+    #override
+      cause(): Error? {
         return null;
     }
 
-    override fn stack_trace(): StackTrace {
+    #override
+      stack_trace(): StackTrace {
         return StackTrace();
     }
 }

@@ -26,7 +26,7 @@ The contract is covariant and yields independent projections:
 
 ```zirk
 interface Iterable<out T> {
-    fn iterator(): Iterator<T>;
+    iterator(): Iterator<T>;
 }
 ```
 

@@ -5,14 +5,14 @@
 class Counter implements Iterable<Int32> {
     limit: Int32;
     construct(limit: Int32) { this.limit = limit; }
-    fn iterator(): Iterator<Int32> { return CounterIterator(this.limit); }
+     iterator(): Iterator<Int32> { return CounterIterator(this.limit); }
 }
 
 class CounterIterator implements Iterator<Int32> {
     limit: Int32;
     current: Int32;
     construct(limit: Int32) { this.limit = limit; this.current = 0; }
-    fn next(): Iteration<Int32> {
+     next(): Iteration<Int32> {
         if (this.current >= this.limit) {
             return Iteration.Done;
         }

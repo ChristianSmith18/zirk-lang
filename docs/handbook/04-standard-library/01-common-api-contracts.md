@@ -98,8 +98,8 @@ Handles with deterministic cleanup implement `Resource<E>`:
 
 ```zirk
 interface Resource<E from Error> {
-    fn close(): Result<Void,E>;
-    fn is_closed(): Boolean;
+    close(): Result<Void,E>;
+    is_closed(): Boolean;
 }
 ```
 

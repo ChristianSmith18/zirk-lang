@@ -48,6 +48,22 @@ fn accepted_body(body: &str) {
     accepted(&in_main(body));
 }
 
+/// Checks a full program expecting no errors, returning the rendered
+/// diagnostics so warnings can be asserted on.
+fn accepted_with_warnings(source_text: &str) -> String {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    check(&sources, &program, &mut sink);
+
+    let rendered = sink.render(RenderStyle::Human);
+    assert!(!sink.has_errors(), "no errors were expected:\n{rendered}");
+    rendered
+}
+
 fn rejected_body(body: &str) -> String {
     rejected(&in_main(body))
 }
@@ -1068,7 +1084,7 @@ fn valid_printing_of_float128() {
 #[test]
 fn valid_printing_of_a_class_with_to_string() {
     accepted(
-        "class Point { x: Int32; construct(x: Int32) { this.x = x; } fn to_string(): String { return \"{this.x}\"; } }
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; }  to_string(): String { return \"{this.x}\"; } }
          fn main(): Void { mut p = Point(1); stdout.println(p); }",
     );
 }
@@ -1076,7 +1092,7 @@ fn valid_printing_of_a_class_with_to_string() {
 #[test]
 fn valid_interpolation_of_a_class_with_to_string() {
     accepted(
-        "class Point { x: Int32; construct(x: Int32) { this.x = x; } fn to_string(): String { return \"{this.x}\"; } }
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; }  to_string(): String { return \"{this.x}\"; } }
          fn main(): Void { mut p = Point(1); mut s = \"p: {p}\"; }",
     );
 }
@@ -1100,8 +1116,8 @@ fn invalid_explicit_to_string_with_arguments() {
 #[test]
 fn valid_to_string_through_a_contract_reference() {
     accepted(
-        "interface Printable { fn to_string(): String; }
-         class Widget implements Printable { construct() { } fn to_string(): String { return \"w\"; } }
+        "interface Printable {  to_string(): String; }
+         class Widget implements Printable { construct() { }  to_string(): String { return \"w\"; } }
          fn describe(p: Printable): Void { stdout.println(p); }
          fn main(): Void { mut w = Widget(); describe(w); }",
     );
@@ -1401,7 +1417,7 @@ fn invalid_iterating_a_type_that_does_not_implement_iterable() {
 
 #[test]
 fn invalid_reopening_the_native_iterable_contract() {
-    let output = rejected("interface Iterable { fn foo(): Int32; }\nfn main(): Void { }");
+    let output = rejected("interface Iterable {  foo(): Int32; }\nfn main(): Void { }");
     assert!(
         output.contains(codes::DUPLICATE_DECLARATION.as_str()),
         "{output}"
@@ -1410,7 +1426,7 @@ fn invalid_reopening_the_native_iterable_contract() {
 
 #[test]
 fn invalid_reopening_the_native_iterator_contract() {
-    let output = rejected("trait Iterator { fn foo(): Int32; }\nfn main(): Void { }");
+    let output = rejected("trait Iterator {  foo(): Int32; }\nfn main(): Void { }");
     assert!(
         output.contains(codes::DUPLICATE_DECLARATION.as_str()),
         "{output}"
@@ -1436,11 +1452,11 @@ fn valid_a_class_implementing_iterable_lowers() {
     accepted(
         "class Counter implements Iterable<Int32> {
              construct() { }
-             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+              iterator(): Iterator<Int32> { return CounterIterator(); }
          }
          class CounterIterator implements Iterator<Int32> {
              construct() { }
-             fn next(): Iteration<Int32> { return Iteration.Done; }
+              next(): Iteration<Int32> { return Iteration.Done; }
          }
          fn main(): Void { }",
     );
@@ -1467,11 +1483,11 @@ fn invalid_a_class_implementing_iterable_with_the_wrong_element_type() {
     let output = rejected(
         "class WrongIterator implements Iterator<String> {
              construct() { }
-             fn next(): Iteration<String> { return Iteration.Done; }
+              next(): Iteration<String> { return Iteration.Done; }
          }
          class Counter implements Iterable<Int32> {
              construct() { }
-             fn iterator(): Iterator<Int32> { return WrongIterator(); }
+              iterator(): Iterator<Int32> { return WrongIterator(); }
          }
          fn main(): Void { }",
     );
@@ -1483,11 +1499,11 @@ fn valid_for_in_over_a_users_iterable_lowers() {
     accepted(
         "class Counter implements Iterable<Int32> {
              construct() { }
-             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+              iterator(): Iterator<Int32> { return CounterIterator(); }
          }
          class CounterIterator implements Iterator<Int32> {
              construct() { }
-             fn next(): Iteration<Int32> { return Iteration.Done; }
+              next(): Iteration<Int32> { return Iteration.Done; }
          }
          fn main(): Void {
              mut c = Counter();
@@ -1507,13 +1523,13 @@ fn valid_iterator_next_called_directly_on_the_implementing_class() {
              limit: Int32;
              current: Int32;
              construct(limit: Int32) { this.limit = limit; this.current = 0; }
-             fn next(): Iteration<Int32> {
+              next(): Iteration<Int32> {
                  if (this.current >= this.limit) { return Iteration.Done; }
                  mut value = this.current;
                  this.current = this.current + 1;
                  return Iteration.Item(value: value);
              }
-             fn has_next(): Boolean { return this.current < this.limit; }
+              has_next(): Boolean { return this.current < this.limit; }
          }
          fn main(): Void {
              mut it = CounterIterator(2);
@@ -1534,11 +1550,11 @@ fn valid_iterator_next_called_through_the_contract_type() {
     accepted(
         "class CounterIterator implements Iterator<Int32> {
              construct() { }
-             fn next(): Iteration<Int32> { return Iteration.Done; }
+              next(): Iteration<Int32> { return Iteration.Done; }
          }
          class Counter implements Iterable<Int32> {
              construct() { }
-             fn iterator(): Iterator<Int32> { return CounterIterator(); }
+              iterator(): Iterator<Int32> { return CounterIterator(); }
          }
          fn main(): Void {
              mut c = Counter();
@@ -1581,7 +1597,7 @@ const USER: &str = "class User {
         this.name = name;
     }
 
-    fn greeting(): String { return this.name; }
+     greeting(): String { return this.name; }
 }";
 
 #[test]
@@ -1595,7 +1611,7 @@ fn valid_this_reads_and_writes_its_own_fields() {
         "class Counter {
              count: Int32;
              construct() { this.count = 0; }
-             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
+              bump(): Int32 { this.count = this.count + 1; return this.count; }
          }",
         "",
     ));
@@ -1614,7 +1630,7 @@ fn invalid_member_that_does_not_exist() {
         "class User {
              name: String;
              construct(name: String) { this.name = name; }
-             fn broken(): String { return this.nombre; }
+              broken(): String { return this.nombre; }
          }",
         "",
     ));
@@ -1647,7 +1663,7 @@ fn valid_private_member_from_inside_its_class() {
         "class User {
              private name: String;
              construct(name: String) { this.name = name; }
-             fn greeting(): String { return this.name; }
+              greeting(): String { return this.name; }
          }",
         "",
     ));
@@ -1716,7 +1732,7 @@ fn invalid_writing_an_inmut_field_from_outside_the_constructor() {
         "class User {
              inmut id: Int32;
              construct(id: Int32) { this.id = id; }
-             fn reset(): Void { this.id = 0; }
+              reset(): Void { this.id = 0; }
          }",
         "",
     ));
@@ -1812,8 +1828,8 @@ const COUNTER: &str = "class Counter {
 
     construct(step: Int32) { this.count = 0; this.step = step; }
 
-    fn bump(): Int32 { this.count = this.count + this.step; return this.count; }
-    private fn secret(): Int32 { return this.step; }
+     bump(): Int32 { this.count = this.count + this.step; return this.count; }
+    private  secret(): Int32 { return this.step; }
 }";
 
 #[test]
@@ -1830,8 +1846,8 @@ fn valid_method_calls_another_through_this() {
         "class Counter {
              count: Int32;
              construct() { this.count = 0; }
-             fn bump(): Int32 { this.count = this.count + 1; return this.count; }
-             fn twice(): Int32 { this.bump(); return this.bump(); }
+              bump(): Int32 { this.count = this.count + 1; return this.count; }
+              twice(): Int32 { this.bump(); return this.bump(); }
          }",
         "",
     ));
@@ -1877,8 +1893,8 @@ fn valid_private_method_from_inside_its_class() {
         "class Counter {
              count: Int32;
              construct() { this.count = 0; }
-             private fn secret(): Int32 { return this.count; }
-             fn public_view(): Int32 { return this.secret(); }
+             private  secret(): Int32 { return this.count; }
+              public_view(): Int32 { return this.secret(); }
          }",
         "",
     ));
@@ -1890,7 +1906,7 @@ fn invalid_method_call_with_the_wrong_argument_type() {
         "class Greeter {
              prefix: String;
              construct() { this.prefix = \">\"; }
-             fn greet(name: String): String { return name; }
+             greet(name: String): String { return name; }
          }",
         "mut g = Greeter();\nmut s = g.greet(1);",
     ));
@@ -1904,7 +1920,7 @@ fn invalid_method_and_field_sharing_a_name() {
         "class User {
              name: String;
              construct() { this.name = \"x\"; }
-             fn name(): String { return this.name; }
+             name(): String { return this.name; }
          }",
         "",
     ));
@@ -1920,7 +1936,7 @@ fn invalid_method_without_a_return_on_every_path() {
         "class Broken {
              flag: Boolean;
              construct() { this.flag = true; }
-             fn value(): Int32 { if this.flag { return 1; } }
+              value(): Int32 { if this.flag { return 1; } }
          }",
         "",
     ));
@@ -1935,7 +1951,7 @@ const HIERARCHY: &str = "class User {
 
     construct(name: String) { this.name = name; this.role = \"user\"; }
 
-    fn describe(): String { return this.name; }
+    describe(): String { return this.name; }
 }
 
 class Manager extends User {
@@ -1947,7 +1963,7 @@ class Manager extends User {
         this.team = team;
     }
 
-    override fn describe(): String { return this.role; }
+    #override describe(): String { return this.role; }
 }";
 
 #[test]
@@ -1991,7 +2007,7 @@ fn invalid_private_does_not_reach_the_subclass() {
          }
          class Derived extends Base {
              construct() { this.hidden = 1; }
-             fn peek(): Int32 { return this.hidden; }
+              peek(): Int32 { return this.hidden; }
          }
          fn main(): Void { }",
     );
@@ -2022,13 +2038,15 @@ fn invalid_override_with_a_different_signature() {
         "class Base {
              x: Int32;
              construct() { this.x = 0; }
-             fn value(): Int32 { return this.x; }
+              value(): Int32 { return this.x; }
          }
          class Derived extends Base {
              construct() { super(); }
-             override fn value(): String { return \"x\"; }
+             #override
+
+               value(): String { return \"x\"; }
          }
-         fn main(): Void { }",
+          main(): Void { }",
     );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     assert!(output.contains("overrides"), "{output}");
@@ -2108,10 +2126,12 @@ fn valid_super_initializes_a_private_field_of_the_base() {
 #[test]
 fn valid_super_method_reaches_the_inherited_body() {
     accepted(
-        "class Base { fn describe(): String { return \"base\"; } construct() { } }
+        "class Base {  describe(): String { return \"base\"; } construct() { } }
          class Derived extends Base {
              construct() { }
-             override fn describe(): String { return super.describe(); }
+             #override
+
+               describe(): String { return super.describe(); }
          }
          fn main(): Void { }",
     );
@@ -2134,23 +2154,25 @@ fn invalid_override_without_the_keyword() {
     // Otherwise adding a method to a base silently changes what a subclass
     // means.
     let output = rejected(
-        "class Base { fn value(): Int32 { return 1; } construct() { } }
-         class Derived extends Base { fn value(): Int32 { return 2; } construct() { } }
+        "class Base {  value(): Int32 { return 1; } construct() { } }
+         class Derived extends Base {  value(): Int32 { return 2; } construct() { } }
          fn main(): Void { }",
     );
     assert!(
         output.contains(codes::MISSING_OVERRIDE.as_str()),
         "{output}"
     );
-    assert!(output.contains("override fn value"), "{output}");
+    assert!(output.contains("#override` above `value"), "{output}");
 }
 
 #[test]
 fn invalid_override_that_overrides_nothing() {
     // The mirror mistake, and usually a typo in the name.
     let output = rejected(
-        "class Base { fn value(): Int32 { return 1; } construct() { } }
-         class Derived extends Base { override fn valeu(): Int32 { return 2; } construct() { } }
+        "class Base {  value(): Int32 { return 1; } construct() { } }
+         class Derived extends Base { #override
+
+  valeu(): Int32 { return 2; } construct() { } }
          fn main(): Void { }",
     );
     assert!(
@@ -2172,19 +2194,19 @@ fn valid_a_class_may_extend_one_declared_later() {
 // --- Contratos ---------------------------------------------------------------
 
 const CONTRACTS: &str = "interface Describable {
-    fn describe(): String;
+     describe(): String;
 }
 
 trait Labelled {
-    fn label(): String;
-    fn shout(): String { return this.label(); }
+     label(): String;
+     shout(): String { return this.label(); }
 }
 
 class User implements Describable, Labelled {
     name: String;
     construct(name: String) { this.name = name; }
-    fn describe(): String { return this.name; }
-    fn label(): String { return \"user\"; }
+     describe(): String { return this.name; }
+     label(): String { return \"user\"; }
 }";
 
 #[test]
@@ -2212,8 +2234,8 @@ fn valid_a_trait_default_body_is_adopted() {
 fn invalid_two_traits_offer_conflicting_defaults() {
     // Neither trait's default should silently win by declaration order (D4).
     let output = rejected(
-        "trait Loud { fn greet(): String { return \"HELLO\"; } }
-         trait Quiet { fn greet(): String { return \"hello\"; } }
+        "trait Loud {  greet(): String { return \"HELLO\"; } }
+         trait Quiet {  greet(): String { return \"hello\"; } }
          class Both implements Loud, Quiet { construct() { } }
          fn main(): Void { }",
     );
@@ -2229,11 +2251,12 @@ fn valid_class_own_method_resolves_two_traits_offering_the_same_name() {
     // Writing the method itself is how the class picks, so it is not a
     // conflict: both traits require the same signature and get it.
     accepted(
-        "trait Loud { fn greet(): String { return \"HELLO\"; } }
-         trait Quiet { fn greet(): String { return \"hello\"; } }
+        "trait Loud {  greet(): String { return \"HELLO\"; } }
+         trait Quiet {  greet(): String { return \"hello\"; } }
          class Both implements Loud, Quiet {
              construct() { }
-             fn greet(): String { return \"hi\"; }
+             #override
+              greet(): String { return \"hi\"; }
          }
          fn main(): Void { }",
     );
@@ -2242,7 +2265,7 @@ fn valid_class_own_method_resolves_two_traits_offering_the_same_name() {
 #[test]
 fn invalid_class_missing_what_a_contract_requires() {
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          class Robot implements Describable { construct() { } }
          fn main(): Void { }",
     );
@@ -2256,10 +2279,10 @@ fn invalid_class_missing_what_a_contract_requires() {
 #[test]
 fn invalid_implementation_with_a_different_signature() {
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          class Robot implements Describable {
              construct() { }
-             fn describe(): Int32 { return 1; }
+              describe(): Int32 { return 1; }
          }
          fn main(): Void { }",
     );
@@ -2270,12 +2293,12 @@ fn invalid_implementation_with_a_different_signature() {
 fn invalid_implementation_that_is_not_public() {
     // A contract declares behaviour anyone may reach.
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          class Robot implements Describable {
              construct() { }
-             private fn describe(): String { return \"x\"; }
+             private  describe(): String { return \"x\"; }
          }
-         fn main(): Void { }",
+          main(): Void { }",
     );
     assert!(
         output.contains(codes::INACCESSIBLE_MEMBER.as_str()),
@@ -2296,7 +2319,7 @@ fn invalid_reaching_a_member_the_contract_does_not_declare() {
 #[test]
 fn invalid_constructing_a_contract() {
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          fn main(): Void { mut d = Describable(); }",
     );
     assert!(output.contains(codes::NOT_CALLABLE.as_str()), "{output}");
@@ -2327,7 +2350,7 @@ fn valid_a_subclass_satisfies_what_its_base_satisfies() {
 fn invalid_interface_method_with_a_body() {
     // A trait is the one that may carry implementation.
     let output = rejected(
-        "interface Describable { fn describe(): String { return \"x\"; } }\nfn main(): Void { }",
+        "interface Describable {  describe(): String { return \"x\"; } }\nfn main(): Void { }",
     );
     assert!(output.contains("has no body"), "{output}");
 }
@@ -2366,7 +2389,7 @@ fn valid_user_type_supplies_an_operator() {
         "class Money {
              amount: Int32;
              construct(amount: Int32) { this.amount = amount; }
-             fn _add(other: Money): Money { return Money(this.amount + other.amount); }
+              _add(other: Money): Money { return Money(this.amount + other.amount); }
          }
          fn main(): Void { mut total = Money(30) + Money(12); }",
     );
@@ -2392,7 +2415,7 @@ fn invalid_operator_method_with_the_wrong_operand() {
         "class Money {
              amount: Int32;
              construct(amount: Int32) { this.amount = amount; }
-             fn _add(other: Int32): Money { return this; }
+              _add(other: Int32): Money { return this; }
          }
          fn main(): Void { mut total = Money(1) + Money(2); }",
     );
@@ -2433,7 +2456,7 @@ fn valid_equality_through_the_reserved_method() {
         "class Point {
              x: Int32;
              construct(x: Int32) { this.x = x; }
-             fn _equals(other: Point): Boolean { return this.x == other.x; }
+              _equals(other: Point): Boolean { return this.x == other.x; }
          }
          fn main(): Void { mut a = Point(1); stdout.println(a == Point(1)); }",
     );
@@ -2488,7 +2511,7 @@ fn invalid_reaching_a_member_through_a_nullable_receiver() {
     ] {
         let output = rejected(&format!(
             "class U {{ name: String; construct() {{ this.name = \"a\"; }} \
-             fn describe(): String {{ return this.name; }} }}\n\
+              describe(): String {{ return this.name; }} }}\n\
              fn main(): Void {{ {body} }}"
         ));
         assert!(output.contains("may be absent"), "for `{body}`:\n{output}");
@@ -2509,7 +2532,7 @@ fn invalid_safe_navigation_on_a_receiver_that_is_never_null() {
     ] {
         let output = rejected(&format!(
             "class U {{ name: String; construct() {{ this.name = \"a\"; }} \
-             fn describe(): String {{ return this.name; }} }}\n\
+              describe(): String {{ return this.name; }} }}\n\
              fn main(): Void {{ {body} }}"
         ));
         assert!(
@@ -2528,7 +2551,7 @@ fn valid_safe_call_on_a_method_that_returns_void() {
     // (`docs/decisions/ADR-003-investigacion-fase-4.md`, section "Extensión:
     // criterio 3...").
     accepted(
-        "class C { construct() { } fn bump(): Void { } }
+        "class C { construct() { }  bump(): Void { } }
          fn main(): Void { mut c: C? = C(); c?.bump(); }",
     );
 }
@@ -2538,8 +2561,8 @@ fn valid_a_nullable_contract_is_a_type() {
     // It reaches lowering as an ordinary nullable, which is what the uniform
     // representation buys.
     accepted(
-        "interface D { fn describe(): String; }
-         class R implements D { construct() { } fn describe(): String { return \"r\"; } }
+        "interface D {  describe(): String; }
+         class R implements D { construct() { }  describe(): String { return \"r\"; } }
          fn main(): Void { mut d: D? = R(); mut e: D? = null; }",
     );
 }
@@ -2557,7 +2580,7 @@ fn valid_generic_class_body_type_checks_against_its_own_type_parameter() {
         "class Box<T> {
              value: T;
              construct(value: T) { this.value = value; }
-             fn get(): T { return this.value; }
+              get(): T { return this.value; }
          }
          fn main(): Void { }",
     );
@@ -2605,7 +2628,7 @@ fn invalid_returning_a_concrete_type_where_the_type_parameter_is_declared() {
     // `T` is opaque: nothing proves it is `Int32`, so a literal does not fit.
     let output = rejected(
         "class Box<T> {
-             fn wrong(): T { return 5; }
+              wrong(): T { return 5; }
          }
          fn main(): Void { }",
     );
@@ -2626,24 +2649,24 @@ fn invalid_type_parameter_is_out_of_scope_outside_its_declaration() {
 fn valid_declared_variance_in_permitted_positions() {
     // `out T` is allowed in an immutable field and a return type.
     accepted(
-        "class Box<out T> { inmut value: T; fn get(): T { return this.value; } }\nfn main(): Void { }",
+        "class Box<out T> { inmut value: T;  get(): T { return this.value; } }\nfn main(): Void { }",
     );
     // `in T` is allowed in parameter positions.
     accepted(
-        "class Sink<in T> { fn take(value: T): Void { } }\nfn main(): Void { }",
+        "class Sink<in T> {  take(value: T): Void { } }\nfn main(): Void { }",
     );
 }
 
 #[test]
 fn invalid_declared_variance_in_the_wrong_position() {
     let output = rejected(
-        "class Box<out T> { fn take(value: T): Void { } }\nfn main(): Void { }",
+        "class Box<out T> {  take(value: T): Void { } }\nfn main(): Void { }",
     );
     assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
     assert!(output.contains("`out T` appears in an input position"), "{output}");
 
     let output = rejected(
-        "class Source<in T> { fn get(): T { } }\nfn main(): Void { }",
+        "class Source<in T> {  get(): T { } }\nfn main(): Void { }",
     );
     assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
     assert!(output.contains("`in T` appears in an output position"), "{output}");
@@ -2662,7 +2685,7 @@ fn valid_method_call_through_a_type_parameters_contract_constraint() {
     // `value.greet()` resolves through `Greeter`, the one constraint `T`
     // declares — task 7.4 of the generics slice.
     let output = rejected(
-        "interface Greeter { fn greet(): String; }
+        "interface Greeter {  greet(): String; }
          fn show<T from Greeter>(value: T): String { return value.greet(); }
          fn main(): Void { }",
     );
@@ -2684,7 +2707,7 @@ fn valid_field_access_through_a_type_parameters_class_constraint() {
 #[test]
 fn invalid_method_the_constraint_does_not_promise() {
     let output = rejected(
-        "interface Greeter { fn greet(): String; }
+        "interface Greeter {  greet(): String; }
          fn show<T from Greeter>(value: T): Void { mut r = value.somethingElse(); }
          fn main(): Void { }",
     );
@@ -2738,7 +2761,7 @@ fn invalid_call_infers_conflicting_types_for_the_same_parameter() {
 #[test]
 fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
     let output = rejected(
-        "interface Serializable { fn serialize(): String; }
+        "interface Serializable {  serialize(): String; }
          fn store<T from Serializable>(value: T): Void { }
          fn main(): Void { store(5); }",
     );
@@ -2749,8 +2772,8 @@ fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
 #[test]
 fn valid_call_infers_a_type_that_satisfies_the_constraint() {
     let output = rejected(
-        "interface Serializable { fn serialize(): String; }
-         class Doc implements Serializable { construct() { } fn serialize(): String { return \"\"; } }
+        "interface Serializable {  serialize(): String; }
+         class Doc implements Serializable { construct() { }  serialize(): String { return \"\"; } }
          fn store<T from Serializable>(value: T): Void { }
          fn main(): Void { store(Doc()); }",
     );
@@ -2784,7 +2807,7 @@ fn invalid_generic_type_argument_count() {
 #[test]
 fn invalid_generic_type_argument_missing_its_constraint() {
     let output = rejected(
-        "interface Serializable { fn serialize(): String; }
+        "interface Serializable {  serialize(): String; }
          class Box<T from Serializable> { value: T; }
          class Holder { value: Box<Int32>; }
          fn main(): Void { }",
@@ -3208,7 +3231,7 @@ fn invalid_mutating_a_record_field_from_a_method() {
     let output = rejected(
         "record Point {
              x: Int32;
-             fn reset(): Void { this.x = 0; }
+              reset(): Void { this.x = 0; }
          }
          fn main(): Void { }",
     );
@@ -3262,7 +3285,7 @@ fn valid_record_equality_over_a_class_field_with_its_own_equals() {
         "class Id {
              value: Int32;
              construct(value: Int32) { this.value = value; }
-             fn _equals(other: Id): Boolean { return this.value == other.value; }
+              _equals(other: Id): Boolean { return this.value == other.value; }
          }
          record Tagged { id: Id; }
          fn main(): Void {
@@ -3328,7 +3351,7 @@ fn valid_record_method_called_directly() {
     accepted(
         "record Point {
              x: Int32;
-             fn double(): Int32 { return this.x * 2; }
+              double(): Int32 { return this.x * 2; }
          }
          fn main(): Void { mut p = Point(x: 3); stdout.println(p.double()); }",
     );
@@ -3342,10 +3365,10 @@ fn valid_record_implements_a_contract_and_dispatches_through_it() {
     // conformance was already checked the same way it is for a class; what
     // this change adds is that the reference itself now compiles too.
     accepted(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          record Point implements Describable {
              x: Int32;
-             fn describe(): String { return \"point\"; }
+              describe(): String { return \"point\"; }
          }
          fn announce(d: Describable): String { return d.describe(); }
          fn main(): Void {
@@ -3362,7 +3385,7 @@ fn invalid_record_missing_what_a_contract_requires() {
     // A record's conformance is checked exactly the way a class's is
     // (unaffected by this change): a missing method is still caught.
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          record Point implements Describable { x: Int32; }
          fn main(): Void { }",
     );
@@ -3381,10 +3404,10 @@ fn invalid_mutating_a_field_through_a_boxed_record_s_contract_type() {
     // to even name, whether the concrete adopter behind it is a class or a
     // boxed value.
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          record Point implements Describable {
              x: Int32;
-             fn describe(): String { return \"point\"; }
+              describe(): String { return \"point\"; }
          }
          fn main(): Void {
              mut p = Point(x: 3);
@@ -3401,7 +3424,7 @@ fn invalid_record_not_implementing_the_named_interface() {
     // same way a class would be — this change only makes the *adopted*
     // case compile, not any and every record.
     let output = rejected(
-        "interface Describable { fn describe(): String; }
+        "interface Describable {  describe(): String; }
          record Point { x: Int32; }
          fn announce(d: Describable): String { return d.describe(); }
          fn main(): Void { mut p = Point(x: 3); stdout.println(announce(p)); }",
@@ -3739,7 +3762,7 @@ fn valid_union_subsumes_a_subclass_alternative() {
 #[test]
 fn invalid_member_access_on_an_unnarrowed_union() {
     let output = rejected(
-        "class A { fn hello(): Void { } }
+        "class A {  hello(): Void { } }
          class B { }
          fn f(x: A | B): Void { x.hello(); }
          fn main(): Void { }",
@@ -3770,8 +3793,8 @@ fn valid_cast_between_a_class_and_its_base() {
 #[test]
 fn valid_cast_between_a_class_and_a_contract() {
     let output = rejected(
-        "interface Shape { fn area(): Int32; }
-         class Circle implements Shape { construct() { } fn area(): Int32 { return 1; } }
+        "interface Shape {  area(): Int32; }
+         class Circle implements Shape { construct() { }  area(): Int32 { return 1; } }
          fn main(): Void { mut c = Circle(); mut s = c as Shape; mut back = <Circle>s; }",
     );
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
@@ -3825,7 +3848,7 @@ fn valid_cast_from_a_type_parameter_to_its_own_constraint() {
     // `T from Serializable` may always be widened to `Serializable`: that is
     // exactly what the constraint promises, not a leap of faith.
     let output = rejected(
-        "interface Serializable { fn serialize(): String; }
+        "interface Serializable {  serialize(): String; }
          fn show<T from Serializable>(x: T): Void { mut y = x as Serializable; }
          fn main(): Void { }",
     );
@@ -3835,7 +3858,7 @@ fn valid_cast_from_a_type_parameter_to_its_own_constraint() {
 #[test]
 fn invalid_cast_from_a_type_parameter_to_an_unrelated_type() {
     let output = rejected(
-        "interface Serializable { fn serialize(): String; }
+        "interface Serializable {  serialize(): String; }
          fn show<T from Serializable>(x: T): Void { mut y = x as String; }
          fn main(): Void { }",
     );
@@ -3858,7 +3881,7 @@ fn valid_safe_field_access_types_as_nullable() {
 #[test]
 fn valid_safe_method_call_types_as_nullable() {
     accepted(
-        "class User { fn greet(): String { return \"hi\"; } construct() { } }
+        "class User {  greet(): String { return \"hi\"; } construct() { } }
          fn main(): Void { mut u: User? = null; mut g: String? = u?.greet(); }",
     );
 }
@@ -3878,7 +3901,7 @@ fn valid_safe_method_call_lowers() {
     // Both halves of task 10.8 lower now: a field through `?.` and a method
     // call through it, dispatched under the same absent/present split.
     accepted(
-        "class User { fn greet(): String { return \"hi\"; } construct() { } }
+        "class User {  greet(): String { return \"hi\"; } construct() { } }
          fn main(): Void { mut u: User? = null; mut g = u?.greet(); }",
     );
 }
@@ -3888,8 +3911,8 @@ fn invalid_safe_method_call_through_generic_param_is_not_lowered() {
     // Through a generic parameter's constraint there is no concrete method
     // body to call yet, so that combination stays gated.
     let output = rejected(
-        "trait Greeter { fn greet(): String; }
-         class Wrap<T from Greeter> { value: T?; construct(value: T?) { this.value = value; } fn hello(): String? { return this.value?.greet(); } }
+        "trait Greeter {  greet(): String; }
+         class Wrap<T from Greeter> { value: T?; construct(value: T?) { this.value = value; }  hello(): String? { return this.value?.greet(); } }
          fn main(): Void { }",
     );
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
@@ -3932,7 +3955,7 @@ fn valid_lambda_parameter_matches_a_field_name() {
         "class Multiplier {
              factor: Int32;
              construct(factor: Int32) { this.factor = factor; }
-             fn scale(factor: Int32): Int32 { return factor * this.factor; }
+              scale(factor: Int32): Int32 { return factor * this.factor; }
          }
          fn main(): Void { }",
     );
@@ -4119,7 +4142,7 @@ fn valid_generic_class_construction_and_member_access() {
         "class Box<T> {
              value: T;
              construct(value: T) { this.value = value; }
-             fn get(): T { return this.value; }
+              get(): T { return this.value; }
          }
          fn main(): Void {
              mut b: Box<Int32> = Box(5);
@@ -4132,7 +4155,7 @@ fn valid_generic_class_construction_and_member_access() {
 
 const SHAPE: &str = "abstract class Shape {
     name: String;
-    abstract fn area(): Int32;
+    abstract  area(): Int32;
 }";
 
 #[test]
@@ -4145,7 +4168,7 @@ fn valid_class_adopts_an_abstract_class() {
          class Circle implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): Int32 {{ return 3; }}
+             #override area(): Int32 {{ return 3; }}
          }}
          fn main(): Void {{ }}"
     ));
@@ -4157,7 +4180,7 @@ fn invalid_abstract_class_missing_attribute() {
         "{SHAPE}
          class Circle implements Shape {{
              construct() {{ }}
-             override fn area(): Int32 {{ return 3; }}
+             #override area(): Int32 {{ return 3; }}
          }}
          fn main(): Void {{ }}"
     ));
@@ -4184,18 +4207,34 @@ fn invalid_abstract_class_missing_method() {
 }
 
 #[test]
-fn invalid_abstract_class_method_without_override() {
-    let output = rejected(&format!(
+fn valid_abstract_class_method_needs_no_override_marker() {
+    // Implementing an abstract-class requirement replaces nothing concrete,
+    // so `#override` is unnecessary — only a warning when written.
+    accepted(&format!(
         "{SHAPE}
          class Circle implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             fn area(): Int32 {{ return 3; }}
+              area(): Int32 {{ return 3; }}
+         }}
+         fn main(): Void {{ }}"
+    ));
+}
+
+#[test]
+fn unnecessary_override_marker_on_an_abstract_requirement_warns() {
+    let output = accepted_with_warnings(&format!(
+        "{SHAPE}
+         class Circle implements Shape {{
+             name: String;
+             construct(name: String) {{ this.name = name; }}
+             #override
+              area(): Int32 {{ return 3; }}
          }}
          fn main(): Void {{ }}"
     ));
     assert!(
-        output.contains(codes::MISSING_OVERRIDE.as_str()),
+        output.contains(codes::UNNECESSARY_OVERRIDE.as_str()),
         "{output}"
     );
 }
@@ -4207,7 +4246,7 @@ fn invalid_abstract_class_method_with_mismatched_signature() {
          class Circle implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): String {{ return \"x\"; }}
+             #override area(): String {{ return \"x\"; }}
          }}
          fn main(): Void {{ }}"
     ));
@@ -4251,7 +4290,7 @@ fn valid_abstract_class_named_as_a_parameter_type_dispatches() {
          class Circle implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): Int32 {{ return 3; }}
+             #override area(): Int32 {{ return 3; }}
          }}
          fn describe(s: Shape): Int32 {{ return s.area(); }}
          fn main(): Void {{ describe(Circle(\"c\")); }}"
@@ -4269,12 +4308,12 @@ fn valid_two_adopters_of_the_same_abstract_class_get_consistent_indices() {
          class Circle implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): Int32 {{ return 3; }}
+             #override area(): Int32 {{ return 3; }}
          }}
          class Square implements Shape {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): Int32 {{ return 4; }}
+             #override area(): Int32 {{ return 4; }}
          }}
          fn describe(s: Shape): Int32 {{ return s.area(); }}
          fn main(): Void {{
@@ -4294,11 +4333,13 @@ fn valid_abstract_class_implemented_before_its_own_declaration() {
         "class Circle implements Shape {
              name: String;
              construct(name: String) { this.name = name; }
-             override fn area(): Int32 { return 3; }
+             #override
+
+               area(): Int32 { return 3; }
          }
          abstract class Shape {
              name: String;
-             abstract fn area(): Int32;
+             abstract  area(): Int32;
          }
          fn describe(s: Shape): Int32 { return s.area(); }
          fn main(): Void { describe(Circle(\"c\")); }",
@@ -4313,13 +4354,13 @@ fn valid_class_implements_an_abstract_class_and_an_interface() {
     accepted(&format!(
         "{SHAPE}
          interface Describable {{
-             fn describe(): String;
+              describe(): String;
          }}
          class Circle implements Shape, Describable {{
              name: String;
              construct(name: String) {{ this.name = name; }}
-             override fn area(): Int32 {{ return 3; }}
-             fn describe(): String {{ return this.name; }}
+             #override area(): Int32 {{ return 3; }}
+              describe(): String {{ return this.name; }}
          }}
          fn print_area(s: Shape): Int32 {{ return s.area(); }}
          fn print_description(d: Describable): String {{ return d.describe(); }}
@@ -4335,10 +4376,12 @@ fn valid_class_implements_an_abstract_class_and_an_interface() {
 
 const BOOM_ERROR: &str = "class BoomError implements RuntimeError {
     construct() { }
-    override fn message(): String { return \"boom\"; }
-    override fn code(): String { return \"BOOM\"; }
-    override fn cause(): Error? { return null; }
-    override fn stack_trace(): StackTrace { return StackTrace(); }
+    #override
+
+      message(): String { return \"boom\"; }
+    #override code(): String { return \"BOOM\"; }
+    #override cause(): Error? { return null; }
+    #override stack_trace(): StackTrace { return StackTrace(); }
 }";
 
 #[test]
@@ -4673,21 +4716,29 @@ fn valid_native_failure_class_is_constructible_like_any_other_runtime_error() {
 const OPEN_ERROR: &str = "class OpenError implements Error {
     inmut reason: String;
     construct(reason: String) { this.reason = reason; }
-    override fn message(): String { return this.reason; }
-    override fn code(): String { return \"OPEN\"; }
-    override fn cause(): Error? { return null; }
+    #override
+
+      message(): String { return this.reason; }
+    #override
+
+      code(): String { return \"OPEN\"; }
+    #override cause(): Error? { return null; }
 }";
 
 const FAKE_FILE: &str = "class FakeFile implements Resource<OpenError> {
     inmut name: String;
     mut closed: Boolean;
     construct(name: String) { this.name = name; this.closed = false; }
-    fn nothing(): Void { return; }
-    override fn close(): Result<Void, OpenError> {
+     nothing(): Void { return; }
+    #override
+
+      close(): Result<Void, OpenError> {
         this.closed = true;
         return Ok(this.nothing());
     }
-    override fn is_closed(): Boolean { return this.closed; }
+    #override
+
+      is_closed(): Boolean { return this.closed; }
 }
 
 fn open(name: String): Result<FakeFile, OpenError> {
@@ -4764,14 +4815,14 @@ fn invalid_class_does_not_implement_resource() {
         "class OpenError implements Error {
              inmut reason: String;
              construct(reason: String) { this.reason = reason; }
-             override fn message(): String { return this.reason; }
-             override fn code(): String { return \"OPEN\"; }
-             override fn cause(): Error? { return null; }
+              message(): String { return this.reason; }
+              code(): String { return \"OPEN\"; }
+              cause(): Error? { return null; }
          }
          class FakeFile implements Resource<OpenError> {
              construct() { }
          }
-         fn main(): Void { }",
+          main(): Void { }",
     );
     assert!(
         output.contains(codes::MISSING_IMPLEMENTATION.as_str()),
@@ -5125,17 +5176,17 @@ fn invalid_class_that_implements_resource_is_not_clone() {
         "class OpenError implements Error {
              inmut reason: String;
              construct(reason: String) { this.reason = reason; }
-             override fn message(): String { return this.reason; }
-             override fn code(): String { return \"OPEN\"; }
-             override fn cause(): Error? { return null; }
+              message(): String { return this.reason; }
+              code(): String { return \"OPEN\"; }
+              cause(): Error? { return null; }
          }
          class FakeFile implements Resource<OpenError> {
              inmut name: String;
              mut closed: Boolean;
              construct(name: String) { this.name = name; this.closed = false; }
-             override fn close(): Result<Void, OpenError> { this.closed = true; return Ok(_void()); }
-             override fn is_closed(): Boolean { return this.closed; }
-             fn _void(): Void { return; }
+              close(): Result<Void, OpenError> { this.closed = true; return Ok(_void()); }
+              is_closed(): Boolean { return this.closed; }
+             _void(): Void { return; }
          }
          fn main(): Void {
              mut f: FakeFile = FakeFile(\"a.txt\");
@@ -5223,9 +5274,9 @@ fn valid_manual_clone_implementation_is_dispatched_as_an_ordinary_method() {
     // `Self::check_method_call_on`'s own gate never reaches
     // `check_derived_clone_call` once the class declares the method itself.
     accepted(
-        "interface Greeter { fn greet(): String; }
-         class Loud implements Greeter { construct() { } fn greet(): String { return \"hi\"; } }
-         class Holder { mut g: Greeter; construct(g: Greeter) { this.g = g; } fn clone(): Holder { return this; } }
+        "interface Greeter {  greet(): String; }
+         class Loud implements Greeter { construct() { }  greet(): String { return \"hi\"; } }
+         class Holder { mut g: Greeter; construct(g: Greeter) { this.g = g; }  clone(): Holder { return this; } }
          fn main(): Void {
              mut h: Holder = Holder(Loud());
              mut clone: Holder = h.clone();

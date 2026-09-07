@@ -253,6 +253,31 @@ fn valid_later_phase_keywords_are_recognized() {
     }
 }
 
+#[test]
+fn valid_member_surface_keywords_and_marker() {
+    // `final` seals classes/methods, `inner` marks capturing nested classes,
+    // and `#` introduces a member marker such as `#override`.
+    for (text, expected) in [
+        ("final", Keyword::Final),
+        ("inner", Keyword::Inner),
+        ("override", Keyword::Override),
+    ] {
+        assert_eq!(
+            tokens(text)[0],
+            TokenKind::Keyword(expected),
+            "for `{text}`"
+        );
+    }
+    assert_eq!(
+        tokens("#override"),
+        vec![
+            TokenKind::Hash,
+            TokenKind::Keyword(Keyword::Override),
+            TokenKind::Eof
+        ]
+    );
+}
+
 // --- Case sensitivity ----------------------------------------------
 
 #[test]
@@ -303,7 +328,7 @@ fn valid_longest_operator_wins() {
 
 #[test]
 fn invalid_every_error_is_reported_at_once() {
-    let source = SourceFile::new("test.zrk", "@ # $");
+    let source = SourceFile::new("test.zrk", "@ $ `");
     let mut sink = DiagnosticSink::new();
     tokenize(&source, &mut sink);
 

@@ -6,12 +6,12 @@
 // any explicit rejection rule needed, purely because the two allocations
 // are not the same one.
 interface Describable {
-    fn describe(): String;
+     describe(): String;
 }
 
 record Point implements Describable {
     x: Int32;
-    fn describe(): String { return "a point"; }
+     describe(): String { return "a point"; }
 }
 
 fn main(): Void {

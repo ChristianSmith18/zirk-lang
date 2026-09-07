@@ -1,6 +1,6 @@
 // El default de un parámetro de tipo debe satisfacer sus constraints.
 interface Movable {
-    fn move(): Void;
+     move(): Void;
 }
 
 class Box<T from Movable = Int32> {

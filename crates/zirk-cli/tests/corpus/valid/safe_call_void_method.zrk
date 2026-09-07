@@ -6,7 +6,7 @@
 class Counter {
     mut value: Int32;
     construct(value: Int32) { this.value = value; }
-    fn bump(): Void { this.value = this.value + 1; }
+     bump(): Void { this.value = this.value + 1; }
 }
 
 fn main(): Void {

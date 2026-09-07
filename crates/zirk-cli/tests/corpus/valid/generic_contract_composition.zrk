@@ -1,16 +1,16 @@
 interface A<T> {
-    fn get(): T;
+     get(): T;
 }
 
 interface B<T> implements A<T> {
-    fn extra(): T;
+     extra(): T;
 }
 
 class C<T> implements B<T> {
     value: T;
     construct(v: T) { this.value = v; }
-    fn get(): T { return this.value; }
-    fn extra(): T { return this.value; }
+     get(): T { return this.value; }
+     extra(): T { return this.value; }
 }
 
 fn main(): Void {

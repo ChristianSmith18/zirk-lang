@@ -18,13 +18,13 @@ class Counter {
     construct(start: Int32) { this.count = start; this.step = 1; }
     construct() { this.count = 0; this.step = 1; }
 
-    fn bump(): Int32 {
+     bump(): Int32 {
         this.count = this.count + this.step;
         return this.count;
     }
 
     // Un método alcanza lo privado de su propia clase, y a otro por `this`.
-    fn twice(): Int32 {
+     twice(): Int32 {
         this.bump();
         return this.bump();
     }

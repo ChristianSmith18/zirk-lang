@@ -1,6 +1,6 @@
 # Classes and Objects
 
-Classes model values with observable identity, encapsulated state, and behavior. They can extend one class and combine multiple interfaces and traits. Zirk constructs them without `new`, uses `this` for the current instance, and makes visibility explicit when needed.
+Classes model values with observable identity, encapsulated state, and behavior. They can extend one class and combine multiple interfaces and traits. Zirk constructs them without `new`, uses `this` for the current instance, makes visibility explicit when needed, and supports static nested classes, instance-capturing `inner` classes, and local classes inside bodies.
 
 ---
 

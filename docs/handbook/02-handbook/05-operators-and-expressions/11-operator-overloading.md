@@ -13,7 +13,7 @@ class Vector2 {
     x: Float;
     y: Float;
 
-    fn _add(other: Vector2): Vector2 {
+    _add(other: Vector2): Vector2 {
         return Vector2(x + other.x, y + other.y);
     }
 }

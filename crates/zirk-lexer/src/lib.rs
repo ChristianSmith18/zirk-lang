@@ -797,6 +797,7 @@ impl<'a> Lexer<'a> {
             '[' => LBracket,
             ']' => RBracket,
             ',' => Comma,
+            '#' => Hash,
             ';' => Semicolon,
             ':' if self.eat(':') => ColonColon,
             ':' => Colon,

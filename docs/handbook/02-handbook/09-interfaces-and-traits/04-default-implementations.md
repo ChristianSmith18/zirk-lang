@@ -8,33 +8,37 @@ Prefer a helper function when reuse does not need polymorphic dispatch or confor
 
 ```zirk
 trait Describable {
-    fn type_name(): String;
+    type_name(): String;
 
-    fn describe(): String {
+    describe(): String {
         return "value of {this.type_name()}";
     }
 }
 
 class User implements Describable {
-    fn type_name(): String {
+    type_name(): String {
         return "User";
     }
     // Inherits `describe`.
 }
 
 class VerboseUser implements Describable {
-    fn type_name(): String {
+    type_name(): String {
         return "VerboseUser";
     }
 
-    fn describe(): String {
+    #override
+    describe(): String {
         return "a user with verbose diagnostics";
     }
 }
 ```
 
-`User` receives the default; `VerboseUser` replaces it. If two adopted traits
-provide the same method, the class must define its own implementation to resolve
+`User` receives the default; `VerboseUser` replaces it. Replacing a trait
+default is an override of an inherited implementation, so it requires the
+`#override` marker; satisfying a signature-only requirement such as
+`type_name()` takes no marker. If two adopted traits provide the same method,
+the class must define its own implementation under `#override` to resolve
 the conflict explicitly.
 
 ---

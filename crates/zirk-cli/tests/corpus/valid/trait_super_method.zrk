@@ -1,14 +1,15 @@
 // Selección explícita del default de un trait con TraitName.super.
 trait Greeter {
-    fn greet(): String;
-    fn buildGreeting(): String { return "hello"; }
+     greet(): String;
+     buildGreeting(): String { return "hello"; }
 }
 
 class Person implements Greeter {
     name: String;
     construct(name: String) { this.name = name; }
-    fn greet(): String { return "hi, " + this.name; }
-    fn buildGreeting(): String { return Greeter.super.buildGreeting() + " " + this.name; }
+     greet(): String { return "hi, " + this.name; }
+    #override
+     buildGreeting(): String { return Greeter.super.buildGreeting() + " " + this.name; }
 }
 
 fn main(): Void {

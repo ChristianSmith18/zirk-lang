@@ -6,7 +6,7 @@ class Counter {
     value: Int32;
     construct(value: Int32) { this.value = value; }
 
-    fn makeAdder(): Int32 {
+     makeAdder(): Int32 {
         mut extra: Int32 = 100;
         inmut add = (n: Int32): Int32 => n + this.value + extra;
         return add(1);

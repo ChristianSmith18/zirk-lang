@@ -9,7 +9,7 @@ class User {
 }
 ```
 
-Fields carry their own binding mutability. Classes are inheritable by default in Zirk 1.x; use composition where a relationship is not truly substitutable.
+Fields carry their own binding mutability. Classes are inheritable by default in Zirk 1.x; declare `final class` to seal a class against `extends`, and use composition where a relationship is not truly substitutable. Methods are declared without `fn`, directly as `name(params): Return { ... }`.
 
 ## API
 

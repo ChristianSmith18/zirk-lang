@@ -4,7 +4,7 @@
 class Engine {
     horsepower: Int32;
     construct(horsepower: Int32) { this.horsepower = horsepower; }
-    fn power(): Int32 { return this.horsepower; }
+     power(): Int32 { return this.horsepower; }
 }
 
 class Car {

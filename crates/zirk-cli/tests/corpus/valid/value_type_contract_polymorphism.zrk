@@ -14,20 +14,20 @@
 // proves the same thing: the same static slot and the same call site
 // dispatch correctly no matter which concrete record is behind it.)
 interface Shape {
-    fn name(): String;
-    fn area(): Int32;
+     name(): String;
+     area(): Int32;
 }
 
 record Circle implements Shape {
     radius: Int32;
-    fn name(): String { return "circle"; }
-    fn area(): Int32 { return this.radius * this.radius * 3; }
+     name(): String { return "circle"; }
+     area(): Int32 { return this.radius * this.radius * 3; }
 }
 
 record Square implements Shape {
     side: Int32;
-    fn name(): String { return "square"; }
-    fn area(): Int32 { return this.side * this.side; }
+     name(): String { return "square"; }
+     area(): Int32 { return this.side * this.side; }
 }
 
 fn describe(shape: Shape): Void {

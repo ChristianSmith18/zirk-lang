@@ -184,6 +184,15 @@ pub struct ClassDecl {
     /// implicit named constructor over `fields`.
     pub constructors: Vec<ConstructDecl>,
     pub methods: Vec<MethodDecl>,
+    /// Classes declared inside this one's body. They are static nested
+    /// classes by default; `is_inner` marks the ones that capture the
+    /// enclosing instance.
+    pub nested: Vec<ClassDecl>,
+    /// `final class` cannot be extended.
+    pub is_final: bool,
+    /// `inner class` captures a hidden `outer` reference to the enclosing
+    /// instance. Only meaningful on a class inside `nested`.
+    pub is_inner: bool,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
     pub span: Span,
@@ -288,12 +297,13 @@ pub struct ConstructDecl {
 pub struct MethodDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
-    /// Written `override fn`, which replacing an inherited method requires
+    /// Written `#override` on its own marker line above the method, which
+    /// replacing an inherited implementation requires
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7).
     pub is_override: bool,
-    /// Written `mut fn`, marking a method that mutates its receiver.
-    pub is_mut: bool,
-    /// `static fn` has no receiver and is not dispatched virtually.
+    /// `final` forbids overriding this method in a subclass.
+    pub is_final: bool,
+    /// `static` methods have no receiver and are not dispatched virtually.
     pub is_static: bool,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
@@ -570,6 +580,9 @@ pub enum Stmt {
     /// the grammar parses it anywhere so the checker can produce its own
     /// contextual diagnostic instead of a raw parse error.
     Commit(CommitBlock),
+    /// A `class` declaration inside a body — a local class, scoped to its
+    /// enclosing block.
+    LocalClass(ClassDecl),
 }
 
 impl Stmt {
@@ -590,6 +603,7 @@ impl Stmt {
             Stmt::Try(s) => s.span,
             Stmt::Unsafe(s) => s.span,
             Stmt::Commit(s) => s.span,
+            Stmt::LocalClass(c) => c.span,
         }
     }
 }

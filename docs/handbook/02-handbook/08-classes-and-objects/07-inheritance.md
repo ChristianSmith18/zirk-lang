@@ -4,7 +4,7 @@ A class may extend one class and implement multiple interfaces or traits. Multip
 
 Inheritance should preserve substitutability: callers using the base contract must remain correct for the subtype. Reuse alone is better served by composition or traits.
 
-Classes are inheritable by default. Zirk 1.x does not define `final`; API authors should rely on visibility and contract design rather than a nonexistent sealing keyword.
+Classes are inheritable by default. Declaring `final class` seals a class against `extends` (it may still implement contracts and be instantiated), and a `final` method cannot be overridden. `final` combined with `abstract` on the same class is contradictory and rejected; `final` never applies to fields, constructors, interfaces, traits, or records.
 
 ```zirk
 class User {
@@ -14,7 +14,7 @@ class User {
         this.name = name;
     }
 
-    override fn label(): String {
+    label(): String {
         return this.name;
     }
 }
@@ -22,7 +22,8 @@ class User {
 class Admin extends User {
     permissions: List<String>;
 
-    fn label(): String {
+    #override
+    label(): String {
         return "Admin: {this.name}";
     }
 }
@@ -32,10 +33,15 @@ stdout.println(user.label()); // Dynamic dispatch calls `Admin.label`.
 ```
 
 Inherited attributes keep their visibility. Public and protected instance
-methods dispatch virtually by default; private and static methods do not. A
-redefinition must use `override fn`, preserve parameter types exactly, and may
-narrow its result covariantly. Use `super(...)` for base construction and
-`super.method()` for inherited behavior.
+methods dispatch virtually by default; private and static methods do not.
+Replacing an inherited concrete implementation requires the `#override` member
+marker, written on its own line above the method; the method must preserve
+parameter types exactly and may narrow its result covariantly. `#override`
+applies only when an inherited implementation is actually replaced: satisfying
+an `abstract class` or `interface` requirement takes no marker (writing one is
+a warning), and a `#override` that overrides nothing is an error. The marker
+never applies to fields, constructors, nested classes, or `static` members. Use
+`super(...)` for base construction and `super.method()` for inherited behavior.
 
 ---
 

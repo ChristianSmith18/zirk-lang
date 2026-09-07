@@ -1254,7 +1254,7 @@ fn valid_generic_argument_does_not_admit_a_union() {
 #[test]
 fn valid_abstract_class_declaration() {
     let p = program(
-        "abstract class Shape { name: String; abstract fn area(): Int32; }
+        "abstract class Shape { name: String; abstract  area(): Int32; }
          fn main(): Void { }",
     );
     let a = &p.classes[0];
@@ -1271,7 +1271,7 @@ fn valid_abstract_class_declaration() {
 fn invalid_abstract_method_outside_an_abstract_class_still_states_its_phase() {
     // An ordinary class does not gain `abstract fn` just because the parser
     // now accepts it inside `abstract class`.
-    let output = errors("class Shape { abstract fn area(): Int32; }\nfn main(): Void { }");
+    let output = errors("class Shape { abstract  area(): Int32; }\nfn main(): Void { }");
     assert!(
         output.contains(codes::ABSTRACT_OUTSIDE_ABSTRACT_CLASS.as_str()),
         "{output}"
@@ -1282,7 +1282,7 @@ fn invalid_abstract_method_outside_an_abstract_class_still_states_its_phase() {
 #[test]
 fn invalid_abstract_method_with_a_body() {
     let output = errors(
-        "abstract class Shape { abstract fn area(): Int32 { return 1; } }
+        "abstract class Shape { abstract  area(): Int32 { return 1; } }
          fn main(): Void { }",
     );
     assert!(
@@ -1307,7 +1307,7 @@ fn valid_record_declaration() {
 #[test]
 fn valid_record_with_a_method() {
     let p = program(
-        "record Point { x: Float64; y: Float64; fn length(): Float64 { return this.x; } }
+        "record Point { x: Float64; y: Float64;  length(): Float64 { return this.x; } }
          fn main(): Void { }",
     );
     assert_eq!(p.classes[0].methods.len(), 1);
@@ -1579,7 +1579,7 @@ fn invalid_a_token_that_cannot_start_an_expression_is_reported_once() {
 fn invalid_diagnostics_come_out_in_source_order() {
     // The lexical error is on line 3 and the syntactic one on line 2. Stages
     // emit all lexing first, so without sorting they would come out reversed.
-    let source_text = "fn main(): Void {\n    class User { }\n    mut x = 123abc;\n}\n";
+    let source_text = "fn main(): Void {\n    fn helper(): Void { }\n    mut x = 123abc;\n}\n";
     let source = SourceFile::new("test.zrk", source_text);
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(&source, &mut sink);
@@ -1707,7 +1707,7 @@ fn valid_class_with_fields_constructor_and_method() {
                  this.name = name;
              }
 
-             fn greeting(): String { return this.name; }
+              greeting(): String { return this.name; }
          }
          fn main(): Void { }",
     );
@@ -1810,7 +1810,7 @@ fn valid_class_type_parameter() {
 
 #[test]
 fn valid_contract_type_parameter() {
-    let p = program("interface Box<out T> { fn value(): T; }\nfn main(): Void { }");
+    let p = program("interface Box<out T> {  value(): T; }\nfn main(): Void { }");
     let contract = &p.contracts[0];
 
     assert_eq!(contract.type_params.len(), 1);
@@ -1854,7 +1854,7 @@ fn valid_type_parameter_with_combined_constraints() {
 fn valid_generic_function_and_method() {
     let p = program(
         "fn identity<T>(value: T): T { return value; }
-         class Box<T> { value: T; fn get<U>(other: U): U { return other; } }
+         class Box<T> { value: T;  get<U>(other: U): U { return other; } }
          fn main(): Void { }",
     );
 

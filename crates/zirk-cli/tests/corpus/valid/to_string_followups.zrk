@@ -5,7 +5,7 @@
 // concrete class, and `Float16` printing (fixed by widening to `Float32`
 // first, always exact).
 interface Printable {
-    fn to_string(): String;
+     to_string(): String;
 }
 
 class Widget implements Printable {
@@ -13,7 +13,7 @@ class Widget implements Printable {
     construct(label: String) {
         this.label = label;
     }
-    fn to_string(): String {
+     to_string(): String {
         return "Widget({this.label})";
     }
 }

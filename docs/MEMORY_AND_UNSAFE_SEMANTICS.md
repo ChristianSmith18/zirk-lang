@@ -71,7 +71,15 @@ borrowed view or ownership-transfer operation instead.
 - `mut` permits binding replacement and, for references, referent mutation.
 - `inmut` prevents binding replacement but does not freeze reachable state.
 - `inmut::strict` prevents binding replacement and mutation anywhere in the
-  reachable graph.
+  reachable graph. That includes method calls: methods carry no `mut` marker,
+  so the compiler infers which methods mutate their receiver — a method
+  mutates if its body writes `this.*` (directly or through a place rooted at
+  `this`) or calls another inferred-mutating `this` method, computed by fixed
+  point over the intra-class call graph. Calling an inferred-mutating method
+  on an `inmut::strict` receiver is an error whose diagnostic shows the
+  mutation chain; methods without an analyzable body (`extern "C"` callables)
+  are conservatively treated as mutating. Plain `inmut` receivers are
+  unaffected.
 
 The compiler must reject construction of a writable alias that would break a
 strict guarantee. Strictness is not defined as cloning: it is an observable
@@ -98,8 +106,8 @@ Its core API is:
 
 ```zirk
 class Weak<T> {
-    static fn from(value: T): Weak<T>;
-    fn upgrade(): Option<T>;
+    static from(value: T): Weak<T>;
+    upgrade(): Option<T>;
     inmut is_alive: Boolean;
 }
 ```

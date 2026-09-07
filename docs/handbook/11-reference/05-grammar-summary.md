@@ -4,6 +4,8 @@ A source file contains declarations and imports. Blocks use braces; parser semic
 
 Decorator grammar includes `fn dec Name(parameters) { target-blocks }`, `repeatable fn dec`, `@Name`/`@Name(arguments)`, and optional `requires decorators [...]`, `before decorators [...]`, and `after decorators [...]`. Target blocks are limited to `class`, `attribute`, `function`, `method`, and `parameter`. Transform and wrapper variants use ordinary exact-arity match patterns; repeatable `applications` is never introduced implicitly.
 
+Inside `class`, `abstract class`, `interface`, `trait`, and `record` bodies, members use no `fn`: a method is `name(params): Return { ... }` and a field is `name: Type;`. A member prefix may carry `#` markers (`#override` is the defined one), then modifiers (visibility, `static`, `abstract`, `final`, `mut`, `inner`). `final` seals a class against `extends` or a method against override. `class Nested {}` declares a static nested class, `inner class` captures the enclosing instance, and `class` is also a valid statement inside a body for a block-scoped local class. `fn` remains only for top-level functions, function types, `fn dec`, `unsafe fn`, and `extern "C" fn`.
+
 Expressions include literals (including `re'pattern'` regex literals), names,
 calls, member/index access, lambdas with optional leading `fn`, unary, binary and
 conditional operators, `if`, and `match`. Statements include

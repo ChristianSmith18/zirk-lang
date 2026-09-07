@@ -3,19 +3,23 @@
 class BoomError implements RuntimeError {
     construct() { }
 
-    override fn message(): String {
+    #override
+      message(): String {
         return "boom";
     }
 
-    override fn code(): String {
+    #override
+      code(): String {
         return "BOOM";
     }
 
-    override fn cause(): Error? {
+    #override
+      cause(): Error? {
         return null;
     }
 
-    override fn stack_trace(): StackTrace {
+    #override
+      stack_trace(): StackTrace {
         return StackTrace();
     }
 }

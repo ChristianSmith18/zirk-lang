@@ -6,7 +6,7 @@ Static members belong to the class rather than to one instance. They suit named 
 
 ```zirk
 class Math {
-    static fn add(a: Int32, b: Int32): Int32 { return a + b; }
+    static add(a: Int32, b: Int32): Int32 { return a + b; }
 }
 
 class Counter {

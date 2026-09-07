@@ -27,7 +27,7 @@ replace fundamental behavior.
 
 ```zirk
 class Vector implements Addable<Vector, Vector> {
-    fn _add(other: Vector): Vector {
+    _add(other: Vector): Vector {
         return Vector(x + other.x, y + other.y);
     }
 }

@@ -3,14 +3,14 @@
 // dispatch works both through a class and through a contract, and a method
 // that already returns a nullable type isn't double-wrapped.
 interface Speaker {
-    fn speak(): String;
+     speak(): String;
 }
 
 class User implements Speaker {
     name: String;
     construct(name: String) { this.name = name; }
-    fn speak(): String { return "hi, " + this.name; }
-    fn nickname(): String? { return null; }
+     speak(): String { return "hi, " + this.name; }
+     nickname(): String? { return null; }
 }
 
 fn main(): Void {

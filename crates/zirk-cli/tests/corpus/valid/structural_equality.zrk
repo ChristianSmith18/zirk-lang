@@ -21,7 +21,7 @@ record Money { amount: Int32; currency: String; }
 class Tick {
     value: Int32;
     construct(value: Int32) { this.value = value; }
-    fn _equals(other: Tick): Boolean {
+     _equals(other: Tick): Boolean {
         stdout.println("tick compared");
         return this.value == other.value;
     }

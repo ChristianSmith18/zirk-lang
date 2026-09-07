@@ -86,7 +86,7 @@ Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
 |---|---|---|---|---|---|---|---|
 | `class`, `construct` | yes | yes | yes | yes | yes | yes | — |
 | Visibility (`public`/`private`/`protected`) | yes | yes | yes | yes | yes | yes | — |
-| Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`override`. |
+| Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`#override`; `final` seals classes and methods. |
 | `interface`/`trait` | yes | yes | yes | yes | yes | yes | `Keyword::Interface`/`Trait` in subset. |
 | `implements` | yes | yes | yes | yes | yes | yes | — |
 | Generics with `from` constraints | yes | yes | yes | yes | partial | partial | `fase-3-verificacion-constraints`; `from` verified at use and in the body, declared variance verified positionally; generic contract/enum dispatch still pending. |
@@ -94,7 +94,7 @@ Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
 | Tuples (literals, `.N` indexing, `match` destructuring) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`. |
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |
 | Enum static members (`E.count`, `E.keys()`, `E.values()`, `E.from_name()`, `E.from_value()`, `E.to_string`, `Enums.*`) | yes | yes | yes | yes | yes | yes | `enum-static-members`; `count`/`keys`/`values`/`to_string` lower to constants, the lookups expand to a comparison chain returning `Result<E, LookupError>`. `values()`/`from_*` apply to traditional enums only. |
-| `static` class members (`static fn`, `static` fields, `ClassName.member`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; statics excluded from vtables, contract tables, record equality, and clone graphs. |
+| `static` class members (`static` methods, `static` fields, `ClassName.member`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; statics excluded from vtables, contract tables, record equality, and clone graphs. |
 | Field default initializers (`field: T = expr;`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; evaluated in declaration order before the constructor body, unless the constructor assigns the field. |
 | `as` casts | yes | yes | yes | yes | yes | yes | — |
 | `as?` nullable casts | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; returns `T?` with `null` on mismatch. |

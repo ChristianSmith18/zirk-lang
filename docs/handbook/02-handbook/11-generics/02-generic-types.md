@@ -18,7 +18,7 @@ argument is omitted or written as an empty argument list:
 class Box<T = Int32> {
     value: T;
     construct(value: T) { this.value = value; }
-    fn get(): T { return this.value; }
+    get(): T { return this.value; }
 }
 
 mut b = Box(7);            // T defaults to Int32

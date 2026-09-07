@@ -17,7 +17,7 @@ receiver's type. `<`, `<=`, `>`, and `>=` call `_less`, `_less_equal`,
 class Money {
     amount: Int32;
     construct(amount: Int32) { this.amount = amount; }
-    fn _less(other: Money): Boolean { return this.amount < other.amount; }
+    _less(other: Money): Boolean { return this.amount < other.amount; }
 }
 
 Money(3) < Money(5); // true
