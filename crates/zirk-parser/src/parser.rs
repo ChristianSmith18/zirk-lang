@@ -831,6 +831,7 @@ impl<'a> Parser<'a> {
             type_params,
             is_override: false,
             is_mut: false,
+            is_static: false,
             params,
             return_type,
             throws,
@@ -847,6 +848,10 @@ impl<'a> Parser<'a> {
 
         // The modifiers come first and apply to whatever follows.
         let visibility = self.parse_visibility();
+
+        // `static fn` and `static` fields live at class level, not in each
+        // instance, and are reached through the type name.
+        let is_static = self.eat_keyword(Keyword::Static);
 
         // Only meaningful inside an `abstract class`: every member there is
         // a signature, never a body, so the keyword itself does not carry
@@ -895,12 +900,13 @@ impl<'a> Parser<'a> {
                     is_abstract,
                     is_override,
                     is_mut,
+                    is_static,
                     start,
                 )
                 .map(ClassMember::Method);
         }
 
-        self.parse_field(visibility, start).map(ClassMember::Field)
+        self.parse_field(visibility, is_static, start).map(ClassMember::Field)
     }
 
     /// `public`, `private` or `protected`, if one is written.
@@ -915,12 +921,12 @@ impl<'a> Parser<'a> {
         Some(visibility)
     }
 
-    /// A field: `[visibility] [mut|inmut|inmut::strict] name: Type;`
+    /// A field: `[visibility] [static] [mut|inmut|inmut::strict] name: Type [= expr];`
     ///
     /// Writing neither modifier means `public mut`
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7). Both spellings produce the same
     /// member; only the flag remembers which was written.
-    fn parse_field(&mut self, visibility: Option<Visibility>, start: Span) -> Option<FieldDecl> {
+    fn parse_field(&mut self, visibility: Option<Visibility>, is_static: bool, start: Span) -> Option<FieldDecl> {
         let mutability = if self.eat_keyword(Keyword::Mut) {
             Some(Mutability::Mutable)
         } else if self.eat_keyword(Keyword::Inmut) {
@@ -954,6 +960,11 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a field")?;
         self.expect(&TokenKind::Colon, "after the field name");
         let ty = self.parse_type()?;
+        let default = if self.eat(&TokenKind::Assign) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         let end = self.peek_span();
         self.eat(&TokenKind::Semicolon);
 
@@ -963,6 +974,8 @@ impl<'a> Parser<'a> {
             visibility: visibility.unwrap_or(Visibility::Public),
             mutability: mutability.unwrap_or(Mutability::Mutable),
             explicit_modifiers: visibility.is_some() || mutability.is_some(),
+            default,
+            is_static,
             span: start.to(end),
         })
     }
@@ -990,6 +1003,7 @@ impl<'a> Parser<'a> {
         is_abstract: bool,
         is_override: bool,
         is_mut: bool,
+        is_static: bool,
         start: Span,
     ) -> Option<MethodDecl> {
         self.eat_keyword(Keyword::Fn);
@@ -1028,6 +1042,7 @@ impl<'a> Parser<'a> {
             type_params,
             is_override,
             is_mut,
+            is_static,
             params,
             return_type,
             throws,

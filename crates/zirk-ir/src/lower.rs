@@ -156,6 +156,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 fields: class
                     .fields
                     .iter()
+                    .filter(|field| !field.is_static)
                     .map(|field| ObjectField {
                         name: field.name.clone(),
                         ty: ir_type(field.ty, instance_base, enum_instance_base, checked),
@@ -170,6 +171,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                     let mut table = vec![String::new(); class.methods.len()];
                     for method in &class.methods {
                         table[method.index] = if class.kind == ast::ClassKind::Abstract {
+                            UNREACHABLE_ABSTRACT_METHOD.to_string()
+                        } else if method.is_static {
                             UNREACHABLE_ABSTRACT_METHOD.to_string()
                         } else {
                             body_symbol(checked, method)
@@ -2140,6 +2143,33 @@ fn lower_class_body<'a>(
     instance_base: u32,
     enum_instance_base: u32,
 ) {
+    // `static` fields lower to module-level getter functions, so they are
+    // available without an instance.
+    let class_info = &checked.classes[id as usize];
+    for (field, info) in class
+        .fields
+        .iter()
+        .filter(|f| f.is_static)
+        .filter_map(|f| {
+            class_info
+                .fields
+                .iter()
+                .find(|i| i.name == f.name.name)
+                .map(|i| (f, i))
+        })
+    {
+        let lowering = FunctionLowering::new(
+            module,
+            checked,
+            declarations,
+            instance_base,
+            enum_instance_base,
+        );
+        let (lowered, lifted) = lowering.run_static_field(&class_info.name, field, info);
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
+    }
+
     for (index, constructor) in class.constructors.iter().enumerate() {
         let lowering = FunctionLowering::new(
             module,
@@ -2427,6 +2457,16 @@ pub fn constructor_symbol(class: &str, index: usize) -> String {
 /// one, since there is no overloading.
 pub fn method_symbol(class: &str, method: &str) -> String {
     format!("{class}${method}")
+}
+
+/// The name a `static fn` is emitted under.
+pub fn static_method_symbol(class: &str, method: &str) -> String {
+    format!("{class}$static${method}")
+}
+
+/// The name a `static` field's getter is emitted under.
+pub fn static_field_symbol(class: &str, field: &str) -> String {
+    format!("{class}$field${field}")
 }
 
 /// The name a trait's own default body is emitted under.
@@ -3992,24 +4032,36 @@ impl<'a> FunctionLowering<'a> {
     /// but a zeroed `String` is a null handle, not the empty string — and the
     /// difference shows the moment anyone compares it to `""`.
     fn initialize_defaults(&mut self, this: SlotId, id: u32, span: Span) {
-        let fields: Vec<(u32, IrType)> = self.module.objects[id as usize]
+        let field_types: Vec<IrType> = self.module.objects[id as usize]
             .fields
             .iter()
-            .enumerate()
-            .map(|(index, field)| (index as u32, field.ty))
+            .map(|f| f.ty)
+            .collect();
+        let checked_fields: Vec<&zirk_sema::FieldInfo> = self.checked.classes[id as usize]
+            .fields
+            .iter()
+            .filter(|f| !f.is_static)
             .collect();
 
-        for (index, ty) in fields {
-            let Some(value) = self.default_value(ty, span) else {
-                // No default: the checker already required the constructor to
-                // write it.
+        for (index, ty) in field_types.iter().enumerate() {
+            let Some(checked) = checked_fields.get(index) else {
                 continue;
+            };
+            let value = if let Some(default) = &checked.default {
+                self.lower_expr(default)
+            } else {
+                let Some(value) = self.default_value(*ty, span) else {
+                    // No default: the checker already required the constructor to
+                    // write it.
+                    continue;
+                };
+                value
             };
             let object = self.emit(InstKind::Load(this), IrType::Object(id), span);
             self.emit_effect(
                 InstKind::StoreField {
                     object,
-                    index,
+                    index: index as u32,
                     value,
                 },
                 span,
@@ -4109,16 +4161,21 @@ impl<'a> FunctionLowering<'a> {
         self.return_type = self.ir_type(found.returns);
         let resolved: Vec<IrType> = found.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
+        let is_static = found.is_static;
+
         let entry = self.new_block();
         self.current = entry;
         self.scopes.push(HashMap::new());
 
         // A record's method receives `this` by value too
         // (roadmap task 11.5): there is nothing to point at.
-        let this_ty = self.ir_type(Type::of(Base::Class(id)));
-        let this = self.declare_slot("this", this_ty, class.name.span);
+        let mut params = Vec::new();
+        if !is_static {
+            let this_ty = self.ir_type(Type::of(Base::Class(id)));
+            let this = self.declare_slot("this", this_ty, class.name.span);
+            params.push(this);
+        }
 
-        let mut params = vec![this];
         params.extend(
             method
                 .params
@@ -4143,7 +4200,11 @@ impl<'a> FunctionLowering<'a> {
         let lifted = std::mem::take(&mut self.lifted);
         let lowered = Function {
             // See the identical note in `run_constructor`.
-            name: method_symbol(&self.checked.classes[id as usize].name, &method.name.name),
+            name: if is_static {
+                static_method_symbol(&self.checked.classes[id as usize].name, &method.name.name)
+            } else {
+                method_symbol(&self.checked.classes[id as usize].name, &method.name.name)
+            },
             params,
             return_type: self.return_type,
             gc_roots: gc_roots_of(self.module, &self.slots),
@@ -4153,6 +4214,45 @@ impl<'a> FunctionLowering<'a> {
             span: method.span,
         };
 
+        (lowered, lifted)
+    }
+
+    /// Lowers a `static` field as a zero-argument getter that returns the
+    /// field's default value.
+    fn run_static_field(
+        mut self,
+        class_name: &str,
+        field: &ast::FieldDecl,
+        info: &zirk_sema::FieldInfo,
+    ) -> (Function, Vec<Function>) {
+        let return_type = self.ir_type(info.ty);
+        self.return_type = return_type;
+
+        let entry = self.new_block();
+        self.current = entry;
+        self.scopes.push(HashMap::new());
+
+        let value = if let Some(default) = &info.default {
+            self.lower_expr(default)
+        } else {
+            self.default_value(return_type, field.name.span)
+                .expect("a static field must be initializable")
+        };
+
+        self.terminate(Terminator::Return(Some(value)));
+        self.scopes.pop();
+
+        let lifted = std::mem::take(&mut self.lifted);
+        let lowered = Function {
+            name: static_field_symbol(class_name, &field.name.name),
+            params: Vec::new(),
+            return_type,
+            gc_roots: gc_roots_of(self.module, &self.slots),
+            slots: self.slots,
+            blocks: self.blocks,
+            entry,
+            span: field.name.span,
+        };
         (lowered, lifted)
     }
 
@@ -6545,6 +6645,9 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
                     return operand;
                 }
+                if let Some(operand) = self.lower_class_static_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_method_call(e, span) {
                     let ty = self.type_of_operand(operand);
                     return self.lower_throws_check(operand, ty, span);
@@ -8214,6 +8317,13 @@ impl<'a> FunctionLowering<'a> {
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
         }
+        // `ClassName.method(...)` names a class, not a contract value, and
+        // `type_of` cannot resolve it.
+        if let ast::Expr::Path(base) = &*field.object {
+            if self.checked.classes.iter().any(|c| c.name == base.name) {
+                return None;
+            }
+        }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
         };
@@ -8227,6 +8337,13 @@ impl<'a> FunctionLowering<'a> {
         };
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
+        }
+        // `ClassName.method(...)` names a type, not a value; `type_of` cannot
+        // resolve it and the static-call path handles it.
+        if let ast::Expr::Path(base) = &*field.object {
+            if self.checked.classes.iter().any(|c| c.name == base.name) {
+                return None;
+            }
         }
         // A record's own method is reached the same way an
         // ordinary class's is: `IrType::Value` only changes how the
@@ -9642,6 +9759,60 @@ impl<'a> FunctionLowering<'a> {
         self.current = continue_block;
     }
 
+    /// Whether `call` is a `ClassName.method(...)` `static fn` call.
+    fn is_class_static_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        let ast::Expr::Path(base) = &*field.object else {
+            return false;
+        };
+        self.checked
+            .classes
+            .iter()
+            .find(|c| c.name == base.name)
+            .and_then(|class| class.method(&field.name.name))
+            .is_some_and(|method| method.is_static)
+    }
+
+    /// The `MethodInfo` for a `ClassName.method(...)` `static fn` call.
+    fn class_static_method_of(&self, call: &ast::CallExpr) -> Option<&zirk_sema::MethodInfo> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let ast::Expr::Path(base) = &*field.object else {
+            return None;
+        };
+        let class = self.checked.classes.iter().find(|c| c.name == base.name)?;
+        class.method(&field.name.name).filter(|method| method.is_static)
+    }
+
+    /// `ClassName.method(...)` for a `static fn`.
+    fn lower_class_static_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let ast::Expr::Path(base) = &*field.object else {
+            return None;
+        };
+        let class_id = self.checked.classes.iter().position(|c| c.name == base.name)?;
+        let class = self.checked.classes[class_id].clone();
+        let method = class.method(&field.name.name).cloned()?;
+        if !method.is_static {
+            return None;
+        }
+
+        let returns = self.ir_type(method.returns);
+        let expected: Vec<IrType> = method
+            .params
+            .iter()
+            .map(|p| self.ir_type(p.ty))
+            .collect();
+        let args = self.lower_held_args(&call.args, &expected);
+        let callee = static_method_symbol(&class.name, &method.name);
+        Some(self.emit(InstKind::Call { callee, args }, returns, span))
+    }
+
     /// Lowers `value.method(...)` where the receiver is reached by contract.
     fn lower_contract_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -9649,6 +9820,13 @@ impl<'a> FunctionLowering<'a> {
         };
         if self.checked.variant_accesses.contains(&field.span) {
             return None;
+        }
+        // `ClassName.method(...)` names a class, not a contract value, and
+        // `type_of` cannot resolve it.
+        if let ast::Expr::Path(base) = &*field.object {
+            if self.checked.classes.iter().any(|c| c.name == base.name) {
+                return None;
+            }
         }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
@@ -14054,6 +14232,20 @@ impl<'a> FunctionLowering<'a> {
             };
         }
 
+        // A `ClassName.field` that names a `static` field of a user class.
+        if let ast::Expr::Path(base) = &*expr.object {
+            if let Some(class_id) = self.checked.classes.iter().position(|c| c.name == base.name) {
+                let class = self.checked.classes[class_id].clone();
+                if let Some(field) = class.field(&expr.name.name).cloned() {
+                    if field.is_static {
+                        let callee = static_field_symbol(&class.name, &expr.name.name);
+                        let returns = self.ir_type(field.ty);
+                        return self.emit(InstKind::Call { callee, args: Vec::new() }, returns, span);
+                    }
+                }
+            }
+        }
+
         // `native-type-member-surface` field/property lowering.
         //
         // Static scalar constants, `String`/`Char` metadata, `Tuple.length`,
@@ -15138,6 +15330,17 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        // `ClassName.field` that names a `static` field of a user class.
+        if let ast::Expr::Path(base) = &*expr.object {
+            if let Some(class_id) = self.checked.classes.iter().position(|c| c.name == base.name) {
+                if let Some(field) = self.checked.classes[class_id].field(&expr.name.name) {
+                    if field.is_static {
+                        return self.ir_type(field.ty);
+                    }
+                }
+            }
+        }
+
         // Universal `.type` member: a `String` with the value's type name.
         if expr.name.name == "type" {
             return IrType::String;
@@ -17424,6 +17627,11 @@ impl<'a> FunctionLowering<'a> {
         if self.is_enum_static_call(call) {
             return false;
         }
+        // `ClassName.method(...)` `static fn`: the base names a type, not a
+        // value, and the static-call path lowers it.
+        if self.is_class_static_call(call) {
+            return false;
+        }
         // A method or `super` call is not a callable call, and asking for the
         // type of its callee would ask for the type of a method — which is not
         // a value. Neither is `myScalar.to_string()` — asking for the type of
@@ -17726,6 +17934,12 @@ impl<'a> FunctionLowering<'a> {
                 self.type_of(&field.object, field.object.span())
             }
             ast::Expr::Call(e) => {
+                // `ClassName.method(...)` `static fn`: the base names a type,
+                // not a value; `method_of`/`contract_method_of` would panic.
+                if let Some(method) = self.class_static_method_of(e) {
+                    return self.ir_type(method.returns);
+                }
+
                 // `native-type-member-surface`: the checker already resolved
                 // the concrete type of built-in method/static calls and of
                 // every other well-typed call — use it before any name-based

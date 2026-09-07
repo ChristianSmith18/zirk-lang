@@ -968,6 +968,8 @@ pub struct MethodInfo {
     pub throws: Vec<Type>,
     /// Written `mut fn`, marking a method that mutates its receiver.
     pub is_mut: bool,
+    /// `static fn` has no receiver and is not dispatched virtually.
+    pub is_static: bool,
 }
 
 /// A declared interface or trait.
@@ -1027,6 +1029,10 @@ pub struct FieldInfo {
     pub span: zirk_diagnostics::Span,
     /// The class that declares it, which is not always the one that has it.
     pub owner: u32,
+    /// `field: Type = expr;` evaluated when the constructor omits the field.
+    pub default: Option<zirk_ast::Expr>,
+    /// `static` fields live outside object instances.
+    pub is_static: bool,
 }
 
 /// A generic type parameter, as the checker sees it.

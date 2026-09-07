@@ -1,0 +1,7 @@
+class Bad {
+    x: Int32 = this.y;
+    y: Int32 = 1;
+    construct() {}
+}
+
+fn main(): Void {}
