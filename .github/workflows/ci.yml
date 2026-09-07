@@ -104,7 +104,7 @@ jobs:
       - name: Cachear LLVM (Windows)
         if: runner.os == 'Windows'
         id: cache-llvm-windows
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\LLVM
           key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64-inkwell
