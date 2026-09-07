@@ -100,12 +100,24 @@ meaning as the unparameterized generic type, which is only valid in positions
 that accept a type constructor (for example, a `from` constraint or a type
 alias).
 
+## Resolved during iteration 3
+
+- Generic contract composition: `interface B<T> implements A<T>` is now
+  substituted transitively, so `class C<T> implements B<T>` and `C<Int32>`
+  satisfy `A<Int32>` correctly.
+- `Box<>` and other all-defaulted class references now lower to the same
+  `Base::Instance` as the explicit `Box<Int32>`, fixing the lowering panic.
+- Type-parameter defaults now also backfill undetermined type parameters in
+  generic callable inference (`infer_type_params`), so constructors or (once
+  lowering allows them) functions with defaults can use them.
+
 ## Out of scope / remaining work
 
-- Generic contract composition: `interface B<T> implements A<T>` and its
-  substitution when a class adopts `B<Int32>` are not yet wired.
-- Diamond-of-death fixtures and a dedicated fixture for two incompatible
-  inherited method signatures are not in the corpus; the incompat check is
-  covered by unit tests only.
-- A fixture for a non-trailing type-parameter default (`<T = Int32, U>`) is not
-  yet added; the trailing rule is enforced at declaration time.
+- User-defined generic functions (`fn f<T = Int32>(...)`) still gate with
+  `NOT_LOWERED`; the default-filling code is wired but cannot be exercised
+  end-to-end until generic function bodies lower.
+- Contract `implements` with the same target listed twice with different
+  type arguments is still rejected by contract id only; full variance-aware
+  duplicate checking is future work.
+- Nested generic `implements` arguments (`Container<Box<T>>`) remain
+  `NOT_LOWERED`.

@@ -3413,14 +3413,43 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::EnumInstance(instance as u32));
         }
         if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
-            if reference.arguments.is_empty() {
-                return Type::of(Base::Class(id as u32));
-            }
-            let args: Vec<Type> = reference
+            let class = &self.checked.classes[id];
+            let mut args: Vec<Type> = reference
                 .arguments
                 .iter()
                 .map(|a| self.resolve_written_type(a))
                 .collect();
+
+            // Apply trailing type-parameter defaults at use sites the same way
+            // the checker does (`resolve_class_reference`): `Box<>` with a
+            // default `T = Int32` is the same `Base::Instance` as `Box<Int32>`.
+            let params = &class.type_params;
+            if args.len() < params.len() {
+                let can_default = params[args.len()..]
+                    .iter()
+                    .all(|&p| self.checked.type_params[p as usize].default.is_some());
+                if can_default {
+                    let mut subst: Vec<(u32, Type)> = params
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .collect();
+                    for i in args.len()..params.len() {
+                        let param = params[i];
+                        let default =
+                            self.checked.type_params[param as usize].default.expect(
+                                "the checker only omits arguments when a default exists",
+                            );
+                        let ty = substitute_generic_type(self.checked, default, &subst);
+                        args.push(ty);
+                        subst.push((param, ty));
+                    }
+                }
+            }
+
+            if args.is_empty() {
+                return Type::of(Base::Class(id as u32));
+            }
             let instance = self
                 .checked
                 .generic_instances

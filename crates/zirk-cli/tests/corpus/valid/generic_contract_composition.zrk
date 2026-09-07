@@ -1,0 +1,20 @@
+interface A<T> {
+    fn get(): T;
+}
+
+interface B<T> implements A<T> {
+    fn extra(): T;
+}
+
+class C<T> implements B<T> {
+    value: T;
+    construct(v: T) { this.value = v; }
+    fn get(): T { return this.value; }
+    fn extra(): T { return this.value; }
+}
+
+fn main(): Void {
+    mut c: C<Int32> = C(7);
+    stdout.println(c.get());
+    stdout.println(c.extra());
+}
