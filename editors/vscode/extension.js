@@ -16,6 +16,83 @@ const pendingLiveChecks = new Map();
 const runningLiveChecks = new Set();
 const liveTempFiles = new Set();
 
+// Brand syntax palette (zirk-lang-site tokens). Every scope ends in `.zirk`,
+// so the rules only ever touch Zirk files — the active theme stays in charge
+// of everything else. Applied/removed at runtime by `applyBrandPalette`.
+const BRAND_TEXTMATE_RULES = [
+    // keywords declarativas: class, fn, import, trait…
+    { scope: ['keyword.declaration.zirk', 'keyword.control.import.zirk', 'storage.type.function.zirk'], settings: { foreground: '#8E6CFF' } },
+    // control de flujo: if, match, try, for, task…
+    { scope: 'keyword.control.zirk', settings: { foreground: '#EC4899' } },
+    // salidas: return, throw, break, continue
+    { scope: 'keyword.control.exit.zirk', settings: { foreground: '#F7C65C' } },
+    // mutabilidad: mut, inmut, inmut::strict, share, sync
+    { scope: 'storage.modifier.mutability.zirk', settings: { foreground: '#F7C65C' } },
+    // modificadores: public, private, static, final, inner, abstract…
+    { scope: 'storage.modifier.zirk', settings: { foreground: '#A78BFA' } },
+    // tipos builtin: Int32, String, Void…
+    { scope: 'storage.type.zirk', settings: { foreground: '#32D4C6' } },
+    // clases/contratos de usuario (Capitalized)
+    { scope: ['entity.name.type.zirk', 'entity.name.class.zirk'], settings: { foreground: '#34D399' } },
+    // declaración de fn/método
+    { scope: 'entity.name.function.zirk', settings: { foreground: '#39C6FF' } },
+    // llamadas
+    { scope: 'entity.name.function.call.zirk', settings: { foreground: '#38BDF8' } },
+    // strings, chars, regex
+    { scope: ['string.quoted.double.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
+    // números y duraciones
+    { scope: ['constant.numeric.integer.zirk', 'constant.numeric.float.zirk', 'constant.numeric.hex.zirk', 'constant.numeric.octal.zirk', 'constant.numeric.binary.zirk', 'constant.numeric.duration.zirk'], settings: { foreground: '#60A5FA' } },
+    // constantes: true, false, null, Ok, Err, Some, None
+    { scope: 'constant.language.zirk', settings: { foreground: '#FF6B81' } },
+    // this / super / outer
+    { scope: 'variable.language.zirk', settings: { foreground: '#FFD166' } },
+    // decoradores @name
+    { scope: ['meta.decorator.zirk', 'entity.name.function.decorator.zirk', 'punctuation.decorator.zirk'], settings: { foreground: '#F4A261' } },
+    // marcadores #name (#override)
+    { scope: 'comment.line.marker.zirk', settings: { foreground: '#6A6A75' } },
+    // módulos en imports: std.io y similares
+    { scope: 'support.class.zirk', settings: { foreground: '#F4A261' } },
+    // nombres importados sin alias ({ stdout }, { describe })
+    { scope: 'variable.other.readwrite.zirk', settings: { foreground: '#F7F7FA' } },
+    // builtins: stdin/stdout/stderr, println, assert…
+    { scope: ['support.variable.zirk', 'support.function.zirk'], settings: { foreground: '#39C6FF' } },
+    // argumentos nombrados
+    { scope: 'variable.parameter.zirk', settings: { foreground: '#B8B8C3', fontStyle: 'italic' } },
+    // operadores (incluye `->` de alias, `is`/`as?` de cast, `|>` pipe)
+    { scope: ['keyword.operator.zirk', 'keyword.operator.alias.zirk', 'keyword.operator.cast.zirk', 'keyword.operator.pipe.zirk'], settings: { foreground: '#A78BFA' } },
+    // puntuación de interpolación `{`/`}` dentro de strings
+    { scope: ['punctuation.section.embedded.begin.zirk', 'punctuation.section.embedded.end.zirk', 'punctuation.definition.placeholder.zirk', 'punctuation.separator.placeholder.zirk'], settings: { foreground: '#8E6CFF' } },
+    // comentarios normales (// y /* */)
+    { scope: ['comment.line.double-slash.zirk', 'comment.block.zirk'], settings: { foreground: '#A3A3AF', fontStyle: 'italic' } },
+];
+
+/** True when a textMateRule's scope belongs to Zirk (ours or the user's own). */
+function isZirkScopeRule(rule) {
+    const scopes = Array.isArray(rule.scope) ? rule.scope : [rule.scope];
+    return scopes.some(s => typeof s === 'string' && s.includes('.zirk'));
+}
+
+/**
+ * Adds or removes the brand rules in `editor.tokenColorCustomizations`,
+ * preserving any user-defined rules. Scopes are `.zirk`-suffixed, so other
+ * languages are untouched even though the setting is global.
+ */
+async function applyBrandPalette(enabled) {
+    const editorConfig = vscode.workspace.getConfiguration('editor');
+    const current = editorConfig.get('tokenColorCustomizations') || {};
+    const kept = (current.textMateRules || []).filter(rule => !isZirkScopeRule(rule));
+    const textMateRules = enabled ? [...kept, ...BRAND_TEXTMATE_RULES] : kept;
+    const next = { ...current, textMateRules };
+    if (next.textMateRules.length === 0) {
+        delete next.textMateRules;
+    }
+    try {
+        await editorConfig.update('tokenColorCustomizations', next, vscode.ConfigurationTarget.Global);
+    } catch (err) {
+        outputChannel?.appendLine(`[palette] could not update tokenColorCustomizations: ${err}`);
+    }
+}
+
 const DEPRECATED_TYPES = new Map([
     ['BinaryFloat', 'Float'],
     ['BinaryFloat16', 'Float16'],
@@ -106,6 +183,14 @@ function activate(context) {
     });
 
     context.subscriptions.push(openDisposable, saveDisposable, changeDisposable, closeDisposable, activeEditorDisposable);
+
+    applyBrandPalette(vscode.workspace.getConfiguration(CONFIG_SECTION).get('brandColors', true));
+    const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration(`${CONFIG_SECTION}.brandColors`)) {
+            applyBrandPalette(vscode.workspace.getConfiguration(CONFIG_SECTION).get('brandColors', true));
+        }
+    });
+    context.subscriptions.push(configDisposable);
 
     for (const document of vscode.workspace.textDocuments) {
         if (document.languageId === LANGUAGE_ID) {

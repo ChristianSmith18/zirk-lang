@@ -9,14 +9,18 @@
     { "include": "#durations" },
     { "include": "#numbers" },
     { "include": "#decorators" },
+    { "include": "#member-markers" },
+    { "include": "#type-declarations" },
     { "include": "#function-declarations" },
+    { "include": "#method-declarations" },
     { "include": "#keywords" },
     { "include": "#constants" },
     { "include": "#types" },
     { "include": "#function-calls" },
     { "include": "#named-arguments" },
     { "include": "#operators" },
-    { "include": "#builtins" }
+    { "include": "#builtins" },
+    { "include": "#identifiers" }
   ],
   "repository": {
     "comments": {
@@ -50,7 +54,7 @@
         {
           "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([A-Z][a-zA-Z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "comment.block.zirk" },
+            "1": { "name": "comment.line.marker.zirk" },
             "2": { "name": "keyword.operator.alias.zirk" },
             "3": { "name": "entity.name.type.zirk" }
           }
@@ -58,7 +62,7 @@
         {
           "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([a-z_][a-zA-Z0-9_]*)\\b",
           "captures": {
-            "1": { "name": "comment.block.zirk" },
+            "1": { "name": "comment.line.marker.zirk" },
             "2": { "name": "keyword.operator.alias.zirk" },
             "3": { "name": "variable.other.readwrite.zirk" }
           }
@@ -173,7 +177,7 @@
       "patterns": [
         {
           "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
-          "name": "entity.name.function.zirk"
+          "name": "entity.name.function.call.zirk"
         }
       ]
     },
@@ -200,6 +204,39 @@
         }
       ]
     },
+    "member-markers": {
+      "patterns": [
+        {
+          "name": "comment.line.marker.zirk",
+          "match": "(#)([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.marker.zirk" },
+            "2": { "name": "comment.line.marker.zirk" }
+          }
+        }
+      ]
+    },
+    "type-declarations": {
+      "patterns": [
+        {
+          "match": "\\b(class|interface|trait|record|enum|extends|implements)\\s+([A-Z][a-zA-Z0-9_]*(\\.[A-Z][a-zA-Z0-9_]*)*)\\b",
+          "captures": {
+            "1": { "name": "keyword.declaration.zirk" },
+            "2": { "name": "entity.name.class.zirk" }
+          }
+        }
+      ]
+    },
+    "method-declarations": {
+      "patterns": [
+        {
+          "match": "\\b(?!fn|construct|if|else|match|while|for|return|in|do|loop|catch|throw|throws|select|await|task|try\\b)([a-z_][a-zA-Z0-9_]*)\\s*(?=\\([^()]*\\)\\s*:)",
+          "captures": {
+            "1": { "name": "entity.name.function.zirk" }
+          }
+        }
+      ]
+    },
     "function-declarations": {
       "patterns": [
         {
@@ -215,11 +252,23 @@
       "patterns": [
         {
           "name": "keyword.control.zirk",
-          "match": "\\b(if|else|return|match|with|for|in|while|do|loop|break|continue|try|catch|finally|throw|throws|task|await|select|parallel|thread|during|requires|permissions|scope|shield|after|cancelled|before|default|timeout|cancellation|from)\\b"
+          "match": "\\b(if|else|match|with|for|in|while|do|loop|try|catch|finally|throws|task|await|select|parallel|thread|during|requires|permissions|scope|shield|after|cancelled|before|default|timeout|cancellation|from)\\b"
         },
         {
-          "name": "keyword.control.zirk",
-          "match": "\\b(mut|inmut::strict|inmut|strict|sync|public|private|protected|abstract|unsafe|share|import|use|type|class|construct|implements|extends|override|repeatable|dec|commit|decorators|attribute|function|method|parameter|interface|trait|record|enum|gen)\\b"
+          "name": "keyword.control.exit.zirk",
+          "match": "\\b(return|break|continue|throw|yield)\\b"
+        },
+        {
+          "name": "storage.modifier.mutability.zirk",
+          "match": "\\b(mut|inmut::strict|inmut|strict|sync|share)\\b"
+        },
+        {
+          "name": "storage.modifier.zirk",
+          "match": "\\b(public|private|protected|abstract|final|inner|static|unsafe|repeatable|dec|commit|decorators|attribute|function|method|parameter|override)\\b"
+        },
+        {
+          "name": "keyword.declaration.zirk",
+          "match": "\\b(import|use|type|class|construct|implements|extends|interface|trait|record|enum|gen|fn)\\b"
         }
       ]
     },
@@ -231,7 +280,7 @@
         },
         {
           "name": "variable.language.zirk",
-          "match": "\\b(this)\\b"
+          "match": "\\b(this|outer|super)\\b"
         }
       ]
     },
@@ -240,6 +289,10 @@
         {
           "name": "storage.type.zirk",
           "match": "\\b(Int8|Int16|Int32|Int64|Int128|Int|Integer|UInt8|UInt16|UInt32|UInt64|UInt128|UInt|Byte|Float16|Float32|Float64|Float128|Float|Decimal|Dec|Boolean|Char|String|Date|Time|DateTime|Instant|ZonedDateTime|TimeZone|Duration|Period|Regex|Array|List|Set|Map|Range|Function|Fn|Tuple|Weak|Pointer|NativeSlice|NativeSliceMut|Task|TaskSettlement|Channel|Thread|Mutex|RwLock|Semaphore|Barrier|Once|Atomic|Null|Void|Never|Object|Result|Option|Throwable)\\b"
+        },
+        {
+          "name": "entity.name.type.zirk",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
         }
       ]
     },
@@ -268,6 +321,14 @@
         {
           "name": "support.function.zirk",
           "match": "\\b(print|println|to_string|assert|equal|expect|fatalError)\\b"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.readwrite.zirk",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
         }
       ]
     }

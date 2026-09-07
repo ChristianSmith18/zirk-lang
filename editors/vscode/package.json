@@ -40,6 +40,11 @@
           "type": "number",
           "default": 500,
           "description": "Debounce delay in milliseconds for live checking while typing."
+        },
+        "zirk.brandColors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Apply the Zirk brand syntax palette (zirk-lang-site colors) to .zrk files, replacing the current theme's colors for Zirk scopes only."
         }
       }
     },
