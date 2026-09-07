@@ -1,0 +1,9 @@
+interface A {
+    fn a(): Int32;
+}
+
+trait B implements A {
+    fn a(): Float64 { return 1.0; }
+}
+
+fn main(): Void { }

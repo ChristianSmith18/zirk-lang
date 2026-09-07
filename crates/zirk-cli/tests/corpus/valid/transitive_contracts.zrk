@@ -1,0 +1,20 @@
+// Conformidad transitiva: una clase que adopta B, y B implementa A,
+// debe satisfacer los métodos de A.
+interface A {
+    fn a(): Int32;
+}
+
+interface B implements A {
+    fn b(): Int32;
+}
+
+class C implements B {
+    construct() { }
+    fn a(): Int32 { return 1; }
+    fn b(): Int32 { return 2; }
+}
+
+fn main(): Void {
+    mut c = C();
+    stdout.println(c.a());
+}
