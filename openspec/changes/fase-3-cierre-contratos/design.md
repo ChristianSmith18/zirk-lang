@@ -86,7 +86,26 @@ features that were never implemented:
 - [`as?` on non-nullable receivers] → Always allowed (never-null result is
   fine); keep compile-time relatedness.
 
-## Open Questions
+## Resolved
 
-- Exact reserved-method names for comparisons if the spec/native table
-  fixes different ones (check `lower.rs` reserved-method table first).
+- Exact reserved-method names for comparisons: `_less`, `_less_equal`, `_greater`, `_greater_equal` (confirmed against `lower.rs` and the contracts spec).
+
+## Use-site default syntax
+
+A generic type with all-defaulted parameters can be written either with the bare
+name (`Box`) or with empty angle brackets (`Box<>`). Both mean the same thing:
+the compiler fills every omitted argument with the trailing default. If a
+parameter has no default and is omitted, the bare name keeps its previous
+meaning as the unparameterized generic type, which is only valid in positions
+that accept a type constructor (for example, a `from` constraint or a type
+alias).
+
+## Out of scope / remaining work
+
+- Generic contract composition: `interface B<T> implements A<T>` and its
+  substitution when a class adopts `B<Int32>` are not yet wired.
+- Diamond-of-death fixtures and a dedicated fixture for two incompatible
+  inherited method signatures are not in the corpus; the incompat check is
+  covered by unit tests only.
+- A fixture for a non-trailing type-parameter default (`<T = Int32, U>`) is not
+  yet added; the trailing rule is enforced at declaration time.

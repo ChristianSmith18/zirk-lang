@@ -1,0 +1,10 @@
+// Los ciclos de `implements` entre contratos deben detectarse.
+interface A implements B {
+    fn a(): Int32;
+}
+
+interface B implements A {
+    fn b(): Int32;
+}
+
+fn main(): Void { }

@@ -228,6 +228,8 @@ pub struct ContractDecl {
     pub name: Ident,
     pub kind: ContractKind,
     pub type_params: Vec<TypeParam>,
+    /// Contracts this contract extends or re-exports (`interface A implements B`).
+    pub implements: Vec<TypeRef>,
     pub methods: Vec<MethodDecl>,
     /// Marked `share`, so other files of the crate may name it.
     pub shared: bool,
@@ -468,7 +470,7 @@ pub struct FnTypeParamRef {
     pub span: Span,
 }
 
-/// A declared type parameter, as in `<T from Serializable>`.
+/// A declared type parameter, as in `<T from Serializable>` or `<T = Int32>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParam {
     pub name: Ident,
@@ -479,6 +481,8 @@ pub struct TypeParam {
     /// Several because `from A & B` requires all of them at once, which is
     /// what lets a body use everything each one promises.
     pub constraints: Vec<TypeRef>,
+    /// Optional default type for trailing parameters (`<T = Int32>`).
+    pub default: Option<TypeRef>,
     pub span: Span,
 }
 
@@ -920,11 +924,13 @@ pub enum Expr {
     Tuple(TupleExpr),
 }
 
-/// `expr as Type` or `<Type>expr`.
+/// `expr as Type`, `expr as? Type`, or `<Type>expr`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CastExpr {
     pub expr: Box<Expr>,
     pub target: TypeRef,
+    /// `true` for the nullable form `as?`.
+    pub optional: bool,
     pub span: Span,
 }
 
@@ -1021,9 +1027,11 @@ pub struct ThisExpr {
     pub span: Span,
 }
 
-/// `super`
+/// `super` or `TraitName.super`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperExpr {
+    /// When `Some`, this is the `TraitName` in `TraitName.super`.
+    pub trait_name: Option<Ident>,
     pub span: Span,
 }
 
