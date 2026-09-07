@@ -266,6 +266,11 @@ pub struct FieldDecl {
     /// thing — but only one of them says it out loud, and a diagnostic about
     /// a redundant modifier needs to tell them apart.
     pub explicit_modifiers: bool,
+    /// `field: Type = expr;`, evaluated per construction when the constructor
+    /// does not assign the field.
+    pub default: Option<Expr>,
+    /// `static` places the field at class level rather than in each instance.
+    pub is_static: bool,
     pub span: Span,
 }
 
@@ -288,6 +293,8 @@ pub struct MethodDecl {
     pub is_override: bool,
     /// Written `mut fn`, marking a method that mutates its receiver.
     pub is_mut: bool,
+    /// `static fn` has no receiver and is not dispatched virtually.
+    pub is_static: bool,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
     /// `throws Type (| Type)*` (roadmap Phase 4b) — reuses `TypeRef`'s own

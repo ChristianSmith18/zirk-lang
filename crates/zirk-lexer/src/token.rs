@@ -94,6 +94,9 @@ pub enum Keyword {
     Dec,
     Gen,
     Default,
+    /// `static` members on classes: fields and methods accessed as
+    /// `ClassName.member`, with no instance receiver.
+    Static,
     /// `out T` on a generic parameter, restricting it to covariant output
     /// positions. `in` is shared with `for ... in`, so only `out` needs a
     /// keyword of its own.
@@ -174,6 +177,7 @@ impl Keyword {
             "gen" => Gen,
             "null" => Null,
             "default" => Default,
+            "static" => Static,
             "out" => Out,
             "commit" => Commit,
             "extern" => Extern,
@@ -242,6 +246,7 @@ impl Keyword {
             Gen => "gen",
             Null => "null",
             Default => "default",
+            Static => "static",
             Out => "out",
             Commit => "commit",
             Extern => "extern",

@@ -819,6 +819,8 @@ impl<'a> Checker<'a> {
                     visibility: zirk_ast::Visibility::Public,
                     mutability: zirk_ast::Mutability::Immutable,
                     span,
+                    default: None,
+                    is_static: false,
                     owner: class_id,
                 },
                 FieldInfo {
@@ -827,6 +829,8 @@ impl<'a> Checker<'a> {
                     visibility: zirk_ast::Visibility::Private,
                     mutability: zirk_ast::Mutability::Immutable,
                     span,
+                    default: None,
+                    is_static: false,
                     owner: class_id,
                 },
                 FieldInfo {
@@ -835,6 +839,8 @@ impl<'a> Checker<'a> {
                     visibility: zirk_ast::Visibility::Public,
                     mutability: zirk_ast::Mutability::Immutable,
                     span,
+                    default: None,
+                    is_static: false,
                     owner: class_id,
                 },
                 FieldInfo {
@@ -843,6 +849,8 @@ impl<'a> Checker<'a> {
                     visibility: zirk_ast::Visibility::Public,
                     mutability: zirk_ast::Mutability::Immutable,
                     span,
+                    default: None,
+                    is_static: false,
                     owner: class_id,
                 },
                 FieldInfo {
@@ -851,6 +859,8 @@ impl<'a> Checker<'a> {
                     visibility: zirk_ast::Visibility::Private,
                     mutability: zirk_ast::Mutability::Immutable,
                     span,
+                    default: None,
+                    is_static: false,
                     owner: class_id,
                 },
             ],
@@ -1601,6 +1611,7 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 is_mut: false,
+            is_static: false,
             },
             MethodInfo {
                 name: "code".into(),
@@ -1614,6 +1625,7 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 is_mut: false,
+            is_static: false,
             },
             MethodInfo {
                 name: "cause".into(),
@@ -1627,6 +1639,7 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 is_mut: false,
+            is_static: false,
             },
         ];
         self.classes.push(ClassType {
@@ -1658,6 +1671,7 @@ impl<'a> Checker<'a> {
             overridden: true,
             throws: Vec::new(),
             is_mut: false,
+            is_static: false,
         });
         self.classes.push(ClassType {
             name: "Throwable".into(),
@@ -1716,6 +1730,7 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     is_mut: false,
+            is_static: false,
                 },
                 MethodInfo {
                     name: "code".into(),
@@ -1729,6 +1744,7 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     is_mut: false,
+            is_static: false,
                 },
                 MethodInfo {
                     name: "cause".into(),
@@ -1742,6 +1758,7 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     is_mut: false,
+            is_static: false,
                 },
                 MethodInfo {
                     name: "stack_trace".into(),
@@ -1755,6 +1772,7 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     is_mut: false,
+            is_static: false,
                 },
             ]
         };
@@ -1771,6 +1789,8 @@ impl<'a> Checker<'a> {
                     visibility: Visibility::Private,
                     mutability: Mutability::Immutable,
                     span: at,
+                    default: None,
+                    is_static: false,
                     owner: id,
                 }],
                 // `construct(reason: String)`: one parameter, no user-visible
@@ -2833,6 +2853,7 @@ impl<'a> Checker<'a> {
             from_contract: Some(contract),
             throws: method.throws.clone(),
             is_mut: false,
+            is_static: false,
         });
     }
 
@@ -3460,7 +3481,14 @@ impl<'a> Checker<'a> {
         // layout start with its base's (D2).
         let base = self.classes[id as usize].base;
         let mut fields: Vec<FieldInfo> = base
-            .map(|b| self.classes[b as usize].fields.clone())
+            .map(|b| {
+                self.classes[b as usize]
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_static)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
 
         for field in &decl.fields {
@@ -3495,6 +3523,19 @@ impl<'a> Checker<'a> {
                     "`Void` is the absence of a value, so there is nothing to store",
                     None,
                 );
+            }
+
+            // `static` fields are class-level only; records and abstract
+            // classes do not carry instance-independent state here.
+            if field.is_static && !matches!(decl.kind, ClassKind::Class) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    field.name.span,
+                    format!("a {} cannot declare a `static` field", decl.kind.as_str()),
+                    "`static` fields live outside the object, which only `class` supports",
+                    Some("remove `static`, or use an ordinary `class`".into()),
+                );
+                continue;
             }
 
             // A record is a value: every field is immutable by
@@ -3532,6 +3573,8 @@ impl<'a> Checker<'a> {
                 mutability,
                 span: field.name.span,
                 owner: id,
+                default: field.default.clone(),
+                is_static: field.is_static,
             });
         }
 
@@ -3662,6 +3705,7 @@ impl<'a> Checker<'a> {
                 from_contract: None,
                 throws,
                 is_mut: method.is_mut,
+                is_static: method.is_static,
             };
             let method_inputs: Vec<Type> = resolved.params.iter().map(|p| p.ty).collect();
             self.check_declared_variance(
@@ -4109,12 +4153,27 @@ impl<'a> Checker<'a> {
         let class_type = Type::of(Base::Class(id as u32));
         self.enter_type_params(&decl.type_params);
 
+        // Field default initializers are evaluated with no instance available,
+        // so `this` is not in scope for them.
+        let previous_this = self.this_type;
+        self.this_type = None;
+        for field in &decl.fields {
+            if let Some(default) = &field.default {
+                let expected = self.resolve_type(&field.ty);
+                let actual = self.check_expr(default);
+                if !actual.is_unknown() {
+                    self.expect_assignable(expected, actual, default.span(), "the default value");
+                }
+            }
+        }
+        self.this_type = previous_this;
+
         for constructor in &decl.constructors {
             self.in_constructor = true;
             let outer_pending = std::mem::take(&mut self.pending_throws);
             self.current_throws = Vec::new();
             let ctor_span = constructor.body.span;
-            self.check_member_body(class_type, &constructor.params, Type::VOID, |checker| {
+            self.check_member_body(class_type, &constructor.params, Type::VOID, true, |checker| {
                 checker.check_block(&constructor.body);
             });
             self.report_uncaught_throws(ctor_span, "construct");
@@ -4132,7 +4191,7 @@ impl<'a> Checker<'a> {
             let span = body.span;
             let outer_pending = std::mem::take(&mut self.pending_throws);
             self.current_throws = throws;
-            self.check_member_body(class_type, &method.params, returns, |checker| {
+            self.check_member_body(class_type, &method.params, returns, !method.is_static, |checker| {
                 let always_returns = checker.check_block(body);
                 if returns != Type::VOID && !returns.is_unknown() && !always_returns {
                     let declared = checker.name(returns);
@@ -4158,23 +4217,27 @@ impl<'a> Checker<'a> {
         class_type: Type,
         params: &[Param],
         returns: Type,
+        bind_this: bool,
         check: impl FnOnce(&mut Self),
     ) {
         let previous_return = self.current_return;
         let previous_this = self.this_type;
         self.current_return = returns;
-        self.this_type = Some(class_type);
+        self.this_type = if bind_this { Some(class_type) } else { None };
 
         self.scopes.push_function();
-        self.declare_local(Binding {
-            name: "this".to_string(),
-            ty: class_type,
-            mutability: Mutability::Immutable,
-            span: Span::new(0, 0),
-            initialized: true,
-            moved: false,
-            pinned: false,
-        });
+        if bind_this {
+            self.declare_local(Binding {
+                name: "this".to_string(),
+                ty: class_type,
+                mutability: Mutability::Immutable,
+                span: Span::new(0, 0),
+                initialized: true,
+                moved: false,
+                pinned: false,
+            });
+        }
+
         for param in params {
             let info = self.resolve_param(param);
             self.declare_local(Binding {
@@ -4218,7 +4281,7 @@ impl<'a> Checker<'a> {
         let unset: Vec<FieldInfo> = self.classes[id as usize]
             .fields
             .iter()
-            .filter(|f| !f.ty.has_default() && !assigned.contains(&f.name))
+            .filter(|f| !f.is_static && !f.ty.has_default() && f.default.is_none() && !assigned.contains(&f.name))
             .filter(|f| !(delegates && base.is_some() && f.owner != id))
             .cloned()
             .collect();
@@ -10176,6 +10239,30 @@ impl<'a> Checker<'a> {
         // consulted here.
         if let Expr::Path(base) = &*expr.object {
             let resolved = self.resolved_name(&base.name, base.span);
+
+            // `ClassName.field` for a `static` class field.
+            if let Some(class_id) = self.class_id(&resolved) {
+                let class = self.classes[class_id as usize].clone();
+                if let Some(field) = class.field(&expr.name.name).cloned() {
+                    if !field.is_static {
+                        let class_name = class.name.clone();
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            expr.name.span,
+                            format!("`{}` is not a static field", expr.name.name),
+                            format!("it is an instance field of `{class_name}`"),
+                            Some("access it through a value, or declare it `static`".into()),
+                        );
+                        return Type::UNKNOWN;
+                    }
+                    if !self.can_access(field.visibility, field.owner) {
+                        self.report_inaccessible(&expr.name.name, expr.name.span, field.visibility, field.owner, field.span);
+                    }
+                    self.scalar_static_accesses.insert(expr.span);
+                    return field.ty;
+                }
+            }
+
             if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
                 // `Direction.count`/`Direction.to_string`
                 // (`enum-static-members`): the static members spelled
@@ -10529,6 +10616,18 @@ impl<'a> Checker<'a> {
         let visibility = field.visibility;
         let declared = field.span;
         let owner = field.owner;
+
+        if field.is_static {
+            let class_name = class.name.clone();
+            self.error(
+                codes::TYPE_MISMATCH,
+                member.span,
+                format!("`{}` is a static field of `{class_name}`", member.name),
+                "access it through the type name, not an instance",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
 
         // A hidden member is a different mistake from one that does not
         // exist, and saying so is the difference between "you cannot reach
@@ -12019,6 +12118,20 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         };
 
+        if method.is_static {
+            self.error(
+                codes::TYPE_MISMATCH,
+                field.name.span,
+                format!("`{}` is a static method", method.name),
+                format!("call it through the type name `{class_name}`"),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
         // A `mut` method on an `inmut::strict` receiver would mutate the
         // reachable graph the strict reference promises to freeze.
         if method.is_mut
@@ -13435,6 +13548,59 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&callee.name).is_none()
         {
             return self.check_pin_construction(expr, callee.span);
+        }
+
+        // `ClassName.method()` for a `static` method.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+        {
+            let resolved = self.resolved_name(&base.name, base.span);
+            if let Some(class_id) = self.class_id(&resolved) {
+                let class = self.classes[class_id as usize].clone();
+                if let Some(method) = class.method(&field.name.name).cloned() {
+                    if !method.is_static {
+                        let class_name = class.name.clone();
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            field.name.span,
+                            format!("`{}` is not a static method", field.name.name),
+                            format!("it is an instance method of `{class_name}`"),
+                            Some("call it on a value, or declare it `static`".into()),
+                        );
+                    } else {
+                        let from_inside = self.this_type == Some(Type::of(Base::Class(class_id)));
+                        if method.visibility != Visibility::Public && !from_inside {
+                            let line = self.sources.location(method.span).line;
+                            let class_name = class.name.clone();
+                            self.error(
+                                codes::INACCESSIBLE_MEMBER,
+                                field.name.span,
+                                format!("`{}` is not accessible here", field.name.name),
+                                format!(
+                                    "it is declared `{}` in `{class_name}`, on line {line}",
+                                    method.visibility.as_str()
+                                ),
+                                Some("only `public` members are reachable from outside the class".into()),
+                            );
+                        }
+                        let signature = Signature {
+                            name: method.name.clone(),
+                            params: method.params.clone(),
+                            returns: method.returns,
+                            shared: class.shared,
+                            span: method.span,
+                            type_params: Vec::new(),
+                            throws: method.throws.clone(),
+                        };
+                        self.scalar_static_accesses.insert(field.span);
+                        return self.check_direct_call(expr, &signature);
+                    }
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+            }
         }
 
         // `u.greeting()` calls a method. It is decided here and not by the

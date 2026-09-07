@@ -1,0 +1,9 @@
+class Math {
+    static x: Int32 = 1;
+    construct() {}
+}
+
+fn main(): Void {
+    mut m = Math();
+    stdout.println(m.x);
+}
