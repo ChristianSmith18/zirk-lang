@@ -138,7 +138,21 @@ Current high-impact delivery limits include:
   table straight at the value's own method silently miscompiled — fixed
   with a small per-method unboxing thunk, needed for a `record`'s own
   method bodies (a trait's inherited default already expects a pointer
-  receiver). Still required: user generic contracts.
+  receiver). The Phase 3 OOP closing slice then delivered user generic
+  contracts end-to-end — `class Box<T> implements Container<T>` and generic
+  records dispatch through `Container<...>`-typed references, including
+  members that name the contract's own `T` — plus `static` methods and
+  fields on `class`, field initializers `field: Type = expr;`, the nullable
+  cast `as?`, `TraitName.super.method()`, contract composition through
+  `implements` on `interface`/`trait` (transitive, generic-aware, with cycle
+  and signature diagnostics), trailing type-parameter defaults `<T = Int32>`
+  checked against `from`, comparison operators as reserved-method contracts
+  (`_less`/`_less_equal`/`_greater`/`_greater_equal`, `!=` via `_equals`),
+  and positional `in`/`out` variance verification. Still open in this area:
+  trait default methods under generic substitution, a nested instantiation
+  as a contract argument (`Container<Box<T>>`, rejected with a diagnostic),
+  type-parameter defaults and bodies for user-defined generic functions, and
+  `static` members on `record`/`enum`.
 - `array-list-tuple-duration-regex` delivers the everyday data surface:
   `Tuple(A, B, ...)` values with constant indexing and destructuring,
   `Duration` as an `i64`-nanosecond primitive with `ns`–`w` literal
@@ -156,9 +170,9 @@ Current high-impact delivery limits include:
   `Iterable<T>` for numeric `T` and `Duration`), derived `Clone` for
   `record`/`enum`, `String` writes `s[i] = c` and slicing
   `s[start:end:step]`, and lowering of user-defined generic `implements
-  Contract<T>` satisfaction for contracts whose members do not name their
-  own type parameter (a member like `fn put(x: T)` still reports
-  `NOT_LOWERED`). `String.split` remains pending.
+  Contract<T>` satisfaction (contract members that name the contract's own
+  `T` were since covered by the Phase 3 OOP closing slice described above).
+  `String.split` remains pending.
 - `Float128` arithmetic lacks complete Windows verification. `Float128`
   `to_string()` is implemented by truncating to `Float64` first, which can
   lose precision for values not exactly representable in `f64`.

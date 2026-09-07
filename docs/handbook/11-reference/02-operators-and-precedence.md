@@ -4,7 +4,7 @@ Operators are grouped below from strongest to weakest binding. Parentheses alway
 
 | Level | Operators | Meaning/availability |
 |---:|---|---|
-| 1 | `()`, `[]`, `.`, `?.` | grouping/call, indexing, member and safe access |
+| 1 | `()`, `[]`, `.`, `?.`, `as`, `as?` | grouping/call, indexing, member and safe access; checked and nullable casts |
 | 2 | postfix `++`, `--` | mutable numeric place only |
 | 3 | prefix `!`, `+`, `-`, `~`, `++`, `--`, unsafe `*` | Boolean not; numeric sign; integer complement; mutable numeric place; raw pointer dereference |
 | 4 | `**` | numeric power; right-associative |
@@ -14,8 +14,8 @@ Operators are grouped below from strongest to weakest binding. Parentheses alway
 | 8 | `&` | integers or explicitly contracted domain types |
 | 9 | `^` | integers or explicitly contracted domain types |
 | 10 | `\|` | integers or explicitly contracted domain types |
-| 11 | `<`, `<=`, `>`, `>=` | ordered compatible operands |
-| 12 | `==`, `!=`, `is` | structural/content equality; identity only for references |
+| 11 | `<`, `<=`, `>`, `>=` | ordered compatible operands; user types resolve through `_less`, `_less_equal`, `_greater`, `_greater_equal` |
+| 12 | `==`, `!=`, `is` | structural/content equality (`!=` is the negation of `_equals`); identity only for references |
 | 13 | `&&` | short-circuit Boolean conjunction |
 | 14 | `\|\|` | short-circuit Boolean disjunction |
 | 15 | `??` | null coalescing |

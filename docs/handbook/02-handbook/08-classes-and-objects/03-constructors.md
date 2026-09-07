@@ -39,6 +39,12 @@ Constructor selection must remain unambiguous after optional and named
 arguments are considered. This constructor-specific facility does not enable
 general function overloading.
 
+Field initializers declared with `field: Type = expr;` run in declaration
+order before the constructor body, and a `super()` call always precedes both
+when the class extends a base. A field the constructor assigns uses that
+assignment; the initializer only fills fields the constructor leaves
+untouched.
+
 ---
 
 **Previous:** [← Attributes and Accessor Methods](02-fields-and-properties.md) · **Next:** [Instantiation →](04-instantiation.md)

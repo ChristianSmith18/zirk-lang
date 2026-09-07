@@ -49,6 +49,32 @@ Parsing text that can fail returns a typed result rather than relying on a cast:
 mut parsed: Result<Int32, ParseError> = Int32.parse(text);
 ```
 
+## Checked and nullable casts
+
+`as` performs a checked cast between related types (a prefix `<Type>`
+form exists as well). It verifies the runtime type and fails the operation
+on a mismatch:
+
+```zirk
+mut a: Animal = Dog();
+mut d = a as Dog; // verifies a is a Dog
+```
+
+When failure is an ordinary outcome, `as?` yields a nullable result instead:
+`x as? T` has type `T?` and evaluates to `null` when the runtime type does not
+match, so the result composes with `match`, `?.`, and `??`:
+
+```zirk
+mut maybeDog: Dog? = a as? Dog;
+match maybeDog {
+    null => stdout.println("no dog"),
+    d => stdout.println(d.speak()),
+}
+```
+
+A cast between unrelated types is rejected at compile time for both forms;
+`as?` is not a way to attempt impossible conversions.
+
 ---
 
 **Previous:** [← Contracts and Capabilities](01c-contracts-and-capabilities.md) · **Next:** [ Native Operators](01e-native-operators.md)
