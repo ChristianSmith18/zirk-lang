@@ -1,0 +1,7 @@
+class Counter {
+    static value: Int32 = 42;
+}
+
+fn main(): Void {
+    stdout.println(Counter.value);
+}
