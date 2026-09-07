@@ -4,4 +4,4 @@ Interfaces describe behavior a type promises. Traits can also provide reusable i
 
 ---
 
-**Previous:** [← Cloning](../08-classes-and-objects/11-cloning.md) · **Next:** [ Interfaces](01-interfaces.md)
+**Previous:** [← Nested, Inner, and Local Classes](../08-classes-and-objects/12-nested-classes.md) · **Next:** [ Interfaces](01-interfaces.md)
