@@ -8072,6 +8072,37 @@ impl<'a> FunctionLowering<'a> {
     /// Both are direct calls: `super` names a body statically, which is the
     /// whole point of writing it instead of letting dispatch decide.
     fn lower_super_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let this_slot = self.try_lookup_slot("this")?;
+        let this_ty = self.slot_type(this_slot);
+
+        // `TraitName.super.method(...)`: a direct call to the selected trait's
+        // default body, with `this` as the receiver.
+        if let ast::Expr::Field(field) = &*call.callee
+            && let ast::Expr::Super(super_expr) = &*field.object
+            && let Some(trait_name) = &super_expr.trait_name
+        {
+            let contract_id = self
+                .checked
+                .contracts
+                .iter()
+                .position(|c| c.name == trait_name.name)?;
+            let method = self.checked.contracts[contract_id].method(&field.name.name)?;
+            let name = contract_method_symbol(
+                &self.checked.contracts[contract_id].name,
+                &method.name,
+            );
+            let returns = self.ir_type(method.returns);
+            let params: Vec<IrType> =
+                method.params.iter().map(|p| self.ir_type(p.ty)).collect();
+
+            let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
+            let mut args = vec![receiver];
+            for (arg, ty) in call.args.iter().zip(params) {
+                args.push(self.lower_expr_as(&arg.value, ty));
+            }
+            return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
+        }
+
         let base = self.enclosing_base()?;
 
         // `super.method(...)`
@@ -8084,8 +8115,7 @@ impl<'a> FunctionLowering<'a> {
             let returns = self.ir_type(method.returns);
             let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
-            let this = self.lookup_slot("this");
-            let receiver = self.emit(InstKind::Load(this), self.slot_type(this), span);
+            let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
             for (arg, ty) in call.args.iter().zip(params) {
                 args.push(self.lower_expr_as(&arg.value, ty));
@@ -8104,8 +8134,7 @@ impl<'a> FunctionLowering<'a> {
             .map(|p| self.ir_type(p.ty))
             .collect();
 
-        let this = self.lookup_slot("this");
-        let receiver = self.emit(InstKind::Load(this), self.slot_type(this), span);
+        let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
         let mut args = vec![receiver];
         for (arg, ty) in call.args.iter().zip(params) {
             args.push(self.lower_expr_as(&arg.value, ty));
@@ -13780,6 +13809,56 @@ impl<'a> FunctionLowering<'a> {
             )
         };
 
+        // `x as? T` produces `T?`: `null` on a mismatch, the retyped value
+        // wrapped on success.
+        if expr.optional {
+            let nullable = Nullable::Object(target_class);
+            let result_ty = IrType::Nullable(nullable);
+            let result = self.declare_slot("<optional cast>", result_ty, span);
+
+            let value_slot = self.spill(value, actual_ty, span);
+            let value_loaded = self.emit(InstKind::Load(value_slot), actual_ty, span);
+            let is_instance = self.emit(
+                InstKind::IsInstance {
+                    object: value_loaded,
+                    target_class,
+                },
+                IrType::Boolean,
+                span,
+            );
+
+            let fail = self.new_block();
+            let success = self.new_block();
+            let cont = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_instance,
+                then_block: success,
+                else_block: fail,
+            });
+
+            self.current = fail;
+            let absent = self.emit(InstKind::NullValue(nullable), result_ty, span);
+            self.emit_effect(InstKind::Store(result, absent), span);
+            self.terminate(Terminator::Jump(cont));
+
+            self.current = success;
+            let value_loaded = self.emit(InstKind::Load(value_slot), actual_ty, span);
+            let retyped = self.emit(InstKind::Retype(value_loaded), target_ty, span);
+            let wrapped = self.emit(
+                InstKind::Wrap {
+                    base: nullable,
+                    value: retyped,
+                },
+                result_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result, wrapped), span);
+            self.terminate(Terminator::Jump(cont));
+
+            self.current = cont;
+            return self.emit(InstKind::Load(result), result_ty, span);
+        }
+
         // `as` / `<T>` casts over class types now throw `InvalidCastError`
         // instead of aborting: `IsInstance` answers the same question
         // `CheckedCast` used to assert, and a failing branch builds the
@@ -17502,8 +17581,15 @@ impl<'a> FunctionLowering<'a> {
                 }
             }
             ast::Expr::Binary(e)
-                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
-                    && self.operator_method_of(e).is_some() =>
+                if matches!(
+                    e.op,
+                    ast::BinaryOp::Eq
+                        | ast::BinaryOp::NotEq
+                        | ast::BinaryOp::Lt
+                        | ast::BinaryOp::LtEq
+                        | ast::BinaryOp::Gt
+                        | ast::BinaryOp::GtEq
+                ) && self.operator_method_of(e).is_some() =>
             {
                 IrType::Boolean
             }
@@ -17850,7 +17936,14 @@ impl<'a> FunctionLowering<'a> {
                 unreachable!("the type of this expression comes from the value it produced")
             }
             ast::Expr::Transfer(e) => self.type_of(&e.expr, e.expr.span()),
-            ast::Expr::Cast(e) => self.ir_type_from_ref(&e.target),
+            ast::Expr::Cast(e) => {
+                let base = self.ir_type_from_ref(&e.target);
+                if e.optional {
+                    IrType::Nullable(Nullable::of(base).expect("only nullable targets reach `as?`"))
+                } else {
+                    base
+                }
+            }
             ast::Expr::Interpolated(_) => IrType::String,
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
             ast::Expr::Commit(c) => self.block_value_type(&c.body),
@@ -18476,6 +18569,10 @@ fn operator_method(op: ast::BinaryOp) -> Option<&'static str> {
         // `!=` is `==` negated: one method answers both, so a type cannot
         // define them inconsistently.
         Eq | NotEq => "_equals",
+        Lt => "_less",
+        LtEq => "_less_equal",
+        Gt => "_greater",
+        GtEq => "_greater_equal",
         _ => return None,
     })
 }

@@ -727,6 +727,20 @@ impl<'a> Parser<'a> {
 
         let name = self.expect_identifier(&format!("after `{}`", kind.as_str()))?;
         let type_params = self.parse_type_params();
+
+        let mut implements = Vec::new();
+        if self.eat_keyword(Keyword::Implements) {
+            loop {
+                let Some(contract) = self.parse_type_atom() else {
+                    break;
+                };
+                implements.push(contract);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
         self.expect(&TokenKind::LBrace, "after the contract name");
 
         let mut methods = Vec::new();
@@ -766,6 +780,7 @@ impl<'a> Parser<'a> {
             name,
             kind,
             type_params,
+            implements,
             methods,
             shared,
             span: start.to(end),
@@ -1583,11 +1598,25 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            let end = constraints.last().map(|c| c.span).unwrap_or(name.span);
+            let default = if self.eat(&TokenKind::Assign) {
+                let Some(ty) = self.parse_type_atom() else {
+                    break;
+                };
+                Some(ty)
+            } else {
+                None
+            };
+
+            let end = default
+                .as_ref()
+                .or_else(|| constraints.last())
+                .map(|c| c.span)
+                .unwrap_or(name.span);
             params.push(TypeParam {
                 name,
                 variance,
                 constraints,
+                default,
                 span: start.to(end),
             });
 
@@ -3190,7 +3219,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Keyword(Keyword::Super) => {
                 self.pos += 1;
-                Some(Expr::Super(SuperExpr { span }))
+                Some(Expr::Super(SuperExpr {
+                    trait_name: None,
+                    span,
+                }))
             }
             // `Pin<T>` and `Pin(obj)` are built-in generic surface syntax; the
             // name is a keyword, but in expression position it acts like the
@@ -3296,6 +3328,7 @@ impl<'a> Parser<'a> {
             span: span.to(operand.span()),
             expr: Box::new(operand),
             target,
+            optional: false,
         }))
     }
 
@@ -3374,6 +3407,22 @@ impl<'a> Parser<'a> {
                     let safe = matches!(self.peek(), TokenKind::QuestionDot);
                     self.pos += 1;
 
+                    // `TraitName.super.method()` — the `super` itself is a
+                    // keyword, and the leading trait name is the already-parsed
+                    // primary it follows.
+                    if let TokenKind::Keyword(Keyword::Super) = self.peek() {
+                        let super_span = self.peek_span();
+                        if let Expr::Path(ref ident) = object {
+                            let trait_name = ident.clone();
+                            self.pos += 1;
+                            object = Expr::Super(SuperExpr {
+                                trait_name: Some(trait_name),
+                                span: object.span().to(super_span),
+                            });
+                            continue;
+                        }
+                    }
+
                     // `Pointer.from(place)` (roadmap Phase 4e, `ADR-015`):
                     // `from` is `Keyword::From` everywhere else (`implements
                     // X from Y`), but unambiguously a field name right after
@@ -3410,11 +3459,16 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Keyword(Keyword::As) => {
                     self.pos += 1;
+                    let optional = matches!(self.peek(), TokenKind::Question);
+                    if optional {
+                        self.pos += 1;
+                    }
                     let target = self.parse_type_atom()?;
                     object = Expr::Cast(CastExpr {
                         span: object.span().to(target.span),
                         expr: Box::new(object),
                         target,
+                        optional,
                     });
                 }
                 // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,

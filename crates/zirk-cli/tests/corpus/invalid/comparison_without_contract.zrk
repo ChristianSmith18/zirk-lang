@@ -1,0 +1,9 @@
+// Un tipo de usuario sin el método reservado correspondiente no puede usar <.
+class Point {
+    x: Int32;
+    construct(x: Int32) { this.x = x; }
+}
+
+fn main(): Void {
+    stdout.println(Point(1) < Point(2));
+}
