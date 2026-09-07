@@ -63,7 +63,7 @@
 - [x] 8.1 Update `docs/ZIRK_LANGUAGE_SPEC.md` §7: `fn`-less methods, `#override` rule, `final` (removing "final does not exist"), `mut` removal, nested/inner/local classes; §12 note that `#` markers are not decorators.
 - [x] 8.2 Update `COMPILER_IMPROVEMENT_SUGGESTIONS.md` where it references the old member surface.
 - [x] 8.3 Update handbook chapters covering classes, interfaces, traits, records, and `inmut::strict`; update feature-status and current-limitations pages.
-- [ ] 8.4 After the relevant commits, run `./scripts/sync-website-content.sh` and update `../zirk-lang-site` status wording per repo convention (with `--audit-date` if project-status evidence changed).
+- [x] 8.4 After the relevant commits, run `./scripts/sync-website-content.sh` and update `../zirk-lang-site` status wording per repo convention (with `--audit-date` if project-status evidence changed).
 
 ## 9. Verification
 
