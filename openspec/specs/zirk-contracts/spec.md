@@ -18,12 +18,21 @@ Interfaces MAY implement interfaces; traits MAY implement interfaces and traits;
 - **WHEN** two adopted traits define `print()` and the class overrides it using `JsonPrintable.super.print()`
 - **THEN** the selected default is called without declaration-order precedence
 
-### Requirement: Explicit capability derivation
-Classes SHALL NOT derive equality, hashing, or cloning silently. Records, tuples, and enums MAY request explicit derivation only when every component satisfies the required capability; derived cloning SHALL be deep.
+### Requirement: Capability derivation model
+Classes SHALL NOT gain equality, hashing, or cloning silently: equality on
+classes requires an explicit `_equals` implementation, and cloning requires
+the type to satisfy the `Clone` capability. Records, tuples, and enums have
+structural equality by definition, and `clone` SHALL be available for any
+type whose complete reachable type graph is cloneable — no explicit
+derivation syntax is required; derived cloning SHALL be deep.
 
 #### Scenario: Uncloneable component
-- **WHEN** Clone derivation is requested for a value containing an uncloneable resource
+- **WHEN** cloning is attempted on a value containing an uncloneable resource
 - **THEN** compilation fails and identifies the component and missing capability
+
+#### Scenario: Record equality is automatic
+- **WHEN** two `record` values of the same type are compared with `==`
+- **THEN** structural field equality applies without any declared derivation
 
 ### Requirement: Interfaces
 
