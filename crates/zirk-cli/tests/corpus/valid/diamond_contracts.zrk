@@ -1,0 +1,16 @@
+trait A {
+    fn a(): Int32 { return 1; }
+}
+
+trait B implements A { }
+
+trait C implements A { }
+
+class D implements B, C {
+    construct() {}
+}
+
+fn main(): Void {
+    mut d = D();
+    stdout.println(d.a());
+}

@@ -11,4 +11,7 @@ fn main(): Void {
 
     mut s: Box<String> = Box("ok");
     stdout.println(s.get());
+
+    mut d: Box<> = Box(5);
+    stdout.println(d.get());
 }

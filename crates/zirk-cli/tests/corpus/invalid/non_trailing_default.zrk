@@ -1,0 +1,10 @@
+class Box<T = Int32, U> {
+    value: T;
+    extra: U;
+    construct(v: T, e: U) {
+        this.value = v;
+        this.extra = e;
+    }
+}
+
+fn main(): Void { }

@@ -2164,10 +2164,11 @@ impl<'a> Checker<'a> {
             let mut resolved_implements = Vec::new();
             for named in &decl.implements {
                 let resolved = self.resolve_type(named);
-                let contract = match resolved.base {
-                    Base::Contract(c) => c,
+                let (contract, args) = match resolved.base {
+                    Base::Contract(c) => (c, Vec::new()),
                     Base::ContractInstance(inst) => {
-                        self.contract_instances[inst as usize].contract
+                        let instance = self.contract_instances[inst as usize].clone();
+                        (instance.contract, instance.args)
                     }
                     _ => {
                         self.error(
@@ -2180,7 +2181,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                 };
-                if resolved_implements.contains(&contract) {
+                if resolved_implements.iter().any(|i: &GenericContractInstance| i.contract == contract) {
                     let name = self.contracts[contract as usize].name.clone();
                     self.error(
                         codes::DUPLICATE_DECLARATION,
@@ -2191,7 +2192,7 @@ impl<'a> Checker<'a> {
                     );
                     continue;
                 }
-                resolved_implements.push(contract);
+                resolved_implements.push(GenericContractInstance { contract, args });
             }
             self.contracts[id as usize].implements = resolved_implements;
 
@@ -2238,8 +2239,8 @@ impl<'a> Checker<'a> {
         }
         visiting.insert(current);
         path.push(current);
-        for &next in &self.contracts[current as usize].implements.clone() {
-            if let Some(cycle) = self.find_contract_cycle(next, path, visiting) {
+        for next in &self.contracts[current as usize].implements.clone() {
+            if let Some(cycle) = self.find_contract_cycle(next.contract, path, visiting) {
                 return Some(cycle);
             }
         }
@@ -2303,8 +2304,49 @@ impl<'a> Checker<'a> {
             return;
         }
         order.push(current);
-        for &next in &self.contracts[current as usize].implements.clone() {
-            self.collect_contracts(next, order, visited);
+        for next in &self.contracts[current as usize].implements.clone() {
+            self.collect_contracts(next.contract, order, visited);
+        }
+    }
+
+    /// Same as [`Self::transitive_contracts`], but carrying the substitution
+    /// that instantiates each inherited contract's own type parameters.
+    /// `subst` maps `contract`'s parameters to the types the adopter supplied.
+    fn transitive_contract_substitutions(
+        &mut self,
+        contract: u32,
+        subst: &[(u32, Type)],
+    ) -> Vec<(u32, Vec<(u32, Type)>)> {
+        let mut out = Vec::new();
+        self.collect_contract_substitutions(contract, subst, &mut out, &mut std::collections::HashSet::new());
+        out
+    }
+
+    fn collect_contract_substitutions(
+        &mut self,
+        current: u32,
+        subst: &[(u32, Type)],
+        out: &mut Vec<(u32, Vec<(u32, Type)>)>,
+        visited: &mut std::collections::HashSet<u32>,
+    ) {
+        if !visited.insert(current) {
+            return;
+        }
+        out.push((current, subst.to_vec()));
+        for implemented in &self.contracts[current as usize].implements.clone() {
+            let child = implemented.contract;
+            let child_params = self.contracts[child as usize].type_params.clone();
+            let child_args: Vec<Type> = implemented
+                .args
+                .iter()
+                .map(|&a| self.substitute_type(a, subst))
+                .collect();
+            let child_subst: Vec<(u32, Type)> = child_params
+                .iter()
+                .copied()
+                .zip(child_args)
+                .collect();
+            self.collect_contract_substitutions(child, &child_subst, out, visited);
         }
     }
 
@@ -2693,9 +2735,8 @@ impl<'a> Checker<'a> {
     /// Checks that a class supplies everything a contract requires, including
     /// everything inherited transitively through `implements`.
     fn require_conformance(&mut self, class: u32, contract: u32, at: Span, subst: &[(u32, Type)]) {
-        for c in self.transitive_contracts(contract) {
-            let subst_for_c = if c == contract { subst } else { &[] };
-            self.require_one_conformance(class, c, at, subst_for_c);
+        for (c, c_subst) in self.transitive_contract_substitutions(contract, subst) {
+            self.require_one_conformance(class, c, at, &c_subst);
         }
     }
 
@@ -14999,7 +15040,16 @@ impl<'a> Checker<'a> {
         }
 
         for &id in &signature.type_params {
-            let Some(&solved) = substitution.get(&id) else {
+            let solved = if let Some(&solved) = substitution.get(&id) {
+                solved
+            } else if let Some(default) = self.type_params[id as usize].default {
+                // A trailing default fills in any type parameter that the
+                // call's arguments (and any seeded context) left undetermined,
+                // the same way an omitted `Box<>` uses `T = Int32`.
+                let solved = self.substitute(default, &substitution);
+                substitution.insert(id, solved);
+                solved
+            } else {
                 let param_name = self.type_params[id as usize].name.clone();
                 self.error(
                     codes::TYPE_MISMATCH,
