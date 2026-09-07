@@ -1,0 +1,10 @@
+// `as?` rechaza cast entre tipos no relacionados.
+class Animal { construct() { } }
+class Dog extends Animal {
+    construct() { super(); }
+}
+
+fn main(): Void {
+    mut a: Animal = Dog();
+    mut i: Int32? = a as? Int32;
+}

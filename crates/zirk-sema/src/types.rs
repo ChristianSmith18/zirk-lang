@@ -984,6 +984,10 @@ pub struct ContractType {
     /// the checker's type-parameter table, the same as
     /// [`ClassType::type_params`].
     pub type_params: Vec<u32>,
+    /// Other contracts this interface or trait `implements`, with the type
+    /// arguments used for each link. A non-generic `implements A` is stored
+    /// as `A` with empty arguments.
+    pub implements: Vec<crate::GenericContractInstance>,
     pub shared: bool,
     pub span: zirk_diagnostics::Span,
 }
@@ -1035,6 +1039,8 @@ pub struct FieldInfo {
 pub struct TypeParamInfo {
     pub name: String,
     pub constraints: Vec<Type>,
+    /// Resolved default type for trailing parameters (`<T = Int32>`).
+    pub default: Option<Type>,
     pub span: zirk_diagnostics::Span,
 }
 

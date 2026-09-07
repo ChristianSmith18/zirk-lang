@@ -936,6 +936,7 @@ impl<'a> Checker<'a> {
         for c in &program.contracts {
             self.declare_contract(c);
         }
+        self.resolve_contract_implements(program);
 
         // A class's own name (and how many type parameters it takes) is
         // registered before enums resolve their associated field types
@@ -1312,6 +1313,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            default: None,
             span: at,
         });
         let iterable = self.contracts.len() as u32;
@@ -1319,6 +1321,7 @@ impl<'a> Checker<'a> {
             name: "Iterable".into(),
             kind: ContractKind::Interface,
             methods: Vec::new(),
+            implements: Vec::new(),
             type_params: vec![iterable_t],
             shared: true,
             span: at,
@@ -1328,6 +1331,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            default: None,
             span: at,
         });
         let iterator = self.contracts.len() as u32;
@@ -1335,6 +1339,7 @@ impl<'a> Checker<'a> {
             name: "Iterator".into(),
             kind: ContractKind::Interface,
             methods: Vec::new(),
+            implements: Vec::new(),
             type_params: vec![iterator_t],
             shared: true,
             span: at,
@@ -1344,6 +1349,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            default: None,
             span: at,
         });
         let iteration = self.enums.len() as u32;
@@ -1437,6 +1443,7 @@ impl<'a> Checker<'a> {
             name: "Clone".into(),
             kind: ContractKind::Interface,
             methods: Vec::new(),
+            implements: Vec::new(),
             type_params: Vec::new(),
             shared: true,
             span: at,
@@ -1493,12 +1500,14 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            default: None,
             span: at,
         });
         let e = self.type_params.len() as u32;
         self.type_params.push(TypeParamInfo {
             name: "E".into(),
             constraints: Vec::new(),
+            default: None,
             span: at,
         });
 
@@ -1885,6 +1894,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "E".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            default: None,
             span: at,
         });
         let resource = self.contracts.len() as u32;
@@ -1892,6 +1902,7 @@ impl<'a> Checker<'a> {
             name: "Resource".into(),
             kind: ContractKind::Interface,
             methods: Vec::new(),
+            implements: Vec::new(),
             type_params: vec![e],
             shared: true,
             span: at,
@@ -1947,6 +1958,7 @@ impl<'a> Checker<'a> {
             name: "TransferableResource".into(),
             kind: ContractKind::Interface,
             methods: Vec::new(),
+            implements: Vec::new(),
             type_params: Vec::new(),
             shared: true,
             span: at,
@@ -1969,6 +1981,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "BodyError".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            default: None,
             span: at,
         });
 
@@ -1976,6 +1989,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "CloseError".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            default: None,
             span: at,
         });
 
@@ -2104,6 +2118,13 @@ impl<'a> Checker<'a> {
                 (inputs, outputs)
             },
         );
+        for p in &decl.type_params {
+            if let Some(default) = &p.default {
+                let id = self.type_param_ids[&p.span];
+                let resolved = self.resolve_type(default);
+                self.type_params[id as usize].default = Some(resolved);
+            }
+        }
         self.check_declared_variance(
             &decl.type_params,
             &contract_inputs,
@@ -2117,10 +2138,216 @@ impl<'a> Checker<'a> {
             name: decl.name.name.clone(),
             kind: decl.kind,
             methods,
+            implements: Vec::new(),
             type_params,
             shared: decl.shared,
             span: decl.name.span,
         });
+    }
+
+    /// Resolves `interface/trait X implements Y` after every contract name
+    /// is known, then checks for cycles and incompatible inherited signatures.
+    fn resolve_contract_implements(&mut self, program: &Program) {
+        for decl in &program.contracts {
+            let Some(id) = self.contract_id(&decl.name.name) else {
+                continue;
+            };
+
+            self.type_param_scope.push(
+                self.contracts[id as usize]
+                    .type_params
+                    .iter()
+                    .map(|&p| (self.type_params[p as usize].name.clone(), p))
+                    .collect(),
+            );
+
+            let mut resolved_implements = Vec::new();
+            for named in &decl.implements {
+                let resolved = self.resolve_type(named);
+                let (contract, args) = match resolved.base {
+                    Base::Contract(c) => (c, Vec::new()),
+                    Base::ContractInstance(inst) => {
+                        let instance = self.contract_instances[inst as usize].clone();
+                        (instance.contract, instance.args)
+                    }
+                    _ => {
+                        self.error(
+                            codes::UNKNOWN_TYPE,
+                            named.span,
+                            format!("`{}` is not a declared contract", named.name),
+                            "`implements` on a contract names another interface or trait",
+                            None,
+                        );
+                        continue;
+                    }
+                };
+                if resolved_implements.iter().any(|i: &GenericContractInstance| i.contract == contract) {
+                    let name = self.contracts[contract as usize].name.clone();
+                    self.error(
+                        codes::DUPLICATE_DECLARATION,
+                        named.span,
+                        format!("`{name}` is listed more than once"),
+                        "a contract lists another only once",
+                        None,
+                    );
+                    continue;
+                }
+                resolved_implements.push(GenericContractInstance { contract, args });
+            }
+            self.contracts[id as usize].implements = resolved_implements;
+
+            self.leave_type_params();
+        }
+
+        self.check_contract_cycles();
+        self.check_contract_incompatibilities();
+    }
+
+    /// Reports a cycle in the contract `implements` graph.
+    fn check_contract_cycles(&mut self) {
+        for i in 0..self.contracts.len() {
+            let mut path: Vec<u32> = Vec::new();
+            let mut visiting = std::collections::HashSet::new();
+            if let Some(cycle) = self.find_contract_cycle(i as u32, &mut path, &mut visiting) {
+                let names: Vec<String> = cycle
+                    .iter()
+                    .map(|&id| self.contracts[id as usize].name.clone())
+                    .collect();
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    self.contracts[i as usize].span,
+                    format!("contract `{}` is part of an inheritance cycle", names[0]),
+                    format!("the cycle is: {}", names.join(" → ")),
+                    Some("break the cycle by removing one `implements` clause".into()),
+                );
+            }
+        }
+    }
+
+    fn find_contract_cycle(
+        &self,
+        current: u32,
+        path: &mut Vec<u32>,
+        visiting: &mut std::collections::HashSet<u32>,
+    ) -> Option<Vec<u32>> {
+        if path.contains(&current) {
+            let start = path.iter().position(|&n| n == current).unwrap();
+            return Some(path[start..].to_vec());
+        }
+        if visiting.contains(&current) {
+            return None;
+        }
+        visiting.insert(current);
+        path.push(current);
+        for next in &self.contracts[current as usize].implements.clone() {
+            if let Some(cycle) = self.find_contract_cycle(next.contract, path, visiting) {
+                return Some(cycle);
+            }
+        }
+        path.pop();
+        None
+    }
+
+    /// Reports when two contracts in the same `implements` chain require the
+    /// same method name with a different concrete signature.
+    fn check_contract_incompatibilities(&mut self) {
+        for i in 0..self.contracts.len() {
+            let mut seen: std::collections::HashMap<String, (u32, ContractMethod)> =
+                std::collections::HashMap::new();
+            let closure = self.transitive_contracts(i as u32);
+            for contract in &closure {
+                let methods = self.contracts[*contract as usize].methods.clone();
+                for method in &methods {
+                    if let Some((owner, previous)) = seen.get(&method.name) {
+                        let same_params = method.params.len() == previous.params.len()
+                            && method
+                                .params
+                                .iter()
+                                .zip(&previous.params)
+                                .all(|(a, b)| a.ty == b.ty);
+                        if !same_params || method.returns != previous.returns {
+                            let a = self.contracts[*owner as usize].name.clone();
+                            let b = self.contracts[*contract as usize].name.clone();
+                            self.error(
+                                codes::DUPLICATE_DECLARATION,
+                                self.contracts[i as usize].span,
+                                format!(
+                                    "contracts `{a}` and `{b}` have incompatible `{0}`",
+                                    method.name
+                                ),
+                                "a contract implementing both must satisfy the same signature",
+                                None,
+                            );
+                        }
+                    } else {
+                        seen.insert(method.name.clone(), (*contract, method.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns `contract` plus every contract it `implements`, transitively.
+    fn transitive_contracts(&self, contract: u32) -> Vec<u32> {
+        let mut order: Vec<u32> = Vec::new();
+        self.collect_contracts(contract, &mut order, &mut std::collections::HashSet::new());
+        order
+    }
+
+    fn collect_contracts(
+        &self,
+        current: u32,
+        order: &mut Vec<u32>,
+        visited: &mut std::collections::HashSet<u32>,
+    ) {
+        if !visited.insert(current) {
+            return;
+        }
+        order.push(current);
+        for next in &self.contracts[current as usize].implements.clone() {
+            self.collect_contracts(next.contract, order, visited);
+        }
+    }
+
+    /// Same as [`Self::transitive_contracts`], but carrying the substitution
+    /// that instantiates each inherited contract's own type parameters.
+    /// `subst` maps `contract`'s parameters to the types the adopter supplied.
+    fn transitive_contract_substitutions(
+        &mut self,
+        contract: u32,
+        subst: &[(u32, Type)],
+    ) -> Vec<(u32, Vec<(u32, Type)>)> {
+        let mut out = Vec::new();
+        self.collect_contract_substitutions(contract, subst, &mut out, &mut std::collections::HashSet::new());
+        out
+    }
+
+    fn collect_contract_substitutions(
+        &mut self,
+        current: u32,
+        subst: &[(u32, Type)],
+        out: &mut Vec<(u32, Vec<(u32, Type)>)>,
+        visited: &mut std::collections::HashSet<u32>,
+    ) {
+        if !visited.insert(current) {
+            return;
+        }
+        out.push((current, subst.to_vec()));
+        for implemented in &self.contracts[current as usize].implements.clone() {
+            let child = implemented.contract;
+            let child_params = self.contracts[child as usize].type_params.clone();
+            let child_args: Vec<Type> = implemented
+                .args
+                .iter()
+                .map(|&a| self.substitute_type(a, subst))
+                .collect();
+            let child_subst: Vec<(u32, Type)> = child_params
+                .iter()
+                .copied()
+                .zip(child_args)
+                .collect();
+            self.collect_contract_substitutions(child, &child_subst, out, visited);
+        }
     }
 
     /// Whether `name` is one of the contracts the language itself registers
@@ -2289,51 +2516,26 @@ impl<'a> Checker<'a> {
             return (Vec::new(), None);
         }
 
-        if reference.arguments.len() != expected.len() {
-            let name = self.contracts[contract as usize].name.clone();
-            self.error(
-                codes::WRONG_ARGUMENT_COUNT,
-                reference.span,
-                format!(
-                    "`{name}` takes {} type argument{}, not {}",
-                    expected.len(),
-                    if expected.len() == 1 { "" } else { "s" },
-                    reference.arguments.len()
-                ),
-                format!("`{name}` is declared with {} of its own", expected.len()),
-                None,
-            );
-            for arg in &reference.arguments {
-                self.resolve_type(arg);
-            }
-            return (Vec::new(), None);
-        }
-
-        let args: Vec<Type> = reference
-            .arguments
-            .iter()
-            .map(|a| self.resolve_type(a))
-            .collect();
-
-        for (&param_id, &arg) in expected.iter().zip(&args) {
-            let constraints = self.type_params[param_id as usize].constraints.clone();
-            for constraint in &constraints {
-                if self.satisfies_constraint(arg, *constraint) {
-                    continue;
-                }
-                let param_name = self.type_params[param_id as usize].name.clone();
-                let arg_name = self.name(arg);
-                let constraint_name = self.name(*constraint);
+        let Some(args) = self.resolve_defaulted_type_args(&expected, reference) else {
+            if reference.arguments.is_empty() && !expected.is_empty() {
+                let name = self.contracts[contract as usize].name.clone();
                 self.error(
-                    codes::TYPE_MISMATCH,
+                    codes::WRONG_ARGUMENT_COUNT,
                     reference.span,
-                    format!("`{arg_name}` does not satisfy `{param_name}`"),
                     format!(
-                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
+                        "`{name}` takes {} type argument{}, not {}",
+                        expected.len(),
+                        if expected.len() == 1 { "" } else { "s" },
+                        0
                     ),
+                    format!("`{name}` is declared with {} of its own", expected.len()),
                     None,
                 );
             }
+            return (Vec::new(), None);
+        };
+        if args.is_empty() {
+            return (Vec::new(), None);
         }
 
         // `implements Iterable<T>` and `implements Iterator<T>` always lower
@@ -2530,8 +2732,21 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks that a class supplies everything a contract requires.
+    /// Checks that a class supplies everything a contract requires, including
+    /// everything inherited transitively through `implements`.
     fn require_conformance(&mut self, class: u32, contract: u32, at: Span, subst: &[(u32, Type)]) {
+        for (c, c_subst) in self.transitive_contract_substitutions(contract, subst) {
+            self.require_one_conformance(class, c, at, &c_subst);
+        }
+    }
+
+    fn require_one_conformance(
+        &mut self,
+        class: u32,
+        contract: u32,
+        at: Span,
+        subst: &[(u32, Type)],
+    ) {
         let required = self.contracts[contract as usize].methods.clone();
         let contract_name = self.contracts[contract as usize].name.clone();
         let class_name = self.classes[class as usize].name.clone();
@@ -2728,6 +2943,7 @@ impl<'a> Checker<'a> {
                 self.type_params.push(TypeParamInfo {
                     name: p.name.name.clone(),
                     constraints: Vec::new(),
+                    default: None,
                     span: p.span,
                 });
                 self.type_param_ids.insert(p.span, id);
@@ -2761,8 +2977,45 @@ impl<'a> Checker<'a> {
                 let constraints: Vec<Type> =
                     p.constraints.iter().map(|c| self.resolve_type(c)).collect();
                 let id = self.type_param_ids[&p.span];
-                self.type_params[id as usize].constraints = constraints;
+                self.type_params[id as usize].constraints = constraints.clone();
+                if let Some(default) = &p.default {
+                    let resolved = self.resolve_type(default);
+                    for &constraint in &constraints {
+                        if !self.satisfies_constraint(resolved, constraint) {
+                            let param_name = p.name.name.clone();
+                            let default_name = self.name(resolved);
+                            let constraint_name = self.name(constraint);
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                default.span,
+                                format!("`{default_name}` does not satisfy `{param_name}`"),
+                                format!(
+                                    "`{param_name}` requires `{constraint_name}`, which `{default_name}` does not provide"
+                                ),
+                                None,
+                            );
+                        }
+                    }
+                    self.type_params[id as usize].default = Some(resolved);
+                }
             }
+
+            let mut seen_default = false;
+            for p in &decl.type_params {
+                let id = self.type_param_ids[&p.span];
+                if self.type_params[id as usize].default.is_some() {
+                    seen_default = true;
+                } else if seen_default {
+                    self.error(
+                        codes::DUPLICATE_DECLARATION,
+                        p.name.span,
+                        format!("`{}` cannot appear after a defaulted parameter", p.name.name),
+                        "default type parameters must be trailing",
+                        None,
+                    );
+                }
+            }
+
             self.type_param_scope.pop();
         }
     }
@@ -4453,6 +4706,7 @@ impl<'a> Checker<'a> {
                     self.type_params.push(TypeParamInfo {
                         name: p.name.name.clone(),
                         constraints: Vec::new(),
+                        default: None,
                         span: p.span,
                     });
                     self.type_param_ids.insert(p.span, id);
@@ -4487,6 +4741,9 @@ impl<'a> Checker<'a> {
                 .map(|c| self.resolve_type(c))
                 .collect();
             self.type_params[id as usize].constraints = constraints;
+            if let Some(default) = &params[i].default {
+                self.type_params[id as usize].default = Some(self.resolve_type(default));
+            }
         }
 
         ids
@@ -5343,40 +5600,75 @@ impl<'a> Checker<'a> {
     }
 
     /// `Box` alone, or `Box<Int32>` with its arguments checked against
-    /// `Box`'s own type parameters (roadmap task 7.3): the right arity, and
-    /// each argument satisfying what its parameter's `from` constraints
-    /// promise.
-    fn resolve_class_reference(&mut self, class: u32, reference: &TypeRef) -> Type {
-        if reference.arguments.is_empty() {
-            return Type::of(Base::Class(class));
-        }
-
-        let expected = self.classes[class as usize].type_params.clone();
-        if reference.arguments.len() != expected.len() {
-            let name = self.classes[class as usize].name.clone();
-            self.error(
-                codes::WRONG_ARGUMENT_COUNT,
-                reference.span,
-                format!(
-                    "`{name}` takes {} type argument{}, not {}",
-                    expected.len(),
-                    if expected.len() == 1 { "" } else { "s" },
-                    reference.arguments.len()
-                ),
-                format!("`{name}` is declared with {} of its own", expected.len()),
-                None,
-            );
-            for arg in &reference.arguments {
-                self.resolve_type(arg);
-            }
-            return Type::of(Base::Class(class));
-        }
-
-        let args: Vec<Type> = reference
+    /// Resolves the explicit type arguments of `reference` and fills any
+    /// trailing omissions with the parameter defaults. Returns `None` when the
+    /// reference is an unparameterized use with missing defaults (the caller
+    /// should then treat the name as a generic type, not an instantiation).
+    fn resolve_defaulted_type_args(
+        &mut self,
+        expected: &[u32],
+        reference: &TypeRef,
+    ) -> Option<Vec<Type>> {
+        let mut args: Vec<Type> = reference
             .arguments
             .iter()
             .map(|a| self.resolve_type(a))
             .collect();
+
+        if args.is_empty() && !expected.is_empty() {
+            if !expected
+                .iter()
+                .all(|&p| self.type_params[p as usize].default.is_some())
+            {
+                return None;
+            }
+            for (i, &param_id) in expected.iter().enumerate() {
+                let default = self.type_params[param_id as usize].default.unwrap();
+                let subst: HashMap<u32, Type> = expected
+                    .iter()
+                    .take(i)
+                    .copied()
+                    .zip(args.iter().copied())
+                    .collect();
+                args.push(self.substitute(default, &subst));
+            }
+        } else if args.len() < expected.len() {
+            for i in args.len()..expected.len() {
+                let param_id = expected[i];
+                let Some(default) = self.type_params[param_id as usize].default else {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        reference.span,
+                        format!("`{}` is missing a type argument or a default", reference.name),
+                        "provide an argument or a default for every trailing parameter",
+                        None,
+                    );
+                    return None;
+                };
+                let subst: HashMap<u32, Type> = expected
+                    .iter()
+                    .take(i)
+                    .copied()
+                    .zip(args.iter().copied())
+                    .collect();
+                args.push(self.substitute(default, &subst));
+            }
+        } else if args.len() > expected.len() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!(
+                    "`{}` takes {} type argument{}, not {}",
+                    reference.name,
+                    expected.len(),
+                    if expected.len() == 1 { "" } else { "s" },
+                    reference.arguments.len()
+                ),
+                format!("`{}` is declared with {} of its own", reference.name, expected.len()),
+                None,
+            );
+            return None;
+        }
 
         for (&param_id, &arg) in expected.iter().zip(&args) {
             let constraints = self.type_params[param_id as usize].constraints.clone();
@@ -5399,6 +5691,20 @@ impl<'a> Checker<'a> {
             }
         }
 
+        Some(args)
+    }
+
+    /// `Box`'s own type parameters (roadmap task 7.3): the right arity, and
+    /// each argument satisfying what its parameter's `from` constraints
+    /// promise.
+    fn resolve_class_reference(&mut self, class: u32, reference: &TypeRef) -> Type {
+        let expected = self.classes[class as usize].type_params.clone();
+        let Some(args) = self.resolve_defaulted_type_args(&expected, reference) else {
+            return Type::of(Base::Class(class));
+        };
+        if args.is_empty() {
+            return Type::of(Base::Class(class));
+        }
         Type::of(Base::Instance(
             self.intern_instance(GenericInstance { class, args }),
         ))
@@ -5520,59 +5826,13 @@ impl<'a> Checker<'a> {
             return Type::of(Base::Contract(contract));
         }
 
-        if reference.arguments.len() != expected.len() {
-            let name = self.contracts[contract as usize].name.clone();
-            self.error(
-                codes::WRONG_ARGUMENT_COUNT,
-                reference.span,
-                format!(
-                    "`{name}` takes {} type argument{}, not {}",
-                    expected.len(),
-                    if expected.len() == 1 { "" } else { "s" },
-                    reference.arguments.len()
-                ),
-                format!("`{name}` is declared with {} of its own", expected.len()),
-                None,
-            );
-            for arg in &reference.arguments {
-                self.resolve_type(arg);
-            }
+        let Some(args) = self.resolve_defaulted_type_args(&expected, reference) else {
+            return Type::of(Base::Contract(contract));
+        };
+        if args.is_empty() {
             return Type::of(Base::Contract(contract));
         }
 
-        let args: Vec<Type> = reference
-            .arguments
-            .iter()
-            .map(|a| self.resolve_type(a))
-            .collect();
-
-        for (&param_id, &arg) in expected.iter().zip(&args) {
-            let constraints = self.type_params[param_id as usize].constraints.clone();
-            for constraint in &constraints {
-                if self.satisfies_constraint(arg, *constraint) {
-                    continue;
-                }
-                let param_name = self.type_params[param_id as usize].name.clone();
-                let arg_name = self.name(arg);
-                let constraint_name = self.name(*constraint);
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    reference.span,
-                    format!("`{arg_name}` does not satisfy `{param_name}`"),
-                    format!(
-                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
-                    ),
-                    None,
-                );
-            }
-        }
-
-        // Naming a generic contract instantiation lowers (roadmap Phase 7):
-        // a contract's dispatch table never depended on its own type
-        // arguments — only the contract id and the method index matter
-        // (task 10.7) — so `Iterable<Int32>` is the same `IrType::Contract`
-        // an unparameterized `Iterable` would be, with the arguments living
-        // in `contract_instances` for the checker's own satisfaction checks.
         Type::of(Base::ContractInstance(self.intern_contract_instance(
             GenericContractInstance { contract, args },
         )))
@@ -5590,61 +5850,13 @@ impl<'a> Checker<'a> {
             return Type::of(Base::Enum(enum_id));
         }
 
-        if reference.arguments.len() != expected.len() {
-            let name = self.enums[enum_id as usize].name.clone();
-            self.error(
-                codes::WRONG_ARGUMENT_COUNT,
-                reference.span,
-                format!(
-                    "`{name}` takes {} type argument{}, not {}",
-                    expected.len(),
-                    if expected.len() == 1 { "" } else { "s" },
-                    reference.arguments.len()
-                ),
-                format!("`{name}` is declared with {} of its own", expected.len()),
-                None,
-            );
-            for arg in &reference.arguments {
-                self.resolve_type(arg);
-            }
+        let Some(args) = self.resolve_defaulted_type_args(&expected, reference) else {
+            return Type::of(Base::Enum(enum_id));
+        };
+        if args.is_empty() {
             return Type::of(Base::Enum(enum_id));
         }
 
-        let args: Vec<Type> = reference
-            .arguments
-            .iter()
-            .map(|a| self.resolve_type(a))
-            .collect();
-
-        for (&param_id, &arg) in expected.iter().zip(&args) {
-            let constraints = self.type_params[param_id as usize].constraints.clone();
-            for constraint in &constraints {
-                if self.satisfies_constraint(arg, *constraint) {
-                    continue;
-                }
-                let param_name = self.type_params[param_id as usize].name.clone();
-                let arg_name = self.name(arg);
-                let constraint_name = self.name(*constraint);
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    reference.span,
-                    format!("`{arg_name}` does not satisfy `{param_name}`"),
-                    format!(
-                        "`{param_name}` requires `{constraint_name}`, which `{arg_name}` does not provide"
-                    ),
-                    None,
-                );
-            }
-        }
-
-        // `Iteration<T>` and `Result<T,E>` were the first generic enum
-        // instantiations verified to lower: a dedicated specialization pass
-        // (`specialize_enum`, `zirk-ir`) builds one concrete `EnumLayout` per
-        // instantiation the program actually names, the same way a generic
-        // class's does (roadmap task 13.5/11.1). That pass runs generically
-        // over every enum instantiation `checked.enum_instances` records, so
-        // a user-declared generic enum lowers the same way (fase-3-generic-
-        // enums) — there is nothing native-specific left to gate here.
         Type::of(Base::EnumInstance(
             self.intern_enum_instance(GenericEnumInstance { enum_id, args }),
         ))
@@ -7631,6 +7843,9 @@ impl<'a> Checker<'a> {
                 "convert the value some other way for now, e.g. through a constructor",
             );
         }
+        if expr.optional {
+            return target.as_nullable();
+        }
         target
     }
 
@@ -8464,11 +8679,58 @@ impl<'a> Checker<'a> {
                 Type::BOOLEAN
             }
 
-            // Comparison only makes sense on numbers in this subset —
-            // integer or `Float` (roadmap Phase 3b), unlike bitwise/shift
-            // which stay integer-only, so this does not reuse
-            // `expect_numeric`.
+            // Comparison makes sense on numbers, or on a user type that
+            // supplies a reserved `_less`/`_less_equal`/`_greater`/`_greater_equal`.
             Lt | LtEq | Gt | GtEq => {
+                if !left.is_unknown() && !right.is_unknown() {
+                    if let Base::Class(id) = left.base
+                        && !left.nullable
+                    {
+                        let reserved = operator_method(expr.op);
+                        if reserved != "_unsupported" {
+                            if let Some(method) = self.classes[id as usize].method(reserved).cloned() {
+                                let class = self.classes[id as usize].name.clone();
+                                let r = self.name(right);
+                                if method.params.len() != 1 {
+                                    self.error(
+                                        codes::TYPE_MISMATCH,
+                                        expr.op_span,
+                                        format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
+                                        format!("`{reserved}` must declare exactly one `other` parameter"),
+                                        None,
+                                    );
+                                    return Type::UNKNOWN;
+                                }
+                                let expected = method.params[0].ty;
+                                if !expected.accepts(right)
+                                    && !self.is_subclass_of(right, expected)
+                                {
+                                    self.error(
+                                        codes::TYPE_MISMATCH,
+                                        expr.op_span,
+                                        format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
+                                        format!("`{reserved}` declares `other: {}`", self.name(expected)),
+                                        None,
+                                    );
+                                    return Type::UNKNOWN;
+                                }
+                                if method.returns != Type::BOOLEAN {
+                                    let found = self.name(method.returns);
+                                    self.error(
+                                        codes::TYPE_MISMATCH,
+                                        expr.op_span,
+                                        format!("`{reserved}` on `{class}` must return `Boolean`"),
+                                        format!("it returns `{found}`"),
+                                        None,
+                                    );
+                                    return Type::UNKNOWN;
+                                }
+                                return Type::BOOLEAN;
+                            }
+                        }
+                    }
+                }
+
                 self.expect_comparable(left, expr.left.span(), expr.op);
                 self.expect_comparable(right, expr.right.span(), expr.op);
                 // Each side is some width on its own; comparing two different
@@ -11421,6 +11683,95 @@ impl<'a> Checker<'a> {
         self.check_method_call(expr, field, base, &[])
     }
 
+    /// `TraitName.super.method(...)`, which explicitly selects a trait default
+    /// to resolve a conflict or call a chosen implementation.
+    fn check_trait_super_method(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        trait_name: &Ident,
+    ) -> Type {
+        let Some(this) = self.this_type else {
+            self.error(
+                codes::UNDECLARED_NAME,
+                field.span,
+                "`TraitName.super.method()` is only available inside a class",
+                "it selects an implementation for the current adopter",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+        let Base::Class(class_id) = this.base else {
+            self.error(
+                codes::UNDECLARED_NAME,
+                field.span,
+                "`TraitName.super.method()` is only available inside a class",
+                "it selects an implementation for the current adopter",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let contract_id = self.classes[class_id as usize]
+            .contracts
+            .iter()
+            .find(|&&c| self.contracts[c as usize].name == trait_name.name)
+            .copied();
+        let Some(contract_id) = contract_id else {
+            let class = self.classes[class_id as usize].name.clone();
+            self.error(
+                codes::TYPE_MISMATCH,
+                trait_name.span,
+                format!("`{}` is not implemented by `{class}`", trait_name.name),
+                "`TraitName.super` must name a contract the current class adopts",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        let contract = &self.contracts[contract_id as usize];
+        let Some(method) = contract.method(&field.name.name) else {
+            let name = contract.name.clone();
+            self.error(
+                codes::UNDECLARED_NAME,
+                field.name.span,
+                format!("`{}` declares no method `{}`", name, field.name.name),
+                "the selected contract does not define this method",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        if !method.has_default {
+            let name = contract.name.clone();
+            self.error(
+                codes::TYPE_MISMATCH,
+                field.name.span,
+                format!("`{}` has no default body for `{}`", name, field.name.name),
+                "only a `trait` may supply a reusable body to call",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        self.check_contract_call(expr, field, contract_id)
+    }
+
     /// The base of the class whose body is being checked, reporting when there
     /// is none to reach.
     fn enclosing_base(&mut self, at: Span, what: &str) -> Option<u32> {
@@ -12884,8 +13235,11 @@ impl<'a> Checker<'a> {
         }
 
         if let Expr::Field(field) = &*expr.callee
-            && matches!(&*field.object, Expr::Super(_))
+            && let Expr::Super(super_expr) = &*field.object
         {
+            if let Some(trait_name) = &super_expr.trait_name {
+                return self.check_trait_super_method(expr, field, trait_name);
+            }
             return self.check_super_method(expr, field);
         }
 
@@ -14686,7 +15040,16 @@ impl<'a> Checker<'a> {
         }
 
         for &id in &signature.type_params {
-            let Some(&solved) = substitution.get(&id) else {
+            let solved = if let Some(&solved) = substitution.get(&id) {
+                solved
+            } else if let Some(default) = self.type_params[id as usize].default {
+                // A trailing default fills in any type parameter that the
+                // call's arguments (and any seeded context) left undetermined,
+                // the same way an omitted `Box<>` uses `T = Int32`.
+                let solved = self.substitute(default, &substitution);
+                substitution.insert(id, solved);
+                solved
+            } else {
                 let param_name = self.type_params[id as usize].name.clone();
                 self.error(
                     codes::TYPE_MISMATCH,
@@ -15352,7 +15715,12 @@ fn operator_method(op: BinaryOp) -> &'static str {
         Mul => "_multiply",
         Div => "_divide",
         Rem => "_remainder",
-        // The rest are not arithmetic and never reach here.
+        Eq | NotEq => "_equals",
+        Lt => "_less",
+        LtEq => "_less_equal",
+        Gt => "_greater",
+        GtEq => "_greater_equal",
+        // The rest are not overloadable through a reserved method.
         _ => "_unsupported",
     }
 }

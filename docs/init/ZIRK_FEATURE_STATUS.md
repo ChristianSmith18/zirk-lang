@@ -95,13 +95,18 @@ Last updated with `exact-decimal-float`, **2026-09-06**.
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |
 | Enum static members (`E.count`, `E.keys()`, `E.values()`, `E.from_name()`, `E.from_value()`, `E.to_string`, `Enums.*`) | yes | yes | yes | yes | yes | yes | `enum-static-members`; `count`/`keys`/`values`/`to_string` lower to constants, the lookups expand to a comparison chain returning `Result<E, LookupError>`. `values()`/`from_*` apply to traditional enums only. |
 | `as` casts | yes | yes | yes | yes | yes | yes | — |
+| `as?` nullable casts | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; returns `T?` with `null` on mismatch. |
+| `TraitName.super.method()` | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; explicit trait default selection. |
+| Type-parameter defaults (`<T = Int32>`) | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; defaults filled at use sites and checked against `from` constraints. |
+| Contract `implements` clauses | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; parsed, DAG checked, transitive conformance enforced. |
+| Comparison operator contracts (`<`, `<=`, `>`, `>=`) | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; `_less`/`_less_equal`/`_greater`/`_greater_equal` reserved methods. |
 | `abstract class` dynamic dispatch | yes | yes | yes | yes | yes | yes | `fase-3-abstract-dispatch`. |
 | Structural equality on records | yes | yes | yes | yes | yes | yes | `fase-3-structural-equality`. |
 | `record` contract dispatch | yes | yes | yes | yes | yes | yes | `fase-3-value-type-contract-dispatch`. |
 | `type` alias lowering | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; an alias resolves to its underlying type through the whole pipeline and is usable in executable programs. |
 | `value class` | n/a | n/a | n/a | n/a | n/a | n/a | **Removed** by `array-list-tuple-duration-regex`; migrate to `record` (or `class` when identity/mutability is wanted). |
 | Derived `Clone` for `record`/`enum` | n/a | n/a | no | no | no | no | Scoped in `array-list-tuple-duration-regex`; still pending — every field must be `Clone`. |
-| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | partial | partial | partial | `fase-3-dispatch-generico`: user-defined `class` generic `implements Contract<T>` lowers and dispatches; generic `record` and trait default bodies remain pending. |
+| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | partial | partial | partial | `fase-3-dispatch-generico`: user-defined `class` generic `implements Contract<T>` lowers and dispatches; generic contract composition (`interface B<T> implements A<T>`) now substitutes transitively; generic `record` and user-defined generic function bodies remain pending. |
 
 ## Phase 3b — Scalars and text
 
