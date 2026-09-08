@@ -21,11 +21,11 @@ traceability; work starts at group 3.
 
 ## 3. `context.rs`: `suspend_current` and a result channel
 
-- [ ] 3.1 Add a thread-local `*const Yielder` (native) / equivalent (fallback); set it at task-body entry and re-arm it at the end of every `Suspender::suspend`
-- [ ] 3.2 Add `pub fn suspend_current()` — asserts a yielder is armed, suspends through it, re-arms on resume
-- [ ] 3.3 Change `TaskContext` so the body returns `usize` and `Run::Finished(usize)` carries it (update Group 2 tests to return `0`)
-- [ ] 3.4 Fallback backend: mirror 3.1–3.3 with the same semantics
-- [ ] 3.5 Tests: `suspend_current` round-trips; three tasks each suspending only via `suspend_current` interleave and each resumes with correct state; a body's `usize` result reaches `resume()`
+- [x] 3.1 Thread-local `ARMED: Cell<*const Yielder>` (native); set at body entry (`ARMED.replace`), re-armed at the end of every `Suspender::suspend` and `suspend_current`
+- [x] 3.2 `pub fn suspend_current()` — asserts `ARMED` non-null, suspends through it, re-arms; re-exported from `lib.rs`
+- [x] 3.3 `TaskContext` body is `FnOnce(&Suspender) -> usize`; `Run::Finished(usize)` carries it; Group 2 tests updated
+- [x] 3.4 Fallback backend mirrors: per-thread `ARMED: Cell<*const Suspender>` set at body entry (each fallback task is its own thread, so the thread-local is already per-task), `Step::Finished(usize)`
+- [x] 3.5 Tests: `suspend_current_round_trips_like_the_suspender`, `three_tasks_suspending_via_suspend_current_interleave` (14 == 1·1+2·2+3·3), `a_body_result_reaches_resume` (0xC0FFEE). 7 context tests pass, clippy/fmt clean.
 
 ## 4. `task.rs`: task control block and registry
 
