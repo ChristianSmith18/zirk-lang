@@ -402,22 +402,44 @@ explicitly in the `zirk-memory-safety` delta.
 - `zirk-feature-phasing`: move the delivered constructs into the implemented
   subset (the `**` operator is the precedent for this wording).
 
-### D14: The context-switch shim across the four target triples
+### D14: The context-switch shim across the four target triples — RESOLVED
 
 `ADR-004` pins the supported targets: macOS aarch64, Linux x86_64, Linux aarch64,
 Windows x86_64. The shim must save/restore callee-saved registers, SP, and the
-return address, and switch stacks. Two candidate implementations, decided during
-implementation:
+return address, and switch stacks.
 
-1. **Hand-written assembly**, one `.S` per (arch, os) — ~40 lines each,
-   `global_asm!` or a build-script-compiled object. Full control, no dependency,
-   matches `ADR-002` (self-contained staticlib). This is the leaning choice.
-2. **A vetted crate** (`corosensei`, which is `no_std`, MIT, and already
-   abstracts exactly these four targets). Less code to own, but a new dependency
-   in the runtime staticlib and less control over the exact frame it builds.
+**Chosen (task group 2): `corosensei` 0.3**, not hand-written assembly.
+Rationale: it covers exactly the four supported triples (and only those — it
+lacks aarch64-Windows, which is already out of `ADR-004`'s matrix), is
+`no_std`-capable and dual MIT/Apache, its `DefaultStack` allocates an OS
+guard page (so `StackOverflowError` gets hardware backing for free rather than as
+deferred work), and it exposes a trap API usable later for recovering from a
+stack overflow in generated code. Hand-written per-triple assembly was the
+earlier leaning for `ADR-002` self-containedness, but ~40 lines of unaudited
+register save/restore per (arch, os) is exactly the kind of code this project
+should not own if a vetted crate does it; `corosensei` compiles into the
+staticlib with no meaningful transitive dependency surface.
 
-Either way this is isolated behind a `fn switch(from: &mut Context, to: &Context)`
-seam with a Rust fallback path used only in `cargo test` on the host.
+The seam is `crates/zirk-runtime/src/context.rs`:
+
+- `TaskContext` owns a task's stack; `TaskContext::new(stack_bytes, body)` /
+  `resume() -> Run` (`Suspended` | `Finished`) / `is_finished()`.
+- `Suspender::suspend()` is handed to the body; the task calls it to switch back
+  to the executor. (This is `corosensei`'s coroutine shape — `resume`/`yield` —
+  rather than a raw `switch(from, to)`; the executor is always one side of the
+  switch, so the two-argument form bought nothing.)
+- `build.rs` emits `task_context_native` for the four supported triples, and the
+  `corosensei` dependency is `[target.'cfg(...)']`-gated to the same predicate.
+  Any other host compiles a **thread-backed fallback** with the same API and the
+  same cooperative one-runner-at-a-time semantics (rendezvous channels; dropping
+  a suspended context unwinds its stack via a panic payload, mirroring
+  `corosensei`'s drop behavior), so `cargo test` builds and passes everywhere.
+
+Verified by `context::tests` (task 2.4): a 1000-round executor↔task ping-pong
+checking a task-stack local and a shared atomic on both sides of every switch,
+plus run-to-completion, independent interleaving of two contexts, and
+drop-unwinds-a-suspended-context. CI runs these on all four matrix triples via
+the existing `cargo test --workspace` job.
 
 ### D15: ADR deliverable
 
@@ -429,10 +451,14 @@ alternatives above. It is referenced from `ADR-003` (memory) and the roadmap.
 
 ## Risks / Trade-offs
 
-- **[Context-switch shim is per-platform unsafe assembly.]** → Isolate behind one
-  `switch()` seam; a host-only Rust fallback for `cargo test`; a dedicated
-  `zirk-runtime` test that spins up N tasks doing ping-pong context switches on
-  each CI target before anything else in step 1 is built on top.
+- **[Context switching is unsafe, platform-specific code.]** → Delegated to
+  `corosensei` (D14) rather than hand-written per this repo; isolated behind the
+  `context.rs` seam; a host-only thread-backed fallback for unsupported hosts;
+  the 1000-round ping-pong test plus three more `context::tests` run on every CI
+  triple (via `cargo test --workspace`) before anything in group 3 builds on top.
+  Residual risk: `corosensei` is a young crate; mitigation is the seam (a
+  hand-written or alternative backend can be swapped in without touching callers)
+  and that its four supported targets exactly match `ADR-004`'s matrix.
 - **[A suspended task's frame roots are missed → use-after-free.]** → This is the
   single highest-severity failure mode. Mitigation: the D4 "spill every transient
   managed SSA value immediately" rule already in the collector; a targeted test
@@ -482,9 +508,6 @@ alternatives above. It is referenced from `ADR-003` (memory) and the roadmap.
 
 ## Open Questions
 
-- **Context-switch shim: hand-written asm vs `corosensei`.** Still open —
-  resolved in implementation (task 1.6) after the isolated per-target ping-pong
-  test (task 2.2); the seam is the same either way.
 - **Does `task scope` as an expression allow `break` / `continue` to cross it, or
   only `return` and fall-through?** Leaning: same rule as a closure body — only
   `return` and fall-through; `break`/`continue` targeting an outer loop across a
@@ -494,6 +517,11 @@ alternatives above. It is referenced from `ADR-003` (memory) and the roadmap.
   follow-up within Phase 5 step 2?** The proposal includes them; if
   implementation pressure is high, the standard `Channel<T>` ships first and the
   families follow in the same change before archive.
+
+### Resolved (task group 2)
+
+- **Context-switch backend (task 1.6 / D14).** `corosensei` 0.3, target-gated to
+  the four supported triples, thread-backed fallback elsewhere. See D14.
 
 ### Resolved (task group 1)
 

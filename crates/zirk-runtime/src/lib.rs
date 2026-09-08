@@ -36,6 +36,7 @@ mod array;
 mod char;
 mod clone;
 mod collector;
+mod context;
 mod decimal;
 mod duration;
 mod exceptions;
@@ -57,6 +58,10 @@ mod temporal;
 pub use array::*;
 pub use char::*;
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
+// Stackful task contexts (ADR-017). Not yet a C-ABI surface — the executor
+// (roadmap Phase 5, task group 3) is what will drive these; exported now so the
+// module and its ping-pong tests are part of the build.
+pub use context::{DEFAULT_TASK_STACK_BYTES, Run, Suspender, TaskContext, spawn_default};
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
     zirk_rt_index_out_of_bounds, zirk_rt_overflow,

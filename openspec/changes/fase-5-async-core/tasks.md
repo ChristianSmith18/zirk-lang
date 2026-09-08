@@ -10,16 +10,16 @@ before anything is built on top.
 - [x] 1.3 Cross-link ADR-017 from `docs/decisions/ADR-003-memoria.md` and `docs/decisions/README.md` (also added the missing ADR-016 row)
 - [x] 1.4 Lock the default task stack size — fixed 128 KiB, not user-configurable in this change; recorded in `design.md` "Resolved" section
 - [x] 1.5 Lock `StackOverflowError` — ships in this change as a catchable `RuntimeError` from a cheap frame-prologue check; added to the `zirk-errors` delta and task 9.6
-- [ ] 1.6 Lock the context-switch implementation choice (hand-written `.S` per triple vs `corosensei`) after task 2.2 passes; record in `design.md` Open Questions resolution
+- [x] 1.6 Context-switch implementation: **`corosensei` 0.3**, target-gated so it only compiles on the four supported triples; thread-backed fallback for any other host. Recorded in `design.md` and `context.rs`. (Chosen up front rather than after 2.2 because `corosensei` *is* the switch — 2.2 now verifies it rather than choosing between candidates.)
 
 ## 2. Runtime: context-switch shim (`zirk-runtime`)
 
-- [ ] 2.1 Add `crates/zirk-runtime/src/context.rs` with `#[repr(C)] struct Context { /* callee-saved regs, sp, pc */ }` and a `fn switch(from: *mut Context, to: *const Context)` seam
-- [ ] 2.2 Implement `switch` for each supported triple (hand-written assembly via `global_asm!` or a build-script object, or the chosen crate), plus a host-only Rust fallback used under `cargo test` when the target is not one of the four
-- [ ] 2.3 Implement `fn make_context(stack_base, stack_size, entry: extern "C" fn(*mut c_void), arg) -> Context` that primes a fresh task stack so the first `switch` into it lands in `entry`
-- [ ] 2.4 Unit test: executor↔task ping-pong for N=1000 round trips on the host target, asserting all callee-saved registers and SP round-trip
-- [ ] 2.5 CI: run the ping-pong test on every supported target triple before merging anything from group 3 onward
-- [ ] 2.6 Document the shim in `docs/ZIRK_RUNTIME_SPEC.md` (new "Task context switch" section)
+- [x] 2.1 Added `crates/zirk-runtime/src/context.rs` with the seam: `TaskContext` (owns the stack), `TaskContext::new(stack_bytes, body)` / `resume() -> Run` / `is_finished()`, and `Suspender::suspend()` handed to the body. Shape follows `corosensei`'s coroutine model rather than a raw `switch(from,to)` — the executor drives via `resume`, the task yields via `suspend`. `DEFAULT_TASK_STACK_BYTES = 128 KiB`.
+- [x] 2.2 Native backend = `corosensei` 0.3, target-gated to the four supported triples via `build.rs` (`task_context_native` cfg) and a matching `[target.'cfg(...)']` dependency. Host-only thread-backed fallback (rendezvous channels, one-runner-at-a-time, drop-unwinds a suspended task) for any other host, same API.
+- [x] 2.3 `corosensei` primes the fresh stack itself (`Coroutine::with_stack`); the fallback does the equivalent by not running the body until the first `resume()`. No separate `make_context` needed with this backend.
+- [x] 2.4 `executor_and_task_ping_pong_preserves_task_local_state`: 1000 resume/suspend round trips, task-stack local + shared atomic checked on both sides across every switch. Plus: run-to-completion, independent interleaving of two contexts, and drop-unwinds-a-suspended-context.
+- [x] 2.5 CI already runs `cargo test --workspace` on all four matrix triples (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `macos-aarch64`) with `--test-threads=1`; the `context::tests` run there automatically. `task_context_native` is set on all four, so the thread fallback is never exercised on CI.
+- [x] 2.6 Documented in `docs/ZIRK_RUNTIME_SPEC.md` §3 ("Implementation status (roadmap Phase 5, steps 1–3)").
 
 ## 3. Runtime: executor and task control block (`zirk-runtime`)
 

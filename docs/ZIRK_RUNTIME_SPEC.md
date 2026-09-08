@@ -67,6 +67,30 @@ queue.
 The scheduler must avoid starvation, bound queue growth and apply backpressure
 where the contract permits.
 
+**Implementation status (roadmap Phase 5, steps 1–3).** The delivered scheduler
+is a **single-threaded cooperative executor**: one operating-system thread, a
+first-in-first-out ready queue, and a monotonic timer heap consulted once per
+scheduling turn. It never preempts a running task — a task yields only at a safe
+point (`await`, a suspending channel operation, `select`, a timer wait, an
+explicit cancellation check). There is no multicore pool, no work stealing, and
+no I/O reactor yet: I/O calls still block, and `parallel` / `thread` /
+`task.blocking` are not delivered. This keeps the garbage collector's
+single-threaded assumption intact (`ADR-003`); the multicore scheduler and the
+reactor described above are roadmap Phase 5 steps 4–6.
+
+Each `task` runs as a **stackful coroutine** (`ADR-017`): it owns a
+heap-allocated stack (fixed 128 KiB) with an OS guard page, and `await` performs
+a cooperative context switch back to the executor. A plain function call keeps
+the ordinary calling convention whether or not the callee awaits internally —
+there is no `async fn` and no function-body transformation. The context-switch
+seam lives in `crates/zirk-runtime/src/context.rs`; on the supported target
+triples (macOS aarch64, Linux x86_64, Linux aarch64, Windows x86_64 — `ADR-004`
+addendum) it is provided by `corosensei`, and every other host uses a
+thread-backed fallback with identical semantics so the test suite builds
+everywhere. Garbage-collection roots are enumerated through one shadow-stack
+chain per task, so a suspended task's references stay reachable across a
+collection.
+
 ## 4. Tasks and await
 
 `task` creates managed concurrent work:
