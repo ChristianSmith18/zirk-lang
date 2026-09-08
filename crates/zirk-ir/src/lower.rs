@@ -170,13 +170,12 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 methods: {
                     let mut table = vec![String::new(); class.methods.len()];
                     for method in &class.methods {
-                        table[method.index] = if class.kind == ast::ClassKind::Abstract {
-                            UNREACHABLE_ABSTRACT_METHOD.to_string()
-                        } else if method.is_static {
-                            UNREACHABLE_ABSTRACT_METHOD.to_string()
-                        } else {
-                            body_symbol(checked, method)
-                        };
+                        table[method.index] =
+                            if class.kind == ast::ClassKind::Abstract || method.is_static {
+                                UNREACHABLE_ABSTRACT_METHOD.to_string()
+                            } else {
+                                body_symbol(checked, method)
+                            };
                     }
                     table
                 },
@@ -3564,8 +3563,7 @@ impl<'a> FunctionLowering<'a> {
                 if can_default {
                     let mut subst: Vec<(u32, Type)> =
                         params.iter().copied().zip(args.iter().copied()).collect();
-                    for i in args.len()..params.len() {
-                        let param = params[i];
+                    for &param in &params[args.len()..] {
                         let default = self.checked.type_params[param as usize]
                             .default
                             .expect("the checker only omits arguments when a default exists");
@@ -8470,10 +8468,10 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a class, not a contract value, and
         // `type_of` cannot resolve it.
-        if let ast::Expr::Path(base) = &*field.object {
-            if self.checked.classes.iter().any(|c| c.name == base.name) {
-                return None;
-            }
+        if let ast::Expr::Path(base) = &*field.object
+            && self.checked.classes.iter().any(|c| c.name == base.name)
+        {
+            return None;
         }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
@@ -8491,10 +8489,10 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a type, not a value; `type_of` cannot
         // resolve it and the static-call path handles it.
-        if let ast::Expr::Path(base) = &*field.object {
-            if self.checked.classes.iter().any(|c| c.name == base.name) {
-                return None;
-            }
+        if let ast::Expr::Path(base) = &*field.object
+            && self.checked.classes.iter().any(|c| c.name == base.name)
+        {
+            return None;
         }
         // A record's own method is reached the same way an
         // ordinary class's is: `IrType::Value` only changes how the
@@ -9976,10 +9974,10 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a class, not a contract value, and
         // `type_of` cannot resolve it.
-        if let ast::Expr::Path(base) = &*field.object {
-            if self.checked.classes.iter().any(|c| c.name == base.name) {
-                return None;
-            }
+        if let ast::Expr::Path(base) = &*field.object
+            && self.checked.classes.iter().any(|c| c.name == base.name)
+        {
+            return None;
         }
         let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
             return None;
@@ -11258,6 +11256,7 @@ impl<'a> FunctionLowering<'a> {
     /// throw the native failure on the false branch, build the value on the
     /// true one. Operands never cross blocks (ADR-007), so each side
     /// reloads from its slot.
+    #[allow(clippy::too_many_arguments)]
     fn temporal_guarded_build(
         &mut self,
         parts: Vec<Operand>,
@@ -14397,28 +14396,27 @@ impl<'a> FunctionLowering<'a> {
         }
 
         // A `ClassName.field` that names a `static` field of a user class.
-        if let ast::Expr::Path(base) = &*expr.object {
-            if let Some(class_id) = self
+        if let ast::Expr::Path(base) = &*expr.object
+            && let Some(class_id) = self
                 .checked
                 .classes
                 .iter()
                 .position(|c| c.name == base.name)
+        {
+            let class = self.checked.classes[class_id].clone();
+            if let Some(field) = class.field(&expr.name.name).cloned()
+                && field.is_static
             {
-                let class = self.checked.classes[class_id].clone();
-                if let Some(field) = class.field(&expr.name.name).cloned() {
-                    if field.is_static {
-                        let callee = static_field_symbol(&class.name, &expr.name.name);
-                        let returns = self.ir_type(field.ty);
-                        return self.emit(
-                            InstKind::Call {
-                                callee,
-                                args: Vec::new(),
-                            },
-                            returns,
-                            span,
-                        );
-                    }
-                }
+                let callee = static_field_symbol(&class.name, &expr.name.name);
+                let returns = self.ir_type(field.ty);
+                return self.emit(
+                    InstKind::Call {
+                        callee,
+                        args: Vec::new(),
+                    },
+                    returns,
+                    span,
+                );
             }
         }
 
@@ -15510,19 +15508,16 @@ impl<'a> FunctionLowering<'a> {
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
         // `ClassName.field` that names a `static` field of a user class.
-        if let ast::Expr::Path(base) = &*expr.object {
-            if let Some(class_id) = self
+        if let ast::Expr::Path(base) = &*expr.object
+            && let Some(class_id) = self
                 .checked
                 .classes
                 .iter()
                 .position(|c| c.name == base.name)
-            {
-                if let Some(field) = self.checked.classes[class_id].field(&expr.name.name) {
-                    if field.is_static {
-                        return self.ir_type(field.ty);
-                    }
-                }
-            }
+            && let Some(field) = self.checked.classes[class_id].field(&expr.name.name)
+            && field.is_static
+        {
+            return self.ir_type(field.ty);
         }
 
         // Universal `.type` member: a `String` with the value's type name.
@@ -18492,8 +18487,8 @@ impl<'a> FunctionLowering<'a> {
         if mixes_duration && matches!(expr.op, Add | Sub) {
             let i128ty = IrType::Int(IntWidth::I128);
             let i64ty = IrType::Int(IntWidth::I64);
-            let (value, base, delta, negate) = if left_base.is_some() {
-                (left, left_base.unwrap(), right, expr.op == Sub)
+            let (value, base, delta, negate) = if let Some(left_base) = left_base {
+                (left, left_base, right, expr.op == Sub)
             } else {
                 (right, right_base.unwrap(), left, false)
             };

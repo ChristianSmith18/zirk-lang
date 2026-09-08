@@ -685,6 +685,10 @@ pub unsafe extern "C" fn zirk_rt_datetime_parse_value(text: *const c_void) -> i1
 /// Renders the civil components under `pattern`. Recognized tokens are
 /// `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss` and `SSS` (milliseconds); any
 /// other text passes through literally — `format` never fails.
+// The seven civil components arrive as separate locals from the decoded packed
+// representation at every call site; boxing them into a struct would only move
+// the unpacking around.
+#[allow(clippy::too_many_arguments)]
 fn format_pattern(
     pattern: &str,
     year: i32,

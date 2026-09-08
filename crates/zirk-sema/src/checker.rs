@@ -2341,7 +2341,7 @@ impl<'a> Checker<'a> {
                     .collect();
                 self.error(
                     codes::TYPE_MISMATCH,
-                    self.contracts[i as usize].span,
+                    self.contracts[i].span,
                     format!("contract `{}` is part of an inheritance cycle", names[0]),
                     format!("the cycle is: {}", names.join(" → ")),
                     Some("break the cycle by removing one `implements` clause".into()),
@@ -2396,7 +2396,7 @@ impl<'a> Checker<'a> {
                             let b = self.contracts[*contract as usize].name.clone();
                             self.error(
                                 codes::DUPLICATE_DECLARATION,
-                                self.contracts[i as usize].span,
+                                self.contracts[i].span,
                                 format!(
                                     "contracts `{a}` and `{b}` have incompatible `{0}`",
                                     method.name
@@ -4220,16 +4220,16 @@ impl<'a> Checker<'a> {
     fn type_matches_with_subst(&self, actual: Type, expected: Type, subst: &[(u32, Type)]) -> bool {
         let mut base = actual.base;
         let mut nullable = actual.nullable;
-        if let Base::Param(id) = base {
-            if let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id) {
-                let replacement = if actual.nullable {
-                    replacement.as_nullable()
-                } else {
-                    replacement.without_null()
-                };
-                base = replacement.base;
-                nullable = replacement.nullable;
-            }
+        if let Base::Param(id) = base
+            && let Some(&(_, replacement)) = subst.iter().find(|(pid, _)| *pid == id)
+        {
+            let replacement = if actual.nullable {
+                replacement.as_nullable()
+            } else {
+                replacement.without_null()
+            };
+            base = replacement.base;
+            nullable = replacement.nullable;
         }
         if nullable != expected.nullable {
             return false;
@@ -9760,59 +9760,50 @@ impl<'a> Checker<'a> {
             // Comparison makes sense on numbers, or on a user type that
             // supplies a reserved `_less`/`_less_equal`/`_greater`/`_greater_equal`.
             Lt | LtEq | Gt | GtEq => {
-                if !left.is_unknown() && !right.is_unknown() {
-                    if let Base::Class(id) = left.base
-                        && !left.nullable
+                if !left.is_unknown()
+                    && !right.is_unknown()
+                    && let Base::Class(id) = left.base
+                    && !left.nullable
+                {
+                    let reserved = operator_method(expr.op);
+                    if reserved != "_unsupported"
+                        && let Some(method) = self.classes[id as usize].method(reserved).cloned()
                     {
-                        let reserved = operator_method(expr.op);
-                        if reserved != "_unsupported" {
-                            if let Some(method) =
-                                self.classes[id as usize].method(reserved).cloned()
-                            {
-                                let class = self.classes[id as usize].name.clone();
-                                let r = self.name(right);
-                                if method.params.len() != 1 {
-                                    self.error(
-                                        codes::TYPE_MISMATCH,
-                                        expr.op_span,
-                                        format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
-                                        format!("`{reserved}` must declare exactly one `other` parameter"),
-                                        None,
-                                    );
-                                    return Type::UNKNOWN;
-                                }
-                                let expected = method.params[0].ty;
-                                if !expected.accepts(right) && !self.is_subclass_of(right, expected)
-                                {
-                                    self.error(
-                                        codes::TYPE_MISMATCH,
-                                        expr.op_span,
-                                        format!(
-                                            "`{}` on `{class}` does not accept {r}",
-                                            expr.op.as_str()
-                                        ),
-                                        format!(
-                                            "`{reserved}` declares `other: {}`",
-                                            self.name(expected)
-                                        ),
-                                        None,
-                                    );
-                                    return Type::UNKNOWN;
-                                }
-                                if method.returns != Type::BOOLEAN {
-                                    let found = self.name(method.returns);
-                                    self.error(
-                                        codes::TYPE_MISMATCH,
-                                        expr.op_span,
-                                        format!("`{reserved}` on `{class}` must return `Boolean`"),
-                                        format!("it returns `{found}`"),
-                                        None,
-                                    );
-                                    return Type::UNKNOWN;
-                                }
-                                return Type::BOOLEAN;
-                            }
+                        let class = self.classes[id as usize].name.clone();
+                        let r = self.name(right);
+                        if method.params.len() != 1 {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                expr.op_span,
+                                format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
+                                format!("`{reserved}` must declare exactly one `other` parameter"),
+                                None,
+                            );
+                            return Type::UNKNOWN;
                         }
+                        let expected = method.params[0].ty;
+                        if !expected.accepts(right) && !self.is_subclass_of(right, expected) {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                expr.op_span,
+                                format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
+                                format!("`{reserved}` declares `other: {}`", self.name(expected)),
+                                None,
+                            );
+                            return Type::UNKNOWN;
+                        }
+                        if method.returns != Type::BOOLEAN {
+                            let found = self.name(method.returns);
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                expr.op_span,
+                                format!("`{reserved}` on `{class}` must return `Boolean`"),
+                                format!("it returns `{found}`"),
+                                None,
+                            );
+                            return Type::UNKNOWN;
+                        }
+                        return Type::BOOLEAN;
                     }
                 }
 
