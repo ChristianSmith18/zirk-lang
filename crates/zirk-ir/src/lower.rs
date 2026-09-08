@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
-    AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, describe, EnumType,
-    EnumVariantInfo, FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth,
-    MethodInfo, ParamInfo, TupleType, Type, TypeNames, VariantMapping,
+    AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
+    FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
+    ParamInfo, TupleType, Type, TypeNames, VariantMapping, describe,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -2142,18 +2142,13 @@ fn lower_class_body<'a>(
     // `static` fields lower to module-level getter functions, so they are
     // available without an instance.
     let class_info = &checked.classes[id as usize];
-    for (field, info) in class
-        .fields
-        .iter()
-        .filter(|f| f.is_static)
-        .filter_map(|f| {
-            class_info
-                .fields
-                .iter()
-                .find(|i| i.name == f.name.name)
-                .map(|i| (f, i))
-        })
-    {
+    for (field, info) in class.fields.iter().filter(|f| f.is_static).filter_map(|f| {
+        class_info
+            .fields
+            .iter()
+            .find(|i| i.name == f.name.name)
+            .map(|i| (f, i))
+    }) {
         let lowering = FunctionLowering::new(
             module,
             checked,
@@ -2995,11 +2990,7 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn function_type(&self, id: u32) -> String {
         let f = &self.0.fn_types[id as usize];
-        let params: Vec<String> = f
-            .params
-            .iter()
-            .map(|p| describe(*p, self))
-            .collect();
+        let params: Vec<String> = f.params.iter().map(|p| describe(*p, self)).collect();
         format!("Fn({}) -> {}", params.join(", "), describe(f.returns, self))
     }
     fn class_name(&self, id: u32) -> String {
@@ -3014,17 +3005,29 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     fn instance_name(&self, id: u32) -> String {
         let i = &self.0.generic_instances[id as usize];
         let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
-        format!("{}<{}>", self.0.classes[i.class as usize].name, args.join(", "))
+        format!(
+            "{}<{}>",
+            self.0.classes[i.class as usize].name,
+            args.join(", ")
+        )
     }
     fn contract_instance_name(&self, id: u32) -> String {
         let i = &self.0.contract_instances[id as usize];
         let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
-        format!("{}<{}>", self.0.contracts[i.contract as usize].name, args.join(", "))
+        format!(
+            "{}<{}>",
+            self.0.contracts[i.contract as usize].name,
+            args.join(", ")
+        )
     }
     fn enum_instance_name(&self, id: u32) -> String {
         let i = &self.0.enum_instances[id as usize];
         let args: Vec<String> = i.args.iter().map(|a| describe(*a, self)).collect();
-        format!("{}<{}>", self.0.enums[i.enum_id as usize].name, args.join(", "))
+        format!(
+            "{}<{}>",
+            self.0.enums[i.enum_id as usize].name,
+            args.join(", ")
+        )
     }
     fn union_name(&self, id: u32) -> String {
         let parts: Vec<String> = self.0.unions[id as usize]
@@ -3559,17 +3562,13 @@ impl<'a> FunctionLowering<'a> {
                     .iter()
                     .all(|&p| self.checked.type_params[p as usize].default.is_some());
                 if can_default {
-                    let mut subst: Vec<(u32, Type)> = params
-                        .iter()
-                        .copied()
-                        .zip(args.iter().copied())
-                        .collect();
+                    let mut subst: Vec<(u32, Type)> =
+                        params.iter().copied().zip(args.iter().copied()).collect();
                     for i in args.len()..params.len() {
                         let param = params[i];
-                        let default =
-                            self.checked.type_params[param as usize].default.expect(
-                                "the checker only omits arguments when a default exists",
-                            );
+                        let default = self.checked.type_params[param as usize]
+                            .default
+                            .expect("the checker only omits arguments when a default exists");
                         let ty = substitute_generic_type(self.checked, default, &subst);
                         args.push(ty);
                         subst.push((param, ty));
@@ -4027,14 +4026,13 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Object(parent),
                 class.name.span,
             );
-            let index = self
-                .checked
-                .classes[id as usize]
+            let index = self.checked.classes[id as usize]
                 .fields
                 .iter()
                 .filter(|f| !f.is_static)
                 .position(|f| f.name == "outer" && f.owner == id)
-                .expect("the checker declares `outer` on an inner class") as u32;
+                .expect("the checker declares `outer` on an inner class")
+                as u32;
             self.emit_effect(
                 InstKind::StoreField {
                     object,
@@ -6374,9 +6372,7 @@ impl<'a> FunctionLowering<'a> {
                 {
                     // `outer` reads the hidden field an `inner class`
                     // stores its enclosing instance in.
-                    let index = self
-                        .checked
-                        .classes[class as usize]
+                    let index = self.checked.classes[class as usize]
                         .fields
                         .iter()
                         .filter(|f| !f.is_static)
@@ -6384,8 +6380,7 @@ impl<'a> FunctionLowering<'a> {
                         .expect("the checker declares `outer` on an inner class")
                         as u32;
                     let this = self.lookup_slot("this");
-                    let object =
-                        self.emit(InstKind::Load(this), IrType::Object(class), span);
+                    let object = self.emit(InstKind::Load(this), IrType::Object(class), span);
                     self.emit(
                         InstKind::LoadField { object, index },
                         IrType::Object(parent),
@@ -8378,13 +8373,10 @@ impl<'a> FunctionLowering<'a> {
                 .iter()
                 .position(|c| c.name == trait_name.name)?;
             let method = self.checked.contracts[contract_id].method(&field.name.name)?;
-            let name = contract_method_symbol(
-                &self.checked.contracts[contract_id].name,
-                &method.name,
-            );
+            let name =
+                contract_method_symbol(&self.checked.contracts[contract_id].name, &method.name);
             let returns = self.ir_type(method.returns);
-            let params: Vec<IrType> =
-                method.params.iter().map(|p| self.ir_type(p.ty)).collect();
+            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
             let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
@@ -9943,7 +9935,9 @@ impl<'a> FunctionLowering<'a> {
             return None;
         };
         let class = self.checked.classes.iter().find(|c| c.name == base.name)?;
-        class.method(&field.name.name).filter(|method| method.is_static)
+        class
+            .method(&field.name.name)
+            .filter(|method| method.is_static)
     }
 
     /// `ClassName.method(...)` for a `static fn`.
@@ -9954,7 +9948,11 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Path(base) = &*field.object else {
             return None;
         };
-        let class_id = self.checked.classes.iter().position(|c| c.name == base.name)?;
+        let class_id = self
+            .checked
+            .classes
+            .iter()
+            .position(|c| c.name == base.name)?;
         let class = self.checked.classes[class_id].clone();
         let method = class.method(&field.name.name).cloned()?;
         if !method.is_static {
@@ -9962,11 +9960,7 @@ impl<'a> FunctionLowering<'a> {
         }
 
         let returns = self.ir_type(method.returns);
-        let expected: Vec<IrType> = method
-            .params
-            .iter()
-            .map(|p| self.ir_type(p.ty))
-            .collect();
+        let expected: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
         let args = self.lower_held_args(&call.args, &expected);
         let callee = static_method_symbol(&class.name, &method.name);
         Some(self.emit(InstKind::Call { callee, args }, returns, span))
@@ -11117,50 +11111,51 @@ impl<'a> FunctionLowering<'a> {
 
         // `None` means "the untouched half" — it is resolved at the
         // combine, after whichever guard opened blocks (ADR-007).
-        let rebuilt_days: Option<Operand> = if date_half && matches!(name, "with_year" | "with_month" | "with_day") {
-            let days = days_value.unwrap_or(receiver);
-            let y = self.emit(
-                InstKind::Call {
-                    callee: "zirk_rt_date_year".to_string(),
-                    args: vec![days],
-                },
-                i32ty,
-                span,
-            );
-            let mo = self.emit(
-                InstKind::Call {
-                    callee: "zirk_rt_date_month".to_string(),
-                    args: vec![days],
-                },
-                i32ty,
-                span,
-            );
-            let d = self.emit(
-                InstKind::Call {
-                    callee: "zirk_rt_date_day".to_string(),
-                    args: vec![days],
-                },
-                i32ty,
-                span,
-            );
-            let arg = self.convert_numeric(arg, arg_ty, i32ty, span);
-            let (y, mo, d) = match name {
-                "with_year" => (arg, mo, d),
-                "with_month" => (y, arg, d),
-                _ => (y, mo, arg),
+        let rebuilt_days: Option<Operand> =
+            if date_half && matches!(name, "with_year" | "with_month" | "with_day") {
+                let days = days_value.unwrap_or(receiver);
+                let y = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_date_year".to_string(),
+                        args: vec![days],
+                    },
+                    i32ty,
+                    span,
+                );
+                let mo = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_date_month".to_string(),
+                        args: vec![days],
+                    },
+                    i32ty,
+                    span,
+                );
+                let d = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_date_day".to_string(),
+                        args: vec![days],
+                    },
+                    i32ty,
+                    span,
+                );
+                let arg = self.convert_numeric(arg, arg_ty, i32ty, span);
+                let (y, mo, d) = match name {
+                    "with_year" => (arg, mo, d),
+                    "with_month" => (y, arg, d),
+                    _ => (y, mo, arg),
+                };
+                Some(self.temporal_guarded_build(
+                    vec![y, mo, d],
+                    "zirk_rt_date_is_valid",
+                    "zirk_rt_date_days",
+                    native.invalid_date,
+                    "invalid date: month or day out of range",
+                    i64ty,
+                    span,
+                ))
+            } else {
+                None
             };
-            Some(self.temporal_guarded_build(
-                vec![y, mo, d],
-                "zirk_rt_date_is_valid",
-                "zirk_rt_date_days",
-                native.invalid_date,
-                "invalid date: month or day out of range",
-                i64ty,
-                span,
-            ))
-        } else {
-            None
-        };
 
         let rebuilt_nanos: Option<Operand> = if time_half
             && matches!(
@@ -11969,11 +11964,8 @@ impl<'a> FunctionLowering<'a> {
                 };
 
                 if widens_to_decimal {
-                    let base = self.emit(
-                        InstKind::Load(base_slot),
-                        IrType::Int(IntWidth::I128),
-                        span,
-                    );
+                    let base =
+                        self.emit(InstKind::Load(base_slot), IrType::Int(IntWidth::I128), span);
                     let base_dec = self.convert_numeric(
                         base,
                         IrType::Int(IntWidth::I128),
@@ -11991,11 +11983,7 @@ impl<'a> FunctionLowering<'a> {
                     ));
                 }
 
-                let base = self.emit(
-                    InstKind::Load(base_slot),
-                    IrType::Int(IntWidth::I128),
-                    span,
-                );
+                let base = self.emit(InstKind::Load(base_slot), IrType::Int(IntWidth::I128), span);
                 let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
                 let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
                 let bits_op = bits_of(self);
@@ -12022,11 +12010,7 @@ impl<'a> FunctionLowering<'a> {
                     .expect("a program with integer arithmetic registered the exception hierarchy");
                 self.throw_native_failure(native.arithmetic_overflow, "arithmetic overflow", span);
                 self.current = cont;
-                let base = self.emit(
-                    InstKind::Load(base_slot),
-                    IrType::Int(IntWidth::I128),
-                    span,
-                );
+                let base = self.emit(InstKind::Load(base_slot), IrType::Int(IntWidth::I128), span);
                 let exp64 = self.emit(InstKind::Load(exp_slot), IrType::Int(IntWidth::I64), span);
                 let exp = self.int_to_i128(exp64, IrType::Int(IntWidth::I64), span);
                 let bits_op = bits_of(self);
@@ -12625,7 +12609,13 @@ impl<'a> FunctionLowering<'a> {
                 };
                 let list_ty = IrType::List(list_id);
                 let element_ty = self.module.list_types[list_id as usize];
-                let list = self.emit(InstKind::ListNew { element_id: list_id }, list_ty, span);
+                let list = self.emit(
+                    InstKind::ListNew {
+                        element_id: list_id,
+                    },
+                    list_ty,
+                    span,
+                );
                 if variant_names.is_empty() {
                     return Some(list);
                 }
@@ -12650,12 +12640,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 Some(self.emit(InstKind::Load(list_slot), list_ty, span))
             }
-            "from_name" | "from_value" => Some(self.lower_enum_lookup(
-                call,
-                field,
-                enum_id,
-                span,
-            )),
+            "from_name" | "from_value" => Some(self.lower_enum_lookup(call, field, enum_id, span)),
             _ => unreachable!("the checker only records the declared static members"),
         }
     }
@@ -13026,11 +13011,7 @@ impl<'a> FunctionLowering<'a> {
     /// recorded semantic type.
     /// `Map<K, V>` and `Set<T>` built-in methods: `length`, `is_empty`,
     /// `set`, `contains_key`, `add`, `contains`.
-    fn lower_map_set_method_call(
-        &mut self,
-        call: &ast::CallExpr,
-        span: Span,
-    ) -> Option<Operand> {
+    fn lower_map_set_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
         let ast::Expr::Field(field) = &*call.callee else {
             return None;
         };
@@ -13067,12 +13048,16 @@ impl<'a> FunctionLowering<'a> {
         };
 
         match (field.name.name.as_str(), call.args.len(), receiver_ty) {
-            ("length", 0, IrType::Map(_)) => {
-                Some(self.emit(InstKind::MapLength(receiver), IrType::Int(IntWidth::U64), span))
-            }
-            ("length", 0, IrType::Set(_)) => {
-                Some(self.emit(InstKind::SetLength(receiver), IrType::Int(IntWidth::U64), span))
-            }
+            ("length", 0, IrType::Map(_)) => Some(self.emit(
+                InstKind::MapLength(receiver),
+                IrType::Int(IntWidth::U64),
+                span,
+            )),
+            ("length", 0, IrType::Set(_)) => Some(self.emit(
+                InstKind::SetLength(receiver),
+                IrType::Int(IntWidth::U64),
+                span,
+            )),
             ("is_empty", 0, IrType::Map(_)) => {
                 Some(self.emit(InstKind::MapIsEmpty(receiver), IrType::Boolean, span))
             }
@@ -13083,7 +13068,11 @@ impl<'a> FunctionLowering<'a> {
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
                 let value = self.lower_expr_as(&call.args[1].value, value_ty);
                 Some(self.emit(
-                    InstKind::MapSet { receiver, key, value },
+                    InstKind::MapSet {
+                        receiver,
+                        key,
+                        value,
+                    },
                     IrType::Void,
                     span,
                 ))
@@ -13098,11 +13087,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ("add", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
-                Some(self.emit(
-                    InstKind::SetAdd { receiver, value },
-                    IrType::Void,
-                    span,
-                ))
+                Some(self.emit(InstKind::SetAdd { receiver, value }, IrType::Void, span))
             }
             ("contains", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
@@ -13123,11 +13108,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ("remove", 1, IrType::Map(_)) => {
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
-                Some(self.emit(
-                    InstKind::MapRemove { receiver, key },
-                    IrType::Boolean,
-                    span,
-                ))
+                Some(self.emit(InstKind::MapRemove { receiver, key }, IrType::Boolean, span))
             }
             ("remove", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
@@ -14417,13 +14398,25 @@ impl<'a> FunctionLowering<'a> {
 
         // A `ClassName.field` that names a `static` field of a user class.
         if let ast::Expr::Path(base) = &*expr.object {
-            if let Some(class_id) = self.checked.classes.iter().position(|c| c.name == base.name) {
+            if let Some(class_id) = self
+                .checked
+                .classes
+                .iter()
+                .position(|c| c.name == base.name)
+            {
                 let class = self.checked.classes[class_id].clone();
                 if let Some(field) = class.field(&expr.name.name).cloned() {
                     if field.is_static {
                         let callee = static_field_symbol(&class.name, &expr.name.name);
                         let returns = self.ir_type(field.ty);
-                        return self.emit(InstKind::Call { callee, args: Vec::new() }, returns, span);
+                        return self.emit(
+                            InstKind::Call {
+                                callee,
+                                args: Vec::new(),
+                            },
+                            returns,
+                            span,
+                        );
                     }
                 }
             }
@@ -14583,7 +14576,10 @@ impl<'a> FunctionLowering<'a> {
             )
         {
             let receiver = self.lower_expr(&expr.object);
-            let is_set = matches!(self.type_of(&expr.object, expr.object.span()), IrType::Set(_));
+            let is_set = matches!(
+                self.type_of(&expr.object, expr.object.span()),
+                IrType::Set(_)
+            );
             let length = self.emit(
                 if is_set {
                     InstKind::SetLength(receiver)
@@ -15273,12 +15269,12 @@ impl<'a> FunctionLowering<'a> {
         for (i, variant) in variants.iter().enumerate() {
             let arm = self.new_block();
             self.current = current;
-            let disc = self.emit(
-                InstKind::Load(disc_slot),
+            let disc = self.emit(InstKind::Load(disc_slot), IrType::Int(IntWidth::I32), span);
+            let index = self.emit(
+                InstKind::ConstInt(i as i128),
                 IrType::Int(IntWidth::I32),
                 span,
             );
-            let index = self.emit(InstKind::ConstInt(i as i128), IrType::Int(IntWidth::I32), span);
             let test = self.emit(
                 InstKind::Binary {
                     op: BinaryOp::Eq,
@@ -15515,7 +15511,12 @@ impl<'a> FunctionLowering<'a> {
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
         // `ClassName.field` that names a `static` field of a user class.
         if let ast::Expr::Path(base) = &*expr.object {
-            if let Some(class_id) = self.checked.classes.iter().position(|c| c.name == base.name) {
+            if let Some(class_id) = self
+                .checked
+                .classes
+                .iter()
+                .position(|c| c.name == base.name)
+            {
                 if let Some(field) = self.checked.classes[class_id].field(&expr.name.name) {
                     if field.is_static {
                         return self.ir_type(field.ty);
@@ -15729,7 +15730,12 @@ impl<'a> FunctionLowering<'a> {
         // Duration component properties (`days`, `hours`, ...).
         if matches!(
             expr.name.name.as_str(),
-            "days" | "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds"
+            "days"
+                | "hours"
+                | "minutes"
+                | "seconds"
+                | "milliseconds"
+                | "microseconds"
                 | "nanoseconds"
         ) && self
             .checked

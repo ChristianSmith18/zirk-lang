@@ -1161,7 +1161,8 @@ impl<'a> Parser<'a> {
             );
         }
 
-        self.parse_field(visibility, is_static, start).map(ClassMember::Field)
+        self.parse_field(visibility, is_static, start)
+            .map(ClassMember::Field)
     }
 
     /// `public`, `private` or `protected`, if one is written.
@@ -1181,7 +1182,12 @@ impl<'a> Parser<'a> {
     /// Writing neither modifier means `public mut`
     /// (`ZIRK_LANGUAGE_SPEC.md` section 7). Both spellings produce the same
     /// member; only the flag remembers which was written.
-    fn parse_field(&mut self, visibility: Option<Visibility>, is_static: bool, start: Span) -> Option<FieldDecl> {
+    fn parse_field(
+        &mut self,
+        visibility: Option<Visibility>,
+        is_static: bool,
+        start: Span,
+    ) -> Option<FieldDecl> {
         let mutability = if self.eat_keyword(Keyword::Mut) {
             Some(Mutability::Mutable)
         } else if self.eat_keyword(Keyword::Inmut) {
@@ -3760,17 +3766,18 @@ impl<'a> Parser<'a> {
                     // X from Y`), but unambiguously a field name right after
                     // `.`/`?.` — nothing else can follow the access operator.
                     // The same applies to the universal `.type` member.
-                    let name = if let TokenKind::Keyword(Keyword::From | Keyword::Type) = self.peek() {
-                        let span = self.peek_span();
-                        let text = match self.peek() {
-                            TokenKind::Keyword(k) => k.as_str().to_string(),
-                            _ => unreachable!("matched above"),
+                    let name =
+                        if let TokenKind::Keyword(Keyword::From | Keyword::Type) = self.peek() {
+                            let span = self.peek_span();
+                            let text = match self.peek() {
+                                TokenKind::Keyword(k) => k.as_str().to_string(),
+                                _ => unreachable!("matched above"),
+                            };
+                            self.pos += 1;
+                            Ident::new(text, span)
+                        } else {
+                            self.expect_identifier("after the access operator")?
                         };
-                        self.pos += 1;
-                        Ident::new(text, span)
-                    } else {
-                        self.expect_identifier("after the access operator")?
-                    };
                     object = Expr::Field(FieldExpr {
                         span: object.span().to(name.span),
                         object: Box::new(object),

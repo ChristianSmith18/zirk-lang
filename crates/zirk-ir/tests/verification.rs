@@ -549,11 +549,7 @@ fn module_with_collections(
 #[test]
 fn map_new_declares_its_interned_map_type() {
     let module = module_with_collections(
-        vec![value(
-            0,
-            InstKind::MapNew { map_id: 0 },
-            IrType::Map(0),
-        )],
+        vec![value(0, InstKind::MapNew { map_id: 0 }, IrType::Map(0))],
         vec![(IrType::String, IrType::Int(IntWidth::I32))],
         vec![],
     );
@@ -573,11 +569,7 @@ fn set_new_declares_its_interned_set_type() {
 #[test]
 fn map_new_with_the_wrong_declared_type_is_rejected() {
     let module = module_with_collections(
-        vec![value(
-            0,
-            InstKind::MapNew { map_id: 0 },
-            IrType::String,
-        )],
+        vec![value(0, InstKind::MapNew { map_id: 0 }, IrType::String)],
         vec![(IrType::String, IrType::Int(IntWidth::I32))],
         vec![],
     );

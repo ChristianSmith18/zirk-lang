@@ -1173,13 +1173,7 @@ mod tests {
         );
 
         // The IEEE 754 binary family is `Float*`.
-        for name in [
-            "Float",
-            "Float16",
-            "Float32",
-            "Float64",
-            "Float128",
-        ] {
+        for name in ["Float", "Float16", "Float32", "Float64", "Float128"] {
             assert!(Type::from_name(name).is_some(), "`{name}` should resolve");
             assert!(pending_type(name).is_none());
         }
@@ -1188,7 +1182,13 @@ mod tests {
 
         // The old `BinaryFloat*` spellings no longer resolve (the checker turns
         // them into a redirect diagnostic).
-        for name in ["BinaryFloat", "BinaryFloat16", "BinaryFloat32", "BinaryFloat64", "BinaryFloat128"] {
+        for name in [
+            "BinaryFloat",
+            "BinaryFloat16",
+            "BinaryFloat32",
+            "BinaryFloat64",
+            "BinaryFloat128",
+        ] {
             assert_eq!(Type::from_name(name), None, "`{name}` must not resolve");
         }
     }

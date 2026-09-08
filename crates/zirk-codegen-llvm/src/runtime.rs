@@ -798,11 +798,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
         external,
     );
-    let map_new = module.add_function(
-        symbols::MAP_NEW,
-        ptr.fn_type(&[], false),
-        external,
-    );
+    let map_new = module.add_function(symbols::MAP_NEW, ptr.fn_type(&[], false), external);
     let map_length = module.add_function(
         symbols::MAP_LENGTH,
         i64.fn_type(&[ptr.into()], false),
@@ -820,7 +816,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let map_contains_key = module.add_function(
         symbols::MAP_CONTAINS_KEY,
-        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
     let map_get = module.add_function(
@@ -830,14 +828,12 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let map_remove = module.add_function(
         symbols::MAP_REMOVE,
-        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
-    let set_new = module.add_function(
-        symbols::SET_NEW,
-        ptr.fn_type(&[], false),
-        external,
-    );
+    let set_new = module.add_function(symbols::SET_NEW, ptr.fn_type(&[], false), external);
     let set_length = module.add_function(
         symbols::SET_LENGTH,
         i64.fn_type(&[ptr.into()], false),
@@ -855,12 +851,16 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let set_contains = module.add_function(
         symbols::SET_CONTAINS,
-        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
     let set_remove = module.add_function(
         symbols::SET_REMOVE,
-        context.bool_type().fn_type(&[ptr.into(), i64.into()], false),
+        context
+            .bool_type()
+            .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
     let array_length = module.add_function(

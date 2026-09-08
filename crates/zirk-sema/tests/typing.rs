@@ -277,16 +277,13 @@ fn invalid_exponentiation_widened_result_is_not_an_integer() {
 
 #[test]
 fn invalid_exponentiation_cannot_mix_exact_and_binary_float() {
-    let output =
-        rejected_body("mut a: Decimal = 2.0;\nmut b: Float64 = 3.0f;\nmut c = a ** b;");
+    let output = rejected_body("mut a: Decimal = 2.0;\nmut b: Float64 = 3.0f;\nmut c = a ** b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn valid_safe_widening_between_float_widths() {
-    accepted_body(
-        "mut a: Float16 = 1.5f16;\nmut b: Float32 = a;\nmut c: Float64 = b;",
-    );
+    accepted_body("mut a: Float16 = 1.5f16;\nmut b: Float32 = a;\nmut c: Float64 = b;");
 }
 
 #[test]
@@ -302,9 +299,7 @@ fn valid_explicit_float_narrowing_with_as() {
 
 #[test]
 fn valid_explicit_conversion_between_int_and_float() {
-    accepted_body(
-        "mut a: Int32 = 5;\nmut b: Float64 = a as Float64;\nmut c: Int32 = b as Int32;",
-    );
+    accepted_body("mut a: Int32 = 5;\nmut b: Float64 = a as Float64;\nmut c: Int32 = b as Int32;");
 }
 
 #[test]
@@ -2652,32 +2647,39 @@ fn valid_declared_variance_in_permitted_positions() {
         "class Box<out T> { inmut value: T;  get(): T { return this.value; } }\nfn main(): Void { }",
     );
     // `in T` is allowed in parameter positions.
-    accepted(
-        "class Sink<in T> {  take(value: T): Void { } }\nfn main(): Void { }",
-    );
+    accepted("class Sink<in T> {  take(value: T): Void { } }\nfn main(): Void { }");
 }
 
 #[test]
 fn invalid_declared_variance_in_the_wrong_position() {
-    let output = rejected(
-        "class Box<out T> {  take(value: T): Void { } }\nfn main(): Void { }",
+    let output = rejected("class Box<out T> {  take(value: T): Void { } }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::INVALID_VARIANCE.as_str()),
+        "{output}"
     );
-    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
-    assert!(output.contains("`out T` appears in an input position"), "{output}");
+    assert!(
+        output.contains("`out T` appears in an input position"),
+        "{output}"
+    );
 
-    let output = rejected(
-        "class Source<in T> {  get(): T { } }\nfn main(): Void { }",
+    let output = rejected("class Source<in T> {  get(): T { } }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::INVALID_VARIANCE.as_str()),
+        "{output}"
     );
-    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
-    assert!(output.contains("`in T` appears in an output position"), "{output}");
+    assert!(
+        output.contains("`in T` appears in an output position"),
+        "{output}"
+    );
 }
 
 #[test]
 fn invalid_declared_variance_in_a_mutable_field() {
-    let output = rejected(
-        "class Cell<out T> { mut value: T; }\nfn main(): Void { }",
+    let output = rejected("class Cell<out T> { mut value: T; }\nfn main(): Void { }");
+    assert!(
+        output.contains(codes::INVALID_VARIANCE.as_str()),
+        "{output}"
     );
-    assert!(output.contains(codes::INVALID_VARIANCE.as_str()), "{output}");
 }
 
 #[test]
@@ -5463,7 +5465,6 @@ fn valid_string_index_write() {
          }",
     );
 }
-
 
 // --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
 

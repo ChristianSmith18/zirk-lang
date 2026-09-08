@@ -430,9 +430,11 @@ fn llvm_type_in<'ctx>(
         }
         // `Array<T>`/`List<T>`/`Map`/`Set` are opaque GC-managed object
         // handles, exactly like `String`/`Object`.
-        ir::IrType::Array(_) | ir::IrType::List(_) | ir::IrType::Range | ir::IrType::Map(_) | ir::IrType::Set(_) => {
-            context.ptr_type(AddressSpace::default()).into()
-        }
+        ir::IrType::Array(_)
+        | ir::IrType::List(_)
+        | ir::IrType::Range
+        | ir::IrType::Map(_)
+        | ir::IrType::Set(_) => context.ptr_type(AddressSpace::default()).into(),
     })
 }
 
@@ -1576,8 +1578,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let result_ty = instruction.ty;
                 let arg_tys: Vec<ir::IrType> =
                     args.iter().map(|a| self.value_types[&a.0]).collect();
-                let signature =
-                    self.contract_signature(*contract, *index, result_ty, &arg_tys);
+                let signature = self.contract_signature(*contract, *index, result_ty, &arg_tys);
                 let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
                 arguments.extend(
                     args.iter()
@@ -3350,7 +3351,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let receiver = self.operand(*operand).into_pointer_value();
                 let call = self
                     .builder
-                    .build_call(self.runtime.map_is_empty, &[receiver.into()], "map_is_empty")
+                    .build_call(
+                        self.runtime.map_is_empty,
+                        &[receiver.into()],
+                        "map_is_empty",
+                    )
                     .expect("map is empty");
                 call.try_as_basic_value().basic()
             }
@@ -3358,24 +3363,52 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let receiver = self.operand(*operand).into_pointer_value();
                 let call = self
                     .builder
-                    .build_call(self.runtime.set_is_empty, &[receiver.into()], "set_is_empty")
+                    .build_call(
+                        self.runtime.set_is_empty,
+                        &[receiver.into()],
+                        "set_is_empty",
+                    )
                     .expect("set is empty");
                 call.try_as_basic_value().basic()
             }
             // `map.set(key, value)`.
-            ir::InstKind::MapSet { receiver, key, value } => {
+            ir::InstKind::MapSet {
+                receiver,
+                key,
+                value,
+            } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
                 let key = self.operand(*key);
                 let key_i64 = match key {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "key").expect("map key"),
-                    _ => self.builder.build_ptr_to_int(key.into_pointer_value(), self.context.i64_type(), "key_ptr").expect("map key"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "key")
+                        .expect("map key"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            key.into_pointer_value(),
+                            self.context.i64_type(),
+                            "key_ptr",
+                        )
+                        .expect("map key"),
                 };
                 let value = self.operand(*value);
                 let value_i64 = match value {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "value").expect("map value"),
-                    _ => self.builder.build_ptr_to_int(value.into_pointer_value(), self.context.i64_type(), "value_ptr").expect("map value"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "value")
+                        .expect("map value"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            value.into_pointer_value(),
+                            self.context.i64_type(),
+                            "value_ptr",
+                        )
+                        .expect("map value"),
                 };
                 self.builder
                     .build_call(
@@ -3392,12 +3425,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let key = self.operand(*key);
                 let key_i64 = match key {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "key").expect("map key"),
-                    _ => self.builder.build_ptr_to_int(key.into_pointer_value(), self.context.i64_type(), "key_ptr").expect("map key"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "key")
+                        .expect("map key"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            key.into_pointer_value(),
+                            self.context.i64_type(),
+                            "key_ptr",
+                        )
+                        .expect("map key"),
                 };
                 let call = self
                     .builder
-                    .build_call(self.runtime.map_contains_key, &[receiver.into(), key_i64.into()], "map_contains")
+                    .build_call(
+                        self.runtime.map_contains_key,
+                        &[receiver.into(), key_i64.into()],
+                        "map_contains",
+                    )
                     .expect("map contains key");
                 call.try_as_basic_value().basic()
             }
@@ -3407,11 +3454,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let value = self.operand(*value);
                 let value_i64 = match value {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "value").expect("set value"),
-                    _ => self.builder.build_ptr_to_int(value.into_pointer_value(), self.context.i64_type(), "value_ptr").expect("set value"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "value")
+                        .expect("set value"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            value.into_pointer_value(),
+                            self.context.i64_type(),
+                            "value_ptr",
+                        )
+                        .expect("set value"),
                 };
                 self.builder
-                    .build_call(self.runtime.set_add, &[receiver.into(), value_i64.into()], "")
+                    .build_call(
+                        self.runtime.set_add,
+                        &[receiver.into(), value_i64.into()],
+                        "",
+                    )
                     .expect("set add");
                 None
             }
@@ -3421,12 +3482,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let value = self.operand(*value);
                 let value_i64 = match value {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "value").expect("set value"),
-                    _ => self.builder.build_ptr_to_int(value.into_pointer_value(), self.context.i64_type(), "value_ptr").expect("set value"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "value")
+                        .expect("set value"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            value.into_pointer_value(),
+                            self.context.i64_type(),
+                            "value_ptr",
+                        )
+                        .expect("set value"),
                 };
                 let call = self
                     .builder
-                    .build_call(self.runtime.set_contains, &[receiver.into(), value_i64.into()], "set_contains")
+                    .build_call(
+                        self.runtime.set_contains,
+                        &[receiver.into(), value_i64.into()],
+                        "set_contains",
+                    )
                     .expect("set contains");
                 call.try_as_basic_value().basic()
             }
@@ -3436,19 +3511,37 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let key = self.operand(*key);
                 let key_i64 = match key {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "key").expect("map key"),
-                    _ => self.builder.build_ptr_to_int(key.into_pointer_value(), self.context.i64_type(), "key_ptr").expect("map key"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "key")
+                        .expect("map key"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            key.into_pointer_value(),
+                            self.context.i64_type(),
+                            "key_ptr",
+                        )
+                        .expect("map key"),
                 };
                 let flag = self
                     .builder
-                    .build_call(self.runtime.map_contains_key, &[receiver.into(), key_i64.into()], "map_contains")
+                    .build_call(
+                        self.runtime.map_contains_key,
+                        &[receiver.into(), key_i64.into()],
+                        "map_contains",
+                    )
                     .expect("map get flag")
                     .try_as_basic_value()
                     .basic()
                     .expect("map get flag");
                 let raw = self
                     .builder
-                    .build_call(self.runtime.map_get, &[receiver.into(), key_i64.into()], "map_get")
+                    .build_call(
+                        self.runtime.map_get,
+                        &[receiver.into(), key_i64.into()],
+                        "map_get",
+                    )
                     .expect("map get value")
                     .try_as_basic_value()
                     .basic()
@@ -3458,25 +3551,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     panic!("MapGet result must be a nullable type");
                 };
                 let inner = nullable.inner();
-                let payload: BasicValueEnum<'ctx> = match self.llvm_type(inner).expect("map get value type") {
-                    BasicTypeEnum::PointerType(ptr_ty) => BasicValueEnum::from(
-                        self.builder
-                            .build_int_to_ptr(raw, ptr_ty, "value_ptr")
-                            .expect("map get value ptr"),
-                    ),
-                    BasicTypeEnum::IntType(int_ty) => {
-                        if int_ty.get_bit_width() == 64 {
-                            BasicValueEnum::from(raw)
-                        } else {
-                            BasicValueEnum::from(
-                                self.builder
-                                    .build_int_truncate(raw, int_ty, "value")
-                                    .expect("map get value"),
-                            )
+                let payload: BasicValueEnum<'ctx> =
+                    match self.llvm_type(inner).expect("map get value type") {
+                        BasicTypeEnum::PointerType(ptr_ty) => BasicValueEnum::from(
+                            self.builder
+                                .build_int_to_ptr(raw, ptr_ty, "value_ptr")
+                                .expect("map get value ptr"),
+                        ),
+                        BasicTypeEnum::IntType(int_ty) => {
+                            if int_ty.get_bit_width() == 64 {
+                                BasicValueEnum::from(raw)
+                            } else {
+                                BasicValueEnum::from(
+                                    self.builder
+                                        .build_int_truncate(raw, int_ty, "value")
+                                        .expect("map get value"),
+                                )
+                            }
                         }
-                    }
-                    other => panic!("MapGet value type cannot be {other}"),
-                };
+                        other => panic!("MapGet value type cannot be {other}"),
+                    };
                 let struct_ty = self
                     .llvm_type(instruction.ty)
                     .expect("map get nullable type")
@@ -3498,12 +3592,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let key = self.operand(*key);
                 let key_i64 = match key {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "key").expect("map key"),
-                    _ => self.builder.build_ptr_to_int(key.into_pointer_value(), self.context.i64_type(), "key_ptr").expect("map key"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "key")
+                        .expect("map key"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            key.into_pointer_value(),
+                            self.context.i64_type(),
+                            "key_ptr",
+                        )
+                        .expect("map key"),
                 };
                 let call = self
                     .builder
-                    .build_call(self.runtime.map_remove, &[receiver.into(), key_i64.into()], "map_remove")
+                    .build_call(
+                        self.runtime.map_remove,
+                        &[receiver.into(), key_i64.into()],
+                        "map_remove",
+                    )
                     .expect("map remove");
                 call.try_as_basic_value().basic()
             }
@@ -3513,12 +3621,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let value = self.operand(*value);
                 let value_i64 = match value {
                     BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self.builder.build_int_s_extend(v, self.context.i64_type(), "value").expect("set value"),
-                    _ => self.builder.build_ptr_to_int(value.into_pointer_value(), self.context.i64_type(), "value_ptr").expect("set value"),
+                    BasicValueEnum::IntValue(v) => self
+                        .builder
+                        .build_int_s_extend(v, self.context.i64_type(), "value")
+                        .expect("set value"),
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            value.into_pointer_value(),
+                            self.context.i64_type(),
+                            "value_ptr",
+                        )
+                        .expect("set value"),
                 };
                 let call = self
                     .builder
-                    .build_call(self.runtime.set_remove, &[receiver.into(), value_i64.into()], "set_remove")
+                    .build_call(
+                        self.runtime.set_remove,
+                        &[receiver.into(), value_i64.into()],
+                        "set_remove",
+                    )
                     .expect("set remove");
                 call.try_as_basic_value().basic()
             }

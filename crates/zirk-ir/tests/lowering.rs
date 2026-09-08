@@ -457,7 +457,10 @@ fn string_repetition_inside_a_larger_expression_still_verifies() {
     let has_concat = instructions(&f)
         .iter()
         .any(|i| matches!(i, InstKind::Concat { .. }));
-    assert!(has_concat, "the surrounding concatenation must still be emitted");
+    assert!(
+        has_concat,
+        "the surrounding concatenation must still be emitted"
+    );
 }
 
 #[test]
@@ -2660,7 +2663,6 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
     }
 }
 
-
 // --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
 
 #[test]
@@ -2698,12 +2700,36 @@ fn map_and_set_methods_lower_to_dedicated_instructions() {
          mut r = s.remove(\"x\");",
     );
     let kinds = instructions(&main);
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapSet { .. })), "{kinds:?}");
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapContainsKey { .. })), "{kinds:?}");
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::MapGet { .. })), "{kinds:?}");
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetAdd { .. })), "{kinds:?}");
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetContains { .. })), "{kinds:?}");
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::SetRemove { .. })), "{kinds:?}");
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::MapSet { .. })),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::MapContainsKey { .. })),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::MapGet { .. })),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::SetAdd { .. })),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::SetContains { .. })),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::SetRemove { .. })),
+        "{kinds:?}"
+    );
 }
 
 // --- Enum static members (`enum-static-members`) ---------------------------
@@ -2729,7 +2755,10 @@ fn enum_keys_lowers_to_a_list_of_names() {
     );
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })), "{kinds:?}");
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })),
+        "{kinds:?}"
+    );
     let adds = kinds
         .iter()
         .filter(|k| matches!(k, InstKind::ListAdd { .. }))
@@ -2750,7 +2779,10 @@ fn enum_values_lowers_to_a_list_of_discriminants() {
     );
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
-    assert!(kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })), "{kinds:?}");
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::ListNew { .. })),
+        "{kinds:?}"
+    );
     // A traditional enum's value is its `Int32` discriminant — the list is
     // two `ConstInt`s added in declaration order.
     let adds: Vec<_> = kinds
@@ -2775,7 +2807,10 @@ fn enums_helpers_lower_like_the_direct_members() {
     );
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
-    assert!(kinds.contains(&InstKind::ConstInt(2)), "Enums.count is a constant");
+    assert!(
+        kinds.contains(&InstKind::ConstInt(2)),
+        "Enums.count is a constant"
+    );
     let lists = kinds
         .iter()
         .filter(|k| matches!(k, InstKind::ListNew { .. }))
@@ -2795,7 +2830,15 @@ fn from_name_lowers_to_a_comparison_chain_producing_a_result() {
     // of the chain: `Ok` on a match, `Err(LookupError)` on the fall-through.
     let comparisons = kinds
         .iter()
-        .filter(|k| matches!(k, InstKind::Binary { op: BinaryOp::Eq, .. }))
+        .filter(|k| {
+            matches!(
+                k,
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(comparisons, 2, "one test per case");
     let builds = kinds
@@ -2820,7 +2863,15 @@ fn from_value_compares_against_the_mapping() {
     let main = module.function("main").expect("main exists");
     let comparisons = instructions(main)
         .iter()
-        .filter(|k| matches!(k, InstKind::Binary { op: BinaryOp::Eq, .. }))
+        .filter(|k| {
+            matches!(
+                k,
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    ..
+                }
+            )
+        })
         .count();
     assert_eq!(comparisons, 2, "one test per mapped case");
 }

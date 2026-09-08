@@ -27,8 +27,7 @@ pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
     IntWidth, MethodInfo, PendingType, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
-    describe,
-    is_ffi_safe, pending_type,
+    describe, is_ffi_safe, pending_type,
 };
 
 /// Diagnostic codes of the checker.

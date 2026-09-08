@@ -1699,8 +1699,8 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                is_final: false,
+                is_static: false,
             },
             MethodInfo {
                 name: "code".into(),
@@ -1714,8 +1714,8 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                is_final: false,
+                is_static: false,
             },
             MethodInfo {
                 name: "cause".into(),
@@ -1729,8 +1729,8 @@ impl<'a> Checker<'a> {
                 overridden: true,
                 throws: Vec::new(),
                 mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                is_final: false,
+                is_static: false,
             },
         ];
         self.classes.push(ClassType {
@@ -1831,8 +1831,8 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                    is_final: false,
+                    is_static: false,
                 },
                 MethodInfo {
                     name: "code".into(),
@@ -1846,8 +1846,8 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                    is_final: false,
+                    is_static: false,
                 },
                 MethodInfo {
                     name: "cause".into(),
@@ -1861,8 +1861,8 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                    is_final: false,
+                    is_static: false,
                 },
                 MethodInfo {
                     name: "stack_trace".into(),
@@ -1876,8 +1876,8 @@ impl<'a> Checker<'a> {
                     overridden: false,
                     throws: Vec::new(),
                     mutates_receiver: false,
-            is_final: false,
-            is_static: false,
+                    is_final: false,
+                    is_static: false,
                 },
             ]
         };
@@ -2238,14 +2238,14 @@ impl<'a> Checker<'a> {
             });
         }
 
-        let (contract_inputs, contract_outputs): (Vec<Type>, Vec<Type>) = methods.iter().fold(
-            (Vec::new(), Vec::new()),
-            |(mut inputs, mut outputs), m| {
-                inputs.extend(m.params.iter().map(|p| p.ty));
-                outputs.push(m.returns);
-                (inputs, outputs)
-            },
-        );
+        let (contract_inputs, contract_outputs): (Vec<Type>, Vec<Type>) =
+            methods
+                .iter()
+                .fold((Vec::new(), Vec::new()), |(mut inputs, mut outputs), m| {
+                    inputs.extend(m.params.iter().map(|p| p.ty));
+                    outputs.push(m.returns);
+                    (inputs, outputs)
+                });
         for p in &decl.type_params {
             if let Some(default) = &p.default {
                 let id = self.type_param_ids[&p.span];
@@ -2253,12 +2253,7 @@ impl<'a> Checker<'a> {
                 self.type_params[id as usize].default = Some(resolved);
             }
         }
-        self.check_declared_variance(
-            &decl.type_params,
-            &contract_inputs,
-            &contract_outputs,
-            &[],
-        );
+        self.check_declared_variance(&decl.type_params, &contract_inputs, &contract_outputs, &[]);
 
         self.leave_type_params();
 
@@ -2309,7 +2304,10 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                 };
-                if resolved_implements.iter().any(|i: &GenericContractInstance| i.contract == contract) {
+                if resolved_implements
+                    .iter()
+                    .any(|i: &GenericContractInstance| i.contract == contract)
+                {
                     let name = self.contracts[contract as usize].name.clone();
                     self.error(
                         codes::DUPLICATE_DECLARATION,
@@ -2446,7 +2444,12 @@ impl<'a> Checker<'a> {
         subst: &[(u32, Type)],
     ) -> Vec<(u32, Vec<(u32, Type)>)> {
         let mut out = Vec::new();
-        self.collect_contract_substitutions(contract, subst, &mut out, &mut std::collections::HashSet::new());
+        self.collect_contract_substitutions(
+            contract,
+            subst,
+            &mut out,
+            &mut std::collections::HashSet::new(),
+        );
         out
     }
 
@@ -2469,11 +2472,8 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|&a| self.substitute_type(a, subst))
                 .collect();
-            let child_subst: Vec<(u32, Type)> = child_params
-                .iter()
-                .copied()
-                .zip(child_args)
-                .collect();
+            let child_subst: Vec<(u32, Type)> =
+                child_params.iter().copied().zip(child_args).collect();
             self.collect_contract_substitutions(child, &child_subst, out, visited);
         }
     }
@@ -2789,10 +2789,7 @@ impl<'a> Checker<'a> {
                     at,
                     format!("`{class_name}` does not implement `{}`", method.name),
                     format!("`{abstract_name}` requires it"),
-                    Some(format!(
-                        "add `{}(...): ...` to `{class_name}`",
-                        method.name
-                    )),
+                    Some(format!("add `{}(...): ...` to `{class_name}`", method.name)),
                 );
                 continue;
             };
@@ -2834,7 +2831,9 @@ impl<'a> Checker<'a> {
                     codes::UNNECESSARY_OVERRIDE,
                     supplied.span,
                     format!("`#override` on `{}` is unnecessary", method.name),
-                    format!("`{abstract_name}` requires a signature, not a replaced implementation"),
+                    format!(
+                        "`{abstract_name}` requires a signature, not a replaced implementation"
+                    ),
                     Some("remove the marker".into()),
                 );
             }
@@ -2857,10 +2856,8 @@ impl<'a> Checker<'a> {
                 if method.is_override {
                     continue;
                 }
-                let replaces_default = self.classes[id as usize]
-                    .contracts
-                    .iter()
-                    .any(|&contract| {
+                let replaces_default =
+                    self.classes[id as usize].contracts.iter().any(|&contract| {
                         self.contracts[contract as usize]
                             .methods
                             .iter()
@@ -2890,7 +2887,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .find(|m| m.name == name)
                     .map(|m| m.has_default);
-                let Some(has_default) = required else { continue };
+                let Some(has_default) = required else {
+                    continue;
+                };
                 claimed = true;
                 if !has_default {
                     let contract_name = self.contracts[contract as usize].name.clone();
@@ -2898,20 +2897,23 @@ impl<'a> Checker<'a> {
                         codes::UNNECESSARY_OVERRIDE,
                         span,
                         format!("`#override` on `{name}` is unnecessary"),
-                        format!("`{contract_name}` requires a signature, not a replaced implementation"),
+                        format!(
+                            "`{contract_name}` requires a signature, not a replaced implementation"
+                        ),
                         Some("remove the marker".into()),
                     );
                 }
             }
-            let claimed_by_abstract = self.classes[class as usize]
-                .abstract_bases
-                .iter()
-                .any(|&abstract_id| {
-                    self.classes[abstract_id as usize]
-                        .methods
-                        .iter()
-                        .any(|m| m.name == name)
-                });
+            let claimed_by_abstract =
+                self.classes[class as usize]
+                    .abstract_bases
+                    .iter()
+                    .any(|&abstract_id| {
+                        self.classes[abstract_id as usize]
+                            .methods
+                            .iter()
+                            .any(|m| m.name == name)
+                    });
             if !claimed && !claimed_by_abstract {
                 self.error(
                     codes::MISSING_OVERRIDE,
@@ -3282,7 +3284,10 @@ impl<'a> Checker<'a> {
                     self.error(
                         codes::DUPLICATE_DECLARATION,
                         p.name.span,
-                        format!("`{}` cannot appear after a defaulted parameter", p.name.name),
+                        format!(
+                            "`{}` cannot appear after a defaulted parameter",
+                            p.name.name
+                        ),
                         "default type parameters must be trailing",
                         None,
                     );
@@ -3530,12 +3535,7 @@ impl<'a> Checker<'a> {
 
     fn class_id(&self, name: &str) -> Option<u32> {
         // Local classes shadow everything, innermost scope first.
-        if let Some((_, id)) = self
-            .local_class_names
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-        {
+        if let Some((_, id)) = self.local_class_names.iter().rev().find(|(n, _)| n == name) {
             return Some(*id);
         }
         if let Some(id) = self
@@ -4016,10 +4016,7 @@ impl<'a> Checker<'a> {
                     method.name.span,
                     format!("`{}` has a body inside an abstract class", method.name.name),
                     "an abstract class declares signatures only, with no body of its own",
-                    Some(format!(
-                        "write `abstract {}(...): ...;`",
-                        method.name.name
-                    )),
+                    Some(format!("write `abstract {}(...): ...;`", method.name.name)),
                 );
                 continue;
             }
@@ -4098,10 +4095,7 @@ impl<'a> Checker<'a> {
                             codes::MISSING_OVERRIDE,
                             method.name.span,
                             format!("`{}` is `final` and cannot be overridden", method.name.name),
-                            format!(
-                                "`{}` seals it",
-                                self.classes[inherited.owner as usize].name
-                            ),
+                            format!("`{}` seals it", self.classes[inherited.owner as usize].name),
                             Some("remove the method, or ask the base to drop `final`".into()),
                         );
                     } else if inherited_has_body && !method.is_override {
@@ -4115,10 +4109,7 @@ impl<'a> Checker<'a> {
                             method.name.span,
                             format!("`{}` replaces an inherited method", method.name.name),
                             format!("`{owner}` declares it on line {line}"),
-                            Some(format!(
-                                "write `#override` above `{}`",
-                                method.name.name
-                            )),
+                            Some(format!("write `#override` above `{}`", method.name.name)),
                         );
                     } else if !inherited_has_body && method.is_override {
                         self.warning(
@@ -4581,9 +4572,15 @@ impl<'a> Checker<'a> {
             let outer_pending = std::mem::take(&mut self.pending_throws);
             self.current_throws = Vec::new();
             let ctor_span = constructor.body.span;
-            self.check_member_body(class_type, &constructor.params, Type::VOID, true, |checker| {
-                checker.check_block(&constructor.body);
-            });
+            self.check_member_body(
+                class_type,
+                &constructor.params,
+                Type::VOID,
+                true,
+                |checker| {
+                    checker.check_block(&constructor.body);
+                },
+            );
             self.report_uncaught_throws(ctor_span, "construct");
             self.pending_throws = outer_pending;
             self.in_constructor = false;
@@ -4599,19 +4596,25 @@ impl<'a> Checker<'a> {
             let span = body.span;
             let outer_pending = std::mem::take(&mut self.pending_throws);
             self.current_throws = throws;
-            self.check_member_body(class_type, &method.params, returns, !method.is_static, |checker| {
-                let always_returns = checker.check_block(body);
-                if returns != Type::VOID && !returns.is_unknown() && !always_returns {
-                    let declared = checker.name(returns);
-                    checker.error(
-                        codes::MISSING_RETURN,
-                        span,
-                        format!("not every path of `{name}` returns a value"),
-                        format!("the method declares `{declared}` as its return type"),
-                        Some("add a `return` at the end of the method".into()),
-                    );
-                }
-            });
+            self.check_member_body(
+                class_type,
+                &method.params,
+                returns,
+                !method.is_static,
+                |checker| {
+                    let always_returns = checker.check_block(body);
+                    if returns != Type::VOID && !returns.is_unknown() && !always_returns {
+                        let declared = checker.name(returns);
+                        checker.error(
+                            codes::MISSING_RETURN,
+                            span,
+                            format!("not every path of `{name}` returns a value"),
+                            format!("the method declares `{declared}` as its return type"),
+                            Some("add a `return` at the end of the method".into()),
+                        );
+                    }
+                },
+            );
             self.report_uncaught_throws(span, &method.name.name);
             self.pending_throws = outer_pending;
             self.leave_type_params();
@@ -4689,12 +4692,15 @@ impl<'a> Checker<'a> {
         let unset: Vec<FieldInfo> = self.classes[id as usize]
             .fields
             .iter()
-            .filter(|f| !f.is_static && !f.ty.has_default() && f.default.is_none() && !assigned.contains(&f.name))
+            .filter(|f| {
+                !f.is_static
+                    && !f.ty.has_default()
+                    && f.default.is_none()
+                    && !assigned.contains(&f.name)
+            })
             // The hidden `outer` of an `inner class` is supplied by the
             // construction itself, never written by a `construct` body.
-            .filter(|f| {
-                !(f.name == "outer" && self.classes[f.owner as usize].enclosing.is_some())
-            })
+            .filter(|f| !(f.name == "outer" && self.classes[f.owner as usize].enclosing.is_some()))
             .filter(|f| !(delegates && base.is_some() && f.owner != id))
             .cloned()
             .collect();
@@ -6115,7 +6121,10 @@ impl<'a> Checker<'a> {
                     self.error(
                         codes::WRONG_ARGUMENT_COUNT,
                         reference.span,
-                        format!("`{}` is missing a type argument or a default", reference.name),
+                        format!(
+                            "`{}` is missing a type argument or a default",
+                            reference.name
+                        ),
                         "provide an argument or a default for every trailing parameter",
                         None,
                     );
@@ -6140,7 +6149,11 @@ impl<'a> Checker<'a> {
                     if expected.len() == 1 { "" } else { "s" },
                     reference.arguments.len()
                 ),
-                format!("`{}` is declared with {} of its own", reference.name, expected.len()),
+                format!(
+                    "`{}` is declared with {} of its own",
+                    reference.name,
+                    expected.len()
+                ),
                 None,
             );
             return None;
@@ -6723,8 +6736,7 @@ impl<'a> Checker<'a> {
         });
         self.class_decl_ids
             .insert(decl as *const ClassDecl as usize, id);
-        self.local_class_names
-            .push((decl.name.name.clone(), id));
+        self.local_class_names.push((decl.name.name.clone(), id));
         self.register_nested_classes(decl, id);
 
         // `extends`, resolved the same way `resolve_bases` does it — every
@@ -7072,12 +7084,8 @@ impl<'a> Checker<'a> {
         match target {
             // Rebinding a local is not a receiver mutation.
             AssignTarget::Name(_) => false,
-            AssignTarget::Field(f) => {
-                self.this_derived_type(ctx, &f.object, aliases).is_some()
-            }
-            AssignTarget::Index(i) => {
-                self.this_derived_type(ctx, &i.receiver, aliases).is_some()
-            }
+            AssignTarget::Field(f) => self.this_derived_type(ctx, &f.object, aliases).is_some(),
+            AssignTarget::Index(i) => self.this_derived_type(ctx, &i.receiver, aliases).is_some(),
         }
     }
 
@@ -7160,8 +7168,7 @@ impl<'a> Checker<'a> {
                     return true;
                 }
                 self.expr_mutates_receiver(ctx, &c.callee, aliases)
-                    || c
-                        .args
+                    || c.args
                         .iter()
                         .any(|a| self.expr_mutates_receiver(ctx, &a.value, aliases))
             }
@@ -7185,8 +7192,7 @@ impl<'a> Checker<'a> {
             Expr::Range(r) => {
                 self.expr_mutates_receiver(ctx, &r.start, aliases)
                     || self.expr_mutates_receiver(ctx, &r.end, aliases)
-                    || r
-                        .step
+                    || r.step
                         .as_ref()
                         .is_some_and(|s| self.expr_mutates_receiver(ctx, s, aliases))
             }
@@ -7197,12 +7203,11 @@ impl<'a> Checker<'a> {
                         Some(ElseBranch::Block(b)) => {
                             self.stmts_mutate_receiver(ctx, &b.statements, aliases)
                         }
-                        Some(ElseBranch::If(inner)) => self
-                            .stmts_mutate_receiver(
-                                ctx,
-                                std::slice::from_ref(&Stmt::If((**inner).clone())),
-                                aliases,
-                            ),
+                        Some(ElseBranch::If(inner)) => self.stmts_mutate_receiver(
+                            ctx,
+                            std::slice::from_ref(&Stmt::If((**inner).clone())),
+                            aliases,
+                        ),
                         None => false,
                     }
             }
@@ -7224,9 +7229,7 @@ impl<'a> Checker<'a> {
                 // A lambda that mutates the receiver might be called — the
                 // conservative reading treats its capture as a mutation.
                 LambdaBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
-                LambdaBody::Block(b) => {
-                    self.stmts_mutate_receiver(ctx, &b.statements, aliases)
-                }
+                LambdaBody::Block(b) => self.stmts_mutate_receiver(ctx, &b.statements, aliases),
             },
             Expr::Cast(c) => self.expr_mutates_receiver(ctx, &c.expr, aliases),
             Expr::Interpolated(i) => i.parts.iter().any(|p| match p {
@@ -7241,7 +7244,8 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
             Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
-            Expr::Variant(_) | Expr::Int(_)
+            Expr::Variant(_)
+            | Expr::Int(_)
             | Expr::Float(_)
             | Expr::Duration(_)
             | Expr::Regex(_)
@@ -9762,7 +9766,9 @@ impl<'a> Checker<'a> {
                     {
                         let reserved = operator_method(expr.op);
                         if reserved != "_unsupported" {
-                            if let Some(method) = self.classes[id as usize].method(reserved).cloned() {
+                            if let Some(method) =
+                                self.classes[id as usize].method(reserved).cloned()
+                            {
                                 let class = self.classes[id as usize].name.clone();
                                 let r = self.name(right);
                                 if method.params.len() != 1 {
@@ -9776,14 +9782,19 @@ impl<'a> Checker<'a> {
                                     return Type::UNKNOWN;
                                 }
                                 let expected = method.params[0].ty;
-                                if !expected.accepts(right)
-                                    && !self.is_subclass_of(right, expected)
+                                if !expected.accepts(right) && !self.is_subclass_of(right, expected)
                                 {
                                     self.error(
                                         codes::TYPE_MISMATCH,
                                         expr.op_span,
-                                        format!("`{}` on `{class}` does not accept {r}", expr.op.as_str()),
-                                        format!("`{reserved}` declares `other: {}`", self.name(expected)),
+                                        format!(
+                                            "`{}` on `{class}` does not accept {r}",
+                                            expr.op.as_str()
+                                        ),
+                                        format!(
+                                            "`{reserved}` declares `other: {}`",
+                                            self.name(expected)
+                                        ),
                                         None,
                                     );
                                     return Type::UNKNOWN;
@@ -9910,9 +9921,7 @@ impl<'a> Checker<'a> {
                 let name = self.name(unsupported);
                 self.not_lowered(
                     expr.span,
-                    &format!(
-                        "structural equality on a record with a field of type `{name}`"
-                    ),
+                    &format!("structural equality on a record with a field of type `{name}`"),
                     "compare its fields individually for now",
                 );
             }
@@ -10134,7 +10143,12 @@ impl<'a> Checker<'a> {
                 expr.step.as_ref().unwrap().span(),
                 "the step of a range",
             );
-            self.expect_assignable(start, step_ty, expr.step.as_ref().unwrap().span(), "the step");
+            self.expect_assignable(
+                start,
+                step_ty,
+                expr.step.as_ref().unwrap().span(),
+                "the step",
+            );
         }
         self.expect_assignable(start, end, expr.end.span(), "the end");
 
@@ -11267,7 +11281,13 @@ impl<'a> Checker<'a> {
                         return Type::UNKNOWN;
                     }
                     if !self.can_access(field.visibility, field.owner) {
-                        self.report_inaccessible(&expr.name.name, expr.name.span, field.visibility, field.owner, field.span);
+                        self.report_inaccessible(
+                            &expr.name.name,
+                            expr.name.span,
+                            field.visibility,
+                            field.owner,
+                            field.span,
+                        );
                     }
                     self.scalar_static_accesses.insert(expr.span);
                     return field.ty;
@@ -11398,7 +11418,10 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if matches!(object.base, Base::Array(_) | Base::List(_) | Base::Map(_) | Base::Set(_)) {
+        if matches!(
+            object.base,
+            Base::Array(_) | Base::List(_) | Base::Map(_) | Base::Set(_)
+        ) {
             match member.name.as_str() {
                 "length" => return Type::of(Base::Int(IntWidth::U64)),
                 "is_empty" => return Type::BOOLEAN,
@@ -11497,7 +11520,11 @@ impl<'a> Checker<'a> {
             Base::Duration
                 if matches!(
                     member.name.as_str(),
-                    "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds"
+                    "hours"
+                        | "minutes"
+                        | "seconds"
+                        | "milliseconds"
+                        | "microseconds"
                         | "nanoseconds"
                 ) =>
             {
@@ -11820,8 +11847,7 @@ impl<'a> Checker<'a> {
         // enclosing family: `Outer` can reach `Outer.Inner`'s members and
         // `Inner` can reach `Outer`'s.
         if self.nesting_root(current) == self.nesting_root(owner)
-            && (self.nesting_parent(current).is_some()
-                || self.nesting_parent(owner).is_some())
+            && (self.nesting_parent(current).is_some() || self.nesting_parent(owner).is_some())
         {
             return true;
         }
@@ -13016,11 +13042,8 @@ impl<'a> Checker<'a> {
             }
             // `o.Inner(...)` constructs the `inner class` bound to `o` as
             // its enclosing instance.
-            if self.classes[id as usize].method(&field.name.name).is_none()
-                && !field.safe
-            {
-                let qualified =
-                    format!("{}.{}", self.classes[id as usize].name, field.name.name);
+            if self.classes[id as usize].method(&field.name.name).is_none() && !field.safe {
+                let qualified = format!("{}.{}", self.classes[id as usize].name, field.name.name);
                 if let Some(inner) = self
                     .classes
                     .iter()
@@ -13578,7 +13601,10 @@ impl<'a> Checker<'a> {
         };
 
         let element = if let Base::Set(id) = expected.base {
-            self.set_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN)
+            self.set_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN)
         } else {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -14241,18 +14267,19 @@ impl<'a> Checker<'a> {
     ) -> Option<Type> {
         let (key, value, element) = match object.base {
             Base::Map(id) => {
-                let MapType { key, value } = self
-                    .map_types
-                    .get(id as usize)
-                    .cloned()
-                    .unwrap_or(MapType {
+                let MapType { key, value } =
+                    self.map_types.get(id as usize).cloned().unwrap_or(MapType {
                         key: Type::UNKNOWN,
                         value: Type::UNKNOWN,
                     });
                 (key, value, Type::UNKNOWN)
             }
             Base::Set(id) => {
-                let element = self.set_types.get(id as usize).copied().unwrap_or(Type::UNKNOWN);
+                let element = self
+                    .set_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN);
                 (Type::UNKNOWN, Type::UNKNOWN, element)
             }
             _ => return None,
@@ -14625,7 +14652,10 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&base.name).is_none()
             && let Some(outer_id) = self.class_id(&base.name)
         {
-            let qualified = format!("{}.{}", self.classes[outer_id as usize].name, field.name.name);
+            let qualified = format!(
+                "{}.{}",
+                self.classes[outer_id as usize].name, field.name.name
+            );
             if let Some(nested_id) = self.classes.iter().position(|c| c.name == qualified) {
                 let nested_id = nested_id as u32;
                 if self.classes[nested_id as usize].enclosing.is_some() {
@@ -14677,7 +14707,10 @@ impl<'a> Checker<'a> {
                                     "it is declared `{}` in `{class_name}`, on line {line}",
                                     method.visibility.as_str()
                                 ),
-                                Some("only `public` members are reachable from outside the class".into()),
+                                Some(
+                                    "only `public` members are reachable from outside the class"
+                                        .into(),
+                                ),
                             );
                         }
                         let signature = Signature {
@@ -15216,7 +15249,12 @@ impl<'a> Checker<'a> {
                     "round" | "floor" | "ceil" | "truncate" if expr.args.len() == 1 => {
                         let t = self.check_expr(&expr.args[0].value);
                         if !t.is_unknown() {
-                            self.expect_assignable(Type::DURATION, t, expr.args[0].value.span(), "the unit");
+                            self.expect_assignable(
+                                Type::DURATION,
+                                t,
+                                expr.args[0].value.span(),
+                                "the unit",
+                            );
                         }
                         return Type::DURATION;
                     }
@@ -15226,18 +15264,33 @@ impl<'a> Checker<'a> {
                     "format" if expr.args.len() == 1 => {
                         let t = self.check_expr(&expr.args[0].value);
                         if !t.is_unknown() {
-                            self.expect_assignable(Type::STRING, t, expr.args[0].value.span(), "the template");
+                            self.expect_assignable(
+                                Type::STRING,
+                                t,
+                                expr.args[0].value.span(),
+                                "the template",
+                            );
                         }
                         return Type::STRING;
                     }
                     "humanize" if expr.args.len() == 2 => {
                         let locale = self.check_expr(&expr.args[0].value);
                         if !locale.is_unknown() {
-                            self.expect_assignable(Type::STRING, locale, expr.args[0].value.span(), "the locale");
+                            self.expect_assignable(
+                                Type::STRING,
+                                locale,
+                                expr.args[0].value.span(),
+                                "the locale",
+                            );
                         }
                         let max_units = self.check_expr(&expr.args[1].value);
                         if !max_units.is_unknown() {
-                            self.expect_assignable(Type::INT32, max_units, expr.args[1].value.span(), "max_units");
+                            self.expect_assignable(
+                                Type::INT32,
+                                max_units,
+                                expr.args[1].value.span(),
+                                "max_units",
+                            );
                         }
                         return Type::STRING;
                     }
@@ -16716,9 +16769,7 @@ impl<'a> Checker<'a> {
     /// own endpoints were not written as (roadmap Phase 3b — a range over
     /// another width is future work, not a rename of this check).
     fn expect_numeric_value(&mut self, actual: Type, span: Span, context: &str) {
-        if actual.is_unknown()
-            || matches!(actual.base, Base::Int(_) | Base::Duration)
-        {
+        if actual.is_unknown() || matches!(actual.base, Base::Int(_) | Base::Duration) {
             return;
         }
 
