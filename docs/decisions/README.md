@@ -21,6 +21,8 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-013](./ADR-013-forma-del-despacho.md) | Shape of dispatch: direct by default, own or contract table only when needed | accepted |
 | [ADR-014](./ADR-014-representacion-de-char.md) | `Char` shares `String`'s opaque representation | accepted |
 | [ADR-015](./ADR-015-declaracion-extern.md) | Native `extern "C" fn` declaration syntax | accepted |
+| [ADR-016](./ADR-016-module-system.md) | Module, import and entrypoint system | accepted |
+| [ADR-017](./ADR-017-modelo-de-suspension.md) | Task suspension: stackful coroutines on a single-threaded cooperative executor | accepted |
 
 ## Status of Phase 0 pending items
 

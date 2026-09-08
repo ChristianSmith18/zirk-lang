@@ -88,3 +88,53 @@ macOS was outside the matrix while the repository was private, because its runne
 | **A** — Windows aarch64 | 🚫 outside the initial matrix | Added when there is real demand. |
 
 **Portability is now verified.** It was the most expensive point of Phase 0 and the one that justified building the foundations before the language: Windows required ten iterations and uncovered three real defects in the code itself, which Linux and macOS tolerated by accident.
+
+## Addendum (September 8, 2026) — task context-switch shim
+
+[ADR-017](./ADR-017-modelo-de-suspension.md) chose stackful coroutines for
+`task` / `await`. Suspending a task is a **context switch**: save the running
+task's callee-saved registers, stack pointer, and resume address, then restore
+another context. This is inherently per-architecture and per-calling-convention
+code, and it adds a **third** portability concern to the two this ADR already
+separates:
+
+```
+PORTABILITY A — the compiler is BUILT on all platforms
+PORTABILITY B — the compiler PRODUCES binaries for all target triples
+PORTABILITY C — the runtime SWITCHES TASK CONTEXTS on every target triple   ← new
+```
+
+Portability C is bounded and does not reopen A or B:
+
+1. The shim is isolated behind a single seam,
+   `fn switch(from: *mut Context, to: *const Context)` in
+   `crates/zirk-runtime/src/context.rs`, plus
+   `fn make_context(stack, size, entry, arg) -> Context`.
+2. It must exist for the four triples this ADR verifies in CI: **macOS aarch64,
+   Linux x86_64, Linux aarch64, Windows x86_64**. The 32-bit and secondary
+   targets in the portability-B table are emission targets, not runtime hosts for
+   the executor, and are out of scope until there is demand.
+3. A **host-only Rust fallback** covers `cargo test` on any host that is not one
+   of the four, so the runtime crate's own tests never depend on the asm path.
+4. Whether each implementation is hand-written assembly (`global_asm!` or a
+   build-script object, ~40 lines per arch/os pair) or a vetted `no_std` crate
+   (`corosensei`, which already abstracts exactly these four targets) is decided
+   in the `fase-5-async-core` change's `design.md`. `ADR-002`
+   (self-contained staticlib) leans toward hand-written; the seam is identical
+   either way.
+
+### Verification split for portability C
+
+The CI matrix gains one test before anything else in Phase 5 step 1 builds on
+top of it: **executor↔task ping-pong for N round trips on each matrix target**,
+asserting every callee-saved register and the stack pointer round-trip exactly.
+
+| Triple | Executor context switch | Evidence |
+|---|---|---|
+| Linux x86_64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
+| Linux aarch64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
+| macOS aarch64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
+| Windows x86_64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
+
+No `task` / `await` codegen is merged until every row above is green, the same
+discipline portability B followed from Phase 1.
