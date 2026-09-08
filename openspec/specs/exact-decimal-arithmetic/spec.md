@@ -3,12 +3,12 @@
 ## Purpose
 TBD - created by archiving change exact-decimal-float. Update Purpose after archive.
 ## Requirements
-### Requirement: `Float` is an exact base-ten decimal value
+### Requirement: `Decimal` is an exact base-ten decimal value
 
-`Float` SHALL be an exact base-ten decimal scalar, not a binary floating-point
+`Decimal` SHALL be an exact base-ten decimal scalar, not a binary floating-point
 type and not a member of a width family. Its value SHALL be modeled as a signed
 128-bit integer coefficient and a non-negative decimal scale `s` in the range
-`0..=38`, denoting the exact rational `coefficient x 10^-s`. Two `Float` values
+`0..=38`, denoting the exact rational `coefficient x 10^-s`. Two `Decimal` values
 SHALL compare equal when they denote the same rational number, independent of
 the scale each carries. Every operation SHALL normalize its result by removing
 trailing decimal zeros before the value is observed.
@@ -16,7 +16,7 @@ trailing decimal zeros before the value is observed.
 #### Scenario: Bare fractional literal is exact
 
 - **WHEN** `inmut a, b = 0.1, 0.2;` is written and `(a + b) == 0.3` is evaluated
-- **THEN** `a` and `b` have type `Float`
+- **THEN** `a` and `b` have type `Decimal`
 - **AND** the comparison evaluates to `true`
 
 #### Scenario: Scale does not affect equality
@@ -31,7 +31,7 @@ trailing decimal zeros before the value is observed.
 
 ### Requirement: Exact addition, subtraction, multiplication, and integer power
 
-`Float` `+`, `-`, `*`, and `**` with a non-negative integer exponent SHALL
+`Decimal` `+`, `-`, `*`, and `**` with a non-negative integer exponent SHALL
 produce the mathematically exact result whenever that result fits within a
 128-bit coefficient after normalization. Addition and subtraction SHALL align
 the operands to the larger scale before combining coefficients. Multiplication
@@ -64,7 +64,7 @@ result still exceeds the 128-bit coefficient budget, SHALL raise a controlled
 
 ### Requirement: Division, modulo, and irrational operations round half-to-even
 
-Inexact `Float` operations SHALL produce a rounded result with the default
+Inexact `Decimal` operations SHALL produce a rounded result with the default
 rounding mode half-to-even. A non-terminating `/` SHALL carry about
 `MAX_SIGNIFICANT_DIGITS` significant digits (division is pure integer
 arithmetic); `sqrt` and a fractional `pow` carry `f64`-grade precision (about
@@ -98,19 +98,19 @@ dividend. Division or modulo by a zero divisor SHALL raise a controlled
 
 #### Scenario: Division by zero is controlled
 
-- **WHEN** a `Float` is divided by `0.0`
+- **WHEN** a `Decimal` is divided by `0.0`
 - **THEN** the program raises a catchable `DivisionByZeroError` at that operation
 
-### Requirement: `Float` has no `NaN` and no infinity
+### Requirement: `Decimal` has no `NaN` and no infinity
 
-The type system SHALL NOT define `NaN` or any infinity value for `Float`. `Float`
+The type system SHALL NOT define `NaN` or any infinity value for `Decimal`. `Decimal`
 SHALL NOT expose `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `EPSILON`,
 `is_finite`, or `is_infinite`. Any operation that would require such a value
 SHALL instead be a controlled runtime error.
 
-#### Scenario: No infinity member on `Float`
+#### Scenario: No infinity member on `Decimal`
 
-- **WHEN** source names `Float.POSITIVE_INFINITY` or `Float.EPSILON`
+- **WHEN** source names `Decimal.POSITIVE_INFINITY` or `Decimal.EPSILON`
 - **THEN** an unknown-member diagnostic is emitted
 
 #### Scenario: `sqrt` of a negative value is controlled
@@ -118,47 +118,47 @@ SHALL instead be a controlled runtime error.
 - **WHEN** `(-1.0).sqrt()` is evaluated
 - **THEN** the program raises the controlled float-domain error, not a `NaN`
 
-### Requirement: Conversions between `Float`, integers, and `BinaryFloat`
+### Requirement: Conversions between `Decimal`, integers, and `Float`
 
-Conversion from any integer width to `Float` SHALL be implicit and exact.
-Conversion from `Float` to an integer SHALL require an explicit `as` cast and
+Conversion from any integer width to `Decimal` SHALL be implicit and exact.
+Conversion from `Decimal` to an integer SHALL require an explicit `as` cast and
 SHALL be checked: a non-integer value or an out-of-range value SHALL raise a
-controlled error. Conversion between `Float` and any `BinaryFloat` width SHALL
-require an explicit cast or constructor in both directions; `BinaryFloat -> Float`
+controlled error. Conversion between `Decimal` and any `Float` width SHALL
+require an explicit cast or constructor in both directions; `Float -> Decimal`
 SHALL be checked and SHALL reject a non-finite input. An arithmetic operation
-with one `Float` operand and one `BinaryFloat` operand SHALL be a type error that
+with one `Decimal` operand and one `Float` operand SHALL be a type error that
 names the required explicit conversion.
 
-#### Scenario: Integer widens to `Float` implicitly
+#### Scenario: Integer widens to `Decimal` implicitly
 
-- **WHEN** an `Int32` is used where `Float` is expected
+- **WHEN** an `Int32` is used where `Decimal` is expected
 - **THEN** it is accepted and represented as that integer at scale 0
 
-#### Scenario: `Float` to integer is a checked cast
+#### Scenario: `Decimal` to integer is a checked cast
 
 - **WHEN** `(2.5) as Int32` is evaluated
 - **THEN** the program raises a controlled conversion error because `2.5` has a
   fractional part
 
-#### Scenario: Mixing `Float` and `BinaryFloat` is rejected
+#### Scenario: Mixing `Decimal` and `Float` is rejected
 
-- **WHEN** a `Float` value is added to a `BinaryFloat64` value
+- **WHEN** a `Decimal` value is added to a `Float64` value
 - **THEN** type checking fails and names the explicit conversion required
 
 #### Scenario: Explicit binary-to-exact conversion
 
-- **WHEN** `Float(x)` is written where `x` is a finite `BinaryFloat64`
+- **WHEN** `Decimal(x)` is written where `x` is a finite `Float64`
 - **THEN** the result is the exact decimal of the binary value, rounded to
   `MAX_SIGNIFICANT_DIGITS`, and a non-finite `x` raises a controlled error
 
-### Requirement: `Float` member surface
+### Requirement: `Decimal` member surface
 
-`Float` SHALL expose: `abs()`, `sign()`, `min(other)`, `max(other)`,
+`Decimal` SHALL expose: `abs()`, `sign()`, `min(other)`, `max(other)`,
 `clamp(low, high)`, `is_zero()`, `is_negative()`, `is_integer()`, `floor()`,
 `ceil()`, `truncate()`, `fraction()`, `round()` / `round(places)`,
 `pow(exponent)`, `sqrt()`, `div(other)` / `div(other, places)`, `scale()` (the
 decimal scale as an integer), `to_string()`, and the static
-`Float.parse(text) -> Result<Float, ParseError>`. `to_string` SHALL render the
+`Decimal.parse(text) -> Result<Decimal, ParseError>`. `to_string` SHALL render the
 exact decimal value. `format(spec)` and an explicit `RoundingMode` argument
 SHALL remain specified but not implemented, as `format` is for the binary
 family; both round half-to-even by default.
@@ -180,48 +180,54 @@ family; both round half-to-even by default.
 
 #### Scenario: Parse round-trips
 
-- **WHEN** `Float.parse("0.1")` succeeds and its value is printed
+- **WHEN** `Decimal.parse("0.1")` succeeds and its value is printed
 - **THEN** the output is `"0.1"`
 
-### Requirement: `BinaryFloat` family carries the IEEE 754 binary semantics
+### Requirement: `Float` family carries the IEEE 754 binary semantics
 
-The type system SHALL recognize `BinaryFloat16`, `BinaryFloat32`,
-`BinaryFloat64`, and `BinaryFloat128`, with `BinaryFloat` aliasing
-`BinaryFloat64`. This family SHALL have exactly the semantics the former
-`Float16`/`Float32`/`Float64`/`Float128` family had: IEEE 754 binary values at
+The type system SHALL recognize `Float16`, `Float32`,
+`Float64`, and `Float128`, with `Float` aliasing
+`Float64`. This family SHALL have exactly the semantics the former
+`BinaryFloat16`/`BinaryFloat32`/`BinaryFloat64`/`BinaryFloat128` family had: IEEE 754 binary values at
 each width, explicit `POSITIVE_INFINITY` and `NEGATIVE_INFINITY`, no valid
 `NaN`, an operation that would produce `NaN` as a controlled runtime error at
-its point of occurrence, `BinaryFloat128` text rendering truncated to
-`BinaryFloat64` precision, and the pending Windows verification for
-`BinaryFloat128`. A `BinaryFloat` literal SHALL be written with a `b` suffix
-(`1.5b`), optionally with a width (`1.5b32`, `0.1b128`). The former spellings
-`Float16`, `Float32`, `Float64`, and `Float128` SHALL NOT resolve; the checker
-SHALL emit a diagnostic naming the `BinaryFloat` replacement.
+its point of occurrence, `Float128` text rendering truncated to
+`Float64` precision, and the pending Windows verification for
+`Float128`. A `Float` literal SHALL be written with an `f` suffix
+(`1.5f`), optionally with a width (`1.5f32`, `0.1f128`). The former `b`/`bN`
+literal suffixes and the `BinaryFloat*` spellings SHALL NOT resolve; the
+lexer SHALL emit a diagnostic pointing to `f`/`fN` and the checker SHALL emit
+a diagnostic naming the `Float` replacement.
 
 #### Scenario: Binary literal suffix
 
+- **WHEN** `inmut x = 1.5f32;` is written
+- **THEN** `x` has type `Float32`
+
+#### Scenario: Old `b` literal suffix is rejected
+
 - **WHEN** `inmut x = 1.5b32;` is written
-- **THEN** `x` has type `BinaryFloat32`
+- **THEN** a diagnostic states that the binary-float suffix is now `f`/`fN`
 
 #### Scenario: Binary division by zero yields infinity
 
-- **WHEN** a non-zero `BinaryFloat64` is divided by `0.0b`
+- **WHEN** a non-zero `Float64` is divided by `0.0f`
 - **THEN** the result is an infinity, not an error
 
 #### Scenario: Binary indeterminate operation is controlled
 
-- **WHEN** a `BinaryFloat` operation would produce `NaN` under IEEE 754
+- **WHEN** a `Float` operation would produce `NaN` under IEEE 754
 - **THEN** the program raises a catchable `FloatNanError` at that operation
 
-#### Scenario: Former `Float64` spelling is redirected
+#### Scenario: Former `BinaryFloat64` spelling is redirected
 
-- **WHEN** an annotation names `Float64`
-- **THEN** a diagnostic states that the binary type is `BinaryFloat64` and the
-  exact base-ten type is `Float`
+- **WHEN** an annotation names `BinaryFloat64`
+- **THEN** a diagnostic states that the binary type is `Float64` and the
+  exact base-ten type is `Decimal`
 
-### Requirement: Runtime representation and helpers for exact `Float`
+### Requirement: Runtime representation and helpers for exact `Decimal`
 
-The runtime SHALL represent a `Float` as a C-compatible value of a signed
+The runtime SHALL represent a `Decimal` as a C-compatible value of a signed
 128-bit coefficient and an 8-bit scale, passed across the native boundary by
 pointer. The runtime SHALL provide helpers for addition, subtraction,
 multiplication, division, remainder, integer power, negation, absolute value,
@@ -230,18 +236,18 @@ decimal-to-text formatting, text-to-decimal parsing, integer/decimal
 conversion, and binary/decimal conversion. Exact arithmetic that an integer
 instruction can perform directly MAY be lowered inline; everything requiring
 scale alignment, normalization, or rounding SHALL be delegated to these
-helpers. `Float` values SHALL NOT be heap-allocated and SHALL NOT participate in
+helpers. `Decimal` values SHALL NOT be heap-allocated and SHALL NOT participate in
 garbage collection.
 
 #### Scenario: Formatting does not go through binary
 
-- **WHEN** the runtime formats a `Float` for `to_string` or interpolation
+- **WHEN** the runtime formats a `Decimal` for `to_string` or interpolation
 - **THEN** it renders the coefficient and scale directly, without converting to
   any binary floating type
 
 #### Scenario: Divide-by-zero guard precedes the helper call
 
-- **WHEN** `a / b` on `Float` is lowered
+- **WHEN** `a / b` on `Decimal` is lowered
 - **THEN** a guard that raises `DivisionByZeroError` is emitted before the
   runtime division helper is called
 
