@@ -29,18 +29,18 @@ traceability; work starts at group 3.
 
 ## 4. `task.rs`: task control block and registry
 
-- [ ] 4.1 `TaskId { index: u32, generation: u32 }`, packing to/from `u64`
-- [ ] 4.2 `TaskState`, `WaitReason`, `TaskOutcome` (`Value(usize)` / `Panicked(Box<dyn Any + Send>)`), `CancelReason` (default `Cancelled`)
-- [ ] 4.3 `TaskSlot` / TCB per design D2, including `shadow_stack` head, `cancel_*`, `shield_depth`, `cleanup_state` (laid down, not yet read)
-- [ ] 4.4 `TaskRegistry`: `Vec<Option<TaskSlot>>`, `insert -> TaskId`, `get(TaskId) -> Option<&mut TaskSlot>` with generation check, `remove(TaskId)` bumping generation, `iter_live()`
-- [ ] 4.5 Unit tests: generation check rejects a stale id after slot reuse; `iter_live` skips freed slots
+- [x] 4.1 `TaskId { index: u32, generation: u32 }`, `to_bits`/`from_bits` (`generation << 32 | index`)
+- [x] 4.2 `TaskState` (+ `is_terminal`), `WaitReason` (`None`/`Yielded`/`AwaitingTask`/`Timer`), `TaskOutcome` (`Value(usize)` / `Panicked(Box<dyn Any + Send>)`), `CancelReason` (`#[default] Cancelled`, `TimedOut`), `CleanupState`
+- [x] 4.3 `TaskControlBlock` per design D2: `state`, `context`, `outcome`, `result_consumed`, `waiter`, `wait`, `cancel_requested`/`cancel_reason`, `shield_depth`, `roots: Vec<collector::Frame>` (group 7 wires push/pop/walk), `cleanup_state` (trivially `Done` here)
+- [x] 4.4 `TaskRegistry`: generational slab (`Vec<Slot>` + free list + `live` count); `insert -> TaskId`, `get`/`get_mut` with generation check, `remove` (bumps generation, drops `TaskContext` ⇒ frees stack), `live_ids()`
+- [x] 4.5 Tests: `to_bits` round-trip; insert/get/remove; a reused slot rejects the old id; `live_ids` skips freed slots. (`#[allow(dead_code)] mod task` until the executor consumes it in group 6.)
 
 ## 5. `timer.rs`: monotonic timer service
 
-- [ ] 5.1 Monotonic `Instant` on the same clock as `Duration` / temporal `now_*`; reject a negative duration up front with a controlled error
-- [ ] 5.2 `TimerHeap`: binary min-heap keyed by deadline; `arm(deadline) -> TimerId`, `disarm(TimerId)`, `poll_expired(now) -> impl Iterator<Item = (TimerId, waiter payload)>`, `peek_deadline()`, `is_empty()`
-- [ ] 5.3 `disarm` of an already-fired or unknown `TimerId` is a no-op
-- [ ] 5.4 Tests: arm/fire ordering; disarm before fire; `peek_deadline` for the idle-executor sleep bound
+- [x] 5.1 `std::time::Instant` (monotonic — deliberately not the `SystemTime` clock the temporal `now_*` use, so a wall-clock jump can't disturb scheduling); `arm` rejects a negative delay with `NegativeDuration` before scheduling
+- [x] 5.2 `TimerService`: `BinaryHeap<Entry>` ordered earliest-first; `arm(delay_nanos, payload) -> Result<TimerId, NegativeDuration>`, `disarm(TimerId)` (lazy — drops at heap top), `poll_expired(now) -> Vec<(TimerId, u64 payload)>`, `peek_deadline()`, `is_empty()`
+- [x] 5.3 `disarm` of an unknown / already-fired / already-cancelled id is a no-op
+- [x] 5.4 Tests: deadline-order firing; disarm before fire; disarm of unknown/fired id; `peek_deadline` bounds the idle sleep; negative delay rejected. (`#[allow(dead_code)] mod timer` until group 6.)
 
 ## 6. `executor.rs`: the loop
 

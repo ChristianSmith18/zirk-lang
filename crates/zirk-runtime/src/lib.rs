@@ -53,7 +53,13 @@ mod resource;
 mod scalar;
 mod set;
 mod string;
+// `task` and `timer` are consumed by `crate::executor` (group 6 of
+// `fase-5-executor-core`). Until that lands their items look dead.
+#[allow(dead_code)]
+mod task;
 mod temporal;
+#[allow(dead_code)]
+mod timer;
 
 pub use array::*;
 pub use char::*;

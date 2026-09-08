@@ -139,14 +139,14 @@ unsafe fn set_weak_target(object: *mut c_void, value: *mut c_void) {
     unsafe { *(header_word(object, WEAK_TARGET_WORD) as *mut *mut c_void) = value };
 }
 
-struct Frame {
+pub(crate) struct Frame {
     /// Address of an array of root addresses (design D2): element `i` is
     /// the address of a reference-typed slot (or one of its own
     /// reference-typed fields) — not the reference's value, which is why
     /// [`mark`] dereferences each entry once more to reach the candidate
     /// object.
-    roots: *mut *mut c_void,
-    count: usize,
+    pub(crate) roots: *mut *mut c_void,
+    pub(crate) count: usize,
 }
 
 thread_local! {
