@@ -44,16 +44,16 @@ traceability; work starts at group 3.
 
 ## 6. `executor.rs`: the loop
 
-- [ ] 6.1 `Executor` struct: `TaskRegistry`, `VecDeque<TaskId>` ready queue, `TimerHeap`, root task id
-- [ ] 6.2 Thread-local `CURRENT_TASK: Cell<Option<TaskId>>`; set on every resume, cleared between turns
-- [ ] 6.3 `spawn(body) -> TaskId`: allocate `TaskContext` + slot, enqueue Ready (do not resume yet — design D6)
-- [ ] 6.4 `suspend_current(reason: WaitReason)`: record the reason in `CURRENT_TASK`'s slot, then `context::suspend_current()`
-- [ ] 6.5 `await_task(id) -> TaskOutcome` per design D5 (generation check, already-done fast path, second-consume `fatalError`, else register waiter + suspend)
-- [ ] 6.6 The loop per design D6: poll timers → wake waiters; pop ready or sleep/abort; `resume`; on `Suspended` leave parked (re-enqueue only `Yielded`); on `Finished` set outcome, wake waiter, run reclamation
-- [ ] 6.7 Unresolvable-wait detector: empty ready queue + empty timer heap + a still-`Suspended` task ⇒ abort with a diagnostic naming the condition
-- [ ] 6.8 `run_until_root_done()`: drive the loop until the root task and all live tasks are terminal
-- [ ] 6.9 Reclamation (design D7): free a slot when terminal + result consumed (or no waiter) + `cleanup_state == Done` + not current
-- [ ] 6.10 Tests: two tasks interleave at `suspend_current`; FIFO fairness across 5 ready tasks; `await` produces the awaited `usize` exactly once and a second `await` aborts; idle executor wakes at the nearest deadline; unresolvable-wait aborts instead of hanging; a spawned task runs before its parent's next suspension point
+- [x] 6.1 `Executor { registry: TaskRegistry, ready: VecDeque<TaskId>, timers: TimerService, root: Option<TaskId> }`
+- [x] 6.2 Thread-locals `EXEC: Cell<*mut Executor>` (raw pointer, set only for `run()`) and `CURRENT_TASK: Cell<Option<TaskId>>`; `with_exec` creates a short-lived `&mut` that never spans a `resume` — the reentrancy contract in the module doc
+- [x] 6.3 `spawn(body) -> TaskId` (free fn, uses `EXEC`): insert a `TaskContext` + slot, `ready.push_back` — not resumed until the loop picks it up
+- [x] 6.4 `suspend_current(reason)` / `yield_now()` / `sleep(delay_nanos)`: record the `WaitReason` on the current slot, then `context::suspend_current()`; `sleep` arms a timer keyed by the task id first
+- [x] 6.5 `await_task(id) -> usize` per design D5: dead-id ⇒ `fatal`, terminal + unconsumed ⇒ fast path, second consume / second waiter ⇒ `fatal`, else register waiter + suspend; a `Panicked` outcome re-unwinds into the awaiter
+- [x] 6.6 The loop: `wake_expired_timers` → pop ready (else all-terminal ⇒ break, or sleep to the nearest deadline); `run_one_turn` takes the context out, resumes under `catch_unwind`, puts it back; on `Suspended` re-enqueue only `Yielded`; on `Finished`/panic → `complete` (outcome, wake waiter, reclaim)
+- [x] 6.7 Unresolvable wait: empty ready queue + not all terminal + no armed timer ⇒ `panic!` with a diagnostic (unwinds out of the executor ⇒ nonzero exit, not a hang)
+- [x] 6.8 `run_with_root(body) -> TaskOutcome`: spawn the root, run the loop until every live task is terminal, return the root's outcome
+- [x] 6.9 `reclaim()` (design D7): free a slot when terminal + `result_consumed` + `cleanup_state == Done` + not root + not current. Never-awaited tasks linger until the executor drops (detach flag arrives with the language surface)
+- [x] 6.10 Tests (14 total): root returns a value; two children round-robin at `yield_now` ("ababab"); `await` produces the child value; already-finished fast path; FIFO across 5 ready tasks; the program waits for a background child after the root returns; a child panic surfaces when awaited; `sleep` wakes via the timer while a sibling runs; an idle executor with only a sleeping task finishes; an unresolvable wait aborts; consumed children are reclaimed
 
 ## 7. `collector.rs`: per-task root chains
 

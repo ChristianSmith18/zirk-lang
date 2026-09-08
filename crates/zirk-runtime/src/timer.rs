@@ -18,6 +18,19 @@ use std::time::{Duration as StdDuration, Instant};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimerId(u64);
 
+impl TimerId {
+    /// The raw value, for stashing in a `WaitReason` (so a cancelled sleep can
+    /// disarm its timer later).
+    pub fn to_bits(self) -> u64 {
+        self.0
+    }
+
+    /// Inverse of [`to_bits`](Self::to_bits).
+    pub fn from_bits(bits: u64) -> Self {
+        TimerId(bits)
+    }
+}
+
 /// Raised when a caller asks to wait for a negative duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NegativeDuration;

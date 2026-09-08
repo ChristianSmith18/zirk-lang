@@ -116,8 +116,11 @@ pub enum CleanupState {
 /// every task run on one OS thread (`ADR-017`).
 pub struct TaskControlBlock {
     pub state: TaskState,
-    /// The stackful coroutine; owns the task's 128 KiB stack.
-    pub context: TaskContext,
+    /// The stackful coroutine; owns the task's 128 KiB stack. `None` only for
+    /// the instant the executor loop has it taken out to `resume()` it — this
+    /// is what lets `suspend_current` / `await` reach back into the executor
+    /// (through its raw-pointer thread-local) without a reentrant borrow.
+    pub context: Option<TaskContext>,
     /// `Some` once the body has finished; taken exactly once by `await`.
     pub outcome: Option<TaskOutcome>,
     /// Set by `await` when it takes `outcome`; a second `await` is a fatal
@@ -142,7 +145,7 @@ impl TaskControlBlock {
     fn new(context: TaskContext) -> Self {
         TaskControlBlock {
             state: TaskState::Ready,
-            context,
+            context: Some(context),
             outcome: None,
             result_consumed: false,
             waiter: None,

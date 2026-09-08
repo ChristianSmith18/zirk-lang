@@ -40,6 +40,10 @@ mod context;
 mod decimal;
 mod duration;
 mod exceptions;
+// `executor` is wired into the entry lifecycle by group 8 and exposed over the
+// C ABI by group 9 of `fase-5-executor-core`; until then its surface looks dead.
+#[allow(dead_code)]
+mod executor;
 mod failure;
 mod io;
 mod journal;

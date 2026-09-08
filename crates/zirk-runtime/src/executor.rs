@@ -1,0 +1,536 @@
+//! The single-threaded cooperative executor: one loop, a first-in-first-out
+//! ready queue, and the timer service, driving stackful-coroutine tasks.
+//!
+//! No task is ever preempted — a task yields only at a safe point (here, an
+//! explicit [`yield_now`], [`await_task`], or a future channel / timer wait).
+//! The loop, the task control blocks, and the timer heap all live in one
+//! [`Executor`] owned by one OS thread (`ADR-017`).
+//!
+//! # Reentrancy
+//!
+//! [`spawn`], [`yield_now`], [`await_task`] and [`suspend_current`] are called
+//! from inside a running task body and must reach back into the `Executor` that
+//! is driving that body. They do so through a raw-pointer thread-local
+//! ([`EXEC`]). Soundness rests on two facts: execution is single-threaded, and
+//! the loop never holds a `&mut Executor` across `TaskContext::resume` — it
+//! takes the `TaskContext` out of its slot first (design D1/D6). So the only
+//! `&mut Executor` alive while a body runs is the one that body creates.
+//!
+//! Design: `openspec/changes/fase-5-executor-core/design.md` D3, D5–D8.
+
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
+use std::time::Instant;
+
+use crate::context::{self, TaskContext};
+use crate::failure::fatal;
+use crate::task::{CleanupState, TaskId, TaskOutcome, TaskRegistry, TaskState, WaitReason};
+
+thread_local! {
+    /// The executor currently running on this thread, or null. Set for the
+    /// duration of [`Executor::run`] only.
+    static EXEC: Cell<*mut Executor> = const { Cell::new(std::ptr::null_mut()) };
+    /// The task whose body is executing right now, if any.
+    static CURRENT_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
+}
+
+/// Runs `f` with a fresh, short-lived `&mut Executor`. The closure must not
+/// resume or suspend a task, so no second `&mut Executor` is ever live.
+fn with_exec<R>(f: impl FnOnce(&mut Executor) -> R) -> R {
+    let ptr = EXEC.get();
+    assert!(!ptr.is_null(), "no executor is running on this thread");
+    // SAFETY: single-threaded; `f` runs to completion without re-entering the
+    // executor (it never calls `resume`), so this is the only live `&mut`.
+    f(unsafe { &mut *ptr })
+}
+
+/// The cooperative executor.
+pub struct Executor {
+    registry: TaskRegistry,
+    ready: VecDeque<TaskId>,
+    timers: crate::timer::TimerService,
+    root: Option<TaskId>,
+}
+
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Executor {
+    pub fn new() -> Self {
+        Executor {
+            registry: TaskRegistry::new(),
+            ready: VecDeque::new(),
+            timers: crate::timer::TimerService::new(),
+            root: None,
+        }
+    }
+
+    /// Spawns `body` as the root task, runs the loop until the root and every
+    /// descendant is terminal, and returns the root's outcome.
+    pub fn run_with_root<F>(mut self, body: F) -> TaskOutcome
+    where
+        F: FnOnce() -> usize + Send + 'static,
+    {
+        let root = self.registry.insert(TaskContext::new(
+            crate::context::DEFAULT_TASK_STACK_BYTES,
+            move |_suspender| body(),
+        ));
+        self.root = Some(root);
+        self.ready.push_back(root);
+        self.run();
+
+        let mut root_tcb = self
+            .registry
+            .remove(root)
+            .expect("the root task must still be registered at shutdown");
+        root_tcb
+            .outcome
+            .take()
+            .expect("a terminal task always has an outcome")
+    }
+
+    /// The scheduling loop.
+    fn run(&mut self) {
+        let previous = EXEC.replace(self as *mut Executor);
+        // Restore on every exit path, including an unwinding task panic.
+        struct Restore(*mut Executor);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                EXEC.set(self.0);
+            }
+        }
+        let _restore = Restore(previous);
+
+        loop {
+            self.wake_expired_timers();
+
+            let Some(task) = self.ready.pop_front() else {
+                if self.all_tasks_terminal() {
+                    break;
+                }
+                match self.timers.peek_deadline() {
+                    Some(deadline) => {
+                        let now = Instant::now();
+                        if deadline > now {
+                            std::thread::sleep(deadline - now);
+                        }
+                        continue;
+                    }
+                    // A real program bug — like a deadlock — rather than a
+                    // fatal-error check: report it and unwind out of the
+                    // executor so the process exits nonzero instead of hanging.
+                    None => panic!(
+                        "executor: unresolvable wait — every remaining task is blocked \
+                         and no timer is armed"
+                    ),
+                }
+            };
+
+            self.run_one_turn(task);
+        }
+    }
+
+    /// Resume `task` once and act on the result.
+    fn run_one_turn(&mut self, task: TaskId) {
+        let mut context = {
+            let tcb = self
+                .registry
+                .get_mut(task)
+                .expect("a task on the ready queue must be registered");
+            tcb.state = TaskState::Running;
+            tcb.wait = WaitReason::None;
+            tcb.context
+                .take()
+                .expect("a ready task always holds its context")
+        };
+
+        CURRENT_TASK.set(Some(task));
+        // No `&mut Executor` (or `&mut self`) is held across this call — see the
+        // module note. `catch_unwind` turns a task panic into a `Failed` state.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| context.resume()));
+        CURRENT_TASK.set(None);
+
+        let finished = self
+            .registry
+            .get_mut(task)
+            .expect("the task cannot vanish while its context is out");
+        finished.context = Some(context);
+
+        match outcome {
+            Ok(crate::context::Run::Suspended) => {
+                let tcb = self.registry.get_mut(task).unwrap();
+                tcb.state = TaskState::Suspended;
+                if tcb.wait == WaitReason::Yielded {
+                    tcb.wait = WaitReason::None;
+                    tcb.state = TaskState::Ready;
+                    self.ready.push_back(task);
+                }
+            }
+            Ok(crate::context::Run::Finished(value)) => {
+                self.complete(task, TaskOutcome::Value(value), TaskState::Completed);
+            }
+            Err(payload) => {
+                self.complete(task, TaskOutcome::Panicked(payload), TaskState::Failed);
+            }
+        }
+    }
+
+    /// A task reached a terminal state: record its outcome, wake its waiter,
+    /// try to reclaim.
+    fn complete(&mut self, task: TaskId, outcome: TaskOutcome, state: TaskState) {
+        let waiter = {
+            let tcb = self.registry.get_mut(task).unwrap();
+            tcb.outcome = Some(outcome);
+            tcb.state = state;
+            tcb.waiter.take()
+        };
+        if let Some(waiter) = waiter {
+            self.make_ready(waiter);
+        }
+        self.reclaim();
+    }
+
+    fn wake_expired_timers(&mut self) {
+        for (_timer, payload) in self.timers.poll_expired(Instant::now()) {
+            let waiter = TaskId::from_bits(payload);
+            self.make_ready(waiter);
+        }
+    }
+
+    /// Move a suspended task back to the ready queue (no-op if it is gone or
+    /// already ready / terminal).
+    fn make_ready(&mut self, task: TaskId) {
+        if let Some(tcb) = self.registry.get_mut(task)
+            && tcb.state == TaskState::Suspended
+        {
+            tcb.wait = WaitReason::None;
+            tcb.state = TaskState::Ready;
+            self.ready.push_back(task);
+        }
+    }
+
+    fn all_tasks_terminal(&self) -> bool {
+        self.registry
+            .live_ids()
+            .all(|id| self.registry.get(id).unwrap().state.is_terminal())
+    }
+
+    /// Free the slot (and stack) of every terminal task whose result has been
+    /// consumed. A terminal task with an un-woken waiter, or a completed task
+    /// nobody has awaited yet, stays until it is consumed (or until the
+    /// executor is dropped). Full detach / structured cleanup arrives with the
+    /// language surface — `cleanup_state` is already the gate.
+    fn reclaim(&mut self) {
+        let current = CURRENT_TASK.get();
+        let dead: Vec<TaskId> = self
+            .registry
+            .live_ids()
+            .filter(|&id| {
+                if Some(id) == self.root || Some(id) == current {
+                    return false;
+                }
+                let tcb = self.registry.get(id).unwrap();
+                tcb.state.is_terminal()
+                    && tcb.result_consumed
+                    && tcb.cleanup_state == CleanupState::Done
+            })
+            .collect();
+        for id in dead {
+            self.registry.remove(id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Called from inside a running task body
+// ---------------------------------------------------------------------------
+
+/// Spawns `body` as a new task in the running executor. It starts as ready and
+/// runs no later than the current task's next safe point.
+pub fn spawn<F>(body: F) -> TaskId
+where
+    F: FnOnce() -> usize + Send + 'static,
+{
+    with_exec(|exec| {
+        let id = exec.registry.insert(TaskContext::new(
+            crate::context::DEFAULT_TASK_STACK_BYTES,
+            move |_suspender| body(),
+        ));
+        exec.ready.push_back(id);
+        id
+    })
+}
+
+/// Yields the current task: it returns to the back of the ready queue and the
+/// executor runs everyone else first.
+pub fn yield_now() {
+    suspend_current(WaitReason::Yielded);
+}
+
+/// Suspends the current task until at least `delay_nanos` from now, letting the
+/// executor run other tasks meanwhile. A negative delay is a fatal error.
+/// (This is the timer safe point `await ... timeout` and `select { after ... }`
+/// will build on.)
+pub fn sleep(delay_nanos: i64) {
+    let me = CURRENT_TASK.get().expect("sleep outside a task body");
+    let timer = with_exec(|exec| match exec.timers.arm(delay_nanos, me.to_bits()) {
+        Ok(id) => id,
+        Err(_) => fatal("sleep with a negative duration"),
+    });
+    suspend_current(WaitReason::Timer(timer.to_bits()));
+}
+
+/// Records `reason` on the current task and suspends it. The executor decides
+/// (from `reason`) whether to re-enqueue it or leave it parked.
+pub fn suspend_current(reason: WaitReason) {
+    let me = CURRENT_TASK
+        .get()
+        .expect("suspend_current outside a task body");
+    with_exec(|exec| {
+        let tcb = exec.registry.get_mut(me).expect("the current task");
+        tcb.wait = reason;
+        tcb.state = TaskState::Suspended;
+    });
+    // Control leaves the task here; no executor borrow is held.
+    context::suspend_current();
+}
+
+/// Consumes the result of `target` exactly once, blocking the current task
+/// until `target` is terminal. A second `await` of the same task, or an
+/// `await` of a task that is already gone, is a fatal error.
+pub fn await_task(target: TaskId) -> usize {
+    let me = CURRENT_TASK.get().expect("await_task outside a task body");
+    assert_ne!(Some(target), Some(me), "a task cannot await itself");
+
+    let ready_now = with_exec(|exec| match exec.registry.get_mut(target) {
+        None => fatal("await of a task that no longer exists"),
+        Some(tcb) if tcb.state.is_terminal() => {
+            if tcb.result_consumed {
+                fatal("task result awaited more than once");
+            }
+            true
+        }
+        Some(tcb) => {
+            if tcb.waiter.is_some() {
+                fatal("task result awaited more than once");
+            }
+            tcb.waiter = Some(me);
+            false
+        }
+    });
+
+    if !ready_now {
+        suspend_current(WaitReason::AwaitingTask(target));
+    }
+
+    with_exec(|exec| {
+        let tcb = exec
+            .registry
+            .get_mut(target)
+            .expect("an awaited task is kept alive until its result is taken");
+        tcb.result_consumed = true;
+        match tcb
+            .outcome
+            .take()
+            .expect("a terminal task always has an outcome")
+        {
+            TaskOutcome::Value(value) => value,
+            TaskOutcome::Panicked(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
+/// Whether `target` has reached a terminal state. Safe to call on a stale id
+/// (returns `false`).
+pub fn is_done(target: TaskId) -> bool {
+    with_exec(|exec| {
+        exec.registry
+            .get(target)
+            .is_some_and(|tcb| tcb.state.is_terminal())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn run<F: FnOnce() -> usize + Send + 'static>(body: F) -> usize {
+        match Executor::new().run_with_root(body) {
+            TaskOutcome::Value(v) => v,
+            TaskOutcome::Panicked(p) => std::panic::resume_unwind(p),
+        }
+    }
+
+    #[test]
+    fn a_root_with_no_children_runs_and_returns() {
+        assert_eq!(run(|| 42), 42);
+    }
+
+    #[test]
+    fn two_children_interleave_at_yield() {
+        // Each child appends its id to a shared log on every turn. FIFO
+        // scheduling gives a strict round-robin: a,b,a,b,...
+        let log = Arc::new(std::sync::Mutex::new(String::new()));
+        let l = Arc::clone(&log);
+        run(move || {
+            for (name, turns) in [('a', 3), ('b', 3)] {
+                let l = Arc::clone(&l);
+                spawn(move || {
+                    for _ in 0..turns {
+                        l.lock().unwrap().push(name);
+                        yield_now();
+                    }
+                    0
+                });
+            }
+            0
+        });
+        assert_eq!(*log.lock().unwrap(), "ababab");
+    }
+
+    #[test]
+    fn await_produces_the_child_value_once() {
+        let got = run(|| {
+            let child = spawn(|| 0xBEEF);
+            await_task(child)
+        });
+        assert_eq!(got, 0xBEEF);
+    }
+
+    #[test]
+    fn await_of_an_already_finished_child_takes_the_fast_path() {
+        let got = run(|| {
+            let child = spawn(|| 7);
+            yield_now(); // let the child finish first
+            assert!(is_done(child));
+            await_task(child)
+        });
+        assert_eq!(got, 7);
+    }
+
+    #[test]
+    fn ready_tasks_are_served_first_in_first_out() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let o = Arc::clone(&order);
+        run(move || {
+            for id in 0..5u32 {
+                let o = Arc::clone(&o);
+                spawn(move || {
+                    o.lock().unwrap().push(id);
+                    0
+                });
+            }
+            0
+        });
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn program_waits_for_a_background_child_after_root_returns() {
+        let child_finished = Arc::new(AtomicUsize::new(0));
+        let cf = Arc::clone(&child_finished);
+        run(move || {
+            let cf = Arc::clone(&cf);
+            spawn(move || {
+                for _ in 0..10 {
+                    yield_now();
+                }
+                cf.store(1, Ordering::SeqCst);
+                0
+            });
+            0 // root returns immediately, child still running
+        });
+        assert_eq!(child_finished.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_child_panic_surfaces_when_awaited() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let child = spawn(|| panic!("boom"));
+                await_task(child)
+            })
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn sleep_wakes_the_task_via_the_timer_and_others_run_meanwhile() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let p = Arc::clone(&progress);
+        let slept = run(move || {
+            let p2 = Arc::clone(&p);
+            // A busy sibling that keeps yielding while the root sleeps.
+            spawn(move || {
+                for _ in 0..20 {
+                    p2.fetch_add(1, Ordering::SeqCst);
+                    yield_now();
+                }
+                0
+            });
+            let before = Instant::now();
+            sleep(3_000_000); // 3 ms
+            assert!(before.elapsed().as_millis() >= 3);
+            1
+        });
+        assert_eq!(slept, 1);
+        assert!(
+            progress.load(Ordering::SeqCst) > 0,
+            "the sibling should have run while the root slept"
+        );
+    }
+
+    #[test]
+    fn idle_executor_with_only_a_sleeping_task_still_finishes() {
+        // No sibling: the loop's ready queue empties, it sleeps until the
+        // timer deadline, wakes the task, and the task completes.
+        assert_eq!(
+            run(|| {
+                sleep(2_000_000);
+                9
+            }),
+            9
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_wait_aborts_instead_of_hanging() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                // Park forever awaiting a sibling that never finishes because
+                // it, too, parks forever. No timer is armed.
+                let a = spawn(|| {
+                    suspend_current(WaitReason::AwaitingTask(TaskId::from_bits(u64::MAX)));
+                    0
+                });
+                await_task(a)
+            })
+        });
+        assert!(outcome.is_err(), "the executor must abort, not hang");
+    }
+
+    #[test]
+    fn an_awaited_child_slot_is_reclaimed_after_consumption() {
+        // Spawn many children one at a time, await each, and rely on
+        // reclamation keeping the live-task count from growing without bound.
+        run(|| {
+            for _ in 0..50 {
+                let c = spawn(|| 1);
+                assert_eq!(await_task(c), 1);
+            }
+            with_exec(|e| {
+                assert!(
+                    e.registry.len() <= 2,
+                    "consumed children were not reclaimed"
+                )
+            });
+            0
+        });
+    }
+}
