@@ -81,7 +81,15 @@ impl Executor {
         ));
         self.root = Some(root);
         self.ready.push_back(root);
-        self.run();
+
+        // Publish `self` and drive the loop through `with_exec` only. `self` is
+        // not touched again until `drive` returns, so no `&mut Executor` is ever
+        // live at the same time as one created inside a task body.
+        let previous = EXEC.replace(&mut self as *mut Executor);
+        crate::collector::set_task_root_walker(Some(walk_all_task_roots));
+        let restore = Restore(previous);
+        drive();
+        drop(restore);
 
         let mut root_tcb = self
             .registry
@@ -91,92 +99,6 @@ impl Executor {
             .outcome
             .take()
             .expect("a terminal task always has an outcome")
-    }
-
-    /// The scheduling loop.
-    fn run(&mut self) {
-        let previous = EXEC.replace(self as *mut Executor);
-        // Restore on every exit path, including an unwinding task panic.
-        struct Restore(*mut Executor);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                EXEC.set(self.0);
-            }
-        }
-        let _restore = Restore(previous);
-
-        loop {
-            self.wake_expired_timers();
-
-            let Some(task) = self.ready.pop_front() else {
-                if self.all_tasks_terminal() {
-                    break;
-                }
-                match self.timers.peek_deadline() {
-                    Some(deadline) => {
-                        let now = Instant::now();
-                        if deadline > now {
-                            std::thread::sleep(deadline - now);
-                        }
-                        continue;
-                    }
-                    // A real program bug — like a deadlock — rather than a
-                    // fatal-error check: report it and unwind out of the
-                    // executor so the process exits nonzero instead of hanging.
-                    None => panic!(
-                        "executor: unresolvable wait — every remaining task is blocked \
-                         and no timer is armed"
-                    ),
-                }
-            };
-
-            self.run_one_turn(task);
-        }
-    }
-
-    /// Resume `task` once and act on the result.
-    fn run_one_turn(&mut self, task: TaskId) {
-        let mut context = {
-            let tcb = self
-                .registry
-                .get_mut(task)
-                .expect("a task on the ready queue must be registered");
-            tcb.state = TaskState::Running;
-            tcb.wait = WaitReason::None;
-            tcb.context
-                .take()
-                .expect("a ready task always holds its context")
-        };
-
-        CURRENT_TASK.set(Some(task));
-        // No `&mut Executor` (or `&mut self`) is held across this call — see the
-        // module note. `catch_unwind` turns a task panic into a `Failed` state.
-        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| context.resume()));
-        CURRENT_TASK.set(None);
-
-        let finished = self
-            .registry
-            .get_mut(task)
-            .expect("the task cannot vanish while its context is out");
-        finished.context = Some(context);
-
-        match outcome {
-            Ok(crate::context::Run::Suspended) => {
-                let tcb = self.registry.get_mut(task).unwrap();
-                tcb.state = TaskState::Suspended;
-                if tcb.wait == WaitReason::Yielded {
-                    tcb.wait = WaitReason::None;
-                    tcb.state = TaskState::Ready;
-                    self.ready.push_back(task);
-                }
-            }
-            Ok(crate::context::Run::Finished(value)) => {
-                self.complete(task, TaskOutcome::Value(value), TaskState::Completed);
-            }
-            Err(payload) => {
-                self.complete(task, TaskOutcome::Panicked(payload), TaskState::Failed);
-            }
-        }
     }
 
     /// A task reached a terminal state: record its outcome, wake its waiter,
@@ -243,6 +165,136 @@ impl Executor {
             self.registry.remove(id);
         }
     }
+}
+
+/// Restores the collector hooks (and the previous `EXEC`) on every exit path
+/// of a run, including an unwinding task panic.
+struct Restore(*mut Executor);
+impl Drop for Restore {
+    fn drop(&mut self) {
+        EXEC.set(self.0);
+        crate::collector::set_active_frames(std::ptr::null_mut());
+        if self.0.is_null() {
+            crate::collector::set_task_root_walker(None);
+        }
+    }
+}
+
+/// The scheduling loop. Every executor access goes through a short-lived
+/// `with_exec`; `run_one_turn` is the only thing that hands control to a task,
+/// and it holds no executor borrow while it does.
+fn drive() {
+    loop {
+        let next = with_exec(|exec| {
+            exec.wake_expired_timers();
+            match exec.ready.pop_front() {
+                Some(task) => NextStep::Run(task),
+                None if exec.all_tasks_terminal() => NextStep::Done,
+                None => match exec.timers.peek_deadline() {
+                    Some(deadline) => NextStep::SleepUntil(deadline),
+                    None => NextStep::Unresolvable,
+                },
+            }
+        });
+        match next {
+            NextStep::Run(task) => run_one_turn(task),
+            NextStep::Done => break,
+            NextStep::SleepUntil(deadline) => {
+                let now = Instant::now();
+                if deadline > now {
+                    std::thread::sleep(deadline - now);
+                }
+            }
+            // A real program bug (a deadlock), not a fatal-error check: unwind
+            // out of the executor so the process exits nonzero, never hangs.
+            NextStep::Unresolvable => panic!(
+                "executor: unresolvable wait — every remaining task is blocked \
+                 and no timer is armed"
+            ),
+        }
+    }
+}
+
+enum NextStep {
+    Run(TaskId),
+    Done,
+    SleepUntil(Instant),
+    Unresolvable,
+}
+
+/// Resume `task` once and act on the result. No executor borrow is held across
+/// `TaskContext::resume`.
+fn run_one_turn(task: TaskId) {
+    let mut context = with_exec(|exec| {
+        let tcb = exec
+            .registry
+            .get_mut(task)
+            .expect("a task on the ready queue must be registered");
+        tcb.state = TaskState::Running;
+        tcb.wait = WaitReason::None;
+        // Route push/pop and any collection triggered inside this body at the
+        // task's own root chain — a `Vec` in a boxed, address-stable control
+        // block, so the pointer stays valid across the resume.
+        let roots: *mut Vec<crate::collector::Frame> = &mut tcb.roots;
+        crate::collector::set_active_frames(roots);
+        tcb.context
+            .take()
+            .expect("a ready task always holds its context")
+    });
+
+    CURRENT_TASK.set(Some(task));
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| context.resume()));
+    CURRENT_TASK.set(None);
+    crate::collector::set_active_frames(std::ptr::null_mut());
+
+    with_exec(move |exec| {
+        exec.registry
+            .get_mut(task)
+            .expect("the task cannot vanish while its context is out")
+            .context = Some(context);
+
+        match outcome {
+            Ok(crate::context::Run::Suspended) => {
+                let tcb = exec.registry.get_mut(task).unwrap();
+                tcb.state = TaskState::Suspended;
+                if tcb.wait == WaitReason::Yielded {
+                    tcb.wait = WaitReason::None;
+                    tcb.state = TaskState::Ready;
+                    exec.ready.push_back(task);
+                }
+            }
+            Ok(crate::context::Run::Finished(value)) => {
+                exec.complete(task, TaskOutcome::Value(value), TaskState::Completed);
+            }
+            Err(payload) => {
+                exec.complete(task, TaskOutcome::Panicked(payload), TaskState::Failed);
+            }
+        }
+    });
+}
+
+/// Visits the roots in every live task's frame chain — registered with the
+/// collector for the duration of a run (design D4). Marking is idempotent, so
+/// visiting the running task's chain here as well as through `ACTIVE_FRAMES` is
+/// harmless.
+fn walk_all_task_roots(mark: &mut dyn FnMut(*mut std::ffi::c_void)) {
+    with_exec(|exec| {
+        for id in exec.registry.live_ids() {
+            let tcb = exec.registry.get(id).expect("a live id resolves");
+            for frame in &tcb.roots {
+                for index in 0..frame.count {
+                    // SAFETY: same contract as `zirk_rt_push_frame` — each entry
+                    // is the address of a reference-typed slot outliving the
+                    // frame.
+                    let root_addr = unsafe { *frame.roots.add(index) };
+                    if !root_addr.is_null() {
+                        let object = unsafe { *(root_addr as *mut *mut std::ffi::c_void) };
+                        mark(object);
+                    }
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

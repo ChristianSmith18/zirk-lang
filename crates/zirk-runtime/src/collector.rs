@@ -139,6 +139,11 @@ unsafe fn set_weak_target(object: *mut c_void, value: *mut c_void) {
     unsafe { *(header_word(object, WEAK_TARGET_WORD) as *mut *mut c_void) = value };
 }
 
+/// A function that visits every garbage-collection root in every live task's
+/// frame chain, calling the supplied marker on each candidate object. The
+/// executor registers one for the duration of a run (design D4).
+pub(crate) type TaskRootWalker = fn(&mut dyn FnMut(*mut c_void));
+
 pub(crate) struct Frame {
     /// Address of an array of root addresses (design D2): element `i` is
     /// the address of a reference-typed slot (or one of its own
@@ -150,13 +155,28 @@ pub(crate) struct Frame {
 }
 
 thread_local! {
-    /// The pushed-frame stack (design D2), one entry per live function
-    /// activation that declared at least one collector-managed local — a
-    /// plain `Vec` rather than an intrusive list threaded through the
-    /// native call stack: `push_frame`/`pop_frame` already happen in
-    /// perfect call/return (LIFO) order, so a `Vec` gives the identical
-    /// stack discipline design D2 asks for with far less unsafe plumbing.
-    static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    /// The **bootstrap** pushed-frame stack: the root chain used before task 0
+    /// exists (a compiled `main` prologue can allocate before the executor has
+    /// finished wiring itself) and whenever no task is running. Once the
+    /// executor is driving a task, [`ACTIVE_FRAMES`] points at *that task's*
+    /// chain instead (`fase-5-executor-core` design D4).
+    ///
+    /// A plain `Vec` rather than an intrusive list: `push_frame`/`pop_frame`
+    /// already happen in perfect call/return (LIFO) order.
+    static BOOTSTRAP_FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+
+    /// The running task's frame chain, or null to fall back to
+    /// [`BOOTSTRAP_FRAMES`]. Set by the executor around every
+    /// `TaskContext::resume` to a `*mut Vec<Frame>` living inside that task's
+    /// (boxed, address-stable) control block.
+    static ACTIVE_FRAMES: Cell<*mut Vec<Frame>> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// When the executor is running, a function that visits the roots of
+    /// *every live task's* frame chain (design D4). `mark` calls it in addition
+    /// to the bootstrap chain, exactly as it already calls
+    /// [`crate::clone::mark_clone_roots`].
+    static TASK_ROOT_WALKER: Cell<Option<TaskRootWalker>> =
+        const { Cell::new(None) };
 
     /// Head of the intrusive all-allocations list `next` threads through
     /// (design D1/D6) — every object ever handed out by
@@ -287,8 +307,8 @@ pub(crate) unsafe fn gc_field_offsets<'a>(descriptor: *const c_void) -> &'a [usi
 /// returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_push_frame(roots: *mut *mut c_void, count: i64) {
-    FRAMES.with(|frames| {
-        frames.borrow_mut().push(Frame {
+    with_active_frames(|frames| {
+        frames.push(Frame {
             roots,
             count: count as usize,
         });
@@ -300,9 +320,35 @@ pub unsafe extern "C" fn zirk_rt_push_frame(roots: *mut *mut c_void, count: i64)
 /// (design D2).
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_pop_frame() {
-    FRAMES.with(|frames| {
-        frames.borrow_mut().pop();
+    with_active_frames(|frames| {
+        frames.pop();
     });
+}
+
+/// Runs `f` on whichever frame chain is active on this thread: the running
+/// task's ([`ACTIVE_FRAMES`]), or [`BOOTSTRAP_FRAMES`] when no task is.
+fn with_active_frames<R>(f: impl FnOnce(&mut Vec<Frame>) -> R) -> R {
+    let active = ACTIVE_FRAMES.get();
+    if active.is_null() {
+        BOOTSTRAP_FRAMES.with(|frames| f(&mut frames.borrow_mut()))
+    } else {
+        // SAFETY: the executor points `ACTIVE_FRAMES` at a `Vec<Frame>` inside a
+        // boxed, address-stable `TaskControlBlock`, and clears it before that
+        // box can be dropped. Single-threaded, so there is no concurrent access.
+        f(unsafe { &mut *active })
+    }
+}
+
+/// The executor calls this around each `TaskContext::resume`: a `*mut Vec<Frame>`
+/// into the running task's control block while it runs, null afterwards.
+pub(crate) fn set_active_frames(frames: *mut Vec<Frame>) {
+    ACTIVE_FRAMES.set(frames);
+}
+
+/// The executor registers a walker over every live task's frame chain for the
+/// duration of its run, and clears it (null) on exit.
+pub(crate) fn set_task_root_walker(walker: Option<TaskRootWalker>) {
+    TASK_ROOT_WALKER.set(walker);
 }
 
 /// Runs a collection if serving an allocation of `incoming` bytes would
@@ -364,18 +410,30 @@ fn collect() {
 }
 
 fn mark() {
-    FRAMES.with(|frames| {
-        for frame in frames.borrow().iter() {
-            for index in 0..frame.count {
-                let root_addr = unsafe { *frame.roots.add(index) };
-                if root_addr.is_null() {
-                    continue;
-                }
-                let object = unsafe { *(root_addr as *mut *mut c_void) };
-                mark_object(object);
+    let mark_frame = |frame: &Frame| {
+        for index in 0..frame.count {
+            let root_addr = unsafe { *frame.roots.add(index) };
+            if root_addr.is_null() {
+                continue;
             }
+            let object = unsafe { *(root_addr as *mut *mut c_void) };
+            mark_object(object);
+        }
+    };
+
+    // The bootstrap chain (roots held before task 0, or with no task running).
+    BOOTSTRAP_FRAMES.with(|frames| {
+        for frame in frames.borrow().iter() {
+            mark_frame(frame);
         }
     });
+
+    // Every live task's chain (design D4) — including the one running right now
+    // (whose chain `ACTIVE_FRAMES` also points at); marking is idempotent, so
+    // visiting it twice is harmless.
+    if let Some(walker) = TASK_ROOT_WALKER.get() {
+        walker(&mut mark_object);
+    }
 
     // `zirk-object-memory`'s own "Deep-clone traversal state is
     // collector-safe for its whole duration" requirement (roadmap Phase
@@ -531,7 +589,8 @@ pub(crate) mod test_support {
     /// never touch (they hold no descriptor `crate::collector::mark_object`
     /// would ever recognize as a WeakCell sentinel).
     pub(crate) fn reset_state_for_tests() {
-        FRAMES.with(|f| f.borrow_mut().clear());
+        BOOTSTRAP_FRAMES.with(|f| f.borrow_mut().clear());
+        ACTIVE_FRAMES.set(std::ptr::null_mut());
         sweep();
         ALL_OBJECTS.with(|c| c.set(std::ptr::null_mut()));
         LIVE_BYTES.with(|c| c.set(0));
@@ -602,7 +661,8 @@ mod tests {
         let guard = TEST_GUARD
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        FRAMES.with(|f| f.borrow_mut().clear());
+        BOOTSTRAP_FRAMES.with(|f| f.borrow_mut().clear());
+        ACTIVE_FRAMES.set(std::ptr::null_mut());
         // Sweeps away anything a previous test in this thread left behind,
         // without asserting on it — tests run single-threaded within one
         // process but share this thread's statics across `#[test]`s.
@@ -662,6 +722,67 @@ mod tests {
             0,
             "once its frame pops, an unrooted object is reclaimed on the next collection"
         );
+    }
+
+    #[test]
+    fn a_suspended_tasks_roots_survive_a_collection_from_another_task() {
+        // The highest-severity case for `fase-5-executor-core` group 7: a
+        // reference held only by a *suspended* task, in a frame pushed while it
+        // ran, must not be swept by a collection another task triggers.
+        let _guard = reset_state();
+        use crate::executor;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let checked = Arc::new(AtomicUsize::new(0));
+        let done = Arc::clone(&checked);
+
+        let object_size = executor::Executor::new().run_with_root(move || {
+            // A sibling that forces a collection while the root is parked.
+            executor::spawn(|| {
+                collect();
+                0
+            });
+
+            let descriptor = descriptor_with_fields(&[]);
+            let object = unsafe { synthetic_object(descriptor.as_ptr() as *const c_void, 0) };
+            let size = unsafe { get_size(object) };
+
+            // Root the object through a pushed frame — routed to *this task's*
+            // chain by the executor.
+            let mut root_slot: *mut c_void = object;
+            let mut roots: [*mut c_void; 1] = [(&mut root_slot as *mut *mut c_void) as *mut c_void];
+            unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
+
+            executor::yield_now(); // the sibling runs `collect()` here
+
+            assert_eq!(
+                LIVE_BYTES.with(Cell::get),
+                size,
+                "the suspended task's rooted object was swept"
+            );
+            // Header word 0 (the descriptor) is intact -> not overwritten by a
+            // reuse of freed memory.
+            assert_eq!(
+                unsafe { *(root_slot as *const *const c_void) },
+                descriptor.as_ptr() as *const c_void,
+                "the object header was clobbered"
+            );
+            zirk_rt_pop_frame();
+            done.store(1, Ordering::SeqCst);
+            size
+        });
+
+        let object_size = match object_size {
+            crate::task::TaskOutcome::Value(v) => v,
+            crate::task::TaskOutcome::Panicked(p) => std::panic::resume_unwind(p),
+        };
+        assert!(object_size > 0);
+        assert_eq!(checked.load(Ordering::SeqCst), 1);
+
+        // Frame popped, object now unrooted: the next collection reclaims it.
+        collect();
+        assert_eq!(LIVE_BYTES.with(Cell::get), 0);
     }
 
     #[test]

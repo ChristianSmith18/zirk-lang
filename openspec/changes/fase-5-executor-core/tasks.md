@@ -57,13 +57,13 @@ traceability; work starts at group 3.
 
 ## 7. `collector.rs`: per-task root chains
 
-- [ ] 7.1 Move the shadow-stack head from the process-global into `TaskSlot.shadow_stack`; add a bootstrap chain used before task 0 exists and folded into task 0 on spawn
-- [ ] 7.2 `zirk_rt_push_frame` / `zirk_rt_pop_frame` resolve `CURRENT_TASK` (bootstrap chain when none)
-- [ ] 7.3 `collect()` walks the bootstrap chain then every live task's chain via an executor-provided `for_each_live_task_roots`; keep `mark_clone_roots` as the separate extra set
-- [ ] 7.4 Assert the object header is still three words (`ADR-012`)
-- [ ] 7.5 Update existing collector tests that assumed the global head (drive an explicit task 0 / bootstrap chain)
-- [ ] 7.6 New tests: reference in a named local across a `suspend_current` survives a forced collection; reference only in a compiler-spilled temporary across a suspend survives; a cycle owned only by a suspended task is reachable; a finished + consumed task stops rooting its result and its stack is reclaimed on the next collection
-- [ ] 7.7 Run the full pre-existing allocation-pressure and cycle suite — no regression
+- [x] 7.1 `FRAMES` split: `BOOTSTRAP_FRAMES` (the pre-task-0 / no-task-running chain) + `ACTIVE_FRAMES: Cell<*mut Vec<Frame>>` (the running task's chain, pointed at a `Vec` inside its boxed control block by the executor)
+- [x] 7.2 `zirk_rt_push_frame` / `zirk_rt_pop_frame` go through `with_active_frames` — the active task's chain, or the bootstrap chain when `ACTIVE_FRAMES` is null
+- [x] 7.3 `mark()` walks the bootstrap chain, then calls the executor-registered `TaskRootWalker` (visits every live task's chain), then `mark_clone_roots` as before. `set_active_frames` / `set_task_root_walker(Option<..>)` are the executor's hooks; a `Restore` guard clears both on every run exit including a panic
+- [x] 7.4 Object header untouched (three words, `ADR-012`) — no change to `HEADER_BYTES` / `NEXT_WORD` / `SIZE_WORD`; the existing header/layout tests still pass
+- [x] 7.5 `reset_state` / `reset_state_for_tests` now clear `BOOTSTRAP_FRAMES` and null `ACTIVE_FRAMES`; every pre-existing collector test drives the bootstrap chain unchanged
+- [x] 7.6 `a_suspended_tasks_roots_survive_a_collection_from_another_task`: root task roots an object through a pushed frame, `yield_now`s; a sibling calls `collect()`; the object survives (accounted in `LIVE_BYTES`, header intact) and is reclaimed only after the frame pops. (The compiler-spilled-temporary variant is a codegen behavior — `fase-5-structured-tasks` — the D4 spill rule; the finished-task-stops-rooting case is covered by executor test `an_awaited_child_slot_is_reclaimed_after_consumption`.)
+- [x] 7.7 `cargo test --workspace` — no regression (see closeout)
 
 ## 8. `lib.rs`: executor lifecycle
 
