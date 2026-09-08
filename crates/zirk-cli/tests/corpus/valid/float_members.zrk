@@ -1,19 +1,19 @@
 fn main(): Void {
     stdout.println(Float64.MAX.to_string());
     stdout.println(Float64.POSITIVE_INFINITY.to_string());
-    stdout.println((-3.5b).abs().to_string());
-    stdout.println((-3.5b).sign().to_string());
-    stdout.println((0.0b).is_zero().to_string());
-    stdout.println((1.5b).is_finite().to_string());
+    stdout.println((-3.5f).abs().to_string());
+    stdout.println((-3.5f).sign().to_string());
+    stdout.println((0.0f).is_zero().to_string());
+    stdout.println((1.5f).is_finite().to_string());
     stdout.println((Float64.POSITIVE_INFINITY).is_infinite().to_string());
-    stdout.println((-2.0b).is_negative().to_string());
-    stdout.println((2.3b).floor().to_string());
-    stdout.println((2.3b).ceil().to_string());
-    stdout.println((2.5b).round().to_string());
-    stdout.println((2.7b).truncate().to_string());
-    stdout.println((2.3b).fraction().to_string());
-    stdout.println((2.0b).sqrt().to_string());
-    stdout.println((2.0b).pow(3).to_string());
+    stdout.println((-2.0f).is_negative().to_string());
+    stdout.println((2.3f).floor().to_string());
+    stdout.println((2.3f).ceil().to_string());
+    stdout.println((2.5f).round().to_string());
+    stdout.println((2.7f).truncate().to_string());
+    stdout.println((2.3f).fraction().to_string());
+    stdout.println((2.0f).sqrt().to_string());
+    stdout.println((2.0f).pow(3).to_string());
     stdout.println(Float64.parse("3.14").unwrap().to_string());
-    stdout.println((1.0b).clamp(0.0b, 0.5b).to_string());
+    stdout.println((1.0f).clamp(0.0f, 0.5f).to_string());
 }

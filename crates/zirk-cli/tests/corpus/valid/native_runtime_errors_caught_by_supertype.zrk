@@ -14,7 +14,7 @@ fn main(): Void {
     }
 
     try {
-        mut zero: Float64 = 0.0b;
+        mut zero: Float64 = 0.0f;
         mut nan: Float64 = zero / zero;
         stdout.println(nan);
     } catch Throwable(e) {

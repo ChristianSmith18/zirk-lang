@@ -23,7 +23,8 @@ enum JSONValue {
 
 `JSONNumber` preserves the exact legal JSON number representation instead of
 immediately losing precision through `Float`. Its `to_int32`, `to_int64`,
-`to_uint64` and `to_float` conversions return typed results. JSON and Zirk both
+`to_uint64` and `to_float` conversions return typed results; `to_decimal` —
+the exact conversion — is specified but not yet implemented. JSON and Zirk both
 reject `NaN` and infinities. Object member order follows deterministic Map
 insertion order.
 

@@ -2651,9 +2651,9 @@ fn decimal_unop_extern(name: &str, arg: IrType, ret: IrType) -> ExternFn {
 
 fn float_literal_width(lit: &ast::FloatLit) -> FloatWidth {
     match lit.width.as_deref() {
-        Some("b16") => FloatWidth::F16,
-        Some("b32") => FloatWidth::F32,
-        Some("b128") => FloatWidth::F128,
+        Some("f16") => FloatWidth::F16,
+        Some("f32") => FloatWidth::F32,
+        Some("f128") => FloatWidth::F128,
         _ => FloatWidth::F64,
     }
 }
@@ -14178,7 +14178,7 @@ impl<'a> FunctionLowering<'a> {
         if let (IrType::Float(_), IrType::Int(_)) = (actual_ty, target_ty) {
             return self.emit(InstKind::FloatToInt(value), target_ty, span);
         }
-        // Exact `Float` <-> integer / `BinaryFloat` `as` casts route through
+        // `Decimal` <-> integer / `Float` `as` casts route through
         // the `convert_numeric` conversion instructions.
         if matches!(
             (actual_ty, target_ty),

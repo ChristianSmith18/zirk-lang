@@ -391,7 +391,7 @@ fn exact_float_exponentiation_uses_the_exact_integer_power_path() {
 
 #[test]
 fn binary_float_exponentiation_uses_the_binary_pow_helper() {
-    let f = main_body("mut b: Float64 = 2.0b;\nmut x: Float64 = b ** 3;");
+    let f = main_body("mut b: Float64 = 2.0f;\nmut x: Float64 = b ** 3;");
     assert!(instructions(&f).iter().any(|i| matches!(
         i,
         InstKind::Call { callee, .. } if callee == "zirk_float_pow"

@@ -51,7 +51,7 @@
 - **Iteration step:** `Iteration<T>.Item(T)` or `Iteration<T>.Done`, which keeps
   completion distinct from nullable values and declared failures.
 - **Grapheme:** one user-perceived Unicode text element; the unit represented by `Char` and used by String indexing.
-- **Contextual conversion:** an explicit outer constructor, such as `Float(...)`, that supplies a conversion context to a compatible contained operator tree.
+- **Contextual conversion:** an explicit outer constructor, such as `Decimal(...)`, that supplies a conversion context to a compatible contained operator tree.
 - **Controlled error:** specified failure that cannot become undefined behavior or silent corruption.
 - **Instant:** an absolute timeline position independent of presentation zone.
 - **Duration:** signed exact elapsed nanoseconds; unlike a `Period`, it has context-free magnitude and ordering. Written with literal suffixes such as `250ms` or `1.5s`.

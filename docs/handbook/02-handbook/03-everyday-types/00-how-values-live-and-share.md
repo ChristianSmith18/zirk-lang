@@ -13,7 +13,7 @@ variations on a single idea.
 
 | Position | Copy/Share rule | Representative types | Mental model |
 |---|---|---|---|
-| Immediate value | Assignment copies the whole value | `Int32`, `Boolean`, `Char`, `Float` | A number in a box |
+| Immediate value | Assignment copies the whole value | `Int32`, `Boolean`, `Char`, `Decimal` | A number in a box |
 | Native value | Assignment copies an independent semantic value | `Date`, `Duration`, `record`, `Tuple` | An immutable payload |
 | Managed reference | Assignment makes another path to the same instance | `String`, `Array<T>`, `List<T>` | A label on a shared object |
 | Borrowed / dependent view | A short-lived, non-owning view | `Weak<T>`, `Dependent<T>`, `NativeSlice<T>` | A ticket that may expire |
@@ -34,13 +34,13 @@ second += 1;
 ```
 
 `first` and `second` are independent. The same rule applies to `Boolean`,
-`Char`, and every `Float` width. Immediate values have no identity, so `is` is
+`Char`, `Decimal`, and every `Float` width. Immediate values have no identity, so `is` is
 not meaningful for them.
 
 ## Position 2: Native values
 
 ```zirk
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 
 inmut a = Point(x: 1.0, y: 2.0);
 inmut b = a;
@@ -100,10 +100,10 @@ native code.
 A point in space can be represented in every position:
 
 ```zirk
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 
 inmut value = Point(x: 1.0, y: 2.0);          // independent copy
-mut shared = class Point2D { x: Float; y: Float; }; // identity, shared
+mut shared = class Point2D { x: Decimal; y: Decimal; }; // identity, shared
 mut unsafe = Pointer<Point>(...);             // raw address
 ```
 

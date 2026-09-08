@@ -10,8 +10,8 @@ contracts of the same kind: `<`, `<=`, `>`, and `>=` resolve to `_less`,
 
 ```zirk
 class Vector2 {
-    x: Float;
-    y: Float;
+    x: Decimal;
+    y: Decimal;
 
     _add(other: Vector2): Vector2 {
         return Vector2(x + other.x, y + other.y);

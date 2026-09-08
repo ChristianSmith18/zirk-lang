@@ -181,7 +181,7 @@ generics.
 **Status: complete for its scoped delivery.** The fractional default is now the
 exact base-ten `Float` (128-bit coefficient + scale, no `NaN`, no infinity);
 the IEEE 754 binary family is `Float16`–`Float128` (`Float` =
-`Float64`), written with a `b` literal suffix. `Float128` formatting
+`Float64`), written with an `f` literal suffix. `Float128` formatting
 truncates to `Float64` first, which can lose precision for values not
 exactly representable in `f64`. Windows `Float128` arithmetic remains an
 implementation limitation.

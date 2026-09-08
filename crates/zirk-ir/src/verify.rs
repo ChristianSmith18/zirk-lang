@@ -509,7 +509,7 @@ fn verify_instruction(
                 && !matches!(ty, IrType::Float(_))
             {
                 report(format!(
-                    "{position}: FloatToDecimal converts {}, which is not a BinaryFloat",
+                    "{position}: FloatToDecimal converts {}, which is not a Float",
                     ty.as_str()
                 ));
             }
@@ -520,7 +520,7 @@ fn verify_instruction(
                 && ty != IrType::Decimal
             {
                 report(format!(
-                    "{position}: DecimalToInt converts {}, which is not a Float",
+                    "{position}: DecimalToInt converts {}, which is not a Decimal",
                     ty.as_str()
                 ));
             }
@@ -536,13 +536,13 @@ fn verify_instruction(
                 && ty != IrType::Decimal
             {
                 report(format!(
-                    "{position}: DecimalToFloat converts {}, which is not a Float",
+                    "{position}: DecimalToFloat converts {}, which is not a Decimal",
                     ty.as_str()
                 ));
             }
             if !matches!(inst.ty, IrType::Float(_)) {
                 report(format!(
-                    "{position}: DecimalToFloat declares {}, which is not a BinaryFloat",
+                    "{position}: DecimalToFloat declares {}, which is not a Float",
                     inst.ty.as_str()
                 ));
             }

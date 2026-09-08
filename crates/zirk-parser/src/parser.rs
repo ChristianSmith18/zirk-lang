@@ -3996,7 +3996,7 @@ fn one(span: Span) -> Expr {
 
 /// Desugars `base ** exponent` (and `base **= exponent`) into the method call
 /// `base.pow(exponent)` (`exponentiation-operator`). Downstream stages then
-/// see an ordinary `pow` call, so `Float` and `BinaryFloat` need no new code
+/// see an ordinary `pow` call, so `Decimal` and `Float` need no new code
 /// and the integer surface only gains a `pow` method. `op_span` (the `**`) is
 /// carried onto the synthetic member name so a diagnostic still points at the
 /// operator.

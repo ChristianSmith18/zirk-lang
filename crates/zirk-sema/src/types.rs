@@ -209,8 +209,8 @@ pub enum Base {
     /// `Int8`…`UInt128` (roadmap Phase 3b) — `Int`/`Integer` alias `Int32`,
     /// `Type::INT32` is `Int(IntWidth::I32)`.
     Int(IntWidth),
-    /// The IEEE 754 binary floating family. Surface name: `BinaryFloat16`…
-    /// `BinaryFloat128`, with `BinaryFloat` aliasing `BinaryFloat64`
+    /// The IEEE 754 binary floating family. Surface name: `Float16`…
+    /// `Float128`, with `Float` aliasing `Float64`
     /// (`Type::BINARY_FLOAT64`). The Rust identifier keeps the name `Float`
     /// from before the exact type existed; see [`FloatWidth::name`].
     Float(FloatWidth),
@@ -385,7 +385,7 @@ pub enum Base {
 impl Type {
     pub const VOID: Type = Type::of(Base::Void);
     pub const INT32: Type = Type::of(Base::Int(IntWidth::I32));
-    /// The IEEE 754 binary `BinaryFloat64` (surface name), `BinaryFloat`'s
+    /// The IEEE 754 binary `Float64` (surface name), `Float`'s
     /// target. The constant keeps its old name.
     pub const FLOAT64: Type = Type::of(Base::Float(FloatWidth::F64));
     /// The exact base-ten decimal type — surface name `Float`.
@@ -482,7 +482,7 @@ impl Type {
                 (Base::Float(dst), Base::Float(src)) => {
                     dst.bits() >= src.bits() && (self.nullable || !other.nullable)
                 }
-                // Int -> BinaryFloat is safe when every source value is exactly
+                // Int -> Float is safe when every source value is exactly
                 // representable in the target float.
                 (Base::Float(dst), Base::Int(src)) => {
                     src.fits_exactly_in_float(dst) && (self.nullable || !other.nullable)
@@ -527,7 +527,7 @@ impl Type {
             Type::of(Int(IntWidth::I128)),
             Type::of(Int(IntWidth::U128)),
             // The exact decimal type is the common type of an integer and a
-            // `Float`; it never joins with a `BinaryFloat` (its `accepts` has
+            // `Decimal`; it never joins with a `Float` (its `accepts` has
             // no `Decimal`/`Float` arm), so ordering it here is safe.
             Type::FLOAT,
             Type::of(Float(FloatWidth::F16)),

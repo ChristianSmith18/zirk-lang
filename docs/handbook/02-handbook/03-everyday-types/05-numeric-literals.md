@@ -1,18 +1,17 @@
 # Numeric Literals
 
 Whole literals default to `Int32` and a suffix-less fractional/scientific
-literal is an exact `Decimal`. An `f` suffix makes it a `Float`; a `d` suffix
-is an explicit `Decimal`.
+literal is an exact `Decimal` — it is the default, so it takes no suffix. An
+`f` suffix makes it a binary `Float`; an optional width (`f16`, `f32`, `f64`,
+`f128`) selects the `FloatN` type, and bare `f` means `f64`.
 
 ```zirk
 inmut count = 42;          // Int32
 inmut ratio = 0.5;         // Decimal (exact base-ten)
 inmut scale = 1e3;         // Decimal
-inmut exact = 1.5d;        // Decimal
 inmut fast = 1.5f;         // Float64
-inmut faster = 1.5f;       // Float64
 inmut compact = 1.5f32;    // Float32
-inmut compact2 = 1.5f32;   // Float32
+inmut wide = 1.5f128;      // Float128
 inmut mask: UInt16 = 65_535;
 ```
 
@@ -45,4 +44,4 @@ suffixes. See [Duration](../03a-temporal/08-duration.md).
 
 ---
 
-**Previous:** [← Floats](04-decimals.md) · **Next:** [ Overflow and Arithmetic Safety](06-overflow-and-arithmetic-safety.md)
+**Previous:** [← Decimals](04-decimals.md) · **Next:** [ Overflow and Arithmetic Safety](06-overflow-and-arithmetic-safety.md)

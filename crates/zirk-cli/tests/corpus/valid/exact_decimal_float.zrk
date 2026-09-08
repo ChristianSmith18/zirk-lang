@@ -25,9 +25,9 @@ fn main(): Void {
     stdout.println((2.3).floor().to_string());
     stdout.println((2.0).is_integer().to_string());
 
-    // The exact type and the binary family stay separate; a `b` literal is
+    // The exact type and the binary family stay separate; a `f` literal is
     // binary and its own division by zero is an infinity, not an error.
-    inmut binary: Float64 = 1.0b / 0.0b;
+    inmut binary: Float64 = 1.0f / 0.0f;
     stdout.println(binary.is_infinite().to_string());
 
     // Conversions: Int -> Decimal implicit; Decimal <-> Float explicit.
@@ -35,7 +35,7 @@ fn main(): Void {
     inmut widened: Decimal = whole;
     stdout.println(widened.to_string());
     stdout.println((widened as Float64).to_string());
-    stdout.println(Decimal(0.5b).to_string());
+    stdout.println(Decimal(0.5f).to_string());
 
     // Parse returns a Result.
     stdout.println(Decimal.parse("3.14").unwrap().to_string());

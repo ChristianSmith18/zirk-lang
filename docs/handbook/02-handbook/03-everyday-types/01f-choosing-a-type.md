@@ -42,7 +42,7 @@ If the number is not really a number, give it a type. A birthday is a `Date`.
 A timeout is a `Duration`. A coordinate is a `record`.
 
 ```zirk
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 inmut origin = Point(x: 0.0, y: 0.0);
 inmut offset = origin; // copies the whole record
 ```
@@ -142,10 +142,10 @@ inmut birthday: Date = Date(2026, 9, 5);
 
 ```zirk
 // Avoid: two different "empty" sessions are never equal by default
-class PointClass { x: Float; y: Float; }
+class PointClass { x: Decimal; y: Decimal; }
 
 // Prefer: value equality when only the data matters
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 ```
 
 **Sharing a collection and being surprised by mutation**

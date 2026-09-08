@@ -581,15 +581,48 @@ fn valid_scientific_notation() {
 fn valid_binary_float_suffix() {
     use TokenKind::*;
     assert_eq!(
-        tokens("1.5b32"),
-        vec![Float(NumberLit::new("1.5").with_width("b32")), Eof]
+        tokens("1.5f32"),
+        vec![Float(NumberLit::new("1.5").with_width("f32")), Eof]
     );
     assert_eq!(
-        tokens("0.1b"),
-        vec![Float(NumberLit::new("0.1").with_width("b")), Eof]
+        tokens("0.1f"),
+        vec![Float(NumberLit::new("0.1").with_width("f")), Eof]
     );
-    // A suffix-less fractional literal carries no width — it is exact `Float`.
+    assert_eq!(
+        tokens("0.1f128"),
+        vec![Float(NumberLit::new("0.1").with_width("f128")), Eof]
+    );
+    // A suffix-less fractional literal carries no width — it is exact
+    // `Decimal`, which is the default and takes no suffix.
     assert_eq!(tokens("0.1"), vec![Float(NumberLit::new("0.1")), Eof]);
+}
+
+#[test]
+fn invalid_old_b_suffix_points_at_f() {
+    let output = errors("1.5b");
+    assert!(
+        output.contains(codes::INVALID_NUMERIC_SUFFIX.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("`f`"), "must point at `f`/`fN`:\n{output}");
+
+    let output = errors("1.5b32");
+    assert!(
+        output.contains(codes::INVALID_NUMERIC_SUFFIX.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_d_suffix_is_a_duration_of_days() {
+    use DurationUnit::*;
+    use TokenKind::*;
+    // `d` is the Duration days unit, not a decimal suffix: `Decimal` is the
+    // default and takes no suffix.
+    assert_eq!(
+        tokens("1.5d"),
+        vec![Duration(NumberLit::new("1.5"), Days), Eof]
+    );
 }
 
 #[test]

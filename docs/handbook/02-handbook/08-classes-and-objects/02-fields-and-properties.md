@@ -13,7 +13,7 @@ public mut name: String;
 Write the modifiers when they communicate a non-default guarantee:
 
 ```zirk
-private mut balance: Float;
+private mut balance: Decimal;
 public inmut account_id: UInt64;
 ```
 
@@ -42,8 +42,8 @@ type; there is no reserved `default` expression. Validation, computed access,
 and storage hiding use ordinary methods named by convention:
 
 ```zirk
-get_balance(): Float { return this.balance; }
-set_balance(value: Float): Void { ... }
+get_balance(): Decimal { return this.balance; }
+set_balance(value: Decimal): Void { ... }
 ```
 
 They are called with parentheses. `inmut` fixes an attribute binding;

@@ -32,7 +32,7 @@ fn main(): Void {
     mut u128: UInt128 = 2000000000 as UInt128;
     mut wide_u128: UInt128 = u128 * u128 * u128;
 
-    mut f32: Float32 = 1.5b32;
+    mut f32: Float32 = 1.5f32;
     mut f64: Float64 = 3.14;
     mut ch: Char = 'z';
 

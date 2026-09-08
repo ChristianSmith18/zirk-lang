@@ -1637,7 +1637,7 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
 fn valid_float_literal_shapes() {
     assert_eq!(shape(&expression("1.5")), "1.5");
     assert_eq!(shape(&expression("6.02e23")), "6.02e23");
-    assert_eq!(shape(&expression("1.5b32")), "1.5b32");
+    assert_eq!(shape(&expression("1.5f32")), "1.5f32");
 }
 
 #[test]

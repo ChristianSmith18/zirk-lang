@@ -21,10 +21,10 @@ Invalid: historical `catch<NetworkError> error`. Valid: a library requests and
 an application grants one scoped operation. Invalid: treating an `init.zrk`
 edit as developer approval or reusing approval after moving the project.
 
-Valid: the explicit Float context reaches the contained division.
+Valid: the explicit Decimal context reaches the contained division.
 
 ```zirk
-inmut ratio = Float(3 / 4); // 0.75
+inmut ratio = Decimal(3 / 4); // 0.75
 ```
 
 Without that context, integer division truncates toward zero. `3 / 4` is `0`, and wrapping the already-computed value inside a function does not retroactively change it.

@@ -27,7 +27,7 @@ Distributable package: `.zpkg`
 > `Object` root. `Float` is an exact base-ten decimal (the default fractional
 > type, no `NaN`, no infinity); the IEEE 754 binary family is
 > `Float16`–`Float128` with `Float == Float64` and a
-> `b` literal suffix, also with no valid `NaN`. Explicit `Float(...)` and
+> `f` literal suffix, also with no valid `NaN`. Explicit `Float(...)` and
 > `String(...)` constructors establish deep contextual evaluation for their
 > contained arithmetic or concatenation tree. `Char` is exactly one Unicode
 > grapheme. `String` is a mutable shared reference governed by `mut`, `inmut`

@@ -244,7 +244,7 @@ name, so there is nothing for a local to shadow.
 (`Int8`…`Int128`, `UInt8`…`UInt128`), the exact base-ten `Float` (the fractional
 default — 128-bit coefficient + scale, no `NaN`/infinity, `0.1 + 0.2 == 0.3`),
 the binary floating family (`Float16`…`Float128`, `Float`
-aliasing `Float64`, `b` literal suffix), `Char`
+aliasing `Float64`, `f` literal suffix), `Char`
 as one Unicode extended grapheme cluster, bitwise/shift operators, deep
 contextual conversion (`Float(3 / 4)`, `String("x=" + 42)`), and a real
 `to_string()` contract that `print`/`println` and string interpolation
@@ -281,7 +281,7 @@ the phase:
 ### What is still pending
 
 - **Integer and Float literal width inference from a simple assignment**
-  context (`mut x: Int8 = 5;`, `mut y: Float16 = 1.0b;`) is implemented;
+  context (`mut x: Int8 = 5;`, `mut y: Float16 = 1.0f16;`) is implemented;
   the literal takes the expected width when the value fits. There is still
   no integer literal suffix syntax (only `Float` has one, e.g. `1.5f32`).
 - **`Float128` arithmetic is unverified on Windows**: LLVM lowers `fp128`

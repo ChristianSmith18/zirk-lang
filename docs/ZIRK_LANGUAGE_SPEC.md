@@ -129,8 +129,9 @@ There is no `undefined`.
 
 Literals admit scientific notation (`1e2`) and `_` as a separator
 (`1_000_000`). A suffix-less fractional literal is an exact `Decimal`; an `f`
-suffix (`1.5f`, `0.1f128`) makes it a `Float`. A `d` suffix (`1.5d`) is also
-accepted as an explicit `Decimal`. A suffix-less literal that
+suffix (`1.5f`, `0.1f128`) makes it a `Float`; an optional width (`f16`,
+`f32`, `f64`, `f128`) selects the `FloatN` type. `Decimal` is the default
+fractional type and takes no suffix. A suffix-less literal that
 needs more than 38 significant digits to be exact is a compile error that
 suggests the `f` suffix. `Decimal` `+ - *` and integer `**` are exact; `/`, `%`,
 `sqrt` and fractional `pow` round half-to-even to a 28-significant-digit

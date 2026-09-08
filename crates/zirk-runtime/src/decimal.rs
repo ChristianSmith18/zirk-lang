@@ -2,7 +2,7 @@
 //!
 //! `Float` is a base-ten decimal value: a signed 128-bit integer `coef` and a
 //! non-negative decimal `scale`, denoting the exact rational `coef * 10^-scale`.
-//! It is not IEEE 754 binary floating point — that is the separate `BinaryFloat`
+//! It is not IEEE 754 binary floating point — that is the separate `Float`
 //! family, still backed by [`crate::scalar`] and [`crate::string`].
 //!
 //! Every value that leaves this module is *normalized*: trailing decimal zeros
@@ -964,7 +964,7 @@ pub unsafe extern "C" fn zirk_rt_decimal_to_i128_checked(out: *mut i128, value: 
     unsafe { out.write_unaligned(value.coef) };
 }
 
-/// `BinaryFloat64 -> Float` (`Float(x)` / `as`, checked: rejects non-finite).
+/// `Float64 -> Decimal` (`Decimal(x)` / `as`, checked: rejects non-finite).
 ///
 /// # Safety
 /// `out` writable.
@@ -987,7 +987,7 @@ pub unsafe extern "C" fn zirk_rt_decimal_from_f64(out: *mut Decimal, value: f64)
     unsafe { *out = parsed };
 }
 
-/// `Float -> BinaryFloat64` (`BinaryFloat(x)` / `as`, may lose precision).
+/// `Decimal -> Float64` (`Float(x)` / `as`, may lose precision).
 ///
 /// # Safety
 /// `value` points at a `Decimal`.

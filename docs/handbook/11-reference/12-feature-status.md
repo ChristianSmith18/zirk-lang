@@ -2,7 +2,7 @@
 
 Status values are **specified and implemented**, **partially implemented**, **specified but not implemented**, **historical/exploratory**, or **explicitly excluded**. A repository revision and evidence are required before claiming implementation.
 
-The type taxonomy, Float and Float families, grapheme Char, shared mutable String, binding
+The type taxonomy, Decimal and Float families, grapheme Char, shared mutable String, binding
 permissions, native operators, temporal family, callable types, escaping
 closures, projection-copy semantics, object/contract model, complete generics,
 algebraic data, collections, and matching rules are authorial definitions even

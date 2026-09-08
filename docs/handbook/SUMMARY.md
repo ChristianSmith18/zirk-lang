@@ -50,7 +50,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Choosing a Type](./02-handbook/03-everyday-types/01f-choosing-a-type.md)
     - [Signed Integers](./02-handbook/03-everyday-types/02-signed-integers.md)
     - [Unsigned Integers](./02-handbook/03-everyday-types/03-unsigned-integers.md)
-    - [Floats](./02-handbook/03-everyday-types/04-decimals.md)
+    - [Decimals](./02-handbook/03-everyday-types/04-decimals.md)
     - [Numeric Literals](./02-handbook/03-everyday-types/05-numeric-literals.md)
     - [Overflow and Arithmetic Safety](./02-handbook/03-everyday-types/06-overflow-and-arithmetic-safety.md)
     - [Boolean](./02-handbook/03-everyday-types/07-boolean.md)

@@ -16,7 +16,7 @@ a reference.
 8. [Choosing a Type](./01f-choosing-a-type.md)
 9. [Signed Integers](./02-signed-integers.md)
 10. [Unsigned Integers](./03-unsigned-integers.md)
-11. [Floats](./04-decimals.md)
+11. [Decimals](./04-decimals.md)
 12. [Numeric Literals](./05-numeric-literals.md)
 13. [Overflow and Arithmetic Safety](./06-overflow-and-arithmetic-safety.md)
 14. [Boolean](./07-boolean.md)

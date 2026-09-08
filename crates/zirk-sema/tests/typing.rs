@@ -183,7 +183,7 @@ fn valid_shift_amount_may_be_a_different_width() {
 #[test]
 fn valid_float_family_resolves() {
     accepted_body(
-        "mut a: Float64 = 1.5;\nmut b: Float32 = 1.5b32;\nmut c: Float16 = 1.5b16;\nmut d: Float128 = 1.5b128;\nreturn;",
+        "mut a: Float64 = 1.5;\nmut b: Float32 = 1.5f32;\nmut c: Float16 = 1.5f16;\nmut d: Float128 = 1.5f128;\nreturn;",
     );
 }
 
@@ -197,7 +197,7 @@ fn valid_exact_float_is_the_bare_fractional_literal() {
 
 #[test]
 fn invalid_exact_float_and_binary_float_do_not_mix() {
-    let output = rejected_body("mut a: Decimal = 0.1;\nmut b: Float64 = 0.2b;\nmut c = a + b;");
+    let output = rejected_body("mut a: Decimal = 0.1;\nmut b: Float64 = 0.2f;\nmut c = a + b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
@@ -235,7 +235,7 @@ fn valid_exact_float_conversions() {
     accepted_body("mut i: Int32 = 5;\nmut f: Float = i;");
     accepted_body("mut f: Float = 2.5;\nmut i: Int32 = f as Int32;");
     accepted_body("mut f: Float = 2.5;\nmut g: Float64 = f as Float64;");
-    accepted_body("mut g: Float64 = 2.5b;\nmut f: Float = Float(g);");
+    accepted_body("mut g: Float64 = 2.5f;\nmut f: Float = Float(g);");
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn valid_exponentiation_operator_result_types() {
     // exact `Decimal` base stays exact `Decimal`.
     accepted_body("mut b: Decimal = 1.5;\nmut x: Decimal = b ** 2;");
     // `Float` base stays that width.
-    accepted_body("mut b: Float64 = 2.0b;\nmut x: Float64 = b ** 3;");
+    accepted_body("mut b: Float64 = 2.0f;\nmut x: Float64 = b ** 3;");
     // a dynamic exponent stays integer.
     accepted_body("mut k: Int32 = 4;\nmut x: Int32 = 2 ** k;");
     // compound form.
@@ -278,14 +278,14 @@ fn invalid_exponentiation_widened_result_is_not_an_integer() {
 #[test]
 fn invalid_exponentiation_cannot_mix_exact_and_binary_float() {
     let output =
-        rejected_body("mut a: Decimal = 2.0;\nmut b: Float64 = 3.0b;\nmut c = a ** b;");
+        rejected_body("mut a: Decimal = 2.0;\nmut b: Float64 = 3.0f;\nmut c = a ** b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
 fn valid_safe_widening_between_float_widths() {
     accepted_body(
-        "mut a: Float16 = 1.5b16;\nmut b: Float32 = a;\nmut c: Float64 = b;",
+        "mut a: Float16 = 1.5f16;\nmut b: Float32 = a;\nmut c: Float64 = b;",
     );
 }
 
@@ -314,7 +314,7 @@ fn valid_mixed_integer_and_float_arithmetic_produces_float() {
 
 #[test]
 fn valid_arithmetic_between_different_float_widths() {
-    accepted_body("mut a: Float32 = 1.5b32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
+    accepted_body("mut a: Float32 = 1.5f32;\nmut b: Float64 = 1.5;\nmut c = a + b;");
 }
 
 #[test]
@@ -365,7 +365,7 @@ fn valid_mixed_signedness_arithmetic_promotes_to_a_common_width() {
 fn valid_mixed_width_float_and_int_arithmetic() {
     accepted_body(
         "mut a: Int8 = 1;\n\
-         mut b: Float16 = 2.0b16;\n\
+         mut b: Float16 = 2.0f16;\n\
          mut c = a + b;\n\
          mut d: UInt32 = 4 as UInt32;\n\
          mut e: Float64 = 8.0;\n\
@@ -379,7 +379,7 @@ fn valid_increment_and_decrement_keep_narrow_widths() {
         "mut a: Int8 = 1;\n\
          a++;\n\
          --a;\n\
-         mut b: Float16 = 1.0b16;\n\
+         mut b: Float16 = 1.0f16;\n\
          b--;",
     );
 }
@@ -1071,14 +1071,14 @@ fn valid_printing_of_the_new_scalars() {
 fn valid_printing_of_float16() {
     // Prints by widening to Float32 first — always exact, since every f16
     // value is representable in f32 without loss.
-    accepted_body("mut a: Float16 = 1.5b16;\nstdout.println(a);");
+    accepted_body("mut a: Float16 = 1.5f16;\nstdout.println(a);");
 }
 
 #[test]
 fn valid_printing_of_float128() {
     // Float128 prints by truncating to Float64; this is accepted but can lose
     // precision for values not exactly representable in f64.
-    accepted_body("mut a: Float128 = 1.5b128;\nstdout.println(a);");
+    accepted_body("mut a: Float128 = 1.5f128;\nstdout.println(a);");
 }
 
 #[test]

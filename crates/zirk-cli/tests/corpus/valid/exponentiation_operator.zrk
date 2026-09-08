@@ -21,7 +21,7 @@ fn main(): Void {
     stdout.println((base ** 2).to_string());
 
     // Float base.
-    inmut bin: Float64 = 2.0b;
+    inmut bin: Float64 = 2.0f;
     stdout.println((bin ** 10).to_string());
 
     // Compound form.

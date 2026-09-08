@@ -9,7 +9,7 @@ Unlike a dynamic collection, it cannot grow. A size mismatch is a compile-time e
 
 ```zirk
 mut bytes: UInt8[16];
-mut matrix: Float[4];
+mut matrix: Decimal[4];
 ```
 
 `T[n]` is the official explicit-size convention. `Array<T>(n)` remains a

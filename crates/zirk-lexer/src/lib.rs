@@ -20,7 +20,9 @@
 
 mod token;
 
-pub use token::{DurationUnit, FLOAT_WIDTHS, Keyword, NumberLit, StrPart, Token, TokenKind};
+pub use token::{
+    DurationUnit, FLOAT_WIDTHS, Keyword, NumberLit, OLD_FLOAT_WIDTHS, StrPart, Token, TokenKind,
+};
 
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
 
@@ -402,10 +404,26 @@ impl<'a> Lexer<'a> {
             };
         }
 
-        // A `b`/`b16`/`b32`/`b64`/`b128` suffix marks a binary `BinaryFloat`
+        // An `f`/`f16`/`f32`/`f64`/`f128` suffix marks a binary `Float`
         // literal — on a fractional or an integer-valued mantissa alike.
         if FLOAT_WIDTHS.contains(&suffix.as_str()) {
             return Some(TokenKind::Float(NumberLit::new(text).with_width(suffix)));
+        }
+
+        // The old `b`/`bN` spellings get a targeted migration diagnostic
+        // rather than the generic invalid-suffix error.
+        if OLD_FLOAT_WIDTHS.contains(&suffix.as_str()) {
+            let span = self.source.span(suffix_start, self.offset());
+            let d = self.error(
+                codes::INVALID_NUMERIC_SUFFIX,
+                span,
+                format!("invalid suffix on numeric literal: `{suffix}`"),
+            );
+            self.emit(
+                d.with_cause("the binary-float suffix is now `f`/`fN`")
+                    .with_help(format!("write `{text}f` or `{text}fN` instead")),
+            );
+            return None;
         }
 
         if let Some(unit) = DurationUnit::from_text(&suffix) {
@@ -419,7 +437,7 @@ impl<'a> Lexer<'a> {
             format!("invalid suffix on numeric literal: `{suffix}`"),
         );
         self.emit(
-            d.with_cause("it is neither a binary-float suffix (`b32`) nor a duration unit (`ms`)")
+            d.with_cause("it is neither a binary-float suffix (`f32`) nor a duration unit (`ms`)")
                 .with_help("separate the number from the identifier with a space or an operator"),
         );
         None

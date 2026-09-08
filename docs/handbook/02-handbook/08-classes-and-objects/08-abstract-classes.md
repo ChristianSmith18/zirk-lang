@@ -11,13 +11,13 @@ Use an interface for a pure contract and a trait for reusable behavior that need
 
 ```zirk
 abstract class Shape {
-    abstract area(): Float;
+    abstract area(): Decimal;
 }
 
 class Circle implements Shape {
-    radius: Float;
+    radius: Decimal;
 
-    area(): Float {
+    area(): Decimal {
         return 3.14159 * this.radius ** 2;
     }
 }

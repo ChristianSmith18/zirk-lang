@@ -1889,7 +1889,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     )
                     .into_float_value();
                 let ir::IrType::Float(target) = instruction.ty else {
-                    unreachable!("DecimalToFloat declares a BinaryFloat destination")
+                    unreachable!("DecimalToFloat declares a Float destination")
                 };
                 let target_ty = self.float_type(target);
                 let converted = match target.bits().cmp(&64) {
@@ -1910,7 +1910,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let value = self.operand(*operand).into_float_value();
                 let source = self.value_types[&operand.0];
                 let ir::IrType::Float(source_width) = source else {
-                    unreachable!("FloatToDecimal converts a BinaryFloat")
+                    unreachable!("FloatToDecimal converts a Float")
                 };
                 let as_f64 = if source_width.bits() == 64 {
                     value

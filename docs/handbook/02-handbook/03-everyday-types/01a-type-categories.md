@@ -14,13 +14,13 @@ inline, and cannot be reopened by application code:
 
 ```zirk
 inmut answer: Int32 = 42;
-inmut ratio: Float = 0.5;
+inmut ratio: Decimal = 0.5;
 inmut ready: Boolean = false;
 inmut unit: Char = 'π';
 ```
 
 - signed and unsigned integers;
-- `Float` (exact base-ten decimal) and the binary `Float16` … `Float128`;
+- `Decimal` (exact base-ten, the fractional default) and the binary `Float16` … `Float128`;
 - `Boolean`;
 - `Char`;
 - exact `Duration`.
@@ -55,7 +55,7 @@ Records and tuples are user-declared value types, not native, but they share
 the same copy-on-assignment behavior:
 
 ```zirk
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 
 inmut a = Point(x: 1.0, y: 2.0);
 inmut b = a;

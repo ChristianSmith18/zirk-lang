@@ -1,8 +1,8 @@
 //! Runtime helpers for the integer and float member surface
 //! (`native-type-member-surface`).
 //!
-//! The `zirk_float_*` helpers here back the IEEE 754 binary `BinaryFloat`
-//! family (surface name), unchanged. The exact base-ten `Float` type has its
+//! The `zirk_float_*` helpers here back the IEEE 754 binary `Float`
+//! family (surface name), unchanged. The exact base-ten `Decimal` type has its
 //! own module, [`crate::decimal`].
 //!
 //! Integers travel as `i128` — wide enough for every `Int`/`UInt` width —

@@ -39,7 +39,7 @@ inmut unit: Char = 'π';
 ```
 
 See [Signed Integers](../02-handbook/03-everyday-types/02-signed-integers.md),
-[Floats](../02-handbook/03-everyday-types/04-decimals.md),
+[Decimals](../02-handbook/03-everyday-types/04-decimals.md),
 [Boolean](../02-handbook/03-everyday-types/07-boolean.md), and
 [Char](../02-handbook/03-everyday-types/08-char.md).
 

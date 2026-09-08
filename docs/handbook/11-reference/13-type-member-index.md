@@ -5,7 +5,7 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | Type/family | Properties | Principal methods | Full explanation |
 |---|---|---|---|
 | signed/unsigned integers | `min`, `max`, `bits`, `is_even`, `is_odd` | `abs()`, `count_ones()`, `leading_zeros()`, `rotate_left()`, checked/wrapping/saturating operations, `to_string()` | [Signed](../02-handbook/03-everyday-types/02-signed-integers.md), [unsigned](../02-handbook/03-everyday-types/03-unsigned-integers.md) |
-| Float | `min`, `max`, `infinity`, `negative_infinity` | `abs()`, `floor()`, `ceil()`, `round()`, `trunc()`, `fract()`, `is_finite()`, `is_infinite()`, `format(spec)`, conversions | [Floats](../02-handbook/03-everyday-types/04-decimals.md) |
+| Float | `min`, `max`, `infinity`, `negative_infinity` | `abs()`, `floor()`, `ceil()`, `round()`, `trunc()`, `fract()`, `is_finite()`, `is_infinite()`, `format(spec)`, conversions | [Decimals](../02-handbook/03-everyday-types/04-decimals.md) |
 | Boolean | — | `to_string()` | [Boolean](../02-handbook/03-everyday-types/07-boolean.md) |
 | Char | byte/code-point metadata | `ascii_code()`, classification, normalization, `to_uppercase()`, `to_lowercase()`, `to_string()` | [Char](../02-handbook/03-everyday-types/08-char.md) |
 | String | `length`, `byte_length` | `is_empty()`, `contains()`, `starts_with()`, `ends_with()`, `search()`, `find()`, `replace()`, `trim()`, `trim_start()`, `trim_end()`, `to_lowercase()`, `to_uppercase()`, `split()`, `split_whitespace()`, `lines()`, `substring()`, `normalize()`, `bytes()`, `codepoints()`, `chars()`, `clone()`, `to_string()` | [String](../02-handbook/03-everyday-types/09-string.md) |

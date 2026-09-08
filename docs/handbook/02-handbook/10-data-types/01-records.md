@@ -4,8 +4,8 @@ A record groups named fields into structural data.
 
 ```zirk
 record Point {
-    x: Float;
-    y: Float;
+    x: Decimal;
+    y: Decimal;
 }
 ```
 
@@ -71,7 +71,7 @@ validation beyond built-in checks.
 ### Examples
 
 ```zirk
-record Point { x: Float; y: Float; }
+record Point { x: Decimal; y: Decimal; }
 
 inmut first = Point(x: 10.0, y: 20.0);
 first == Point(x: 10.0, y: 20.0);   // true

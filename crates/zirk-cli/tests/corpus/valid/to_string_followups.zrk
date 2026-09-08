@@ -39,7 +39,7 @@ fn main(): Void {
     mut e: String = "already".to_string();
     stdout.println(e);
 
-    mut f: Float16 = 1.5b16;
+    mut f: Float16 = 1.5f16;
     stdout.println(f);
     stdout.println(f.to_string());
 

@@ -84,4 +84,4 @@ inmut converted = UInt32(signed); // controlled range failure
 
 ---
 
-**Previous:** [← Signed Integers](02-signed-integers.md) · **Next:** [ Floats](04-decimals.md)
+**Previous:** [← Signed Integers](02-signed-integers.md) · **Next:** [ Decimals](04-decimals.md)

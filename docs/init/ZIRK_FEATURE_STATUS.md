@@ -116,7 +116,7 @@ Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
 |---|---|---|---|---|---|---|---|
 | All 10 integer widths | yes | yes | yes | yes | yes | yes | `Int8`–`Int128`, `UInt8`–`UInt128`; `Type::from_name` resolves. |
 | Exact base-ten `Float` | yes | yes | yes | yes | yes | yes | `Base::Decimal`; 128-bit coefficient + scale, no `NaN`/infinity; the fractional default. `0.1 + 0.2 == 0.3`. |
-| `Float16`/`Float32`/`Float64`/`Float128` | yes | yes | yes | yes | yes | yes | `Float` aliases `Float64`; IEEE 754, `b` literal suffix. `Float16/32/64/128` no longer resolve (redirect diagnostic). |
+| `Float16`/`Float32`/`Float64`/`Float128` | yes | yes | yes | yes | yes | yes | `Float` aliases `Float64`; IEEE 754, `f` literal suffix. The old `BinaryFloat*` spellings no longer resolve (redirect diagnostic). |
 | `Char` as grapheme | yes | yes | yes | yes | yes | yes | `ADR-014`; runtime exposes grapheme helpers. |
 | Bitwise/shift operators | yes | yes | yes | yes | yes | yes | `TokenKind` `Amp`/`Pipe`/`Caret`/`Tilde`/`Shl`/`Shr`. |
 | Deep contextual conversion | yes | yes | yes | yes | yes | yes | `Float(3 / 4)` etc. |

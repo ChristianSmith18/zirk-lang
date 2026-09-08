@@ -4,7 +4,7 @@ Zirk 1.x does not select among multiple same-name functions by argument types. U
 
 ```zirk
 fn parse_int(text: String): Result<Int32, ParseError> { /* ... */ }
-fn parse_float(text: String): Result<Float, ParseError> { /* ... */ }
+fn parse_decimal(text: String): Result<Decimal, ParseError> { /* ... */ }
 ```
 
 This keeps name resolution deterministic and diagnostics direct. A generic function represents one algorithm across types; a union represents one API that intentionally handles alternatives.

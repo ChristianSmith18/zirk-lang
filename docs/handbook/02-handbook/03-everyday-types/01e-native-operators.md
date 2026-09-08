@@ -8,7 +8,7 @@ chapter explains the rules that apply across types.
 | --- | --- | --- |
 | Signed integers | arithmetic, order, bitwise, increment | `/` truncates toward zero |
 | Unsigned integers | signed set except unary `-` | signed mixing is explicit |
-| Float | arithmetic and order | mixed integer arithmetic yields Float |
+| Decimal and Float | arithmetic and order | mixed integer arithmetic yields the fractional operand's type |
 | Boolean | `!`, `&&`, `||`, equality | no truthiness or ordering |
 | Char | equality and deterministic order | no numeric arithmetic |
 | String | `+`, `*`, equality, order, `is` | repetition requires non-negative integer |

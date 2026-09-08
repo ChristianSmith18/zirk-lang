@@ -16,6 +16,6 @@ fn main(): Void {
     mut w: Float128 = 1234.5;
     stdout.println(w.format(".2"));
 
-    stdout.println((-1234.5b).format(".2"));
-    stdout.println((1234567.0b).format(".2e"));
+    stdout.println((-1234.5f).format(".2"));
+    stdout.println((1234567.0f).format(".2e"));
 }

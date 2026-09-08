@@ -27,7 +27,7 @@ Object
 ```
 
 The tree is a learning model, not automatic subtype permission. `Int32` and
-`Float` share numeric capabilities, but a function accepting `Int32` does not
+`Decimal` share numeric capabilities, but a function accepting `Int32` does not
 accept every numeric value. `Date` and `Duration` are both temporal, but only
 the combinations defined by their contracts compile.
 

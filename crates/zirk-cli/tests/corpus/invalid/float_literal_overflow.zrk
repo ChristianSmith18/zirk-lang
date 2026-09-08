@@ -2,5 +2,5 @@
 // compile time (roadmap Phase 3b, task 5.1) — Float16's largest finite
 // magnitude is 65504; this exceeds it.
 fn main(): Void {
-    mut a: Float16 = 100000.0b16;
+    mut a: Float16 = 100000.0f16;
 }

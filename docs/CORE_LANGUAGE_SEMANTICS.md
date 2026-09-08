@@ -22,7 +22,7 @@ interaction boundaries.
   independent values. `Float` is an exact base-ten decimal scalar (the default
   fractional type, no `NaN`, no infinity); the IEEE 754 binary family is
   `Float16`…`Float128` (`Float` = `Float64`), written
-  with a `b` literal suffix. The two never combine implicitly.
+  with an `f` literal suffix. The two never combine implicitly.
 - Classes, `String`, `Array`, `List`, `Map`, and `Set` are reference-backed.
   Assigning, passing, returning, or capturing a **complete variable** shares
   its referent.

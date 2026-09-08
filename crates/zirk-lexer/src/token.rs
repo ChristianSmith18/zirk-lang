@@ -388,11 +388,17 @@ impl DurationUnit {
     }
 }
 
-/// Suffixes that make a fractional literal an IEEE 754 binary `BinaryFloat`.
+/// Suffixes that make a fractional literal an IEEE 754 binary `Float`.
 ///
-/// A suffix-less fractional literal is the exact base-ten `Float` instead.
-/// `b` alone means `BinaryFloat64`.
-pub const FLOAT_WIDTHS: &[&str] = &["b", "b16", "b32", "b64", "b128"];
+/// A suffix-less fractional literal is the exact base-ten `Decimal` instead —
+/// `Decimal` is the default and takes no suffix. `f` alone means `Float64`.
+pub const FLOAT_WIDTHS: &[&str] = &["f", "f16", "f32", "f64", "f128"];
+
+/// Binary-float suffixes from the previous naming scheme.
+///
+/// They no longer resolve; the lexer recognizes them only to emit a targeted
+/// diagnostic pointing at `f`/`fN`.
+pub const OLD_FLOAT_WIDTHS: &[&str] = &["b", "b16", "b32", "b64", "b128"];
 
 /// Class of token produced by the lexer.
 #[derive(Debug, Clone, PartialEq)]

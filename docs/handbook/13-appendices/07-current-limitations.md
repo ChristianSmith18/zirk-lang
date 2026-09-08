@@ -177,9 +177,9 @@ Current high-impact delivery limits include:
 - `Float128` arithmetic lacks complete Windows verification. `Float128`
   `to_string()` is implemented by truncating to `Float64` first, which can
   lose precision for values not exactly representable in `f64`.
-- Exact `Float` irrational operations (`sqrt`, a fractional `pow`) carry only
+- Exact `Decimal` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full
-  28-digit budget the rational operations use. `Float.format(spec)` and an
+  28-digit budget the rational operations use. `Decimal.format(spec)` and an
   explicit `RoundingMode` for `div` / `round` are specified but not implemented;
   both round half-to-even by default.
 - Standard-library, structured-concurrency, packaging, developer-tooling,

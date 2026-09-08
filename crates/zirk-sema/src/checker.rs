@@ -1263,7 +1263,7 @@ impl<'a> Checker<'a> {
             // prints by truncating to `Float64`; this can lose precision for
             // values that are not exactly representable in `f64`.
             Base::Float(_) => true,
-            // The exact base-ten `Float` renders its coefficient and scale
+            // The exact base-ten `Decimal` renders its coefficient and scale
             // directly — always exact, never a binary artifact.
             Base::Decimal => true,
             // Every class, record, tuple, enum, weak reference and callable
@@ -8963,7 +8963,7 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
-        // Exact `Float` <-> integer (checked) and `Float` <-> `BinaryFloat`
+        // `Decimal` <-> integer (checked) and `Decimal` <-> `Float`
         // (explicit) `as` casts lower to the `zirk_rt_decimal_*` conversion
         // helpers.
         if matches!(
@@ -9008,7 +9008,7 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
-        // Exact `Float` <-> integer, and `Float` <-> `BinaryFloat`.
+        // `Decimal` <-> integer, and `Decimal` <-> `Float`.
         if matches!(
             (actual_bare.base, target_bare.base),
             (Base::Decimal, Base::Int(_))
@@ -9176,15 +9176,15 @@ impl<'a> Checker<'a> {
     /// represent, so there is no `f64`-based bound for it.
     fn check_float_literal(&mut self, lit: &FloatLit, expected: Option<Type>) -> Type {
         use FloatWidth::*;
-        // A `b*` suffix forces the IEEE 754 binary family; no suffix leaves the
-        // literal exact base-ten `Float` unless a `BinaryFloat` annotation
+        // An `f*` suffix forces the IEEE 754 binary family; no suffix leaves
+        // the literal exact base-ten `Decimal` unless a `Float` annotation
         // pulls it into a binary width contextually.
         let explicit_binary = match lit.width.as_deref() {
             None => None,
-            Some("b" | "b64") => Some(F64),
-            Some("b16") => Some(F16),
-            Some("b32") => Some(F32),
-            Some("b128") => Some(F128),
+            Some("f" | "f64") => Some(F64),
+            Some("f16") => Some(F16),
+            Some("f32") => Some(F32),
+            Some("f128") => Some(F128),
             Some(_) => None,
         };
         let is_binary_literal = lit.width.is_some();
@@ -9223,10 +9223,10 @@ impl<'a> Checker<'a> {
 
         let expected_bare = expected.map(Type::without_null).filter(|t| !t.is_unknown());
 
-        // No suffix and no binary context -> the exact base-ten `Float`.
-        // A suffix-less literal still adopts a `BinaryFloat` width when the
+        // No suffix and no binary context -> the exact base-ten `Decimal`.
+        // A suffix-less literal still adopts a `Float` width when the
         // annotation asks for one (contextual typing of a literal is not a
-        // `Float`/`BinaryFloat` value mix).
+        // `Decimal`/`Float` value mix).
         if !is_binary_literal {
             let contextual_binary = expected_bare.and_then(|t| match t.base {
                 Base::Float(w) => Some(w),
@@ -9252,7 +9252,7 @@ impl<'a> Checker<'a> {
                                 "the literal {} needs more than 38 significant digits to be exact",
                                 lit.text
                             ),
-                            "add a `b` suffix to store it as a `BinaryFloat` instead",
+                            "add an `f` suffix to store it as a `Float` instead",
                             None,
                         );
                         return Type::UNKNOWN;
@@ -9282,7 +9282,7 @@ impl<'a> Checker<'a> {
         mantissa.chars().filter(|c| c.is_ascii_digit()).count() > 38
     }
 
-    /// Range- and finiteness-checks a `BinaryFloat` literal, then types it.
+    /// Range- and finiteness-checks a binary `Float` literal, then types it.
     fn finish_binary_float_literal(
         &mut self,
         lit: &FloatLit,
@@ -9305,7 +9305,7 @@ impl<'a> Checker<'a> {
                 codes::INTEGER_OUT_OF_RANGE,
                 lit.span,
                 format!("the literal {} is not a finite number", lit.text),
-                "BinaryFloat128 literals must be finite",
+                "Float128 literals must be finite",
                 None,
             );
             return Type::UNKNOWN;
@@ -9664,7 +9664,7 @@ impl<'a> Checker<'a> {
         let saved = self.expected_type;
         // For an unhinted operator, let a bare numeric literal on one side
         // adopt the concrete numeric type of the other — `binaryValue == 0.75`
-        // types the `0.75` as `BinaryFloat64`, not the exact `Float` it would
+        // types the `0.75` as `Float64`, not the exact `Decimal` it would
         // default to. Only a literal is steered; a `Duration` literal or any
         // non-numeric operand is left alone.
         let is_num_literal = |e: &Expr| {
@@ -16467,7 +16467,7 @@ impl<'a> Checker<'a> {
         for arg in &expr.args {
             // Propagate the target parameter's own type as the expected type
             // for this argument, so a bare numeric literal adopts it (a
-            // `5.0` argument to a `BinaryFloat64` parameter is that width,
+            // `5.0` argument to a `Float64` parameter is that width,
             // not the exact `Float` a context-free literal defaults to).
             // Only a fully concrete numeric hint is used — a generic
             // parameter's own inference must not be steered by it.
@@ -16944,7 +16944,7 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
             if matches!(left.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
                 && matches!(right.base, Base::Int(_) | Base::Float(_) | Base::Decimal) =>
         {
-            // `common_numeric` yields `None` for a `Float`/`BinaryFloat` mix
+            // `common_numeric` yields `None` for a `Decimal`/`Float` mix
             // (its `accepts` has no cross arm), which surfaces as the
             // "not available" diagnostic — the two never combine implicitly.
             left.common_numeric(right)

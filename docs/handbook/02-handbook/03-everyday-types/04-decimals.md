@@ -118,7 +118,7 @@ replacement:
 | `BinaryFloat16` / `BinaryFloat32` / `BinaryFloat64` / `BinaryFloat128` | `Float16` / `Float32` / `Float64` / `Float128` |
 | `1.5b32` literal | `1.5f32` |
 | `1.5b` literal | `1.5f` |
-| `1.5` where `Float` was exact | `1.5` (now `Decimal`) or `1.5d` |
+| `1.5` where `Float` was exact | `1.5` (now `Decimal`; there is no `d` suffix) |
 
 ### Examples
 
@@ -127,7 +127,7 @@ inmut price: Decimal = 19.99;
 inmut tax = price * 0.08;          // 1.5992 — exact
 inmut total = (price + tax).round(2);   // 21.59
 
-inmut near = 1.0b - Float64.EPSILON;
+inmut near = 1.0f - Float64.EPSILON;
 stdout.println(near.is_finite());  // true
 ```
 

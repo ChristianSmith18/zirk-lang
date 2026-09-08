@@ -124,8 +124,8 @@ pub enum IrType {
     /// natively, so nothing downstream needs a different *shape* per width,
     /// only the right one substituted in.
     Int(IntWidth),
-    /// The IEEE 754 binary floating family (surface name `BinaryFloat16`…
-    /// `BinaryFloat128`). Same reasoning as `Int` above, minus the
+    /// The IEEE 754 binary floating family (surface name `Float16`…
+    /// `Float128`). Same reasoning as `Int` above, minus the
     /// signedness: LLVM's `FloatType` is parameterized by width alone. The
     /// Rust identifier keeps the name `Float` from before the exact type.
     Float(FloatWidth),
@@ -1044,10 +1044,10 @@ pub enum InstKind {
     /// non-integer or out-of-range value is a controlled runtime error.
     /// Lowers to `zirk_rt_decimal_to_i128_checked` then an integer cast.
     DecimalToInt(Operand),
-    /// `BinaryFloat(x)` / `x as BinaryFloat*` from an exact `Float` — may
+    /// `Float(x)` / `x as Float*` from an exact `Decimal` — may
     /// lose precision. Lowers to `zirk_rt_decimal_to_f64` then a float cast.
     DecimalToFloat(Operand),
-    /// `Float(x)` / `x as Float` from a `BinaryFloat` — checked: a
+    /// `Decimal(x)` / `x as Decimal` from a `Float` — checked: a
     /// non-finite input is a controlled runtime error. Lowers to
     /// `zirk_rt_decimal_from_f64`.
     FloatToDecimal(Operand),
