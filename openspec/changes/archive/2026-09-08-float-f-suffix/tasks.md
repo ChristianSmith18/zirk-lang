@@ -20,4 +20,4 @@
 ## 4. Docs
 
 - [x] 4.1 Update remaining `b`-suffix mentions in `docs/init/*`, `docs/ZIRK_*_SPEC.md`, and other internal docs to `f`/`fN`; confirm no doc presents `d` as a decimal suffix.
-- [ ] 4.2 If any public docs changed after commit, run `./scripts/sync-website-content.sh` per AGENTS.md.
+- [x] 4.2 If any public docs changed after commit, run `./scripts/sync-website-content.sh` per AGENTS.md.
