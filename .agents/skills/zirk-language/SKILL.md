@@ -1,69 +1,69 @@
 ---
 name: zirk-language
-description: Write, explain, review, or repair Zirk `.zrk` source and `init.zrk` manifests using the repository's normative language contracts. Use for application, library, test, and example code; not for Rust compiler implementation unless the task also changes Zirk source semantics.
+description: Write, explain, review, or repair Zirk `.zrk` source and `.zkinit` manifests using the repository's normative language contracts. Use for application, library, test, and example code; not for Rust compiler implementation unless the task also changes Zirk source semantics.
 ---
 
 # Zirk Language
 
-Write Zirk that is both normatively correct and honest about the current
-toolchain. Zirk is specified ahead of portions of its implementation: never
-claim that an example runs merely because it is valid in the language design.
+Write Zirk that is normatively correct and honest about the compiler in this
+checkout. The language specification leads implementation in some domains: do
+not claim a program runs until it is checked with the current local binary.
 
-## Start here
+## Start and route by concept
 
-1. Read [the authority and validation guide](references/authority-and-validation.md).
-2. Read [the writing guide](references/writing-zirk.md) before authoring or
-   repairing ordinary language code. It contains the high-value syntax,
-   semantic invariants, and invalid substitutes that commonly leak in from
-   TypeScript, Python, Rust, Java, or C#.
-3. Read the topic-specific source documents named in the authority guide for
-   resources, unsafe/native access, concurrency, decorators, permissions,
-   packages, or standard-library APIs. Do not guess an API signature from a
-   familiar language.
+1. Read [authority and validation](references/authority-and-validation.md).
+2. Identify the user's data, control-flow, failure, safety, or project
+   need. Read only the matching category below before writing code.
+3. For a concrete `std.*` API, read its handbook owner too; never infer an API
+   from another language.
 
-Use repository-relative paths from the Zirk checkout. The normative documents
-are the source of truth; this skill is a decision guide and compact writing
-reference, not a replacement for them.
+| User intent | Read |
+| --- | --- |
+| Bindings, scalar values, nullability, conversions | [Foundations](references/foundations.md) |
+| Arrays, lists, ranges, indexing, slices, iteration | [Collections and iteration](references/collections-and-iteration.md) |
+| Conditions, loops, `match`, functions, lambdas | [Control flow and callables](references/control-flow-and-callables.md) |
+| Classes, records, enums, unions, interfaces, generics | [Data modeling and generics](references/data-modeling-and-generics.md) |
+| `Result`, `throws`, resources, permissions | [Failures, resources, and authority](references/failures-resources-and-authority.md) |
+| Dates, times, durations, temporal parsing | [Authority guide](references/authority-and-validation.md) + handbook `03a-temporal/` |
+| Decorators, generated APIs, reflection | [Authority guide](references/authority-and-validation.md) + `DECORATOR_SEMANTICS.md` |
+| Files, imports, `.zkinit`, tests, executable verification | [Projects, modules, and validation](references/projects-modules-and-validation.md) |
 
-## Working rules
+Read [writing-zirk](references/writing-zirk.md) only when a request spans
+several categories and needs a compact cross-category checklist.
 
-- Preserve `.zrk` syntax and Zirk names in code; use the official formatter's
-  style (braces, semicolons, `snake_case` for values/functions/files and
-  `UpperCamelCase` for types).
-- Begin a new executable project with `init.zrk`, `src/main.zrk`, and `fn
-  main(): Void { ... }`. `init.zrk` is declarative, never executable code.
-- Choose an explicit failure channel: `Result<T, E>` for expected operational
-  failure, `throws` for exceptional recoverable failure, and `fatalError` only
-  for unrecoverable state. Do not invent a `?` propagation operator.
-- Respect reference boundaries: complete reference assignment aliases; a read
-  of an attribute, index, slice, destructured component, pattern binding, or
-  projected capture is an independent value (deep clone when reference-backed).
-  A projection used as an assignment place writes original storage.
-- Check feature availability separately from normative validity. When a
-  runnable result is requested, run `zirk check <source>` (or `zirk check` in
-  a project) and report the exact outcome. If the binary is unavailable or a
-  requested construct is not implemented, say so rather than substituting
-  another language feature.
-- Keep permissions in the application `init.zrk`; libraries use `requires`.
-  A declaration requests authority but never constitutes user consent.
-- Prefer the simple safe form. Enter `unsafe {}` only for an operation in its
-  closed low-level set, and use `commit {}` inside it before an irreversible
-  effect. Use `match with` for `Resource<E>` ownership and structured `task`
-  scopes/channels for concurrent work.
+## Authoring decision process
 
-## Completion checklist
+- Infer the desired value and its lifetime first. For example, “a list of 1 to
+  100” means a resizable `List<Int32>`; `List(1..=100)` is shorter and clearer
+  than a manual loop. If the length must not change, choose `Array<Int32>` or
+  a fixed declaration such as `Int32[100]` instead.
+- Prefer the narrowest language form that expresses the request. Use a range
+  for a regular finite sequence, `for item in iterable` to consume it, and a
+  traditional `for mut i = ...` only when the update is not a range.
+- Keep Zirk naming and syntax: braces, semicolons, `snake_case` values and
+  functions, `UpperCamelCase` types. Do not import TypeScript/Python/Rust/C#
+  syntax by analogy.
+- Treat whole reference assignment as aliasing; reads from an attribute,
+  index, slice, destructuring, pattern, or projected capture are independent
+  values. A projection on the left side of `=` writes original storage.
+- Select one explicit failure channel: `Result<T, E>` for expected outcomes,
+  `throws` for exceptional recoverable failure, and `fatalError` only for an
+  unrecoverable invariant. There is no `?` propagation operator.
+- If the request says “function”, first choose a top-level `fn`, a method, a
+  lambda, or a generic callable value; if it says “object”, choose `class`,
+  `record`, or a collection from the semantics, not from the noun alone.
 
-Before handing over code, check the applicable items:
+## Delivering runnable code
 
-- Names, declarations, types, nullability, mutation permissions, and named
-  call labels match the writing guide.
-- Every `Result` is consumed; every explicit thrown exception is caught or
-  declared; every resource is closed by `match with` or explicitly transferred.
-- Cross-task/thread/channel values meet transfer or sharing rules; no mutable
-  alias, mutex guard, dependent view, or tentative unsafe state crosses an
-  invalid boundary.
-- Imports use quoted local/package paths and unquoted `std.*` modules; only
-  `share` exports declarations and only `use` exposes declared globals.
-- For docs or examples, label normative-but-unimplemented material rather than
-  presenting it as executable. For executable claims, include the verification
-  command and result.
+When execution matters, consult feature status and validate with the checkout's
+binary. Prefer `./target/debug/zirk` so a stale or unrelated `zirk` on `PATH`
+cannot invalidate the result. Rebuild it when source is newer than the binary:
+
+```sh
+LLVM_SYS_201_PREFIX=/opt/homebrew/opt/llvm@20 cargo build -p zirk-cli -p zirk-runtime
+./target/debug/zirk check path/to/file.zrk
+./target/debug/zirk run path/to/file.zrk
+```
+
+Report an unsupported or unverified construct plainly. Do not silently replace
+the requested behavior with a familiar but different language feature.

@@ -83,7 +83,7 @@ mut port = Env.get<Int>(name:);
 
 ## Permissions and non-disclosure
 
-Applications grant exact names or reviewed name patterns in `init.zrk`.
+Applications grant exact names or reviewed name patterns in `.zkinit`.
 Libraries declare requirements but cannot grant themselves access. Runtime code
 never prompts or edits the manifest.
 

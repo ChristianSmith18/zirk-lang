@@ -24,7 +24,7 @@
 //! The lifecycle of `ZIRK_RUNTIME_SPEC.md` section 2 is:
 //!
 //! ```text
-//! validate init.zrk and permissions -> load minimal runtime -> init globals
+//! validate .zkinit and permissions -> load minimal runtime -> init globals
 //!   -> main() -> concurrency scopes -> close resources -> flush -> exit
 //! ```
 //!

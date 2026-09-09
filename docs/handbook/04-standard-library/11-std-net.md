@@ -275,7 +275,7 @@ broad outbound authority.
 Libraries declare required scopes with `requires`; only the application grants
 them. Missing authority produces `NetworkPermissionError` through the operation
 result before the external effect occurs. Runtime library code never prompts or
-edits `init.zrk`; trusted tooling owns consent.
+edits `.zkinit`; trusted tooling owns consent.
 
 ## Errors, limits, and portability
 

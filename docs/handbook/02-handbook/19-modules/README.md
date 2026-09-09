@@ -1,6 +1,6 @@
 # Modules
 
-Files provide private declaration boundaries; `share` publishes names, `import` brings published names into another file, and `use` enables application globals declared in `init.zrk`. These operations are deliberately distinct.
+Files provide private declaration boundaries; `share` publishes names, `import` brings published names into another file, and `use` enables application globals declared in `.zkinit`. These operations are deliberately distinct.
 
 ---
 

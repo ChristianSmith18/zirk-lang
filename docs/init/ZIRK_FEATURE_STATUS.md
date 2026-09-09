@@ -198,7 +198,7 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `init.zrk` / multi-file projects | no | no | no | no | no | partial | `zirk build`/`zirk run` operate on a single file today. |
+| `.zkinit` / multi-file projects | no | no | no | no | no | partial | `zirk build`/`zirk run` operate on a single file today. |
 | `requires`/`during: build` manifest | no | no | no | no | no | no | Spec defined; not started. |
 
 ## Phase 7 — Standard library

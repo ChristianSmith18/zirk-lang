@@ -149,7 +149,7 @@ environment variables.
 ## Permissions
 
 Importing a module grants nothing. Privileged operations carry inferred effects
-through functions, closures and tasks, and `init.zrk` is the only application
+through functions, closures and tasks, and `.zkinit` is the only application
 grant location. Denial is a typed operational result. Filesystem checks use
 canonical paths and symlink-aware policy; process checks use the canonical
 executable and permitted argument forms.

@@ -86,7 +86,7 @@ do not inject all their methods into file scope.
 
 ## Globals
 
-`use` enables an application global already declared in `init.zrk`; it does not
+`use` enables an application global already declared in `.zkinit`; it does not
 load code or infer a path. Libraries cannot declare application globals. Missing
 or ambiguous enabled globals fail during resolution before type checking their
 uses.

@@ -163,7 +163,7 @@ dependencies. Modern 32-bit macOS is not promised.
 Resolution:
 
 1. `zirk build --target ...`;
-2. every `build_targets` entry in `init.zrk`;
+2. every `build_targets` entry in `.zkinit`;
 3. host detection.
 
 A CLI target temporarily replaces `build_targets`. The compiler checks early for

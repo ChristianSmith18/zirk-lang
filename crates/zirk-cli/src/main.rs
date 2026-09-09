@@ -109,7 +109,7 @@ fn check(args: &[String]) -> i32 {
             codes::NOT_IMPLEMENTED,
             "several source files were given",
             "this version of the compiler checks a single file",
-            Some("multi-file projects with `init.zrk` arrive in Phase 6"),
+            Some("multi-file projects with `.zkinit` arrive in Phase 6"),
         );
     }
 
@@ -144,7 +144,7 @@ fn compile(args: &[String], action: Action) -> i32 {
             codes::NOT_IMPLEMENTED,
             "several source files were given",
             "this version of the compiler processes a single file",
-            Some("multi-file projects with `init.zrk` arrive in Phase 6"),
+            Some("multi-file projects with `.zkinit` arrive in Phase 6"),
         );
     }
 

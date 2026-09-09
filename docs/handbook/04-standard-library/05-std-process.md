@@ -5,7 +5,7 @@ captures results and binds every child to structured cancellation and cleanup.
 The executable and its arguments are always separate.
 
 > **Implementation status:** target Zirk 1.x contract. Process, environment and
-> shell permissions must be granted separately in `init.zrk`.
+> shell permissions must be granted separately in `.zkinit`.
 
 ## Commands and results
 

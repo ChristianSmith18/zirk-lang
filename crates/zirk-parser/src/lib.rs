@@ -7,7 +7,7 @@
 //! whether it makes *sense*. `Int32 + String` is valid syntax and a type error:
 //! `zirk-sema` resolves that.
 //!
-//! The language parser is not reused for `init.zrk`: `ZIRK_LANGUAGE_SPEC.md`
+//! The language parser is not reused for `.zkinit`: `ZIRK_LANGUAGE_SPEC.md`
 //! section 10 defines it as a declarative DSL with its own parser, arriving in
 //! Phase 6.
 //!

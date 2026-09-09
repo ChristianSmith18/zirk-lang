@@ -243,7 +243,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
     - [Circular Dependencies](./02-handbook/19-modules/07-circular-dependencies.md)
 - [Projects and Builds](./03-projects/README.md)
   - [Project Layout](./03-projects/01-project-layout.md)
-  - [`init.zrk`](./03-projects/02-init-zrk.md)
+  - [`.zkinit`](./03-projects/02-zkinit.md)
   - [Applications](./03-projects/03-applications.md)
   - [Libraries](./03-projects/04-libraries.md)
   - [Entry Point](./03-projects/05-entry-point.md)

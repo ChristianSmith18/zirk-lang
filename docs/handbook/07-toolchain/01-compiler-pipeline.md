@@ -6,7 +6,7 @@ builds continue through portable IR and LLVM; frontend-only tools stop before
 those stages.
 
 ```text
-source files and init.zrk
+source files and .zkinit
         ↓
 source/module loading
         ↓
@@ -56,7 +56,7 @@ shape without depending on another stage.
 
 ## Loading reachable source
 
-Compilation begins at an entry source or the entry declared by `init.zrk`. The
+Compilation begins at an entry source or the entry declared by `.zkinit`. The
 loader follows imports rather than compiling every `.zrk` in a directory. An
 unreachable file is not part of the program.
 

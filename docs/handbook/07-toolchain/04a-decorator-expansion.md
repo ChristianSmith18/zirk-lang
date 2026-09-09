@@ -84,7 +84,7 @@ metadata and diagnostics.
 Pure inspection/generation requires no external authority. Filesystem,
 environment, network, process or other build effects require library `requires`,
 application `permissions`, the `during: build` phase, and signed developer
-approval. A decorator cannot edit `init.zrk`, approve itself, or inherit runtime
+approval. A decorator cannot edit `.zkinit`, approve itself, or inherit runtime
 authority merely because the application has it.
 
 Observed inputs enter the expansion fingerprint. Permission denial occurs before

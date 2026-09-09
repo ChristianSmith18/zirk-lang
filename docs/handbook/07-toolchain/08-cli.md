@@ -36,7 +36,7 @@ selection, `--warnings-as-errors`, and cache inspection/cleaning. Structured
 output and exit codes are stable enough for editors and CI; prompts are never
 written in JSON or noninteractive mode.
 
-Dependency and publishing commands update `init.zrk` and `zirk.lock` only
+Dependency and publishing commands update `.zkinit` and `zirk.lock` only
 through reviewable deterministic changes. Permission commands inspect or revoke
 the signed external approval record; editing the manifest alone never grants
 authority.

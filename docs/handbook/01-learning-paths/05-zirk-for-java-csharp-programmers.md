@@ -30,7 +30,7 @@ There is no public global event loop and no `async fn` in Zirk 1.x. A `task` bel
 
 ## Applications decide capabilities
 
-Libraries cannot grant themselves filesystem or network access. They declare requirements; applications grant the final finite permission set in `init.zrk`. Compile-time decorators have a separate permission boundary.
+Libraries cannot grant themselves filesystem or network access. They declare requirements; applications grant the final finite permission set in `.zkinit`. Compile-time decorators have a separate permission boundary.
 
 ## Recommended route
 

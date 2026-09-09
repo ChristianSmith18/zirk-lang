@@ -220,7 +220,7 @@ For an existing file, preserve the user-written path for diagnostics but derive
 a canonical filesystem identity after successful resolution. The same physical
 file reached through aliases or symlinks must be one module. Imports must not
 escape the project root except through a dependency explicitly declared in
-`init.zrk`. Missing targets still need diagnostics at the importing span.
+`.zkinit`. Missing targets still need diagnostics at the importing span.
 
 Loading behavior:
 

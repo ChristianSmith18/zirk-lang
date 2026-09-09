@@ -1,6 +1,6 @@
 # Projects
 
-`init.zrk` defines whether a project is an application or library and declares entry points, capabilities, targets, dependencies, and build contracts. `zirk.lock` records exact resolved versions and hashes.
+`.zkinit` defines whether a project is an application or library and declares entry points, capabilities, targets, dependencies, and build contracts. `zirk.lock` records exact resolved versions and hashes.
 
 Libraries request authority with `requires`; applications grant it with
 `permissions`, including build/runtime phase. Source declaration is not

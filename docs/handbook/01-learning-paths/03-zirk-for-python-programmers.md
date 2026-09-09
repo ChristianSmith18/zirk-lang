@@ -31,7 +31,7 @@ Filesystem, network, process, environment, and compile-time access are declared 
 
 ## Recommended route
 
-Study bindings and inference first, then nullability, functions, declared data types, generics, errors, resources, and modules. Read the project and package chapters before translating a Python application structure: `init.zrk`, locked dependencies, native targets, and standalone output are central to Zirk rather than optional ecosystem conventions.
+Study bindings and inference first, then nullability, functions, declared data types, generics, errors, resources, and modules. Read the project and package chapters before translating a Python application structure: `.zkinit`, locked dependencies, native targets, and standalone output are central to Zirk rather than optional ecosystem conventions.
 
 ---
 

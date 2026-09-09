@@ -18,7 +18,7 @@ Valid: expected failure is matched exhaustively. Invalid: using `?` to propagate
 Valid: `_ = operation()` explicitly discards a `Result`. Invalid:
 `operation();` when its value is `Result`. Valid: `catch NetworkError(error)`.
 Invalid: historical `catch<NetworkError> error`. Valid: a library requests and
-an application grants one scoped operation. Invalid: treating an `init.zrk`
+an application grants one scoped operation. Invalid: treating a `.zkinit`
 edit as developer approval or reusing approval after moving the project.
 
 Valid: the explicit Decimal context reaches the contained division.

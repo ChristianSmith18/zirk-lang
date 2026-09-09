@@ -38,7 +38,7 @@ value rather than an unhandled throwable.
 
 `task.blocking` runs unavoidable blocking code on a runtime-managed bounded
 pool. Saturation waits cancelably instead of creating unlimited threads; pool
-configuration is an advanced `init.zrk` setting.
+configuration is an advanced `.zkinit` setting.
 
 ## Channels
 

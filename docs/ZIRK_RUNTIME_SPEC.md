@@ -25,7 +25,7 @@ raise the same controlled failures the rest of the language uses.
 Normative order:
 
 ```text
-validate init.zrk and permissions
+validate .zkinit and permissions
     ↓
 load minimal runtime
     ↓

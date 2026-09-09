@@ -15,18 +15,18 @@ A minimal application has this shape:
 
 ```text
 hello-zirk/
-├── init.zrk
+├── .zkinit
 ├── zirk.lock
 ├── src/
 │   └── main.zrk
 └── test/
 ```
 
-`init.zrk` describes the project. `zirk.lock` records an exact dependency resolution and hashes; it is produced and maintained by dependency commands rather than edited as application source. `src/main.zrk` contains the entry function.
+`.zkinit` describes the project. `zirk.lock` records an exact dependency resolution and hashes; it is produced and maintained by dependency commands rather than edited as application source. `src/main.zrk` contains the entry function.
 
 ## Describe the application
 
-Open `init.zrk` and verify the project block:
+Open `.zkinit` and verify the project block:
 
 ```zirk
 project {

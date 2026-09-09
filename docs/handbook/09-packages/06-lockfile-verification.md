@@ -2,7 +2,7 @@
 
 The lockfile pins versions and hashes. Installation verifies fetched content and rejects substitution, corruption, or mismatched metadata with the affected package identified.
 
-The lockfile is not a secret store and cannot authorize permissions absent from `init.zrk`.
+The lockfile is not a secret store and cannot authorize permissions absent from `.zkinit`.
 
 Each node records exact version, source/registry identity, content integrity,
 dependency edges, and relevant native/IR metadata. Canonical serialization

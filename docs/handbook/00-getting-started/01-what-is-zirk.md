@@ -25,7 +25,7 @@ Even this small program exposes several parts of the language:
 - The official formatter writes semicolons, even though the parser may omit them when there is no ambiguity.
 - `stdout` is supplied by the standard library rather than being a compiler keyword.
 
-Zirk source files use the `.zrk` extension. An application also has an `init.zrk` manifest that tells the toolchain what it is building:
+Zirk source files use the `.zrk` extension. An application also has a `.zkinit` manifest that tells the toolchain what it is building:
 
 ```zirk
 project {

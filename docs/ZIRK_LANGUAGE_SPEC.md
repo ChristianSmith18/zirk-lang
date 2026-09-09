@@ -83,7 +83,7 @@ parameters are the deliberate capture exception: the plain name selects the
 lambda-local binding and `this.name` selects the captured outer value.
 
 Only an `application` may declare globals, and exclusively in the `globals`
-block of `init.zrk`:
+block of `.zkinit`:
 
 ```text
 globals {
@@ -563,7 +563,7 @@ convenience members directly when unambiguous. After
 `stdout.println("hello")`. A collision requires qualification. Local and
 package objects do not inject methods into file scope.
 
-`init.zrk` is a declarative DSL, not executable code. It contains `project`,
+`.zkinit` is a declarative DSL, not executable code. It contains `project`,
 `build_targets`, `globals`, `permissions`, `requires` and dependencies according
 to project type. Libraries request authority with `requires`; applications grant
 it with `permissions`. Each operation uses `during: build`, `runtime` or `both`;

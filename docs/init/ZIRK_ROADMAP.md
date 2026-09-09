@@ -62,7 +62,7 @@ basic arithmetic, `if`/`else`, `mut`/`inmut` variables, and a minimal hardcoded
 `println` (not the full stdlib yet).
 
 Explicitly out: generics, classes, `Result`, concurrency, decorators,
-multi-file modules, `init.zrk`.
+multi-file modules, `.zkinit`.
 
 **Phase output:** a real `.zrk`, with real syntax from the spec, compiling to a
 real native binary. This is the milestone that validates that the whole
@@ -83,7 +83,7 @@ Phase 4d rather than silently treated as complete here.
   parameters, default values, and locally callable closures/lambdas.
 - `match` with basic exhaustiveness (over simple enums).
 - Nullability: `T?`, `?.`, `??`.
-- Modules within a single crate: basic `share`/`import`, without `init.zrk` yet.
+- Modules within a single crate: basic `share`/`import`, without `.zkinit` yet.
 
 **Output:** programs with several functions, real control flow and closures —
 still without classes or concurrency.
@@ -416,7 +416,7 @@ and data-race guarantees, working end to end.
 
 ## Phase 6 — Project system and CLI
 
-- `init.zrk` as a declarative DSL (its own parser, not reusing the Zirk parser).
+- `.zkinit` as a declarative DSL (its own parser, not reusing the Zirk parser).
 - `project`, `build_targets`, `globals`, library `requires`, and application
   `permissions` with per-operation `during: build | runtime | both`.
 - CLI: `new`, `init`, `run`, `build`, `check`, `test`.

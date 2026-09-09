@@ -1,6 +1,6 @@
-# `init.zrk`
+# `.zkinit`
 
-`init.zrk` is a declarative typed DSL, not executable startup code. It may
+`.zkinit` is a declarative typed DSL, not executable startup code. It may
 contain `project`, `build_targets`, `globals`, `permissions`, `requires`, and
 dependencies according to project type. A permission operation carries
 `during: build`, `runtime`, or `both`; there is no separate

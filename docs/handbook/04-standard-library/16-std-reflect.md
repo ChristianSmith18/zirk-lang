@@ -76,7 +76,7 @@ project/package and logical file-module path. Given:
 
 ```text
 shop-api/
-├── init.zrk                 // project.name = "shop-api"
+├── .zkinit                  // project.name = "shop-api"
 └── src/domain/user.zrk      // share class User
 ```
 

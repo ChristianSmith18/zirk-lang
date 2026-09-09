@@ -5,7 +5,7 @@ Initial publication: 12 August 2026
 Last normative checkpoint: 20 August 2026
 Source extension: `.zrk`
 CLI: `zirk`
-Manifest: `init.zrk`
+Manifest: `.zkinit`
 Lockfile: `zirk.lock`
 Distributable package: `.zpkg`
 
@@ -128,7 +128,7 @@ dependencies:
 - Mach-O, ELF and PE.
 - cross-compilation through `zirk build --target <target>`.
 
-`build_targets` in `init.zrk` allows producing several targets. An explicit
+`build_targets` in `.zkinit` allows producing several targets. An explicit
 `--target` takes precedence. With neither, the host is detected.
 
 ## 3. Outside the initial scope
@@ -185,7 +185,7 @@ implemented, never resolved silently.
 
 ```text
 my_app/
-├── init.zrk
+├── .zkinit
 ├── zirk.lock
 ├── src/
 │   └── main.zrk
@@ -230,7 +230,7 @@ fn main(): Void {
 - The runtime may use an event reactor internally, but Zirk exposes no global
   event loop.
 - `share` publishes declarations, `import` brings them in, and `use` enables
-  globals from `init.zrk`.
+  globals from `.zkinit`.
 - Ordinary local shadowing is rejected; an explicit lambda capture collision
   uses `this.name`.
 - All arrays have fixed length; `List<T>` is the resizable sequence.
@@ -247,12 +247,12 @@ An `application` may declare globals and grants the final permissions. A
 intermediate representation, a manifest, documentation and a license. In the
 final build, every piece is compiled for the same target.
 
-Permissions are finite capabilities declared in `init.zrk`, but declaration is
+Permissions are finite capabilities declared in `.zkinit`, but declaration is
 not consent. A signed external approval binds exact authority/requesters to the
 project name and canonical location. Trusted interactive commands may show and
 apply a narrow manifest diff only after explicit consent; unchanged signed
 fingerprints take an incremental fast path. CI is noninteractive and deployed
-programs never prompt. Tokens and secret values are never stored in `init.zrk`,
+programs never prompt. Tokens and secret values are never stored in `.zkinit`,
 `zirk.lock`, diagnostics, or approval history.
 
 ## 8. Completeness criterion

@@ -214,7 +214,7 @@ permissions {
 The compiler infers effects through privileged calls, functions, methods,
 lambdas, closures, generators, and higher-order callables. Permission syntax is
 not added to `Fn`, but compiler/callable metadata retains the requirement and
-diagnostics show the call path to the privileged API. `init.zrk` is the only
+diagnostics show the call path to the privileged API. `.zkinit` is the only
 grant location.
 
 ## 6. Scoped authority
@@ -251,7 +251,7 @@ own manifest.
 
 ## 7. Consent is not source text
 
-`init.zrk` states what is requested. Consent lives outside the repository in a
+`.zkinit` states what is requested. Consent lives outside the repository in a
 signed Zirk approval record protected by the OS key store. It binds:
 
 - project name and absolute canonical location;
@@ -263,7 +263,7 @@ signed Zirk approval record protected by the OS key store. It binds:
 Moving or renaming a project requires new consent. Widening a grant, adding or
 updating a requester, changing integrity/path/phase, or invalidating approval
 also requires consent even if textual scopes look unchanged. Removing or
-narrowing authority does not. Editing `init.zrk`, copying another approval,
+narrowing authority does not. Editing `.zkinit`, copying another approval,
 tampering with storage, or deleting it grants nothing; failure reconstructs
 analysis or asks again. Build code has no public access to approval storage.
 
@@ -276,7 +276,7 @@ path. A change recomputes only affected graph segments.
 
 An interactive trusted CLI shows the exact grant, phase, call path, requester,
 dependency path, and manifest diff, then offers allow once, approve the exact
-set, or deny. Approval edits `init.zrk` with its parser/formatter and records a
+set, or deny. Approval edits `.zkinit` with its parser/formatter and records a
 signature. Dynamic scopes require manual patterns. `all` is legal only after a
 critical warning and typing the project name; generic `--yes` cannot approve
 it. CI uses protected explicit policy and fails noninteractively on widening.

@@ -108,7 +108,7 @@ The target checker tracks:
 - unsafe transaction, rollback eligibility and irreversible `commit` effects.
 
 Effects remain callable/compiler metadata rather than extra syntax in `Fn`.
-Application grants remain in `init.zrk`; successful type/effect checking never
+Application grants remain in `.zkinit`; successful type/effect checking never
 grants authority.
 
 ## Decorator rechecking

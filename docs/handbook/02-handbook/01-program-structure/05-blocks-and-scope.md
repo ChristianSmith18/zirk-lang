@@ -11,7 +11,7 @@ if authenticated {
 // greeting is not visible here.
 ```
 
-Scopes exist at block, function, file, and module levels. Function parameters and locals belong to the function. A file declaration remains private unless `share` publishes it. Application globals are exceptional: they may appear only in the `globals` block of `init.zrk`, and each consumer opts in with `use`.
+Scopes exist at block, function, file, and module levels. Function parameters and locals belong to the function. A file declaration remains private unless `share` publishes it. Application globals are exceptional: they may appear only in the `globals` block of `.zkinit`, and each consumer opts in with `use`.
 
 Invalid example:
 

@@ -1,6 +1,6 @@
 # `use` and Globals
 
-Only applications may declare globals, inside `globals` in `init.zrk`. Each source consumer opts in with `use`.
+Only applications may declare globals, inside `globals` in `.zkinit`. Each source consumer opts in with `use`.
 
 ```zirk
 use APP_NAME;

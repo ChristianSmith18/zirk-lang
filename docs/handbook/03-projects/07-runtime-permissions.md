@@ -2,7 +2,7 @@
 
 Permissions are finite capabilities for filesystem, network, processes,
 environment/secrets, and other effects. Only the application grants the final
-set in `init.zrk`; each operation identifies `during: build`, `runtime`, or
+set in `.zkinit`; each operation identifies `during: build`, `runtime`, or
 `both`.
 
 The compiler infers requirements through privileged APIs and callable metadata;

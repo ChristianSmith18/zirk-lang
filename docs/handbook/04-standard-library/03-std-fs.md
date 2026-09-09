@@ -7,7 +7,7 @@ locks and change notification. Filesystem operations accept `Path`; accepting a
 
 > **Implementation status:** target Zirk 1.x contract. The current runtime may
 > implement only a subset. Every example requires an appropriate filesystem
-> grant in `init.zrk`.
+> grant in `.zkinit`.
 
 ## Opening files
 

@@ -10,7 +10,7 @@ reads strict UTF-8, counts graphemes, and reports every expected failure.
 
 ```text
 word-count/
-├── init.zrk
+├── .zkinit
 ├── src/main.zrk
 └── test/arguments.spec.zrk
 ```

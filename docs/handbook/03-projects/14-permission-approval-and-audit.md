@@ -7,7 +7,7 @@ dependency's version, integrity, and transitive path.
 
 Moving or renaming a project, widening authority, adding/updating a requester,
 or changing requester integrity/path/phase requires approval. Narrowing does
-not. A library that edits `init.zrk` gains nothing because it cannot produce the
+not. A library that edits `.zkinit` gains nothing because it cannot produce the
 matching signature. Deleted or corrupt state grants nothing and triggers
 reconstruction or reapproval.
 
@@ -22,7 +22,7 @@ affected dependency-graph segments.
 
 The CLI displays the grant, phase, call path, requester, dependency path and
 manifest diff, then offers allow once, approve this exact set, or deny. Accepted
-changes use the `init.zrk` parser and formatter. Dynamic targets require a
+changes use the `.zkinit` parser and formatter. Dynamic targets require a
 developer-chosen pattern. An `all` grant shows a critical warning and requires
 typing the project name; Enter or generic `--yes` cannot approve it.
 

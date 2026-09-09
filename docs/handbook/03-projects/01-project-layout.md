@@ -2,7 +2,7 @@
 
 ```text
 my_app/
-├── init.zrk
+├── .zkinit
 ├── zirk.lock
 ├── src/main.zrk
 └── test/
@@ -12,4 +12,4 @@ The manifest and lockfile sit at the root. Source and tests remain distinct; gen
 
 ---
 
-**Previous:** [← Projects](README.md) · **Next:** [ init.zrk](02-init-zrk.md)
+**Previous:** [← Projects](README.md) · **Next:** [ .zkinit](02-zkinit.md)

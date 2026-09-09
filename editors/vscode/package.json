@@ -97,9 +97,6 @@
         "extensions": [
           ".zrk"
         ],
-        "filenames": [
-          "init.zrk"
-        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./images/logo.svg",

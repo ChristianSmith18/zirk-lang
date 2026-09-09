@@ -1,10 +1,10 @@
 # Source Files
 
-Zirk source code lives in UTF-8 text files with the `.zrk` extension. A file participates in a project described by `init.zrk`; it is not an independently interpreted script.
+Zirk source code lives in UTF-8 text files with the `.zrk` extension. A file participates in a project described by `.zkinit`; it is not an independently interpreted script.
 
 ```text
 catalog/
-├── init.zrk
+├── .zkinit
 └── src/
     ├── main.zrk
     └── product.zrk
@@ -22,7 +22,7 @@ share record Product {
 
 Filename conventions use `snake_case`. Case matters: `product.zrk` and `Product.zrk` are distinct names even on a filesystem that happens to compare them loosely. Avoid relying on platform-specific casing behavior.
 
-`init.zrk` is a typed project manifest with a reserved role; ordinary application declarations belong under the configured source tree. The entry path identifies the file containing `main`.
+`.zkinit` is a typed project manifest with a reserved role; ordinary application declarations belong under the configured source tree. The entry path identifies the file containing `main`.
 
 ---
 

@@ -8,7 +8,7 @@
 
 Zirk currently compiles and runs a single `.zrk` file that must contain `fn main(): Void`. Phase 6 needs a real project system: multiple source files, imports, libraries, a project manifest, and a clear entrypoint model.
 
-The language already has `share`, `import` and `use` in the grammar, and `ZIRK_LANGUAGE_SPEC.md` section 10 describes an `init.zrk` manifest. This ADR tightens those ideas, introduces `.zkinit` as the project manifest, and defines the script-vs-project execution modes.
+The language already has `share`, `import` and `use` in the grammar, and `ZIRK_LANGUAGE_SPEC.md` section 10 describes the project manifest. This ADR tightens those ideas, establishes `.zkinit` as the only project manifest, and defines the script-vs-project execution modes.
 
 ## Decision
 
@@ -23,7 +23,7 @@ Execution is split into two modes:
 
 ### 1. `.zkinit` — project manifest
 
-`.zkinit` is a declarative DSL, not executable code. It replaces the previous `init.zrk` manifest. If `.zkinit` is missing and `init.zrk` exists, the CLI may read it with a deprecation warning.
+`.zkinit` is a declarative DSL, not executable code. It is the only supported project manifest; `init.zrk` is invalid and is not read as a compatibility fallback.
 
 Example:
 
@@ -134,7 +134,7 @@ import { stdout } from std.io;
 
 ## Consequences
 
-- `init.zrk` is deprecated in favor of `.zkinit`.
+- `.zkinit` is the only supported project manifest.
 - The parser and `zirk-cli` must distinguish project mode from script mode.
 - `Span` already carries a `FileId` (ADR-010), so multi-file diagnostics are supported.
 - `share` already parses in the grammar for top-level declarations; the checker only needs to enforce visibility across files.
