@@ -63,7 +63,7 @@ keyword + parser → checker → IR + lowering → codegen → fixtures → docs
 - [x] 7.1 `docs/init/ZIRK_FEATURE_STATUS.md` Phase 5: `task`/`await` row -> lexer→CLI = yes for the bare forms; note `task scope` / `await ... timeout` still pending
 - [x] 7.2 `docs/init/ZIRK_ROADMAP.md` Phase 5 step 1: bare `task`/`await` delivered (`fase-5-task-await`)
 - [x] 7.3 Handbook `02-handbook/18-concurrency/`: fill in the `task` / `await` section with runnable examples; add a `11-reference` `Task<T>` page
-- [ ] 7.4 After merge: `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`
+- [x] 7.4 After merge: `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`
 
 ## 8. Closeout
 
