@@ -1,9 +1,0 @@
-fn add(value: Int32): Int32 { return value + 1; }
-
-fn main(): Void {
-    mut base: Int32 = 20;
-    mut first = task add(base);
-    mut second = task add(base);
-    stdout.println(await first);
-    stdout.println(await second);
-}

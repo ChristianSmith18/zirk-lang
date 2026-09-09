@@ -80,31 +80,6 @@ fn zirk_functions_are_prefixed() {
     assert!(ir.contains("@zk_printf"));
 }
 
-#[test]
-fn task_spawn_and_await_emit_the_runtime_calls() {
-    let ir = llvm_ir(
-        "fn identity(value: Int32): Int32 { return value; }\nfn main(): Void {\nmut base: Int32 = 21;\nmut handle = task identity(base);\nmut value: Int32 = await handle;\n}",
-    );
-    assert!(
-        ir.contains(symbols::TASK_SPAWN),
-        "missing task spawn:\n{ir}"
-    );
-    assert!(
-        ir.contains(symbols::TASK_AWAIT),
-        "missing task await:\n{ir}"
-    );
-    assert!(ir.contains("zk.task_thunk."), "missing task thunk:\n{ir}");
-    assert!(
-        ir.contains(symbols::ALLOC_CALLABLE),
-        "a captured task must allocate its capture block:\n{ir}"
-    );
-    assert!(
-        ir.contains("await.resume"),
-        "missing await resume block:\n{ir}"
-    );
-    assert!(ir.contains("trunc i64"), "missing await narrowing:\n{ir}");
-}
-
 // --- Application lifecycle --------------------------------------------------
 
 #[test]

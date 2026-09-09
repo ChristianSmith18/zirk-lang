@@ -2784,9 +2784,6 @@ fn ir_type(
         // conversion (see `Self::lower_lambda`'s own comment on why captures
         // read the *slot's* type, not the checker's).
         Base::Function(id) => IrType::Callable(id),
-        // `Task<T>` is represented by the executor's opaque one-word handle;
-        // its element type is retained only by `Base::Task` for `await`.
-        Base::Task(_) => IrType::Task,
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -3098,9 +3095,6 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn weak_element(&self, id: u32) -> Type {
         self.0.weak_types[id as usize]
-    }
-    fn task_element(&self, id: u32) -> Type {
-        self.0.task_types[id as usize]
     }
     fn native_slice_element(&self, id: u32) -> Type {
         self.0.native_slice_types[id as usize]
@@ -3439,23 +3433,6 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Weak<T> it type-checked")
                 as u32;
             return Type::of(Base::Weak(id));
-        }
-
-        // `Task<T>` (roadmap Phase 5, `fase-5-task-await`, design D1): a
-        // written task annotation must resolve to the same interned result
-        // type the checker recorded. The runtime representation is always an
-        // opaque task handle, but retaining the result type here is what lets
-        // `ir_type` produce that handle and `await` retain its concrete type.
-        if reference.name == "Task" {
-            let result = self.resolve_written_type(&reference.arguments[0]);
-            let id = self
-                .checked
-                .task_types
-                .iter()
-                .position(|&t| t == result)
-                .expect("the checker interned every Task<T> it type-checked")
-                as u32;
-            return Type::of(Base::Task(id));
         }
 
         // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
@@ -4043,7 +4020,8 @@ impl<'a> FunctionLowering<'a> {
                         .list_types
                         .iter()
                         .position(|&t| self.ir_type(t) == element)
-                        .expect("the checker interned the variadic list type") as u32;
+                        .expect("the checker interned the variadic list type")
+                        as u32;
                     IrType::List(list_id)
                 } else {
                     self.ir_type(ty)
@@ -4311,7 +4289,6 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Callable(_)
-            | IrType::Task
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -7141,12 +7118,6 @@ impl<'a> FunctionLowering<'a> {
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
             ast::Expr::Lambda(e) => self.lower_lambda(e, span),
-            ast::Expr::Task(e) => self.lower_task(e, span),
-            ast::Expr::Await(e) => {
-                let handle = self.lower_expr(&e.operand);
-                let result = self.type_of(expr, span);
-                self.emit(InstKind::Await { handle, result }, result, span)
-            }
 
             ast::Expr::Cast(e) => self.lower_cast(e, span),
 
@@ -7620,137 +7591,6 @@ impl<'a> FunctionLowering<'a> {
             IrType::Callable(id),
             span,
         )
-    }
-
-    /// Lowers a `task` body through the same boxed-callable representation as
-    /// a lambda, then starts it on the cooperative executor. Unlike a lambda,
-    /// the task body has no written parameters and its return type was inferred
-    /// by the checker.
-    fn lower_task(&mut self, expr: &ast::TaskExpr, span: Span) -> Operand {
-        let info = self
-            .checked
-            .lambdas
-            .get(&expr.span)
-            .expect("the checker records every task it accepted");
-        let capture_slots: Vec<SlotId> = info
-            .captures
-            .iter()
-            .map(|capture| self.lookup_slot(&capture.name))
-            .collect();
-        let capture_types: Vec<IrType> = capture_slots
-            .iter()
-            .map(|slot| self.slot_type(*slot))
-            .collect();
-        let returns = self.ir_type(self.checked.fn_types[info.fn_type as usize].returns);
-        let name = format!("task.{}.{}", expr.span.file.0, expr.span.start);
-        let id = info.fn_type;
-
-        if !info.captures.is_empty() {
-            self.module.closures[id as usize] = ClosureLayout {
-                captures: capture_types.clone(),
-                params: Vec::new(),
-                returns,
-            };
-        }
-
-        let captures: Vec<Operand> = capture_slots
-            .iter()
-            .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
-            .collect();
-        let names: Vec<String> = info
-            .captures
-            .iter()
-            .map(|capture| capture.name.clone())
-            .collect();
-        let body = self.lift_task_body(expr, &name, &names, &capture_types, returns);
-        self.lifted.push(body);
-
-        let callable = self.emit(
-            InstKind::MakeCallable {
-                target: name,
-                captures,
-            },
-            IrType::Callable(id),
-            span,
-        );
-        self.emit(
-            InstKind::TaskStart {
-                target: format!("task.{}.{}", expr.span.file.0, expr.span.start),
-                body: callable,
-            },
-            IrType::Task,
-            span,
-        )
-    }
-
-    /// Lifts a task body to the zero-argument function called by its boxed
-    /// callable. Captures become leading parameters exactly as they do for a
-    /// lambda body; an expression body returns its value, while a block body
-    /// uses its explicit `return` statements (or is `Void`).
-    fn lift_task_body(
-        &mut self,
-        expr: &ast::TaskExpr,
-        name: &str,
-        params: &[String],
-        types: &[IrType],
-        returns: IrType,
-    ) -> Function {
-        let mut inner = FunctionLowering::new(
-            self.module,
-            self.checked,
-            self.declarations,
-            self.instance_base,
-            self.enum_instance_base,
-        );
-        inner.return_type = returns;
-        let entry = inner.new_block();
-        inner.current = entry;
-        inner.scopes.push(HashMap::new());
-        let slots: Vec<SlotId> = params
-            .iter()
-            .zip(types)
-            .map(|(name, ty)| inner.declare_slot(name, *ty, expr.span))
-            .collect();
-
-        match &expr.body {
-            ast::TaskBody::Expr(body) => {
-                let value = inner.lower_expr_as(body, returns);
-                // A `Void` expression still has an IR instruction operand for
-                // its effects, but it has no SSA value to return. Keeping it
-                // out of `Return(Some(_))` matches ordinary `Void` functions
-                // and lets `task fire_and_forget()` compile as `Task<Void>`.
-                inner.terminate(if returns == IrType::Void {
-                    Terminator::Return(None)
-                } else {
-                    Terminator::Return(Some(value))
-                });
-            }
-            ast::TaskBody::Block(block) => {
-                inner.lower_block(block);
-                if returns == IrType::Void {
-                    inner.terminate(Terminator::Return(None));
-                } else {
-                    // The checker inferred a non-Void task result from its
-                    // explicit returns. Any synthetically unreachable tail
-                    // must not claim to return Void from this function.
-                    inner.terminate(Terminator::Unreachable);
-                }
-            }
-        }
-
-        inner.scopes.pop();
-        let nested = std::mem::take(&mut inner.lifted);
-        self.lifted.extend(nested);
-        Function {
-            name: name.to_string(),
-            params: slots,
-            return_type: returns,
-            gc_roots: gc_roots_of(inner.module, &inner.slots),
-            slots: inner.slots,
-            blocks: inner.blocks,
-            entry,
-            span: expr.span,
-        }
     }
 
     /// Lowers a lambda body as a function of its own.
@@ -10083,7 +9923,8 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_effect(InstKind::Store(source_slot, source), span);
 
                 for (index, sub) in c.elements.iter().enumerate() {
-                    let index_value = self.const_int_at(index as i128, IrType::Int(IntWidth::U64), span);
+                    let index_value =
+                        self.const_int_at(index as i128, IrType::Int(IntWidth::U64), span);
                     let receiver = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
                     let element = self.emit(
                         InstKind::ArrayListLoad {
@@ -10099,109 +9940,122 @@ impl<'a> FunctionLowering<'a> {
                 }
 
                 if let Some(rest) = &c.rest {
-                if let IrType::Array(_) = scrutinee_type {
-                    let start = self.const_int_at(
-                        c.elements.len() as i128,
-                        IrType::Int(IntWidth::I64),
-                        span,
-                    );
-                    let end = self.const_i64(i64::MIN as i128, span);
-                    let step = self.const_int_at(1, IrType::Int(IntWidth::I64), span);
-                    let receiver = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
-                    let slice = self.emit(
-                        InstKind::ArraySlice {
-                            receiver,
-                            start,
-                            end,
-                            step,
-                        },
-                        scrutinee_type,
-                        span,
-                    );
-                    let rest_slot = self.declare_slot(&rest.name, scrutinee_type, rest.span);
-                    self.emit_effect(InstKind::Store(rest_slot, slice), span);
-                } else if let IrType::List(list_id) = scrutinee_type {
-                    let list_ty = scrutinee_type;
-                    let rest_list = self.emit(
-                        InstKind::ListNew { element_id: list_id },
-                        list_ty,
-                        span,
-                    );
-                    let rest_list_slot = self.spill(rest_list, list_ty, span);
+                    if let IrType::Array(_) = scrutinee_type {
+                        let start = self.const_int_at(
+                            c.elements.len() as i128,
+                            IrType::Int(IntWidth::I64),
+                            span,
+                        );
+                        let end = self.const_i64(i64::MIN as i128, span);
+                        let step = self.const_int_at(1, IrType::Int(IntWidth::I64), span);
+                        let receiver = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
+                        let slice = self.emit(
+                            InstKind::ArraySlice {
+                                receiver,
+                                start,
+                                end,
+                                step,
+                            },
+                            scrutinee_type,
+                            span,
+                        );
+                        let rest_slot = self.declare_slot(&rest.name, scrutinee_type, rest.span);
+                        self.emit_effect(InstKind::Store(rest_slot, slice), span);
+                    } else if let IrType::List(list_id) = scrutinee_type {
+                        let list_ty = scrutinee_type;
+                        let rest_list = self.emit(
+                            InstKind::ListNew {
+                                element_id: list_id,
+                            },
+                            list_ty,
+                            span,
+                        );
+                        let rest_list_slot = self.spill(rest_list, list_ty, span);
 
-                    let source = self.emit(InstKind::Load(source_slot), list_ty, span);
-                    let len = self.emit(
-                        InstKind::ListLength(source),
-                        IrType::Int(IntWidth::U64),
-                        span,
-                    );
-                    let len_slot = self.spill(len, IrType::Int(IntWidth::U64), span);
+                        let source = self.emit(InstKind::Load(source_slot), list_ty, span);
+                        let len = self.emit(
+                            InstKind::ListLength(source),
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        );
+                        let len_slot = self.spill(len, IrType::Int(IntWidth::U64), span);
 
-                    let counter = self.declare_slot("<rest index>", IrType::Int(IntWidth::U64), span);
-                    let start = self.const_int_at(
-                        c.elements.len() as i128,
-                        IrType::Int(IntWidth::U64),
-                        span,
-                    );
-                    self.emit_effect(InstKind::Store(counter, start), span);
+                        let counter =
+                            self.declare_slot("<rest index>", IrType::Int(IntWidth::U64), span);
+                        let start = self.const_int_at(
+                            c.elements.len() as i128,
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        );
+                        self.emit_effect(InstKind::Store(counter, start), span);
 
-                    let header = self.new_block();
-                    let body = self.new_block();
-                    let done = self.new_block();
-                    self.terminate(Terminator::Jump(header));
-                    self.current = header;
+                        let header = self.new_block();
+                        let body = self.new_block();
+                        let done = self.new_block();
+                        self.terminate(Terminator::Jump(header));
+                        self.current = header;
 
-                    let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
-                    let bound = self.emit(InstKind::Load(len_slot), IrType::Int(IntWidth::U64), span);
-                    let keep_going = self.emit(
-                        InstKind::Binary {
-                            op: BinaryOp::Lt,
-                            left: current,
-                            right: bound,
-                        },
-                        IrType::Boolean,
-                        span,
-                    );
-                    self.terminate(Terminator::Branch {
-                        condition: keep_going,
-                        then_block: body,
-                        else_block: done,
-                    });
+                        let current =
+                            self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                        let bound =
+                            self.emit(InstKind::Load(len_slot), IrType::Int(IntWidth::U64), span);
+                        let keep_going = self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Lt,
+                                left: current,
+                                right: bound,
+                            },
+                            IrType::Boolean,
+                            span,
+                        );
+                        self.terminate(Terminator::Branch {
+                            condition: keep_going,
+                            then_block: body,
+                            else_block: done,
+                        });
 
-                    self.current = body;
-                    let source = self.emit(InstKind::Load(source_slot), list_ty, span);
-                    let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
-                    let element = self.emit(
-                        InstKind::ArrayListLoad {
-                            receiver: source,
-                            index,
-                        },
-                        element_ty,
-                        span,
-                    );
-                    let receiver = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
-                    self.emit_effect(InstKind::ListAdd { receiver, value: element }, span);
+                        self.current = body;
+                        let source = self.emit(InstKind::Load(source_slot), list_ty, span);
+                        let index =
+                            self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                        let element = self.emit(
+                            InstKind::ArrayListLoad {
+                                receiver: source,
+                                index,
+                            },
+                            element_ty,
+                            span,
+                        );
+                        let receiver = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
+                        self.emit_effect(
+                            InstKind::ListAdd {
+                                receiver,
+                                value: element,
+                            },
+                            span,
+                        );
 
-                    let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
-                    let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
-                    let next = self.emit(
-                        InstKind::Binary {
-                            op: BinaryOp::Add,
-                            left: current,
-                            right: one,
-                        },
-                        IrType::Int(IntWidth::U64),
-                        span,
-                    );
-                    self.emit_effect(InstKind::Store(counter, next), span);
-                    self.terminate(Terminator::Jump(header));
+                        let current =
+                            self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+                        let next = self.emit(
+                            InstKind::Binary {
+                                op: BinaryOp::Add,
+                                left: current,
+                                right: one,
+                            },
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        );
+                        self.emit_effect(InstKind::Store(counter, next), span);
+                        self.terminate(Terminator::Jump(header));
 
-                    self.current = done;
-                    let rest_value = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
-                    let rest_slot = self.declare_slot(&rest.name, list_ty, rest.span);
-                    self.emit_effect(InstKind::Store(rest_slot, rest_value), span);
+                        self.current = done;
+                        let rest_value = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
+                        let rest_slot = self.declare_slot(&rest.name, list_ty, rest.span);
+                        self.emit_effect(InstKind::Store(rest_slot, rest_value), span);
+                    }
                 }
-            }
             }
             ast::Pattern::Record(r) => {
                 let fields: Vec<_> = match scrutinee_type {
@@ -10262,12 +10116,15 @@ impl<'a> FunctionLowering<'a> {
                                     )
                                 })
                                 .collect();
-                            self.emit(InstKind::BuildValue { class: id, fields }, scrutinee_type, span)
+                            self.emit(
+                                InstKind::BuildValue { class: id, fields },
+                                scrutinee_type,
+                                span,
+                            )
                         }
                         _ => return,
                     };
-                    let rest_slot =
-                        self.declare_slot(&rest.name, scrutinee_type, rest.span);
+                    let rest_slot = self.declare_slot(&rest.name, scrutinee_type, rest.span);
                     self.emit_effect(InstKind::Store(rest_slot, rest_value), span);
                 }
             }
@@ -13730,21 +13587,11 @@ impl<'a> FunctionLowering<'a> {
                     ));
                 }
                 let element_ty = self.module.array_types[id as usize];
-                Some(self.lower_expanded_array(
-                    call.args.as_slice(),
-                    id,
-                    element_ty,
-                    span,
-                ))
+                Some(self.lower_expanded_array(call.args.as_slice(), id, element_ty, span))
             }
             ("List", Base::List(id)) => {
                 let element_ty = self.module.list_types[id as usize];
-                Some(self.lower_expanded_list(
-                    call.args.as_slice(),
-                    id,
-                    element_ty,
-                    span,
-                ))
+                Some(self.lower_expanded_list(call.args.as_slice(), id, element_ty, span))
             }
             ("Map", Base::Map(id)) if call.args.is_empty() => {
                 Some(self.emit(InstKind::MapNew { map_id: id }, IrType::Map(id), span))
@@ -13900,12 +13747,7 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// The runtime length of an iterable value used for a spread into an array.
-    fn lower_iterable_length(
-        &mut self,
-        value: SlotId,
-        iterable_ty: IrType,
-        span: Span,
-    ) -> Operand {
+    fn lower_iterable_length(&mut self, value: SlotId, iterable_ty: IrType, span: Span) -> Operand {
         match iterable_ty {
             IrType::Range => {
                 let length_slot = self.lower_checked_range_length(value, span);
@@ -13979,7 +13821,11 @@ impl<'a> FunctionLowering<'a> {
 
                 self.current = header;
                 let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
-                let bound = self.emit(InstKind::Load(length_slot), IrType::Int(IntWidth::U64), span);
+                let bound = self.emit(
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
                 let keep_going = self.emit(
                     InstKind::Binary {
                         op: BinaryOp::Lt,
@@ -14042,8 +13888,7 @@ impl<'a> FunctionLowering<'a> {
         // The accumulated capacity is held in a slot so it can survive across
         // `amount` computations (range-length checks, spread lengths) that open
         // new blocks.
-        let capacity_slot =
-            self.declare_slot("<array capacity>", IrType::Int(IntWidth::U64), span);
+        let capacity_slot = self.declare_slot("<array capacity>", IrType::Int(IntWidth::U64), span);
         let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
         self.emit_effect(InstKind::Store(capacity_slot, zero), span);
         for item in &prepared {
@@ -14060,8 +13905,11 @@ impl<'a> FunctionLowering<'a> {
                     self.lower_iterable_length(value, iterable_ty, span)
                 }
             };
-            let capacity =
-                self.emit(InstKind::Load(capacity_slot), IrType::Int(IntWidth::U64), span);
+            let capacity = self.emit(
+                InstKind::Load(capacity_slot),
+                IrType::Int(IntWidth::U64),
+                span,
+            );
             let new_capacity = self.checked_int_arithmetic(
                 BinaryOp::Add,
                 capacity,
@@ -14072,8 +13920,11 @@ impl<'a> FunctionLowering<'a> {
             self.emit_effect(InstKind::Store(capacity_slot, new_capacity), span);
         }
         let array_ty = IrType::Array(element_id);
-        let capacity =
-            self.emit(InstKind::Load(capacity_slot), IrType::Int(IntWidth::U64), span);
+        let capacity = self.emit(
+            InstKind::Load(capacity_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
         let array = self.emit(
             InstKind::ArrayNew {
                 element_id,
@@ -14097,11 +13948,16 @@ impl<'a> FunctionLowering<'a> {
                         this.store_collection_array_value(array, array_ty, output, value, span)
                     })
                 }
-                PreparedCollectionElement::Spread { value, iterable_ty } => {
-                    self.lower_iterable_elements(value, iterable_ty, element_ty, span, |this, value| {
-                        this.store_collection_array_value(array, array_ty, output, value, span)
-                    })
-                }
+                PreparedCollectionElement::Spread { value, iterable_ty } => self
+                    .lower_iterable_elements(
+                        value,
+                        iterable_ty,
+                        element_ty,
+                        span,
+                        |this, value| {
+                            this.store_collection_array_value(array, array_ty, output, value, span)
+                        },
+                    ),
             }
         }
         self.emit(InstKind::Load(array), array_ty, span)
@@ -14160,12 +14016,17 @@ impl<'a> FunctionLowering<'a> {
                         this.emit_effect(InstKind::ListAdd { receiver, value }, span);
                     })
                 }
-                PreparedCollectionElement::Spread { value, iterable_ty } => {
-                    self.lower_iterable_elements(value, iterable_ty, element_ty, span, |this, value| {
-                        let receiver = this.emit(InstKind::Load(list), list_ty, span);
-                        this.emit_effect(InstKind::ListAdd { receiver, value }, span);
-                    })
-                }
+                PreparedCollectionElement::Spread { value, iterable_ty } => self
+                    .lower_iterable_elements(
+                        value,
+                        iterable_ty,
+                        element_ty,
+                        span,
+                        |this, value| {
+                            let receiver = this.emit(InstKind::Load(list), list_ty, span);
+                            this.emit_effect(InstKind::ListAdd { receiver, value }, span);
+                        },
+                    ),
             }
         }
         self.emit(InstKind::Load(list), list_ty, span)
@@ -15060,7 +14921,8 @@ impl<'a> FunctionLowering<'a> {
                             }
                         }
                         ast::RecordLiteralElement::Field(f) => {
-                            let Some(index) = field_names.iter().position(|n| n == &f.name.name) else {
+                            let Some(index) = field_names.iter().position(|n| n == &f.name.name)
+                            else {
                                 continue;
                             };
                             let value = self.lower_expr_as(&f.value, field_types[index]);
@@ -15117,7 +14979,8 @@ impl<'a> FunctionLowering<'a> {
                             }
                         }
                         ast::RecordLiteralElement::Field(f) => {
-                            let Some(index) = field_names.iter().position(|n| n == &f.name.name) else {
+                            let Some(index) = field_names.iter().position(|n| n == &f.name.name)
+                            else {
                                 continue;
                             };
                             let value = self.lower_expr_as(&f.value, field_types[index]);
@@ -18677,14 +18540,20 @@ impl<'a> FunctionLowering<'a> {
         let fixed_count = variadic_index.unwrap_or(signature.params.len());
         let variadic_info = variadic_index.map(|i| {
             let element_ty = self.ir_type(signature.params[i].ty);
-            let list_id = self
-                .checked
-                .list_types
-                .iter()
-                .position(|&t| self.ir_type(t) == element_ty)
-                .expect("the checker interned the variadic list type") as u32;
+            let list_id =
+                self.checked
+                    .list_types
+                    .iter()
+                    .position(|&t| self.ir_type(t) == element_ty)
+                    .expect("the checker interned the variadic list type") as u32;
             let list_ty = IrType::List(list_id);
-            let list = self.emit(InstKind::ListNew { element_id: list_id }, list_ty, call.span);
+            let list = self.emit(
+                InstKind::ListNew {
+                    element_id: list_id,
+                },
+                list_ty,
+                call.span,
+            );
             let list_slot = self.spill(list, list_ty, call.span);
             (list_id, element_ty, list_ty, list_slot)
         });
@@ -18700,12 +18569,11 @@ impl<'a> FunctionLowering<'a> {
                 .any(|a| self.opens_blocks(&a.value));
 
             if arg.is_spread {
-                let (_list_id, element_ty, list_ty, list_slot) = variadic_info
-                    .expect("the checker allows spread only into variadic parameters");
+                let (_list_id, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker allows spread only into variadic parameters");
                 let source = self.lower_expr(&arg.value);
                 let source_ty = self.type_of_operand(source);
-                let source_slot =
-                    self.declare_slot("<spread source>", source_ty, arg.value.span());
+                let source_slot = self.declare_slot("<spread source>", source_ty, arg.value.span());
                 self.emit_effect(InstKind::Store(source_slot, source), arg.value.span());
                 self.lower_iterable_elements(
                     source_slot,
@@ -18714,7 +18582,13 @@ impl<'a> FunctionLowering<'a> {
                     arg.span,
                     |this, element| {
                         let receiver = this.emit(InstKind::Load(list_slot), list_ty, arg.span);
-                        this.emit_effect(InstKind::ListAdd { receiver, value: element }, arg.span);
+                        this.emit_effect(
+                            InstKind::ListAdd {
+                                receiver,
+                                value: element,
+                            },
+                            arg.span,
+                        );
                     },
                 );
                 continue;
@@ -18728,14 +18602,21 @@ impl<'a> FunctionLowering<'a> {
                     .expect("the checker resolved every named argument");
                 if index < fixed_count {
                     let ty = self.ir_type(signature.params[index].ty);
-                    fixed_slots[index] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                    fixed_slots[index] =
+                        Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
                 } else {
-                    let (_, element_ty, list_ty, list_slot) = variadic_info
-                        .expect("the checker resolved a named variadic argument");
+                    let (_, element_ty, list_ty, list_slot) =
+                        variadic_info.expect("the checker resolved a named variadic argument");
                     let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
                     let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
                     let element = self.reload(value, call.span);
-                    self.emit_effect(InstKind::ListAdd { receiver, value: element }, call.span);
+                    self.emit_effect(
+                        InstKind::ListAdd {
+                            receiver,
+                            value: element,
+                        },
+                        call.span,
+                    );
                 }
                 continue;
             }
@@ -18748,17 +18629,24 @@ impl<'a> FunctionLowering<'a> {
                 fixed_slots[next] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
                 next += 1;
             } else {
-                let (_, element_ty, list_ty, list_slot) = variadic_info
-                    .expect("the checker rejects too many positional arguments");
+                let (_, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker rejects too many positional arguments");
                 let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
                 let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
                 let element = self.reload(value, call.span);
-                self.emit_effect(InstKind::ListAdd { receiver, value: element }, call.span);
+                self.emit_effect(
+                    InstKind::ListAdd {
+                        receiver,
+                        value: element,
+                    },
+                    call.span,
+                );
             }
         }
 
         let declaration = self.declarations.get(name.as_str()).copied();
-        let mut args: Vec<Operand> = Vec::with_capacity(fixed_count + variadic_info.is_some() as usize);
+        let mut args: Vec<Operand> =
+            Vec::with_capacity(fixed_count + variadic_info.is_some() as usize);
         for (index, slot) in fixed_slots.into_iter().enumerate() {
             let ty = self.ir_type(signature.params[index].ty);
             args.push(match slot {
@@ -19528,11 +19416,6 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int(IntWidth::I32),
             ast::Expr::Println(_) => IrType::Void,
-            ast::Expr::Task(_) => IrType::Task,
-            ast::Expr::Await(_) => self
-                .semantic_type(expr)
-                .map(|ty| self.ir_type(ty))
-                .expect("the checker records every await result type"),
             // A lambda's type is the closure layout it produced, which only
             // exists once it has been lowered: the caller asks the value.
             ast::Expr::Tuple(_) => {

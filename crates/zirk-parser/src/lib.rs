@@ -63,4 +63,8 @@ pub mod codes {
     pub const LEGACY_RANGE_STEP: Code = Code::new("E0316");
     /// A braced `{ ... }` operand written outside a range bound.
     pub const BRACED_OPERAND_OUTSIDE_RANGE: Code = Code::new("E0317");
+    /// A construct that was removed from the language (`task`, `await`,
+    /// `select`, `cancellation shield`) — distinct from one not yet
+    /// implemented. The diagnostic names the replacement.
+    pub const REMOVED_CONSTRUCT: Code = Code::new("E0318");
 }

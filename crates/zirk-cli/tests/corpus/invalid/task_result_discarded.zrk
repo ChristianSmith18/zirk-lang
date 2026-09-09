@@ -1,0 +1,3 @@
+fn main(): Void {
+    task fire_and_forget();
+}

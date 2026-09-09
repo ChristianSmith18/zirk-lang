@@ -676,14 +676,13 @@ are in `MEMORY_AND_UNSAFE_SEMANTICS.md`.
 
 ## 14. Syntax reserved for concurrency
 
-`task`, `task scope`, `await`, `cancellation shield`, `select`, `parallel`,
-`parallel for`, `thread`, `Channel<T>`, `sync` and `Atomic<T>` are defined
-normatively in `STRUCTURED_CONCURRENCY_SEMANTICS.md` and the runtime
-specification. `Task<T>` awaits to exactly `T`; there is no `async fn`, general
-detach, or independent `worker`.
+`task`, `await`, `task scope`, `cancellation shield`, and `select` are removed
+constructs. The parser reports a targeted removal diagnostic that names the
+replacement; `scope` and `shield` are ordinary identifiers.
 
-`select` chooses one ready task, channel, timer, or cancellation branch fairly,
-supports `default`, and leaves losing operations alive. `Task.all`,
-`Task.first`, and `Task.settled` make aggregation failure policy explicit.
+The Phase 5 surface is defined by the pending `concurrent` / `spawn`,
+`parallel`, typed-channel, and concurrency-completion changes. `parallel`,
+`thread`, `Channel<T>`, `sync`, and `Atomic<T>` remain owned by their respective
+changes. There is no `async fn`, general detach, or independent `worker`.
 Internal `Transfer`/`Share` properties are compiler-derived and never ordinary
 user-implemented contracts.

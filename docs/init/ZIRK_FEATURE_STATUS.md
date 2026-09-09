@@ -188,8 +188,8 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| Cooperative executor + task control block + timer + per-task GC roots | n/a | n/a | n/a | n/a | yes | n/a | `fase-5-executor-core`: `zirk-runtime` `executor.rs` / `task.rs` / `timer.rs` + `collector.rs` per-task root chains. `zirk_rt_run_main` runs `main` as the executor's root task. `fase-5-task-await` now calls the provisional `zirk_rt_task_spawn`/`await` ABI from generated code. |
-| bare `task` / `await` | yes | yes | yes | yes | yes | yes | `fase-5-task-await`: `task expr`, `task { ... }`, `Task<T>`, and single-consume `await` run end-to-end. Task captures are GC-rooted by their control block. `task scope` and `await ... timeout` remain deferred with targeted diagnostics. |
+| Cooperative executor + scheduler control block + timer + per-task GC roots | n/a | n/a | n/a | n/a | yes | n/a | `fase-5-executor-core` runtime infrastructure remains: `executor.rs` / `task.rs` / `timer.rs` and `collector.rs` per-task root chains. `zirk_rt_run_main` runs `main` as the executor's root scheduler task; the provisional task ABI is retained internally until renamed by `concurrent-blocks-and-timers`. |
+| removed `task` / `await` / `select` surface | n/a | targeted diagnostic | n/a | n/a | retained runtime only | yes | `remove-task-await-model`: `task`, `await`, `Task<T>`, task scope, selection, and shields were removed from lexer, AST, sema, IR, codegen, and corpus. Construct-shaped legacy syntax reports `E0318` with its replacement. |
 | `parallel`/`thread` | yes | partial | no | no | no | no | `Keyword::Parallel`/`Thread`/`Sync` gated. Phase 5 steps 4–6 (need a multi-threaded collector). |
 | `Channel<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (`fase-5-select-and-channels`). |
 | `Atomic<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (steps 4–6). |

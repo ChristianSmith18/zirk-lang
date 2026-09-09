@@ -1,10 +1,10 @@
 //! The executor's monotonic timer service: a min-heap of deadlines the loop
 //! consults once per scheduling turn.
 //!
-//! Backs `after duration` in `select` and `await operation timeout duration`
-//! (delivered by later changes). Uses [`std::time::Instant`] — a wall-clock jump
-//! must not disturb scheduling, so this is deliberately *not* the `SystemTime`
-//! clock the temporal `now_*` helpers use.
+//! Backs the timer API introduced by the pending concurrency-surface changes.
+//! Uses [`std::time::Instant`] — a wall-clock jump must not disturb scheduling,
+//! so this is deliberately *not* the `SystemTime` clock the temporal `now_*`
+//! helpers use.
 //!
 //! Cancellation is lazy: [`disarm`](TimerService::disarm) records the id and the
 //! entry is dropped when it reaches the top of the heap. Design:

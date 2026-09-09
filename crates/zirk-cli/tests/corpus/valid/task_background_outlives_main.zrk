@@ -1,7 +1,0 @@
-fn background(): Void {
-    stdout.println("background complete");
-}
-
-fn main(): Void {
-    _ = task background();
-}

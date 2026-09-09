@@ -391,22 +391,20 @@ model: stackful coroutines on a single-threaded cooperative executor, no
 function coloring.
 
 0. **Executor infrastructure** — `fase-5-executor-core` (**runtime delivered**):
-   the cooperative executor, task control block, stackful-coroutine
+   the cooperative executor, scheduler control block, stackful-coroutine
    suspend/resume, monotonic timer, per-task garbage-collection root chains, and
-   `zirk_rt_run_main` running `main` as the executor's root task. No `.zrk`
-   surface yet — `task` / `await` still emit the phase diagnostic.
-1. Bare `Task<T>`, `task expr` / `task { ... }`, and `await expr` — **delivered**
-   by `fase-5-task-await` on the step-0 executor. `task scope`, sibling-failure
-   propagation, cancellation, shield and timeout remain the next language slice.
-2. `Task.all`/`first`/`settled`, `TaskSettlement<T>`, fair `select`, and
-   bounded/unbounded `Channel<T>` with closure/backpressure.
-3. Compiler-derived transfer/share and capture analysis sufficient to enforce
-   the safe-code data-race guarantee across every supported boundary.
-4. `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, and safe-default
-   `Atomic<T>`; weak atomic ordering remains unsafe.
-5. scoped `thread`, `task.blocking`, and application root supervision.
-6. ordered/unordered `parallel` operations and associative/deterministic
-   reductions on a multicore pool.
+   `zirk_rt_run_main` running `main` as the executor's root scheduler task.
+1. `concurrent { }`, dynamic `spawn`, cleanup edges, cancellation, timers, and
+   application-root supervision (`concurrent-blocks-and-timers`).
+2. Ordered/unordered `parallel` operations and associative/deterministic
+   reductions on a multicore pool (`parallel-cpu-regions`).
+3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
+   (`typed-channels`).
+4. Outcomes, aggregation policy, safe-default synchronization, scoped
+   `thread`, and the remaining concurrency APIs (`concurrency-completion`).
+
+`task`, `await`, `Task<T>`, task scopes, `select`, and cancellation shields are
+removed constructs. Their parser diagnostic names the applicable replacement.
 
 **Output:** the structured concurrency contract of
 `STRUCTURED_CONCURRENCY_SEMANTICS.md`, including cleanup, selection, transfer,
@@ -432,7 +430,7 @@ and data-race guarantees, working end to end.
 Order suggested by real dependency, not by the order they appear in the spec:
 
 `std.io` (already partially covered) → `std.collections` → `std.fs`/`std.path` →
-`std.time` → `std.process` → `std.task`/`std.thread`/`std.sync` (wrapping
+`std.time` → `std.process` → `std.thread`/`std.sync` (wrapping
 Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
 `std.system`.

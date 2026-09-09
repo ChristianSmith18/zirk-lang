@@ -200,8 +200,8 @@ invalidates active iterators deterministically. Explicit read-only views may
 share storage for a checked lifetime; mutable iteration is deferred. `Range`
 is a finite lazy reusable value iterable. Collection transformations are eager;
 iterator adapters are single-pass/lazy and require an explicit materialization
-terminal. Task-aware streams remain a separate contract so iteration never
-hides `await`. List growth is automatic and allocation capacity is not a public
+terminal. Concurrent streams remain a separate contract so iteration never
+hides a suspension boundary. List growth is automatic and allocation capacity is not a public
 source-level API.
 
 ## 7. Mandatory contributor reading order

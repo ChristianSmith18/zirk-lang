@@ -18,9 +18,13 @@ pub mod symbols {
     pub const INIT: &str = "zirk_rt_init";
     /// Runs the Zirk entrypoint as the cooperative executor's root task.
     pub const RUN_MAIN: &str = "zirk_rt_run_main";
-    /// Starts a child task from a body thunk and boxed-callable capture block.
+    /// Starts a child scheduler task from a body thunk and boxed-callable
+    /// capture block. This provisional symbol is reused and renamed by
+    /// `concurrent-blocks-and-timers`.
     pub const TASK_SPAWN: &str = "zirk_rt_task_spawn";
-    /// Suspends the current task until a child result is available.
+    /// Suspends the current scheduler task until a child result is available.
+    /// This provisional symbol is reused and renamed by
+    /// `concurrent-blocks-and-timers`.
     pub const TASK_AWAIT: &str = "zirk_rt_task_await";
     /// Shuts the runtime down after `main`.
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";

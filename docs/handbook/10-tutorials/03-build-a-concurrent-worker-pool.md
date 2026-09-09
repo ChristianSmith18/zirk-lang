@@ -54,7 +54,7 @@ more workers than jobs, channel closure, first failure, settled aggregation,
 cancellation during send/receive, bounded timeout, stable output ordering, and
 leak-free cleanup with a fixed seed. See
 [Structured Concurrency](../02-handbook/18-concurrency/README.md) and
-[`std.task`](../04-standard-library/08-std-task.md).
+the structured-concurrency handbook.
 
 ## Completion contract
 

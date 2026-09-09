@@ -159,6 +159,20 @@ this.
   cheap software frame check, and a later guard-page implementation, are tracked
   by the `fase-5-async-core` change, not by this ADR.
 
+## Superseded surface decisions
+
+`remove-task-await-model` supersedes the language-surface consequences of this
+ADR: `task`, `await`, `task scope`, `select`, cancellation shields, `Task<T>`,
+and their parser, semantic, IR, and codegen nodes are no longer part of Zirk.
+The pending `concurrent-blocks-and-timers` ADR defines their replacement.
+
+The runtime decisions remain in force. Scheduler tasks are stackful coroutines
+on a cooperative executor; each has a control block and its own shadow-stack
+root chain; ordinary functions retain one calling convention; and concurrency
+does not require an effect or function-color system. In this document, “task”
+therefore denotes an internal scheduler coroutine unless a superseded language
+surface is being discussed historically.
+
 ## Related
 
 - [ADR-003](./ADR-003-memoria.md) — the shadow stack and cooperative collection

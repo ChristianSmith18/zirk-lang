@@ -1,6 +1,6 @@
 # Workers by Composition
 
-Zirk 1.x has no standalone `worker` primitive. Build a dedicated worker from a supervised task or thread plus one or more `Channel<T>` values. This keeps scheduling, ownership, shutdown, and backpressure visible through existing contracts.
+Zirk 1.x has no standalone `worker` primitive. Build a dedicated worker from a supervised concurrent operation or thread plus one or more `Channel<T>` values. This keeps scheduling, ownership, shutdown, and backpressure visible through existing contracts.
 
 ---
 

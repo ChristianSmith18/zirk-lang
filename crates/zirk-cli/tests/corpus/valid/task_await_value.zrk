@@ -1,6 +1,0 @@
-fn compute(value: Int32): Int32 { return value * 2; }
-
-fn main(): Void {
-    mut handle = task compute(21);
-    stdout.println(await handle);
-}

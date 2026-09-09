@@ -242,7 +242,7 @@ fn valid_later_phase_keywords_are_recognized() {
         ("class", Keyword::Class),
         ("for", Keyword::For),
         ("match", Keyword::Match),
-        ("task", Keyword::Task),
+        ("parallel", Keyword::Parallel),
         ("import", Keyword::Import),
     ] {
         assert_eq!(

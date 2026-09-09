@@ -258,6 +258,62 @@ impl<'a> Parser<'a> {
         self.sink.emit(d);
     }
 
+    /// If the current tokens spell a construct that was removed from the
+    /// language, returns its name and the one-line replacement hint.
+    ///
+    /// Only the construct-shaped form matches: `task <expression>` /
+    /// `await <expression>` / `select {` / `cancellation shield`. A bare word
+    /// or an ordinary assignment to `task` or `select` does not match.
+    fn removed_construct_here(&self) -> Option<(&'static str, &'static str)> {
+        let TokenKind::Identifier(name) = self.peek() else {
+            return None;
+        };
+        let next_starts_expression = matches!(
+            self.peek_at(1),
+            TokenKind::LBrace
+                | TokenKind::Identifier(_)
+                | TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::Duration(_, _)
+                | TokenKind::Str(_)
+                | TokenKind::InterpolatedStr(_)
+                | TokenKind::Char(_)
+                | TokenKind::Regex(_)
+                | TokenKind::LParen
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Not
+                | TokenKind::Keyword(
+                    Keyword::True
+                        | Keyword::False
+                        | Keyword::Null
+                        | Keyword::This
+                        | Keyword::Super
+                        | Keyword::Transfer
+                        | Keyword::Unsafe
+                        | Keyword::Commit
+                )
+        );
+        match name.as_str() {
+            "task" if next_starts_expression => Some((
+                "task",
+                "use a `concurrent { }` block, or `spawn` inside one",
+            )),
+            "await" if next_starts_expression => Some((
+                "await",
+                "a `concurrent { }` block joins its branches; `job.wait()` collects a `Job<T>`",
+            )),
+            "select" if matches!(self.peek_at(1), TokenKind::LBrace) => Some((
+                "select",
+                "wait on several operations with `Concurrent.of(...).first()`",
+            )),
+            "cancellation" if matches!(self.peek_at(1), TokenKind::Identifier(next) if next == "shield") => {
+                Some(("cancellation shield", "use `Concurrent.protect(fn)`"))
+            }
+            _ => None,
+        }
+    }
+
     /// Emits the not-implemented diagnostic when it applies.
     ///
     /// Returns `true` when the current token is a construct from a later phase,
@@ -265,32 +321,17 @@ impl<'a> Parser<'a> {
     fn report_if_from_another_phase(&mut self) -> bool {
         let span = self.peek_span();
 
-        // These words remain ordinary identifiers until their structural form
-        // makes the future async construct unambiguous. That keeps names such
-        // as `select` and `cancellation` available to current programs while
-        // still giving the real constructs their promised phase diagnostics.
-        let deferred_async = match (self.peek(), self.peek_at(1)) {
-            (TokenKind::Identifier(name), TokenKind::LBrace) if name == "select" => Some((
-                "select",
-                "`select` arrives in the `fase-5-select-and-channels` slice of Phase 5",
-            )),
-            (TokenKind::Identifier(name), TokenKind::Identifier(next))
-                if name == "cancellation" && next == "shield" =>
-            {
-                Some((
-                    "cancellation shield",
-                    "`cancellation shield` arrives with structured task cancellation in Phase 5",
-                ))
-            }
-            _ => None,
-        };
-        if let Some((construct, cause)) = deferred_async {
+        // `task` / `await` / `select` / `cancellation shield` were removed from
+        // the language by `remove-task-await-model`. They are ordinary
+        // identifiers now; only their construct-shaped form is diagnosed, so
+        // `mut task = 1;` and `mut select = 2;` stay valid.
+        if let Some((construct, replacement)) = self.removed_construct_here() {
             self.error(
-                codes::NOT_IMPLEMENTED,
+                codes::REMOVED_CONSTRUCT,
                 span,
-                format!("`{construct}` is not implemented yet"),
-                cause,
-                Some("the bare `task` / `await` forms are available now".into()),
+                format!("`{construct}` was removed from the language"),
+                "the concurrency surface is `concurrent {{ }}` / `parallel {{ }}` / `spawn` plus the `Concurrent` / `Timer` / `Channel` methods",
+                Some(replacement.into()),
             );
             self.synchronize();
             return true;
@@ -3230,7 +3271,9 @@ impl<'a> Parser<'a> {
                 if !matches!(self.peek(), TokenKind::RBracket) {
                     loop {
                         if self.eat(&TokenKind::DotDotDot) {
-                            rest = Some(self.expect_identifier("after `...` in a collection pattern")?);
+                            rest = Some(
+                                self.expect_identifier("after `...` in a collection pattern")?,
+                            );
                             break;
                         }
                         elements.push(self.parse_pattern()?);
@@ -3266,10 +3309,7 @@ impl<'a> Parser<'a> {
                         } else {
                             None
                         };
-                        let end = binding
-                            .as_ref()
-                            .map(|b| b.span)
-                            .unwrap_or(name.span);
+                        let end = binding.as_ref().map(|b| b.span).unwrap_or(name.span);
                         fields.push(RecordPatternField {
                             name: name.clone(),
                             binding,
@@ -3435,10 +3475,9 @@ impl<'a> Parser<'a> {
         }
         match self.peek_at(1) {
             TokenKind::DotDotDot => true,
-            TokenKind::Identifier(_) => matches!(
-                self.peek_at(2),
-                TokenKind::Colon | TokenKind::Comma
-            ),
+            TokenKind::Identifier(_) => {
+                matches!(self.peek_at(2), TokenKind::Colon | TokenKind::Comma)
+            }
             _ => false,
         }
     }
@@ -3598,10 +3637,7 @@ impl<'a> Parser<'a> {
                     Some(expr) => {
                         let span = element_start.to(expr.span());
                         if is_spread {
-                            elements.push(CollectionElement::Spread(SpreadElement {
-                                expr,
-                                span,
-                            }));
+                            elements.push(CollectionElement::Spread(SpreadElement { expr, span }));
                         } else {
                             elements.push(CollectionElement::Scalar(expr));
                         }
@@ -3653,10 +3689,8 @@ impl<'a> Parser<'a> {
                     match self.parse_expr() {
                         Some(expr) => {
                             let span = element_start.to(expr.span());
-                            elements.push(RecordLiteralElement::Spread(SpreadElement {
-                                expr,
-                                span,
-                            }));
+                            elements
+                                .push(RecordLiteralElement::Spread(SpreadElement { expr, span }));
                         }
                         None => {
                             ok = false;
@@ -3750,13 +3784,18 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Option<Expr> {
         let start = self.peek_span();
 
-        // `task expr` / `task { block }` and `await expr` are unary-precedence
-        // prefix forms (roadmap Phase 5 step 1, `fase-5-task-await`).
-        if self.check_keyword(Keyword::Task) {
-            return self.parse_task(start);
-        }
-        if self.check_keyword(Keyword::Await) {
-            return self.parse_await(start);
+        // `task` / `await` were removed from the language; diagnose their
+        // construct-shaped form here (they are identifiers now).
+        if let Some((construct, replacement)) = self.removed_construct_here() {
+            self.error(
+                codes::REMOVED_CONSTRUCT,
+                start,
+                format!("`{construct}` was removed from the language"),
+                "the concurrency surface is `concurrent {{ }}` / `parallel {{ }}` / `spawn` plus the `Concurrent` / `Timer` / `Channel` methods",
+                Some(replacement.into()),
+            );
+            self.synchronize();
+            return None;
         }
 
         // `++i` and `--i` in value position: the operand is updated first and
@@ -4114,68 +4153,6 @@ impl<'a> Parser<'a> {
         Some(Expr::Transfer(TransferExpr {
             expr: Box::new(expr),
             span: span.to(end),
-        }))
-    }
-
-    /// `task expr` / `task { block }` (roadmap Phase 5 step 1). `start` is the
-    /// `task` keyword span; the current token is still `task`.
-    fn parse_task(&mut self, start: Span) -> Option<Expr> {
-        self.pos += 1; // `task`
-
-        // `task scope { ... }` — structured task scopes are a later slice.
-        if matches!(self.peek(), TokenKind::Identifier(n) if n == "scope") {
-            let span = start.to(self.peek_span());
-            self.error(
-                codes::NOT_IMPLEMENTED,
-                span,
-                "`task scope` is not implemented yet",
-                "structured task scopes arrive in the `fase-5-task-scope` slice of Phase 5",
-                Some("bare `task expr` and `task { block }` are available now".into()),
-            );
-            self.synchronize();
-            return None;
-        }
-
-        let (body, end) = if matches!(self.peek(), TokenKind::LBrace) {
-            let block = self.parse_block()?;
-            let end = block.span;
-            (TaskBody::Block(block), end)
-        } else {
-            let expr = self.parse_unary()?;
-            let end = expr.span();
-            (TaskBody::Expr(Box::new(expr)), end)
-        };
-
-        Some(Expr::Task(TaskExpr {
-            body,
-            span: start.to(end),
-        }))
-    }
-
-    /// `await expr` (roadmap Phase 5 step 1). `start` is the `await` keyword
-    /// span; the current token is still `await`.
-    fn parse_await(&mut self, start: Span) -> Option<Expr> {
-        self.pos += 1; // `await`
-        let operand = self.parse_unary()?;
-        let end = operand.span();
-
-        // `await expr timeout <dur>` — arrives with `select` and channels.
-        if matches!(self.peek(), TokenKind::Identifier(n) if n == "timeout") {
-            let span = start.to(self.peek_span());
-            self.error(
-                codes::NOT_IMPLEMENTED,
-                span,
-                "`await ... timeout` is not implemented yet",
-                "awaiting with a timeout arrives in the `fase-5-select-and-channels` slice of Phase 5",
-                Some("bare `await expr` is available now".into()),
-            );
-            self.synchronize();
-            return None;
-        }
-
-        Some(Expr::Await(AwaitExpr {
-            operand: Box::new(operand),
-            span: start.to(end),
         }))
     }
 

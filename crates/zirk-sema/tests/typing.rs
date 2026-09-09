@@ -5802,77 +5802,18 @@ fn invalid_temporal_duration_interop() {
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
-// --- `task` / `await` (roadmap Phase 5 step 1, `fase-5-task-await`) --------
+// --- `task` / `await` were removed (`remove-task-await-model`) --------------
 
 #[test]
-fn valid_await_unwraps_the_task_result_type() {
-    accepted(
-        "fn compute(n: Int32): Int32 { return n; }\n\
-         fn main(): Void { mut h = task compute(21); mut x: Int32 = await h; }",
-    );
+fn task_is_not_a_type() {
+    // `Task<T>` no longer resolves: it is an unknown type name.
+    let output = rejected_body("mut h: Task<Int32> = 1;");
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
 }
 
 #[test]
-fn valid_task_block_infers_its_result_type() {
-    accepted(
-        "fn compute(n: Int32): Int32 { return n; }\n\
-         fn main(): Void { mut h = task { return compute(21); }; mut x: Int32 = await h; }",
-    );
-}
-
-#[test]
-fn valid_task_over_a_void_body_is_task_void() {
-    accepted(
-        "fn tick(): Void { }\n\
-         fn main(): Void { mut h = task tick(); await h; }",
-    );
-}
-
-#[test]
-fn invalid_await_on_a_non_task() {
-    let output = rejected_body("mut x = await 5;");
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains("Task"), "{output}");
-}
-
-#[test]
-fn invalid_task_result_wider_than_a_machine_word() {
-    let output = rejected(
-        "fn big(): Int128 { return 1; }\n\
-         fn main(): Void { mut h = task big(); mut x: Int128 = await h; }",
-    );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains("machine word"), "{output}");
-}
-
-#[test]
-fn invalid_task_awaited_twice() {
-    let output = rejected(
-        "fn compute(n: Int32): Int32 { return n; }\n\
-         fn main(): Void { mut h = task compute(1); mut a = await h; mut b = await h; }",
-    );
-    assert!(output.contains(codes::SECOND_AWAIT.as_str()), "{output}");
-    assert!(output.contains("first consumed"), "{output}");
-}
-
-#[test]
-fn invalid_unconsumed_task_is_must_use() {
-    let output = rejected(
-        "fn compute(n: Int32): Int32 { return n; }\n\
-         fn main(): Void { task compute(1); }",
-    );
-    assert!(
-        output.contains(codes::DISCARDED_RESULT.as_str()),
-        "{output}"
-    );
-}
-
-#[test]
-fn valid_discarded_task_with_underscore() {
-    accepted(
-        "fn compute(n: Int32): Int32 { return n; }\n\
-         fn main(): Void { _ = task compute(1); }",
-    );
+fn task_and_select_are_ordinary_identifiers() {
+    accepted_body("mut task = 1; mut select = 2; task = select;");
 }
 
 // --- Range collection expansion (OpenSpec `range-collection-expansion`) ---

@@ -2,10 +2,10 @@
 //! lives.
 //!
 //! [`ADR-017`](../../../../docs/decisions/ADR-017-modelo-de-suspension.md) chose
-//! **stackful coroutines**: a `task` owns its own stack and suspends by
-//! switching back to the executor, with no `async fn`, no function coloring, and
-//! no transformation of function bodies into state machines. This module is the
-//! only place that knows how that switch is performed.
+//! **stackful coroutines**: an internal scheduler task owns its own stack and
+//! suspends by switching back to the executor, with no transformation of
+//! function bodies into state machines. This module is the only place that
+//! knows how that switch is performed.
 //!
 //! # Backends
 //!
@@ -36,9 +36,9 @@
 //! task only ever resumes from inside its own last suspend call, whenever any
 //! task is running that pointer refers to *its* handle.
 
-/// Default task stack size, in bytes. Fixed at 128 KiB and not user-configurable
-/// in this phase (design decision 1.4). A per-`task` size and a hardware
-/// guard-page scheme are tracked as follow-up.
+/// Default scheduler-task stack size, in bytes. Fixed at 128 KiB and not
+/// user-configurable in this phase (design decision 1.4). A per-task size and
+/// a hardware guard-page scheme are tracked as follow-up.
 pub const DEFAULT_TASK_STACK_BYTES: usize = 128 * 1024;
 
 /// Result of resuming a [`TaskContext`].

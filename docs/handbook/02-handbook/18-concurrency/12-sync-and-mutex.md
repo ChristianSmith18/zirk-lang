@@ -3,7 +3,7 @@
 `sync` and `Mutex<T>` protect shared mutable state. Structured
 `mutex.with(value => { ... })` access prevents a guard or writable view from
 escaping. Keep critical sections small; holding an ordinary mutex across
-`await` is a compile-time error.
+Suspension is a compile-time error.
 
 Prefer channels or immutable values when ownership transfer expresses the design better.
 

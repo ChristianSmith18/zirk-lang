@@ -13,11 +13,11 @@ At a concurrent boundary:
 - synchronization-aware references may share;
 - resources, pointers, locks, and dependent views follow specialized contracts.
 
-Task captures use those same rules. Capturing `users[0]` captures an independent
+Concurrent branch captures use those same rules. Capturing `users[0]` captures an independent
 projected value, while capturing complete `users` would share or transfer the
 complete reference only when safe. An ambiguous mutable alias is a compile-time
 error with suggestions for strict sharing, transfer, synchronization, or clone.
 
 ---
 
-**Previous:** [← select](16-select.md) · **Next:** [ Modules](../19-modules/README.md)
+**Previous:** [← Data-Race Prevention](14-data-race-prevention.md) · **Next:** [ Modules](../19-modules/README.md)

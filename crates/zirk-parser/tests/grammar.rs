@@ -221,11 +221,6 @@ fn shape(e: &Expr) -> String {
             )
         }
         Expr::Regex(r) => format!("re'{:?}'", r.pattern),
-        Expr::Task(t) => match &t.body {
-            TaskBody::Expr(e) => format!("task({})", shape(e)),
-            TaskBody::Block(b) => format!("task({{{} stmts}})", b.statements.len()),
-        },
-        Expr::Await(a) => format!("await({})", shape(&a.operand)),
     }
 }
 
@@ -2180,75 +2175,57 @@ fn valid_pointer_type_in_every_position() {
     assert_eq!(p.functions[0].return_type.name, "Pointer");
 }
 
-// --- Bare `task` / `await` (roadmap Phase 5 step 1, `fase-5-task-await`) ---
+// --- `task` / `await` / `select` were removed (`remove-task-await-model`) ---
 
 #[test]
-fn valid_task_over_a_call() {
-    assert_eq!(shape(&expression("task f(1)")), "task(f(1))");
-}
-
-#[test]
-fn valid_task_over_a_block() {
-    assert_eq!(
-        shape(&expression("task { return g(); }")),
-        "task({1 stmts})"
-    );
-}
-
-#[test]
-fn valid_await_over_a_name() {
-    assert_eq!(shape(&expression("await h")), "await(h)");
-}
-
-#[test]
-fn valid_task_handle_declaration() {
-    let stmts = statements("mut u: Task<User> = task load(42);");
-    match &stmts[0] {
-        Stmt::Let(l) => {
-            assert_eq!(l.ty.as_ref().unwrap().name, "Task");
-            assert_eq!(l.ty.as_ref().unwrap().arguments[0].name, "User");
-            assert_eq!(shape(l.init.as_ref().unwrap()), "task(load(42))");
-        }
-        other => panic!("expected a declaration, got {other:?}"),
+fn invalid_task_is_a_removed_construct() {
+    for source in [
+        "fn main(): Void { task f(1); }",
+        "fn main(): Void { task 42; }",
+    ] {
+        let output = errors(source);
+        assert!(
+            output.contains(codes::REMOVED_CONSTRUCT.as_str()),
+            "{output}"
+        );
+        assert!(output.contains("`task` was removed"), "{output}");
+        assert!(output.contains("concurrent"), "{output}");
+        assert!(
+            !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+            "{output}"
+        );
     }
 }
 
 #[test]
-fn valid_await_binds_looser_than_a_call_and_tighter_than_assignment() {
-    // `x = await h()` is `x = (await (h()))`.
-    let stmts = statements("mut x = 0; x = await h();");
-    match &stmts[1] {
-        Stmt::Assign(a) => assert_eq!(shape(&a.value), "await(h())"),
-        other => panic!("expected an assignment, got {other:?}"),
-    }
-}
-
-#[test]
-fn invalid_task_scope_names_its_slice() {
-    let output = errors("fn main(): Void { task scope { } }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("task scope"), "{output}");
-    assert!(output.contains("fase-5-task-scope"), "{output}");
+fn invalid_await_is_a_removed_construct() {
+    let output = errors("fn main(): Void { mut h = 0; _ = await h; }");
     assert!(
-        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        output.contains(codes::REMOVED_CONSTRUCT.as_str()),
         "{output}"
     );
+    assert!(output.contains("`await` was removed"), "{output}");
 }
 
 #[test]
-fn invalid_await_timeout_names_its_slice() {
-    let output = errors("fn main(): Void { mut h = task f(); _ = await h timeout 1s; }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
-    assert!(output.contains("timeout"), "{output}");
-    assert!(output.contains("fase-5-select-and-channels"), "{output}");
+fn invalid_select_is_a_removed_construct() {
+    let output = errors("fn main(): Void { select { } }");
     assert!(
-        !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+        output.contains(codes::REMOVED_CONSTRUCT.as_str()),
         "{output}"
     );
+    assert!(output.contains("`select` was removed"), "{output}");
 }
 
 #[test]
-fn invalid_select_and_cancellation_shield_name_their_future_slices() {
+fn valid_task_and_select_are_ordinary_identifiers() {
+    // The words are free again: only their construct-shaped form is diagnosed.
+    let stmts = statements("mut task = 1; mut select = 2; task = select;");
+    assert_eq!(stmts.len(), 3);
+}
+
+#[test]
+fn invalid_select_and_cancellation_shield_are_removed_constructs() {
     for (source, construct) in [
         ("fn main(): Void { select { } }", "select"),
         (
@@ -2257,8 +2234,14 @@ fn invalid_select_and_cancellation_shield_name_their_future_slices() {
         ),
     ] {
         let output = errors(source);
-        assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()), "{output}");
+        assert!(
+            output.contains(codes::REMOVED_CONSTRUCT.as_str()),
+            "{output}"
+        );
         assert!(output.contains(construct), "{output}");
-        assert!(output.contains("Phase 5"), "{output}");
+        assert!(
+            !output.contains(codes::UNEXPECTED_TOKEN.as_str()),
+            "{output}"
+        );
     }
 }

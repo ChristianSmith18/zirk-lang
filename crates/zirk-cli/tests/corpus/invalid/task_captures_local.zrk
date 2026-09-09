@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut base: Int32 = 20;
+    task add(base);
+}

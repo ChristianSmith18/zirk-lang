@@ -74,11 +74,11 @@ Distributable package: `.zpkg`
 > `Option<T>`; bounded native views are preferred to raw pointers; deep cloning
 > preserves graph topology. Ordinary `unsafe` blocks transactionally journal
 > managed and validated-range writes and roll them back on controlled failure;
-> irreversible effects require an explicit `commit` boundary. Tasks are typed,
-> scoped and never orphaned. Failure cancels siblings, cancellation and timeouts
-> await cleanup, `Task.settled` preserves every outcome, and fair `select`
-> coordinates tasks, channels, timers and cancellation. Transfer/share safety
-> is compiler-derived, and safe code is data-race free.
+> irreversible effects require an explicit `commit` boundary. Concurrent
+> operations are scoped and never orphaned. Failure cancels siblings, and
+> cancellation and timeouts wait for cleanup. The planned `concurrent`,
+> `parallel`, channel, and outcome APIs preserve explicit coordination.
+> Transfer/share safety is compiler-derived, and safe code is data-race free.
 
 Contributors implementing these decisions must next read the consolidated
 [`CORE_LANGUAGE_SEMANTICS.md`](CORE_LANGUAGE_SEMANTICS.md) checkpoint before
@@ -137,9 +137,9 @@ The following are not part of Zirk 1.x:
 
 - a WebAssembly target or native browser/DOM integration;
 - `@runtime`, `@target`, `@host` or `@platform` directives;
-- a `worker` as an independent primitive: it is composed from `task`, `thread`
-  and `Channel<T>`;
-- `async fn`: `task` and `await` express asynchrony;
+- a `worker` as an independent primitive: it is composed from the concurrency
+  surface, `thread`, and `Channel<T>`;
+- `async fn`: concurrency remains colorless without a function modifier;
 - a public or manually managed event loop;
 - inline textual assembly;
 - general `comptime {}`;
@@ -172,7 +172,7 @@ This specification is split into:
 - [MEMORY_AND_UNSAFE_SEMANTICS.md](./MEMORY_AND_UNSAFE_SEMANTICS.md): managed
   memory, references, native views, pointers, unsafe rollback, and commit.
 - [STRUCTURED_CONCURRENCY_SEMANTICS.md](./STRUCTURED_CONCURRENCY_SEMANTICS.md):
-  tasks, cancellation, aggregation, select, channels, parallelism, and races.
+  model-neutral lifetime, cancellation, capture, runtime, and race-safety rules.
 - [DECORATOR_SEMANTICS.md](./DECORATOR_SEMANTICS.md): decorator declarations,
   targets, phases, composition, erasure, and generated framework API.
 

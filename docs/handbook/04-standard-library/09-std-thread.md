@@ -23,4 +23,4 @@ controlled internal or unsafe TLS; application context uses explicit values.
 
 ---
 
-**Previous:** [← std.task](08-std-task.md) · **Next:** [ std.sync](10-std-sync.md)
+**Previous:** [← std.time](07-std-time.md) · **Next:** [ std.sync](10-std-sync.md)

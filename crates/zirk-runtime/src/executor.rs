@@ -1,5 +1,7 @@
 //! The single-threaded cooperative executor: one loop, a first-in-first-out
-//! ready queue, and the timer service, driving stackful-coroutine tasks.
+//! ready queue, and the timer service, driving internal stackful-coroutine
+//! scheduler tasks. These tasks are runtime control blocks, not language-level
+//! `Task<T>` values.
 //!
 //! No task is ever preempted — a task yields only at a safe point (here, an
 //! explicit [`yield_now`], [`await_task`], or a future channel / timer wait).

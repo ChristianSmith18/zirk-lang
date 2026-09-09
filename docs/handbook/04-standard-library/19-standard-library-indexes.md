@@ -16,7 +16,7 @@ the module chapter and its normative specification own the contract.
 | Build, format, search, or match text | [`std.text`](05a-std-text.md) | native `String`/`Char`, `std.encoding` |
 | Store and transform in-memory values | [`std.collections`](06-std-collections.md) | iteration and functional-style handbook |
 | Work with dates, time zones, clocks, or timers | [`std.time`](07-std-time.md) | temporal-types handbook, `std.task` |
-| Start, settle, cancel, or communicate between tasks | [`std.task`](08-std-task.md) | `std.sync`, structured-concurrency handbook |
+| Coordinate concurrent work | structured-concurrency handbook | `std.sync`, typed channels, and the pending concurrency surface |
 | Use a dedicated system thread | [`std.thread`](09-std-thread.md) | `std.sync`, `std.task` |
 | Protect shared state or coordinate threads | [`std.sync`](10-std-sync.md) | atomics and memory-safety handbook |
 | Parallelize CPU work | [`std.parallel`](10a-std-parallel.md) | `std.task`, collections |
@@ -68,7 +68,7 @@ This index lists prominent entry types rather than every helper or enum.
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
 | collection families | [`std.collections`](06-std-collections.md) | owned/reference collections and iterators |
 | `Date`, `Time`, `DateTime`, `Instant`, `Duration`, `Period` | [`std.time`](07-std-time.md) | civil and monotonic temporal domains |
-| `Task<T>`, channels and task scopes | [`std.task`](08-std-task.md) | structured asynchronous work |
+| Channels and concurrent scopes | structured-concurrency handbook | structured concurrent work |
 | `Thread<T>` | [`std.thread`](09-std-thread.md) | explicit dedicated OS thread |
 | `Mutex<T>`, `RWLock<T>`, `Semaphore`, atomics | [`std.sync`](10-std-sync.md) | shared-state coordination |
 | `IPAddress`, `HostName`, `Port`, `SocketAddress` | [`std.net`](11-std-net.md) | immutable network addressing |

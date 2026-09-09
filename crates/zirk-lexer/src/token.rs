@@ -86,8 +86,6 @@ pub enum Keyword {
     As,
     Is,
     Unsafe,
-    Task,
-    Await,
     Parallel,
     Thread,
     Sync,
@@ -174,8 +172,6 @@ impl Keyword {
             "as" => As,
             "is" => Is,
             "unsafe" => Unsafe,
-            "task" => Task,
-            "await" => Await,
             "parallel" => Parallel,
             "thread" => Thread,
             "sync" => Sync,
@@ -245,8 +241,6 @@ impl Keyword {
             As => "as",
             Is => "is",
             Unsafe => "unsafe",
-            Task => "task",
-            Await => "await",
             Parallel => "parallel",
             Thread => "thread",
             Sync => "sync",
@@ -289,10 +283,11 @@ impl Keyword {
             // phase's scope, so `default` stays gated until `match with`
             // needs its own catch-all arm.
             Default => Phase::FOUR,
-            // `task` / `await` bare expression forms are implemented as of
-            // `fase-5-task-await` (Phase 5 step 1), so they are no longer gated
-            // here — the parser consumes them directly. `parallel` / `thread` /
-            // `sync` stay deferred to their Phase 5 sub-steps.
+            // `task` / `await` were removed from the language by
+            // `remove-task-await-model`: they are no longer keywords, and the
+            // parser reports them in a construct position as removed constructs.
+            // `parallel` / `thread` / `sync` stay deferred to their Phase 5
+            // sub-changes.
             Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.
@@ -664,11 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn bare_task_and_await_are_in_the_subset() {
-        for k in [Keyword::Task, Keyword::Await] {
-            assert!(k.in_subset(), "`{}` should be implemented", k.as_str());
-            assert_eq!(k.phase(), None, "`{}`", k.as_str());
-        }
+    fn task_and_await_are_not_keywords() {
+        // Removed from the language by `remove-task-await-model`; they lex as
+        // ordinary identifiers and the parser handles them as removed constructs.
+        assert_eq!(Keyword::from_text("task"), None);
+        assert_eq!(Keyword::from_text("await"), None);
     }
 
     #[test]

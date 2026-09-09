@@ -1,11 +1,9 @@
 //! The task control block and the registry that owns every live task.
 //!
 //! A [`TaskId`] is a generational handle: freeing a task bumps its slot's
-//! generation, so an id kept after the task is gone — a stale `await` target, a
-//! `Task<T>` value that outlived its task — is *detectably* dead rather than
-//! aliasing whatever task reused the slot. This is what lets
-//! [`crate::executor`] reject a second `await` and never confuse a reused slot
-//! for the original task.
+//! generation, so an id kept after its scheduler task is gone is *detectably*
+//! dead rather than aliasing whatever task reused the slot. This protects the
+//! runtime's internal wait bookkeeping from stale scheduler ids.
 //!
 //! Design: `openspec/changes/fase-5-executor-core/design.md` D1–D2. The
 //! `roots` field is this task's garbage-collection shadow-stack chain; group 7
@@ -27,7 +25,7 @@ pub struct TaskId {
 }
 
 impl TaskId {
-    /// The raw `u64` a `Task<T>` value carries across the C ABI.
+    /// The raw `u64` carried across the internal C ABI.
     pub fn to_bits(self) -> u64 {
         (u64::from(self.generation) << 32) | u64::from(self.index)
     }

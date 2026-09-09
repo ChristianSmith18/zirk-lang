@@ -31,6 +31,12 @@
 //! In Phase 0 only the ends of that sequence exist, with empty bodies. They
 //! are defined now on purpose: they fix the shape onto which Phase 4 (memory)
 //! and Phase 5 (concurrency) hook without refactoring codegen.
+//!
+//! # Scheduler terminology
+//!
+//! A *task* in this crate is an internal stackful coroutine scheduled by the
+//! executor. It is not the removed language-level `Task<T>` value; the pending
+//! concurrency-surface changes reuse these scheduler primitives.
 
 mod array;
 mod char;

@@ -959,35 +959,6 @@ pub enum Expr {
     Transfer(TransferExpr),
     /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
     Tuple(TupleExpr),
-    /// `task expr` or `task { block }` — spawns a cooperative task and yields
-    /// a `Task<T>` handle (roadmap Phase 5 step 1, `fase-5-task-await`).
-    Task(TaskExpr),
-    /// `await handle` — suspends until the `Task<T>` completes and yields its
-    /// `T` (roadmap Phase 5 step 1, `fase-5-task-await`).
-    Await(AwaitExpr),
-}
-
-/// `task expr` / `task { block }` — see [`Expr::Task`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct TaskExpr {
-    pub body: TaskBody,
-    /// Starts at the `task` keyword so diagnostics point at the user's code.
-    pub span: Span,
-}
-
-/// The code a `task` runs: any expression, or an explicit block.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TaskBody {
-    Expr(Box<Expr>),
-    Block(Block),
-}
-
-/// `await handle` — see [`Expr::Await`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct AwaitExpr {
-    pub operand: Box<Expr>,
-    /// Starts at the `await` keyword.
-    pub span: Span,
 }
 
 /// `expr as Type`, `expr as? Type`, or `<Type>expr`.
@@ -1043,8 +1014,6 @@ impl Expr {
             Expr::Commit(e) => e.span,
             Expr::Transfer(e) => e.span,
             Expr::Tuple(e) => e.span,
-            Expr::Task(e) => e.span,
-            Expr::Await(e) => e.span,
         }
     }
 }

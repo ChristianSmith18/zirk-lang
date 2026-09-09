@@ -1,3 +1,4 @@
 fn main(): Void {
-    mut value = await 5;
+    mut handle = 5;
+    mut value = await handle;
 }

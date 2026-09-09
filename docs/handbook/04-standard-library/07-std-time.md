@@ -70,4 +70,4 @@ an official package rather than `std.time`.
 
 ---
 
-**Previous:** [← std.collections](06-std-collections.md) · **Next:** [ std.task](08-std-task.md)
+**Previous:** [← std.collections](06-std-collections.md) · **Next:** [ std.thread](09-std-thread.md)

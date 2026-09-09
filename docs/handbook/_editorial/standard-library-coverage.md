@@ -14,7 +14,6 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 | `std.text` and native text contracts | `05a-std-text.md` plus type-system handbook | builder, format, safe regex, Unicode String/Char operations | Added and deepened in task 1.3 |
 | `std.collections` | `06-std-collections.md` plus collections handbook | types, projection copies, mutation, iteration invalidation, views, equality, complexity, allocation | Deepened in task 1.3 |
 | `std.time` | `07-std-time.md` plus temporal handbook | sealed temporal family, clocks/timers/sleep, errors, exact vs calendar arithmetic | Deepened in task 1.3 |
-| `std.task` | `08-std-task.md` plus concurrency handbook | handles/scopes, aggregation, settlement, cancellation, channels, blocking bridge | Deepened in task 1.3 |
 | `std.thread` | `09-std-thread.md` | thread creation/join/transfer and distinction from task/parallel | Deepened in task 1.3 |
 | `std.sync` | `10-std-sync.md` | locks, semaphore, barrier, once, atomics, ordering and race guarantees | Deepened in task 1.3 |
 | `std.parallel` | `10a-std-parallel.md` | ordered CPU mapping, reductions, settlement, cancellation, pool behavior | Added and deepened in task 1.3 |

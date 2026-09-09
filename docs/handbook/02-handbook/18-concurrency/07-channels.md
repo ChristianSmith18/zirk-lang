@@ -1,13 +1,14 @@
 # Channels
 
-`Channel<T>` is a typed thread-safe queue across tasks, parallel work, and threads.
+`Channel<T>` is a planned typed thread-safe queue across concurrent branches,
+parallel work, and threads.
 
 ```zirk
 mut messages = Channel<String>();
 mut jobs = Channel<Job>(capacity: 8);
 
-await messages.send("ok");
-mut message = await messages.receive();
+messages.send("ok");
+mut message = messages.receive();
 ```
 
 Bounded forms apply backpressure by suspending senders without blocking an OS

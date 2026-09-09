@@ -135,22 +135,6 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     );
 }
 
-/// A task can outlive the frame that created its captured callable. Forcing a
-/// collection before the executor first runs the child proves the task control
-/// block itself roots that capture block.
-#[test]
-fn a_task_capture_survives_collection_before_the_child_starts() {
-    let source = include_str!("corpus/valid/task_under_gc_pressure.zrk");
-    let output = zirk_with_env(source, "task_gc_capture", &[("ZIRK_GC_THRESHOLD", "1")]);
-
-    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
-    assert_eq!(
-        normalize(&output.stdout),
-        "capture survives collection\n",
-        "the task's capture block must remain rooted until its body runs"
-    );
-}
-
 #[test]
 fn the_reference_program_of_the_roadmap_runs() {
     let source = corpus("valid").join("hello.zrk");
@@ -331,6 +315,36 @@ fn the_invalid_corpus_is_rejected_with_diagnostics() {
         checked >= 10,
         "the corpus shrank unexpectedly: {checked} programs"
     );
+}
+
+#[test]
+fn removed_concurrency_constructs_name_their_replacement() {
+    for (name, construct) in [
+        ("task_await_value", "task"),
+        ("await_non_task", "await"),
+        ("select_removed_construct", "select"),
+        (
+            "cancellation_shield_removed_construct",
+            "cancellation shield",
+        ),
+    ] {
+        let source = corpus("invalid").join(format!("{name}.zrk"));
+        let output = zirk("run", &source, &format!("removed_{name}"), &[]);
+
+        assert_ne!(output.status, 0, "`{name}` should not compile");
+        assert!(
+            output.stderr.contains("error[E0318]"),
+            "`{name}` must use the removed-construct diagnostic:\n{}",
+            output.stderr
+        );
+        assert!(
+            output
+                .stderr
+                .contains(&format!("`{construct}` was removed")),
+            "`{name}` must name the removed construct:\n{}",
+            output.stderr
+        );
+    }
 }
 
 #[test]
