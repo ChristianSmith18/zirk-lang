@@ -198,6 +198,22 @@ A `record` SHALL be immutable and have structural semantics, per `ZIRK_LANGUAGE_
 - **WHEN** a record's field is assigned to
 - **THEN** a diagnostic is emitted indicating that a record cannot be modified
 
+### Requirement: Record spread and rest
+
+A record expression of the form `{ ...source, field: value }` SHALL be accepted
+when an expected record type is known, SHALL copy every field from `source`, and
+SHALL override a copied field with an explicit field of the same name. Record
+destructuring patterns MAY contain one final `...name` binding that collects
+every remaining field into a new record value.
+
+#### Scenario: Record spread with override
+- **WHEN** `{ ...profile, name: "Grace" }` is evaluated as a `UserProfile`
+- **THEN** the result has the same `id` and `active` as `profile` but `name` is `"Grace"`
+
+#### Scenario: Record rest destructuring
+- **WHEN** `{ id, ...details }` destructures a `UserProfile`
+- **THEN** `id` receives the selected field and `details` contains every remaining field
+
 ### Requirement: Unions and aliases
 
 `A | B` SHALL declare a union, and `type` SHALL declare an alias.

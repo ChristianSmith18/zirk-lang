@@ -304,6 +304,22 @@ fn collection_literals_expand_ranges_without_repeating_their_operands() {
 }
 
 #[test]
+fn spread_and_rest_operators_lower_to_valid_ir() {
+    let source =
+        "fn sum(...values: Int32): Int32 { mut total: Int32 = 0; for value in values { total = total + value; } return total; }\n\
+         fn main(): Void {\n\
+             mut values: List<Int32> = [1, 2, 3];\n\
+             mut total: Int32 = sum(...values);\n\
+             mut array = [0, ...values, 4];\n\
+             mut listed: List<Int32> = [0, ...values, 4];\n\
+             mut copied: Array<Int32> = Array(...values);\n\
+             mut linked: List<Int32> = List(...values);\n\
+             mut [first, ...remaining] = values;\n\
+         }";
+    compile(source);
+}
+
+#[test]
 fn range_reverse_abi_is_absent_after_colon_step_migration() {
     let module = compile("fn main(): Void { mut r = 3..0; }");
     assert!(

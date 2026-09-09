@@ -1,7 +1,7 @@
 // Spread and rest operator examples
 //
-// This file is normative for the spread/rest feature. It is exercised by the
-// CLI corpus test and can be run with `zirk run examples/spread_rest_examples.zrk`.
+// This file is normative for the proposed spread/rest feature. The current
+// compiler may reject spread expressions until the proposal is implemented.
 
 fn sum_values(...values: Int32): Int32 {
     mut total: Int32 = 0;

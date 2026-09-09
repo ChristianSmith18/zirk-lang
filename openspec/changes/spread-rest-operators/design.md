@@ -79,8 +79,19 @@ Keep the existing ordered read-only `Iterable<T>` representation for `...values:
 
 Rollback is a source-level revert; no persistent data migration is required.
 
-## Open Questions
+## Open Questions (answered)
 
 - Should spread into a fixed-arity call be permitted for statically sized arrays only, or for any compile-time-known finite iterable?
+  - **Decision:** Any compile-time-known finite iterable. When the target has a fixed arity `n`, the expanded count must not exceed `n`; if it is smaller, the first expanded slots are occupied and the remaining fixed slots are filled by subsequent positional arguments or defaults.
 - Which ordered iterable types beyond `Array`, `List`, `String`, and `Range` should be accepted by rest destructuring in the first release?
+  - **Decision:** Object/record rest destructuring is also supported via field-based `{ ...rest }` in record patterns.
 - Should `...` be allowed in named-argument positions through a mapping/object form, or remain strictly positional?
+  - **Decision:** An inline record/object argument constructed at the call site may use `{ ...rest }` as the value of a named argument, e.g. `foo(profile: { ...base, active: false })`.
+
+## Status
+
+Implemented end-to-end. `examples/spread_rest_examples.zrk` compiles and runs;
+`cargo test -p zirk-parser`, `cargo test -p zirk-sema`, `cargo test -p zirk-ir`,
+and `cargo test -p zirk-cli` pass with the required LLVM 20.1 toolchain. The
+OpenSpec main specs, `ZIRK_LANGUAGE_SPEC.md`, `CORE_LANGUAGE_SEMANTICS.md`, and
+`ZIRK_FEATURE_STATUS.md` have been updated to remove stale unsupported claims.

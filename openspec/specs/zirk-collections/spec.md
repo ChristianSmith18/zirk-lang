@@ -76,9 +76,11 @@ Iteration SHALL use `Iteration<T>.Item/Done`, yield independent copies, and make
 `Array<T>` SHALL be constructible from an element listing
 (`Array(e0, e1, …)` or `[e0, e1, …]` with an `Array<T>` context), and
 `List<T>` from `List(e0, e1, …)` or `[e0, e1, …]` with a `List<T>` context.
-Range elements SHALL expand in place before allocation, and an unannotated
+Range elements SHALL expand in place before allocation. Explicit `...expr`
+spread elements SHALL expand any `Iterable<T>` in place. An unannotated
 `[...]` literal SHALL default to `Array<T>`; all forms SHALL infer or check
-`T` against the destination.
+`T` against the destination. Ordered collection patterns MAY contain one final
+`...name` rest binding that collects the remaining elements.
 
 #### Scenario: Pre-populated list
 

@@ -228,7 +228,8 @@ forms. Pattern guards are not part of Zirk: conditional logic belongs in the
 branch body. A demonstrably unreachable branch is an error. Pattern bindings
 are projection reads and therefore independent values. Records and tuples may
 be destructured directly when irrefutable; an algebraic enum is unpacked only
-inside `match`, and rest destructuring is not initially supported.
+inside `match`. Rest destructuring `[first, ...rest]`, `{ field, ...rest }`,
+and explicit `...value` spread in calls and collection literals is supported.
 
 Commas group alternative patterns before one `=>` body. A regex literal is a
 string pattern, and nested patterns compose:
@@ -276,8 +277,12 @@ failure remains explicit in a result such as
 
 Local inference, typed optional parameters (`name?: String`), nullable types
 (`String?`), default values, named parameters and variadics (`...values`) are
-supported. Optional positional parameters follow required ones. Inside a
-function, a variadic is an ordered read-only `Iterable<T>` valid for the call.
+supported. Optional positional parameters follow required ones. A variadic
+parameter is an ordered read-only `Iterable<T>` inside the function body. The
+same `...expr` syntax expands any `Iterable<T>` into positional arguments,
+array/list literals, and `Array(...)`/`List(...)` constructor calls. Rest
+destructuring `[first, ...rest]` collects remaining ordered elements, and
+`{ field, ...rest }` collects remaining record fields.
 There is no traditional overloading; unions, generics or different names are
 used instead.
 

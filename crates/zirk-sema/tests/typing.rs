@@ -5918,3 +5918,34 @@ fn invalid_collection_element_and_removed_range_builders_are_rejected() {
         assert!(output.contains("colon-step"), "{output}");
     }
 }
+
+// --- Spread and rest operators (OpenSpec `spread-rest-operators`) ------------
+
+#[test]
+fn valid_spread_and_rest_operators_type_check() {
+    accepted(
+        "fn sum(...values: Int32): Int32 { mut total: Int32 = 0; for value in values { total = total + value; } return total; }\n\
+         fn main(): Void {\n\
+             mut values: List<Int32> = [1, 2, 3];\n\
+             mut total: Int32 = sum(...values);\n\
+             mut array = [0, ...values, 4];\n\
+             mut listed: List<Int32> = [0, ...values, 4];\n\
+             mut copied: Array<Int32> = Array(...values);\n\
+             mut linked: List<Int32> = List(...values);\n\
+             mut [first, ...remaining] = values;\n\
+         }",
+    );
+}
+
+#[test]
+fn valid_record_spread_and_rest_type_check() {
+    accepted(
+        "record UserProfile { id: Int32; name: String; active: Boolean; }\n\
+         fn main(): Void {\n\
+             mut profile: UserProfile = UserProfile(id: 7, name: \"Ada\", active: true);\n\
+             mut renamed: UserProfile = { ...profile, name: \"Grace\" };\n\
+             mut { id, ...details } = profile;\n\
+             mut { id: profile_id, name: profile_name, ...flags } = profile;\n\
+         }",
+    );
+}

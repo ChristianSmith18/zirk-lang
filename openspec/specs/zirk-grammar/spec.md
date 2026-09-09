@@ -429,6 +429,33 @@ expansion.
 - **WHEN** source contains `values[::-1]`
 - **THEN** it represents a slice with omitted bounds and negative step
 
+### Requirement: Spread and rest operator syntax
+
+The parser SHALL accept `...expr` as a positional call argument and as an
+element of a collection literal or `Array(...)`/`List(...)` constructor list. It
+SHALL accept one `...name` rest binding at the end of a collection pattern and a
+record pattern, and object/record expressions of the form `{ ...source, field: value }`.
+
+#### Scenario: Spread in a call
+
+- **WHEN** source contains `sum(...values)`
+- **THEN** it produces a call whose argument is marked as spread
+
+#### Scenario: Spread in a collection literal
+
+- **WHEN** source contains `[0, ...values, 4]`
+- **THEN** it produces a collection literal with a spread element between two scalars
+
+#### Scenario: Collection rest pattern
+
+- **WHEN** source contains `[first, ...rest]`
+- **THEN** it produces a collection pattern with one rest binding at the end
+
+#### Scenario: Object/record spread expression
+
+- **WHEN** source contains `{ ...profile, name: "Grace" }`
+- **THEN** it produces a record literal expression with one spread element and one explicit field
+
 ### Requirement: Match alternatives, regex, and nested destructuring
 
 The parser SHALL group alternative patterns with commas followed by one `=>` body, SHALL accept regex literals as patterns, and SHALL compose enum payload and record destructuring as `UserCreated({ id, name })`.

@@ -19,7 +19,7 @@ The evidence for each row is the archived OpenSpec change, the relevant
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
+Last updated with `spread-rest-operators`, **2026-09-13**.
 
 ---
 
@@ -77,7 +77,7 @@ Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
 | Nullability (`T?`, `?.`, `??`) | yes | yes | yes | yes | yes | yes | `T?` folds into the `nullable` bit. |
 | `share`/`import`/`use` | yes | yes | yes | yes | yes | yes | Single-crate module linking; per-module namespacing is Phase 6. |
 | Local closures (non-escaping) | yes | yes | yes | yes | yes | yes | `lower_lambda` copies captures at creation time. |
-| Optional/named/variadic parameters | yes | yes | yes | yes | yes | yes | — |
+| Optional/named/variadic parameters | yes | yes | yes | yes | yes | yes | Includes spread/rest operators: `...expr` in calls/collections, `[first, ...rest]`, `{ ...source, field }`, `{ field, ...rest }` (`spread-rest-operators`) |
 | Compound assignment (`+=`, etc.) | yes | yes | yes | yes | yes | yes | `TokenKind` compound operators. |
 
 ## Phase 3 — Objects and type system

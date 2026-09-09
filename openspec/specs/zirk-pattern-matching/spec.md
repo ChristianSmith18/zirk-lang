@@ -23,7 +23,7 @@ Match SHALL support compatible values, types, enum variants, union alternatives,
 - **THEN** compilation fails because the later branch is unreachable
 
 ### Requirement: Pattern binding copy semantics
-Every attribute, tuple element, or enum payload bound by a pattern SHALL be an independent logical value and SHALL require deep Clone for reference data. Records and tuples MAY be destructured directly when irrefutable; algebraic enums SHALL only be unpacked inside match. Rest destructuring SHALL not be part of the initial language.
+Every attribute, tuple element, or enum payload bound by a pattern SHALL be an independent logical value and SHALL require deep Clone for reference data. Records and tuples MAY be destructured directly when irrefutable; algebraic enums SHALL only be unpacked inside match. Ordered collection patterns and record patterns MAY contain one final `...name` rest binding that collects the remaining elements or fields.
 
 #### Scenario: Enum destructuring outside match
 - **WHEN** `inmut Ready(document) = state` is declared

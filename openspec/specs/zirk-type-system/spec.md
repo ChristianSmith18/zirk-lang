@@ -281,7 +281,7 @@ The checker SHALL accept `if`/`else` in expression position only when both branc
 
 ### Requirement: Typing of optional, named, variadic parameters and default values
 
-The checker SHALL verify that every call resolves to a valid assignment of arguments to parameters: named ones are matched by name, absent ones with a default value take it from the signature, and any left over are grouped into the variadic parameter if one exists.
+The checker SHALL verify that every call resolves to a valid assignment of arguments to parameters: named ones are matched by name, absent ones with a default value take it from the signature, `...expr` spread arguments are expanded from any `Iterable<T>`, and any left over are grouped into the variadic parameter if one exists. Collection literals and `Array(...)`/`List(...)` constructor calls SHALL accept spread elements. Rest destructuring `[first, ...rest]` and `{ field, ...rest }` SHALL bind the remaining ordered elements or record fields. Object/record expressions of the form `{ ...source, field: value }` SHALL copy source fields and override them with explicit fields.
 
 #### Scenario: Optional parameter not provided
 - **WHEN** `greet()` is called with `name?: String` and no argument
@@ -294,6 +294,22 @@ The checker SHALL verify that every call resolves to a valid assignment of argum
 #### Scenario: Type of the variadic
 - **WHEN** `sum(1, 2, 3)` is called with `...values: Int32`
 - **THEN** `values` has the sequence type of `Int32` within the body
+
+#### Scenario: Spread argument expands into a variadic call
+- **WHEN** `sum(...values)` is called with `values: List<Int32>` containing `[1, 2, 3]`
+- **THEN** `values` is iterated once and the call receives the arguments `1`, `2`, and `3`
+
+#### Scenario: Collection literal spread
+- **WHEN** `[0, ...values, 4]` is constructed with `values: List<Int32>` containing `[1, 2, 3]`
+- **THEN** the result is an `Array<Int32>` containing `[0, 1, 2, 3, 4]`
+
+#### Scenario: Rest destructuring of a list
+- **WHEN** `[first, ...rest]` destructures `[10, 20, 30]`
+- **THEN** `first` has type `Int32` and `rest` has the same list type as the source
+
+#### Scenario: Record spread with override
+- **WHEN** `{ ...profile, name: "Grace" }` is checked as a `UserProfile`
+- **THEN** every field of `profile` is copied and `name` is replaced by the explicit value
 
 ### Requirement: Typing of closures and immutable capture
 

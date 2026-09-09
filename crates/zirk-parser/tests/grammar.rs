@@ -109,9 +109,12 @@ fn shape(e: &Expr) -> String {
             let args: Vec<_> = c
                 .args
                 .iter()
-                .map(|a| match &a.name {
-                    Some(name) => format!("{}: {}", name.name, shape(&a.value)),
-                    None => shape(&a.value),
+                .map(|a| {
+                    let prefix = if a.is_spread { "..." } else { "" };
+                    match &a.name {
+                        Some(name) => format!("{}{}: {}", prefix, name.name, shape(&a.value)),
+                        None => format!("{}{}", prefix, shape(&a.value)),
+                    }
                 })
                 .collect();
             format!("{}({})", shape(&c.callee), args.join(", "))
@@ -179,10 +182,30 @@ fn shape(e: &Expr) -> String {
             "({})",
             t.elements.iter().map(shape).collect::<Vec<_>>().join(", ")
         ),
-        Expr::Collection(c) => format!(
-            "[{}]",
-            c.elements.iter().map(shape).collect::<Vec<_>>().join(", ")
-        ),
+        Expr::Collection(c) => {
+            let parts: Vec<_> = c
+                .elements
+                .iter()
+                .map(|e| match e {
+                    CollectionElement::Scalar(expr) => shape(expr),
+                    CollectionElement::Spread(s) => format!("...{}", shape(&s.expr)),
+                })
+                .collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Expr::Record(r) => {
+            let parts: Vec<_> = r
+                .elements
+                .iter()
+                .map(|e| match e {
+                    RecordLiteralElement::Field(f) => {
+                        format!("{}: {}", f.name.name, shape(&f.value))
+                    }
+                    RecordLiteralElement::Spread(s) => format!("...{}", shape(&s.expr)),
+                })
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
         Expr::Slice(s) => {
             let part = |p: &Option<Box<Expr>>| {
                 p.as_ref()
@@ -532,6 +555,11 @@ fn invalid_else_over_a_conditional_without_braces() {
 #[test]
 fn valid_call_with_arguments() {
     assert_eq!(shape(&expression("add(1, 2)")), "add(1, 2)");
+    assert_eq!(shape(&expression("sum(...values)")), "sum(...values)");
+    assert_eq!(
+        shape(&expression("sum(first, ...middle, last)")),
+        "sum(first, ...middle, last)"
+    );
 }
 
 #[test]
@@ -1069,6 +1097,21 @@ fn valid_collection_literal_forms() {
     assert_eq!(shape(&expression("[1, 5..8, 9]")), "[1, (5..8), 9]");
     assert_eq!(shape(&expression("[0..10:2]")), "[(0..10:2)]");
     assert_eq!(shape(&expression("[1, 2,]")), "[1, 2]");
+    assert_eq!(shape(&expression("[0, ...values, 4]")), "[0, ...values, 4]");
+    assert_eq!(shape(&expression("[...xs]")), "[...xs]");
+}
+
+#[test]
+fn valid_record_literal_forms() {
+    assert_eq!(
+        shape(&expression("{ name: \"Ada\", active: true }")),
+        "{name: \"Ada\", active: true}"
+    );
+    assert_eq!(
+        shape(&expression("{ ...profile, name: \"Grace\" }")),
+        "{...profile, name: \"Grace\"}"
+    );
+    assert_eq!(shape(&expression("{ ...source }")), "{...source}");
 }
 
 #[test]

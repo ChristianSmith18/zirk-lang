@@ -892,6 +892,9 @@ pub enum Expr {
     /// a `List<T>` destination context selects a list. A range element is
     /// expanded in place.
     Collection(CollectionLiteralExpr),
+    /// `{ ...source, field: value }` — a record/object literal with an
+    /// optional spread source and explicit field values.
+    Record(RecordLiteralExpr),
     /// `if c { a } else { b }` used where a value is expected.
     ///
     /// The node is the same one the statement form uses: what changes is the
@@ -1021,6 +1024,7 @@ impl Expr {
             Expr::Call(e) => e.span,
             Expr::Range(e) => e.span,
             Expr::Collection(e) => e.span,
+            Expr::Record(e) => e.span,
             Expr::If(e) => e.span,
             Expr::This(e) => e.span,
             Expr::Super(e) => e.span,
@@ -1103,10 +1107,66 @@ pub struct TupleExpr {
 ///
 /// Elements are evaluated left to right. An [`Expr::Range`] element expands
 /// into its generated sequence in place; there is no nested-range escape
-/// hatch. An empty literal (`[]`) is valid.
+/// hatch. An explicit spread element (`...expr`) expands its `Iterable<T>`
+/// source in place. An empty literal (`[]`) is valid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectionLiteralExpr {
-    pub elements: Vec<Expr>,
+    pub elements: Vec<CollectionElement>,
+    pub span: Span,
+}
+
+/// One element of a collection literal: a scalar expression or an explicit
+/// spread (`...expr`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CollectionElement {
+    Scalar(Expr),
+    Spread(SpreadElement),
+}
+
+impl CollectionElement {
+    pub fn span(&self) -> Span {
+        match self {
+            CollectionElement::Scalar(e) => e.span(),
+            CollectionElement::Spread(s) => s.span,
+        }
+    }
+}
+
+/// `...expr` in a call argument or a collection literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpreadElement {
+    pub expr: Expr,
+    pub span: Span,
+}
+
+/// One element of a record/object literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordLiteralElement {
+    Field(RecordLiteralField),
+    Spread(SpreadElement),
+}
+
+impl RecordLiteralElement {
+    pub fn span(&self) -> Span {
+        match self {
+            RecordLiteralElement::Field(f) => f.span,
+            RecordLiteralElement::Spread(s) => s.span,
+        }
+    }
+}
+
+/// `field: value` in a record/object literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordLiteralField {
+    pub name: Ident,
+    pub value: Expr,
+    pub span: Span,
+}
+
+/// `{ ...source, field: value, ... }` — a record/object literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordLiteralExpr {
+    pub elements: Vec<RecordLiteralElement>,
     pub span: Span,
 }
 
@@ -1285,6 +1345,12 @@ pub enum Pattern {
     Bool(BoolLit),
     Null(NullLit),
     Tuple(TuplePattern),
+    /// `[first, ...rest]` — a collection pattern with an optional final rest
+    /// binding.
+    Collection(CollectionPattern),
+    /// `{ id, ...details }` — a record pattern with optional field bindings and
+    /// an optional final rest binding.
+    Record(RecordPattern),
     /// `re'pattern' name?` — matches a `String` scrutinee against the regex
     /// and optionally binds the resulting `Regex.Match` to `name`.
     Regex(RegexPattern),
@@ -1313,6 +1379,8 @@ impl Pattern {
             Pattern::Bool(l) => l.span,
             Pattern::Null(l) => l.span,
             Pattern::Tuple(t) => t.span,
+            Pattern::Collection(c) => c.span,
+            Pattern::Record(r) => r.span,
             Pattern::Regex(r) => r.span,
         }
     }
@@ -1322,6 +1390,10 @@ impl Pattern {
         match self {
             Pattern::Wildcard(_) | Pattern::Binding(_) => true,
             Pattern::Tuple(t) => t.elements.iter().all(|p| p.is_irrefutable()),
+            Pattern::Collection(c) => {
+                c.elements.iter().all(|p| p.is_irrefutable()) && c.rest.is_some()
+            }
+            Pattern::Record(r) => r.fields.iter().all(|f| f.is_irrefutable()) && r.rest.is_some(),
             _ => false,
         }
     }
@@ -1332,6 +1404,14 @@ impl Pattern {
             Pattern::Binding(i) => Some(&i.name),
             _ => None,
         }
+    }
+}
+
+impl RecordPatternField {
+    /// A record field pattern (`name` or `field: binding`) is always
+    /// irrefutable: it binds one name.
+    pub fn is_irrefutable(&self) -> bool {
+        true
     }
 }
 
@@ -1359,6 +1439,35 @@ pub struct VariantPattern {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TuplePattern {
     pub elements: Vec<Pattern>,
+    pub span: Span,
+}
+
+/// `[first, ...rest]` in pattern position — one pattern per scalar element
+/// and an optional final `...rest` binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionPattern {
+    pub elements: Vec<Pattern>,
+    /// Final `...rest` binding, if present.
+    pub rest: Option<Ident>,
+    pub span: Span,
+}
+
+/// `{ id, name: n, ...details }` in pattern position — a fixed field selection
+/// and an optional final `...rest` binding that collects the remaining fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordPattern {
+    pub fields: Vec<RecordPatternField>,
+    /// Final `...rest` binding, if present.
+    pub rest: Option<Ident>,
+    pub span: Span,
+}
+
+/// One field of a record pattern. The shorthand `name` binds `name` to the
+/// field `name`; the long form `field: binding` binds `binding` to `field`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordPatternField {
+    pub name: Ident,
+    pub binding: Option<Ident>,
     pub span: Span,
 }
 
@@ -1568,6 +1677,8 @@ pub struct Arg {
     /// Present for `name: value`, which matches by name instead of position.
     pub name: Option<Ident>,
     pub value: Expr,
+    /// `...value` — expand the iterable into positional arguments.
+    pub is_spread: bool,
     pub span: Span,
 }
 
@@ -1578,6 +1689,7 @@ impl Arg {
             name: None,
             span: value.span(),
             value,
+            is_spread: false,
         }
     }
 }

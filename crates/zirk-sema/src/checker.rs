@@ -14,7 +14,7 @@ use crate::types::{
     IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
     describe, is_ffi_safe, pending_type,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
@@ -5151,16 +5151,6 @@ impl<'a> Checker<'a> {
             ty = ty.as_nullable();
         }
 
-        // A variadic collects its values into a sequence, and no collection
-        // type exists until Phase 3 brings `List`.
-        if p.variadic {
-            self.not_lowered(
-                p.span,
-                "a variadic parameter",
-                "declare the parameters explicitly until collections arrive",
-            );
-        }
-
         ParamInfo {
             name: p.name.name.clone(),
             ty,
@@ -6643,9 +6633,15 @@ impl<'a> Checker<'a> {
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
 
+            let binding_ty = if info.variadic {
+                let list_id = self.intern_list_type(info.ty);
+                Type::of(Base::List(list_id))
+            } else {
+                info.ty
+            };
             self.declare_local(Binding {
                 name: info.name.clone(),
-                ty: info.ty,
+                ty: binding_ty,
                 mutability: Mutability::Immutable,
                 span: param.name.span,
                 initialized: true,
@@ -7350,10 +7346,14 @@ impl<'a> Checker<'a> {
                 .elements
                 .iter()
                 .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
-            Expr::Collection(c) => c
-                .elements
-                .iter()
-                .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
+            Expr::Collection(c) => c.elements.iter().any(|e| match e {
+                CollectionElement::Scalar(expr) => self.expr_mutates_receiver(ctx, expr, aliases),
+                CollectionElement::Spread(s) => self.expr_mutates_receiver(ctx, &s.expr, aliases),
+            }),
+            Expr::Record(r) => r.elements.iter().any(|e| match e {
+                RecordLiteralElement::Field(f) => self.expr_mutates_receiver(ctx, &f.value, aliases),
+                RecordLiteralElement::Spread(s) => self.expr_mutates_receiver(ctx, &s.expr, aliases),
+            }),
             Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
             // A `task` body might run and mutate the receiver's graph; a
             // conservative reading treats spawning it as a mutation. `await`
@@ -8499,105 +8499,54 @@ impl<'a> Checker<'a> {
     /// written `implements Iterable<Int32>` it does not have — nothing
     /// changes for it, and Phase 2's corpus keeps compiling unmodified.
     fn element_type(&mut self, iterable: Type, span: Span) -> Type {
-        match iterable.base {
-            Base::Range(id) => self
-                .range_types
-                .get(id as usize)
-                .copied()
-                .unwrap_or(Type::UNKNOWN),
-            // A `String` iterates by grapheme, binding a `Char` — the debt
-            // Phase 2 first noted and Phase 3b's task 6.3 retires: `zirk-ir`
-            // lowers this as a byte-offset walk over the string's own
-            // graphemes (`lower_for_in_string`), the same shape a range loop
-            // already threads its own counter with.
-            Base::String => Type::of(Base::Char),
-            Base::Array(id) => self
-                .array_types
-                .get(id as usize)
-                .copied()
-                .unwrap_or(Type::UNKNOWN),
-            Base::List(id) => self
-                .list_types
-                .get(id as usize)
-                .copied()
-                .unwrap_or(Type::UNKNOWN),
-            Base::Unknown => Type::UNKNOWN,
-            // `it: Iterable<Int32>` — a contract-typed iterable (roadmap
-            // Phase 7): the element type is the instantiation's own type
-            // argument, and the loop's `Iteration<T>` is interned and
-            // recorded exactly like the class receiver below.
-            Base::ContractInstance(id) => {
-                let iterable_contract = self
-                    .native_iteration
-                    .expect("registered unconditionally before any program declaration")
-                    .iterable;
-                let instance = self.contract_instances[id as usize].clone();
-                if instance.contract != iterable_contract {
-                    let name = self.name(iterable);
-                    self.error(
-                        codes::NOT_ITERABLE,
-                        span,
-                        format!("`{name}` cannot be iterated"),
-                        "`for ... in` requires `Iterable<T>`, which this type does not implement",
-                        None,
-                    );
-                    return Type::UNKNOWN;
-                }
-                let element = instance.args[0];
-                let iteration = self.native_iteration.unwrap().iteration;
-                let instance_id = self.intern_enum_instance(GenericEnumInstance {
-                    enum_id: iteration,
-                    args: vec![element],
-                });
-                self.for_in_iteration.insert(span, instance_id);
-                element
-            }
-            Base::Class(id) => {
-                let Some(element) = self.iterable_element_type(id) else {
-                    let name = self.name(iterable);
-                    self.error(
-                        codes::NOT_ITERABLE,
-                        span,
-                        format!("`{name}` cannot be iterated"),
-                        "`for ... in` requires `Iterable<T>`, which this type does not implement",
-                        Some(format!(
-                            "add `implements Iterable<T>` to `{name}` and supply `iterator()`"
-                        )),
-                    );
-                    return Type::UNKNOWN;
-                };
+        let Some(element) = self.element_type_of(iterable) else {
+            let name = self.name(iterable);
+            self.error(
+                codes::NOT_ITERABLE,
+                span,
+                format!("`{name}` cannot be iterated"),
+                "`for ... in` requires `Iterable<T>`, which this type does not implement",
+                Some(format!(
+                    "add `implements Iterable<T>` to `{name}` and supply `iterator()`"
+                )),
+            );
+            return Type::UNKNOWN;
+        };
 
-                // Reaching an element calls through the class's contract
-                // table (task 10.7) and matches against `Iteration<T>`'s
-                // associated data (11.3/11.4) — both lower on their own by
-                // now (roadmap task 13.5), but the specific `Iteration<T>`
-                // this loop's element type needs is not derivable from the
-                // AST the way most other types are (nothing writes `T`
-                // here), so it is interned and recorded the same way a
-                // generic construction's instantiation is
-                // (`CheckedProgram::generic_constructions`).
-                let iteration = self
-                    .native_iteration
-                    .expect("registered unconditionally before any program declaration")
-                    .iteration;
-                let instance = self.intern_enum_instance(GenericEnumInstance {
-                    enum_id: iteration,
-                    args: vec![element],
-                });
-                self.for_in_iteration.insert(span, instance);
-                element
+        // `Iterable<T>` and `Iterator<T>` loops need the concrete
+        // `Iteration<T>` instance recorded for lowering.
+        if matches!(iterable.base, Base::ContractInstance(_) | Base::Class(_)) {
+            let iteration = self
+                .native_iteration
+                .expect("registered unconditionally before any program declaration")
+                .iteration;
+            let instance = self.intern_enum_instance(GenericEnumInstance {
+                enum_id: iteration,
+                args: vec![element],
+            });
+            self.for_in_iteration.insert(span, instance);
+        }
+        element
+    }
+
+    /// The element type produced by an iterable value, without side effects.
+    ///
+    /// Returns `None` for types that do not implement `Iterable<T>` (or are
+    /// not natively iterable like ranges, strings, arrays, and lists).
+    fn element_type_of(&self, iterable: Type) -> Option<Type> {
+        match iterable.base {
+            Base::Range(id) => self.range_types.get(id as usize).copied(),
+            Base::String => Some(Type::of(Base::Char)),
+            Base::Array(id) => self.array_types.get(id as usize).copied(),
+            Base::List(id) => self.list_types.get(id as usize).copied(),
+            Base::Unknown => Some(Type::UNKNOWN),
+            Base::ContractInstance(id) => {
+                let iterable_contract = self.native_iteration?.iterable;
+                let instance = &self.contract_instances[id as usize];
+                (instance.contract == iterable_contract).then(|| instance.args[0])
             }
-            _ => {
-                let name = self.name(iterable);
-                self.error(
-                    codes::NOT_ITERABLE,
-                    span,
-                    format!("`{name}` cannot be iterated"),
-                    "`for ... in` requires `Iterable<T>`, which this type does not implement",
-                    None,
-                );
-                Type::UNKNOWN
-            }
+            Base::Class(id) => self.iterable_element_type(id),
+            _ => None,
         }
     }
 
@@ -8967,6 +8916,7 @@ impl<'a> Checker<'a> {
             Expr::Range(e) => self.check_range(e, expected),
             Expr::Collection(e) => self.check_collection_literal(e, expected),
             Expr::Tuple(tuple) => self.check_tuple_literal(tuple, expected),
+            Expr::Record(e) => self.check_record_literal(e, expected),
             Expr::If(e) => self.check_if_expr(e),
             Expr::This(e) => match self.this_type {
                 Some(ty) => {
@@ -10434,8 +10384,29 @@ impl<'a> Checker<'a> {
             if let Some(expected_element) = expected_element {
                 self.expected_type = Some(expected_element);
             }
-            let item_ty = self.check_expr(item);
-            let item_element = self.range_element_type(item_ty).unwrap_or(item_ty);
+            let item_element = match item {
+                CollectionElement::Scalar(expr) => {
+                    let item_ty = self.check_expr(expr);
+                    self.range_element_type(item_ty).unwrap_or(item_ty)
+                }
+                CollectionElement::Spread(s) => {
+                    let item_ty = self.check_expr(&s.expr);
+                    match self.element_type_of(item_ty) {
+                        Some(spread_element) => spread_element,
+                        None => {
+                            let found = self.name(item_ty);
+                            self.error(
+                                codes::NOT_ITERABLE,
+                                s.span,
+                                format!("spread source has type `{found}`, which is not iterable"),
+                                "spread requires `Iterable<T>`, collection spread yields `T`",
+                                None,
+                            );
+                            Type::UNKNOWN
+                        }
+                    }
+                }
+            };
             if element.is_unknown() {
                 element = item_element;
             } else if !item_element.is_unknown() && !element.accepts(item_element) {
@@ -10504,6 +10475,165 @@ impl<'a> Checker<'a> {
 
         let id = self.intern_tuple_type(TupleType { elements });
         Type::of(Base::Tuple(id))
+    }
+
+    /// `{ ...source, field: value, ... }` — a record/object literal.
+    fn check_record_literal(
+        &mut self,
+        literal: &RecordLiteralExpr,
+        expected: Option<Type>,
+    ) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                literal.span,
+                "a record/object literal needs a record-typed context",
+                "write an explicit type annotation, or use this value where a record type is expected",
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+
+        let (class_id, result_ty) = match expected.without_null().base {
+            Base::Class(id) => (id, expected.without_null()),
+            Base::Instance(inst_id) => {
+                let inst = self.generic_instances[inst_id as usize].clone();
+                (
+                    inst.class,
+                    Type {
+                        base: Base::Instance(inst_id),
+                        nullable: false,
+                    },
+                )
+            }
+            _ => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    "a record/object literal is only valid where a record type is expected",
+                    format!("expected {}", self.name(expected)),
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+        };
+
+        let class = self.classes[class_id as usize].clone();
+        if class.kind != ClassKind::Record {
+            self.error(
+                codes::TYPE_MISMATCH,
+                literal.span,
+                "object literal syntax is only valid for record value types",
+                format!("`{}` is a {}", class.name, class.kind.as_str()),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        // Build a substitution map for generic record field types.
+        let substitution: HashMap<u32, Type> = if let Base::Instance(inst_id) = expected.without_null().base {
+            let inst = &self.generic_instances[inst_id as usize];
+            class
+                .type_params
+                .iter()
+                .copied()
+                .zip(inst.args.iter().copied())
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        let field_types: HashMap<String, Type> = class
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), self.substitute(f.ty, &substitution)))
+            .collect();
+
+        let mut provided: HashMap<String, Span> = HashMap::new();
+        let mut explicit: HashSet<String> = HashSet::new();
+
+        for element in &literal.elements {
+            match element {
+                RecordLiteralElement::Spread(s) => {
+                    let source_ty = self.check_expr(&s.expr);
+                    if !result_ty.accepts(source_ty) {
+                        let found = self.name(source_ty);
+                        let wanted = self.name(result_ty);
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            s.span,
+                            format!("cannot spread `{found}` into a `{wanted}` literal"),
+                            "the spread source must have the same record type",
+                            None,
+                        );
+                    } else {
+                        for field in &class.fields {
+                            provided.entry(field.name.clone()).or_insert(s.span);
+                            explicit.remove(&field.name);
+                        }
+                    }
+                }
+                RecordLiteralElement::Field(f) => {
+                    let field_name = f.name.name.clone();
+                    let Some(&field_ty) = field_types.get(&field_name) else {
+                        self.error(
+                            codes::UNKNOWN_MEMBER,
+                            f.name.span,
+                            format!("record `{}` has no field `{}`", class.name, field_name),
+                            format!("fields are: {}", class.fields.iter().map(|fld| &fld.name[..]).collect::<Vec<_>>().join(", ")),
+                            None,
+                        );
+                        continue;
+                    };
+                    if explicit.contains(&field_name) {
+                        let &prev = provided.get(&field_name).expect("explicit field is tracked");
+                        self.error(
+                            codes::DUPLICATE_DECLARATION,
+                            f.name.span,
+                            format!("field `{}` is set more than once", field_name),
+                            "remove the duplicate assignment",
+                            Some(format!("also set at {:?}", prev)),
+                        );
+                        continue;
+                    }
+                    self.expected_type = Some(field_ty);
+                    let value_ty = self.check_expr(&f.value);
+                    if !field_ty.accepts(value_ty) {
+                        let found = self.name(value_ty);
+                        let wanted = self.name(field_ty);
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            f.value.span(),
+                            format!("field `{field_name}` has type `{found}`, expected `{wanted}`"),
+                            "the explicit value does not match the record field type",
+                            None,
+                        );
+                    }
+                    provided.insert(field_name.clone(), f.name.span);
+                    explicit.insert(field_name);
+                }
+            }
+        }
+
+        for field in &class.fields {
+            if !provided.contains_key(&field.name) {
+                let field_ty = field_types
+                    .get(&field.name)
+                    .copied()
+                    .unwrap_or(Type::UNKNOWN);
+                if !field_ty.has_default() {
+                    self.error(
+                        codes::UNINITIALIZED_FIELD,
+                        literal.span,
+                        format!("field `{}` of record `{}` is not initialized", field.name, class.name),
+                        "provide an explicit value or a spread that includes it",
+                        None,
+                    );
+                }
+            }
+        }
+
+        result_ty
     }
 
     /// `if` used where a value is expected. Decision D7.
@@ -11121,6 +11251,99 @@ impl<'a> Checker<'a> {
                         ty: Type::of(Base::Class(self.regex_match_class)),
                         mutability: Mutability::Immutable,
                         span: binding.span,
+                        initialized: true,
+                        moved: false,
+                        pinned: false,
+                    });
+                }
+            }
+            Pattern::Collection(c) => {
+                let inner = scrutinee.without_null();
+                let Some(element) = self.element_type_of(inner) else {
+                    let name = self.name(scrutinee);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        c.span,
+                        format!("cannot match a collection pattern against `{name}`"),
+                        "collection patterns match `Array<T>`, `List<T>`, and other ordered iterables",
+                        None,
+                    );
+                    return;
+                };
+                if pattern.is_irrefutable() {
+                    *has_wildcard = true;
+                }
+                let element = if scrutinee.nullable {
+                    element.as_nullable()
+                } else {
+                    element
+                };
+                for sub in &c.elements {
+                    self.check_pattern(sub, element, covered, has_wildcard, bindings);
+                }
+                if let Some(rest) = &c.rest {
+                    bindings.push(Binding {
+                        name: rest.name.clone(),
+                        ty: scrutinee.without_null(),
+                        mutability: Mutability::Immutable,
+                        span: rest.span,
+                        initialized: true,
+                        moved: false,
+                        pinned: false,
+                    });
+                }
+            }
+            Pattern::Record(r) => {
+                let inner = scrutinee.without_null();
+                match inner.base {
+                    Base::Class(_) | Base::Instance(_) => {}
+                    _ => {
+                        let name = self.name(scrutinee);
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            r.span,
+                            format!("cannot match a record pattern against `{name}`"),
+                            "record patterns match record or class values",
+                            None,
+                        );
+                        return;
+                    }
+                };
+                if pattern.is_irrefutable() {
+                    *has_wildcard = true;
+                }
+                for field in &r.fields {
+                    let field_ty = self.member_type(inner, &field.name, r.span, false);
+                    let binding_name = field
+                        .binding
+                        .as_ref()
+                        .map(|b| b.name.clone())
+                        .unwrap_or_else(|| field.name.name.clone());
+                    let binding_span = field
+                        .binding
+                        .as_ref()
+                        .map(|b| b.span)
+                        .unwrap_or(field.name.span);
+                    bindings.push(Binding {
+                        name: binding_name,
+                        ty: if scrutinee.nullable {
+                            field_ty.as_nullable()
+                        } else {
+                            field_ty
+                        },
+                        mutability: Mutability::Immutable,
+                        span: binding_span,
+                        initialized: true,
+                        moved: false,
+                        pinned: false,
+                    });
+                }
+                if let Some(rest) = &r.rest {
+                    bindings.push(Binding {
+                        name: rest.name.clone(),
+                        ty: scrutinee.without_null(),
+                        mutability: Mutability::Immutable,
+                        span: rest.span,
                         initialized: true,
                         moved: false,
                         pinned: false,
@@ -12782,7 +13005,26 @@ impl<'a> Checker<'a> {
             }
             Expr::Collection(e) => {
                 for element in &e.elements {
-                    self.check_recursive_reference(element, name, nested);
+                    match element {
+                        CollectionElement::Scalar(expr) => {
+                            self.check_recursive_reference(expr, name, nested);
+                        }
+                        CollectionElement::Spread(s) => {
+                            self.check_recursive_reference(&s.expr, name, nested);
+                        }
+                    }
+                }
+            }
+            Expr::Record(e) => {
+                for element in &e.elements {
+                    match element {
+                        RecordLiteralElement::Field(f) => {
+                            self.check_recursive_reference(&f.value, name, nested);
+                        }
+                        RecordLiteralElement::Spread(s) => {
+                            self.check_recursive_reference(&s.expr, name, nested);
+                        }
+                    }
                 }
             }
             Expr::If(e) => {
@@ -13883,6 +14125,7 @@ impl<'a> Checker<'a> {
 
         if expr.args.len() == 1
             && expr.args[0].name.is_none()
+            && !expr.args[0].is_spread
             && !matches!(expr.args[0].value, Expr::Range(_))
         {
             // `Array<T>(capacity)` — the single-argument form remains capacity.
@@ -13910,11 +14153,28 @@ impl<'a> Checker<'a> {
                 }
                 self.expected_type = Some(element);
                 let checked = self.check_expr(&arg.value);
-                let arg_ty = self.range_element_type(checked).unwrap_or(checked);
-                if !element.is_unknown() && !arg_ty.is_unknown() {
+                let arg_element = if arg.is_spread {
+                    match self.element_type_of(checked) {
+                        Some(spread_element) => spread_element,
+                        None => {
+                            let found = self.name(checked);
+                            self.error(
+                                codes::NOT_ITERABLE,
+                                arg.span,
+                                format!("spread source has type `{found}`, which is not iterable"),
+                                "spread requires `Iterable<T>`",
+                                None,
+                            );
+                            Type::UNKNOWN
+                        }
+                    }
+                } else {
+                    self.range_element_type(checked).unwrap_or(checked)
+                };
+                if !element.is_unknown() && !arg_element.is_unknown() {
                     self.expect_assignable(
                         element,
-                        arg_ty,
+                        arg_element,
                         arg.value.span(),
                         "array literal element",
                     );
@@ -13973,9 +14233,26 @@ impl<'a> Checker<'a> {
             }
             self.expected_type = Some(element);
             let checked = self.check_expr(&arg.value);
-            let arg_ty = self.range_element_type(checked).unwrap_or(checked);
-            if !element.is_unknown() && !arg_ty.is_unknown() {
-                self.expect_assignable(element, arg_ty, arg.value.span(), "list literal element");
+            let arg_element = if arg.is_spread {
+                match self.element_type_of(checked) {
+                    Some(spread_element) => spread_element,
+                    None => {
+                        let found = self.name(checked);
+                        self.error(
+                            codes::NOT_ITERABLE,
+                            arg.span,
+                            format!("spread source has type `{found}`, which is not iterable"),
+                            "spread requires `Iterable<T>`",
+                            None,
+                        );
+                        Type::UNKNOWN
+                    }
+                }
+            } else {
+                self.range_element_type(checked).unwrap_or(checked)
+            };
+            if !element.is_unknown() && !arg_element.is_unknown() {
+                self.expect_assignable(element, arg_element, arg.value.span(), "list literal element");
             }
         }
 
@@ -17023,6 +17300,69 @@ impl<'a> Checker<'a> {
                     && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
             });
             let ty = self.check_expr(&arg.value);
+
+            if arg.is_spread {
+                let Some(element) = self.element_type_of(ty) else {
+                    let found = self.name(ty);
+                    self.error(
+                        codes::NOT_ITERABLE,
+                        arg.span,
+                        format!("spread source has type `{found}`, which is not iterable"),
+                        "spread requires `Iterable<T>`",
+                        None,
+                    );
+                    continue;
+                };
+                if arg.name.is_some() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        arg.span,
+                        "a named argument cannot be spread",
+                        "spread is only allowed in positional argument lists",
+                        None,
+                    );
+                    continue;
+                }
+
+                // For now, spread into a fixed-arity parameter list requires a
+                // compile-time-known length. Without one, the spread can only
+                // fill the variadic tail.
+                while next_position < slots.len()
+                    && matches!(slots[next_position], ArgSlot::Given { .. })
+                {
+                    next_position += 1;
+                }
+                match slots.get_mut(next_position) {
+                    Some(ArgSlot::Variadic(items)) => items.push((element, arg.span)),
+                    Some(slot) => {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            arg.span,
+                            format!(
+                                "`{}` received a spread argument in a fixed-arity position",
+                                signature.name
+                            ),
+                            "spread into fixed parameters requires a compile-time-known length; use a variadic target instead",
+                            None,
+                        );
+                        *slot = ArgSlot::Given {
+                            ty: element,
+                            span: arg.span,
+                        };
+                        next_position += 1;
+                    }
+                    None => {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            arg.span,
+                            format!("`{}` received too many arguments", signature.name),
+                            format!("it declares {} parameter(s)", signature.params.len()),
+                            None,
+                        );
+                    }
+                }
+                continue;
+            }
 
             if let Some(name) = &arg.name {
                 let Some(index) = signature.params.iter().position(|p| p.name == name.name) else {

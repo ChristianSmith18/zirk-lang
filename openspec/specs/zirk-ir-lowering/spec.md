@@ -85,6 +85,26 @@ IR generation SHALL start from the already-resolved and verified tree, not from 
 - **THEN** the input has resolved names and verified types
 - **AND** lowering does NOT re-check types
 
+### Requirement: Lowering of spread and rest operators
+
+Lowering SHALL evaluate each spread source once, expand it in order, and produce
+checked-capacity array allocation or list appends. It SHALL lower rest
+destructuring into projections that copy the remaining elements or fields without
+mutating the source, and object/record spread into field-by-field copies with
+explicit-field overrides.
+
+#### Scenario: Spread into a variadic call
+- **WHEN** `sum(...values)` is lowered
+- **THEN** the call receives a single `List<Int32>` built by appending each spread element
+
+#### Scenario: Spread in an array literal
+- **WHEN** `[0, ...values, 4]` is lowered
+- **THEN** the array is allocated with the exact combined length and each element is written in order
+
+#### Scenario: Record spread with override
+- **WHEN** `{ ...profile, name: "Grace" }` is lowered
+- **THEN** source fields are copied first and the explicit `name` field overwrites the previous value
+
 ### Requirement: Lowering of loops and of `break`/`continue`
 
 Lowering SHALL translate `for`, `for ... in`, `while`, and `loop` into basic blocks with the condition evaluated in its own block, and SHALL translate `break`/`continue` into a direct jump to the continuation block or to the condition block of the loop that contains them.

@@ -3223,6 +3223,74 @@ impl<'a> Parser<'a> {
                     span: span.to(end),
                 }))
             }
+            TokenKind::LBracket => {
+                self.pos += 1;
+                let mut elements = Vec::new();
+                let mut rest = None;
+                if !matches!(self.peek(), TokenKind::RBracket) {
+                    loop {
+                        if self.eat(&TokenKind::DotDotDot) {
+                            rest = Some(self.expect_identifier("after `...` in a collection pattern")?);
+                            break;
+                        }
+                        elements.push(self.parse_pattern()?);
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        if matches!(self.peek(), TokenKind::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                let end = self.peek_span();
+                self.expect(&TokenKind::RBracket, "to close the collection pattern");
+                Some(Pattern::Collection(CollectionPattern {
+                    elements,
+                    rest,
+                    span: span.to(end),
+                }))
+            }
+            TokenKind::LBrace => {
+                self.pos += 1;
+                let mut fields = Vec::new();
+                let mut rest = None;
+                if !matches!(self.peek(), TokenKind::RBrace) {
+                    loop {
+                        if self.eat(&TokenKind::DotDotDot) {
+                            rest = Some(self.expect_identifier("after `...` in a record pattern")?);
+                            break;
+                        }
+                        let name = self.expect_identifier("as a record pattern field")?;
+                        let binding = if self.eat(&TokenKind::Colon) {
+                            Some(self.expect_identifier("after `:` in a record pattern")?)
+                        } else {
+                            None
+                        };
+                        let end = binding
+                            .as_ref()
+                            .map(|b| b.span)
+                            .unwrap_or(name.span);
+                        fields.push(RecordPatternField {
+                            name: name.clone(),
+                            binding,
+                            span: name.span.to(end),
+                        });
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                        if matches!(self.peek(), TokenKind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                let end = self.peek_span();
+                self.expect(&TokenKind::RBrace, "to close the record pattern");
+                Some(Pattern::Record(RecordPattern {
+                    fields,
+                    rest,
+                    span: span.to(end),
+                }))
+            }
             TokenKind::Identifier(name) => {
                 self.pos += 1;
 
@@ -3343,11 +3411,13 @@ impl<'a> Parser<'a> {
     /// position is only ever a range bound. The legacy `a..b..step` spelling
     /// still parses, with a migration warning.
     fn parse_range(&mut self) -> Option<Expr> {
-        // A leading `{` can only be a braced range start. The non-braced
-        // path stays a direct `parse_binary` so the (common) no-range case
-        // adds nothing to this hot frame — everything a real range needs
-        // lives in `parse_range_tail`, which recursion never touches unless
-        // a `..` is actually present.
+        // A leading `{` is either a record/object literal (`{ ...src, f: v }`)
+        // or a braced range bound (`{offset}..{limit}`). Record literals are
+        // recognized by `...` or by an identifier immediately followed by `:`
+        // or `,` at the top level.
+        if self.is_record_literal() {
+            return self.parse_record_literal(self.peek_span());
+        }
         if matches!(self.peek(), TokenKind::LBrace) {
             return self.parse_range_tail(true);
         }
@@ -3356,6 +3426,21 @@ impl<'a> Parser<'a> {
             return self.parse_range_from(start, false);
         }
         Some(start)
+    }
+
+    /// Whether the `{` at the cursor starts a record/object literal.
+    fn is_record_literal(&self) -> bool {
+        if !matches!(self.peek(), TokenKind::LBrace) {
+            return false;
+        }
+        match self.peek_at(1) {
+            TokenKind::DotDotDot => true,
+            TokenKind::Identifier(_) => matches!(
+                self.peek_at(2),
+                TokenKind::Colon | TokenKind::Comma
+            ),
+            _ => false,
+        }
     }
 
     /// The range grammar past its start operand. `start_braced` says the
@@ -3497,7 +3582,8 @@ impl<'a> Parser<'a> {
     /// (`range-syntax-and-collection-expansion`). `[` is at the cursor;
     /// `open` is its span. An empty literal `[]` is valid; a trailing comma
     /// is allowed. A range element is kept as an [`Expr::Range`] and expanded
-    /// later by the checker and lowering.
+    /// later by the checker and lowering. An explicit spread element
+    /// (`...expr`) is kept as a [`CollectionElement::Spread`].
     fn parse_collection_literal(&mut self, open: Span) -> Option<Expr> {
         self.pos += 1; // `[`
         let saved_block = std::mem::take(&mut self.block_follows);
@@ -3506,8 +3592,20 @@ impl<'a> Parser<'a> {
         let mut ok = true;
         if !matches!(self.peek(), TokenKind::RBracket) {
             loop {
+                let element_start = self.peek_span();
+                let is_spread = self.eat(&TokenKind::DotDotDot);
                 match self.parse_expr() {
-                    Some(element) => elements.push(element),
+                    Some(expr) => {
+                        let span = element_start.to(expr.span());
+                        if is_spread {
+                            elements.push(CollectionElement::Spread(SpreadElement {
+                                expr,
+                                span,
+                            }));
+                        } else {
+                            elements.push(CollectionElement::Scalar(expr));
+                        }
+                    }
                     None => {
                         ok = false;
                         break;
@@ -3532,6 +3630,85 @@ impl<'a> Parser<'a> {
             return None;
         }
         Some(Expr::Collection(CollectionLiteralExpr {
+            elements,
+            span: open.to(end),
+        }))
+    }
+
+    /// `{ ...source, field: value, ... }` — a record/object literal.
+    ///
+    /// The opening `{` is at the cursor; `open` is its span. An empty record
+    /// literal (`{}`) is not accepted here because the parser only reaches this
+    /// function when the leading tokens disambiguate a record/object shape.
+    fn parse_record_literal(&mut self, open: Span) -> Option<Expr> {
+        self.pos += 1; // `{`
+        let saved_block = std::mem::take(&mut self.block_follows);
+
+        let mut elements = Vec::new();
+        let mut ok = true;
+        if !matches!(self.peek(), TokenKind::RBrace) {
+            loop {
+                let element_start = self.peek_span();
+                if self.eat(&TokenKind::DotDotDot) {
+                    match self.parse_expr() {
+                        Some(expr) => {
+                            let span = element_start.to(expr.span());
+                            elements.push(RecordLiteralElement::Spread(SpreadElement {
+                                expr,
+                                span,
+                            }));
+                        }
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                } else {
+                    let Some(name) = self.expect_identifier("as a record field name") else {
+                        ok = false;
+                        break;
+                    };
+                    let (value, value_span) = if self.eat(&TokenKind::Colon) {
+                        let value = match self.parse_expr() {
+                            Some(v) => v,
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        };
+                        let span = value.span();
+                        (value, span)
+                    } else {
+                        // Shorthand `name` means `name: name`.
+                        let value = Expr::Path(name.clone());
+                        (value, name.span)
+                    };
+                    let span = name.span.to(value_span);
+                    elements.push(RecordLiteralElement::Field(RecordLiteralField {
+                        name,
+                        value,
+                        span,
+                    }));
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                if matches!(self.peek(), TokenKind::RBrace) {
+                    break;
+                }
+            }
+        }
+
+        self.block_follows = saved_block;
+        if !ok {
+            return None;
+        }
+
+        let end = self.peek_span();
+        if !self.expect(&TokenKind::RBrace, "to close the record literal") {
+            return None;
+        }
+        Some(Expr::Record(RecordLiteralExpr {
             elements,
             span: open.to(end),
         }))
@@ -4271,18 +4448,26 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RParen) && !self.at_eof() {
             let start = self.peek_span();
 
+            // `...expr` is an explicit spread argument and must be positional.
+            let is_spread = self.eat(&TokenKind::DotDotDot);
+
             // `name: value` matches by name. A bare identifier followed by `:`
             // is unambiguous here: a type annotation cannot appear in a call.
-            let name = match self.peek().clone() {
-                TokenKind::Identifier(name)
-                    if self.tokens.get(self.pos + 1).map(|t| &t.kind)
-                        == Some(&TokenKind::Colon) =>
-                {
-                    let span = self.peek_span();
-                    self.pos += 2;
-                    Some(Ident::new(name, span))
+            // Spread arguments cannot be named.
+            let name = if is_spread {
+                None
+            } else {
+                match self.peek().clone() {
+                    TokenKind::Identifier(name)
+                        if self.tokens.get(self.pos + 1).map(|t| &t.kind)
+                            == Some(&TokenKind::Colon) =>
+                    {
+                        let span = self.peek_span();
+                        self.pos += 2;
+                        Some(Ident::new(name, span))
+                    }
+                    _ => None,
                 }
-                _ => None,
             };
 
             let value = self.parse_expr()?;
@@ -4290,6 +4475,7 @@ impl<'a> Parser<'a> {
                 span: start.to(value.span()),
                 name,
                 value,
+                is_spread,
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -4367,6 +4553,7 @@ fn pow_call(base: Expr, exponent: Expr, op_span: Span) -> Expr {
         args: vec![Arg {
             name: None,
             value: exponent,
+            is_spread: false,
             span: arg_span,
         }],
         span,

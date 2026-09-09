@@ -2858,6 +2858,45 @@ fn gc_roots_of(module: &Module, slots: &[Slot]) -> Vec<SlotId> {
 enum PreparedCollectionElement {
     Scalar(SlotId),
     Range { value: SlotId, length: SlotId },
+    Spread { value: SlotId, iterable_ty: IrType },
+}
+
+/// A scalar or spread element usable by `lower_expanded_array` and
+/// `lower_expanded_list`, abstracting over `CollectionElement` and call `Arg`.
+trait CollectionLikeElement {
+    fn element_span(&self) -> Span;
+    fn element_expr(&self) -> &ast::Expr;
+    fn is_spread(&self) -> bool;
+}
+
+impl CollectionLikeElement for ast::CollectionElement {
+    fn element_span(&self) -> Span {
+        match self {
+            ast::CollectionElement::Scalar(e) => e.span(),
+            ast::CollectionElement::Spread(s) => s.span,
+        }
+    }
+    fn element_expr(&self) -> &ast::Expr {
+        match self {
+            ast::CollectionElement::Scalar(e) => e,
+            ast::CollectionElement::Spread(s) => &s.expr,
+        }
+    }
+    fn is_spread(&self) -> bool {
+        matches!(self, ast::CollectionElement::Spread(_))
+    }
+}
+
+impl CollectionLikeElement for ast::Arg {
+    fn element_span(&self) -> Span {
+        self.span
+    }
+    fn element_expr(&self) -> &ast::Expr {
+        &self.value
+    }
+    fn is_spread(&self) -> bool {
+        self.is_spread
+    }
 }
 
 struct FunctionLowering<'a> {
@@ -3983,13 +4022,34 @@ impl<'a> FunctionLowering<'a> {
 
         // The parameter types come from the checker, not from what was
         // written: `name?: T` is declared as `T` and resolved as `T?`, and the
-        // slot has to hold the resolved one.
-        let resolved: Vec<IrType> = self
+        // slot has to hold the resolved one. A variadic parameter's slot holds
+        // a `List<T>` of its element type.
+        let param_info: Vec<(Type, bool)> = self
             .checked
             .functions
             .get(&function.name.name)
-            .map(|s| s.params.iter().map(|p| self.ir_type(p.ty)).collect())
-            .expect("the checker records every declared function");
+            .expect("the checker records every declared function")
+            .params
+            .iter()
+            .map(|p| (p.ty, p.variadic))
+            .collect();
+        let resolved: Vec<IrType> = param_info
+            .iter()
+            .map(|&(ty, variadic)| {
+                if variadic {
+                    let element = self.ir_type(ty);
+                    let list_id = self
+                        .checked
+                        .list_types
+                        .iter()
+                        .position(|&t| self.ir_type(t) == element)
+                        .expect("the checker interned the variadic list type") as u32;
+                    IrType::List(list_id)
+                } else {
+                    self.ir_type(ty)
+                }
+            })
+            .collect();
 
         let params: Vec<SlotId> = function
             .params
@@ -4726,6 +4786,13 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Pattern::Tuple(_) => {
                 let slot = self.declare_slot("<tuple>", ty, stmt.pattern.span());
+                if let Some((operand, _)) = value {
+                    self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+                }
+                self.lower_pattern_bindings(&stmt.pattern, slot, ty, stmt.span);
+            }
+            ast::Pattern::Collection(_) | ast::Pattern::Record(_) => {
+                let slot = self.declare_slot("<destructured>", ty, stmt.pattern.span());
                 if let Some((operand, _)) = value {
                     self.emit_effect(InstKind::Store(slot, operand), stmt.span);
                 }
@@ -7115,6 +7182,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Range(range) => self.lower_range_value(range, span),
             ast::Expr::Collection(collection) => self.lower_collection_literal(collection, span),
+            ast::Expr::Record(record) => self.lower_record_literal(record, span),
             ast::Expr::Null(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
@@ -8444,6 +8512,9 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Pattern::Tuple(_) => {
                 unreachable!("tuple patterns are not lowered yet")
+            }
+            ast::Pattern::Collection(_) | ast::Pattern::Record(_) => {
+                unreachable!("collection and record patterns are not tested this way yet")
             }
             ast::Pattern::Regex(_) => {
                 unreachable!("handled above, before the comparison chain")
@@ -9998,6 +10069,206 @@ impl<'a> FunctionLowering<'a> {
                         ast::Pattern::Wildcard(_) => {}
                         _ => {}
                     }
+                }
+            }
+            ast::Pattern::Collection(c) => {
+                let element_ty = match scrutinee_type {
+                    IrType::Array(id) => self.module.array_types[id as usize],
+                    IrType::List(id) => self.module.list_types[id as usize],
+                    _ => return,
+                };
+                let source_slot = scrutinee;
+                let source = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
+                let source_slot = self.declare_slot("<collection>", scrutinee_type, span);
+                self.emit_effect(InstKind::Store(source_slot, source), span);
+
+                for (index, sub) in c.elements.iter().enumerate() {
+                    let index_value = self.const_int_at(index as i128, IrType::Int(IntWidth::U64), span);
+                    let receiver = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
+                    let element = self.emit(
+                        InstKind::ArrayListLoad {
+                            receiver,
+                            index: index_value,
+                        },
+                        element_ty,
+                        span,
+                    );
+                    let element_slot = self.declare_slot("<element>", element_ty, span);
+                    self.emit_effect(InstKind::Store(element_slot, element), span);
+                    self.lower_pattern_bindings(sub, element_slot, element_ty, span);
+                }
+
+                if let Some(rest) = &c.rest {
+                if let IrType::Array(_) = scrutinee_type {
+                    let start = self.const_int_at(
+                        c.elements.len() as i128,
+                        IrType::Int(IntWidth::I64),
+                        span,
+                    );
+                    let end = self.const_i64(i64::MIN as i128, span);
+                    let step = self.const_int_at(1, IrType::Int(IntWidth::I64), span);
+                    let receiver = self.emit(InstKind::Load(source_slot), scrutinee_type, span);
+                    let slice = self.emit(
+                        InstKind::ArraySlice {
+                            receiver,
+                            start,
+                            end,
+                            step,
+                        },
+                        scrutinee_type,
+                        span,
+                    );
+                    let rest_slot = self.declare_slot(&rest.name, scrutinee_type, rest.span);
+                    self.emit_effect(InstKind::Store(rest_slot, slice), span);
+                } else if let IrType::List(list_id) = scrutinee_type {
+                    let list_ty = scrutinee_type;
+                    let rest_list = self.emit(
+                        InstKind::ListNew { element_id: list_id },
+                        list_ty,
+                        span,
+                    );
+                    let rest_list_slot = self.spill(rest_list, list_ty, span);
+
+                    let source = self.emit(InstKind::Load(source_slot), list_ty, span);
+                    let len = self.emit(
+                        InstKind::ListLength(source),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let len_slot = self.spill(len, IrType::Int(IntWidth::U64), span);
+
+                    let counter = self.declare_slot("<rest index>", IrType::Int(IntWidth::U64), span);
+                    let start = self.const_int_at(
+                        c.elements.len() as i128,
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(counter, start), span);
+
+                    let header = self.new_block();
+                    let body = self.new_block();
+                    let done = self.new_block();
+                    self.terminate(Terminator::Jump(header));
+                    self.current = header;
+
+                    let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                    let bound = self.emit(InstKind::Load(len_slot), IrType::Int(IntWidth::U64), span);
+                    let keep_going = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Lt,
+                            left: current,
+                            right: bound,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.terminate(Terminator::Branch {
+                        condition: keep_going,
+                        then_block: body,
+                        else_block: done,
+                    });
+
+                    self.current = body;
+                    let source = self.emit(InstKind::Load(source_slot), list_ty, span);
+                    let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                    let element = self.emit(
+                        InstKind::ArrayListLoad {
+                            receiver: source,
+                            index,
+                        },
+                        element_ty,
+                        span,
+                    );
+                    let receiver = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
+                    self.emit_effect(InstKind::ListAdd { receiver, value: element }, span);
+
+                    let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                    let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+                    let next = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Add,
+                            left: current,
+                            right: one,
+                        },
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(counter, next), span);
+                    self.terminate(Terminator::Jump(header));
+
+                    self.current = done;
+                    let rest_value = self.emit(InstKind::Load(rest_list_slot), list_ty, span);
+                    let rest_slot = self.declare_slot(&rest.name, list_ty, rest.span);
+                    self.emit_effect(InstKind::Store(rest_slot, rest_value), span);
+                }
+            }
+            }
+            ast::Pattern::Record(r) => {
+                let fields: Vec<_> = match scrutinee_type {
+                    IrType::Object(id) => self.module.objects[id as usize]
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty))
+                        .collect(),
+                    IrType::Value(id) => self.module.values[id as usize]
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty))
+                        .collect(),
+                    _ => return,
+                };
+                let source = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                for field in &r.fields {
+                    let Some((index, field_ty)) = fields
+                        .iter()
+                        .position(|(n, _)| n == &field.name.name)
+                        .map(|i| (i as u32, fields[i].1))
+                    else {
+                        continue;
+                    };
+                    let value = self.emit(
+                        InstKind::LoadField {
+                            object: source,
+                            index,
+                        },
+                        field_ty,
+                        span,
+                    );
+                    let binding_name = field
+                        .binding
+                        .as_ref()
+                        .map(|b| b.name.as_str())
+                        .unwrap_or(field.name.name.as_str());
+                    let binding_slot = self.declare_slot(binding_name, field_ty, span);
+                    self.emit_effect(InstKind::Store(binding_slot, value), span);
+                }
+                if let Some(rest) = &r.rest {
+                    let rest_value = match scrutinee_type {
+                        IrType::Object(_) => {
+                            self.emit(InstKind::Clone(source), scrutinee_type, span)
+                        }
+                        IrType::Value(id) => {
+                            let fields: Vec<Operand> = fields
+                                .iter()
+                                .enumerate()
+                                .map(|(index, (_, field_ty))| {
+                                    self.emit(
+                                        InstKind::LoadField {
+                                            object: source,
+                                            index: index as u32,
+                                        },
+                                        *field_ty,
+                                        span,
+                                    )
+                                })
+                                .collect();
+                            self.emit(InstKind::BuildValue { class: id, fields }, scrutinee_type, span)
+                        }
+                        _ => return,
+                    };
+                    let rest_slot =
+                        self.declare_slot(&rest.name, scrutinee_type, rest.span);
+                    self.emit_effect(InstKind::Store(rest_slot, rest_value), span);
                 }
             }
             _ => {}
@@ -13441,7 +13712,10 @@ impl<'a> FunctionLowering<'a> {
         let &ty = self.checked.expr_types.get(&call.span)?;
         match (callee.name.as_str(), ty.base) {
             ("Array", Base::Array(id)) if !call.args.is_empty() => {
-                if call.args.len() == 1 && !matches!(call.args[0].value, ast::Expr::Range(_)) {
+                if call.args.len() == 1
+                    && !call.args[0].is_spread
+                    && !matches!(call.args[0].value, ast::Expr::Range(_))
+                {
                     // `Array<T>(capacity)` — the single-argument form keeps
                     // its historical meaning as an empty array with room.
                     let capacity =
@@ -13457,7 +13731,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 let element_ty = self.module.array_types[id as usize];
                 Some(self.lower_expanded_array(
-                    call.args.iter().map(|arg| &arg.value),
+                    call.args.as_slice(),
                     id,
                     element_ty,
                     span,
@@ -13466,7 +13740,7 @@ impl<'a> FunctionLowering<'a> {
             ("List", Base::List(id)) => {
                 let element_ty = self.module.list_types[id as usize];
                 Some(self.lower_expanded_list(
-                    call.args.iter().map(|arg| &arg.value),
+                    call.args.as_slice(),
                     id,
                     element_ty,
                     span,
@@ -13482,27 +13756,38 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    fn lower_collection_elements<'b>(
+    fn lower_collection_elements<E: CollectionLikeElement>(
         &mut self,
-        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        elements: &[E],
         element_ty: IrType,
         span: Span,
     ) -> Vec<PreparedCollectionElement> {
         elements
-            .into_iter()
-            .map(|element| match element {
-                ast::Expr::Range(range) => {
+            .iter()
+            .map(|element| {
+                let expr = element.element_expr();
+                if element.is_spread() {
+                    let source = self.lower_expr(expr);
+                    let source_ty = self.type_of_operand(source);
+                    let value = self.spill(source, source_ty, element.element_span());
+                    PreparedCollectionElement::Spread {
+                        value,
+                        iterable_ty: source_ty,
+                    }
+                } else if matches!(expr, ast::Expr::Range(_)) {
+                    let ast::Expr::Range(range) = expr else {
+                        unreachable!("just matched")
+                    };
                     let range_value = self.lower_range_value(range, span);
                     let value = self.spill(range_value, IrType::Range, range.span);
                     let length = self.lower_checked_range_length(value, range.span);
                     PreparedCollectionElement::Range { value, length }
-                }
-                _ => {
-                    let scalar = self.lower_expr_as(element, element_ty);
+                } else {
+                    let scalar = self.lower_expr_as(expr, element_ty);
                     PreparedCollectionElement::Scalar(self.spill(
                         scalar,
                         element_ty,
-                        element.span(),
+                        element.element_span(),
                     ))
                 }
             })
@@ -13614,35 +13899,181 @@ impl<'a> FunctionLowering<'a> {
         self.current = done;
     }
 
-    fn lower_expanded_array<'b>(
+    /// The runtime length of an iterable value used for a spread into an array.
+    fn lower_iterable_length(
         &mut self,
-        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        value: SlotId,
+        iterable_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        match iterable_ty {
+            IrType::Range => {
+                let length_slot = self.lower_checked_range_length(value, span);
+                let length = self.emit(
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::U64), span)
+            }
+            IrType::Array(_) | IrType::List(_) => {
+                let iterable = self.emit(InstKind::Load(value), iterable_ty, span);
+                self.emit(
+                    if matches!(iterable_ty, IrType::Array(_)) {
+                        InstKind::ArrayLength(iterable)
+                    } else {
+                        InstKind::ListLength(iterable)
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                )
+            }
+            _ => panic!(
+                "spread of iterable type `{}` is not lowered yet",
+                iterable_ty.as_str()
+            ),
+        }
+    }
+
+    /// Iterates a spilled iterable value and calls `emit_element` for each item.
+    fn lower_iterable_elements(
+        &mut self,
+        value: SlotId,
+        iterable_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+        mut emit_element: impl FnMut(&mut Self, Operand),
+    ) {
+        match iterable_ty {
+            IrType::Range => {
+                let length = self.lower_checked_range_length(value, span);
+                self.lower_range_elements(value, length, element_ty, span, emit_element);
+            }
+            IrType::Array(_) | IrType::List(_) => {
+                let iterable_slot = self.declare_slot("<iterable>", iterable_ty, span);
+                let iterable_value = self.emit(InstKind::Load(value), iterable_ty, span);
+                self.emit_effect(InstKind::Store(iterable_slot, iterable_value), span);
+
+                let iterable = self.emit(InstKind::Load(iterable_slot), iterable_ty, span);
+                let length = self.emit(
+                    if matches!(iterable_ty, IrType::Array(_)) {
+                        InstKind::ArrayLength(iterable)
+                    } else {
+                        InstKind::ListLength(iterable)
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                // The same counter/index pattern as `lower_for_in_array_list`.
+                let length_slot = self.declare_slot("<length>", IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(length_slot, length), span);
+
+                let counter = self.declare_slot("<index>", IrType::Int(IntWidth::U64), span);
+                let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(counter, zero), span);
+
+                let header = self.new_block();
+                let body = self.new_block();
+                let done = self.new_block();
+                self.terminate(Terminator::Jump(header));
+
+                self.current = header;
+                let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                let bound = self.emit(InstKind::Load(length_slot), IrType::Int(IntWidth::U64), span);
+                let keep_going = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: current,
+                        right: bound,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                self.terminate(Terminator::Branch {
+                    condition: keep_going,
+                    then_block: body,
+                    else_block: done,
+                });
+
+                self.current = body;
+                let iterable = self.emit(InstKind::Load(iterable_slot), iterable_ty, span);
+                let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                let element = self.emit(
+                    InstKind::ArrayListLoad {
+                        receiver: iterable,
+                        index,
+                    },
+                    element_ty,
+                    span,
+                );
+                emit_element(self, element);
+
+                let current = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+                let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+                let next = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Add,
+                        left: current,
+                        right: one,
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(counter, next), span);
+                self.terminate(Terminator::Jump(header));
+
+                self.current = done;
+            }
+            _ => panic!(
+                "spread of iterable type `{}` is not lowered yet",
+                iterable_ty.as_str()
+            ),
+        }
+    }
+
+    fn lower_expanded_array<E: CollectionLikeElement>(
+        &mut self,
+        elements: &[E],
         element_id: u32,
         element_ty: IrType,
         span: Span,
     ) -> Operand {
         let prepared = self.lower_collection_elements(elements, element_ty, span);
-        let mut capacity = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        // The accumulated capacity is held in a slot so it can survive across
+        // `amount` computations (range-length checks, spread lengths) that open
+        // new blocks.
+        let capacity_slot =
+            self.declare_slot("<array capacity>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(capacity_slot, zero), span);
         for item in &prepared {
-            let amount = match item {
+            let amount = match *item {
                 PreparedCollectionElement::Scalar(_) => {
                     self.const_int_at(1, IrType::Int(IntWidth::U64), span)
                 }
                 PreparedCollectionElement::Range { length, .. } => {
                     let length =
-                        self.emit(InstKind::Load(*length), IrType::Int(IntWidth::I64), span);
+                        self.emit(InstKind::Load(length), IrType::Int(IntWidth::I64), span);
                     self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::U64), span)
                 }
+                PreparedCollectionElement::Spread { value, iterable_ty } => {
+                    self.lower_iterable_length(value, iterable_ty, span)
+                }
             };
-            capacity = self.checked_int_arithmetic(
+            let capacity =
+                self.emit(InstKind::Load(capacity_slot), IrType::Int(IntWidth::U64), span);
+            let new_capacity = self.checked_int_arithmetic(
                 BinaryOp::Add,
                 capacity,
                 amount,
                 IrType::Int(IntWidth::U64),
                 span,
             );
+            self.emit_effect(InstKind::Store(capacity_slot, new_capacity), span);
         }
         let array_ty = IrType::Array(element_id);
+        let capacity =
+            self.emit(InstKind::Load(capacity_slot), IrType::Int(IntWidth::U64), span);
         let array = self.emit(
             InstKind::ArrayNew {
                 element_id,
@@ -13663,6 +14094,11 @@ impl<'a> FunctionLowering<'a> {
                 }
                 PreparedCollectionElement::Range { value, length } => {
                     self.lower_range_elements(value, length, element_ty, span, |this, value| {
+                        this.store_collection_array_value(array, array_ty, output, value, span)
+                    })
+                }
+                PreparedCollectionElement::Spread { value, iterable_ty } => {
+                    self.lower_iterable_elements(value, iterable_ty, element_ty, span, |this, value| {
                         this.store_collection_array_value(array, array_ty, output, value, span)
                     })
                 }
@@ -13700,9 +14136,9 @@ impl<'a> FunctionLowering<'a> {
         self.emit_effect(InstKind::Store(output, next), span);
     }
 
-    fn lower_expanded_list<'b>(
+    fn lower_expanded_list<E: CollectionLikeElement>(
         &mut self,
-        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        elements: &[E],
         element_id: u32,
         element_ty: IrType,
         span: Span,
@@ -13720,6 +14156,12 @@ impl<'a> FunctionLowering<'a> {
                 }
                 PreparedCollectionElement::Range { value, length } => {
                     self.lower_range_elements(value, length, element_ty, span, |this, value| {
+                        let receiver = this.emit(InstKind::Load(list), list_ty, span);
+                        this.emit_effect(InstKind::ListAdd { receiver, value }, span);
+                    })
+                }
+                PreparedCollectionElement::Spread { value, iterable_ty } => {
+                    self.lower_iterable_elements(value, iterable_ty, element_ty, span, |this, value| {
                         let receiver = this.emit(InstKind::Load(list), list_ty, span);
                         this.emit_effect(InstKind::ListAdd { receiver, value }, span);
                     })
@@ -13743,11 +14185,11 @@ impl<'a> FunctionLowering<'a> {
         match ty.base {
             Base::Array(id) => {
                 let element = self.module.array_types[id as usize];
-                self.lower_expanded_array(literal.elements.iter(), id, element, span)
+                self.lower_expanded_array(literal.elements.as_slice(), id, element, span)
             }
             Base::List(id) => {
                 let element = self.module.list_types[id as usize];
-                self.lower_expanded_list(literal.elements.iter(), id, element, span)
+                self.lower_expanded_list(literal.elements.as_slice(), id, element, span)
             }
             _ => unreachable!("a collection literal has Array<T> or List<T> type"),
         }
@@ -13955,6 +14397,10 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
                 ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
                 ast::InterpolatedPart::Literal(_) => false,
+            }),
+            ast::Expr::Record(r) => r.elements.iter().any(|e| match e {
+                ast::RecordLiteralElement::Field(f) => self.opens_blocks(&f.value),
+                ast::RecordLiteralElement::Spread(s) => self.opens_blocks(&s.expr),
             }),
             _ => false,
         }
@@ -14575,6 +15021,130 @@ impl<'a> FunctionLowering<'a> {
             IrType::Value(id),
             span,
         )
+    }
+
+    /// `{ ...source, field: value, ... }` — a record/object literal with an
+    /// optional spread source and explicit field overrides, processed left to
+    /// right so a later explicit field overrides an earlier spread.
+    fn lower_record_literal(&mut self, record: &ast::RecordLiteralExpr, span: Span) -> Operand {
+        let ty = self.type_of(&ast::Expr::Record(record.clone()), span);
+
+        match ty {
+            IrType::Value(id) => {
+                let field_names: Vec<String> = self.module.values[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                let field_types: Vec<IrType> = self.module.values[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty)
+                    .collect();
+
+                let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
+                for element in &record.elements {
+                    match element {
+                        ast::RecordLiteralElement::Spread(s) => {
+                            let source = self.lower_expr(&s.expr);
+                            for index in 0..field_names.len() {
+                                let field_value = self.emit(
+                                    InstKind::LoadField {
+                                        object: source,
+                                        index: index as u32,
+                                    },
+                                    field_types[index],
+                                    span,
+                                );
+                                given[index] = Some(field_value);
+                            }
+                        }
+                        ast::RecordLiteralElement::Field(f) => {
+                            let Some(index) = field_names.iter().position(|n| n == &f.name.name) else {
+                                continue;
+                            };
+                            let value = self.lower_expr_as(&f.value, field_types[index]);
+                            given[index] = Some(value);
+                        }
+                    }
+                }
+
+                let fields: Vec<Operand> = given
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        value.unwrap_or_else(|| {
+                            self.default_value(field_types[index], span)
+                                .expect("the checker required a default for an omitted field")
+                        })
+                    })
+                    .collect();
+
+                self.emit(
+                    InstKind::BuildValue { class: id, fields },
+                    IrType::Value(id),
+                    span,
+                )
+            }
+            IrType::Object(id) => {
+                let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+                let field_names: Vec<String> = self.module.objects[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect();
+                let field_types: Vec<IrType> = self.module.objects[id as usize]
+                    .fields
+                    .iter()
+                    .map(|f| f.ty)
+                    .collect();
+
+                let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
+                for element in &record.elements {
+                    match element {
+                        ast::RecordLiteralElement::Spread(s) => {
+                            let source = self.lower_expr(&s.expr);
+                            for index in 0..field_names.len() {
+                                let field_value = self.emit(
+                                    InstKind::LoadField {
+                                        object: source,
+                                        index: index as u32,
+                                    },
+                                    field_types[index],
+                                    span,
+                                );
+                                given[index] = Some(field_value);
+                            }
+                        }
+                        ast::RecordLiteralElement::Field(f) => {
+                            let Some(index) = field_names.iter().position(|n| n == &f.name.name) else {
+                                continue;
+                            };
+                            let value = self.lower_expr_as(&f.value, field_types[index]);
+                            given[index] = Some(value);
+                        }
+                    }
+                }
+
+                for (index, value) in given.into_iter().enumerate() {
+                    let value = value.unwrap_or_else(|| {
+                        self.default_value(field_types[index], span)
+                            .expect("the checker required a default for an omitted field")
+                    });
+                    self.emit_effect(
+                        InstKind::StoreField {
+                            object,
+                            index: index as u32,
+                            value,
+                        },
+                        span,
+                    );
+                }
+
+                object
+            }
+            _ => unreachable!("a record literal has a record type"),
+        }
     }
 
     /// The enum and discriminant a call constructs, if it names a variant
@@ -18076,10 +18646,10 @@ impl<'a> FunctionLowering<'a> {
 
     /// Lowers the arguments of a call into the parameters they fill.
     ///
-    /// Named arguments are placed by name and omitted ones take their default,
-    /// so the call reaching the IR always has the declared arity. That is
-    /// decision D4: neither the IR nor LLVM ever sees a named or missing
-    /// argument.
+    /// Named arguments are placed by name and omitted ones take their default.
+    /// A variadic parameter is passed as a single `List<T>` built from the
+    /// trailing positional arguments and any spread sources, so the IR always
+    /// sees the declared arity.
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
         let name = self.callee_name(call);
 
@@ -18100,50 +18670,107 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .functions
             .get(&name)
-            .expect("a verified program only calls declared functions");
-        let params: Vec<(String, IrType)> = signature
-            .params
-            .iter()
-            .map(|p| (p.name.clone(), self.ir_type(p.ty)))
-            .collect();
+            .expect("a verified program only calls declared functions")
+            .clone();
 
-        let mut slots: Vec<Option<Held>> = (0..params.len()).map(|_| None).collect();
+        let variadic_index = signature.params.iter().position(|p| p.variadic);
+        let fixed_count = variadic_index.unwrap_or(signature.params.len());
+        let variadic_info = variadic_index.map(|i| {
+            let element_ty = self.ir_type(signature.params[i].ty);
+            let list_id = self
+                .checked
+                .list_types
+                .iter()
+                .position(|&t| self.ir_type(t) == element_ty)
+                .expect("the checker interned the variadic list type") as u32;
+            let list_ty = IrType::List(list_id);
+            let list = self.emit(InstKind::ListNew { element_id: list_id }, list_ty, call.span);
+            let list_slot = self.spill(list, list_ty, call.span);
+            (list_id, element_ty, list_ty, list_slot)
+        });
+
+        let mut fixed_slots: Vec<Option<Held>> = (0..fixed_count).map(|_| None).collect();
         let mut next = 0usize;
 
         for (position, arg) in call.args.iter().enumerate() {
-            let index = match &arg.name {
-                Some(named) => params
-                    .iter()
-                    .position(|(name, _)| *name == named.name)
-                    .expect("the checker resolved every named argument"),
-                None => {
-                    while next < slots.len() && slots[next].is_some() {
-                        next += 1;
-                    }
-                    let index = next;
-                    next += 1;
-                    index
-                }
-            };
             // A later argument that opens blocks would strand the ones already
             // computed, so each is held until every argument is lowered.
             let branches_later = call.args[position + 1..]
                 .iter()
                 .any(|a| self.opens_blocks(&a.value));
-            slots[index] =
-                Some(self.lower_and_hold_as(&arg.value, params[index].1, branches_later));
+
+            if arg.is_spread {
+                let (_list_id, element_ty, list_ty, list_slot) = variadic_info
+                    .expect("the checker allows spread only into variadic parameters");
+                let source = self.lower_expr(&arg.value);
+                let source_ty = self.type_of_operand(source);
+                let source_slot =
+                    self.declare_slot("<spread source>", source_ty, arg.value.span());
+                self.emit_effect(InstKind::Store(source_slot, source), arg.value.span());
+                self.lower_iterable_elements(
+                    source_slot,
+                    source_ty,
+                    element_ty,
+                    arg.span,
+                    |this, element| {
+                        let receiver = this.emit(InstKind::Load(list_slot), list_ty, arg.span);
+                        this.emit_effect(InstKind::ListAdd { receiver, value: element }, arg.span);
+                    },
+                );
+                continue;
+            }
+
+            if let Some(named) = &arg.name {
+                let index = signature
+                    .params
+                    .iter()
+                    .position(|p| p.name == named.name)
+                    .expect("the checker resolved every named argument");
+                if index < fixed_count {
+                    let ty = self.ir_type(signature.params[index].ty);
+                    fixed_slots[index] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                } else {
+                    let (_, element_ty, list_ty, list_slot) = variadic_info
+                        .expect("the checker resolved a named variadic argument");
+                    let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                    let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                    let element = self.reload(value, call.span);
+                    self.emit_effect(InstKind::ListAdd { receiver, value: element }, call.span);
+                }
+                continue;
+            }
+
+            while next < fixed_count && fixed_slots[next].is_some() {
+                next += 1;
+            }
+            if next < fixed_count {
+                let ty = self.ir_type(signature.params[next].ty);
+                fixed_slots[next] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                next += 1;
+            } else {
+                let (_, element_ty, list_ty, list_slot) = variadic_info
+                    .expect("the checker rejects too many positional arguments");
+                let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                let element = self.reload(value, call.span);
+                self.emit_effect(InstKind::ListAdd { receiver, value: element }, call.span);
+            }
         }
 
         let declaration = self.declarations.get(name.as_str()).copied();
-
-        slots
-            .into_iter()
-            .enumerate()
-            .map(|(index, filled)| match filled {
+        let mut args: Vec<Operand> = Vec::with_capacity(fixed_count + variadic_info.is_some() as usize);
+        for (index, slot) in fixed_slots.into_iter().enumerate() {
+            let ty = self.ir_type(signature.params[index].ty);
+            args.push(match slot {
                 Some(held) => self.reload(held, call.span),
-                None => self.lower_default(declaration, index, params[index].1, call.span),
-            })
-            .collect()
+                None => self.lower_default(declaration, index, ty, call.span),
+            });
+        }
+        if let Some((list_id, _, _, list_slot)) = variadic_info {
+            let list_ty = IrType::List(list_id);
+            args.push(self.emit(InstKind::Load(list_slot), list_ty, call.span));
+        }
+        args
     }
 
     /// The value a parameter takes when the call omits it.
@@ -18922,6 +19549,13 @@ impl<'a> FunctionLowering<'a> {
                 .copied()
                 .map(|ty| self.ir_type(ty))
                 .expect("the checker records every collection literal type"),
+            ast::Expr::Record(record) => self
+                .checked
+                .expr_types
+                .get(&record.span)
+                .copied()
+                .map(|ty| self.ir_type(ty))
+                .expect("the checker records every record literal type"),
             ast::Expr::Lambda(_) | ast::Expr::Null(_) => {
                 unreachable!("the type of this expression comes from the value it produced")
             }

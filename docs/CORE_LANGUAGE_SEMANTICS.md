@@ -69,9 +69,10 @@ mut print: Fn(String) => Void = stdout.println
 ```
 
 Labels in a callable type govern named invocation. Optional parameters use
-`name?: T`; variadics use `...values: T` and expand with `...values`. The type
-records optionality, not a concrete default expression. Parameters are
-contravariant and results covariant. There is no implicit partial application.
+`name?: T`; variadics use `...values: T` and expand with `...values` in calls,
+collection literals, and `Array(...)`/`List(...)` constructors. The type records
+optionality, not a concrete default expression. Parameters are contravariant
+and results covariant. There is no implicit partial application.
 
 Lambdas use contextual inference. Recursive lambdas require an explicit
 binding type. Closures may escape and the compiler chooses efficient storage:
@@ -159,8 +160,9 @@ compatible capabilities are accessible before narrowing. Every statement and
 expression `match` over a closed domain is exhaustive. Patterns support values,
 types, enum variants, unions, regex, alternatives, and nesting. Guards are not
 part of Zirk. Proven unreachable patterns are errors. Bindings are projected
-copies. Direct destructuring supports records and tuples only; enum and rest
-destructuring are invalid. `Never` unifies with every branch result type.
+copies. Direct destructuring supports records, tuples, ordered collections with
+a rest binding (`[first, ...rest]`), and record rest patterns (`{ field, ...rest }`);
+enum destructuring remains invalid. `Never` unifies with every branch result type.
 
 ## 6. Collections and iteration
 
