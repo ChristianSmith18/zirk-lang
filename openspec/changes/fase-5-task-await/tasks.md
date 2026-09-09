@@ -16,9 +16,10 @@ keyword + parser → checker → IR + lowering → codegen → fixtures → docs
 
 ## 3. Type system (`zirk-sema`)
 
+- [ ] 3.0 Refactor `check_lambda`'s scope + capture core (`push_function` / `capture_stack` / outer-capture propagation / `fn_types` + `lambdas` registration) into a helper both `check_lambda` and a new `check_task` call — see design D2
 - [ ] 3.1 `types.rs`: `Base::Task(Box<Type>)`; `Type::from_name` + generic-argument resolution recognize `Task<T>` for any valid `T`; `Task<T>` prints as `Task<...>`
-- [ ] 3.2 `checker.rs`: type `Expr::Task` -> `Task<T>` (T = the call/block result type); a `Void` body is allowed and yields `Task<Void>`
-- [ ] 3.3 Desugar the task body to a zero-arg closure so the existing closure capture analysis, must-use, and lowering apply; the synthesized closure keeps the `task` span
+- [ ] 3.2 `check_task`: infer `T` from the body (block result type / expression type); a `Void` body yields `Task<Void>`; register a capturing-closure `fn_type` + `LambdaInfo` so lowering has a `target` + `captures`
+- [ ] 3.3 The `task` body runs the ordinary closure capture analysis (value snapshot / projected read / whole-reference share); its `fn_type` carries the `task` span for diagnostics
 - [ ] 3.4 Type `Expr::Await` on `Task<T>` -> exactly `T`; `await` on a non-`Task` is a type error naming the expected type
 - [ ] 3.5 Reject a task result type wider than a machine word (a `record` / large value `T`) with a clear "arrives with `Task.settled`" message; allow reference, `<=64-bit` scalar, `Boolean`, `Char`, `String`, and `Void`
 - [ ] 3.6 Single-consume: track a `Task<T>` local as a linear binding (reuse the `transfer` use-after-move liveness pass); `await x` consumes it; a second `await x` or any later use of `x` is `SECOND_AWAIT` with a "first consumed here" note

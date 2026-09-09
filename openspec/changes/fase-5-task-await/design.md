@@ -70,19 +70,36 @@ _Alternative:_ a real boxed `Task<T>` GC object. Rejected — the handle is a
 number, the TCB is runtime-private, and boxing would add a GC root that must be
 kept consistent with executor-side liveness for no benefit.
 
-### D2: `task` desugars to a zero-argument closure
+### D2: `task` body is a captured closure — but a dedicated node, not a synthesized `LambdaExpr`
 
-- `task { block }` → the body is `|| -> T { block }` where `T` is the block
-  result type.
-- `task expr` → `task { return expr; }`. `task f(a, b)` is the common case;
-  any expression is accepted.
+The intent is unchanged: a `task` body is a zero-argument closure over a
+GC-tracked capture block, lowered through the Phase 4d `MakeCallable` path.
 
-The closure is lowered through the existing Phase 4d path: `MakeCallable {
-target, captures }` builds a GC-tracked capture block and a body function
-`fn(capture_block) -> T`. Captures follow the ordinary closure-capture rules
-(value snapshot, projected read, whole-reference share). The AST reuses the
-closure node so the checker's capture analysis, the IR's closure lowering, and
-codegen's capture-block emission all apply unchanged.
+**But it cannot reuse the AST `LambdaExpr` node.** `parse_lambda` requires an
+explicit `: ReturnType` (`(a): Int32 => ...`) — the grammar has no
+inferred-return lambda, and `TypeRef` has no "infer" form — while a `task` body's
+result type `T` is only known after checking. So:
+
+- AST: `Expr::Task(TaskExpr { body: TaskBody, span })`,
+  `TaskBody = Block(Block) | Expr(Box<Expr>)`. `Expr::Await(AwaitExpr { operand:
+  Box<Expr>, span })`. (`TaskBody::Expr` covers `task f(a,b)` and any expression;
+  `task { }` is `TaskBody::Block`.)
+- Checker: a new `check_task` that mirrors `check_lambda`'s scope/capture
+  handling (`scopes.push_function`, `capture_stack.push`, the outer-capture
+  propagation loop, `fn_types` / `lambdas` registration) **minus** the
+  explicit-return requirement, **plus** inferring `T` from the body — the block's
+  result type or the expression's type. It produces `Base::Task(Box<T>)` and
+  registers a capturing-closure `fn_type` + `LambdaInfo` so lowering has a
+  `target` function and a `captures: Vec<Capture>` list, exactly like a lambda.
+- Lowering: `lower_task` reuses `lower_lambda`'s body-function emission and
+  `MakeCallable { target, captures }`, then wraps the resulting boxed callable in
+  `TaskStart`.
+- Codegen: the capture-block emission is the existing `MakeCallable` path
+  unchanged; only the `TaskStart` (thunk + `zirk_rt_task_spawn`) and `Await`
+  (`zirk_rt_task_await` + narrow) instructions are new.
+
+Refactoring `check_lambda` / `lower_lambda` to share their core with
+`check_task` / `lower_task` (rather than copy) is the first real task of group 3.
 
 ### D3: `TaskStart` lowering and the spawn thunk
 
