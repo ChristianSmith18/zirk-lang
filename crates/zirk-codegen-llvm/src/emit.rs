@@ -400,6 +400,8 @@ fn llvm_type_in<'ctx>(
         // the captured values are read back at the call site
         // (`phase-4d-callables`).
         ir::IrType::Callable(_) => callable_struct(context).into(),
+        // Task ids are packed `u64` values at the executor ABI boundary.
+        ir::IrType::Task => context.i64_type().into(),
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
         // carries no pointee type; a load/store through it supplies `T`'s
@@ -4134,6 +4136,219 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("indirect callable call");
 
                 call.try_as_basic_value().basic()
+            }
+
+            ir::InstKind::TaskStart { target, body } => {
+                let callable = self.operand(*body).into_struct_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "task_capture")
+                    .expect("task capture pointer")
+                    .into_pointer_value();
+                let id = match self.value_types.get(&body.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("TaskStart body is not a Callable: {other:?}"),
+                };
+                let layout = &self.module.closures[id as usize];
+                let thunk_name = format!(
+                    "zk.task_thunk.{}",
+                    instruction.result.expect("task result").0
+                );
+                let thunk = self.llvm.add_function(
+                    &thunk_name,
+                    self.context.i64_type().fn_type(
+                        &[self.context.ptr_type(AddressSpace::default()).into()],
+                        false,
+                    ),
+                    Some(Linkage::Private),
+                );
+                thunk.set_call_conventions(0);
+                let resume = self.builder.get_insert_block().expect("instruction block");
+                let entry = self.context.append_basic_block(thunk, "entry");
+                self.builder.position_at_end(entry);
+                let capture_arg = thunk
+                    .get_first_param()
+                    .expect("capture argument")
+                    .into_pointer_value();
+                let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+                for (index, ty) in layout.captures.iter().enumerate() {
+                    let offset = self.closure_capture_offset(layout, index);
+                    let slot = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(),
+                            capture_arg,
+                            &[offset],
+                            "capture",
+                        )
+                    }
+                    .expect("task capture gep");
+                    args.push(
+                        self.builder
+                            .build_load(self.llvm_type(*ty).expect("capture type"), slot, "capture")
+                            .expect("task capture load")
+                            .into(),
+                    );
+                }
+                let call = self
+                    .builder
+                    .build_call(self.functions[target], &args, "task_body")
+                    .expect("task body call");
+                let packed = match self
+                    .module
+                    .function(target)
+                    .expect("task target")
+                    .return_type
+                {
+                    ir::IrType::Void => self.context.i64_type().const_zero(),
+                    ir::IrType::Int(_) | ir::IrType::Boolean => self
+                        .builder
+                        .build_int_z_extend(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("task value")
+                                .into_int_value(),
+                            self.context.i64_type(),
+                            "task_result",
+                        )
+                        .expect("task widen"),
+                    ir::IrType::Float(width) => {
+                        let bits = self
+                            .builder
+                            .build_bit_cast(
+                                call.try_as_basic_value()
+                                    .basic()
+                                    .expect("task value")
+                                    .into_float_value(),
+                                self.context
+                                    .custom_width_int_type(
+                                        std::num::NonZeroU32::new(width.bits())
+                                            .expect("float width"),
+                                    )
+                                    .expect("float bits type"),
+                                "task_float_bits",
+                            )
+                            .expect("float bits")
+                            .into_int_value();
+                        self.builder
+                            .build_int_z_extend(bits, self.context.i64_type(), "task_result")
+                            .expect("task float widen")
+                    }
+                    _ => self
+                        .builder
+                        .build_ptr_to_int(
+                            call.try_as_basic_value()
+                                .basic()
+                                .expect("task value")
+                                .into_pointer_value(),
+                            self.context.i64_type(),
+                            "task_result",
+                        )
+                        .expect("task pointer bits"),
+                };
+                self.builder
+                    .build_return(Some(&packed))
+                    .expect("task thunk return");
+                self.builder.position_at_end(resume);
+                let handle = self
+                    .builder
+                    .build_call(
+                        self.runtime.task_spawn,
+                        &[
+                            thunk.as_global_value().as_pointer_value().into(),
+                            capture.into(),
+                        ],
+                        "task",
+                    )
+                    .expect("task spawn")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("task handle");
+                Some(handle)
+            }
+
+            ir::InstKind::Await { handle, result } => {
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .expect("await instruction block")
+                    .get_parent()
+                    .expect("await function");
+                let raw = self
+                    .builder
+                    .build_call(
+                        self.runtime.task_await,
+                        &[self.operand(*handle).into()],
+                        "await",
+                    )
+                    .expect("task await")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("await result")
+                    .into_int_value();
+                let resume = self.context.append_basic_block(function, "await.resume");
+                self.builder
+                    .build_unconditional_branch(resume)
+                    .expect("await resume branch");
+                self.builder.position_at_end(resume);
+                match result {
+                    ir::IrType::Void => None,
+                    ir::IrType::Int(width) => Some(
+                        self.builder
+                            .build_int_truncate(
+                                raw,
+                                self.context
+                                    .custom_width_int_type(
+                                        std::num::NonZeroU32::new(width.bits()).expect("width"),
+                                    )
+                                    .expect("int type"),
+                                "await_value",
+                            )
+                            .expect("await narrow")
+                            .into(),
+                    ),
+                    ir::IrType::Boolean => Some(
+                        self.builder
+                            .build_int_truncate(raw, self.context.bool_type(), "await_value")
+                            .expect("await bool")
+                            .into(),
+                    ),
+                    ir::IrType::Float(width) => {
+                        let bits = self
+                            .builder
+                            .build_int_truncate(
+                                raw,
+                                self.context
+                                    .custom_width_int_type(
+                                        std::num::NonZeroU32::new(width.bits())
+                                            .expect("float width"),
+                                    )
+                                    .expect("float bits type"),
+                                "await_float_bits",
+                            )
+                            .expect("await float bits");
+                        Some(
+                            self.builder
+                                .build_bit_cast(
+                                    bits,
+                                    self.llvm_type(*result).expect("await float type"),
+                                    "await_value",
+                                )
+                                .expect("await float"),
+                        )
+                    }
+                    ty => Some(
+                        self.builder
+                            .build_int_to_ptr(
+                                raw,
+                                self.llvm_type(*ty)
+                                    .expect("await pointer type")
+                                    .into_pointer_type(),
+                                "await_value",
+                            )
+                            .expect("await pointer")
+                            .into(),
+                    ),
+                }
             }
 
             // `Dependent.from(base, field_ptr)` (roadmap Phase 4e,

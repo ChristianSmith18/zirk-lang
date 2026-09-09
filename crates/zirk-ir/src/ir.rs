@@ -166,6 +166,10 @@ pub enum IrType {
     /// allocated capture block plus the function pointer that knows how to
     /// use it.
     Callable(u32),
+    /// A one-word handle to a task owned by the cooperative executor (Phase 5,
+    /// `fase-5-task-await`). The element type exists only in the checker;
+    /// `Await` records the concrete result type at its use site.
+    Task,
     /// A reference to an object, identified by its layout in the module.
     ///
     /// It is a reference and not a value: an object has identity, and identity
@@ -351,6 +355,7 @@ impl IrType {
             IrType::Char => "Char",
             IrType::Closure(_) => "closure",
             IrType::Callable(_) => "Callable",
+            IrType::Task => "Task",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
             IrType::Value(_) => "value",
@@ -1192,6 +1197,23 @@ pub enum InstKind {
     CallCallable {
         callable: Operand,
         args: Vec<Operand>,
+    },
+
+    /// Starts a child task from a zero-argument boxed callable. The executor
+    /// owns the resulting handle; it is neither an allocation nor a GC root.
+    TaskStart {
+        /// The lifted task-body function. Keeping this explicit lets codegen
+        /// construct a per-site C-ABI thunk without reverse-engineering an
+        /// SSA producer for `body`.
+        target: String,
+        body: Operand,
+    },
+    /// Suspends until `handle` completes and yields its statically known
+    /// result. The result type is repeated here because `IrType::Task` is an
+    /// intentionally erased, one-word runtime handle.
+    Await {
+        handle: Operand,
+        result: IrType,
     },
 
     /// `Pointer.from(place)` where `place` is a local/parameter slot

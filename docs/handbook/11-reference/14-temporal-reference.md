@@ -42,4 +42,4 @@ For worked examples, read [Temporal Types](../02-handbook/03a-temporal/README.md
 
 ---
 
-**Previous:** [← Type Member Index](13-type-member-index.md) · **Next:** [ Explanations](../12-explanations/README.md)
+**Previous:** [← Type Member Index](13-type-member-index.md) · **Next:** [ `Task<T>`](15-task.md)

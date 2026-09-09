@@ -1,0 +1,5 @@
+fn main(): Void {
+    mut handle = task 42;
+    mut first = await handle;
+    mut second = await handle;
+}

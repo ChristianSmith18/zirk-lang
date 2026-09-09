@@ -21,7 +21,7 @@ examples, and advice on choosing a type, begin with
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[N]` access | component defaults where explicitly constructed |
 | Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `T?` | no implicit default |
 | Native memory | `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>` | unsafe raw address or bounded dependent native view | null only for raw pointer |
-| Concurrency | `Task<T>`, `TaskSettlement<T>`, `Channel<T>`, `Thread<T>` | scoped execution and typed coordination | no implicit default |
+| Concurrency | `Task<T>`; `TaskSettlement<T>`, `Channel<T>`, `Thread<T>` deferred | `Task<T>` is a one-consume child-work handle; the rest are specified for later Phase 5 slices | no implicit default |
 | Synchronization | `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `Atomic<T>` | contract-controlled shared state | type-specific |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
@@ -95,7 +95,8 @@ Complete reference variables alias when moved. Reads through an attribute,
 index, slice, destructuring, pattern, iterator, argument, return, or closure
 capture are independent projections and require `Clone` when reference-backed.
 
-`Task<T>` awaits to exactly `T`. `TaskSettlement<T>` is
+`Task<T>` awaits to exactly `T`; see the [`Task<T>` reference](15-task.md).
+`TaskSettlement<T>` is
 `Fulfilled(T) | Rejected(Throwable) | Cancelled(CancelledError)`. Internal
 transfer/share properties are compiler-derived rather than user-declared types.
 

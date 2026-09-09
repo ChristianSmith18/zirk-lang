@@ -20,7 +20,7 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | `Weak<T>` | `is_alive` | static `from()`, `upgrade()`, `to_string()` | [Safe References](../02-handbook/17-memory-and-safety/04-safe-references.md) |
 | `Pointer<T>` | `is_null` | `read()`, `write()`, `offset()`, `offset_bytes()`, `cast<T>()`, volatile access | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |
 | native slices | `length`, `is_empty` | bounds-checked indexing/iteration; mutable writes for `NativeSliceMut<T>` | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |
-| `Task<T>` | completion state through API | `cancel()`, aggregation through `Task.all/first/settled`, await | [Tasks](../02-handbook/18-concurrency/02-tasks.md) |
+| `Task<T>` | — in the current slice | `await` consumes it once; cancellation and aggregation are deferred | [`Task<T>`](15-task.md) |
 | `Channel<T>` | `is_closed`, `capacity`, `length` | `send()`, `receive()`, `try_send()`, `try_receive()`, `close()` | [Channels](../02-handbook/18-concurrency/07-channels.md) |
 | synchronization | type-specific | scoped lock access, permits/barriers/once, supported atomic operations | [`std.sync`](../04-standard-library/10-std-sync.md) |
 | tuples | `length` | constant `[N]` indexing, destructuring, `to_string()`, derived capabilities | [Tuples](../02-handbook/10-data-types/00-tuples.md) |

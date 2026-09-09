@@ -238,6 +238,37 @@ impl<'a> Parser<'a> {
     fn report_if_from_another_phase(&mut self) -> bool {
         let span = self.peek_span();
 
+        // These words remain ordinary identifiers until their structural form
+        // makes the future async construct unambiguous. That keeps names such
+        // as `select` and `cancellation` available to current programs while
+        // still giving the real constructs their promised phase diagnostics.
+        let deferred_async = match (self.peek(), self.peek_at(1)) {
+            (TokenKind::Identifier(name), TokenKind::LBrace) if name == "select" => Some((
+                "select",
+                "`select` arrives in the `fase-5-select-and-channels` slice of Phase 5",
+            )),
+            (TokenKind::Identifier(name), TokenKind::Identifier(next))
+                if name == "cancellation" && next == "shield" =>
+            {
+                Some((
+                    "cancellation shield",
+                    "`cancellation shield` arrives with structured task cancellation in Phase 5",
+                ))
+            }
+            _ => None,
+        };
+        if let Some((construct, cause)) = deferred_async {
+            self.error(
+                codes::NOT_IMPLEMENTED,
+                span,
+                format!("`{construct}` is not implemented yet"),
+                cause,
+                Some("the bare `task` / `await` forms are available now".into()),
+            );
+            self.synchronize();
+            return true;
+        }
+
         // Declarations belong at the top level, and reaching here means one
         // appeared inside a function body.
         if self.check_keyword(Keyword::Import)
@@ -3305,6 +3336,15 @@ impl<'a> Parser<'a> {
     fn parse_unary(&mut self) -> Option<Expr> {
         let start = self.peek_span();
 
+        // `task expr` / `task { block }` and `await expr` are unary-precedence
+        // prefix forms (roadmap Phase 5 step 1, `fase-5-task-await`).
+        if self.check_keyword(Keyword::Task) {
+            return self.parse_task(start);
+        }
+        if self.check_keyword(Keyword::Await) {
+            return self.parse_await(start);
+        }
+
         // `++i` and `--i` in value position: the operand is updated first and
         // the expression is the new value (`LANGUAGE_SPEC` section 4).
         if let Some(op) = increment_op(self.peek()) {
@@ -3655,6 +3695,68 @@ impl<'a> Parser<'a> {
         Some(Expr::Transfer(TransferExpr {
             expr: Box::new(expr),
             span: span.to(end),
+        }))
+    }
+
+    /// `task expr` / `task { block }` (roadmap Phase 5 step 1). `start` is the
+    /// `task` keyword span; the current token is still `task`.
+    fn parse_task(&mut self, start: Span) -> Option<Expr> {
+        self.pos += 1; // `task`
+
+        // `task scope { ... }` — structured task scopes are a later slice.
+        if matches!(self.peek(), TokenKind::Identifier(n) if n == "scope") {
+            let span = start.to(self.peek_span());
+            self.error(
+                codes::NOT_IMPLEMENTED,
+                span,
+                "`task scope` is not implemented yet",
+                "structured task scopes arrive in the `fase-5-task-scope` slice of Phase 5",
+                Some("bare `task expr` and `task { block }` are available now".into()),
+            );
+            self.synchronize();
+            return None;
+        }
+
+        let (body, end) = if matches!(self.peek(), TokenKind::LBrace) {
+            let block = self.parse_block()?;
+            let end = block.span;
+            (TaskBody::Block(block), end)
+        } else {
+            let expr = self.parse_unary()?;
+            let end = expr.span();
+            (TaskBody::Expr(Box::new(expr)), end)
+        };
+
+        Some(Expr::Task(TaskExpr {
+            body,
+            span: start.to(end),
+        }))
+    }
+
+    /// `await expr` (roadmap Phase 5 step 1). `start` is the `await` keyword
+    /// span; the current token is still `await`.
+    fn parse_await(&mut self, start: Span) -> Option<Expr> {
+        self.pos += 1; // `await`
+        let operand = self.parse_unary()?;
+        let end = operand.span();
+
+        // `await expr timeout <dur>` — arrives with `select` and channels.
+        if matches!(self.peek(), TokenKind::Identifier(n) if n == "timeout") {
+            let span = start.to(self.peek_span());
+            self.error(
+                codes::NOT_IMPLEMENTED,
+                span,
+                "`await ... timeout` is not implemented yet",
+                "awaiting with a timeout arrives in the `fase-5-select-and-channels` slice of Phase 5",
+                Some("bare `await expr` is available now".into()),
+            );
+            self.synchronize();
+            return None;
+        }
+
+        Some(Expr::Await(AwaitExpr {
+            operand: Box::new(operand),
+            span: start.to(end),
         }))
     }
 

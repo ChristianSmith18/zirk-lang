@@ -1,0 +1,3 @@
+fn main(): Void {
+    mut value = await 5;
+}

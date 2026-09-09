@@ -395,9 +395,9 @@ function coloring.
    suspend/resume, monotonic timer, per-task garbage-collection root chains, and
    `zirk_rt_run_main` running `main` as the executor's root task. No `.zrk`
    surface yet — `task` / `await` still emit the phase diagnostic.
-1. `Task<T>`, `task scope`, `await`, sibling-failure propagation, cancellation,
-   shield and timeout — the language surface (`fase-5-structured-tasks`), on the
-   step-0 executor.
+1. Bare `Task<T>`, `task expr` / `task { ... }`, and `await expr` — **delivered**
+   by `fase-5-task-await` on the step-0 executor. `task scope`, sibling-failure
+   propagation, cancellation, shield and timeout remain the next language slice.
 2. `Task.all`/`first`/`settled`, `TaskSettlement<T>`, fair `select`, and
    bounded/unbounded `Channel<T>` with closure/backpressure.
 3. Compiler-derived transfer/share and capture analysis sufficient to enforce

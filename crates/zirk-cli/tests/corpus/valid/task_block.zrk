@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut handle = task { return 7; };
+    stdout.println(await handle);
+}

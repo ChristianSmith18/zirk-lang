@@ -106,9 +106,10 @@ fn valid_the_four_types_of_the_subset() {
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
     // `Int64`/`Float64`/`Char` and the rest of the scalars in this phase's
-    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1) — `Task` is a
+    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1); `Task<T>` is
+    // implemented as of `fase-5-task-await`, but `Channel` is still a
     // genuinely pending name from Phase 5.
-    let output = rejected_body("mut x: Task = 1;");
+    let output = rejected_body("mut x: Channel = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
     assert!(output.contains("Phase 5"), "{output}");
 }
@@ -5775,4 +5776,77 @@ fn invalid_temporal_duration_interop() {
     // `Time - Time` yields `Duration`; `Time + Int` stays rejected.
     let output = rejected_body("mut t: Time = Time(1, 0);\nmut x = t + 2;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+// --- `task` / `await` (roadmap Phase 5 step 1, `fase-5-task-await`) --------
+
+#[test]
+fn valid_await_unwraps_the_task_result_type() {
+    accepted(
+        "fn compute(n: Int32): Int32 { return n; }\n\
+         fn main(): Void { mut h = task compute(21); mut x: Int32 = await h; }",
+    );
+}
+
+#[test]
+fn valid_task_block_infers_its_result_type() {
+    accepted(
+        "fn compute(n: Int32): Int32 { return n; }\n\
+         fn main(): Void { mut h = task { return compute(21); }; mut x: Int32 = await h; }",
+    );
+}
+
+#[test]
+fn valid_task_over_a_void_body_is_task_void() {
+    accepted(
+        "fn tick(): Void { }\n\
+         fn main(): Void { mut h = task tick(); await h; }",
+    );
+}
+
+#[test]
+fn invalid_await_on_a_non_task() {
+    let output = rejected_body("mut x = await 5;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("Task"), "{output}");
+}
+
+#[test]
+fn invalid_task_result_wider_than_a_machine_word() {
+    let output = rejected(
+        "fn big(): Int128 { return 1; }\n\
+         fn main(): Void { mut h = task big(); mut x: Int128 = await h; }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("machine word"), "{output}");
+}
+
+#[test]
+fn invalid_task_awaited_twice() {
+    let output = rejected(
+        "fn compute(n: Int32): Int32 { return n; }\n\
+         fn main(): Void { mut h = task compute(1); mut a = await h; mut b = await h; }",
+    );
+    assert!(output.contains(codes::SECOND_AWAIT.as_str()), "{output}");
+    assert!(output.contains("first consumed"), "{output}");
+}
+
+#[test]
+fn invalid_unconsumed_task_is_must_use() {
+    let output = rejected(
+        "fn compute(n: Int32): Int32 { return n; }\n\
+         fn main(): Void { task compute(1); }",
+    );
+    assert!(
+        output.contains(codes::DISCARDED_RESULT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_discarded_task_with_underscore() {
+    accepted(
+        "fn compute(n: Int32): Int32 { return n; }\n\
+         fn main(): Void { _ = task compute(1); }",
+    );
 }

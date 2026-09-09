@@ -1,0 +1,12 @@
+fn delayed_text(): Task<String> {
+    mut text = "capture survives collection";
+    return task text;
+}
+
+fn main(): Void {
+    mut handle = delayed_text();
+    for i in 1..=256 {
+        mut garbage = "discarded-" + i.to_string();
+    }
+    stdout.println(await handle);
+}

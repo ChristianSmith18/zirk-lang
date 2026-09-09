@@ -18,6 +18,10 @@ pub mod symbols {
     pub const INIT: &str = "zirk_rt_init";
     /// Runs the Zirk entrypoint as the cooperative executor's root task.
     pub const RUN_MAIN: &str = "zirk_rt_run_main";
+    /// Starts a child task from a body thunk and boxed-callable capture block.
+    pub const TASK_SPAWN: &str = "zirk_rt_task_spawn";
+    /// Suspends the current task until a child result is available.
+    pub const TASK_AWAIT: &str = "zirk_rt_task_await";
     /// Shuts the runtime down after `main`.
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";
     /// Builds a `String` from UTF-8 bytes and a length.
@@ -291,6 +295,8 @@ pub mod symbols {
 pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
     pub run_main: FunctionValue<'ctx>,
+    pub task_spawn: FunctionValue<'ctx>,
+    pub task_await: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
     pub str_from_i8: FunctionValue<'ctx>,
@@ -452,6 +458,16 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let run_main = module.add_function(
         symbols::RUN_MAIN,
         void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let task_spawn = module.add_function(
+        symbols::TASK_SPAWN,
+        i64.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let task_await = module.add_function(
+        symbols::TASK_AWAIT,
+        i64.fn_type(&[i64.into()], false),
         external,
     );
     let shutdown = module.add_function(symbols::SHUTDOWN, void.fn_type(&[], false), external);
@@ -1127,6 +1143,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     Runtime {
         init,
         run_main,
+        task_spawn,
+        task_await,
         shutdown,
         str_from_utf8,
         str_from_i8,

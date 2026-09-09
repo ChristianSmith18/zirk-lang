@@ -1,0 +1,7 @@
+fn fire_and_forget(): Void {
+    stdout.println("ran");
+}
+
+fn main(): Void {
+    _ = task fire_and_forget();
+}

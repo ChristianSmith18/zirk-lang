@@ -1490,6 +1490,33 @@ fn verify_instruction(
                 }
             }
         }
+        InstKind::TaskStart { target, body } => {
+            expect(inst.ty, IrType::Task, position, "TaskStart", report);
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: TaskStart targets `{target}`, which is not a module function"
+                ));
+            }
+            if let Some(actual) = type_of(body)
+                && !matches!(actual, IrType::Callable(_))
+            {
+                report(format!(
+                    "{position}: TaskStart body is {}, expected a Callable type",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::Await { handle, result } => {
+            expect(inst.ty, *result, position, "Await", report);
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Task
+            {
+                report(format!(
+                    "{position}: Await handle is {}, expected Task",
+                    actual.as_str()
+                ));
+            }
+        }
         InstKind::ResourceTransfer { source } => {
             if let Some(ty) = type_of(source) {
                 if !matches!(ty, IrType::Object(_) | IrType::Contract(_)) {
@@ -2298,6 +2325,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             operands.extend(args.iter().copied());
             operands
         }
+        InstKind::TaskStart { body, .. } => vec![*body],
+        InstKind::Await { handle, .. } => vec![*handle],
         InstKind::ResourceTransfer { source } => vec![*source],
         InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
         InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],

@@ -37,8 +37,8 @@ a follow-up change against the same specs.
   Transfer/Share change); for now a task body captures by the ordinary closure
   rules and a `.zrk` fixture stays within value / projection / whole-reference
   captures.
-- **IR + lowering**: a new `TaskStart` instruction (operand: a boxed callable for
-  the body) yielding a `Task<T>` value, and an `Await` instruction (a suspension
+- **IR + lowering**: a new `TaskStart` instruction (a lifted body target plus a
+  boxed callable operand) yielding a `Task<T>` value, and an `Await` instruction (a suspension
   point) yielding the element value. `Task<T>` lowers to a one-word handle
   (`IrType::Task`, an ABI `i64`). `await` lowers to a call to `zirk_rt_task_await`;
   `task` lowers to building the body thunk plus a call to `zirk_rt_task_spawn`.

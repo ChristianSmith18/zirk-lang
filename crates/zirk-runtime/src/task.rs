@@ -138,11 +138,14 @@ pub struct TaskControlBlock {
     /// This task's garbage-collection shadow-stack chain (design D2). Group 7
     /// makes `zirk_rt_push_frame` / `zirk_rt_pop_frame` and `collect()` use it.
     pub roots: Vec<Frame>,
+    /// Capture block received from generated task code. It remains a root until
+    /// the child has completed, including before its first body frame exists.
+    pub capture_root: Option<*mut std::ffi::c_void>,
     pub cleanup_state: CleanupState,
 }
 
 impl TaskControlBlock {
-    fn new(context: TaskContext) -> Self {
+    fn new(context: TaskContext, capture_root: Option<*mut std::ffi::c_void>) -> Self {
         TaskControlBlock {
             state: TaskState::Ready,
             context: Some(context),
@@ -154,6 +157,7 @@ impl TaskControlBlock {
             cancel_reason: None,
             shield_depth: 0,
             roots: Vec::new(),
+            capture_root,
             cleanup_state: CleanupState::Done,
         }
     }
@@ -204,7 +208,16 @@ impl TaskRegistry {
 
     /// Registers a fresh task and returns its id.
     pub fn insert(&mut self, context: TaskContext) -> TaskId {
-        let tcb = Box::new(TaskControlBlock::new(context));
+        self.insert_with_capture_root(context, None)
+    }
+
+    /// Registers a generated task whose callable capture block is a GC root.
+    pub fn insert_with_capture_root(
+        &mut self,
+        context: TaskContext,
+        capture_root: Option<*mut std::ffi::c_void>,
+    ) -> TaskId {
+        let tcb = Box::new(TaskControlBlock::new(context, capture_root));
         self.live += 1;
         if let Some(index) = self.free.pop() {
             let generation = match &self.slots[index as usize] {

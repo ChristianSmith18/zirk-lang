@@ -175,20 +175,21 @@ unsafe impl Send for TaskArg {}
 ///
 /// Must be called from inside a running task (ultimately from a `zirk_main`
 /// driven by [`zirk_rt_run_main`]). `body` must be a valid function pointer and
-/// `arg` whatever `body` expects (a capture-block pointer, or null).
+/// `arg` must be the compiler-emitted callable capture-block pointer (or null).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_task_spawn(
     body: extern "C" fn(*mut std::ffi::c_void) -> usize,
     arg: *mut std::ffi::c_void,
 ) -> u64 {
     let arg = TaskArg(arg);
+    let capture_root = arg.0;
     let child = move || {
         // `let arg = arg;` forces edition-2024 disjoint captures to move the
         // whole `Send` `TaskArg`, not its `!Send` `*mut` field.
         let arg = arg;
         body(arg.0)
     };
-    executor::spawn(child).to_bits()
+    executor::spawn_with_capture_root(child, capture_root).to_bits()
 }
 
 /// Consumes the result of the task named by `id` exactly once, suspending the

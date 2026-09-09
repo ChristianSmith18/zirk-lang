@@ -289,7 +289,11 @@ impl Keyword {
             // phase's scope, so `default` stays gated until `match with`
             // needs its own catch-all arm.
             Default => Phase::FOUR,
-            Task | Await | Parallel | Thread | Sync => Phase::FIVE,
+            // `task` / `await` bare expression forms are implemented as of
+            // `fase-5-task-await` (Phase 5 step 1), so they are no longer gated
+            // here — the parser consumes them directly. `parallel` / `thread` /
+            // `sync` stay deferred to their Phase 5 sub-steps.
+            Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.
             Gen | Yield => Phase::SEVEN_B,
@@ -655,8 +659,16 @@ mod tests {
 
     #[test]
     fn later_phase_keywords_declare_their_phase() {
-        assert!(!Keyword::Task.in_subset());
-        assert_eq!(Keyword::Task.phase(), Some(Phase::FIVE));
+        assert!(!Keyword::Parallel.in_subset());
+        assert_eq!(Keyword::Parallel.phase(), Some(Phase::FIVE));
+    }
+
+    #[test]
+    fn bare_task_and_await_are_in_the_subset() {
+        for k in [Keyword::Task, Keyword::Await] {
+            assert!(k.in_subset(), "`{}` should be implemented", k.as_str());
+            assert_eq!(k.phase(), None, "`{}`", k.as_str());
+        }
     }
 
     #[test]

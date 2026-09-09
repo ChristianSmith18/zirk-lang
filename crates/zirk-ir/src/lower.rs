@@ -2774,6 +2774,9 @@ fn ir_type(
         // conversion (see `Self::lower_lambda`'s own comment on why captures
         // read the *slot's* type, not the checker's).
         Base::Function(id) => IrType::Callable(id),
+        // `Task<T>` is represented by the executor's opaque one-word handle;
+        // its element type is retained only by `Base::Task` for `await`.
+        Base::Task(_) => IrType::Task,
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -3040,6 +3043,9 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn weak_element(&self, id: u32) -> Type {
         self.0.weak_types[id as usize]
+    }
+    fn task_element(&self, id: u32) -> Type {
+        self.0.task_types[id as usize]
     }
     fn native_slice_element(&self, id: u32) -> Type {
         self.0.native_slice_types[id as usize]
@@ -3378,6 +3384,23 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Weak<T> it type-checked")
                 as u32;
             return Type::of(Base::Weak(id));
+        }
+
+        // `Task<T>` (roadmap Phase 5, `fase-5-task-await`, design D1): a
+        // written task annotation must resolve to the same interned result
+        // type the checker recorded. The runtime representation is always an
+        // opaque task handle, but retaining the result type here is what lets
+        // `ir_type` produce that handle and `await` retain its concrete type.
+        if reference.name == "Task" {
+            let result = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .task_types
+                .iter()
+                .position(|&t| t == result)
+                .expect("the checker interned every Task<T> it type-checked")
+                as u32;
+            return Type::of(Base::Task(id));
         }
 
         // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
@@ -4212,6 +4235,7 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Callable(_)
+            | IrType::Task
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -6857,6 +6881,12 @@ impl<'a> FunctionLowering<'a> {
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
             ast::Expr::Lambda(e) => self.lower_lambda(e, span),
+            ast::Expr::Task(e) => self.lower_task(e, span),
+            ast::Expr::Await(e) => {
+                let handle = self.lower_expr(&e.operand);
+                let result = self.type_of(expr, span);
+                self.emit(InstKind::Await { handle, result }, result, span)
+            }
 
             ast::Expr::Cast(e) => self.lower_cast(e, span),
 
@@ -7369,6 +7399,137 @@ impl<'a> FunctionLowering<'a> {
             IrType::Callable(id),
             span,
         )
+    }
+
+    /// Lowers a `task` body through the same boxed-callable representation as
+    /// a lambda, then starts it on the cooperative executor. Unlike a lambda,
+    /// the task body has no written parameters and its return type was inferred
+    /// by the checker.
+    fn lower_task(&mut self, expr: &ast::TaskExpr, span: Span) -> Operand {
+        let info = self
+            .checked
+            .lambdas
+            .get(&expr.span)
+            .expect("the checker records every task it accepted");
+        let capture_slots: Vec<SlotId> = info
+            .captures
+            .iter()
+            .map(|capture| self.lookup_slot(&capture.name))
+            .collect();
+        let capture_types: Vec<IrType> = capture_slots
+            .iter()
+            .map(|slot| self.slot_type(*slot))
+            .collect();
+        let returns = self.ir_type(self.checked.fn_types[info.fn_type as usize].returns);
+        let name = format!("task.{}.{}", expr.span.file.0, expr.span.start);
+        let id = info.fn_type;
+
+        if !info.captures.is_empty() {
+            self.module.closures[id as usize] = ClosureLayout {
+                captures: capture_types.clone(),
+                params: Vec::new(),
+                returns,
+            };
+        }
+
+        let captures: Vec<Operand> = capture_slots
+            .iter()
+            .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+            .collect();
+        let names: Vec<String> = info
+            .captures
+            .iter()
+            .map(|capture| capture.name.clone())
+            .collect();
+        let body = self.lift_task_body(expr, &name, &names, &capture_types, returns);
+        self.lifted.push(body);
+
+        let callable = self.emit(
+            InstKind::MakeCallable {
+                target: name,
+                captures,
+            },
+            IrType::Callable(id),
+            span,
+        );
+        self.emit(
+            InstKind::TaskStart {
+                target: format!("task.{}.{}", expr.span.file.0, expr.span.start),
+                body: callable,
+            },
+            IrType::Task,
+            span,
+        )
+    }
+
+    /// Lifts a task body to the zero-argument function called by its boxed
+    /// callable. Captures become leading parameters exactly as they do for a
+    /// lambda body; an expression body returns its value, while a block body
+    /// uses its explicit `return` statements (or is `Void`).
+    fn lift_task_body(
+        &mut self,
+        expr: &ast::TaskExpr,
+        name: &str,
+        params: &[String],
+        types: &[IrType],
+        returns: IrType,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = returns;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let slots: Vec<SlotId> = params
+            .iter()
+            .zip(types)
+            .map(|(name, ty)| inner.declare_slot(name, *ty, expr.span))
+            .collect();
+
+        match &expr.body {
+            ast::TaskBody::Expr(body) => {
+                let value = inner.lower_expr_as(body, returns);
+                // A `Void` expression still has an IR instruction operand for
+                // its effects, but it has no SSA value to return. Keeping it
+                // out of `Return(Some(_))` matches ordinary `Void` functions
+                // and lets `task fire_and_forget()` compile as `Task<Void>`.
+                inner.terminate(if returns == IrType::Void {
+                    Terminator::Return(None)
+                } else {
+                    Terminator::Return(Some(value))
+                });
+            }
+            ast::TaskBody::Block(block) => {
+                inner.lower_block(block);
+                if returns == IrType::Void {
+                    inner.terminate(Terminator::Return(None));
+                } else {
+                    // The checker inferred a non-Void task result from its
+                    // explicit returns. Any synthetically unreachable tail
+                    // must not claim to return Void from this function.
+                    inner.terminate(Terminator::Unreachable);
+                }
+            }
+        }
+
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        Function {
+            name: name.to_string(),
+            params: slots,
+            return_type: returns,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span: expr.span,
+        }
     }
 
     /// Lowers a lambda body as a function of its own.
@@ -18370,6 +18531,11 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Match(e) => self.arm_value_type(e),
             ast::Expr::Variant(_) => IrType::Int(IntWidth::I32),
             ast::Expr::Println(_) => IrType::Void,
+            ast::Expr::Task(_) => IrType::Task,
+            ast::Expr::Await(_) => self
+                .semantic_type(expr)
+                .map(|ty| self.ir_type(ty))
+                .expect("the checker records every await result type"),
             // A lambda's type is the closure layout it produced, which only
             // exists once it has been lowered: the caller asks the value.
             ast::Expr::Tuple(_) => {

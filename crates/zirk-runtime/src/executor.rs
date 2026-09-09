@@ -292,6 +292,9 @@ fn walk_all_task_roots(mark: &mut dyn FnMut(*mut std::ffi::c_void)) {
     with_exec(|exec| {
         for id in exec.registry.live_ids() {
             let tcb = exec.registry.get(id).expect("a live id resolves");
+            if let Some(capture) = tcb.capture_root {
+                mark(capture);
+            }
             for frame in &tcb.roots {
                 for index in 0..frame.count {
                     // SAFETY: same contract as `zirk_rt_push_frame` — each entry
@@ -318,11 +321,23 @@ pub fn spawn<F>(body: F) -> TaskId
 where
     F: FnOnce() -> usize + Send + 'static,
 {
+    spawn_with_capture_root(body, std::ptr::null_mut())
+}
+
+/// Spawns generated code and roots its callable capture block for the task's
+/// entire lifetime, including before the body installs compiler frame roots.
+pub fn spawn_with_capture_root<F>(body: F, capture_root: *mut std::ffi::c_void) -> TaskId
+where
+    F: FnOnce() -> usize + Send + 'static,
+{
     with_exec(|exec| {
-        let id = exec.registry.insert(TaskContext::new(
-            crate::context::DEFAULT_TASK_STACK_BYTES,
-            move |_suspender| body(),
-        ));
+        let id = exec.registry.insert_with_capture_root(
+            TaskContext::new(
+                crate::context::DEFAULT_TASK_STACK_BYTES,
+                move |_suspender| body(),
+            ),
+            (!capture_root.is_null()).then_some(capture_root),
+        );
         exec.ready.push_back(id);
         id
     })

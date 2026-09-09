@@ -113,6 +113,92 @@ fn an_empty_function_has_one_block_with_a_return() {
     assert_eq!(f.return_type, IrType::Void);
 }
 
+// --- Tasks ------------------------------------------------------------------
+
+#[test]
+fn task_creation_builds_a_callable_then_starts_it() {
+    let f = main_body("mut handle = task 21;");
+    let insts = instructions(&f);
+    let callable = insts
+        .iter()
+        .position(|inst| matches!(inst, InstKind::MakeCallable { .. }))
+        .expect("task creation emits its body callable");
+    let start = insts
+        .iter()
+        .position(|inst| matches!(inst, InstKind::TaskStart { .. }))
+        .expect("task creation starts the callable");
+
+    assert!(callable < start);
+}
+
+#[test]
+fn await_emits_the_task_result_type() {
+    let f = main_body("mut handle = task 21;\nmut value: Int32 = await handle;");
+
+    assert!(instructions(&f).iter().any(|inst| {
+        matches!(
+            inst,
+            InstKind::Await {
+                result: IrType::Int(IntWidth::I32),
+                ..
+            }
+        )
+    }));
+}
+
+#[test]
+fn an_explicit_task_annotation_lowers_to_a_task_handle() {
+    let f = main_body("mut handle: Task<Int32> = task 21;");
+
+    assert!(
+        f.slots
+            .iter()
+            .any(|slot| slot.name == "handle" && slot.ty == IrType::Task)
+    );
+}
+
+#[test]
+fn task_body_captures_its_enclosing_local() {
+    let module = compile(
+        "fn double(value: Int32): Int32 { return value * 2; }\nfn main(): Void {\nmut base: Int32 = 21;\nmut handle = task double(base);\nmut value: Int32 = await handle;\n}",
+    );
+    let f = module.function("main").expect("main exists");
+
+    assert!(
+        f.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|inst| {
+                matches!(
+                    &inst.kind,
+                    InstKind::MakeCallable { captures, .. } if captures.len() == 1
+                )
+            })
+    );
+    assert!(
+        module
+            .functions
+            .iter()
+            .any(|function| function.name.starts_with("task.") && function.params.len() == 1)
+    );
+}
+
+#[test]
+fn a_void_task_expression_lifts_a_void_return() {
+    let module = compile("fn notify(): Void { }\nfn main(): Void {\n_ = task notify();\n}");
+    let body = module
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("task."))
+        .expect("lifted task body");
+
+    assert!(
+        body.blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Some(Terminator::Return(None))))
+    );
+}
+
 #[test]
 fn parameters_become_slots() {
     let module =

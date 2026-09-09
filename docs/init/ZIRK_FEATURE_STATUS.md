@@ -188,8 +188,8 @@ Last updated with `fase-3-miembros-y-defaults`, **2026-09-06**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| Cooperative executor + task control block + timer + per-task GC roots | n/a | n/a | n/a | n/a | yes | n/a | `fase-5-executor-core`: `zirk-runtime` `executor.rs` / `task.rs` / `timer.rs` + `collector.rs` per-task root chains. `zirk_rt_run_main` runs `main` as the executor's root task. Provisional `zirk_rt_task_spawn`/`await`/`is_done` C-ABI defined, not codegen-wired. Rust-tested; no `.zrk` surface. |
-| `task`/`await` | yes | partial | no | no | no | no | `Keyword::Task`/`Await` gated to Phase 5. Runtime executor ready (`fase-5-executor-core`); parsing/checking/lowering/codegen are `fase-5-structured-tasks`. |
+| Cooperative executor + task control block + timer + per-task GC roots | n/a | n/a | n/a | n/a | yes | n/a | `fase-5-executor-core`: `zirk-runtime` `executor.rs` / `task.rs` / `timer.rs` + `collector.rs` per-task root chains. `zirk_rt_run_main` runs `main` as the executor's root task. `fase-5-task-await` now calls the provisional `zirk_rt_task_spawn`/`await` ABI from generated code. |
+| bare `task` / `await` | yes | yes | yes | yes | yes | yes | `fase-5-task-await`: `task expr`, `task { ... }`, `Task<T>`, and single-consume `await` run end-to-end. Task captures are GC-rooted by their control block. `task scope` and `await ... timeout` remain deferred with targeted diagnostics. |
 | `parallel`/`thread` | yes | partial | no | no | no | no | `Keyword::Parallel`/`Thread`/`Sync` gated. Phase 5 steps 4–6 (need a multi-threaded collector). |
 | `Channel<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (`fase-5-select-and-channels`). |
 | `Atomic<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (steps 4–6). |

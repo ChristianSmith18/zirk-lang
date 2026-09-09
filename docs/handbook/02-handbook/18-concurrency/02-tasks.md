@@ -1,17 +1,26 @@
 # Tasks
 
-`task` creates typed managed work in the current structured scope and returns
-`Task<T>`.
+`task` creates typed managed work and returns `Task<T>`. The bare expression
+and block forms are available now.
 
 ```zirk
-mut operation: Task<Result<Data, LoadError>> = task load_data();
-mut result: Result<Data, LoadError> = await operation;
+fn load_data(): Int32 { return 42; }
+
+fn main(): Void {
+    mut operation: Task<Int32> = task load_data();
+    stdout.println(await operation);
+}
 ```
 
-The callable form is shorthand for a task block. A task cannot become implicitly
-orphaned. Scope exit waits for completion or requests cancellation and then
-waits for cleanup. Ignoring a must-use task result requires explicit `_ =`; it
-does not detach the work.
+`task expression` evaluates the expression in a child task; `task { ... }`
+uses the block's `return` value. Its result must fit in one machine word: a
+reference, `String`, `Char`, `Boolean`, `Duration`, `Void`, or a scalar of up
+to 64 bits. Captured values are stored in a GC-tracked capture block.
+
+Each handle is consumed once by `await`. A bare discarded task is a diagnostic;
+write `_ = task notify();` to make the discard explicit. The executor still
+runs that child before the process exits. `task scope`, cancellation and
+sibling-failure semantics are specified but remain deferred.
 
 ---
 

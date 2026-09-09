@@ -94,6 +94,9 @@ pub struct CheckedProgram {
     /// Interned `Weak<T>` referent types, indexed by the id their
     /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
     pub weak_types: Vec<Type>,
+    /// Interned `Task<T>` result types, indexed by the id their
+    /// [`Base::Task`] carries (roadmap Phase 5 step 1, `fase-5-task-await`).
+    pub task_types: Vec<Type>,
     /// Interned `NativeSlice<T>` element types, indexed by the id their
     /// [`Base::NativeSlice`] carries (roadmap Phase 4e,
     /// `fase-4e-native-slice`, design D1).
@@ -314,6 +317,7 @@ struct Names<'t> {
     unions: &'t [Vec<Base>],
     pointer_types: &'t [Type],
     weak_types: &'t [Type],
+    task_types: &'t [Type],
     native_slice_types: &'t [Type],
     native_slice_mut_types: &'t [Type],
     dependent_types: &'t [Type],
@@ -410,6 +414,13 @@ impl TypeNames for Names<'_> {
 
     fn weak_element(&self, id: u32) -> Type {
         self.weak_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn task_element(&self, id: u32) -> Type {
+        self.task_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -517,6 +528,16 @@ struct Checker<'a> {
     aliases: HashMap<Span, String>,
     /// Return type of the function or lambda being checked.
     current_return: Type,
+    /// Set while checking a `task { block }` body: `return` statements infer
+    /// the task's result type `T` rather than checking against a declared one
+    /// (roadmap Phase 5 step 1, `fase-5-task-await`, design D2).
+    task_return_infer: bool,
+    /// The result type inferred so far for the enclosing `task` block, with
+    /// the span of the first `return` that produced it.
+    task_return_acc: Option<(Type, Span)>,
+    /// Declaration span of a `Task<T>` local -> span of the `await` that
+    /// consumed it, for the `SECOND_AWAIT` diagnostic (design D5).
+    awaited_at: HashMap<Span, Span>,
     /// The type the expression about to be checked is expected to produce,
     /// if the immediate surrounding context already knows one (roadmap
     /// Phase 4a — a `let` with an explicit annotation, a `return` against
@@ -655,6 +676,9 @@ struct Checker<'a> {
     /// Interned `Weak<T>` referent types, indexed by the id their
     /// [`Base::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design D1).
     weak_types: Vec<Type>,
+    /// Interned `Task<T>` result types, indexed by the id their
+    /// [`Base::Task`] carries (roadmap Phase 5 step 1, `fase-5-task-await`).
+    task_types: Vec<Type>,
     /// Interned `NativeSlice<T>` element types, indexed by the id their
     /// [`Base::NativeSlice`] carries (roadmap Phase 4e,
     /// `fase-4e-native-slice`, design D1).
@@ -796,6 +820,9 @@ impl<'a> Checker<'a> {
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
+            task_return_infer: false,
+            task_return_acc: None,
+            awaited_at: HashMap::new(),
             expected_type: None,
             this_type: None,
             in_constructor: false,
@@ -827,6 +854,7 @@ impl<'a> Checker<'a> {
             variant_constructions: HashMap::new(),
             pointer_types: Vec::new(),
             weak_types: Vec::new(),
+            task_types: Vec::new(),
             native_slice_types: Vec::new(),
             native_slice_mut_types: Vec::new(),
             dependent_types: Vec::new(),
@@ -991,6 +1019,7 @@ impl<'a> Checker<'a> {
                 unions: &self.unions,
                 pointer_types: &self.pointer_types,
                 weak_types: &self.weak_types,
+                task_types: &self.task_types,
                 native_slice_types: &self.native_slice_types,
                 native_slice_mut_types: &self.native_slice_mut_types,
                 dependent_types: &self.dependent_types,
@@ -1113,6 +1142,7 @@ impl<'a> Checker<'a> {
             native_exceptions: self.native_exceptions,
             pointer_types: self.pointer_types,
             weak_types: self.weak_types,
+            task_types: self.task_types,
             native_slice_types: self.native_slice_types,
             native_slice_mut_types: self.native_slice_mut_types,
             dependent_types: self.dependent_types,
@@ -5370,6 +5400,7 @@ impl<'a> Checker<'a> {
                 Base::Date => (32, 0),
                 Base::Time => (33, 0),
                 Base::DateTime => (34, 0),
+                Base::Task(id) => (35, id),
                 Base::Tuple(id) => (27, id),
                 Base::Array(id) => (28, id),
                 Base::List(id) => (29, id),
@@ -5512,6 +5543,73 @@ impl<'a> Checker<'a> {
         }
         self.weak_types.push(referent);
         (self.weak_types.len() - 1) as u32
+    }
+
+    /// `Task<T>` (roadmap Phase 5 step 1, `fase-5-task-await`): resolves `T`
+    /// and rejects a result type wider than a machine word — the executor's
+    /// provisional ABI passes a task result back as a single `i64`, so `T`
+    /// must be a reference, a `<= 64-bit` scalar, `Boolean`, `Char`, `String`,
+    /// or `Void`. A `record` or large value `T` arrives with `Task.settled`
+    /// (`fase-5-task-aggregation`).
+    fn resolve_task_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Task<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Task<T>` naming the result type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        let result = self.resolve_type(&reference.arguments[0]);
+        if !result.is_unknown() && !self.is_task_result_type(result) {
+            let name = self.name(result);
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.arguments[0].span,
+                format!("`{name}` is wider than a machine word"),
+                "a task result must be a reference, a `<= 64-bit` scalar, `Boolean`, `Char`, `String`, or `Void`",
+                Some("results wider than a machine word arrive with `Task.settled`".into()),
+            );
+        }
+
+        let id = self.intern_task_type(result);
+        let ty = Type::of(Base::Task(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    /// Interns a `Task<T>` result type, returning the id its [`Base::Task`]
+    /// carries.
+    fn intern_task_type(&mut self, result: Type) -> u32 {
+        if let Some(index) = self.task_types.iter().position(|&t| t == result) {
+            return index as u32;
+        }
+        self.task_types.push(result);
+        (self.task_types.len() - 1) as u32
+    }
+
+    /// Whether `T` can be a `Task<T>` result in this slice: a reference, a
+    /// scalar no wider than 64 bits, `Boolean`, `Char`, `String`, or `Void`.
+    fn is_task_result_type(&self, ty: Type) -> bool {
+        if ty.nullable {
+            // Every nullable is `{ present, value }` in the IR, whereas a
+            // task result is exactly one ABI word. A boxed result path is a
+            // later slice.
+            return false;
+        }
+        match ty.base {
+            Base::Void | Base::Boolean | Base::Char | Base::String => true,
+            Base::Int(w) => w.bits() <= 64,
+            Base::Float(w) => w.bits() <= 64,
+            Base::Duration => true,
+            _ => self.is_reference_type(ty),
+        }
     }
 
     /// `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
@@ -5907,6 +6005,9 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Weak" {
             return self.resolve_weak_type_ref(reference);
+        }
+        if reference.name == "Task" {
+            return self.resolve_task_type_ref(reference);
         }
         if reference.name == "NativeSlice" {
             return self.resolve_native_slice_type_ref(reference, false);
@@ -7244,6 +7345,14 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
             Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
+            // A `task` body might run and mutate the receiver's graph; a
+            // conservative reading treats spawning it as a mutation. `await`
+            // just consumes a handle.
+            Expr::Task(t) => match &t.body {
+                TaskBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
+                TaskBody::Block(b) => self.stmts_mutate_receiver(ctx, &b.statements, aliases),
+            },
+            Expr::Await(a) => self.expr_mutates_receiver(ctx, &a.operand, aliases),
             Expr::Variant(_)
             | Expr::Int(_)
             | Expr::Float(_)
@@ -8492,6 +8601,38 @@ impl<'a> Checker<'a> {
             None => Type::VOID,
         };
 
+        // Inside a `task { block }` body the result type `T` is inferred from
+        // the `return` statements rather than checked against a declared type
+        // (design D2). The first `return` fixes `T`; a later one that differs
+        // is a mismatch against it.
+        if self.task_return_infer {
+            let at = stmt.value.as_ref().map(|e| e.span()).unwrap_or(stmt.span);
+            match self.task_return_acc {
+                None => self.task_return_acc = Some((actual, at)),
+                Some((first, first_at)) => {
+                    if !first.is_unknown()
+                        && !actual.is_unknown()
+                        && !first.accepts(actual)
+                        && !self.is_subclass_of(actual, first)
+                    {
+                        let expected = self.name(first);
+                        let found = self.name(actual);
+                        let line = self.sources.location(first_at).line;
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            at,
+                            "the task body returns two different types",
+                            format!(
+                                "an earlier `return` on line {line} produces `{expected}` and this returns `{found}`"
+                            ),
+                            None,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         if let Some(expr) = &stmt.value
             && self.reject_pointer_escape(actual, expr.span(), "returned from a function")
         {
@@ -8839,6 +8980,8 @@ impl<'a> Checker<'a> {
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
             Expr::Transfer(e) => self.check_transfer(e, expected),
+            Expr::Task(e) => self.check_task(e),
+            Expr::Await(e) => self.check_await(e),
         };
         self.expr_types.insert(expr.span(), ty);
         ty
@@ -9454,7 +9597,16 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         };
 
-        if resolved.binding.moved {
+        if let Some(&first) = self.awaited_at.get(&resolved.binding.span) {
+            let line = self.sources.location(first).line;
+            self.error(
+                codes::SECOND_AWAIT,
+                ident.span,
+                format!("`{}` was already consumed by `await`", ident.name),
+                format!("the task result was first consumed by the `await` on line {line}"),
+                Some("a task result is consumed exactly once".into()),
+            );
+        } else if resolved.binding.moved {
             self.error(
                 codes::USE_OF_TRANSFERRED_RESOURCE,
                 ident.span,
@@ -12532,7 +12684,41 @@ impl<'a> Checker<'a> {
             Expr::Transfer(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Unsafe(e) => self.check_recursive_reference_block(&e.body, name, nested),
             Expr::Commit(e) => self.check_recursive_reference_block(&e.body, name, nested),
+            // A `task` body is a closure literal, like a nested lambda.
+            Expr::Task(e) => match &e.body {
+                TaskBody::Expr(body) => self.check_recursive_reference(body, name, true),
+                TaskBody::Block(b) => self.check_recursive_reference_block(b, name, true),
+            },
+            Expr::Await(e) => self.check_recursive_reference(&e.operand, name, nested),
         }
+    }
+
+    /// Enters the function scope shared by closures and task bodies. Both
+    /// forms capture outer bindings and neither inherits an enclosing loop.
+    fn begin_capture_scope(&mut self) -> u32 {
+        let enclosing_depth = self.loop_depth;
+        self.loop_depth = 0;
+        self.capture_stack.push(Vec::new());
+        self.scopes.push_function();
+        enclosing_depth
+    }
+
+    /// Leaves a closure/task body, propagating captures needed by an enclosing
+    /// closure and restoring the surrounding loop context.
+    fn finish_capture_scope(&mut self, enclosing_depth: u32) -> Vec<Capture> {
+        self.scopes.pop();
+        let captures = self.capture_stack.pop().unwrap_or_default();
+        self.loop_depth = enclosing_depth;
+
+        for capture in &captures {
+            if let Some(resolved) = self.scopes.resolve(&capture.name)
+                && resolved.captured
+            {
+                self.record_capture(&resolved.binding);
+            }
+        }
+
+        captures
     }
 
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {
@@ -12542,10 +12728,8 @@ impl<'a> Checker<'a> {
         let enclosing_return = self.current_return;
         // A lambda body is not inside the enclosing loop: `break` in it has
         // nothing to leave.
-        let enclosing_depth = self.loop_depth;
         self.current_return = returns;
-        self.loop_depth = 0;
-        self.capture_stack.push(Vec::new());
+        let enclosing_depth = self.begin_capture_scope();
 
         // `Option::take` so a lambda nested inside this one (if this is the
         // recursive lambda `Self::check_let` just pre-declared) never
@@ -12554,7 +12738,6 @@ impl<'a> Checker<'a> {
         // this.
         let own_recursive_binding = self.recursive_binding.take();
 
-        self.scopes.push_function();
         for (param, info) in expr.params.iter().zip(&params) {
             if let Some(default) = &param.default {
                 let actual = self.check_expr(default);
@@ -12590,21 +12773,8 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        self.scopes.pop();
-
-        let captures = self.capture_stack.pop().unwrap_or_default();
+        let captures = self.finish_capture_scope(enclosing_depth);
         self.current_return = enclosing_return;
-        self.loop_depth = enclosing_depth;
-
-        // A capture of an inner lambda is also a capture of the outer one when
-        // the name lives further out still.
-        for capture in &captures {
-            if let Some(resolved) = self.scopes.resolve(&capture.name)
-                && resolved.captured
-            {
-                self.record_capture(&resolved.binding);
-            }
-        }
 
         let shape = FnType {
             params: params.iter().map(|p| p.ty).collect(),
@@ -12665,6 +12835,125 @@ impl<'a> Checker<'a> {
         );
 
         Type::of(Base::Function(fn_type))
+    }
+
+    /// `task expr` / `task { block }` (roadmap Phase 5 step 1,
+    /// `fase-5-task-await`, design D2). The body is a zero-argument closure
+    /// over a GC-tracked capture block, checked with the same scope + capture
+    /// scaffolding as [`Self::check_lambda`] but with its result type `T`
+    /// inferred rather than declared. Produces `Task<T>`.
+    fn check_task(&mut self, expr: &TaskExpr) -> Type {
+        let enclosing_return = self.current_return;
+        let enclosing_infer = self.task_return_infer;
+        let enclosing_acc = self.task_return_acc.take();
+
+        let enclosing_depth = self.begin_capture_scope();
+
+        let result = match &expr.body {
+            TaskBody::Expr(e) => {
+                self.task_return_infer = false;
+                self.current_return = Type::UNKNOWN;
+                self.check_expr(e)
+            }
+            TaskBody::Block(b) => {
+                self.task_return_infer = true;
+                self.task_return_acc = None;
+                self.current_return = Type::UNKNOWN;
+                let _always_returns = self.check_block(b);
+                self.task_return_acc
+                    .take()
+                    .map(|(t, _)| t)
+                    .unwrap_or(Type::VOID)
+            }
+        };
+
+        let captures = self.finish_capture_scope(enclosing_depth);
+
+        self.current_return = enclosing_return;
+        self.task_return_infer = enclosing_infer;
+        self.task_return_acc = enclosing_acc;
+
+        let result = if result.is_unknown() {
+            Type::UNKNOWN
+        } else if !self.is_task_result_type(result) {
+            let name = self.name(result);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("a task result of type `{name}` is wider than a machine word"),
+                "a task result must be a reference, a `<= 64-bit` scalar, `Boolean`, `Char`, `String`, or `Void`",
+                Some("results wider than a machine word arrive with `Task.settled`".into()),
+            );
+            Type::UNKNOWN
+        } else {
+            result
+        };
+
+        // Registered as a capturing closure so lowering has a `target`
+        // function and a `captures` list, exactly like a lambda (design D2).
+        let shape = FnType {
+            params: Vec::new(),
+            returns: result,
+        };
+        self.fn_types.push(shape);
+        let fn_type = (self.fn_types.len() - 1) as u32;
+
+        self.lambdas.insert(
+            expr.span,
+            LambdaInfo {
+                captures,
+                fn_type,
+                recursive_binding: None,
+            },
+        );
+
+        let id = self.intern_task_type(result);
+        Type::of(Base::Task(id))
+    }
+
+    /// `await handle` (roadmap Phase 5 step 1, `fase-5-task-await`). On a
+    /// `Task<T>` it produces exactly `T`; on anything else it is a type
+    /// error. A statically tracked `Task<T>` local is consumed here — a
+    /// second `await` of it is [`codes::SECOND_AWAIT`] (design D5).
+    fn check_await(&mut self, expr: &AwaitExpr) -> Type {
+        let handle = self.check_expr(&expr.operand);
+        if handle.is_unknown() {
+            return Type::UNKNOWN;
+        }
+
+        let Base::Task(id) = handle.base else {
+            let name = self.name(handle);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("`await` expects a `Task<T>`, found `{name}`"),
+                "only a task handle can be awaited",
+                Some("spawn work with `task ...` to get a `Task<T>`".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let result = self.task_types[id as usize];
+
+        if let Expr::Path(ident) = &*expr.operand
+            && let Some(resolved) = self.scopes.resolve(&ident.name)
+        {
+            let decl = resolved.binding.span;
+            if let Some(&first) = self.awaited_at.get(&decl) {
+                let line = self.sources.location(first).line;
+                self.error(
+                    codes::SECOND_AWAIT,
+                    expr.span,
+                    format!("`{}` was already consumed by `await`", ident.name),
+                    format!("the task result was first consumed by the `await` on line {line}"),
+                    Some("a task result is consumed exactly once".into()),
+                );
+            } else {
+                self.awaited_at.insert(decl, expr.span);
+                self.scopes.mark_moved(&ident.name, true);
+            }
+        }
+
+        result
     }
 
     /// `value.method(...)` where `value` is reached through a contract.
@@ -13694,6 +13983,19 @@ impl<'a> Checker<'a> {
     /// hatch, and it is a `Stmt::Assign`, not a `Stmt::Expr` — so it never
     /// reaches this check at all.
     fn require_result_consumed(&mut self, ty: Type, span: Span) {
+        // A `Task<T>` spawned and never bound or awaited is dropped work
+        // (design D5). `_ = task ...;` is the deliberate-discard escape hatch
+        // and reaches this check as a `Stmt::Assign`, not a `Stmt::Expr`.
+        if matches!(ty.base, Base::Task(_)) {
+            self.error(
+                codes::DISCARDED_RESULT,
+                span,
+                "a spawned task must be bound or awaited",
+                "a `task` expression produces a `Task<T>` handle; dropping it on the floor is almost always a mistake",
+                Some("bind it (`mut h = task ...;`) and `await h`, or `_ = task ...;` to spawn it deliberately without a handle".into()),
+            );
+            return;
+        }
         let Base::EnumInstance(inst) = ty.base else {
             return;
         };

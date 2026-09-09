@@ -103,8 +103,12 @@ Refactoring `check_lambda` / `lower_lambda` to share their core with
 
 ### D3: `TaskStart` lowering and the spawn thunk
 
-New `InstKind::TaskStart { body: Operand }` where `body` is the two-word boxed
-callable from D2. It lowers to:
+`TaskStart` carries both the boxed callable operand and the lifted body target.
+The explicit target avoids reconstructing an SSA producer in codegen and lets
+the backend emit a deterministic per-site thunk.
+
+New `InstKind::TaskStart { target, body }` where `body` is the two-word boxed
+callable from D2 and `target` is the lifted body function. It lowers to:
 
 1. a per-site **thunk** `extern "C" fn __zirk_task_thunk_N(capture: *mut c_void)
    -> usize`, emitted by codegen, that: loads the body function pointer from the

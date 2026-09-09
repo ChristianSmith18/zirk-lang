@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut handle = task 1;
+    await handle timeout 1s;
+}
