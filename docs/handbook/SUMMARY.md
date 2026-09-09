@@ -361,6 +361,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
   - [Feature Status](./11-reference/12-feature-status.md)
   - [Type Member Index](./11-reference/13-type-member-index.md)
   - [Temporal Reference](./11-reference/14-temporal-reference.md)
+  - [`Task<T>`](./11-reference/15-task.md)
 - [Explanations](./12-explanations/README.md)
   - [Why Static Types?](./12-explanations/01-why-static-types.md)
   - [Why Structured Concurrency?](./12-explanations/02-why-structured-concurrency.md)
