@@ -1,0 +1,3 @@
+interface:
+  display_name: "Zirk Language"
+  short_description: "Escribe código Zirk conforme a la especificación"
