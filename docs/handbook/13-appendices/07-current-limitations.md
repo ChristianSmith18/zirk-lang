@@ -167,8 +167,9 @@ Current high-impact delivery limits include:
   Also delivered inside the change: `Regex.split` and
   `Regex.find_all(text): List<Regex.Match>` for match iteration
   (`matches(text)` keeps its `Boolean` meaning), `re'...'` patterns in
-  `match` arms, `Range<T>` (`start`, `end`, `step`, `reverse()`, slicing,
-  `Iterable<T>` for numeric `T` and `Duration`), derived `Clone` for
+  `match` arms, `Range<T>` (`start`, `end`, `step`, colon steps, inferred
+  direction, slicing, expansion, and `Iterable<T>` for integer `T` and
+  `Duration`), derived `Clone` for
   `record`/`enum`, `String` writes `s[i] = c` and slicing
   `s[start:end:step]`, and lowering of user-defined generic `implements
   Contract<T>` satisfaction (contract members that name the contract's own

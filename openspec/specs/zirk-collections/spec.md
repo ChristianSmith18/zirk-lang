@@ -75,8 +75,10 @@ Iteration SHALL use `Iteration<T>.Item/Done`, yield independent copies, and make
 
 `Array<T>` SHALL be constructible from an element listing
 (`Array(e0, e1, …)` or `[e0, e1, …]` with an `Array<T>` context), and
-`List<T>` from `List(e0, e1, …)`, both inferring or checking `T` against
-the destination.
+`List<T>` from `List(e0, e1, …)` or `[e0, e1, …]` with a `List<T>` context.
+Range elements SHALL expand in place before allocation, and an unannotated
+`[...]` literal SHALL default to `Array<T>`; all forms SHALL infer or check
+`T` against the destination.
 
 #### Scenario: Pre-populated list
 
@@ -87,6 +89,21 @@ the destination.
 
 - **WHEN** `inmut a: Array<Int32> = [1, 2, 3]` is constructed
 - **THEN** `a.length` is `3`
+
+#### Scenario: Array literal with a range
+
+- **WHEN** `inmut a: Array<Int32> = [0..3]` is constructed
+- **THEN** `a` contains `0`, `1`, and `2`
+
+#### Scenario: List literal with a range
+
+- **WHEN** `inmut l: List<Int32> = [0..3]` is constructed
+- **THEN** `l` contains `0`, `1`, and `2` and remains resizable
+
+#### Scenario: Mixed values and ranges expand in place
+
+- **WHEN** `Array(9, 0..3, 10)` is constructed
+- **THEN** the result contains `[9, 0, 1, 2, 10]`
 
 ### Requirement: Negative indexing counts from the end
 
@@ -193,19 +210,49 @@ The language SHALL provide a `Tuple(A, B, ...)` value type constructed with `(a,
 
 ### Requirement: Range<T> generic range and iteration
 
-`Range<T>` SHALL represent a sequence from `start` to `end` with an optional `step`. It SHALL be constructible with `start..end` and `start..end..step`. `Range<T>` SHALL satisfy `Iterable<T>` for numeric `T` and `Duration`. It SHALL support `reverse()` and slicing.
+`Range<T>` SHALL represent a finite arithmetic sequence from `start` to `end`.
+`start..end` SHALL exclude the endpoint and `start..=end` SHALL include it.
+An optional step SHALL use the colon form `start..end:step` or
+`start..=end:step`; the legacy second-`..` step form SHALL be rejected.
+Omitted steps SHALL follow the bounds (`+1` ascending, `-1` descending);
+non-literal operands SHALL be braced. Zero steps fail with
+`InvalidStepError` and contradictory direction fails with
+`InvalidRangeDirectionError` before iteration or allocation. Valid elements
+are integer scalar families and `Duration`. `Range<T>` SHALL satisfy
+`Iterable<T>`, support slicing, and expand in `[...]`, `Array(...)`, and
+`List(...)`. Range builder methods are not supported.
 
 #### Scenario: Numeric range
 - **WHEN** `for i in 0..5 { stdout.println(i); }` is executed
 - **THEN** it prints `0` through `4`
 
 #### Scenario: Range with step
-- **WHEN** `for i in 0..10..2 { stdout.println(i); }` is executed
+- **WHEN** `for i in 0..10:2 { stdout.println(i); }` is executed
 - **THEN** it prints `0`, `2`, `4`, `6`, `8`
 
 #### Scenario: Range of Duration
-- **WHEN** `for d in 0s..5s..1s { stdout.println(d); }` is executed
+- **WHEN** `for d in 0s..5s:1s { stdout.println(d); }` is executed
 - **THEN** it prints five `Duration` values from `0s` to `4s`
+
+#### Scenario: Descending range infers a negative step
+
+- **WHEN** `for i in 2..0 { stdout.println(i); }` is executed
+- **THEN** it prints `2`, then `1`
+
+#### Scenario: Contradictory constant step
+
+- **WHEN** `for i in 0..10:-1 { }` is written
+- **THEN** a compile-time diagnostic states the step moves away from the range end
+
+#### Scenario: Interpolated bound
+
+- **WHEN** `inmut end: Int32 = 3;` and `for i in 0..{end} { }` are written
+- **THEN** the bound is evaluated once and the loop iterates `0`, `1`, and `2`
+
+#### Scenario: Range constructor expansion
+
+- **WHEN** `List(0..=2)` is constructed
+- **THEN** it is equivalent to `List(0, 1, 2)`
 
 ### Requirement: Remove value class references
 
@@ -214,4 +261,3 @@ Any collection example or test that used `value class` for domain types SHALL be
 #### Scenario: Collection of domain values
 - **WHEN** `record UserId { value: UInt64; }` is used in a `List<UserId>`
 - **THEN** the program compiles and the list contains independent `UserId` values
-

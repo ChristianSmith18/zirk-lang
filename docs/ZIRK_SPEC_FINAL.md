@@ -12,7 +12,8 @@ Distributable package: `.zpkg`
 > **Authorial language checkpoint — 15 August 2026.** The language author's
 > numbered handbook annotations supersede older omissions and contradictory
 > examples in the 12 August snapshot. The specialized language and standard
-> library specifications now define exponentiation; complete range and slicing
+> library specifications now define exponentiation; complete colon-step range,
+> range-expansion, fixed-array, and slicing
 > forms; classic `for`, single-statement `if`, and `do ... while`; regex
 > literals and patterns; comma-grouped `match`; typed optional and iterable
 > variadic parameters; optional `fn` lambdas; qualified closure captures; class

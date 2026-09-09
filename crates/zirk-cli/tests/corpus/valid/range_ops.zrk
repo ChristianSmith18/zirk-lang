@@ -3,7 +3,7 @@ fn main(): Void {
         stdout.println(i);
     }
     stdout.println("done");
-    for i in 0..10..2 {
+    for i in 0..10:2 {
         stdout.println(i);
     }
     stdout.println("done");
@@ -11,7 +11,7 @@ fn main(): Void {
         stdout.println(i);
     }
     stdout.println("done");
-    for i in 5..0..-1 {
+    for i in 5..0:-1 {
         stdout.println(i);
     }
     stdout.println("done");
@@ -19,7 +19,7 @@ fn main(): Void {
     stdout.println(r.start);
     stdout.println(r.end);
     stdout.println(r.step);
-    mut rr: Range<Int32> = r.reverse();
+    mut rr: Range<Int32> = 8..1:-1;
     for i in rr {
         stdout.println(i);
     }

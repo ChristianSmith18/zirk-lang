@@ -637,6 +637,38 @@ fn valid_range_is_not_read_as_a_fraction() {
 }
 
 #[test]
+fn valid_colon_range_step_is_an_ordinary_colon() {
+    use TokenKind::*;
+    // `range-syntax-and-collection-expansion`: the step delimiter reuses the
+    // existing `Colon` token and is not merged with `::`.
+    assert_eq!(
+        tokens("0..10:-2"),
+        vec![
+            Integer(0),
+            DotDot,
+            Integer(10),
+            Colon,
+            Minus,
+            Integer(2),
+            Eof
+        ]
+    );
+    assert_eq!(
+        tokens("0..={n}:2"),
+        vec![
+            Integer(0),
+            DotDotEq,
+            LBrace,
+            id("n"),
+            RBrace,
+            Colon,
+            Integer(2),
+            Eof
+        ]
+    );
+}
+
+#[test]
 fn valid_member_access_on_an_integer_is_not_a_fraction() {
     use TokenKind::*;
     assert_eq!(

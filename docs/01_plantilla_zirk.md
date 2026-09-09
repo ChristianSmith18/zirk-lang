@@ -6365,13 +6365,13 @@ for index in 0..10 {
 Los ranges implementarán `Iterable<T>` y podrán utilizar `map`, `filter` y `reduce` sin construir previamente un array.
 
 ```text
-(0..100).step(5);
-(0..10).reverse();
+0..100:5;
+10..0:-1;
 ```
 
-La dirección se inferirá por los bounds: `10..0` descenderá hasta excluir `0` y
-`10..=0` lo incluirá. `step(n)` recibirá una distancia positiva distinta de
-cero. Un bound calculado podrá escribirse como `0..{number}.step(1)`.
+La dirección se infiere por los bounds: `10..0` desciende hasta excluir `0` y
+`10..=0` lo incluye. Un step explícito usa `:step`, no puede ser cero y un
+bound calculado se escribe como `0..{number}:1`.
 
 `Range<T>` será independiente del slicing. El slicing conservará su sintaxis `[inicio:fin:paso]`, mientras que un range será un objeto iterable.
 

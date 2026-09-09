@@ -2,7 +2,7 @@
 
 ### Requirement: `for ... in` over the minimal iteration protocol
 
-The checker SHALL accept `for ... in` over integer ranges using exclusive, inclusive, ascending, descending, positive-step, negative-step, and braced dynamic operands. It SHALL reject non-integer range operands and unbraced variable/expression bounds. The loop binding SHALL have the range element type.
+The checker SHALL accept `for ... in` over ranges whose element type is an integer scalar family or `Duration`, using exclusive, inclusive, ascending, descending, positive-step, negative-step, and braced dynamic operands. It SHALL reject range operands outside the valid element types (for example `String`) and unbraced variable/expression bounds. The loop binding SHALL have the range element type.
 
 #### Scenario: Iteration over a descending range
 - **WHEN** `for i in 2..0 { }` is written

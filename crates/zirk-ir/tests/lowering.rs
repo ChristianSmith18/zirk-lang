@@ -64,7 +64,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 15] = [
+const NATIVE_FAILURE_CODES: [&str; 16] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -76,6 +76,7 @@ const NATIVE_FAILURE_CODES: [&str; 15] = [
     // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step is
     // `0`), synthesized through the same `register_native_failure` path.
     "E_INVALID_STEP",
+    "E_INVALID_RANGE_DIRECTION",
     // `native-type-member-surface`: the `Result`-carried error types of
     // `parse`, `checked_*`, and `Regex.parse`.
     "E_PARSE",
@@ -256,6 +257,62 @@ fn a_string_literal_goes_into_the_module_table() {
 fn a_repeated_literal_is_interned_once() {
     let module = compile("fn main(): Void {\nmut a: String = \"x\";\nmut b: String = \"x\";\n}");
     assert_eq!(module.strings.len(), NATIVE_FAILURE_CODE_COUNT + 1);
+}
+
+#[test]
+fn omitted_range_steps_are_normalized_after_the_bounds_are_evaluated() {
+    let f = main_body("for i in 3..0 { stdout.println(i); }");
+    assert!(
+        instructions(&f).contains(&InstKind::ConstInt(-1)),
+        "a descending range without `:step` must materialize -1"
+    );
+}
+
+#[test]
+fn fixed_size_array_declarations_allocate_the_written_length() {
+    let f = main_body("mut values: Int32[3];");
+    assert!(
+        instructions(&f)
+            .iter()
+            .any(|instruction| { matches!(instruction, InstKind::ArrayNew { .. }) }),
+        "Int32[3] lowers as an Array allocation"
+    );
+    assert!(
+        instructions(&f).contains(&InstKind::ConstInt(3)),
+        "the allocation capacity is the written fixed length"
+    );
+}
+
+#[test]
+fn collection_literals_expand_ranges_without_repeating_their_operands() {
+    let f = main_body("mut values: Array<Int32> = [1, 2..5, 6];");
+    let calls: Vec<_> = instructions(&f)
+        .into_iter()
+        .filter_map(|instruction| match instruction {
+            InstKind::Call { callee, .. } => Some(callee),
+            _ => None,
+        })
+        .collect();
+    assert!(calls.contains(&"zirk_range_length".to_string()));
+    assert!(calls.contains(&"zirk_range_element_at".to_string()));
+    assert!(
+        instructions(&f)
+            .iter()
+            .any(|instruction| matches!(instruction, InstKind::ArrayNew { .. })),
+        "the expanded length drives a single Array allocation"
+    );
+}
+
+#[test]
+fn range_reverse_abi_is_absent_after_colon_step_migration() {
+    let module = compile("fn main(): Void { mut r = 3..0; }");
+    assert!(
+        !module
+            .externs
+            .iter()
+            .any(|external| external.name == "zirk_range_reverse"),
+        "the compiler must not declare the removed range-builder ABI"
+    );
 }
 
 // --- Locals as slots --------------------------------------------------------

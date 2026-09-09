@@ -34,6 +34,22 @@ fn errors(source_text: &str) -> String {
     sink.render(RenderStyle::Human)
 }
 
+/// Parses and returns every rendered diagnostic, asserting none is an error
+/// (so a warning-only case still passes).
+fn warnings(source_text: &str) -> String {
+    let source = SourceFile::new("test.zrk", source_text);
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(&source, &mut sink);
+    parse(&source, &tokens, &mut sink);
+
+    assert!(
+        !sink.has_errors(),
+        "no error was expected:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+    sink.render(RenderStyle::Human)
+}
+
 /// Parses the body of `main`, for statement-focused tests.
 fn statements(body: &str) -> Vec<Stmt> {
     let p = program(&format!("fn main(): Void {{ {body} }}"));
@@ -100,12 +116,26 @@ fn shape(e: &Expr) -> String {
                 .collect();
             format!("{}({})", shape(&c.callee), args.join(", "))
         }
-        Expr::Range(r) => format!(
-            "({}{}{})",
-            shape(&r.start),
-            if r.inclusive { "..=" } else { ".." },
-            shape(&r.end)
-        ),
+        Expr::Range(r) => {
+            let operand = |e: &Expr, braced: bool| {
+                if braced {
+                    format!("{{{}}}", shape(e))
+                } else {
+                    shape(e)
+                }
+            };
+            let mut out = format!(
+                "({}{}{}",
+                operand(&r.start, r.start_braced),
+                if r.inclusive { "..=" } else { ".." },
+                operand(&r.end, r.end_braced),
+            );
+            if let Some(step) = &r.step {
+                out.push_str(&format!(":{}", operand(step, r.step_braced)));
+            }
+            out.push(')');
+            out
+        }
         Expr::If(i) => format!("if({})", shape(&i.condition)),
         Expr::Ternary(t) => format!(
             "({} ? {} : {})",
@@ -148,6 +178,10 @@ fn shape(e: &Expr) -> String {
         Expr::Tuple(t) => format!(
             "({})",
             t.elements.iter().map(shape).collect::<Vec<_>>().join(", ")
+        ),
+        Expr::Collection(c) => format!(
+            "[{}]",
+            c.elements.iter().map(shape).collect::<Vec<_>>().join(", ")
         ),
         Expr::Slice(s) => {
             let part = |p: &Option<Box<Expr>>| {
@@ -960,6 +994,99 @@ fn valid_for_in_over_a_range() {
 #[test]
 fn valid_inclusive_range() {
     assert_eq!(shape(&expression("0..=10")), "(0..=10)");
+}
+
+// --- Range syntax and collection expansion --------------------------------
+
+#[test]
+fn valid_colon_step_range() {
+    assert_eq!(shape(&expression("0..10:2")), "(0..10:2)");
+    assert_eq!(shape(&expression("10..=0:-2")), "(10..=0:-2)");
+}
+
+#[test]
+fn valid_descending_range_without_a_step() {
+    assert_eq!(shape(&expression("3..0")), "(3..0)");
+}
+
+#[test]
+fn valid_braced_range_operands() {
+    assert_eq!(shape(&expression("0..{limit}")), "(0..{limit})");
+    assert_eq!(
+        shape(&expression("{offset}..{limit + offset}:2")),
+        "({offset}..{(limit + offset)}:2)"
+    );
+}
+
+#[test]
+fn valid_braced_range_end_before_a_block() {
+    let stmts = statements("for i in 0..{limit} { }");
+    let Stmt::ForIn(f) = &stmts[0] else {
+        panic!("expected a for-in, got {:?}", stmts[0]);
+    };
+    assert_eq!(shape(&f.iterable), "(0..{limit})");
+}
+
+#[test]
+fn invalid_braced_operand_outside_a_range() {
+    let output = errors("fn main(): Void { mut x = {value} + 1; }");
+    assert!(
+        output.contains(codes::BRACED_OPERAND_OUTSIDE_RANGE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_legacy_range_step_still_parses_with_a_warning() {
+    let output = warnings("fn main(): Void { for i in 0..10..2 { } }");
+    assert!(
+        output.contains(codes::LEGACY_RANGE_STEP.as_str()),
+        "{output}"
+    );
+    let stmts = statements("for i in 0..10..2 { }");
+    let Stmt::ForIn(f) = &stmts[0] else {
+        panic!("expected a for-in");
+    };
+    assert_eq!(shape(&f.iterable), "(0..10:2)");
+}
+
+#[test]
+fn valid_stepped_range_in_a_ternary_true_branch_is_not_swallowed() {
+    // The `:` after `2..4` must close the ternary, not start a range step.
+    assert_eq!(shape(&expression("flag ? 2..4 : 9")), "(flag ? (2..4) : 9)");
+    // An explicit group lets a stepped range appear there anyway.
+    assert_eq!(
+        shape(&expression("flag ? (2..4:1) : 9")),
+        "(flag ? (2..4:1) : 9)"
+    );
+}
+
+#[test]
+fn valid_collection_literal_forms() {
+    assert_eq!(shape(&expression("[]")), "[]");
+    assert_eq!(shape(&expression("[1, 2, 3]")), "[1, 2, 3]");
+    assert_eq!(shape(&expression("[0..5]")), "[(0..5)]");
+    assert_eq!(shape(&expression("[1, 5..8, 9]")), "[1, (5..8), 9]");
+    assert_eq!(shape(&expression("[0..10:2]")), "[(0..10:2)]");
+    assert_eq!(shape(&expression("[1, 2,]")), "[1, 2]");
+}
+
+#[test]
+fn valid_postfix_index_and_slice_still_parse_after_a_receiver() {
+    assert_eq!(shape(&expression("values[0]")), "values[0]");
+    assert_eq!(shape(&expression("values[1:4:2]")), "values[1:4:2]");
+}
+
+#[test]
+fn valid_fixed_size_array_type() {
+    let stmts = statements("inmut buffer: Int32[6];");
+    let Stmt::Let(l) = &stmts[0] else {
+        panic!("expected a declaration, got {:?}", stmts[0]);
+    };
+    let ty = l.ty.as_ref().expect("an annotation");
+    assert_eq!(ty.name, "Array");
+    assert_eq!(ty.arguments[0].name, "Int32");
+    assert_eq!(ty.fixed_size.as_ref().map(|n| n.value), Some(6));
 }
 
 #[test]

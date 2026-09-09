@@ -1,0 +1,36 @@
+fn trace(value: Int32): Int32 {
+    stdout.println(value);
+    return value;
+}
+
+fn main(): Void {
+    inmut inferred = [0..100];
+    stdout.println(inferred.length);
+
+    mut list_literal: List<Int32> = [0..100];
+    list_literal.add(100);
+    stdout.println(list_literal.length);
+
+    inmut from_array: Array<Int32> = Array(0..2);
+    inmut from_list: List<Int32> = List(0..=2);
+    stdout.println(from_array.length);
+    stdout.println(from_list.length);
+
+    mut mixed: Array<Int32> = [trace(9), {trace(0)}..{trace(3)}, trace(10)];
+    mixed[0] = 99;
+    stdout.println(mixed.length);
+    for value in mixed {
+        stdout.println(value);
+    }
+
+    inmut mixed_list: List<Int32> = List(-1, 3..6, 6);
+    for value in mixed_list {
+        stdout.println(value);
+    }
+
+    mut fixed: Int32[6];
+    fixed[5] = 50;
+    stdout.println(fixed.length);
+    stdout.println(fixed[0]);
+    stdout.println(fixed[5]);
+}

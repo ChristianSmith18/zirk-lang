@@ -18,6 +18,14 @@ mut also: Array<String>(8);              // supported alternative
 The literal `[...]` infers the fixed length. `T[n]` and `Array<T>(n)` allocate
 `n` default-initialized elements. All forms produce a fixed-size array.
 
+Range elements expand before that length is fixed, preserving source order:
+
+```zirk
+inmut values: Array<Int32> = [9, 0..3, 10];
+inmut also: Array<Int32> = Array(0..2);
+// values is [9, 0, 1, 2, 10]; also is [0, 1]
+```
+
 ## Indexing and replacement
 
 ```zirk

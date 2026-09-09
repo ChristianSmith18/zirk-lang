@@ -21,8 +21,9 @@ families. Hashing uses a per-process defensive seed while iteration preserves
 insertion order.
 
 > **Implementation status:** accepted Zirk 1.x collection contract.
-> `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end..step`,
-> `.reverse()`, slicing and `Iterable<T>` for numeric `T` and `Duration`)
+> `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end:step`,
+> inferred descending direction, slicing, expansion, and `Iterable<T>` for
+> integer `T` and `Duration`)
 > are delivered by `array-list-tuple-duration-regex`; `Map<K,V>`, `Set<T>`
 > and the wider eager/lazy API remain ahead of the current compiler.
 

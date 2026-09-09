@@ -8,24 +8,24 @@ for index in 0..10 {
 }
 ```
 
-`..` excludes the end and `..=` includes it. A second `..` operand supplies the
-step, which may be negative; `.reverse()` inverts a constructed range:
+`..` excludes the end and `..=` includes it. A colon supplies an explicit step;
+without one, the step is inferred from the bounds:
 
 ```zirk
 0..10;              // 0 through 9
 0..=10;             // 0 through 10
-0..10..2;           // 0, 2, 4, 6, 8
-10..0..-1;          // 10 down to 1
-mut r = 0..10;
-r.reverse();        // 9 down to 0
+0..10:2;            // 0, 2, 4, 6, 8
+10..0;              // 10 down to 1
+9..0:-1;            // 9 down to 1
 ```
 
 Bounds and step may be computed, and the element type is `Int32` for integer
-ranges or `Duration` for duration ranges (`0s..5s..1s`):
+ranges or `Duration` for duration ranges (`0s..5s:1s`). Non-literal operands
+must be enclosed in braces:
 
 ```zirk
 inmut number = 10;
-for index in 0..number..1 {
+for index in 0..{number}:1 {
     process(index);
 }
 ```
@@ -47,8 +47,8 @@ array.
 
 A lazy, finite arithmetic progression; value-like, implements `Iterable<T>`.
 
-> Entirely `specified` — `Range<T>` is pending (`Range<T>` is explicitly listed
-> as remaining work in the feature status).
+> **Implementation status:** delivered for integer and `Duration` ranges,
+> including collection expansion and fixed-array allocation.
 
 ### Properties
 
@@ -63,10 +63,9 @@ A lazy, finite arithmetic progression; value-like, implements `Iterable<T>`.
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `a..b` | `Range<T>` | Exclusive end | specified |
-| `a..=b` | `Range<T>` | Inclusive end | specified |
-| `r.step(n)` | `Range<T>` | Positive distance between values; zero is invalid | specified |
-| `r.reverse()` | `Range<T>` | Reversed direction | specified |
+| `a..b` | `Range<T>` | Exclusive end; direction inferred when step is omitted | delivered |
+| `a..=b` | `Range<T>` | Inclusive end | delivered |
+| `a..b:step` | `Range<T>` | Explicit non-zero signed step | delivered |
 | `r.contains(value)` | `Boolean` | Bounds test | specified |
 | `r.iterator()` | `Iterator<T>` | Lazy iteration | specified |
 | `r.to_string()` | `String` | Definition rendering | specified |
@@ -78,9 +77,9 @@ the yielded sequence.
 ### Examples
 
 ```zirk
-for index in 0..10.step(2) { process(index); }   // 0, 2, 4, 6, 8
-for index in 10..=0 { process(index); }          // descending
-(0..10).reverse();                                // 9 down to 0
+for index in 0..10:2 { process(index); }   // 0, 2, 4, 6, 8
+for index in 10..=0 { process(index); }     // descending
+for index in 9..0:-1 { process(index); }    // 9 down to 1
 ```
 
 ---

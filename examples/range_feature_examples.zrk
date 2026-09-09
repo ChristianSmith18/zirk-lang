@@ -1,9 +1,7 @@
 // Range feature examples
 //
-// This file documents the proposed range and collection-extension behavior.
-// The colon step syntax and collection literals shown here are normative for
-// the proposed feature; the current compiler may reject them until the change
-// is implemented.
+// This file is executable documentation for the delivered range and
+// collection-expansion behavior.
 
 fn show_basic_ranges(): Void {
     stdout.println("exclusive ascending");

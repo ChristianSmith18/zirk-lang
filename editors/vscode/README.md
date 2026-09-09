@@ -4,7 +4,7 @@ VS Code extension offering syntax highlighting, diagnostics, and language config
 
 ## Features
 
-- **Full Syntax Highlighting:** Covers the entire Zirk language specification including keywords, operators, decorators (`@test`, `@e2e`, `@bench`), variables, types, and strings (with escape sequence support and string interpolation).
+- **Full Syntax Highlighting:** Covers the entire Zirk language specification including keywords, operators, range operators (`..`, `..=`), braced dynamic range operands (`{start}..{end}:{step}`) with normal embedded-expression highlighting, collection/index brackets, fixed array types (`T[n]`), decorators (`@test`, `@e2e`, `@bench`), variables, types, and strings (with escape sequence support and string interpolation).
 - **Compiler Diagnostics:** `zirk-check` runs on open, on save, and live while typing (debounced), and errors/warnings are shown as inline diagnostics with the compiler code, cause, and help text.
 - **Quick Fixes:** Code actions rename deprecated type spellings (`BinaryFloat*` → `Float*`, `Decimal16`/`32`/`64`/`128` → `Decimal`) in place.
 - **Snippets:** Built-in snippets for `fn`, `if`/`else`, `for`, `class`, and `import`.

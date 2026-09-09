@@ -78,8 +78,75 @@ Literal loops may lower directly to a counter loop. Range values and collection 
 
 Rollback is a source-level revert of the change commit; no persistent data migration is involved.
 
+## Resolved Decisions (Task 1.1)
+
+The three open questions below are resolved as follows and are now normative for this change.
+
+### RD1 — Contradictory explicit step direction
+
+A non-zero explicit step whose sign cannot reach `end` from `start` is an error, never a silently-empty range.
+
+- **Constant operands:** compile-time error (`codes` entry `E04xx`, message "the step of this range moves away from its end"), reusing the constant sign/bound contradiction check in task 3.1.
+- **Dynamic operands (any braced non-literal bound or step):** a dedicated controlled runtime failure `InvalidRangeDirectionError`, raised by the shared range-normalization helper (task 4.1) *before* any iteration or collection allocation begins, alongside the existing `InvalidStepError` for a zero step.
+
+`InvalidRangeDirectionError` is a new sibling of `InvalidStepError` in the runtime's controlled-error set; it is catchable with the same machinery and carries the evaluated `start`, `end`, and `step`.
+
+### RD2 — Allocation-only `T[n]` initialization
+
+An allocation-only `inmut buffer: T[n];` zero-initializes every slot to `T`'s zero/default representation (universal zero-init):
+
+- scalar integer / float / boolean / char families → numeric zero / `false` / `\0`;
+- `String` → the empty string;
+- `record` / class types → their all-defaults value when every field has a default, otherwise a compile-time error naming the first field with no default;
+- reference/nullable types → `null`.
+
+Reads of an unwritten slot are therefore always well-defined; there is no read-before-write analysis for fixed arrays. The zero value is materialized by the same runtime array-construction path used for expanded literals (task 4.5), not decided in the parser.
+
+### RD3 — `Range<Duration>` retention
+
+`Range<Duration>` is retained as a compatible extension, not removed. The "integer-compatible operand" rule generalizes to "valid range element type", whose members are the integer scalar families and `Duration`. Duration ranges obey the same colon-step spelling, inferred direction, zero-step rejection, and `InvalidRangeDirectionError` rules; only the legacy `..step` spelling and `.step(...)` / `.reverse()` methods are removed for them too. Duration bounds/steps written as non-literals still require braces.
+
+## Compatibility Inventory (Task 1.2)
+
+Every current reference to a form this change replaces or removes:
+
+### Legacy `start..end..step` (second `..` step)
+
+- `crates/zirk-parser/src/parser.rs:3283` — `parse_range` consumes a second `..` as the step. Replace with optional `:step`; a second `..` becomes a migration diagnostic.
+- `crates/zirk-sema/src/checker.rs:10256-10312` — `check_range` doc and logic mention `start..end..step`; step already type-checked generically, only the doc/AST source changes.
+- `crates/zirk-ir/src/lower.rs:5268`, `:6975`, `:2820` — range value/loop lowering reads `start`/`end`/`step` as written; direction inference for an omitted step must be added (task 4.1/4.2).
+- Fixtures using the legacy spelling: `crates/zirk-cli/tests/corpus/valid/range_ops.zrk:6,14`, `range_duration.zrk:2,6`, `range_types.zrk:9`. Migrated in task 6.3 / 5.4.
+
+### `.reverse()` range-builder method
+
+- `crates/zirk-sema/src/checker.rs:15465` (dispatch), `:11643-11659` (member diagnostic listing `reverse()`).
+- `crates/zirk-ir/src/lower.rs:12995-13015` (`lower_range_reverse`, `is_range_reverse`), `:1056` (extern decl `zirk_range_reverse`).
+- `crates/zirk-runtime/src/range.rs:153-173` (`zirk_range_reverse`), `crates/zirk-runtime/src/lib.rs:90` (re-export).
+- Fixture: `crates/zirk-cli/tests/corpus/valid/range_ops.zrk:22`.
+- Docs: `docs/01_plantilla_zirk.md:6369`, `docs/handbook/02-handbook/05-operators-and-expressions/10-ranges.md:29,34`, `docs/handbook/02-handbook/12-collections/06-ranges.md:12,20`, `docs/handbook/04-standard-library/06-std-collections.md:25`, `docs/handbook/11-reference/05-grammar-summary.md:41`, `docs/init/ZIRK_ROADMAP.md:463`.
+
+### `.step(...)` range-builder method
+
+- Not currently dispatched in checker/lower (no `zirk_range_*` symbol); only referenced in prose `docs/01_plantilla_zirk.md:6368,6374`. Task 3.5 adds an explicit rejection with migration guidance so the documented form fails cleanly.
+
+### Range interpolation / braced dynamic operands
+
+- No current support: `parse_range` calls `parse_binary(0)` for each operand and any bare identifier bound already parses today (e.g. `range_types.zrk` uses `1 as Int64 .. 5 as Int64`). The new contract *requires* braces for non-literals — task 2.3 adds the balanced-brace operand parser and task 3.1 enforces it. Existing brace-free non-literal bounds in fixtures/docs must be rewritten to `{ ... }` (tasks 6.1/6.3).
+- `crates/zirk-ast/src/lib.rs:1057-1067` (`RangeExpr`) — needs explicit-brace metadata per operand (task 2.1).
+
+### Range value member surface (retained)
+
+- `start` / `end` / `step` read-only members: `crates/zirk-sema/src/checker.rs:11651`, `crates/zirk-ir/src/lower.rs:14677-14679`, `crates/zirk-runtime/src/range.rs:88-120`. Retained as read-only introspection (design "Removal of range methods").
+- Range slicing `r[start:end:step]`: `crates/zirk-ir/src/lower.rs:16518`, `crates/zirk-runtime/src/range.rs:187` (`zirk_range_slice`). Retained unchanged (non-goal: slice syntax).
+
+### Collection literal `[...]` / `Array(...)` / `List(...)`
+
+- No AST node or parser path exists (`[` in `parser.rs:3921` is postfix index/slice only). `Array<T>` / `List<T>` are not checker types today (only `NativeSlice<T>` from Phase 4e, plus incipient `crates/zirk-runtime/src/array.rs` / `range.rs`). Tasks 2.4, 3.2-3.4, 4.3-4.5, 5.x build these.
+
+### Public status / roadmap
+
+- `docs/init/ZIRK_ROADMAP.md:463` states range `start`/`end`/`step`, `.reverse()` and slicing are still pending — reword in task 6.2.
+
 ## Open Questions
 
-- Should a dynamic explicit step whose sign conflicts with its bounds be a dedicated `InvalidRangeDirectionError`, or should it produce an empty range?
-- What exact default value/read-before-write behavior should apply to an allocation-only `T[n]` array for every supported element family?
-- Does the final integer-only range contract intentionally remove `Range<Duration>`, or should duration ranges retain the same colon-step and direction rules as a compatible extension?
+*(All resolved — see "Resolved Decisions" above.)*

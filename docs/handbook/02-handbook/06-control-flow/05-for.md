@@ -15,7 +15,7 @@ needs explicit state or a non-range update.
 For an ordinary progression, prefer a range:
 
 ```zirk
-for index in 0..10.step(2) {
+for index in 0..10:2 {
     process(index);
 }
 ```

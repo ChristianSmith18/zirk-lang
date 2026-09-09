@@ -17,6 +17,14 @@ mut names = List("Ada", "Grace", "Linus");
 `List<T>()` or `List(...)` creates an empty or pre-populated list. The element
 type is usually explicit or inferred from the initial values.
 
+A `List<T>` annotation also selects list storage for `[...]`; ranges expand in
+place in literals and constructor calls:
+
+```zirk
+mut values: List<Int32> = [0..3];
+mut more: List<Int32> = List(-1, 3..6, 6);
+```
+
 ## Growth, insertion, and removal
 
 ```zirk

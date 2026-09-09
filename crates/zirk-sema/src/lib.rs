@@ -243,4 +243,6 @@ pub mod codes {
     /// its consuming `await` (roadmap Phase 5 step 1, `fase-5-task-await`,
     /// design D5).
     pub const SECOND_AWAIT: Code = Code::new("E0465");
+    /// An invalid range bound, step, or fixed-array extent.
+    pub const INVALID_RANGE: Code = Code::new("E0466");
 }

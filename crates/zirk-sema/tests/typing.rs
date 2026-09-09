@@ -5874,3 +5874,47 @@ fn valid_discarded_task_with_underscore() {
          fn main(): Void { _ = task compute(1); }",
     );
 }
+
+// --- Range collection expansion (OpenSpec `range-collection-expansion`) ---
+
+#[test]
+fn valid_range_collection_context_and_constructor_expansion_type_check() {
+    accepted_body(
+        "mut inferred = [0..3];\n\
+         mut first: Int32 = inferred[0];\n\
+         mut listed: List<Int32> = [0..3, 9];\n\
+         mut wide: Array<Int64> = [0..3];\n\
+         mut array: Array<Int32> = Array(0..2, 9);\n\
+         mut from_constructor: List<Int32> = List(0..=2);",
+    );
+}
+
+#[test]
+fn valid_fixed_array_is_initialized_for_semantic_reads() {
+    accepted_body("mut buffer: Int32[2];\nmut first: Int32 = buffer[0];");
+}
+
+#[test]
+fn invalid_range_operands_and_steps_report_migration_safe_diagnostics() {
+    for body in [
+        "mut end = 3;\nfor i in 0..end { }",
+        "for i in 0..3:0 { }",
+        "for i in 0..3:-1 { }",
+        "for i in 3..0:1 { }",
+    ] {
+        let output = rejected_body(body);
+        assert!(output.contains(codes::INVALID_RANGE.as_str()), "{output}");
+    }
+}
+
+#[test]
+fn invalid_collection_element_and_removed_range_builders_are_rejected() {
+    let output = rejected_body("mut xs = [1, \"not an integer\"];");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+
+    for body in ["mut r = 0..3; r.reverse();", "mut r = 0..3; r.step(2);"] {
+        let output = rejected_body(body);
+        assert!(output.contains(codes::INVALID_RANGE.as_str()), "{output}");
+        assert!(output.contains("colon-step"), "{output}");
+    }
+}

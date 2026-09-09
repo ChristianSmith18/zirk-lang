@@ -150,27 +150,34 @@ fn element_at(range: &ZirkRange, index: i128) -> i64 {
         as i64
 }
 
-/// `r.reverse()` (roadmap Phase 7): the same elements, produced last to
-/// first — a new `Range`, the receiver untouched. A reversed empty range
-/// is empty.
+/// The number of elements in `handle`, or `-1` when it cannot fit in an
+/// `i64`.  Lowering turns that sentinel into the language's ordinary
+/// `ArithmeticOverflowError` before using the result as an allocation size.
 ///
 /// # Safety
 ///
 /// `handle` must come from `zirk_range_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_range_reverse(handle: *const c_void) -> *mut c_void {
+pub unsafe extern "C" fn zirk_range_length(handle: *const c_void) -> i64 {
     let Some(range) = (unsafe { borrow(handle) }) else {
-        return std::ptr::null_mut();
+        return 0;
     };
-    let count = element_count(range);
-    if count == 0 {
-        return unsafe { zirk_range_new(0, 0, 1, 0) };
-    }
-    let last = element_at(range, count - 1);
-    // The reversed sequence runs `last, last - step, …, start`: a backward
-    // range whose exclusive bound sits one step below the original `start`,
-    // so the `current > end` walk still lands exactly on `start`.
-    unsafe { zirk_range_new(last, range.start.saturating_sub(range.step), -range.step, 0) }
+    i64::try_from(element_count(range)).unwrap_or(-1)
+}
+
+/// The element at the zero-based sequence position `index`.  Callers obtain
+/// `index` from `zirk_range_length`, so an out-of-range value is never used
+/// by generated code; direct callers receive `0` for a null handle.
+///
+/// # Safety
+///
+/// `handle` must come from `zirk_range_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_range_element_at(handle: *const c_void, index: i64) -> i64 {
+    let Some(range) = (unsafe { borrow(handle) }) else {
+        return 0;
+    };
+    element_at(range, index as i128)
 }
 
 /// `r[lo:hi:st]` (roadmap Phase 7): slices the *element sequence* — `r[1:3]`
@@ -247,4 +254,69 @@ pub unsafe extern "C" fn zirk_range_slice(
     // `last` without an extra compare at build time.
     let new_end = element_at(range, last as i128).saturating_add(new_step);
     unsafe { zirk_range_new(element_at(range, first as i128), new_end, new_step, 0) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ZirkRange, element_at, element_count};
+
+    #[test]
+    fn counts_ascending_descending_and_inclusive_ranges() {
+        assert_eq!(
+            element_count(&ZirkRange {
+                start: 1,
+                end: 6,
+                step: 2,
+                inclusive: 0,
+            }),
+            3
+        );
+        assert_eq!(
+            element_count(&ZirkRange {
+                start: 6,
+                end: 0,
+                step: -2,
+                inclusive: 1,
+            }),
+            4
+        );
+        assert_eq!(
+            element_count(&ZirkRange {
+                start: 4,
+                end: 4,
+                step: -1,
+                inclusive: 1,
+            }),
+            1
+        );
+        assert_eq!(
+            element_count(&ZirkRange {
+                start: 4,
+                end: 4,
+                step: 1,
+                inclusive: 0,
+            }),
+            0
+        );
+        assert_eq!(
+            element_count(&ZirkRange {
+                start: 0,
+                end: 4,
+                step: 0,
+                inclusive: 0,
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn indexes_a_descending_range_in_sequence_order() {
+        let range = ZirkRange {
+            start: 5,
+            end: 0,
+            step: -2,
+            inclusive: 0,
+        };
+        assert_eq!([0, 1, 2].map(|index| element_at(&range, index)), [5, 3, 1]);
+    }
 }

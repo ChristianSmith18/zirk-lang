@@ -463,9 +463,11 @@ mutating the source. The pipe `|>` passes the left-hand result into the next
 ordinary function, so pure functions need not be methods on the value's class.
 
 `Range<T>` is lazy, iterable and independent of slicing. `start..end` excludes
-the end; `start..=end` includes it. Direction follows the relative bounds,
-`.step(distance)` uses a positive non-zero distance, `.reverse()` inverts a
-range, and an inline computed bound may be `0..{number}`. Slicing uses
+the end; `start..=end` includes it. Direction follows the relative bounds; an
+explicit non-zero step uses `start..end:step` (or `..=:step`), and a computed
+bound or step must be braced, as in `0..{number}:2`. A zero step raises
+`InvalidStepError`; a dynamic step whose sign moves away from its end raises
+`InvalidRangeDirectionError` before iteration or collection allocation. Slicing uses
 `[start:end:step]`, permits omitted or negative components, applies to ordered
 collections and `String`, and excludes its end. With positive/omitted step,
 omitted `(start,end,step)` default to `(0,length,1)`; with negative step they
@@ -481,6 +483,11 @@ a zone; `Instant` is an absolute timeline point; `ZonedDateTime` combines an
 instant with an IANA `TimeZone`. They are distinct immutable values in a sealed
 `Temporal` capability family. `Date + Time` produces `DateTime`, and assigning
 a zone produces `ZonedDateTime`; unrelated combinations are rejected.
+
+Range elements may be integer scalars or `Duration`; range elements in `[...]`,
+`Array(...)`, and `List(...)` expand in source order. An unannotated `[...]`
+infers `Array<T>`; a `List<T>` destination selects a resizable list. `T[n]`
+allocates exactly `n` zero-initialized fixed array slots.
 
 `Duration` is a signed exact timeline quantity with nanosecond precision and a
 conceptual `Int128` range. It contains fixed units through weeks and supports

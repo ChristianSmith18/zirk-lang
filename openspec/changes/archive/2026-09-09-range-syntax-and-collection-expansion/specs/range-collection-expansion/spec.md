@@ -30,8 +30,12 @@ The `[...]` collection literal SHALL default to `Array<T>` when no expected coll
 
 ### Requirement: Fixed-size array allocation
 
-An allocation-only declaration `T[n]` SHALL reserve exactly `n` fixed array slots without deriving its length from an initializer. The array SHALL remain non-resizable and SHALL follow the language's defined default-initialization/read-before-write policy.
+An allocation-only declaration `T[n]` SHALL reserve exactly `n` fixed array slots without deriving its length from an initializer. The array SHALL remain non-resizable. Every slot SHALL be zero-initialized to `T`'s zero/default representation (numeric zero, `false`, `\0`, the empty `String`, `null` for a nullable/reference type, or the all-defaults value of a `record`/class whose every field has a default). A `T` with no zero/default representation SHALL be a compile-time error naming the first field or reason. Reading an unwritten slot SHALL be well-defined; there is no read-before-write rejection.
 
 #### Scenario: Fixed array reserves declared capacity
 - **WHEN** `inmut buffer: Int32[6];` is declared
-- **THEN** `buffer.length` is `6` and indexed writes cannot change that length
+- **THEN** `buffer.length` is `6`, every slot reads `0`, and indexed writes cannot change that length
+
+#### Scenario: Fixed array of a type without a default
+- **WHEN** `inmut rows: UserProfile[3];` is declared and `UserProfile` has a field with no default
+- **THEN** a compile-time diagnostic names the field that prevents zero-initialization

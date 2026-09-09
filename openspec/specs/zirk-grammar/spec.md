@@ -390,12 +390,39 @@ The parser SHALL recognize `share` as a declaration modifier, `import { names } 
 
 ### Requirement: Complete range and slice forms
 
-The parser SHALL accept `start..end`, `start..=end`, descending bounds, `.step(distance)`, `.reverse()`, interpolated bounds such as `0..{number}`, and slices `[start:end:step]` with omitted or negative components.
+The parser SHALL accept `start..end`, `start..=end`, descending bounds, colon
+steps (`start..end:step` and `start..=end:step`), and braced interpolated
+bounds/steps such as `0..{number}:2`. It SHALL reject the legacy
+`start..end..step`, `.step(...)`, and `.reverse()` range-builder forms. Slice
+syntax `[start:end:step]` SHALL remain unchanged.
 
 #### Scenario: Descending stepped range
 
-- **WHEN** source contains `10..=0.step(2)`
+- **WHEN** source contains `10..=0:-2`
 - **THEN** it represents an inclusive descending range with distance two
+
+#### Scenario: Braced expression bound
+
+- **WHEN** source contains `0..{limit + 1}:2`
+- **THEN** the expression is retained as the range end operand
+
+### Requirement: Collection literals with range expansion
+
+The parser SHALL accept `[...]` as a collection literal and SHALL permit range
+expressions among its elements. Range elements SHALL be distinguishable from
+indexing and slicing by primary-expression context. Constructor argument lists
+for `Array(...)` and `List(...)` SHALL also accept range expressions for
+expansion.
+
+#### Scenario: Range-only literal
+
+- **WHEN** source contains `[0..100]`
+- **THEN** it represents one collection literal whose expanded elements are `0` through `99`
+
+#### Scenario: Mixed literal
+
+- **WHEN** source contains `[1, 5..8, 9]`
+- **THEN** it represents the expanded sequence `1, 5, 6, 7, 9`
 
 #### Scenario: Reverse slice
 
@@ -1070,4 +1097,3 @@ block is a bounded non-interruptible region. `shield` SHALL be contextual after
 
 - **WHEN** source contains `cancellation shield { await persist_commit(); }`
 - **THEN** the parser produces a cancellation-shield node wrapping the block
-

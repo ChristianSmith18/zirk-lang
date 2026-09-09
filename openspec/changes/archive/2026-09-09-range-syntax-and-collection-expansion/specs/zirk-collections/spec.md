@@ -14,7 +14,19 @@
 
 ### Requirement: Range<T> generic range and iteration
 
-`Range<T>` SHALL represent a finite arithmetic sequence from `start` toward `end`. `start..end` SHALL exclude the endpoint and `start..=end` SHALL include it. An optional step SHALL use the colon form `start..end:step` or `start..=end:step`; the legacy second-`..` step form SHALL be rejected. Omitted steps SHALL be inferred from bound direction. Positive steps SHALL add their magnitude and negative steps SHALL subtract their magnitude. Zero steps SHALL produce `InvalidStepError`. Range construction SHALL require braces around every non-literal bound or step expression. `Range<T>` SHALL remain iterable and range values SHALL be usable in collection expansion.
+`Range<T>` SHALL represent a finite arithmetic sequence from `start` toward `end`. `start..end` SHALL exclude the endpoint and `start..=end` SHALL include it. An optional step SHALL use the colon form `start..end:step` or `start..=end:step`; the legacy second-`..` step form SHALL be rejected. Omitted steps SHALL be inferred from bound direction. Positive steps SHALL add their magnitude and negative steps SHALL subtract their magnitude. Zero steps SHALL produce `InvalidStepError`. An explicit non-zero step whose sign cannot reach `end` from `start` SHALL be a compile-time error when the operands are constant and SHALL produce a controlled `InvalidRangeDirectionError` before any iteration or allocation when an operand is dynamic. Range construction SHALL require braces around every non-literal bound or step expression. The valid range element types are the integer scalar families and `Duration`; `Range<Duration>` is retained as a compatible extension under the same colon-step, inferred-direction, and error rules. `Range<T>` SHALL remain iterable and range values SHALL be usable in collection expansion.
+
+#### Scenario: Contradictory constant step
+- **WHEN** `for i in 0..10:-1 { }` is written
+- **THEN** a compile-time diagnostic states the step moves away from the range end
+
+#### Scenario: Contradictory dynamic step
+- **WHEN** `inmut s: Int32 = -1;` and `for i in 0..{10}:{s} { }` are executed
+- **THEN** an `InvalidRangeDirectionError` is raised before the loop body runs
+
+#### Scenario: Duration range keeps colon-step
+- **WHEN** `for d in 0s..=6s:2s { }` is executed
+- **THEN** it iterates `0s`, `2s`, `4s`, and `6s`
 
 #### Scenario: Numeric range
 - **WHEN** `for i in 0..5 { stdout.println(i); }` is executed

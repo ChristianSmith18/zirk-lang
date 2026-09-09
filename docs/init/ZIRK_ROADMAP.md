@@ -460,8 +460,9 @@ distinction changes who implements them:
 the search/trim/`substring` methods are delivered in
 `array-list-tuple-duration-regex` — the moment ADR-005's boundary was designed
 to protect. `String.split` returns `List<String>` and lands with `List<T>`;
-`Range<T>`'s `start`/`end`/`step`, `.reverse()` and range slicing are still
-pending in the same change.
+`Range<T>` now supports readable `start`/`end`/`step`, colon steps, inferred
+descending direction, slicing, and expansion in `Array`/`List` literals and
+constructors; `.reverse()` is intentionally not a range-builder API.
 
 `Regex` core support also lands here — the `re'pattern'` literal, the
 `Regex.matches(text): Boolean`, `Regex.find(text): Regex.Match?` and

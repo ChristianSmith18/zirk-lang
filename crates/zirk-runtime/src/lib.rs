@@ -87,8 +87,8 @@ pub use journal::{
 pub use list::*;
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
 pub use range::{
-    zirk_range_end, zirk_range_inclusive, zirk_range_new, zirk_range_reverse, zirk_range_slice,
-    zirk_range_start, zirk_range_step,
+    zirk_range_element_at, zirk_range_end, zirk_range_inclusive, zirk_range_length, zirk_range_new,
+    zirk_range_slice, zirk_range_start, zirk_range_step,
 };
 pub use regex::{
     zirk_regex_find, zirk_regex_find_all, zirk_regex_from_pattern, zirk_regex_is_match,

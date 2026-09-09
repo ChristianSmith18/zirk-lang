@@ -165,7 +165,9 @@ destructuring are invalid. `Never` unifies with every branch result type.
 ## 6. Collections and iteration
 
 `Array`, fixed arrays, `List`, `Map`, and `Set` are reference containers;
-`Range` and tuples are values. Whole-variable assignment aliases, while index,
+`Range` and tuples are values. A range uses `..`/`..=` with optional `:step`;
+an omitted step follows its bounds, and range elements expand in collection
+literals and `Array(...)`/`List(...)` calls. Whole-variable assignment aliases, while index,
 slice, entry, iterator, destructuring, and returned component reads project
 independent values.
 

@@ -130,7 +130,11 @@ counts, and diagnose unrepresentable allocation sizes.
 
 ### Requirement: Iteration via contract
 
-`for ... in` SHALL require that the iterated expression implement `Iterable<T>`, and the element SHALL have the type `T` that the contract declares.
+`for ... in` SHALL require that the iterated expression implement `Iterable<T>`,
+and the element SHALL have the type `T` that the contract declares. Range
+iteration SHALL expose the normalized sequence produced by colon-step and
+inferred-direction rules; range iteration SHALL not require `.step()` or
+`.reverse()` dispatch.
 
 This removes the closed protocol from the previous phase: ranges and `String` now implement the contract instead of being cases the compiler recognizes specially.
 
@@ -145,6 +149,11 @@ This removes the closed protocol from the previous phase: ranges and `String` no
 - **WHEN** `for i in 0..10 { }` is written
 - **THEN** it compiles and iterates the same as before
 - **AND** it does so because the range implements `Iterable<Int32>`
+
+#### Scenario: Expanded collection remains iterable
+
+- **WHEN** `inmut values: List<Int32> = [0..3]` is iterated
+- **THEN** iteration yields `0`, `1`, and `2` in order
 
 #### Scenario: Type that does not implement the contract
 

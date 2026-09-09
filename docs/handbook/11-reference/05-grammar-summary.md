@@ -37,8 +37,9 @@ Resources use `match acquisition with binding`, including grouped acquisition.
 Manifests use library `requires`, application `permissions`, and operation
 `during: build | runtime | both`.
 
-Ranges use `start..end`, `start..=end` or `start..end..step`, with
-`.reverse()` and `[start:end:step]` slicing. Slices use `[start:end:step]`. Multiple patterns use comma before
+Ranges use `start..end`, `start..=end`, `start..end:step` or
+`start..=end:step`; non-literal bounds and steps use `{...}`. Range construction
+does not use `.reverse()`. Slices use `[start:end:step]`. Multiple patterns use comma before
 one shared `=>` body. Traditional enums may map cases with `->`; algebraic enum
 patterns may destructure nested records. This summary does not replace the
 machine-readable grammar or its complete precedence and recovery rules.

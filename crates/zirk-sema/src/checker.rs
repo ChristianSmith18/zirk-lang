@@ -245,6 +245,9 @@ pub struct NativeExceptions {
     /// `[start:end:step]` slice is built with a step of `0` — a stride that
     /// can never advance is a construction error, not an empty sequence.
     pub invalid_step: u32,
+    /// `InvalidRangeDirectionError`: a dynamic explicit step points away
+    /// from its evaluated end bound.
+    pub invalid_range_direction: u32,
     /// `ParseError` (`native-type-member-surface`): the `Error` half of the
     /// `Result` `IntN.parse`/`FloatN.parse` return.
     pub parse_error: u32,
@@ -1981,6 +1984,8 @@ impl<'a> Checker<'a> {
         // step is `0` can never advance, so constructing one is a
         // controlled failure, the same kind as a negative repeat count.
         let invalid_step = register_native_failure(&mut self.classes, "InvalidStepError");
+        let invalid_range_direction =
+            register_native_failure(&mut self.classes, "InvalidRangeDirectionError");
         // `native-type-member-surface`: the `Result`-carried error types of
         // `IntN.parse`/`FloatN.parse`, `checked_*`, and `Regex.parse` —
         // registered through the same closure so `lower.rs` synthesizes
@@ -2012,6 +2017,7 @@ impl<'a> Checker<'a> {
             index_out_of_bounds,
             native_error,
             invalid_step,
+            invalid_range_direction,
             parse_error,
             overflow_error,
             regex_error,
@@ -7344,6 +7350,10 @@ impl<'a> Checker<'a> {
                 .elements
                 .iter()
                 .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
+            Expr::Collection(c) => c
+                .elements
+                .iter()
+                .any(|e| self.expr_mutates_receiver(ctx, e, aliases)),
             Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
             // A `task` body might run and mutate the receiver's graph; a
             // conservative reading treats spawning it as a mutation. `await`
@@ -7399,6 +7409,19 @@ impl<'a> Checker<'a> {
 
     fn check_let(&mut self, stmt: &LetStmt) {
         let annotated = stmt.ty.as_ref().map(|t| self.resolve_type(t));
+        let fixed_array = stmt.ty.as_ref().is_some_and(|t| t.fixed_size.is_some());
+
+        if let Some(size) = stmt.ty.as_ref().and_then(|t| t.fixed_size.as_ref())
+            && size.value < 0
+        {
+            self.error(
+                codes::INVALID_RANGE,
+                size.span,
+                "a fixed array length cannot be negative",
+                format!("found {}", size.value),
+                Some("write a non-negative integer literal".into()),
+            );
+        }
 
         // Only irrefutable patterns are allowed in a declaration, and a tuple
         // pattern needs an initializer to destructure.
@@ -7555,7 +7578,9 @@ impl<'a> Checker<'a> {
 
         for binding in &mut bindings {
             binding.mutability = stmt.mutability;
-            binding.initialized = stmt.init.is_some();
+            // Allocation-only `T[n]` has a universal default value in each
+            // slot, so indexed reads are defined immediately.
+            binding.initialized = stmt.init.is_some() || fixed_array;
         }
 
         if self_recursive {
@@ -8438,7 +8463,7 @@ impl<'a> Checker<'a> {
                 // `Range<T>` is recorded by hand — `zirk-ir`'s
                 // `range_loop_element_type` reads it back to pick the
                 // counter's width (`Int32` vs `Duration`'s `i64`).
-                let ty = self.check_range(range);
+                let ty = self.check_range(range, None);
                 self.expr_types.insert(range.span, ty);
                 ty
             }
@@ -8939,7 +8964,8 @@ impl<'a> Checker<'a> {
             Expr::Call(e) => self.check_call(e, expected),
             // `a..b` is a `Range<T>` value (roadmap Phase 7) — stored,
             // passed, reversed, sliced; `for ... in` still iterates it.
-            Expr::Range(e) => self.check_range(e),
+            Expr::Range(e) => self.check_range(e, expected),
+            Expr::Collection(e) => self.check_collection_literal(e, expected),
             Expr::Tuple(tuple) => self.check_tuple_literal(tuple, expected),
             Expr::If(e) => self.check_if_expr(e),
             Expr::This(e) => match self.this_type {
@@ -10253,15 +10279,31 @@ impl<'a> Checker<'a> {
         unified
     }
 
-    /// `start..end`, `start..=end` or `start..end..step` (roadmap Phase 7,
+    /// `start..end`, `start..=end` or `start..end:step` (roadmap Phase 7,
     /// `Range<T>`): a real value — a finite arithmetic sequence. The element
     /// type is `Int32` when every part is an integer, `Duration` when they
     /// all are; mixing a `Duration` with an integer is rejected, since no
     /// implicit conversion exists between an amount of time and a count.
-    fn check_range(&mut self, expr: &RangeExpr) -> Type {
+    fn check_range(&mut self, expr: &RangeExpr, expected: Option<Type>) -> Type {
+        self.check_range_operand_braces(&expr.start, expr.start_braced, "start");
+        self.check_range_operand_braces(&expr.end, expr.end_braced, "end");
+        if let Some(step) = &expr.step {
+            self.check_range_operand_braces(step, expr.step_braced, "step");
+        }
+
+        // Collection contexts supply an *element* expected type, which lets
+        // an otherwise-default `Int32` literal become (for example) `Int64`.
+        // A written `Range<T>` expected type is deliberately not forwarded.
+        let operand_expected =
+            expected.filter(|ty| matches!(ty.base, Base::Int(_) | Base::Duration));
+        self.expected_type = operand_expected;
         let start = self.check_expr(&expr.start);
+        self.expected_type = operand_expected;
         let end = self.check_expr(&expr.end);
-        let step = expr.step.as_ref().map(|s| self.check_expr(s));
+        let step = expr.step.as_ref().map(|s| {
+            self.expected_type = operand_expected;
+            self.check_expr(s)
+        });
 
         let parts: Vec<(Type, Span)> = [
             Some((start, expr.start.span())),
@@ -10307,8 +10349,119 @@ impl<'a> Checker<'a> {
         }
         self.expect_assignable(start, end, expr.end.span(), "the end");
 
+        if let Some(step_expr) = &expr.step
+            && let Some(step_value) = Self::range_integer_constant(step_expr)
+        {
+            if step_value == 0 {
+                self.error(
+                    codes::INVALID_RANGE,
+                    step_expr.span(),
+                    "a range step cannot be zero",
+                    "a zero step would never advance the range",
+                    Some("use a positive or negative non-zero step".into()),
+                );
+            } else if let (Some(start_value), Some(end_value)) = (
+                Self::range_integer_constant(&expr.start),
+                Self::range_integer_constant(&expr.end),
+            ) && ((start_value < end_value && step_value < 0)
+                || (start_value > end_value && step_value > 0))
+            {
+                self.error(codes::INVALID_RANGE, step_expr.span(), "the step of this range moves away from its end", format!("the range starts at {start_value}, ends at {end_value}, and steps by {step_value}"), Some("reverse the step sign or swap the bounds".into()));
+            }
+        }
+
         let id = self.intern_range_type(start);
         Type::of(Base::Range(id))
+    }
+
+    fn range_operand_is_literal(expr: &Expr) -> bool {
+        matches!(expr, Expr::Int(_) | Expr::Duration(_))
+            || matches!(expr, Expr::Unary(unary) if matches!(unary.op, UnaryOp::Neg) && matches!(&*unary.operand, Expr::Int(_) | Expr::Duration(_)))
+    }
+
+    fn check_range_operand_braces(&mut self, operand: &Expr, braced: bool, role: &str) {
+        if !braced && !Self::range_operand_is_literal(operand) {
+            self.error(
+                codes::INVALID_RANGE,
+                operand.span(),
+                format!("the {role} of a range must be enclosed in `{{...}}`"),
+                "non-literal range operands are evaluated once before the range begins",
+                Some(format!("write `{{...}}` around the {role} expression")),
+            );
+        }
+    }
+
+    fn range_integer_constant(expr: &Expr) -> Option<i128> {
+        match expr {
+            Expr::Int(lit) => Some(lit.value),
+            Expr::Unary(unary) if matches!(unary.op, UnaryOp::Neg) => match &*unary.operand {
+                Expr::Int(lit) => lit.value.checked_neg(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `[e0, e1, ...]`, contextually an `Array<T>` or `List<T>`.
+    fn check_collection_literal(
+        &mut self,
+        literal: &CollectionLiteralExpr,
+        expected: Option<Type>,
+    ) -> Type {
+        let (list, expected_element) = match expected {
+            Some(Type {
+                base: Base::Array(id),
+                ..
+            }) => (false, self.array_types.get(id as usize).copied()),
+            Some(Type {
+                base: Base::List(id),
+                ..
+            }) => (true, self.list_types.get(id as usize).copied()),
+            Some(other) => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    "a collection literal needs an Array<T> or List<T> context",
+                    format!("found expected type {}", self.name(other)),
+                    None,
+                );
+                (false, None)
+            }
+            None => (false, None),
+        };
+        let mut element = expected_element.unwrap_or(Type::UNKNOWN);
+        for item in &literal.elements {
+            if let Some(expected_element) = expected_element {
+                self.expected_type = Some(expected_element);
+            }
+            let item_ty = self.check_expr(item);
+            let item_element = self.range_element_type(item_ty).unwrap_or(item_ty);
+            if element.is_unknown() {
+                element = item_element;
+            } else if !item_element.is_unknown() && !element.accepts(item_element) {
+                let found = self.name(item_element);
+                let wanted = self.name(element);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    item.span(),
+                    format!("collection element has type `{found}`, expected `{wanted}`"),
+                    "scalar elements and expanded ranges must share one element type",
+                    None,
+                );
+            }
+        }
+        if list {
+            Type::of(Base::List(self.intern_list_type(element)))
+        } else {
+            Type::of(Base::Array(self.intern_array_type(element)))
+        }
+    }
+
+    fn range_element_type(&self, ty: Type) -> Option<Type> {
+        let Base::Range(id) = ty.base else {
+            return None;
+        };
+        self.range_types.get(id as usize).copied()
     }
 
     /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
@@ -11639,9 +11792,7 @@ impl<'a> Checker<'a> {
             };
         }
 
-        // `Range<T>`'s own members (roadmap Phase 7): `start`, `end` and
-        // `step`, all of the element type. `reverse()` is a call — handled
-        // in `check_call`, where methods live.
+        // `Range<T>` exposes only read-only `start`, `end`, and `step`.
         if let Base::Range(id) = object.base {
             let element = self
                 .range_types
@@ -11656,7 +11807,7 @@ impl<'a> Checker<'a> {
                 codes::UNKNOWN_MEMBER,
                 member.span,
                 format!("`{name}` has no member `{}`", member.name),
-                "a range exposes `start`, `end`, `step` and `reverse()`",
+                "a range exposes the read-only members `start`, `end`, and `step`",
                 None,
             );
             return Type::UNKNOWN;
@@ -12625,6 +12776,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Tuple(e) => {
+                for element in &e.elements {
+                    self.check_recursive_reference(element, name, nested);
+                }
+            }
+            Expr::Collection(e) => {
                 for element in &e.elements {
                     self.check_recursive_reference(element, name, nested);
                 }
@@ -13725,7 +13881,10 @@ impl<'a> Checker<'a> {
             return expected;
         }
 
-        if expr.args.len() == 1 && expr.args[0].name.is_none() {
+        if expr.args.len() == 1
+            && expr.args[0].name.is_none()
+            && !matches!(expr.args[0].value, Expr::Range(_))
+        {
             // `Array<T>(capacity)` — the single-argument form remains capacity.
             let capacity = self.check_expr(&expr.args[0].value);
             if !capacity.is_unknown() && !matches!(capacity.base, Base::Int(_)) {
@@ -13749,7 +13908,9 @@ impl<'a> Checker<'a> {
                         None,
                     );
                 }
-                let arg_ty = self.check_expr(&arg.value);
+                self.expected_type = Some(element);
+                let checked = self.check_expr(&arg.value);
+                let arg_ty = self.range_element_type(checked).unwrap_or(checked);
                 if !element.is_unknown() && !arg_ty.is_unknown() {
                     self.expect_assignable(
                         element,
@@ -13810,7 +13971,9 @@ impl<'a> Checker<'a> {
                     None,
                 );
             }
-            let arg_ty = self.check_expr(&arg.value);
+            self.expected_type = Some(element);
+            let checked = self.check_expr(&arg.value);
+            let arg_ty = self.range_element_type(checked).unwrap_or(checked);
             if !element.is_unknown() && !arg_ty.is_unknown() {
                 self.expect_assignable(element, arg_ty, arg.value.span(), "list literal element");
             }
@@ -15462,27 +15625,28 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            // `r.reverse()` (roadmap Phase 7, `Range<T>`): the same range
-            // walked from its last element to its first — a new `Range<T>`,
-            // the receiver is untouched.
+            // Colon-step syntax replaces range-builder methods.
             if matches!(object.base, Base::Range(_))
-                && field.name.name == "reverse"
+                && matches!(field.name.name.as_str(), "reverse" | "step")
                 && !field.safe
                 && !object.nullable
             {
-                if !expr.args.is_empty() {
-                    self.error(
-                        codes::WRONG_ARGUMENT_COUNT,
-                        expr.span,
-                        "`reverse` takes no arguments",
-                        format!("received {}", expr.args.len()),
-                        None,
-                    );
-                }
                 for arg in &expr.args {
                     self.check_expr(&arg.value);
                 }
-                return object;
+                let help = if field.name.name == "reverse" {
+                    "write the range with descending bounds and a negative colon step"
+                } else {
+                    "write the step after the range end, as `start..end:step`"
+                };
+                self.error(
+                    codes::INVALID_RANGE,
+                    expr.span,
+                    format!("`Range.{}` is no longer supported", field.name.name),
+                    "range builder methods were replaced by colon-step range syntax",
+                    Some(help.into()),
+                );
+                return Type::UNKNOWN;
             }
 
             // `Char` built-in classification and normalization methods

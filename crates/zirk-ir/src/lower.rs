@@ -1053,9 +1053,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: IrType::Int(IntWidth::I64),
         },
         ExternFn {
-            name: "zirk_range_reverse".to_string(),
+            name: "zirk_range_length".to_string(),
             params: vec![IrType::Range],
-            return_type: IrType::Range,
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_range_element_at".to_string(),
+            params: vec![IrType::Range, IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I64),
         },
         ExternFn {
             name: "zirk_range_slice".to_string(),
@@ -2073,6 +2078,7 @@ fn synthesize_native_failure_bodies<'a>(
         // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step
         // is `0`), registered and built through the same closure.
         (native.invalid_step, "E_INVALID_STEP"),
+        (native.invalid_range_direction, "E_INVALID_RANGE_DIRECTION"),
         // `native-type-member-surface`: the `Result`-carried errors of
         // `parse`/`checked_*`/`Regex.parse`.
         (native.parse_error, "E_PARSE"),
@@ -2846,6 +2852,12 @@ fn gc_roots_of(module: &Module, slots: &[Slot]) -> Vec<SlotId> {
         .filter(|(_, slot)| slot.ty.is_managed_reference(module))
         .map(|(index, _)| SlotId(index as u32))
         .collect()
+}
+
+#[derive(Clone, Copy)]
+enum PreparedCollectionElement {
+    Scalar(SlotId),
+    Range { value: SlotId, length: SlotId },
 }
 
 struct FunctionLowering<'a> {
@@ -4655,13 +4667,40 @@ impl<'a> FunctionLowering<'a> {
                     .is_some_and(|i| !i.captures.is_empty())
         );
 
-        let value = stmt.init.as_ref().map(|e| {
-            let operand = match annotated {
-                Some(expected) if !literal_captures => self.lower_expr_as(e, expected),
-                _ => self.lower_expr(e),
-            };
-            (operand, e.span())
-        });
+        let value = stmt
+            .init
+            .as_ref()
+            .map(|e| {
+                let operand = match annotated {
+                    Some(expected) if !literal_captures => self.lower_expr_as(e, expected),
+                    _ => self.lower_expr(e),
+                };
+                (operand, e.span())
+            })
+            .or_else(|| {
+                // `T[n]` is an allocation-only declaration.  The parser has
+                // already rewritten it to `Array<T>` and the checker established
+                // that `n` is non-negative, so materialize the same
+                // zero-initialized array `Array<T>(n)` would produce.
+                let size = stmt.ty.as_ref()?.fixed_size.as_ref()?;
+                let IrType::Array(element_id) = annotated? else {
+                    unreachable!("a fixed-size type reference resolves to Array<T>");
+                };
+                let capacity = self.emit(
+                    InstKind::ConstInt(size.value),
+                    IrType::Int(IntWidth::U64),
+                    size.span,
+                );
+                let array = self.emit(
+                    InstKind::ArrayNew {
+                        element_id,
+                        capacity,
+                    },
+                    IrType::Array(element_id),
+                    stmt.span,
+                );
+                Some((array, size.span))
+            });
 
         let ty = match (annotated, value) {
             (Some(ty), _) if !literal_captures => ty,
@@ -5268,14 +5307,176 @@ impl<'a> FunctionLowering<'a> {
     /// written operands, exactly the values `zirk_range_new` would store.
     fn lower_for_in_range(&mut self, stmt: &ast::ForInStmt, range: &ast::RangeExpr) {
         let element = self.range_loop_element_type(range.span);
-        let start = self.lower_expr_as(&range.start, element);
-        let end = self.lower_expr_as(&range.end, element);
-        let step = match &range.step {
-            Some(step) => self.lower_expr_as(step, element),
-            None => self.const_int_at(1, element, stmt.span),
-        };
+        let (start, end, step) = self.lower_normalized_range(range, element, stmt.span);
         let inclusive = range.inclusive;
         self.emit_range_loop(stmt, element, start, end, step, inclusive);
+    }
+
+    /// Evaluates a source range's three operands once, infers an omitted
+    /// step from its evaluated bounds, then rejects zero and contradictory
+    /// dynamic steps before a loop or allocation can observe the sequence.
+    /// Returned operands are freshly loaded in the continuation block.
+    fn lower_normalized_range(
+        &mut self,
+        range: &ast::RangeExpr,
+        element: IrType,
+        span: Span,
+    ) -> (Operand, Operand, Operand) {
+        let start_value = self.lower_expr_as(&range.start, element);
+        let start = self.spill(start_value, element, range.start.span());
+        let end_value = self.lower_expr_as(&range.end, element);
+        let end = self.spill(end_value, element, range.end.span());
+        let step = self.declare_slot("<range step>", element, span);
+
+        if let Some(written) = &range.step {
+            let value = self.lower_expr_as(written, element);
+            self.emit_effect(InstKind::Store(step, value), written.span());
+        } else {
+            let start_value = self.emit(InstKind::Load(start), element, span);
+            let end_value = self.emit(InstKind::Load(end), element, span);
+            let ascending = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Lt,
+                    left: start_value,
+                    right: end_value,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let forward = self.new_block();
+            let backward = self.new_block();
+            let joined = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: ascending,
+                then_block: forward,
+                else_block: backward,
+            });
+            self.current = forward;
+            let one = self.const_int_at(1, element, span);
+            self.emit_effect(InstKind::Store(step, one), span);
+            self.terminate(Terminator::Jump(joined));
+            self.current = backward;
+            let minus_one = self.const_int_at(-1, element, span);
+            self.emit_effect(InstKind::Store(step, minus_one), span);
+            self.terminate(Terminator::Jump(joined));
+            self.current = joined;
+        }
+
+        let step_value = self.emit(InstKind::Load(step), element, span);
+        let zero = self.const_int_at(0, element, span);
+        let zero_step = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: step_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let zero_fail = self.new_block();
+        let direction_check = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: zero_step,
+            then_block: zero_fail,
+            else_block: direction_check,
+        });
+        self.current = zero_fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a range registered the native failures");
+        self.throw_native_failure(native.invalid_step, "a range's step cannot be zero", span);
+        self.terminate(Terminator::Jump(direction_check));
+
+        self.current = direction_check;
+        let start_value = self.emit(InstKind::Load(start), element, span);
+        let end_value = self.emit(InstKind::Load(end), element, span);
+        let step_value = self.emit(InstKind::Load(step), element, span);
+        let zero = self.const_int_at(0, element, span);
+        let forward = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: step_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let backward = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: step_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let descends = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: start_value,
+                right: end_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let ascends = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: start_value,
+                right: end_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let forward_away = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: forward,
+                right: descends,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let backward_away = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: backward,
+                right: ascends,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let wrong_direction = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Or,
+                left: forward_away,
+                right: backward_away,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let direction_fail = self.new_block();
+        let normalized = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: wrong_direction,
+            then_block: direction_fail,
+            else_block: normalized,
+        });
+        self.current = direction_fail;
+        self.throw_native_failure(
+            native.invalid_range_direction,
+            "the step of this range moves away from its end",
+            span,
+        );
+        self.terminate(Terminator::Jump(normalized));
+        self.current = normalized;
+
+        (
+            self.emit(InstKind::Load(start), element, span),
+            self.emit(InstKind::Load(end), element, span),
+            self.emit(InstKind::Load(step), element, span),
+        )
     }
 
     /// `for x in range` where `range` is a `Range<T>` value rather than a
@@ -6804,9 +7005,6 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_result_method_call(e, span) {
                     return operand;
                 }
-                if let Some(operand) = self.lower_range_method_call(e, span) {
-                    return operand;
-                }
                 if let Some(operand) = self.lower_array_list_method_call(e, span) {
                     return operand;
                 }
@@ -6916,59 +7114,19 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
             ast::Expr::Range(range) => self.lower_range_value(range, span),
+            ast::Expr::Collection(collection) => self.lower_collection_literal(collection, span),
             ast::Expr::Null(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
         }
     }
 
-    /// `start..end(..step)` as a `Range<T>` value (roadmap Phase 7): each
-    /// part widens to `i64` — the runtime's `ZirkRange` word — and a `step`
-    /// of `0` throws `InvalidStepError` before the object exists, since such
-    /// a stride could never advance.
+    /// `start..end[:step]` as a `Range<T>` value. The shared normalizer
+    /// evaluates bounds once, infers the omitted direction, and validates
+    /// zero or contradictory dynamic steps before the object exists.
     fn lower_range_value(&mut self, range: &ast::RangeExpr, span: Span) -> Operand {
         let i64_ty = IrType::Int(IntWidth::I64);
-        let start = self.lower_expr_as(&range.start, i64_ty);
-        let start = self.spill(start, i64_ty, range.start.span());
-        let end = self.lower_expr_as(&range.end, i64_ty);
-        let end = self.spill(end, i64_ty, range.end.span());
-        let step = match &range.step {
-            Some(step) => self.lower_expr_as(step, i64_ty),
-            None => self.const_i64(1, span),
-        };
-        let step = self.spill(step, i64_ty, span);
-
-        let step_value = self.emit(InstKind::Load(step), i64_ty, span);
-        let zero = self.const_i64(0, span);
-        let zero_step = self.emit(
-            InstKind::Binary {
-                op: BinaryOp::Eq,
-                left: step_value,
-                right: zero,
-            },
-            IrType::Boolean,
-            span,
-        );
-        let fail = self.new_block();
-        let keep = self.new_block();
-        self.terminate(Terminator::Branch {
-            condition: zero_step,
-            then_block: fail,
-            else_block: keep,
-        });
-        self.current = fail;
-        let invalid_step = self
-            .checked
-            .native_exceptions
-            .expect("a program constructing a range registered the exception hierarchy")
-            .invalid_step;
-        self.throw_native_failure(invalid_step, "a range's step cannot be zero", span);
-        self.terminate(Terminator::Jump(keep));
-        self.current = keep;
-
-        let start = self.emit(InstKind::Load(start), i64_ty, span);
-        let end = self.emit(InstKind::Load(end), i64_ty, span);
-        let step = self.emit(InstKind::Load(step), i64_ty, span);
+        let (start, end, step) = self.lower_normalized_range(range, i64_ty, span);
         let inclusive = self.const_i64(range.inclusive as i128, span);
         self.emit(
             InstKind::Call {
@@ -8720,6 +8878,7 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.index_out_of_bounds
                 || id == n.native_error
                 || id == n.invalid_step
+                || id == n.invalid_range_direction
                 || id == n.parse_error
                 || id == n.overflow_error
                 || id == n.regex_error
@@ -12992,37 +13151,6 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
-    /// `r.reverse()` on a `Range<T>` (roadmap Phase 7): the same elements
-    /// produced last to first — a new `Range`, the receiver untouched.
-    fn lower_range_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
-        if !self.is_range_method_call(call) {
-            return None;
-        }
-        let ast::Expr::Field(field) = &*call.callee else {
-            return None;
-        };
-        let receiver = self.lower_expr(&field.object);
-        Some(self.emit(
-            InstKind::Call {
-                callee: "zirk_range_reverse".to_string(),
-                args: vec![receiver],
-            },
-            IrType::Range,
-            span,
-        ))
-    }
-
-    /// Whether `call` is `r.reverse()` on a `Range<T>` receiver.
-    fn is_range_method_call(&self, call: &ast::CallExpr) -> bool {
-        let ast::Expr::Field(field) = &*call.callee else {
-            return false;
-        };
-        if field.name.name != "reverse" || !call.args.is_empty() || field.safe {
-            return false;
-        }
-        self.type_of(&field.object, field.object.span()) == IrType::Range
-    }
-
     /// `Char` built-in classification and normalization methods.
     fn lower_char_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -13313,7 +13441,7 @@ impl<'a> FunctionLowering<'a> {
         let &ty = self.checked.expr_types.get(&call.span)?;
         match (callee.name.as_str(), ty.base) {
             ("Array", Base::Array(id)) if !call.args.is_empty() => {
-                if call.args.len() == 1 {
+                if call.args.len() == 1 && !matches!(call.args[0].value, ast::Expr::Range(_)) {
                     // `Array<T>(capacity)` — the single-argument form keeps
                     // its historical meaning as an empty array with room.
                     let capacity =
@@ -13327,55 +13455,22 @@ impl<'a> FunctionLowering<'a> {
                         span,
                     ));
                 }
-                // `Array(e0, e1, …)` — a literal of `args.len()` elements.
-                let len = call.args.len() as u64;
-                let capacity = self.emit(
-                    InstKind::ConstInt(len as i128),
-                    IrType::Int(IntWidth::U64),
-                    span,
-                );
-                let array = self.emit(
-                    InstKind::ArrayNew {
-                        element_id: id,
-                        capacity,
-                    },
-                    IrType::Array(id),
-                    span,
-                );
-                let array_slot = self.spill(array, IrType::Array(id), span);
                 let element_ty = self.module.array_types[id as usize];
-                for (i, arg) in call.args.iter().enumerate() {
-                    let receiver = self.emit(InstKind::Load(array_slot), IrType::Array(id), span);
-                    let index = self.emit(
-                        InstKind::ConstInt(i as i128),
-                        IrType::Int(IntWidth::I64),
-                        span,
-                    );
-                    let value = self.lower_expr_as(&arg.value, element_ty);
-                    self.emit_effect(
-                        InstKind::ArrayListStore {
-                            receiver,
-                            index,
-                            value,
-                        },
-                        span,
-                    );
-                }
-                Some(self.emit(InstKind::Load(array_slot), IrType::Array(id), span))
+                Some(self.lower_expanded_array(
+                    call.args.iter().map(|arg| &arg.value),
+                    id,
+                    element_ty,
+                    span,
+                ))
             }
             ("List", Base::List(id)) => {
-                let list = self.emit(InstKind::ListNew { element_id: id }, IrType::List(id), span);
-                if call.args.is_empty() {
-                    return Some(list);
-                }
-                let list_slot = self.spill(list, IrType::List(id), span);
                 let element_ty = self.module.list_types[id as usize];
-                for arg in call.args.iter() {
-                    let receiver = self.emit(InstKind::Load(list_slot), IrType::List(id), span);
-                    let value = self.lower_expr_as(&arg.value, element_ty);
-                    self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span);
-                }
-                Some(self.emit(InstKind::Load(list_slot), IrType::List(id), span))
+                Some(self.lower_expanded_list(
+                    call.args.iter().map(|arg| &arg.value),
+                    id,
+                    element_ty,
+                    span,
+                ))
             }
             ("Map", Base::Map(id)) if call.args.is_empty() => {
                 Some(self.emit(InstKind::MapNew { map_id: id }, IrType::Map(id), span))
@@ -13384,6 +13479,277 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.emit(InstKind::SetNew { set_id: id }, IrType::Set(id), span))
             }
             _ => None,
+        }
+    }
+
+    fn lower_collection_elements<'b>(
+        &mut self,
+        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        element_ty: IrType,
+        span: Span,
+    ) -> Vec<PreparedCollectionElement> {
+        elements
+            .into_iter()
+            .map(|element| match element {
+                ast::Expr::Range(range) => {
+                    let range_value = self.lower_range_value(range, span);
+                    let value = self.spill(range_value, IrType::Range, range.span);
+                    let length = self.lower_checked_range_length(value, range.span);
+                    PreparedCollectionElement::Range { value, length }
+                }
+                _ => {
+                    let scalar = self.lower_expr_as(element, element_ty);
+                    PreparedCollectionElement::Scalar(self.spill(
+                        scalar,
+                        element_ty,
+                        element.span(),
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    fn lower_checked_range_length(&mut self, range: SlotId, span: Span) -> SlotId {
+        let handle = self.emit(InstKind::Load(range), IrType::Range, span);
+        let length = self.emit(
+            InstKind::Call {
+                callee: "zirk_range_length".to_string(),
+                args: vec![handle],
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let length = self.spill(length, IrType::Int(IntWidth::I64), span);
+        let value = self.emit(InstKind::Load(length), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        let overflow = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: overflow,
+            then_block: fail,
+            else_block: cont,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a range registered native failures");
+        self.throw_native_failure(native.arithmetic_overflow, "range length overflow", span);
+        self.terminate(Terminator::Jump(cont));
+        self.current = cont;
+        length
+    }
+
+    fn lower_range_elements(
+        &mut self,
+        range: SlotId,
+        length: SlotId,
+        element_ty: IrType,
+        span: Span,
+        mut emit_element: impl FnMut(&mut Self, Operand),
+    ) {
+        let index = self.declare_slot("<range element index>", IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(index, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index_value = self.emit(InstKind::Load(index), IrType::Int(IntWidth::I64), span);
+        let count = self.emit(InstKind::Load(length), IrType::Int(IntWidth::I64), span);
+        let keep_going = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index_value,
+                right: count,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep_going,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let handle = self.emit(InstKind::Load(range), IrType::Range, span);
+        let position = self.emit(InstKind::Load(index), IrType::Int(IntWidth::I64), span);
+        let value = self.emit(
+            InstKind::Call {
+                callee: "zirk_range_element_at".to_string(),
+                args: vec![handle, position],
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let value = if element_ty == IrType::Int(IntWidth::I64) {
+            value
+        } else {
+            self.emit(InstKind::IntCast(value), element_ty, span)
+        };
+        emit_element(self, value);
+        let current = self.emit(InstKind::Load(index), IrType::Int(IntWidth::I64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::I64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: current,
+                right: one,
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+    }
+
+    fn lower_expanded_array<'b>(
+        &mut self,
+        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        element_id: u32,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let prepared = self.lower_collection_elements(elements, element_ty, span);
+        let mut capacity = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        for item in &prepared {
+            let amount = match item {
+                PreparedCollectionElement::Scalar(_) => {
+                    self.const_int_at(1, IrType::Int(IntWidth::U64), span)
+                }
+                PreparedCollectionElement::Range { length, .. } => {
+                    let length =
+                        self.emit(InstKind::Load(*length), IrType::Int(IntWidth::I64), span);
+                    self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::U64), span)
+                }
+            };
+            capacity = self.checked_int_arithmetic(
+                BinaryOp::Add,
+                capacity,
+                amount,
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+        }
+        let array_ty = IrType::Array(element_id);
+        let array = self.emit(
+            InstKind::ArrayNew {
+                element_id,
+                capacity,
+            },
+            array_ty,
+            span,
+        );
+        let array = self.spill(array, array_ty, span);
+        let output = self.declare_slot("<collection index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(output, zero), span);
+        for item in prepared {
+            match item {
+                PreparedCollectionElement::Scalar(value) => {
+                    let value = self.emit(InstKind::Load(value), element_ty, span);
+                    self.store_collection_array_value(array, array_ty, output, value, span);
+                }
+                PreparedCollectionElement::Range { value, length } => {
+                    self.lower_range_elements(value, length, element_ty, span, |this, value| {
+                        this.store_collection_array_value(array, array_ty, output, value, span)
+                    })
+                }
+            }
+        }
+        self.emit(InstKind::Load(array), array_ty, span)
+    }
+
+    fn store_collection_array_value(
+        &mut self,
+        array: SlotId,
+        array_ty: IrType,
+        output: SlotId,
+        value: Operand,
+        span: Span,
+    ) {
+        let receiver = self.emit(InstKind::Load(array), array_ty, span);
+        let index = self.emit(InstKind::Load(output), IrType::Int(IntWidth::U64), span);
+        self.emit_effect(
+            InstKind::ArrayListStore {
+                receiver,
+                index,
+                value,
+            },
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.checked_int_arithmetic(
+            BinaryOp::Add,
+            index,
+            one,
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(output, next), span);
+    }
+
+    fn lower_expanded_list<'b>(
+        &mut self,
+        elements: impl IntoIterator<Item = &'b ast::Expr>,
+        element_id: u32,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let prepared = self.lower_collection_elements(elements, element_ty, span);
+        let list_ty = IrType::List(element_id);
+        let list = self.emit(InstKind::ListNew { element_id }, list_ty, span);
+        let list = self.spill(list, list_ty, span);
+        for item in prepared {
+            match item {
+                PreparedCollectionElement::Scalar(value) => {
+                    let receiver = self.emit(InstKind::Load(list), list_ty, span);
+                    let value = self.emit(InstKind::Load(value), element_ty, span);
+                    self.emit_effect(InstKind::ListAdd { receiver, value }, span);
+                }
+                PreparedCollectionElement::Range { value, length } => {
+                    self.lower_range_elements(value, length, element_ty, span, |this, value| {
+                        let receiver = this.emit(InstKind::Load(list), list_ty, span);
+                        this.emit_effect(InstKind::ListAdd { receiver, value }, span);
+                    })
+                }
+            }
+        }
+        self.emit(InstKind::Load(list), list_ty, span)
+    }
+
+    fn lower_collection_literal(
+        &mut self,
+        literal: &ast::CollectionLiteralExpr,
+        span: Span,
+    ) -> Operand {
+        let ty = self
+            .checked
+            .expr_types
+            .get(&literal.span)
+            .copied()
+            .expect("the checker records every collection literal type");
+        match ty.base {
+            Base::Array(id) => {
+                let element = self.module.array_types[id as usize];
+                self.lower_expanded_array(literal.elements.iter(), id, element, span)
+            }
+            Base::List(id) => {
+                let element = self.module.list_types[id as usize];
+                self.lower_expanded_list(literal.elements.iter(), id, element, span)
+            }
+            _ => unreachable!("a collection literal has Array<T> or List<T> type"),
         }
     }
 
@@ -15890,16 +16256,6 @@ impl<'a> FunctionLowering<'a> {
                 .map(|element| self.ir_type(element))
                 .unwrap_or(IrType::Int(IntWidth::I64));
         }
-        // `r.reverse` named as a callee (roadmap Phase 7): `is_callable_call`
-        // and `is_range_method_call` classify the call, so this type is
-        // only ever asked whether it is `Callable` — `Range` answers that
-        // without `field_position`'s layout walk, which a range has no
-        // part in.
-        if expr.name.name == "reverse"
-            && self.type_of(&expr.object, expr.object.span()) == IrType::Range
-        {
-            return IrType::Range;
-        }
         // Duration component properties (`days`, `hours`, ...).
         if matches!(
             expr.name.name.as_str(),
@@ -18400,9 +18756,6 @@ impl<'a> FunctionLowering<'a> {
                 if self.is_regex_match_group_call(e) {
                     return IrType::String;
                 }
-                if self.is_range_method_call(e) {
-                    return IrType::Range;
-                }
                 if self.is_string_method_call(e)
                     && let ast::Expr::Field(field) = &*e.callee
                 {
@@ -18562,6 +18915,13 @@ impl<'a> FunctionLowering<'a> {
                 self.ir_type(ty)
             }
             ast::Expr::Range(_) => IrType::Range,
+            ast::Expr::Collection(collection) => self
+                .checked
+                .expr_types
+                .get(&collection.span)
+                .copied()
+                .map(|ty| self.ir_type(ty))
+                .expect("the checker records every collection literal type"),
             ast::Expr::Lambda(_) | ast::Expr::Null(_) => {
                 unreachable!("the type of this expression comes from the value it produced")
             }

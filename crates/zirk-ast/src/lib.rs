@@ -422,6 +422,11 @@ pub struct TypeRef {
     /// diagnostics; every consumer that cares about the callable shape reads
     /// this field first.
     pub function: Option<Box<FnTypeRef>>,
+    /// `T[n]` — an allocation-only fixed-size array declaration
+    /// (`range-syntax-and-collection-expansion`). When `Some`, this reference
+    /// names an `Array<T>` of exactly that many slots; the parser rewrites
+    /// `T[n]` into `name = "Array"`, `arguments = [T]`, `fixed_size = Some(n)`.
+    pub fixed_size: Option<IntLit>,
     pub span: Span,
 }
 
@@ -433,6 +438,7 @@ impl TypeRef {
             nullable: false,
             union_with: Vec::new(),
             function: None,
+            fixed_size: None,
             span,
         }
     }
@@ -444,6 +450,7 @@ impl TypeRef {
             nullable: true,
             union_with: Vec::new(),
             function: None,
+            fixed_size: None,
             span,
         }
     }
@@ -456,6 +463,7 @@ impl TypeRef {
             nullable: false,
             union_with: Vec::new(),
             function: Some(Box::new(function)),
+            fixed_size: None,
             span,
         }
     }
@@ -879,6 +887,11 @@ pub enum Expr {
     Call(CallExpr),
     /// `0..10` and `0..=10`.
     Range(RangeExpr),
+    /// `[e0, e1, ...]` — a collection literal
+    /// (`range-syntax-and-collection-expansion`). Defaults to `Array<T>`;
+    /// a `List<T>` destination context selects a list. A range element is
+    /// expanded in place.
+    Collection(CollectionLiteralExpr),
     /// `if c { a } else { b }` used where a value is expected.
     ///
     /// The node is the same one the statement form uses: what changes is the
@@ -1007,6 +1020,7 @@ impl Expr {
             Expr::Binary(e) => e.span,
             Expr::Call(e) => e.span,
             Expr::Range(e) => e.span,
+            Expr::Collection(e) => e.span,
             Expr::If(e) => e.span,
             Expr::This(e) => e.span,
             Expr::Super(e) => e.span,
@@ -1052,23 +1066,46 @@ pub struct NullLit {
     pub span: Span,
 }
 
-/// `start..end`, `start..=end` or `start..end..step` (roadmap Phase 7,
-/// `Range<T>`).
+/// `start..end`, `start..=end`, `start..end:step` or `start..=end:step`
+/// (`range-syntax-and-collection-expansion`).
+///
+/// The legacy second-`..` step spelling (`start..end..step`) is still parsed
+/// for recovery but reported as a migration warning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RangeExpr {
     pub start: Box<Expr>,
     pub end: Box<Expr>,
     /// The distance between elements, `None` when the source did not write
-    /// one (which means `1`).
+    /// one (which means `+1` for an ascending range and `-1` for a
+    /// descending one).
     pub step: Option<Box<Expr>>,
     /// `..=` includes the endpoint; `..` does not.
     pub inclusive: bool,
+    /// Whether each operand was written as an explicitly braced `{ expr }`.
+    /// A non-literal operand must be braced; these flags let the checker
+    /// tell a missing brace from a type error. `step_braced` is `false`
+    /// when no step was written.
+    pub start_braced: bool,
+    pub end_braced: bool,
+    pub step_braced: bool,
     pub span: Span,
 }
 
 /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleExpr {
+    pub elements: Vec<Expr>,
+    pub span: Span,
+}
+
+/// `[e0, e1, ...]` — a collection literal
+/// (`range-syntax-and-collection-expansion`).
+///
+/// Elements are evaluated left to right. An [`Expr::Range`] element expands
+/// into its generated sequence in place; there is no nested-range escape
+/// hatch. An empty literal (`[]`) is valid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionLiteralExpr {
     pub elements: Vec<Expr>,
     pub span: Span,
 }

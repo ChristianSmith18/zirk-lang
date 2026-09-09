@@ -57,4 +57,10 @@ pub mod codes {
     pub const EXTERN_HAS_BODY: Code = Code::new("E0314");
     /// An `extern` calling-convention literal other than `"C"` (roadmap Phase 4e).
     pub const EXTERN_BAD_CONVENTION: Code = Code::new("E0315");
+    /// A deprecated range spelling: `start..end..step` instead of
+    /// `start..end:step` (`range-syntax-and-collection-expansion`). A
+    /// warning, not an error, until the migration completes.
+    pub const LEGACY_RANGE_STEP: Code = Code::new("E0316");
+    /// A braced `{ ... }` operand written outside a range bound.
+    pub const BRACED_OPERAND_OUTSIDE_RANGE: Code = Code::new("E0317");
 }

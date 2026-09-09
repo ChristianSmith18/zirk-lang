@@ -59,7 +59,8 @@ const BRAND_TEXTMATE_RULES = [
     // argumentos nombrados
     { scope: 'variable.parameter.zirk', settings: { foreground: '#B8B8C3', fontStyle: 'italic' } },
     // operadores (incluye `->` de alias, `is`/`as?` de cast, `|>` pipe)
-    { scope: ['keyword.operator.zirk', 'keyword.operator.alias.zirk', 'keyword.operator.cast.zirk', 'keyword.operator.pipe.zirk'], settings: { foreground: '#A78BFA' } },
+    { scope: ['keyword.operator.zirk', 'keyword.operator.alias.zirk', 'keyword.operator.cast.zirk', 'keyword.operator.pipe.zirk', 'keyword.operator.range.zirk'], settings: { foreground: '#A78BFA' } },
+    { scope: ['punctuation.section.array.begin.zirk', 'punctuation.section.array.end.zirk', 'punctuation.section.brackets.begin.zirk', 'punctuation.section.brackets.end.zirk'], settings: { foreground: '#8E6CFF' } },
     // puntuación de interpolación `{`/`}` dentro de strings
     { scope: ['punctuation.section.embedded.begin.zirk', 'punctuation.section.embedded.end.zirk', 'punctuation.definition.placeholder.zirk', 'punctuation.separator.placeholder.zirk'], settings: { foreground: '#8E6CFF' } },
     // comentarios normales (// y /* */)

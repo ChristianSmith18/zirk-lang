@@ -65,6 +65,12 @@ struct Parser<'a> {
     /// block — `if`/`while`/`for ... in`/`match` headers — where `expr {`
     /// is the body's brace, not an anonymous-class tail.
     block_follows: u32,
+    /// Nonzero while parsing the true-branch of a ternary, where a trailing
+    /// `:` closes that branch and must not be read as a range `:step`
+    /// (`range-syntax-and-collection-expansion`). Reset to `0` inside a
+    /// parenthesis, bracket, or braced range operand so an explicit group
+    /// can still write a stepped range there.
+    range_step_suppressed: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -77,6 +83,7 @@ impl<'a> Parser<'a> {
             depth: 0,
             pending_gt: None,
             block_follows: 0,
+            range_step_suppressed: 0,
         }
     }
 
@@ -225,6 +232,26 @@ impl<'a> Parser<'a> {
         help: Option<String>,
     ) {
         let mut d = self.build(code, span, message).with_cause(cause);
+        if let Some(help) = help {
+            d = d.with_help(help);
+        }
+        self.sink.emit(d);
+    }
+
+    /// A non-fatal migration notice: the program still parses, but the form
+    /// it used is deprecated.
+    fn warn(
+        &mut self,
+        code: Code,
+        span: Span,
+        message: impl Into<String>,
+        cause: impl Into<String>,
+        help: Option<String>,
+    ) {
+        let mut d = Diagnostic::warning(code, message)
+            .at(self.source.location(span))
+            .with_snippet(self.source.snippet(span))
+            .with_cause(cause);
         if let Some(help) = help {
             d = d.with_help(help);
         }
@@ -1757,6 +1784,36 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
 
+        // `T[n]` — an allocation-only fixed-size array declaration
+        // (`range-syntax-and-collection-expansion`). Rewritten into
+        // `Array<T>` carrying the constant length.
+        if matches!(self.peek(), TokenKind::LBracket)
+            && matches!(self.peek_at(1), TokenKind::Integer(_))
+        {
+            self.pos += 1; // `[`
+            let size_span = self.peek_span();
+            let value = match self.peek().clone() {
+                TokenKind::Integer(value) => {
+                    self.pos += 1;
+                    value
+                }
+                _ => unreachable!("guarded by the match above"),
+            };
+            let end = self.peek_span();
+            if !self.expect(&TokenKind::RBracket, "to close the fixed-array size") {
+                return None;
+            }
+            let mut element = TypeRef::new(name, span);
+            element.arguments = arguments;
+            let mut array = TypeRef::new("Array", span.to(end));
+            array.fixed_size = Some(IntLit {
+                value,
+                span: size_span,
+            });
+            array.arguments = vec![element];
+            return Some(array);
+        }
+
         // `T?` is `T | Null`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
         if matches!(self.peek(), TokenKind::Question) {
             let end = self.peek_span();
@@ -2808,7 +2865,14 @@ impl<'a> Parser<'a> {
             self.leave();
             return None;
         }
+        // A fresh expression context (a call argument, a parenthesized or
+        // bracketed group, a braced range operand) starts a new range-step
+        // scope: the ternary `:` that suppresses a range step does not reach
+        // across it. Ternary branches recurse through `parse_ternary`, not
+        // here, so their suppression is preserved.
+        let saved_step = std::mem::take(&mut self.range_step_suppressed);
         let parsed = self.parse_expr_nested();
+        self.range_step_suppressed = saved_step;
         self.leave();
         parsed
     }
@@ -3252,7 +3316,13 @@ impl<'a> Parser<'a> {
         let op_span = self.peek_span();
         self.pos += 1;
 
+        // Until this ternary's own `:` is consumed, a `:` inside its
+        // true-branch closes the branch and is not a range `:step`. A `None`
+        // here abandons the whole parse, so the counter is not restored on
+        // that path on purpose.
+        self.range_step_suppressed += 1;
         let when_true = self.parse_ternary()?;
+        self.range_step_suppressed -= 1;
         self.expect(&TokenKind::Colon, "to separate the branches of the ternary");
         let when_false = self.parse_ternary()?;
 
@@ -3265,23 +3335,94 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// `a..b` and `a..=b`, which bind looser than every binary operator.
+    /// `a..b`, `a..=b`, `a..b:step` and `a..=b:step`, which bind looser than
+    /// every binary operator (`range-syntax-and-collection-expansion`).
+    ///
+    /// Every non-literal bound or step must be written as a braced `{ expr }`
+    /// operand. The braces are consumed here — a bare `{` in expression
+    /// position is only ever a range bound. The legacy `a..b..step` spelling
+    /// still parses, with a migration warning.
     fn parse_range(&mut self) -> Option<Expr> {
+        // A leading `{` can only be a braced range start. The non-braced
+        // path stays a direct `parse_binary` so the (common) no-range case
+        // adds nothing to this hot frame — everything a real range needs
+        // lives in `parse_range_tail`, which recursion never touches unless
+        // a `..` is actually present.
+        if matches!(self.peek(), TokenKind::LBrace) {
+            return self.parse_range_tail(true);
+        }
         let start = self.parse_binary(0)?;
+        if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
+            return self.parse_range_from(start, false);
+        }
+        Some(start)
+    }
 
-        let inclusive = match self.peek() {
-            TokenKind::DotDot => false,
-            TokenKind::DotDotEq => true,
-            _ => return Some(start),
+    /// The range grammar past its start operand. `start_braced` says the
+    /// start was a braced `{ expr }`; the start itself is re-parsed here so
+    /// this cold path, not `parse_range`, carries the `Expr`-sized locals.
+    #[inline(never)]
+    fn parse_range_tail(&mut self, start_braced: bool) -> Option<Expr> {
+        let start = if start_braced {
+            self.parse_braced_operand("the start of the range")?
+        } else {
+            self.parse_binary(0)?
         };
+        if !matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
+            if start_braced {
+                self.braced_operand_outside_range(start.span());
+            }
+            return Some(start);
+        }
+        self.parse_range_from(start, start_braced)
+    }
+
+    #[inline(never)]
+    fn parse_range_from(&mut self, start: Expr, start_braced: bool) -> Option<Expr> {
+        let inclusive = matches!(self.peek(), TokenKind::DotDotEq);
         self.pos += 1;
 
-        let end = self.parse_binary(0)?;
+        let end_braced = matches!(self.peek(), TokenKind::LBrace);
+        let end = if end_braced {
+            self.parse_braced_operand("the end of the range")?
+        } else {
+            self.parse_binary(0)?
+        };
 
-        // `start..end..step` (roadmap Phase 7): a second `..` — never `..=`,
-        // the step does not bind a bound — introduces the step.
-        let step = if self.eat(&TokenKind::DotDot) {
-            Some(Box::new(self.parse_binary(0)?))
+        // `start..end:step` — the colon step. A trailing `:` that closes a
+        // ternary branch, or one not followed by a plausible step, is left
+        // for the caller. The legacy `start..end..step` still parses, with a
+        // migration warning.
+        let mut step_braced = false;
+        let step = if matches!(self.peek(), TokenKind::Colon)
+            && self.range_step_suppressed == 0
+            && self.colon_introduces_step()
+        {
+            self.pos += 1; // `:`
+            step_braced = matches!(self.peek(), TokenKind::LBrace);
+            let expr = if step_braced {
+                self.parse_braced_operand("the step of the range")?
+            } else {
+                self.parse_binary(0)?
+            };
+            Some(Box::new(expr))
+        } else if matches!(self.peek(), TokenKind::DotDot) {
+            let dotdot = self.peek_span();
+            self.pos += 1;
+            self.warn(
+                codes::LEGACY_RANGE_STEP,
+                dotdot,
+                "the `start..end..step` range spelling is deprecated",
+                "the step now follows a single colon",
+                Some("write `start..end:step` (or `start..=end:step`)".into()),
+            );
+            step_braced = matches!(self.peek(), TokenKind::LBrace);
+            let expr = if step_braced {
+                self.parse_braced_operand("the step of the range")?
+            } else {
+                self.parse_binary(0)?
+            };
+            Some(Box::new(expr))
         } else {
             None
         };
@@ -3297,6 +3438,102 @@ impl<'a> Parser<'a> {
             end: Box::new(end),
             step,
             inclusive,
+            start_braced,
+            end_braced,
+            step_braced,
+        }))
+    }
+
+    /// A braced `{ ... }` operand written where no range follows.
+    #[cold]
+    #[inline(never)]
+    fn braced_operand_outside_range(&mut self, span: Span) {
+        let found = self.peek().description();
+        self.error(
+            codes::BRACED_OPERAND_OUTSIDE_RANGE,
+            span,
+            "a braced `{ ... }` operand is only valid as a range bound",
+            format!("found {found} after it"),
+            Some("write it as `start..end`, or drop the braces".into()),
+        );
+    }
+
+    /// `{ expr }` as a range operand. The `{` is at the cursor. Braces are
+    /// balanced by the expression parser; a step suppression is lifted inside
+    /// so `{ a..b:c }` may still be written.
+    fn parse_braced_operand(&mut self, what: &str) -> Option<Expr> {
+        self.pos += 1; // `{`
+        let saved_block = std::mem::take(&mut self.block_follows);
+        let inner = self.parse_expr();
+        self.block_follows = saved_block;
+        let inner = inner?;
+        if !self.expect(
+            &TokenKind::RBrace,
+            &format!("to close the braces around {what}"),
+        ) {
+            return None;
+        }
+        Some(inner)
+    }
+
+    /// Whether the `:` at the cursor introduces a range step rather than
+    /// closing a ternary branch or a type annotation. A step is a literal or
+    /// a braced operand, so one or two tokens of lookahead settle it.
+    fn colon_introduces_step(&self) -> bool {
+        matches!(
+            self.peek_at(1),
+            TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::Duration(_, _)
+                | TokenKind::LBrace
+        ) || (matches!(self.peek_at(1), TokenKind::Minus | TokenKind::Plus)
+            && matches!(
+                self.peek_at(2),
+                TokenKind::Integer(_) | TokenKind::Float(_) | TokenKind::Duration(_, _)
+            ))
+    }
+
+    /// `[e0, e1, ...]` — a collection literal
+    /// (`range-syntax-and-collection-expansion`). `[` is at the cursor;
+    /// `open` is its span. An empty literal `[]` is valid; a trailing comma
+    /// is allowed. A range element is kept as an [`Expr::Range`] and expanded
+    /// later by the checker and lowering.
+    fn parse_collection_literal(&mut self, open: Span) -> Option<Expr> {
+        self.pos += 1; // `[`
+        let saved_block = std::mem::take(&mut self.block_follows);
+
+        let mut elements = Vec::new();
+        let mut ok = true;
+        if !matches!(self.peek(), TokenKind::RBracket) {
+            loop {
+                match self.parse_expr() {
+                    Some(element) => elements.push(element),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                if matches!(self.peek(), TokenKind::RBracket) {
+                    break;
+                }
+            }
+        }
+
+        self.block_follows = saved_block;
+        if !ok {
+            return None;
+        }
+
+        let end = self.peek_span();
+        if !self.expect(&TokenKind::RBracket, "to close the collection literal") {
+            return None;
+        }
+        Some(Expr::Collection(CollectionLiteralExpr {
+            elements,
+            span: open.to(end),
         }))
     }
 
@@ -3598,6 +3835,11 @@ impl<'a> Parser<'a> {
             // 128-deep nesting guard test out of a 2 MB stack before it could
             // even report the diagnostic.
             TokenKind::Lt => self.parse_prefix_cast(span),
+            // `[e0, e1, ...]` — a collection literal
+            // (`range-syntax-and-collection-expansion`). A leading `[` never
+            // starts a primary expression otherwise: postfix indexing and
+            // slicing need a receiver, which nothing precedes here.
+            TokenKind::LBracket => self.parse_collection_literal(span),
             TokenKind::LParen => {
                 self.pos += 1;
                 // A parenthesized expression has one value; a comma makes it

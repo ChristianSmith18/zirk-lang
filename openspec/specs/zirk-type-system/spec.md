@@ -229,10 +229,13 @@ The checker SHALL require the condition of `for` and `while` to be `Boolean`, wi
 
 ### Requirement: `for ... in` over the minimal iteration protocol
 
-The checker SHALL accept `for ... in` over ranges (`0..N`, `0..=N`) and over
-`String`, which iterates by graphemes binding an element of type `Char`. Over
-any other type, it SHALL reject it, indicating that iteration of user-defined
-types arrives with the Phase 3 traits.
+The checker SHALL accept `for ... in` over ranges whose element type is an
+integer scalar family or `Duration`, using exclusive, inclusive, ascending,
+descending, positive-step, negative-step, and braced dynamic operands. It
+SHALL reject range operands outside the valid element types (for example
+`String`) and unbraced variable/expression bounds. The loop binding SHALL
+have the range element type. Iteration over `String` remains subject to the
+existing `Char` phase diagnostic.
 
 While `Char` is not implemented, iteration of `String` SHALL be deferred
 with the phase diagnostic, without binding an element of another type.
@@ -240,6 +243,16 @@ with the phase diagnostic, without binding an element of another type.
 #### Scenario: Iteration over a range
 - **WHEN** `for i in 0..10 { }` is written
 - **THEN** `i` has type `Int32` within the body
+
+#### Scenario: Iteration over a descending range
+
+- **WHEN** `for i in 2..0 { }` is written
+- **THEN** `i` has integer type and the loop produces `2` and `1`
+
+#### Scenario: Invalid range operand
+
+- **WHEN** a range bound expression evaluates to `String`
+- **THEN** a type diagnostic is emitted requiring an integer
 
 #### Scenario: Iteration over an unsupported type
 - **WHEN** `for x in value { }` is written and `value` is neither a range nor `String`
@@ -418,7 +431,7 @@ User-defined types SHALL implement language operator contracts through reserved 
 - **THEN** the checker rejects reopening the native type
 
 ### Requirement: Value, enum, array, iteration, and generator semantics
-Records SHALL be immutable with structural field equality; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
+Records SHALL be immutable with structural field equality; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; contextual collection literals SHALL infer `Array<T>` by default or select `List<T>` from context; range elements and constructor arguments SHALL expand before element-type unification and allocation; fixed declarations `T[n]` SHALL produce an `Array<T>` with exactly `n` slots; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
 
 #### Scenario: Enum default and explicit mapping
 - **WHEN** `Direction.North` has no mapping and `Code.North` maps to `"N"`
@@ -427,6 +440,16 @@ Records SHALL be immutable with structural field equality; an unmapped tradition
 #### Scenario: Fixed inferred array
 - **WHEN** an array literal contains three elements
 - **THEN** its length is fixed at three and append/remove operations are rejected
+
+#### Scenario: Contextual list typing
+
+- **WHEN** `inmut xs: List<Int32> = [0..3]` is written
+- **THEN** the literal type is `List<Int32>` and its length is `3`
+
+#### Scenario: Fixed array typing
+
+- **WHEN** `inmut xs: Int32[6];` is declared
+- **THEN** `xs` has fixed `Array<Int32>` type and length `6`
 
 #### Scenario: Structural field equality compares every field
 - **WHEN** `==` compares two values of the same `record` type
@@ -1049,4 +1072,3 @@ E>)`, never as `Rejected` for an ordinary `Error(e)` value.
 
 - **WHEN** `mut settlements = await Task.settled(taskList);` is checked
 - **THEN** `settlements` has type `List<TaskSettlement<User>>`
-

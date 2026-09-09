@@ -266,8 +266,9 @@ The lexer SHALL recognize `{ expression }` interpolation within a string
 literal, with balanced braces, producing the literal parts and the embedded
 expressions as distinct elements of the literal.
 
-The same balancing rules SHALL apply to an interpolated range bound such as
-`0..{number}`.
+The same balancing rules SHALL apply to range operands such as
+`0..{number}:2`, retaining the inner expression and its source span without
+treating the braces as a collection block.
 
 #### Scenario: Interpolated string
 
@@ -287,8 +288,19 @@ The same balancing rules SHALL apply to an interpolated range bound such as
 
 #### Scenario: Interpolated range bound
 
-- **WHEN** the source contains `0..{number}.step(1)`
+- **WHEN** the source contains `0..{number}:1`
 - **THEN** the token stream retains the interpolated bound as an expression within the range
+
+### Requirement: Colon range-step delimiter
+
+The lexer SHALL emit the existing `Colon` token for a range step delimiter
+without merging it with `ColonColon` or changing ternary/type-colon
+tokenization.
+
+#### Scenario: Colon step tokenization
+
+- **WHEN** `0..10:-2` is tokenized
+- **THEN** the stream contains `Integer`, `DotDot`, `Integer`, `Colon`, `Minus`, and `Integer` tokens in that order
 
 ### Requirement: Duration literals
 
