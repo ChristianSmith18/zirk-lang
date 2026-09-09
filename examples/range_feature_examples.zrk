@@ -1,0 +1,152 @@
+// Range feature examples
+//
+// This file documents the proposed range and collection-extension behavior.
+// The colon step syntax and collection literals shown here are normative for
+// the proposed feature; the current compiler may reject them until the change
+// is implemented.
+
+fn show_basic_ranges(): Void {
+    stdout.println("exclusive ascending");
+    for value in 0..3 {
+        stdout.println(value);
+    }
+    // Expected: 0, 1, 2
+
+    stdout.println("inclusive ascending");
+    for value in 0..=3 {
+        stdout.println(value);
+    }
+    // Expected: 0, 1, 2, 3
+
+    stdout.println("ascending step");
+    for value in 0..10:2 {
+        stdout.println(value);
+    }
+    // Expected: 0, 2, 4, 6, 8
+
+    stdout.println("descending inferred step");
+    for value in 3..0 {
+        stdout.println(value);
+    }
+    // Expected: 3, 2, 1
+
+    stdout.println("descending negative step");
+    for value in 10..0:-2 {
+        stdout.println(value);
+    }
+    // Expected: 10, 8, 6, 4, 2
+
+    stdout.println("inclusive descending negative step");
+    for value in 6..=0:-2 {
+        stdout.println(value);
+    }
+    // Expected: 6, 4, 2, 0
+}
+
+fn show_interpolated_bounds(): Void {
+    inmut limit: Int32 = 4;
+    inmut offset: Int32 = 1;
+
+    stdout.println("variable bound");
+    for value in 0..{limit} {
+        stdout.println(value);
+    }
+    // Expected: 0, 1, 2, 3
+
+    stdout.println("expression bounds and step");
+    for value in {offset}..{limit + offset}:2 {
+        stdout.println(value);
+    }
+    // Expected: 1, 3
+}
+
+fn show_array_literals(): Void {
+    // An unannotated collection literal defaults to Array.
+    inmut numbers = [0..5];
+    stdout.println("default array length");
+    stdout.println(numbers.length);
+    // Expected: 5
+    // Expected contents: [0, 1, 2, 3, 4]
+
+    // `..=` includes the final bound.
+    inmut inclusive_numbers = [0..=5];
+    stdout.println("inclusive array length");
+    stdout.println(inclusive_numbers.length);
+    // Expected: 6
+    // Expected contents: [0, 1, 2, 3, 4, 5]
+
+    // A negative step creates a descending array.
+    inmut descending = [5..0:-1];
+    stdout.println("descending array first and last");
+    stdout.println(descending[0]);
+    stdout.println(descending[4]);
+    // Expected: 5, then 1
+}
+
+fn show_list_literals(): Void {
+    // The destination type selects List instead of the default Array.
+    inmut values: List<Int32> = [0..5];
+    stdout.println("list length");
+    stdout.println(values.length);
+    // Expected: 5
+    // Expected contents: [0, 1, 2, 3, 4]
+
+    inmut stepped: List<Int32> = [10..0:-3];
+    stdout.println("stepped list");
+    for value in stepped {
+        stdout.println(value);
+    }
+    // Expected: 10, 7, 4, 1
+}
+
+fn show_constructor_expansion(): Void {
+    // A range argument expands into individual constructor arguments.
+    inmut array_values: Array<Int32> = Array(0..2);
+    stdout.println("Array(range) length");
+    stdout.println(array_values.length);
+    // Equivalent to Array(0, 1); Expected length: 2
+
+    inmut list_values: List<Int32> = List(0..=2);
+    stdout.println("List(range) length");
+    stdout.println(list_values.length);
+    // Equivalent to List(0, 1, 2); Expected length: 3
+
+    inmut mixed_array: Array<Int32> = Array(99, 0..3, 100);
+    stdout.println("mixed Array expansion");
+    for value in mixed_array {
+        stdout.println(value);
+    }
+    // Expected: 99, 0, 1, 2, 100
+
+    inmut mixed_list: List<Int32> = List(-1, 3..6, 6);
+    stdout.println("mixed List expansion");
+    for value in mixed_list {
+        stdout.println(value);
+    }
+    // Expected: -1, 3, 4, 5, 6
+}
+
+fn show_fixed_array_storage(): Void {
+    // A fixed array declaration reserves six element slots.
+    // It has no initializer and therefore has length 6.
+    inmut fixed: Int32[6];
+    stdout.println("fixed array length");
+    stdout.println(fixed.length);
+    // Expected: 6
+
+    // Assigning a slot does not resize the array.
+    fixed[0] = 10;
+    fixed[5] = 50;
+    stdout.println(fixed[0]);
+    stdout.println(fixed[5]);
+    // Expected: 10, then 50
+}
+
+fn main(): Void {
+    show_basic_ranges();
+    show_interpolated_bounds();
+    show_array_literals();
+    show_list_literals();
+    show_constructor_expansion();
+    show_fixed_array_storage();
+}

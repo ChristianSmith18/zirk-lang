@@ -1,0 +1,134 @@
+// Spread and rest operator examples
+//
+// This file is normative for the proposed spread/rest feature. The current
+// compiler may reject spread expressions until the proposal is implemented.
+
+fn sum_values(...values: Int32): Int32 {
+    mut total: Int32 = 0;
+    for value in values {
+        total = total + value;
+    }
+    return total;
+}
+
+fn print_values(...values: Int32): Void {
+    for value in values {
+        stdout.println(value);
+    }
+}
+
+fn show_rest_parameters(): Void {
+    // Rest parameters collect all remaining positional arguments.
+    stdout.println(sum_values(1, 2, 3));
+    // Expected: 6
+
+    stdout.println(sum_values());
+    // Expected: 0 (the rest sequence is empty)
+
+    print_values(4, 5, 6);
+    // Expected output: 4, then 5, then 6
+}
+
+fn show_spread_calls(): Void {
+    inmut values: List<Int32> = [1, 2, 3];
+
+    // Spread expands one Iterable<T> into positional call arguments.
+    stdout.println(sum_values(...values));
+    // Equivalent to sum_values(1, 2, 3); Expected: 6
+
+    inmut first: Int32 = 10;
+    inmut last: Int32 = 20;
+    inmut middle: List<Int32> = [12, 14, 16, 18];
+    stdout.println(sum_values(first, ...middle, last));
+    // Equivalent to sum_values(10, 12, 14, 16, 18, 20); Expected: 90
+}
+
+fn show_spread_collections(): Void {
+    inmut values: List<Int32> = [1, 2, 3];
+
+    // An unannotated literal defaults to Array and spreads the iterable.
+    inmut array_values = [0, ...values, 4];
+    stdout.println(array_values.length);
+    // Expected: 5
+    // Expected contents: [0, 1, 2, 3, 4]
+
+    // The destination type selects List<T> for the same syntax.
+    inmut list_values: List<Int32> = [0, ...values, 4];
+    stdout.println(list_values.length);
+    // Expected: 5
+    // Expected contents: [0, 1, 2, 3, 4]
+
+    inmut copied: Array<Int32> = Array(...values);
+    inmut linked: List<Int32> = List(...values);
+    stdout.println(copied.length);
+    stdout.println(linked.length);
+    // Expected: 3, then 3
+}
+
+fn show_range_and_spread(): Void {
+    // Range expansion and explicit spread are related but distinct:
+    // `Array(0..3)` expands a Range directly; `...(0..3)` is explicit spread.
+    inmut direct: Array<Int32> = Array(0..3);
+    inmut explicit: Array<Int32> = Array(...(0..3));
+
+    stdout.println(direct.length);
+    stdout.println(explicit.length);
+    // Expected: 3, then 3
+    // Both arrays contain [0, 1, 2].
+}
+
+fn show_rest_destructuring(): Void {
+    inmut values: List<Int32> = [10, 20, 30, 40];
+
+    // Rest destructuring binds the first value and collects the remainder.
+    inmut [first, ...remaining] = values;
+    stdout.println(first);
+    // Expected: 10
+    stdout.println(remaining.length);
+    // Expected: 3
+    // Expected remaining contents: [20, 30, 40]
+}
+
+record UserProfile {
+    id: Int32;
+    name: String;
+    active: Boolean;
+}
+
+fn show_object_spread_and_rest(): Void {
+    inmut profile: UserProfile = UserProfile(
+        id: 7,
+        name: "Ada",
+        active: true,
+    );
+
+    // Object/record spread copies named fields and explicit fields override
+    // earlier values. The expected record type supplies the object shape.
+    inmut renamed: UserProfile = { ...profile, name: "Grace" };
+    stdout.println(renamed.id);
+    stdout.println(renamed.name);
+    stdout.println(renamed.active);
+    // Expected: 7, then "Grace", then true
+
+    // Object rest binds selected fields and collects the remaining fields.
+    inmut { id, ...details } = profile;
+    stdout.println(id);
+    stdout.println(details.name);
+    stdout.println(details.active);
+    // Expected: 7, then "Ada", then true
+
+    inmut { id: profile_id, name: profile_name, ...flags } = profile;
+    stdout.println(profile_id);
+    stdout.println(profile_name);
+    stdout.println(flags.active);
+    // Expected: 7, then "Ada", then true
+}
+
+fn main(): Void {
+    show_rest_parameters();
+    show_spread_calls();
+    show_spread_collections();
+    show_range_and_spread();
+    show_rest_destructuring();
+    show_object_spread_and_rest();
+}
