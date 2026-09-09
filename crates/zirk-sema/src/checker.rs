@@ -8059,23 +8059,37 @@ impl<'a> Checker<'a> {
                     if element.is_unknown() {
                         return;
                     }
-                    // `s[i] = c` (roadmap Phase 7, `zirk-standard-library`'s
-                    // "String write by index"): rebinding a `String` slot is
-                    // a write, so it is permitted only when the receiver is
-                    // a writable variable — a `String` computed on the spot
-                    // has nowhere for the result to live.
+                    // `s[i] = c` mutates String's shared referent rather than
+                    // rebinding the receiver slot. `inmut` therefore permits
+                    // it; only a strict root rules out the reachable write.
                     if !writable && receiver_ty.base == Base::String {
-                        let Expr::Path(name) = &*index.receiver else {
+                        if let Some((root_name, Mutability::Strict)) =
+                            self.root_binding_mutability(&index.receiver)
+                        {
+                            self.error(
+                                codes::STRICT_ALIAS_VIOLATION,
+                                index.span,
+                                format!("cannot write through `{root_name}`"),
+                                format!(
+                                    "`{root_name}` is `inmut::strict`; an indexed String write mutates the referent it protects"
+                                ),
+                                Some(format!(
+                                    "declare `{root_name}` with `mut` if its String contents must change"
+                                )),
+                            );
+                            return;
+                        }
+                        if !matches!(
+                            &*index.receiver,
+                            Expr::Path(_) | Expr::Field(_) | Expr::This(_)
+                        ) {
                             self.error(
                                 codes::INDEX_NOT_WRITABLE,
                                 index.span,
-                                "cannot write through a `String` that is not a variable",
-                                "`s[i] = c` rebinds the variable `s` names, so the receiver has to be one",
-                                Some("assign the string to a `mut` variable first".into()),
+                                "cannot write through a temporary `String`",
+                                "an indexed write requires a stable String place so its referent remains observable",
+                                Some("assign the string to a local or a field first".into()),
                             );
-                            return;
-                        };
-                        if self.require_writable(name).is_none() {
                             return;
                         }
                         // A `Char` or a single-grapheme `String` is what the
@@ -8091,8 +8105,6 @@ impl<'a> Checker<'a> {
                                 None,
                             );
                         }
-                        self.scopes.mark_initialized(&name.name);
-                        self.scopes.mark_moved(&name.name, false);
                         return;
                     }
                     if !writable {
@@ -11228,8 +11240,9 @@ impl<'a> Checker<'a> {
 
     /// The extensible receiver-type-keyed dispatch table `receiver[index]`
     /// consults (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —
-    /// today exactly two entries: `NativeSlice<T>` (read-only element `T`)
-    /// and `NativeSliceMut<T>` (read/write element `T`). Returns the
+    /// today the built-in `String` (read-only extraction, referent writes),
+    /// `NativeSlice<T>` (read-only element `T`), `NativeSliceMut<T>`
+    /// (read/write element `T`), `Array<T>`, and `List<T>`. Returns the
     /// element type and whether a write through it is permitted; `None`
     /// means this receiver type has no indexing entry at all.
     ///

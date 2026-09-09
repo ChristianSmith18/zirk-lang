@@ -1,0 +1,8 @@
+fn main(): Void {
+    mut text: String = "Hello, World!";
+    mut alias: String = text;
+    text[0] = "😃";
+
+    stdout.println(text);
+    stdout.println(alias);
+}

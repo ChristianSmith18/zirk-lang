@@ -106,13 +106,18 @@ pub static mut zirk_rt_weak_cell_ever_allocated: u8 = 0;
 
 /// Descriptor for collector-managed `String`/`Char` objects.
 ///
-/// The payload is a `ZirkString` (private to `crates/zirk-runtime/src/string.rs`);
-/// `gc_field_count` is zero because the bytes following the header are owned
-/// data, not GC references. This lets the collector reclaim string/char
-/// objects exactly as it does ordinary class objects.
+/// The payload is a `ZirkString` (private to `crates/zirk-runtime/src/string.rs`).
+/// Its optional backing handle is a strong GC edge after an indexed mutation;
+/// inline bytes remain ordinary owned data rather than GC references.
 #[unsafe(no_mangle)]
 #[allow(non_upper_case_globals)]
-pub static zirk_rt_string_descriptor: [usize; 4] = [0, 0, 0, 0];
+pub static zirk_rt_string_descriptor: [usize; 5] = [
+    0,
+    0,
+    0,
+    1,
+    HEADER_BYTES + crate::string::ZirkString::BACKING_OFFSET,
+];
 
 #[inline]
 fn weak_cell_descriptor() -> *mut c_void {

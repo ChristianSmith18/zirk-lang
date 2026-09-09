@@ -5467,6 +5467,30 @@ fn valid_string_index_write() {
     );
 }
 
+#[test]
+fn valid_string_index_write_through_inmut_referent() {
+    accepted(
+        "fn main(): Void {
+             inmut s: String = \"hola\";
+             s[0] = 'x';
+         }",
+    );
+}
+
+#[test]
+fn invalid_string_index_write_through_strict_referent() {
+    let output = rejected(
+        "fn main(): Void {
+             inmut::strict s: String = \"hola\";
+             s[0] = 'x';
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
 // --- `Map<K, V>` / `Set<T>` (roadmap Phase 7, `map-set-collections`) ---------
 
 #[test]

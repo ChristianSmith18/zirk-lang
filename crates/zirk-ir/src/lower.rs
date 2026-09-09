@@ -542,11 +542,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::String, IrType::String],
             return_type: IrType::Int(IntWidth::I64),
         },
-        // `s[i] = c` (roadmap Phase 7, "String write by index"):
-        // (handle, byte offset, grapheme byte length, replacement) → the
-        // replacement `String`. The third parameter is `Char`/`String`'s
-        // shared representation (ADR-014); the extern's `String` spelling is
-        // the canonical one.
+        // `s[i] = c` mutates the stable String handle's backing referent. The
+        // replacement shares `Char`/`String`'s representation (ADR-014).
         ExternFn {
             name: "zirk_str_set".to_string(),
             params: vec![
@@ -555,7 +552,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 IrType::Int(IntWidth::I64),
                 IrType::String,
             ],
-            return_type: IrType::String,
+            return_type: IrType::Void,
+        },
+        // Snapshots a stable String handle's backing edge before an indexed
+        // write in an active unsafe transaction.
+        ExternFn {
+            name: "zirk_rt_journal_record_string_backing".to_string(),
+            params: vec![IrType::JournalHandle, IrType::String],
+            return_type: IrType::Void,
         },
         // `s[start:end:step]` (roadmap Phase 7, `String` slicing):
         // `i64::MIN` marks a part the source left out.
@@ -4931,12 +4935,10 @@ impl<'a> FunctionLowering<'a> {
             // `value` is spilled too, since the bounds check just below
             // opens a split of its own regardless of what `stmt.value` did.
             ast::AssignTarget::Index(index_expr) => {
-                // `s[i] = c` (roadmap Phase 7, "String write by index"):
-                // a `String` cannot be mutated in place — its bytes are
-                // inline and a replacement grapheme may be a different
-                // length — so the write lowers to a fresh `String` stored
-                // back into the variable the checker required the receiver
-                // to be.
+                // Indexed String writes mutate the stable handle's backing
+                // referent. The runtime can replace the backing allocation
+                // when a grapheme changes byte length without rebinding a
+                // single local slot and losing aliases.
                 if self.type_of(&index_expr.receiver, index_expr.receiver.span()) == IrType::String
                 {
                     // `Char` and `String` share one runtime representation
@@ -5002,26 +5004,21 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// `s[i] = c` where `s` is a `String` variable (roadmap Phase 7): builds
-    /// the replacement `String` through `zirk_str_set` — bounds-checked the
-    /// same way a `s[i]` read is (`StringGraphemeOffset` answering `-1` when
-    /// the index is out of range throws `IndexOutOfBoundsError`) — and stores
-    /// it back into the variable's slot. `value` is an already-lowered
-    /// `Char`/`String` handle.
+    /// `s[i] = c` (roadmap Phase 7): mutates the receiver's stable String
+    /// handle through `zirk_str_set`. Bounds are checked through the same
+    /// grapheme path as reads; no local slot is replaced, so every complete
+    /// alias observes the new text. `value` is an already-lowered `Char` or
+    /// `String` handle.
     fn lower_string_index_write(
         &mut self,
         index_expr: &ast::IndexExpr,
         value: Operand,
         span: Span,
     ) {
-        let ast::Expr::Path(name) = &*index_expr.receiver else {
-            unreachable!("the checker only writes through a `String` variable")
-        };
-        let slot = self.lookup_slot(&name.name);
         let value_ty = self.type_of_operand(value);
         let value_slot = self.spill(value, value_ty, span);
 
-        let string = self.emit(InstKind::Load(slot), IrType::String, index_expr.span);
+        let string = self.lower_expr(&index_expr.receiver);
         let string_slot = self.spill(string, IrType::String, span);
         let index = self.lower_expr_as(&index_expr.index, IrType::Int(IntWidth::I64));
         let index_slot = self.spill(index, IrType::Int(IntWidth::I64), span);
@@ -5083,16 +5080,14 @@ impl<'a> FunctionLowering<'a> {
             span,
         );
         let value = self.emit(InstKind::Load(value_slot), value_ty, span);
-        let replaced = self.emit(
+        self.journal_string_backing(string, span);
+        self.emit_effect(
             InstKind::Call {
                 callee: "zirk_str_set".to_string(),
                 args: vec![string, offset, length, value],
             },
-            IrType::String,
             span,
         );
-        self.journal_writes_to_slot(slot, span);
-        self.emit_effect(InstKind::Store(slot, replaced), span);
     }
 
     /// Lowers `if`/`else` into blocks with a conditional branch.
@@ -9993,6 +9988,28 @@ impl<'a> FunctionLowering<'a> {
                     journal,
                     object,
                     index,
+                },
+                span,
+            );
+        }
+    }
+
+    /// Records the stable String backing edge in each active unsafe journal.
+    /// The write is heap state, so it is always journaled while a frame is
+    /// open; rollback restores what every alias observes.
+    fn journal_string_backing(&mut self, string: Operand, span: Span) {
+        let targets: Vec<SlotId> = self
+            .unsafe_stack
+            .iter()
+            .filter(|frame| !frame.committed)
+            .map(|frame| frame.journal_slot)
+            .collect();
+        for journal_slot in targets {
+            let journal = self.emit(InstKind::Load(journal_slot), IrType::JournalHandle, span);
+            self.emit_effect(
+                InstKind::Call {
+                    callee: "zirk_rt_journal_record_string_backing".to_string(),
+                    args: vec![journal, string],
                 },
                 span,
             );

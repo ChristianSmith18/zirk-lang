@@ -72,6 +72,26 @@ pub unsafe extern "C" fn zirk_rt_journal_record(
     journal.records.push(Record { address, before });
 }
 
+/// Snapshots a stable String handle's backing-reference field before indexed
+/// mutation. Restoring this one pointer makes every alias observe the text
+/// that existed at the enclosing `unsafe` block's entry.
+///
+/// # Safety
+///
+/// `journal` must be live and `string` must be a live runtime String handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_journal_record_string_backing(
+    journal: *mut c_void,
+    string: *mut c_void,
+) {
+    let address = unsafe {
+        crate::string::payload_ptr(string)
+            .cast::<u8>()
+            .add(crate::string::ZirkString::BACKING_OFFSET)
+    };
+    unsafe { zirk_rt_journal_record(journal, address, std::mem::size_of::<*mut c_void>()) };
+}
+
 /// Durably commits `journal`: discards the undo log without restoring, and
 /// frees the journal itself (design D1) — the success path.
 ///
@@ -185,5 +205,24 @@ mod tests {
             let journal = zirk_rt_journal_begin();
             zirk_rt_journal_rollback(journal);
         }
+    }
+
+    #[test]
+    fn string_backing_record_restores_a_shared_string_on_rollback() {
+        let text = crate::string::alloc_owned("abc");
+        let replacement = crate::string::alloc_owned("X");
+        unsafe {
+            let journal = zirk_rt_journal_begin();
+            zirk_rt_journal_record_string_backing(journal, text);
+            let offset = crate::string::zirk_str_grapheme_offset(text, 1);
+            let len = crate::string::zirk_str_grapheme_len_at(text, offset);
+            crate::string::zirk_str_set(text, offset, len, replacement);
+            assert_eq!(crate::string::borrow(text).map(|s| s.as_str()), Some("aXc"));
+            zirk_rt_journal_rollback(journal);
+        }
+        assert_eq!(
+            unsafe { crate::string::borrow(text) }.map(|s| unsafe { s.as_str() }),
+            Some("abc")
+        );
     }
 }

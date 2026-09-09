@@ -277,7 +277,7 @@ Lowering SHALL desugar a literal with interpolated expressions into a sequence o
 - **THEN** the resulting IR calls `to_string()` on `name` and concatenates it with the literal text
 
 ### Requirement: String indexing lowers to a grapheme-offset instruction
-A `String[index]` read expression SHALL lower to an instruction that computes the byte offset of the `index`-th grapheme and then extracts the grapheme.
+A `String[index]` read expression SHALL lower to an instruction that computes the byte offset of the `index`-th grapheme and then extracts the grapheme. An indexed String assignment SHALL preserve that bounds-check path and lower to a runtime effect on the receiver's stable String handle, not to an unsupported write or a replacement stored only in one local slot. When the assignment occurs inside an active unsafe transaction, lowering SHALL journal the receiver's backing-reference update before the mutation.
 
 #### Scenario: Valid string index
 - **WHEN** the program contains `let c: Char = s[i]` with `s` of type `String`
@@ -291,9 +291,13 @@ A `String[index]` read expression SHALL lower to an instruction that computes th
 - **WHEN** the program contains `s[i]` with `i` of a signed type and `i < 0`
 - **THEN** the compiler reports a negative-index diagnostic before lowering
 
-#### Scenario: String is not writable through index
-- **WHEN** the program contains `s[i] = c`
-- **THEN** the compiler reports `INDEXING_NOT_WRITABLE` or equivalent
+#### Scenario: Indexed assignment mutates the String referent
+- **WHEN** the program contains a checker-approved `s[i] = c`
+- **THEN** the IR calls the String mutation runtime entry point without storing a replacement handle back into only `s`'s local slot
+
+#### Scenario: Unsafe indexed assignment is journaled
+- **WHEN** a checker-approved `s[i] = c` occurs in an active uncommitted `unsafe` block
+- **THEN** the IR records the String backing-reference state before invoking the mutation entry point
 
 ### Requirement: IR supports dependent references and pinning
 The language SHALL lower `Dependent<T>` construction to `DependentFrom` and `Pin<T>` construction to `PinObject`.
@@ -528,4 +532,3 @@ outcome. A value crossing into or out of a channel SHALL be lowered under the
 
 - **WHEN** `channel.try_receive()` is lowered
 - **THEN** the IR contains a plain runtime call whose result is a typed outcome and no suspend instruction
-

@@ -2500,6 +2500,51 @@ fn string_index_lowers_to_grapheme_instructions() {
     );
 }
 
+#[test]
+fn string_index_write_calls_mutation_without_rebinding_the_slot() {
+    let source = "fn main(): Void {
+        mut s: String = \"abc\";
+        mut alias: String = s;
+        s[1] = 'X';
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let calls = instructions(main);
+    assert!(
+        calls.iter().any(|kind| matches!(
+            kind,
+            InstKind::Call { callee, .. } if callee == "zirk_str_set"
+        )),
+        "indexed String writes must call zirk_str_set"
+    );
+    assert!(
+        module.externs.iter().any(|external| {
+            external.name == "zirk_str_set" && external.return_type == IrType::Void
+        }),
+        "zirk_str_set must be an effect-only runtime entry point"
+    );
+}
+
+#[test]
+fn unsafe_string_index_write_records_the_backing_edge() {
+    let source = "fn main(): Void {
+        mut s: String = \"abc\";
+        unsafe {
+            s[1] = 'X';
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let calls = instructions(main);
+    assert!(
+        calls.iter().any(|kind| matches!(
+            kind,
+            InstKind::Call { callee, .. } if callee == "zirk_rt_journal_record_string_backing"
+        )),
+        "unsafe String writes must journal the backing edge"
+    );
+}
+
 /// `view[i]` (read) lowers to a bounds check (a comparison against the
 /// carried length) followed by the actual load — design D2/D3/D5.
 #[test]

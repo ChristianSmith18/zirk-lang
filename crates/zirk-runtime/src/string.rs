@@ -38,9 +38,30 @@ pub struct ZirkString {
     /// intention rather than a state. It arrives with the phase that can read
     /// text the compiler did not normalize.
     is_ascii: bool,
+    /// A replacement backing object for a stable String handle. The outer
+    /// handle keeps its observable identity when indexed mutation needs a
+    /// different byte length; the collector traces this strong edge through
+    /// `zirk_rt_string_descriptor`.
+    backing: *mut c_void,
 }
 
 impl ZirkString {
+    pub(crate) const BACKING_OFFSET: usize = std::mem::offset_of!(ZirkString, backing);
+
+    /// The object whose inline bytes currently represent this String.
+    ///
+    /// A backing object is created only by indexed mutation and is always a
+    /// fresh leaf String, so one redirection is sufficient. Keeping the
+    /// indirection bounded also prevents a sequence of writes from turning
+    /// ordinary reads into an ever-growing traversal.
+    unsafe fn active(&self) -> &ZirkString {
+        if self.backing.is_null() {
+            self
+        } else {
+            unsafe { &*payload_ptr(self.backing) }
+        }
+    }
+
     /// The contents as a string slice.
     ///
     /// # Safety
@@ -48,14 +69,19 @@ impl ZirkString {
     /// The caller guarantees the handle came from this runtime and that its
     /// bytes are still alive.
     pub(crate) unsafe fn as_str(&self) -> &str {
-        if self.bytes.is_null() || self.len == 0 {
+        let active = unsafe { self.active() };
+        if active.bytes.is_null() || active.len == 0 {
             return "";
         }
-        let slice = unsafe { std::slice::from_raw_parts(self.bytes, self.len) };
+        let slice = unsafe { std::slice::from_raw_parts(active.bytes, active.len) };
         // The compiler only produces literals that were valid UTF-8 in the
         // source, so the lossy path is unreachable in practice; it is there so
         // a corrupt handle cannot cause undefined behaviour.
         std::str::from_utf8(slice).unwrap_or("")
+    }
+
+    unsafe fn is_ascii(&self) -> bool {
+        unsafe { self.active() }.is_ascii
     }
 }
 
@@ -90,6 +116,7 @@ unsafe fn alloc_string(len: usize) -> *mut c_void {
         } else {
             data_ptr(object) as *const u8
         };
+        (*payload).backing = std::ptr::null_mut();
         // `is_ascii` is left for the caller to set after writing the bytes.
         object
     }
@@ -128,6 +155,7 @@ unsafe fn alloc_literal(bytes: *const u8, len: usize) -> *mut c_void {
         (*payload).len = len;
         (*payload).bytes = if len == 0 { std::ptr::null() } else { bytes };
         (*payload).is_ascii = is_ascii;
+        (*payload).backing = std::ptr::null_mut();
         object
     }
 }
@@ -347,7 +375,7 @@ pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *
         for i in 0..(count as usize) {
             std::ptr::copy_nonoverlapping(text.as_ptr(), data.add(i * text.len()), text.len());
         }
-        (*payload).is_ascii = string.is_ascii;
+        (*payload).is_ascii = string.is_ascii();
     }
     object
 }
@@ -408,7 +436,7 @@ pub unsafe extern "C" fn zirk_str_eq(left: *const c_void, right: *const c_void) 
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_is_ascii(handle: *const c_void) -> bool {
-    unsafe { borrow(handle) }.is_none_or(|string| string.is_ascii)
+    unsafe { borrow(handle) }.is_none_or(|string| unsafe { string.is_ascii() })
 }
 
 /// The byte offset of the `index`-th Unicode extended grapheme, or `-1`
@@ -614,13 +642,11 @@ pub unsafe extern "C" fn zirk_str_substring(
 /// range `[offset, offset + len)` of `handle` with `ch` (roadmap Phase 7,
 /// `s[i] = c` — "String write by index").
 ///
-/// `String` is not mutated in place: its bytes are stored inline in the
-/// object and a replacement grapheme may be a different length, so a fresh
-/// handle is produced and generated code stores it back into the variable
-/// slot. There is no grapheme cache to invalidate yet — `ZirkString` carries
-/// only `bytes`/`len`/`is_ascii`, and the `is_ascii` flag is recomputed on
-/// the replacement — so recomputing here *is* the invalidation the spec
-/// requires.
+/// The stable handle is mutated in place even though its inline bytes cannot
+/// grow: a fresh leaf String owns the replacement text and becomes the
+/// handle's collector-traced backing object. Complete aliases therefore keep
+/// their identity and observe the new contents. There is no grapheme cache
+/// yet, so switching backing objects is the required invalidation.
 ///
 /// A `ch` that is more than one grapheme replaces the single grapheme at
 /// the range with the whole text; the result is still a valid `String`.
@@ -637,7 +663,7 @@ pub unsafe extern "C" fn zirk_str_set(
     offset: i64,
     len: i64,
     ch: *const c_void,
-) -> *mut c_void {
+) {
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
@@ -652,14 +678,16 @@ pub unsafe extern "C" fn zirk_str_set(
         || !text.is_char_boundary(start)
         || !text.is_char_boundary(end)
     {
-        return alloc_owned(text);
+        return;
     }
 
     let mut out = String::with_capacity(text.len() - (end - start) + replacement.len());
     out.push_str(&text[..start]);
     out.push_str(replacement);
     out.push_str(&text[end..]);
-    alloc_owned(&out)
+    let replacement = alloc_owned(&out);
+    let payload = unsafe { payload_ptr(handle.cast_mut()) };
+    unsafe { (*payload).backing = replacement };
 }
 
 /// `s[start:end:step]` over graphemes (roadmap Phase 7, `String` slicing).
@@ -1179,6 +1207,21 @@ mod tests {
         }
         assert_eq!(read(handle), "12345");
         assert_eq!(noise.len(), 1000);
+    }
+
+    #[test]
+    fn indexed_write_keeps_the_handle_and_updates_every_alias() {
+        let text = build("Hello, World!");
+        let alias = text;
+        let replacement = build("😃");
+        let offset = unsafe { zirk_str_grapheme_offset(text, 0) };
+        let len = unsafe { zirk_str_grapheme_len_at(text, offset) };
+
+        unsafe { zirk_str_set(text, offset, len, replacement) };
+
+        assert_eq!(read(text), "😃ello, World!");
+        assert_eq!(read(alias), "😃ello, World!");
+        assert!(!unsafe { zirk_str_is_ascii(text) });
     }
 
     #[test]
