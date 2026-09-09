@@ -184,9 +184,9 @@ keep receiving the diagnostic.
 - **WHEN** `task`, `await`, `task scope`, `select`, or `cancellation shield` is parsed
 - **THEN** the parser produces the corresponding node and emits no phase diagnostic
 
-#### Scenario: `init.zrk` out of scope
+#### Scenario: `.zkinit` out of scope
 
-- **WHEN** an `init.zrk` file is found
+- **WHEN** a `.zkinit` file is found
 - **THEN** the diagnostic indicates that declarative project configuration arrives in a later phase
 
 ### Requirement: Location on every node
@@ -243,28 +243,19 @@ Parentheses around the header SHALL be optional in all these forms. The canonica
 
 ### Requirement: Optional, named, variadic parameters and default values
 
-The parser SHALL recognize parameters with a `?` sign for optional ones, default values after `=`, and a variadic parameter prefixed with `...`, per `ZIRK_LANGUAGE_SPEC.md` section 6.
+The parser SHALL recognize optional parameters, default values, and a final variadic parameter prefixed with `...`. It SHALL additionally recognize `...expression` as an explicit spread argument in calls and `...expression` as a collection-literal element, while keeping declaration and expression contexts distinct.
 
-#### Scenario: Optional parameter
-
-- **WHEN** `fn greet(name?: String): Void { }` is parsed
-- **THEN** a parameter marked as optional is produced
-
-#### Scenario: Default value
-
-- **WHEN** `fn greet(name: String = "world"): Void { }` is parsed
-- **THEN** a parameter with a default-value expression is produced
-
-#### Scenario: Variadic parameter
-
-- **WHEN** `fn sum(...values: Int32): Int32 { }` is parsed
+#### Scenario: Variadic declaration
+- **WHEN** `fn print(...values: Int32): Void { }` is parsed
 - **THEN** a variadic parameter is produced
-- **AND** a variadic parameter that is not the last one produces a diagnostic
 
-#### Scenario: Named arguments in the call
+#### Scenario: Spread call argument
+- **WHEN** `print(...values)` is parsed
+- **THEN** one spread argument node is produced
 
-- **WHEN** `greet(name: "Ana")` is parsed
-- **THEN** a call with one named argument is produced
+#### Scenario: Rest destructuring pattern
+- **WHEN** `[first, ...remaining]` is parsed in a destructuring declaration
+- **THEN** a final rest binding is produced
 
 ### Requirement: Closures and lambdas
 
@@ -383,10 +374,10 @@ The parser SHALL recognize `share` as a declaration modifier, `import { names } 
 - **WHEN** `import { Role -> DomainRole } from "./domain/user";` is parsed
 - **THEN** the imported name is exposed under the alias
 
-#### Scenario: `init.zrk` is not imported from code
+#### Scenario: `.zkinit` is not imported from code
 
 - **WHEN** an `import` of project configuration is found
-- **THEN** the `init.zrk` out-of-scope diagnostic is emitted
+- **THEN** the `.zkinit` out-of-scope diagnostic is emitted
 
 ### Requirement: Complete range and slice forms
 
@@ -628,7 +619,7 @@ The manifest grammar SHALL accept library `requires`, application `permissions`,
 
 #### Scenario: Build-only filesystem grant
 
-- **WHEN** `init.zrk` grants a filesystem read operation with `during: build`
+- **WHEN** `.zkinit` grants a filesystem read operation with `during: build`
 - **THEN** the manifest AST preserves the operation, scope, and phase separately
 
 ### Requirement: Named argument shorthand is explicit
@@ -1124,3 +1115,16 @@ block is a bounded non-interruptible region. `shield` SHALL be contextual after
 
 - **WHEN** source contains `cancellation shield { await persist_commit(); }`
 - **THEN** the parser produces a cancellation-shield node wrapping the block
+
+### Requirement: Object spread and rest grammar
+
+The parser SHALL accept field-based object/record spread in a record-typed expression context (`{ ...source, field: value }`) and a final object rest binding in record destructuring (`{ field, ...rest }`). It SHALL distinguish these forms from statement blocks and reject more than one rest binding or any field after the rest binding.
+
+#### Scenario: Object spread expression
+- **WHEN** `{ ...profile, active: false }` appears where a `UserProfile` is expected
+- **THEN** the parser produces an object-spread expression with one override field
+
+#### Scenario: Object rest pattern
+- **WHEN** `{ id, ...details }` appears in a destructuring declaration
+- **THEN** the parser produces a record pattern with a final rest binding
+

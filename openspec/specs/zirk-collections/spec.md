@@ -73,39 +73,23 @@ Iteration SHALL use `Iteration<T>.Item/Done`, yield independent copies, and make
 
 ### Requirement: Collection literal construction
 
-`Array<T>` SHALL be constructible from an element listing
-(`Array(e0, e1, …)` or `[e0, e1, …]` with an `Array<T>` context), and
-`List<T>` from `List(e0, e1, …)` or `[e0, e1, …]` with a `List<T>` context.
-Range elements SHALL expand in place before allocation. Explicit `...expr`
-spread elements SHALL expand any `Iterable<T>` in place. An unannotated
-`[...]` literal SHALL default to `Array<T>`; all forms SHALL infer or check
-`T` against the destination. Ordered collection patterns MAY contain one final
-`...name` rest binding that collects the remaining elements.
+`Array<T>` and `List<T>` literals and constructors SHALL accept scalar elements and explicit spread elements/arguments. Each spread source SHALL implement `Iterable<T>`, SHALL be consumed once, and SHALL expand in place before final allocation. Unannotated literals retain their existing default collection type; destination context selects `List<T>` when requested.
 
-#### Scenario: Pre-populated list
+#### Scenario: Array constructor spread
+- **WHEN** `Array(...values)` is constructed from `[1, 2, 3]`
+- **THEN** the array contains three copied elements in order
 
-- **WHEN** `mut l: List<Int32> = List(10, 20)` is constructed
-- **THEN** `l.length` is `2` and `l[0]`/`l[1]` read `10`/`20`
+#### Scenario: List literal spread
+- **WHEN** `inmut values: List<Int32> = [...source]` is constructed
+- **THEN** the list contains every source element and remains independently resizable
 
-#### Scenario: Array literal in context
+### Requirement: Record field spread is distinct from collection spread
 
-- **WHEN** `inmut a: Array<Int32> = [1, 2, 3]` is constructed
-- **THEN** `a.length` is `3`
+Record/object spread SHALL copy named fields and SHALL preserve nominal record shape. It SHALL not be implemented by iterating a record as `Iterable<T>`, and collection spread SHALL not copy named fields.
 
-#### Scenario: Array literal with a range
-
-- **WHEN** `inmut a: Array<Int32> = [0..3]` is constructed
-- **THEN** `a` contains `0`, `1`, and `2`
-
-#### Scenario: List literal with a range
-
-- **WHEN** `inmut l: List<Int32> = [0..3]` is constructed
-- **THEN** `l` contains `0`, `1`, and `2` and remains resizable
-
-#### Scenario: Mixed values and ranges expand in place
-
-- **WHEN** `Array(9, 0..3, 10)` is constructed
-- **THEN** the result contains `[9, 0, 1, 2, 10]`
+#### Scenario: Field spread preserves record shape
+- **WHEN** a `UserProfile` is constructed with `{ ...profile, name: "Grace" }`
+- **THEN** the result remains a `UserProfile` with the source fields and the override
 
 ### Requirement: Negative indexing counts from the end
 
@@ -263,3 +247,4 @@ Any collection example or test that used `value class` for domain types SHALL be
 #### Scenario: Collection of domain values
 - **WHEN** `record UserId { value: UInt64; }` is used in a `List<UserId>`
 - **THEN** the program compiles and the list contains independent `UserId` values
+

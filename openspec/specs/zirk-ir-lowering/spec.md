@@ -552,3 +552,12 @@ outcome. A value crossing into or out of a channel SHALL be lowered under the
 
 - **WHEN** `channel.try_receive()` is lowered
 - **THEN** the IR contains a plain runtime call whose result is a typed outcome and no suspend instruction
+
+### Requirement: Deterministic object spread lowering
+
+IR lowering SHALL evaluate object spread sources and explicit fields left to right, copy fields according to nominal layout metadata, apply later explicit overrides, and construct the destination without mutating any source object.
+
+#### Scenario: Object override order
+- **WHEN** `{ ...base, name: replacement }` is lowered
+- **THEN** `base` is evaluated first and `replacement` becomes the final `name` field
+

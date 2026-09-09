@@ -1,5 +1,8 @@
-## ADDED Requirements
+# spread-rest-operators Specification
 
+## Purpose
+TBD - created by archiving change spread-rest-operators. Update Purpose after archive.
+## Requirements
 ### Requirement: Explicit spread in calls
 
 The language SHALL accept `...expression` as a positional call argument when `expression` implements `Iterable<T>`. It SHALL expand elements in iteration order, exactly once, before matching fixed and variadic parameters.
@@ -51,3 +54,4 @@ Record/object expressions SHALL support field-based spread using `{ ...source, f
 #### Scenario: Object spread requires a shape
 - **WHEN** `{ ...value }` is written without a record/object expected type
 - **THEN** the checker emits a diagnostic instead of creating an untyped dictionary
+

@@ -12,14 +12,14 @@ It does not include a language server —autocomplete, navigation, renaming—, 
 
 ### Requirement: Source file recognition
 
-Editor support SHALL be associated with the `.zrk` extension, with `init.zrk` manifest files, and with `.zkinit` project-initialization files. `.zkinit` files SHALL be a distinct editor language surface (`zirk-init`) so they carry their own file icon, while reusing the Zirk grammar and language configuration.
+Editor support SHALL be associated with the `.zrk` extension and with `.zkinit` project-initialization files. `.zkinit` files SHALL be a distinct editor language surface (`zirk-init`) so they carry their own file icon, while reusing the Zirk grammar and language configuration.
 
 #### Scenario: Opening a Zirk file
 - **WHEN** a file with the `.zrk` extension is opened
 - **THEN** the editor recognizes it as the Zirk language
 
 #### Scenario: Opening the project manifest
-- **WHEN** the `init.zrk` file is opened
+- **WHEN** the `.zkinit` file is opened
 - **THEN** the editor recognizes it as the Zirk language
 
 #### Scenario: Opening a `.zkinit` file
@@ -40,7 +40,7 @@ Covering the full language is deliberate: the editor shows the language as defin
 - **WHEN** the source contains `task`, `await`, `select`, `parallel`, `thread`, `match`, `with`, `do`, `yield`, `throw`, `throws`, or `commit`
 - **THEN** they are highlighted as control or storage keywords
 
-#### Scenario: init.zrk manifest keyword
+#### Scenario: .zkinit manifest keyword
 - **WHEN** the source contains `project`, `build_targets`, `globals`, `permissions`, `requires`, or `during`
 - **THEN** they are highlighted as keywords or structural blocks
 

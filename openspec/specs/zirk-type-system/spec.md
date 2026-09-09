@@ -281,35 +281,15 @@ The checker SHALL accept `if`/`else` in expression position only when both branc
 
 ### Requirement: Typing of optional, named, variadic parameters and default values
 
-The checker SHALL verify that every call resolves to a valid assignment of arguments to parameters: named ones are matched by name, absent ones with a default value take it from the signature, `...expr` spread arguments are expanded from any `Iterable<T>`, and any left over are grouped into the variadic parameter if one exists. Collection literals and `Array(...)`/`List(...)` constructor calls SHALL accept spread elements. Rest destructuring `[first, ...rest]` and `{ field, ...rest }` SHALL bind the remaining ordered elements or record fields. Object/record expressions of the form `{ ...source, field: value }` SHALL copy source fields and override them with explicit fields.
+The checker SHALL preserve existing optional/named/variadic matching and SHALL type-check explicit spread arguments by requiring an `Iterable<T>`. Spread elements SHALL contribute `T` to collection element unification. A spread into fixed parameters SHALL require a statically provable compatible count; otherwise the target SHALL have a variadic tail.
 
-#### Scenario: Optional parameter not provided
-- **WHEN** `greet()` is called with `name?: String` and no argument
-- **THEN** `name` has value `null` within the body
+#### Scenario: Spread element type
+- **WHEN** `sum(...values)` is called with `values: List<Int32>`
+- **THEN** every expanded argument is checked as `Int32`
 
-#### Scenario: Nonexistent named argument
-- **WHEN** a call names an argument that does not exist in the signature
-- **THEN** a diagnostic naming the unknown parameter is emitted
-
-#### Scenario: Type of the variadic
-- **WHEN** `sum(1, 2, 3)` is called with `...values: Int32`
-- **THEN** `values` has the sequence type of `Int32` within the body
-
-#### Scenario: Spread argument expands into a variadic call
-- **WHEN** `sum(...values)` is called with `values: List<Int32>` containing `[1, 2, 3]`
-- **THEN** `values` is iterated once and the call receives the arguments `1`, `2`, and `3`
-
-#### Scenario: Collection literal spread
-- **WHEN** `[0, ...values, 4]` is constructed with `values: List<Int32>` containing `[1, 2, 3]`
-- **THEN** the result is an `Array<Int32>` containing `[0, 1, 2, 3, 4]`
-
-#### Scenario: Rest destructuring of a list
-- **WHEN** `[first, ...rest]` destructures `[10, 20, 30]`
-- **THEN** `first` has type `Int32` and `rest` has the same list type as the source
-
-#### Scenario: Record spread with override
-- **WHEN** `{ ...profile, name: "Grace" }` is checked as a `UserProfile`
-- **THEN** every field of `profile` is copied and `name` is replaced by the explicit value
+#### Scenario: Non-iterable spread rejection
+- **WHEN** `sum(...value)` is written and `value` is `Int32`
+- **THEN** a diagnostic states that spread requires `Iterable<T>`
 
 ### Requirement: Typing of closures and immutable capture
 
@@ -414,15 +394,12 @@ The checker SHALL reject a local declaration that hides a still-visible local or
 - **THEN** `prefix` resolves to the parameter and `this.prefix` resolves to the captured outer value
 
 ### Requirement: Parameter collection semantics
-Every optional parameter SHALL retain an explicit type and SHALL follow required positional parameters. A variadic parameter SHALL be an ordered read-only `Iterable<T>` for the duration of the call.
 
-#### Scenario: Untyped optional parameter
-- **WHEN** a declaration contains `prefix?` without `: Type`
-- **THEN** the checker emits a missing parameter type diagnostic
+Every variadic parameter SHALL remain an ordered read-only `Iterable<T>`. A rest destructuring binding SHALL have the corresponding ordered collection type and SHALL not mutate the source collection.
 
-#### Scenario: Variadic iteration
-- **WHEN** a variadic `...values: String` is used in `for value in values`
-- **THEN** `value` has type `String`
+#### Scenario: Rest binding type
+- **WHEN** `[head, ...tail]` destructures a `List<Int32>`
+- **THEN** `tail` has an ordered collection type whose element type is `Int32`
 
 ### Requirement: Class defaults and constructor resolution
 An unmodified class field SHALL be `public mut`. A class MAY declare multiple constructors with distinct effective signatures. Selection SHALL consider arity, types, optional parameters, and names and SHALL reject ambiguous or duplicate effective signatures.
@@ -1088,3 +1065,16 @@ E>)`, never as `Rejected` for an ordinary `Error(e)` value.
 
 - **WHEN** `mut settlements = await Task.settled(taskList);` is checked
 - **THEN** `settlements` has type `List<TaskSettlement<User>>`
+
+### Requirement: Object spread and rest typing
+
+Object spread SHALL require a known nominal record/object shape, SHALL verify field compatibility and override types, and SHALL produce a value of that shape. Object rest destructuring SHALL bind selected fields to their declared types and the remainder to a record-compatible type containing exactly the unselected fields.
+
+#### Scenario: Object spread type checking
+- **WHEN** `{ ...profile, active: false }` is assigned to `UserProfile`
+- **THEN** the expression has type `UserProfile` and `active` is `Boolean`
+
+#### Scenario: Invalid object spread field
+- **WHEN** an object spread adds an unknown field to a nominal record
+- **THEN** a field/type diagnostic is emitted
+

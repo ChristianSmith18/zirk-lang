@@ -109,7 +109,7 @@ Permission documentation SHALL show manifest requests/grants, dependency paths, 
 
 #### Scenario: Malicious manifest edit is explained
 - **WHEN** a reader examines the permission-security chapter
-- **THEN** it explicitly demonstrates that changing `init.zrk` cannot create a valid signed approval
+- **THEN** it explicitly demonstrates that changing `.zkinit` cannot create a valid signed approval
 
 ### Requirement: Safety and concurrency source synchronization
 The editorial system SHALL identify canonical owners for memory/unsafe and concurrency semantics and SHALL update all derivative handbook, reference, roadmap, example, and agent-context pages when those rules change.
@@ -169,4 +169,3 @@ Every expanded or new handbook type chapter SHALL include: a construction/litera
 #### Scenario: Simple types remain focused
 - **WHEN** the `Boolean` chapter already satisfies the contract
 - **THEN** the change leaves it unchanged and does not add filler examples
-

@@ -21,7 +21,7 @@ The compiler SHALL infer permission needs from privileged APIs through functions
 ### Requirement: Declaration and developer consent are separate
 Zirk SHALL store signed approval outside the repository and bind it to project name, canonical project location, user, device, exact permission phases/scopes, requester package versions/integrity, and transitive requirement paths. Moving or renaming the project, widening authority, updating a requester, adding a requester, or changing its path/phase SHALL invalidate the applicable approval. Repository edits alone SHALL never grant authority.
 
-#### Scenario: Library edits init.zrk
+#### Scenario: Library edits .zkinit
 - **WHEN** repository contents add a broad permission without a matching signed approval
 - **THEN** Zirk stops before executing build or runtime code and requests explicit developer consent
 

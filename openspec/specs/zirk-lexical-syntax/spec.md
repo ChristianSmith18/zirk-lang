@@ -6,7 +6,6 @@ Defines the lexicon of Zirk: tokens, literals, comments, locations and lexical e
 
 The keywords of the whole language are recognized, not only those of the implemented subset, so a construct from a later phase can be told apart from a syntax error.
 ## Requirements
-
 ### Requirement: Tokenization of the subset
 
 The lexer SHALL convert `.zrk` source text into a sequence of tokens, each with its location in the source.
@@ -140,36 +139,30 @@ A fractional literal suffixed with `f` or `fN` SHALL be classified as a binary f
 
 #### Scenario: `f` suffix resolves to `Float64`
 
-
 - **WHEN** the literal `1.5f` is tokenized and typed
 - **THEN** the resulting type is `Float64`
 
 #### Scenario: `f32` suffix resolves to `Float32`
-
 
 - **WHEN** the literal `1.5f32` is tokenized and typed
 - **THEN** the resulting type is `Float32`
 
 #### Scenario: `f128` suffix resolves to `Float128`
 
-
 - **WHEN** the literal `0.1f128` is tokenized and typed
 - **THEN** the resulting type is `Float128`
 
 #### Scenario: Unsuffixed fractional literal resolves to `Decimal`
-
 
 - **WHEN** the literal `1.5` is tokenized and typed without context
 - **THEN** the resulting type is `Decimal`
 
 #### Scenario: Old `b` suffix is rejected
 
-
 - **WHEN** the literal `1.5b` is tokenized
 - **THEN** a diagnostic states that the binary-float suffix is now `f`/`fN`
 
 #### Scenario: `d` stays a duration unit, not a decimal suffix
-
 
 - **WHEN** the literal `1.5d` is tokenized
 - **THEN** it is a `Duration` literal of one and a half days; there is no decimal `d` suffix
@@ -192,13 +185,11 @@ and the compiler SHALL NOT defer them with a phase diagnostic.
 
 #### Scenario: Power
 
-
 - **WHEN** `value ** 2` or `value **= 2` is tokenized
 - **THEN** the power and compound-power tokens are produced
 - **AND** two consecutive multiplication tokens are NOT produced
 
 #### Scenario: Power tokens carry no arrival phase
-
 
 - **WHEN** the phase of `**` or `**=` is queried
 - **THEN** it reports that the token is part of the implemented subset, not a
@@ -385,3 +376,16 @@ The lexer SHALL recognize `final` as a keyword of the whole language, so it can 
 
 - **WHEN** `final` is tokenized
 - **THEN** a keyword token is produced and no identifier is produced
+
+### Requirement: Contextual `...` token use
+
+The lexer SHALL continue emitting `DotDotDot` for `...`; parser context SHALL distinguish a variadic parameter marker, a spread expression, and a rest-pattern marker without introducing a second token.
+
+#### Scenario: Spread tokenization
+- **WHEN** `sum(...values)` is tokenized
+- **THEN** `DotDotDot` precedes the identifier `values`
+
+#### Scenario: Object spread tokenization
+- **WHEN** `{ ...profile, name: "Grace" }` is tokenized
+- **THEN** `DotDotDot` precedes `profile` and the braces remain available for contextual object parsing
+

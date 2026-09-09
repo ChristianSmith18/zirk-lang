@@ -66,7 +66,7 @@ The CLI SHALL present diagnostics in the format defined by `ZIRK_COMPILER_SPEC.m
 The CLI in this phase SHALL operate on a single file, with no project manifest.
 
 #### Scenario: Absence of a manifest
-- **WHEN** a file is compiled without an `init.zrk` present
+- **WHEN** a file is compiled without a `.zkinit` present
 - **THEN** compilation proceeds normally
 
 #### Scenario: Multiple files
@@ -142,4 +142,3 @@ The `zirk check` subcommand SHALL present diagnostics in the same format as `zir
 #### Scenario: Structured output from `zirk check`
 - **WHEN** `zirk check` is invoked with a structured-output flag
 - **THEN** the output is the same machine-readable format as `zirk build`
-

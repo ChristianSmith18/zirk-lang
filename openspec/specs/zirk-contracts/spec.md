@@ -4,7 +4,6 @@
 Defines interfaces, traits, abstract requirement classes, capability contracts,
 conformance, conflict resolution, and dynamic contract dispatch.
 ## Requirements
-
 ### Requirement: Interface, trait, and abstract requirements
 
 Interfaces SHALL contain behavior signatures only. Traits SHALL contain behavior requirements and reusable method bodies but no attributes or constructors. Abstract classes SHALL contain nominal attribute and abstract-method requirements but no bodies. All three SHALL be adopted through `implements`; a declaration SHALL satisfy every compatible requirement explicitly.
@@ -130,35 +129,11 @@ counts, and diagnose unrepresentable allocation sizes.
 
 ### Requirement: Iteration via contract
 
-`for ... in` SHALL require that the iterated expression implement `Iterable<T>`,
-and the element SHALL have the type `T` that the contract declares. Range
-iteration SHALL expose the normalized sequence produced by colon-step and
-inferred-direction rules; range iteration SHALL not require `.step()` or
-`.reverse()` dispatch.
+`Iterable<T>` SHALL be the source contract for explicit spread in calls, collection literals, and rest destructuring. Spread SHALL use the iterable's documented order and ordinary iteration projection-copy, invalidation, transfer, and sharing rules.
 
-This removes the closed protocol from the previous phase: ranges and `String` now implement the contract instead of being cases the compiler recognizes specially.
-
-#### Scenario: Iterating a custom type
-
-- **WHEN** a class implements `Iterable<Int32>` and `for x in instance { }` is written
-- **THEN** `x` has type `Int32`
-- **AND** the loop iterates over what the iterator produces
-
-#### Scenario: Ranges keep working
-
-- **WHEN** `for i in 0..10 { }` is written
-- **THEN** it compiles and iterates the same as before
-- **AND** it does so because the range implements `Iterable<Int32>`
-
-#### Scenario: Expanded collection remains iterable
-
-- **WHEN** `inmut values: List<Int32> = [0..3]` is iterated
-- **THEN** iteration yields `0`, `1`, and `2` in order
-
-#### Scenario: Type that does not implement the contract
-
-- **WHEN** a type that does not implement `Iterable<T>` is iterated
-- **THEN** a diagnostic is emitted naming the missing contract
+#### Scenario: User iterable spread
+- **WHEN** an object implementing `Iterable<Int32>` is used as `...source`
+- **THEN** its iterator supplies the expanded `Int32` values in order
 
 ### Requirement: A contract cannot be partially satisfied
 
@@ -187,3 +162,12 @@ same substitution.
 
 - **WHEN** a class declares `implements Comparable<Int32>` without the required method at the substituted signature
 - **THEN** a `MISSING_IMPLEMENTATION` diagnostic is emitted
+
+### Requirement: Object spread does not require Iterable
+
+Record/object spread and rest SHALL use named-field metadata and SHALL remain valid for records that do not implement `Iterable<T>`. Only collection/call spread requires the iterable contract.
+
+#### Scenario: Non-iterable record field spread
+- **WHEN** a record without `Iterable<T>` is used as `{ ...record }`
+- **THEN** named fields are copied successfully according to its record shape
+
