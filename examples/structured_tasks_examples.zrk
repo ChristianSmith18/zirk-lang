@@ -1,0 +1,271 @@
+// structured_tasks_examples.zrk
+//
+// Executable documentation for the fase-5-structured-tasks slice: sibling
+// failure propagation, cooperative cancellation, `final task` with its
+// shielded await, `Task.combine` / `Task.all` / `Task.settled`, and the
+// `Task.sleep` / `Task.after` / `Task.every` timer surface.
+//
+// It does NOT compile until this slice is implemented; today `final task`,
+// `Task.Final<T>`, `h.cancel()`, `Task.combine` / `Task.all` / `Task.settled`,
+// and the `Task.sleep` / `Task.after` / `Task.every` surface are still gated.
+// The bare `task` / `await` forms already work.
+//
+// Expected stdout is written next to each section as `// -> ...`.
+
+// --------------------------------------------------------------------------
+// A minimal user-defined exception (mirrors the corpus error classes).
+// --------------------------------------------------------------------------
+
+class DemoError implements RuntimeError {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    message(): String {
+        return this.reason;
+    }
+
+    code(): String {
+        return "DEMO";
+    }
+
+    cause(): Error? {
+        return null;
+    }
+
+    stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+// --------------------------------------------------------------------------
+// Helpers. Each performs a cooperative delay; `await Task.sleep(d)` is a
+// safe point, so a cancelled task stops there.
+// --------------------------------------------------------------------------
+
+fn slow_double(label: String, x: Int32): Int32 {
+    await Task.sleep(10ms);
+    stdout.println("  computed " + label);
+    return x * 2;
+}
+
+fn failing(label: String, fail: Boolean): Int32 throws DemoError {
+    await Task.sleep(5ms);
+    if fail {
+        stdout.println("  " + label + " about to throw");
+        throw DemoError("boom from " + label);
+    }
+    return 0;
+}
+
+fn load_user(): String {
+    await Task.sleep(4ms);
+    return "Ada";
+}
+
+fn load_roles(): List<String> {
+    await Task.sleep(6ms);
+    return ["admin", "editor"];
+}
+
+fn load_prefs(): Boolean {
+    await Task.sleep(2ms);
+    return true;
+}
+
+// --------------------------------------------------------------------------
+// 1. Sibling-failure propagation. The function body is the structured scope
+//    (no `task scope` keyword). When one child throws, the running sibling
+//    is cancelled and cleaned before the primary exception propagates.
+// --------------------------------------------------------------------------
+
+fn section_sibling_failure(): Void {
+    stdout.println("1. sibling failure");
+    try {
+        mut a: Task<Int32> = task slow_double("A", 21);   // cancelled mid-flight
+        mut b: Task<Int32> = task failing("B", true);
+        mut sum: Int32 = (await a) + (await b);
+        stdout.println("  sum " + sum.to_string());
+    } catch DemoError(e) {
+        stdout.println("  caught: " + e.message());
+    }
+    // -> 1. sibling failure
+    // ->   B about to throw
+    // ->   caught: boom from B
+    //    ("computed A" never prints: task A was cancelled at its Task.sleep)
+}
+
+// --------------------------------------------------------------------------
+// 2. Cooperative cancellation with cleanup. `h.cancel()` is observed at the
+//    next safe point (`await`), which throws CancelledError; `finally` runs.
+// --------------------------------------------------------------------------
+
+fn section_cancel(): Void {
+    stdout.println("2. cancellation");
+    mut h: Task<Int32> = task slow_double("C", 5);
+    h.cancel();
+    try {
+        mut v: Int32 = await h;
+        stdout.println("  got " + v.to_string());
+    } catch CancelledError(e) {
+        stdout.println("  cancelled as expected");
+    } finally {
+        stdout.println("  finally ran");
+    }
+    // -> 2. cancellation
+    // ->   cancelled as expected
+    // ->   finally ran
+}
+
+// --------------------------------------------------------------------------
+// 3. `final task` cleanup that survives cancellation (the shielded await).
+//    The enclosing task is cancelled, then reaches `await final task { ... }`.
+//    Awaiting a Task.Final<T> is a shielded await: the pending CancelledError
+//    is held until the final task completes, then delivered.
+// --------------------------------------------------------------------------
+
+fn persist_rollback(): Void {
+    await Task.sleep(8ms);
+    stdout.println("  ROLLBACK reached the server");
+}
+
+fn section_final_task_cleanup(): Void {
+    stdout.println("3. final task cleanup");
+    mut work: Task<Int32> = task {
+        try {
+            await Task.sleep(50ms);          // cancelled here
+            return 0;
+        } finally {
+            mut cleanup: Task.Final<Void> = final task {
+                persist_rollback();
+            };
+            await cleanup;                   // shielded: runs to completion
+            stdout.println("  cleanup finished");
+        }
+    };
+    work.cancel();
+    try {
+        _ = await work;
+    } catch CancelledError(e) {
+        stdout.println("  work observed cancellation after cleanup");
+    }
+    // -> 3. final task cleanup
+    // ->   ROLLBACK reached the server
+    // ->   cleanup finished
+    // ->   work observed cancellation after cleanup
+}
+
+// --------------------------------------------------------------------------
+// 4. `Task.combine` — heterogeneous, fail-fast, tuple result. Replaces the
+//    removed `task scope { ... return combine(...); }` pattern.
+// --------------------------------------------------------------------------
+
+fn section_combine(): Void {
+    stdout.println("4. Task.combine");
+    mut u: Task<String> = task load_user();
+    mut r: Task<List<String>> = task load_roles();
+    mut p: Task<Boolean> = task load_prefs();
+    mut (name, roles, verified) = await Task.combine(u, r, p);
+    stdout.println("  " + name + " / " + roles.length.to_string()
+        + " roles / verified=" + verified.to_string());
+    // -> 4. Task.combine
+    // ->   Ada / 2 roles / verified=true
+}
+
+// --------------------------------------------------------------------------
+// 5. `Task.all` preserves input order regardless of completion order.
+// --------------------------------------------------------------------------
+
+fn section_all(): Void {
+    stdout.println("5. Task.all");
+    mut tasks: List<Task<Int32>> = [
+        task slow_double("x", 1),
+        task slow_double("y", 2),
+        task slow_double("z", 3),
+    ];
+    mut results: List<Int32> = await Task.all(tasks);
+    for value in results {
+        stdout.println("  result " + value.to_string());
+    }
+    // -> 5. Task.all
+    // ->   computed x
+    // ->   computed y
+    // ->   computed z
+    // ->   result 2
+    // ->   result 4
+    // ->   result 6
+}
+
+// --------------------------------------------------------------------------
+// 6. `Task.settled` — every member finishes; mixed outcomes preserved.
+// --------------------------------------------------------------------------
+
+fn section_settled(): Void {
+    stdout.println("6. Task.settled");
+    mut ok: Task<String> = task load_user();
+    mut settlements = await Task.settled([ok]);
+    for s in settlements {
+        match s {
+            TaskSettlement.Fulfilled(v) => {
+                stdout.println("  fulfilled: " + v);
+            },
+            TaskSettlement.Rejected(err) => {
+                stdout.println("  rejected: " + err.message());
+            },
+            TaskSettlement.Cancelled(_) => {
+                stdout.println("  cancelled");
+            },
+        }
+    }
+    // -> 6. Task.settled
+    // ->   fulfilled: Ada
+}
+
+// --------------------------------------------------------------------------
+// 7. Timer surface: Task.sleep, Task.after (one-shot), Task.every (repeating).
+//    All return Task<T>. Task.after / Task.every are scope-owned: cancellable
+//    and never orphaned, unlike JS setTimeout / setInterval.
+// --------------------------------------------------------------------------
+
+fn tick(): Void {
+    stdout.println("  tick");
+}
+
+fn section_timers(): Void {
+    stdout.println("7. timers");
+
+    // A plain cooperative delay: yields the executor, resumes after the deadline.
+    await Task.sleep(5ms);
+    stdout.println("  slept");
+
+    // One-shot deferred work; await it for the result. Body captures nothing
+    // (closures cannot mutate captured variables).
+    mut later: Task<Int32> = Task.after(10ms, (): Int32 => 21 * 2);
+    stdout.println("  after -> " + (await later).to_string());
+
+    // Repeating work at a fixed delay, stopped by cancelling the handle.
+    mut ticker: Task<Void> = Task.every(3ms, tick);
+    await Task.sleep(11ms);              // ~3 ticks fit in 11ms
+    ticker.cancel();
+    _ = await Task.settled([ticker]);    // join the cancelled ticker
+    stdout.println("  ticker stopped");
+    // -> 7. timers
+    // ->   slept
+    // ->   after -> 42
+    // ->   tick
+    // ->   tick
+    // ->   tick
+    // ->   ticker stopped
+}
+
+fn main(): Void {
+    section_sibling_failure();
+    section_cancel();
+    section_final_task_cleanup();
+    section_combine();
+    section_all();
+    section_settled();
+    section_timers();
+}

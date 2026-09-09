@@ -1,0 +1,481 @@
+// ============================================================================
+// concurrency-model-draft.zrk
+//
+// DESIGN DRAFT — does not compile. The Zirk concurrency model rethought from
+// scratch, expressed as code, as the shared reference for the five OpenSpec
+// proposals that implement it.
+//
+// Philosophy:
+//   1. SIMPLE  — understandable in 5 minutes, maps to what a JS dev already knows
+//   2. FAST    — what is slow under a single thread is concurrent here with no effort
+//   3. NO COLOR — no function changes its signature because it contains concurrency
+//
+// 3 KEYWORDS (structure):   concurrent { }   ·   parallel; opts { }   ·   spawn
+// EVERYTHING ELSE is methods (operations and helpers): Concurrent.* Timer.* ...
+//
+// OUT: Task, await, async, function coloring, futures as values.
+// ============================================================================
+
+
+// ============================================================================
+// ILLUSTRATIVE STDLIB — NOT part of the proposal. Assumed to exist:
+//   Http.*  Db.*  Csv.*  Fs.*  Dir.*  Path  Args  Store.*  Push.*  Metrics.*
+//   domain types: Dashboard, Profile, Sale, Report, Item, ...
+//
+// THE PROPOSAL is ONLY:
+//   keywords: concurrent · parallel · spawn
+//   types:    Concurrent · Timer · Channel<T> · Thread · Job<T>
+// ============================================================================
+
+
+// ============================================================================
+// PART 1 — THE 3 KEYWORDS
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 1.1  concurrent { }  — overlap work that mostly WAITS (I/O, network, DB).
+//
+//   · The block does NOT close until EVERY branch has finished.
+//   · `inmut` declared inside stays visible AFTER the block.
+//   · Dependency rule (dataflow): branches run at once, unless one uses the
+//     result of another — that one waits only for that one.
+// ----------------------------------------------------------------------------
+
+fn load_dashboard(user_id: Int32): Dashboard {
+    inmut user = Db.find_user(user_id);      // sequential: called, returns User
+
+    concurrent {
+        inmut roles  = Db.roles_of(user);    // no deps  -> starts now
+        inmut prefs  = Db.prefs_of(user);    // no deps  -> starts now (in parallel)
+        inmut badges = Db.badges_of(roles);  // uses roles -> waits for roles, then runs
+    }
+    // here roles, prefs and badges are all filled
+
+    return Dashboard(user, roles, prefs, badges);
+}
+
+// Compared with JS/TS:
+//   const [roles, prefs] = await Promise.all([Db.rolesOf(user), Db.prefsOf(user)]);
+//   // + those functions must be async
+//
+//   concurrent { inmut roles = Db.roles_of(user); inmut prefs = Db.prefs_of(user); }
+//   // no await, no Promise.all, no async, direct names
+
+// ----------------------------------------------------------------------------
+// 1.2  spawn  — inside concurrent. A DYNAMIC branch (loop, if, stream).
+//   · spawn f()            branch with no result that the block will wait for
+//   · inmut h = spawn f()  branch with a Job<T> handle to collect it before close
+// ----------------------------------------------------------------------------
+
+fn notify_all(topic: String, msg: String): Void {
+    concurrent {
+        for sub in Db.subscribers(topic) {   // 3 or 50,000, from the query
+            spawn Push.send(sub, msg);
+        }
+    }
+    // the block waited for every Push.send
+}
+
+fn with_handle(): Int64 {
+    concurrent {
+        inmut work: Job<Int64> = spawn heavy_calc();
+        other_thing();                       // runs while the calc proceeds
+        return work.wait();                  // collect it when you need it
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 1.3  parallel; options { }  — heavy CPU across cores, LEXICAL config.
+//   · Inside the block, `for` loops split their iterations and collection
+//     chains (.map/.filter/.reduce) run in parallel.
+//   · The block can be an expression and return a value (like `match`).
+// ----------------------------------------------------------------------------
+
+fn compress_all(files: List<Path>): Void {
+    parallel; cores: -1 {                     // all cores minus 1
+        for f in files {
+            compress_in_place(f);            // iterations spread across cores
+        }
+    }
+}
+
+fn heavy_sum(rows: List<Row>): Int64 {
+    return parallel; cores: 2..=8 {
+        rows.filter((r: Row): Boolean => r.valid)
+            .map((r: Row): Int64 => heavy(r))
+            .sum()                           // the block returns the value
+    };
+}
+
+// `cores` knob:
+//   (nothing)      all available
+//   cores: N       exactly N               (N > 0)
+//   cores: -N      available minus N        (leave cores free for the OS/UI)
+//   cores: A..=B   between A and B, the runtime picks
+//   cores: 0       compile error
+
+
+// ============================================================================
+// PART 2 — OPERATIONS AND HELPERS (methods, pipe style)
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 2.1  Concurrent.of(t1, t2, ...).<op>()  — combine operations with a policy.
+//   .first()       first to finish wins, cancels the rest        (was `race`)
+//   .settled()     all finish; returns List<Outcome<T>>
+//   .within(d)     with a time limit; TimeoutError if exceeded    (was `timeout`)
+// ----------------------------------------------------------------------------
+
+fn fastest_mirror(key: String): Value {
+    return Concurrent.of(
+        (): Value => Store.a.get(key),
+        (): Value => Store.b.get(key),
+    ).first();
+}
+
+fn with_limit(): Data {
+    return Concurrent.of((): Data => slow_operation()).within(5s);
+}
+
+fn all_outcomes(ids: List<Int32>): List<Outcome<User>> {
+    return Concurrent.each_settled(ids, (id: Int32): User => Db.find_user(id));
+}
+
+// ----------------------------------------------------------------------------
+// 2.2  Concurrent.each(coll, fn) -> List<R>  — the SAME thing over a
+//      collection, in parallel, results in input order. No thunks.
+// ----------------------------------------------------------------------------
+
+fn thumbnails(urls: List<String>): List<Image> {
+    return Concurrent.each(urls, (u: String): Image => Http.get_image(u));
+}
+
+// ----------------------------------------------------------------------------
+// 2.3  Concurrent.detach(fn)  — fire-and-forget. Goes to the app background
+//      scope: cancelled on shutdown; errors to App.on_background_error.
+//      Does NOT block the local function.
+// ----------------------------------------------------------------------------
+
+fn handle_with_analytics(req: Request): Response {
+    inmut result = process(req);
+    Concurrent.detach((): Void => Analytics.log(req, result));   // does not wait for the POST
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// 2.4  Timer.*  — Timer.sleep pauses the current line. Timer.after/every =
+//      setTimeout/setInterval, attached to the nearest LEXICAL `concurrent { }`
+//      (or the root scope of main). They are AMBIENT: cancelled when that
+//      block closes.
+// ----------------------------------------------------------------------------
+
+fn with_pause(): Void {
+    stdout.println("start");
+    Timer.sleep(2s);                          // pauses the line; usable anywhere
+    stdout.println("2s later");
+}
+
+fn with_timers(): Void {
+    concurrent {
+        Timer.after(5s, (): Void => stdout.println("five"));    // ~ setTimeout
+        inmut ticker: Job<Void> = Timer.every(1s, (): Void => stdout.println("tick"));
+        work_for_10s();
+        ticker.cancel();                     // or the block cancels it on close
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 2.5  coll.parallel  — adapter for ONE collection chain outside a `parallel`
+//      block.
+// ----------------------------------------------------------------------------
+
+fn quick_sum(rows: List<Row>): Int64 {
+    return rows.parallel.map((r: Row): Int64 => heavy(r)).sum();
+}
+
+// ----------------------------------------------------------------------------
+// 2.6  Channel<T>  — streaming / producer-consumer. (already in the spec)
+//      send · receive · try_send · try_receive · close · is_closed · length
+// ----------------------------------------------------------------------------
+
+fn sum_over_channel(items: List<Item>): Int64 {
+    inmut nums: Channel<Int64> = Channel<Int64>(capacity: 32);
+    mut total: Int64 = 0;
+
+    concurrent {
+        spawn (): Void => {
+            for item in items { nums.send(weigh(item)); }
+            nums.close();
+        };
+        // consumer in another branch of the same block
+        loop {
+            match nums.receive() {
+                Some(n) => total = total + n,
+                None    => break,            // channel closed and drained
+            }
+        }
+    }
+    return total;
+}
+
+// ----------------------------------------------------------------------------
+// 2.7  Thread.run(fn) -> T  — raw OS thread (blocking C libs, affinity).
+// ----------------------------------------------------------------------------
+
+fn with_c_lib(input: Bytes): Bytes {
+    return Thread.run((): Bytes => native_blocking_decode(input));
+}
+
+
+// ============================================================================
+// PART 3 — ERROR HANDLING
+// ============================================================================
+
+class NetworkError implements RuntimeError {
+    inmut reason: String;
+    construct(reason: String) { this.reason = reason; }
+    message(): String { return this.reason; }
+    code(): String { return "NET"; }
+    cause(): Error? { return null; }
+    stack_trace(): StackTrace { return StackTrace(); }
+}
+
+// If a branch of `concurrent { }` (or of Concurrent.of / .each) throws:
+//   the siblings are cancelled, their cleanup is awaited, and the error
+//   propagates out of the block. Like Promise.all, but structured.
+
+fn with_errors(id: Int32): Profile {
+    try {
+        concurrent {
+            inmut user  = Db.find_user(id);      // cancelled if the other one fails
+            inmut prefs = Api.prefs_flaky(id);   // throws NetworkError
+        }
+        return Profile(user, prefs);
+    } catch NetworkError(e) {
+        stdout.println("one failed: " + e.message());
+        return Profile.fallback();
+    }
+}
+
+
+// ============================================================================
+// PART 4 — REAL CASES
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 4.1  REST API
+// ----------------------------------------------------------------------------
+
+fn server(): Void {
+    inmut listener = Http.serve(port: 8080);
+
+    concurrent {                             // server scope: lives until SIGINT
+        Timer.every(60s, (): Void => Metrics.flush());   // ambient, dies on shutdown
+
+        loop {
+            inmut req = listener.accept();
+            spawn handle(req);              // each request, concurrent
+        }
+    }
+}
+
+fn handle(req: Request): Response {          // NORMAL function, sequential, no async
+    inmut user = Db.find_user(req.user_id);
+
+    concurrent {
+        inmut orders  = Db.orders_of(user);
+        inmut credits = Payments.balance(user);
+        inmut prefs   = Cache.get_or_load(user.id);
+    }
+
+    Concurrent.detach((): Void => Audit.record(req, user));   // does not block
+
+    return Response.json(Payload(user, orders, credits, prefs));
+}
+
+// ----------------------------------------------------------------------------
+// 4.2  CLI — process the files the user passed
+//      Usage:  mytool convert a.png b.png c.png ...
+// ----------------------------------------------------------------------------
+
+fn cli_convert(args: Args): Int32 {
+    inmut results: List<ConvertOutcome> = Concurrent.each(
+        args.files,
+        (path: String): ConvertOutcome => {
+            try {
+                convert_file(path);
+                return ConvertOutcome.Ok(path);
+            } catch ConversionError(e) {
+                return ConvertOutcome.Failed(path, e.message());
+            }
+        },
+    );
+
+    for r in results { stdout.println(r.describe()); }
+    inmut failed = results.count((r: ConvertOutcome): Boolean => r.is_failed());
+    return match failed {
+        0 => 0,
+        _ => 1,
+    };
+}
+
+// ----------------------------------------------------------------------------
+// 4.3  Data analysis — CSV with millions of rows
+// ----------------------------------------------------------------------------
+
+fn sales_report(path: String): Report {
+    inmut rows: List<Sale> = Csv.read(path);          // 2M rows
+
+    concurrent {
+        // branch 1: heavy aggregate, parallel block inside
+        inmut totals = parallel; cores: -1 {
+            rows.filter((s: Sale): Boolean => s.valid)
+                .map((s: Sale): Decimal => s.amount)
+                .sum()
+        };
+        // branch 2: light scan, in parallel with the above
+        inmut range = rows.min_max_by((s: Sale): Date => s.date);
+    }
+
+    return Report(totals, range);
+}
+
+// ----------------------------------------------------------------------------
+// 4.4  Walk a directory tree (recursive fan-out)
+//      Each call opens its own `concurrent { }` -> the tree of blocks mirrors
+//      the tree of folders, each block waits for its subtree.
+// ----------------------------------------------------------------------------
+
+fn total_size(dir: Path): Int64 {
+    mut total: Int64 = 0;
+    concurrent {
+        for entry in Dir.list(dir) {
+            if entry.is_dir() {
+                inmut sub: Job<Int64> = spawn total_size(entry.path);
+                total = total + sub.wait();
+            } else {
+                total = total + entry.size;
+            }
+        }
+    }
+    return total;
+}
+
+// ----------------------------------------------------------------------------
+// 4.5  Worker pool over a queue.
+//      Results come back through a channel and are drained in the block body
+//      (NOT accumulated by a spawned closure — closures cannot mutate captures).
+// ----------------------------------------------------------------------------
+
+fn process_batch(items: List<Item>, workers: Int32): List<Outcome> {
+    inmut input:  Channel<Item>    = Channel<Item>(capacity: 64);
+    inmut output: Channel<Outcome> = Channel<Outcome>();
+    mut collected: List<Outcome> = [];
+
+    concurrent {
+        spawn (): Void => {
+            for item in items { input.send(item); }
+            input.close();
+        };
+        for i in 0..workers {
+            spawn (): Void => {
+                loop {
+                    match input.receive() {
+                        Some(item) => output.send(transform(item)),
+                        None       => break,
+                    }
+                }
+            };
+        }
+        // drain in the block body: sequential, may mutate `collected`
+        mut done: Int32 = 0;
+        loop {
+            match output.receive() {
+                Some(out) => collected.push(out),
+                None      => break,
+            }
+        }
+    }
+    return collected;
+}
+
+// ----------------------------------------------------------------------------
+// 4.6  File watcher that rebuilds on every change
+// ----------------------------------------------------------------------------
+
+fn dev_server(): Void {
+    concurrent {
+        inmut watcher = Fs.watch("src/");
+        loop {
+            inmut event = watcher.next();
+            spawn rebuild(event.path);       // one rebuild per change
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 4.7  Download with a progress bar
+// ----------------------------------------------------------------------------
+
+fn download_with_progress(url: String): File {
+    inmut progress = Progress.new();
+    concurrent {
+        inmut ticker: Job<Void> = Timer.every(100ms, (): Void => {
+            stdout.print("\r" + progress.bar());
+        });
+        inmut file = Http.download(url, progress);   // named branch -> the block waits for it
+        ticker.cancel();
+        stdout.println("\rdone           ");
+        return file;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 4.8  Hedged request — hit the primary now; if it does not answer in 50ms,
+//      also hit the secondary; keep whichever returns first.
+// ----------------------------------------------------------------------------
+
+fn hedged(key: String): Value {
+    return Concurrent.of(
+        (): Value => Store.a.get(key),
+        (): Value => {
+            Timer.sleep(50ms);
+            return Store.b.get(key);
+        },
+    ).first();
+}
+
+
+// ============================================================================
+// PART 5 — MENTAL TABLE
+// ============================================================================
+//
+//   KEYWORDS
+//     concurrent { }                    overlap I/O branches. closes when all finish.
+//       inmut x = f()                     named branch (dataflow: waits for its deps)
+//       spawn f()  /  inmut h = spawn f()  dynamic branch / with handle
+//     parallel; cores: N { }            CPU region: for loops and iterators across cores
+//
+//   METHODS
+//     Concurrent.of(t1, t2, ...).first()      first to finish wins    (was race)
+//                              .settled()     all, List<Outcome<T>>
+//                              .within(d)     or TimeoutError          (was timeout)
+//     Concurrent.each(coll, fn) -> List<R>    same thing over a collection
+//     Concurrent.each_settled(coll, fn)       ditto, outcomes
+//     Concurrent.detach(fn)                   fire-and-forget -> app background scope
+//     coll.parallel.map(f)...                 one chain in parallel, outside a block
+//     Timer.sleep(d)                          pauses the line
+//     Timer.after(d, fn) / Timer.every(d, fn) -> Job   ambient, tied to the lexical concurrent
+//     Channel<T>                              streaming / coordination
+//     Thread.run(fn)                          raw OS thread
+//     Job<T>: .wait() .cancel() .done
+//
+//   OUT: Task, await, async, coloring, futures-as-value,
+//        and the keywords race / timeout / detach (now methods)
+//
+// ============================================================================
+
+
+fn main(): Void {
+    server();
+}
