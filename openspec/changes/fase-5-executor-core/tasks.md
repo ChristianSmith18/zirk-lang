@@ -74,21 +74,21 @@ traceability; work starts at group 3.
 
 ## 9. `extern "C"` surface (defined, Rust-tested, codegen-wired later)
 
-- [ ] 9.1 `zirk_rt_task_spawn(body: extern "C" fn(*mut c_void) -> usize, arg: *mut c_void) -> u64`
-- [ ] 9.2 `zirk_rt_task_await(id: u64) -> usize`, `zirk_rt_task_is_done(id: u64) -> bool`
-- [ ] 9.3 Module docs: the packed-`u64` `TaskId` and `usize` result are provisional pending `fase-5-structured-tasks`
-- [ ] 9.4 Tests exercising the `extern "C"` entry points directly (spawn a C-ABI body, await it, read the result)
+- [x] 9.1 `zirk_rt_task_spawn(body: extern "C" fn(*mut c_void) -> usize, arg: *mut c_void) -> u64` — wraps `executor::spawn`; `arg` crosses in via a `TaskArg(*mut c_void)` newtype with a documented `unsafe impl Send` (cooperative single-runner scheduling)
+- [x] 9.2 `zirk_rt_task_await(id: u64) -> usize`, `zirk_rt_task_is_done(id: u64) -> bool` over `executor::await_task` / `is_done`
+- [x] 9.3 Doc-comment on each: **provisional ABI** — the packed-`u64` id and `usize` result may change when `fase-5-structured-tasks` decides the real `Task<T>` value representation. Not declared in `runtime.rs` / called by codegen yet
+- [x] 9.4 `the_c_abi_task_surface_spawns_awaits_and_reports_done` (lib.rs test): a C-ABI driver spawns a child (passing an integer through `arg`), checks `is_done` is false before a safe point, `await`s, reads 42 back
 
 ## 10. Documentation and status
 
-- [ ] 10.1 `docs/ZIRK_RUNTIME_SPEC.md` §3: fill in the timer service and the `main` lifecycle detail
-- [ ] 10.2 `docs/init/ZIRK_FEATURE_STATUS.md`: add a Phase 5 row — executor / task control block / timer / per-task GC roots delivered; `task` / `await` / `select` still pending
-- [ ] 10.3 `docs/init/ZIRK_ROADMAP.md` Phase 5: note the executor infrastructure is delivered ahead of the language surface
-- [ ] 10.4 After the crate lands and is committed, run `./scripts/sync-website-content.sh` and pass `--audit-date YYYY-MM-DD` for the changed Phase 5 status
+- [x] 10.1 `docs/ZIRK_RUNTIME_SPEC.md` §2 (lifecycle: `zirk_rt_run_main`, root task, 8 MiB root stack) and §3 (single-threaded executor, stackful coroutines, `context.rs` seam, per-task roots) filled in
+- [x] 10.2 `docs/init/ZIRK_FEATURE_STATUS.md` Phase 5: new "Cooperative executor + task control block + timer + per-task GC roots" row (runtime = yes); `task`/`await` note updated to point at `fase-5-structured-tasks`
+- [x] 10.3 `docs/init/ZIRK_ROADMAP.md` Phase 5: step 0 ("Executor infrastructure — runtime delivered") added ahead of the language-surface steps; ADR-017 referenced
+- [ ] 10.4 After the branch merges, run `./scripts/sync-website-content.sh` with `--audit-date YYYY-MM-DD` for the changed Phase 5 status (`../zirk-lang-site`). Deferred to the merge workstream — the sibling repo must be clean and the docs committed on the mainline
 
 ## 11. Closeout
 
-- [ ] 11.1 `cargo test -p zirk-runtime` green; `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] 11.2 `cargo test --workspace` — no regression in Phase 1–4 fixtures
-- [ ] 11.3 `openspec validate fase-5-executor-core --strict`
-- [ ] 11.4 Confirm no language-surface construct compiles (`task` / `await` still diagnose)
+- [x] 11.1 `cargo test -p zirk-runtime` → 95 green; `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [x] 11.2 `cargo test --workspace` — no regression (full serial run; `zirk-cli` fixture suite of 42 compiled+run `.zrk` programs green with `main` on the executor)
+- [x] 11.3 `openspec validate fase-5-executor-core --strict` → valid
+- [x] 11.4 `task` / `await` still emit the phase diagnostic — lexer/parser/checker untouched; the `zirk-cli` suite (which includes phase-diagnostic fixtures) is green

@@ -155,6 +155,66 @@ pub unsafe extern "C" fn zirk_rt_run_main(zirk_main: extern "C" fn()) {
     }
 }
 
+/// A raw pointer that crosses into a task body. The executor is single-threaded
+/// (`ADR-017`) and, on the thread-backed fallback backend, hands control between
+/// task threads by rendezvous so only one ever runs at a time — so moving a
+/// `*mut c_void` (a GC-tracked capture-block pointer) into a task closure is
+/// sound even though `*mut` is not `Send` on its own.
+struct TaskArg(*mut std::ffi::c_void);
+// SAFETY: see the type doc — cooperative single-runner scheduling.
+unsafe impl Send for TaskArg {}
+
+/// Starts `body(arg)` as a new task in the running executor and returns a packed
+/// [`crate::task::TaskId`]. The child is ready immediately and runs no later
+/// than the current task's next safe point.
+///
+/// **Provisional ABI.** `fase-5-structured-tasks` decides the real `Task<T>`
+/// value representation; the packed-`u64` id and `usize` result may change then.
+///
+/// # Safety
+///
+/// Must be called from inside a running task (ultimately from a `zirk_main`
+/// driven by [`zirk_rt_run_main`]). `body` must be a valid function pointer and
+/// `arg` whatever `body` expects (a capture-block pointer, or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_task_spawn(
+    body: extern "C" fn(*mut std::ffi::c_void) -> usize,
+    arg: *mut std::ffi::c_void,
+) -> u64 {
+    let arg = TaskArg(arg);
+    let child = move || {
+        // `let arg = arg;` forces edition-2024 disjoint captures to move the
+        // whole `Send` `TaskArg`, not its `!Send` `*mut` field.
+        let arg = arg;
+        body(arg.0)
+    };
+    executor::spawn(child).to_bits()
+}
+
+/// Consumes the result of the task named by `id` exactly once, suspending the
+/// current task until that task is terminal. A second `await` of the same task,
+/// or an `await` of a task that no longer exists, is a fatal error.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `id` must come from
+/// [`zirk_rt_task_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_task_await(id: u64) -> usize {
+    executor::await_task(task::TaskId::from_bits(id))
+}
+
+/// Whether the task named by `id` has reached a terminal state. Safe on a stale
+/// id (returns `false`).
+///
+/// # Safety
+///
+/// Must be called from inside a running task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_task_is_done(id: u64) -> bool {
+    executor::is_done(task::TaskId::from_bits(id))
+}
+
 /// Shuts the runtime down after `main` returns.
 ///
 /// Corresponds to the "ordered shutdown of resources and managed threads" and
@@ -262,5 +322,39 @@ mod tests {
             1,
             "zirk_rt_run_main returned before the background task finished"
         );
+    }
+
+    #[test]
+    fn the_c_abi_task_surface_spawns_awaits_and_reports_done() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static RESULT: AtomicU64 = AtomicU64::new(0);
+
+        extern "C" fn child(arg: *mut std::ffi::c_void) -> usize {
+            // `arg` carries a plain integer for this test.
+            for _ in 0..4 {
+                executor::yield_now();
+            }
+            arg as usize + 1
+        }
+
+        extern "C" fn driver() {
+            let id = unsafe { zirk_rt_task_spawn(child, 41 as *mut std::ffi::c_void) };
+            assert!(
+                !unsafe { zirk_rt_task_is_done(id) },
+                "child ran before a safe point"
+            );
+            let value = unsafe { zirk_rt_task_await(id) };
+            assert!(unsafe { zirk_rt_task_is_done(id) });
+            RESULT.store(value as u64, Ordering::SeqCst);
+        }
+
+        RESULT.store(0, Ordering::SeqCst);
+        unsafe {
+            zirk_rt_init();
+            zirk_rt_run_main(driver);
+            zirk_rt_shutdown();
+        }
+        assert_eq!(RESULT.load(Ordering::SeqCst), 42);
     }
 }

@@ -384,10 +384,20 @@ safe code, verified end to end.
 ## Phase 5 — Concurrency and parallelism (the hardest and least trodden part)
 
 This is the phase of highest technical risk in the project — build it in
-sub-steps, not in one go:
+sub-steps, not in one go. Each is a focused OpenSpec change against the
+`async-runtime-core` / `zirk-structured-concurrency` specs (the full design was
+recorded and archived as `fase-5-async-core`). `ADR-017` fixes the suspension
+model: stackful coroutines on a single-threaded cooperative executor, no
+function coloring.
 
+0. **Executor infrastructure** — `fase-5-executor-core` (**runtime delivered**):
+   the cooperative executor, task control block, stackful-coroutine
+   suspend/resume, monotonic timer, per-task garbage-collection root chains, and
+   `zirk_rt_run_main` running `main` as the executor's root task. No `.zrk`
+   surface yet — `task` / `await` still emit the phase diagnostic.
 1. `Task<T>`, `task scope`, `await`, sibling-failure propagation, cancellation,
-   shield and timeout on a custom single-threaded executor first.
+   shield and timeout — the language surface (`fase-5-structured-tasks`), on the
+   step-0 executor.
 2. `Task.all`/`first`/`settled`, `TaskSettlement<T>`, fair `select`, and
    bounded/unbounded `Channel<T>` with closure/backpressure.
 3. Compiler-derived transfer/share and capture analysis sufficient to enforce
