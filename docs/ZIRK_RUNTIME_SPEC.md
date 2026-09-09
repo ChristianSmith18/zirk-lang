@@ -53,6 +53,16 @@ diagnostic.
 Normal termination happens when `main` ends and all of its root scopes have
 concluded. Orphan work is never silently awaited.
 
+**Implementation status.** The generated C `main` calls `zirk_rt_init`, then
+`zirk_rt_run_main(zirk_main)`, then — as before — checks for an uncaught Zirk
+exception, then `zirk_rt_shutdown`. `zirk_rt_run_main` runs `zirk_main` as the
+**root task (task 0)** of the single-threaded cooperative executor (`ADR-017`)
+and returns only once task 0 and every task it spawned has completed or been
+cleaned — so a background task keeps the process alive after `main` returns. The
+root task gets an 8 MiB stack (`main` historically ran on the OS main-thread
+stack); spawned tasks get 128 KiB. For a program with no `task` / `await` yet,
+`zirk_rt_run_main` is exactly one run of `zirk_main` to completion.
+
 ## 3. Scheduler and I/O reactor
 
 The scheduler runs tasks on a multicore pool sized from hardware and safe

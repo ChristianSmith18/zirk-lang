@@ -16,6 +16,8 @@ use inkwell::values::FunctionValue;
 pub mod symbols {
     /// Initializes the runtime before `main`.
     pub const INIT: &str = "zirk_rt_init";
+    /// Runs the Zirk entrypoint as the cooperative executor's root task.
+    pub const RUN_MAIN: &str = "zirk_rt_run_main";
     /// Shuts the runtime down after `main`.
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";
     /// Builds a `String` from UTF-8 bytes and a length.
@@ -288,6 +290,7 @@ pub mod symbols {
 #[allow(dead_code)]
 pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
+    pub run_main: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
     pub str_from_i8: FunctionValue<'ctx>,
@@ -446,6 +449,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let external = Some(Linkage::External);
 
     let init = module.add_function(symbols::INIT, void.fn_type(&[], false), external);
+    let run_main = module.add_function(
+        symbols::RUN_MAIN,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
     let shutdown = module.add_function(symbols::SHUTDOWN, void.fn_type(&[], false), external);
 
     let str_from_utf8 = module.add_function(
@@ -1118,6 +1126,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
 
     Runtime {
         init,
+        run_main,
         shutdown,
         str_from_utf8,
         str_from_i8,

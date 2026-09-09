@@ -213,6 +213,21 @@ docs.
 
 ## Open Questions
 
+### Resolved (group 8)
+
+- **Root task stack size.** `main` used to run on the OS main-thread stack, so
+  the root task gets **8 MiB** (`executor::ROOT_TASK_STACK_BYTES`), not the
+  128 KiB a spawned task gets — one allocation for the life of the program.
+  Verified: the full `zirk-cli` fixture suite (42 compiled + run `.zrk`
+  programs) passes with `main` on the root task.
+- **Does `zirk_rt_run_main` sit before or after the uncaught-exception check?**
+  Before. `zirk_rt_run_main` runs the executor to completion, then the generated
+  C `main` runs its existing `has_pending_exception` → `uncaught_exception`
+  check, then `zirk_rt_shutdown` — Zirk exceptions are a pending-slot mechanism,
+  not Rust unwinding, so they survive the return from `zirk_rt_run_main`.
+
+### Open
+
 - **Bootstrap chain vs. requiring task 0 before any allocation.** Leaning:
   bootstrap chain, folded into task 0 on spawn — generated `main` prologue may
   allocate before `zirk_rt_main` finishes wiring the executor.

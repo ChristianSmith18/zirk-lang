@@ -907,9 +907,13 @@ fn emit_c_entrypoint<'ctx>(
     builder
         .build_call(runtime.init, &[], "")
         .expect("call to the runtime initializer");
+    // `zirk_main` runs as the body of the cooperative executor's root task
+    // (`ADR-017`) rather than being called directly, so a `main` that spawns
+    // tasks is driven to completion before this returns.
+    let zirk_main_ptr = zirk_main.as_global_value().as_pointer_value();
     builder
-        .build_call(zirk_main, &[], "")
-        .expect("call to Zirk main");
+        .build_call(runtime.run_main, &[zirk_main_ptr.into()], "")
+        .expect("call to the executor entrypoint");
 
     // `main` itself may declare `throws` and still leave an exception
     // pending — nothing above it in the call chain checks (roadmap Phase

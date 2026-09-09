@@ -27,6 +27,11 @@ use crate::context::{self, TaskContext};
 use crate::failure::fatal;
 use crate::task::{CleanupState, TaskId, TaskOutcome, TaskRegistry, TaskState, WaitReason};
 
+/// Stack size for the root task — it runs the program's `main`, which used to
+/// run on the OS main-thread stack. 8 MiB matches a typical main-thread stack;
+/// it is one allocation for the whole program.
+pub const ROOT_TASK_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 thread_local! {
     /// The executor currently running on this thread, or null. Set for the
     /// duration of [`Executor::run`] only.
@@ -71,14 +76,20 @@ impl Executor {
 
     /// Spawns `body` as the root task, runs the loop until the root and every
     /// descendant is terminal, and returns the root's outcome.
+    ///
+    /// The root gets a large stack ([`ROOT_TASK_STACK_BYTES`]): it runs the
+    /// whole program's `main`, which historically ran on the operating-system
+    /// main-thread stack, so it must not be squeezed onto the 128 KiB a
+    /// spawned task gets. One allocation for the life of the program.
     pub fn run_with_root<F>(mut self, body: F) -> TaskOutcome
     where
         F: FnOnce() -> usize + Send + 'static,
     {
-        let root = self.registry.insert(TaskContext::new(
-            crate::context::DEFAULT_TASK_STACK_BYTES,
-            move |_suspender| body(),
-        ));
+        let root = self
+            .registry
+            .insert(TaskContext::new(ROOT_TASK_STACK_BYTES, move |_suspender| {
+                body()
+            }));
         self.root = Some(root);
         self.ready.push_back(root);
 

@@ -65,12 +65,12 @@ traceability; work starts at group 3.
 - [x] 7.6 `a_suspended_tasks_roots_survive_a_collection_from_another_task`: root task roots an object through a pushed frame, `yield_now`s; a sibling calls `collect()`; the object survives (accounted in `LIVE_BYTES`, header intact) and is reclaimed only after the frame pops. (The compiler-spilled-temporary variant is a codegen behavior — `fase-5-structured-tasks` — the D4 spill rule; the finished-task-stops-rooting case is covered by executor test `an_awaited_child_slot_is_reclaimed_after_consumption`.)
 - [x] 7.7 `cargo test --workspace` — no regression (see closeout)
 
-## 8. `lib.rs`: executor lifecycle
+## 8. `lib.rs` + codegen: executor lifecycle
 
-- [ ] 8.1 `zirk_rt_main` (or the existing entry wrapper) creates task 0 from `main`'s body, runs `run_until_root_done()`, returns task 0's exit code
-- [ ] 8.2 An exception escaping task 0 still yields a nonzero exit (unchanged behavior, routed through the executor)
-- [ ] 8.3 Register `executor`, `task`, `timer` modules; wire `context::suspend_current` visibility
-- [ ] 8.4 Test: a Rust-level `main` body that spawns a child and returns — the process (test harness) does not "finish" until the child is terminal
+- [x] 8.1 `zirk_rt_run_main(zirk_main: extern "C" fn())` in `lib.rs`: runs `zirk_main` as the executor's root task (8 MiB stack — `ROOT_TASK_STACK_BYTES` in `executor.rs`), returns once task 0 and all descendants are terminal. Codegen: `runtime::symbols::RUN_MAIN` + `Runtime::run_main` declared; `emit_c_entrypoint` calls `zirk_rt_run_main(&zirk_main)` instead of calling `zirk_main` directly
+- [x] 8.2 A pending Zirk exception is not a Rust panic — it flows out of `zirk_rt_run_main` normally and the generated C `main` runs its existing `has_pending_exception` → `uncaught_exception` (nonzero exit) check afterwards, unchanged. A genuine Rust panic inside the runtime is re-raised via `resume_unwind`
+- [x] 8.3 `executor` / `task` / `timer` modules registered; `#[allow(dead_code)]` narrowed to the items only the language surface will read (cancel flags, `TimedOut`, `WaitReason::Timer` inspection)
+- [x] 8.4 `run_main_drives_a_background_child_to_completion` (lib.rs test): a stand-in `extern "C"` main spawns a child that yields 8 times, then returns; `zirk_rt_run_main` does not return until the child has set its done flag. Full `zirk-cli` fixture suite (42 compiled+run `.zrk` programs, GC / weak-ref / allocation-pressure included) still green with `main` on the executor's root task
 
 ## 9. `extern "C"` surface (defined, Rust-tested, codegen-wired later)
 

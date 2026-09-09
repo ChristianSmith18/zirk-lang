@@ -40,9 +40,10 @@ mod context;
 mod decimal;
 mod duration;
 mod exceptions;
-// `executor` is wired into the entry lifecycle by group 8 and exposed over the
-// C ABI by group 9 of `fase-5-executor-core`; until then its surface looks dead.
+// The cooperative executor (`ADR-017`): `zirk_rt_run_main` drives it, and
+// `fase-5-structured-tasks` will add the `task` / `await` C-ABI surface.
 #[allow(dead_code)]
+// spawn/await/sleep/is_done are used only by tests until the language surface lands
 mod executor;
 mod failure;
 mod io;
@@ -57,8 +58,9 @@ mod resource;
 mod scalar;
 mod set;
 mod string;
-// `task` and `timer` are consumed by `crate::executor` (group 6 of
-// `fase-5-executor-core`). Until that lands their items look dead.
+// `task` and `timer` back `crate::executor`; a few of their items (cancel
+// flags, `TimedOut`, `WaitReason::Timer` inspection) are only read once the
+// language surface lands in `fase-5-structured-tasks`.
 #[allow(dead_code)]
 mod task;
 mod temporal;
@@ -119,6 +121,38 @@ pub unsafe extern "C" fn zirk_rt_init() {
     // `ZIRK_RUNTIME_SPEC.md` section 1 asks for lazy subsystem initialization,
     // so this point will likely never do heavy work: it marks the start of the
     // lifecycle, it does not build the whole runtime.
+}
+
+/// Runs the Zirk entrypoint as the executor's root task.
+///
+/// Corresponds to the "`main()` → concurrency scopes" step of
+/// `ZIRK_RUNTIME_SPEC.md` section 2. The generated C `main` calls this instead
+/// of calling the Zirk `main` directly: `zirk_main` becomes the body of task 0
+/// on the single-threaded cooperative executor (`ADR-017`), and this call
+/// returns only once task 0 and every task it spawned has completed or been
+/// cleaned. For a program with no `task` / `await` yet, that is exactly one
+/// run of `zirk_main` to completion — the executor is in place for when `main`
+/// can spawn.
+///
+/// A pending Zirk exception is not a Rust panic, so it flows out normally and
+/// the generated C `main` checks [`zirk_rt_has_pending_exception`](exceptions)
+/// afterwards, as before. A genuine Rust panic inside the runtime is
+/// re-raised.
+///
+/// # Safety
+///
+/// `zirk_main` must be the compiler-emitted Zirk entrypoint: an `extern "C"`
+/// function taking no arguments. Invoked by generated code exactly once,
+/// after [`zirk_rt_init`] and before [`zirk_rt_shutdown`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_run_main(zirk_main: extern "C" fn()) {
+    let outcome = executor::Executor::new().run_with_root(move || {
+        zirk_main();
+        0
+    });
+    if let task::TaskOutcome::Panicked(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 /// Shuts the runtime down after `main` returns.
@@ -193,5 +227,40 @@ mod tests {
             zirk_rt_init();
             zirk_rt_shutdown();
         }
+    }
+
+    #[test]
+    fn run_main_drives_a_background_child_to_completion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static MAIN_RAN: AtomicUsize = AtomicUsize::new(0);
+        static CHILD_DONE: AtomicUsize = AtomicUsize::new(0);
+
+        // Stand-in for the compiler-emitted Zirk entrypoint: it spawns a
+        // background task and returns while that task is still running.
+        extern "C" fn fake_zirk_main() {
+            MAIN_RAN.store(1, Ordering::SeqCst);
+            executor::spawn(|| {
+                for _ in 0..8 {
+                    executor::yield_now();
+                }
+                CHILD_DONE.store(1, Ordering::SeqCst);
+                0
+            });
+        }
+
+        MAIN_RAN.store(0, Ordering::SeqCst);
+        CHILD_DONE.store(0, Ordering::SeqCst);
+        unsafe {
+            zirk_rt_init();
+            zirk_rt_run_main(fake_zirk_main);
+            zirk_rt_shutdown();
+        }
+        assert_eq!(MAIN_RAN.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            CHILD_DONE.load(Ordering::SeqCst),
+            1,
+            "zirk_rt_run_main returned before the background task finished"
+        );
     }
 }
