@@ -76,5 +76,5 @@
 ## 9. Website + closeout
 
 - [x] 9.1 `cargo test --workspace` green (1250+ tests); `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [x] 9.2 Commit zirk-lang; `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`; review status catalog; commit `../zirk-lang-site` separately; record both revisions
+- [x] 9.2 Commit zirk-lang (`d788e92`); `./scripts/sync-website-content.sh --audit-date 2026-09-10`; reviewed status catalog; committed `../zirk-lang-site` separately (`a99a8a2`)
 - [x] 9.3 `openspec validate concurrent-blocks-and-timers --strict` — valid
