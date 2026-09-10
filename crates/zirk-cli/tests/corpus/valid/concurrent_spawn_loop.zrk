@@ -1,0 +1,14 @@
+// Dynamic branches: every `spawn` inside the block is awaited before it closes.
+
+fn announce(n: Int32): Void {
+    stdout.println(n);
+}
+
+fn main(): Void {
+    concurrent {
+        for n in 1..=3 {
+            spawn announce(n);
+        }
+    }
+    stdout.println(0);
+}

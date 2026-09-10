@@ -21,7 +21,7 @@ mod checker;
 mod scope;
 mod types;
 
-pub use checker::{Capture, CheckedProgram, LambdaInfo, check};
+pub use checker::{Capture, CheckedProgram, ConcurrentPlan, LambdaInfo, check};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
@@ -241,4 +241,14 @@ pub mod codes {
     pub const REDUNDANT_FINAL: Code = Code::new("W0464");
     /// An invalid range bound, step, or fixed-array extent.
     pub const INVALID_RANGE: Code = Code::new("E0466");
+    /// A Job handle was consumed by `wait()` more than once.
+    pub const SECOND_WAIT: Code = Code::new("E0467");
+    /// `spawn` was used outside a `concurrent` block or the implicit `main` scope.
+    pub const SPAWN_OUTSIDE_SCOPE: Code = Code::new("E0468");
+    /// A concurrent branch reads a sibling binding before that binding is available.
+    pub const CONCURRENT_EARLY_READ: Code = Code::new("E0469");
+    /// Named concurrent bindings form a dependency cycle.
+    pub const CONCURRENT_BINDING_CYCLE: Code = Code::new("E0470");
+    /// A `Job<T>` handle left its `concurrent` scope neither waited nor cancelled.
+    pub const UNUSED_JOB: Code = Code::new("E0471");
 }

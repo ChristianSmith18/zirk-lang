@@ -1,0 +1,8 @@
+// A `Job` handle is linear: a second `wait()` is a use-after-consume error.
+fn main(): Void {
+    concurrent {
+        inmut h: Job<Int32> = spawn 1;
+        inmut first: Int32 = h.wait();
+        inmut second: Int32 = h.wait();
+    }
+}

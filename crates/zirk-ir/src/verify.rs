@@ -2082,6 +2082,111 @@ fn verify_instruction(
                 }
             }
         }
+
+        InstKind::ScopeEnter => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I64),
+                position,
+                "ScopeEnter",
+                report,
+            );
+        }
+        InstKind::ScopeExit { scope } => {
+            expect(inst.ty, IrType::Void, position, "ScopeExit", report);
+            if let Some(ty) = type_of(scope)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: ScopeExit's scope is {}, expected the Int64 id from ScopeEnter",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::BranchStart {
+            target,
+            body,
+            scope,
+            kind,
+            delay,
+        } => {
+            if inst.ty != IrType::Job {
+                report(format!(
+                    "{position}: BranchStart declares {}, expected Job",
+                    inst.ty.as_str()
+                ));
+            }
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: BranchStart targets `{target}`, which is not a module function"
+                ));
+            }
+            if !matches!(type_of(body), Some(IrType::Callable(_))) {
+                report(format!("{position}: BranchStart body is not a Callable"));
+            }
+            if let Some(ty) = type_of(scope)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: BranchStart's scope is {}, expected the Int64 id from ScopeEnter",
+                    ty.as_str()
+                ));
+            }
+            match (kind.is_ambient(), delay) {
+                (true, None) => report(format!(
+                    "{position}: an ambient BranchStart ({kind:?}) needs a delay operand"
+                )),
+                (false, Some(_)) => {
+                    report(format!("{position}: a Spawn BranchStart carries no delay"))
+                }
+                (true, Some(operand)) => {
+                    if let Some(ty) = type_of(operand)
+                        && !matches!(ty, IrType::Int(_))
+                    {
+                        report(format!(
+                            "{position}: BranchStart delay is {}, expected an integer",
+                            ty.as_str()
+                        ));
+                    }
+                }
+                (false, None) => {}
+            }
+        }
+        InstKind::JobWait { job, result } => {
+            if inst.ty != *result {
+                report(format!(
+                    "{position}: JobWait declares {} but its result type is {}",
+                    inst.ty.as_str(),
+                    result.as_str()
+                ));
+            }
+            if !matches!(type_of(job), Some(IrType::Job)) {
+                report(format!("{position}: JobWait operand is not a Job"));
+            }
+        }
+        InstKind::JobDone { job } => {
+            expect(inst.ty, IrType::Boolean, position, "JobDone", report);
+            if !matches!(type_of(job), Some(IrType::Job)) {
+                report(format!("{position}: JobDone operand is not a Job"));
+            }
+        }
+        InstKind::JobCancel { job } => {
+            expect(inst.ty, IrType::Void, position, "JobCancel", report);
+            if !matches!(type_of(job), Some(IrType::Job)) {
+                report(format!("{position}: JobCancel operand is not a Job"));
+            }
+        }
+        InstKind::TimerSleep { nanos } => {
+            expect(inst.ty, IrType::Void, position, "TimerSleep", report);
+            if let Some(ty) = type_of(nanos)
+                && !matches!(ty, IrType::Int(_))
+            {
+                report(format!(
+                    "{position}: TimerSleep delay is {}, expected an integer",
+                    ty.as_str()
+                ));
+            }
+        }
     }
 }
 
@@ -2342,5 +2447,18 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             end,
             step,
         } => vec![*receiver, *start, *end, *step],
+        InstKind::ScopeEnter => Vec::new(),
+        InstKind::ScopeExit { scope } => vec![*scope],
+        InstKind::BranchStart {
+            body, scope, delay, ..
+        } => {
+            let mut operands = vec![*body, *scope];
+            operands.extend(delay.iter().copied());
+            operands
+        }
+        InstKind::JobWait { job, .. } | InstKind::JobDone { job } | InstKind::JobCancel { job } => {
+            vec![*job]
+        }
+        InstKind::TimerSleep { nanos } => vec![*nanos],
     }
 }

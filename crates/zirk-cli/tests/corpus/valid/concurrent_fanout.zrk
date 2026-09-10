@@ -1,0 +1,18 @@
+// `concurrent { }` with two named branches whose results are hoisted into the
+// enclosing scope after the block joins (`concurrent-blocks-and-timers`).
+
+fn load_users(): Int32 {
+    return 12;
+}
+
+fn load_orders(): Int32 {
+    return 30;
+}
+
+fn main(): Void {
+    concurrent {
+        inmut users: Int32 = load_users();
+        inmut orders: Int32 = load_orders();
+    }
+    stdout.println(users + orders);
+}

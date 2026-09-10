@@ -62,6 +62,24 @@ fn valid_minimal_program() {
 }
 
 #[test]
+fn concurrent_and_spawn_are_keywords() {
+    assert_eq!(
+        tokens("concurrent { spawn work(); }"),
+        vec![
+            TokenKind::Keyword(Keyword::Concurrent),
+            TokenKind::LBrace,
+            TokenKind::Keyword(Keyword::Spawn),
+            id("work"),
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
 fn valid_every_sequence_ends_in_eof() {
     assert_eq!(tokens("").last(), Some(&TokenKind::Eof));
     assert_eq!(tokens("fn").last(), Some(&TokenKind::Eof));

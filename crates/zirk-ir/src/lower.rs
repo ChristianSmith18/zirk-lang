@@ -2784,6 +2784,9 @@ fn ir_type(
         // conversion (see `Self::lower_lambda`'s own comment on why captures
         // read the *slot's* type, not the checker's).
         Base::Function(id) => IrType::Callable(id),
+        // A Job is an opaque one-word runtime handle. Its source-level result
+        // type remains in the checker; IR operations recover it at `JobWait`.
+        Base::Job(_) => IrType::Job,
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -2849,6 +2852,71 @@ fn gc_roots_of(module: &Module, slots: &[Slot]) -> Vec<SlotId> {
         .filter(|(_, slot)| slot.ty.is_managed_reference(module))
         .map(|(index, _)| SlotId(index as u32))
         .collect()
+}
+
+/// Whether `main`'s body directly starts a branch that needs the implicit
+/// root scope — a `spawn`, `Timer.after` or `Timer.every` reached without
+/// crossing into a `concurrent { }` block, which owns its own scope
+/// (`concurrent-blocks-and-timers`, design D5).
+fn body_opens_root_scope(block: &ast::Block) -> bool {
+    fn stmt_opens(stmt: &ast::Stmt) -> bool {
+        match stmt {
+            // A `concurrent { }` block owns its scope; do not descend.
+            ast::Stmt::Concurrent(_) => false,
+            ast::Stmt::Expr(s) => expr_opens(&s.expr),
+            ast::Stmt::Let(s) => s.init.as_ref().is_some_and(expr_opens),
+            ast::Stmt::Assign(s) => expr_opens(&s.value),
+            ast::Stmt::Return(s) => s.value.as_ref().is_some_and(expr_opens),
+            ast::Stmt::Throw(s) => s.value.as_ref().is_some_and(expr_opens),
+            ast::Stmt::Block(b) => body_opens_root_scope(b),
+            ast::Stmt::If(s) => {
+                expr_opens(&s.condition)
+                    || body_opens_root_scope(&s.then_branch)
+                    || match &s.else_branch {
+                        Some(ast::ElseBranch::Block(b)) => body_opens_root_scope(b),
+                        Some(ast::ElseBranch::If(nested)) => {
+                            stmt_opens(&ast::Stmt::If((**nested).clone()))
+                        }
+                        None => false,
+                    }
+            }
+            ast::Stmt::Loop(s) => {
+                s.condition.as_ref().is_some_and(expr_opens) || body_opens_root_scope(&s.body)
+            }
+            ast::Stmt::ForIn(s) => expr_opens(&s.iterable) || body_opens_root_scope(&s.body),
+            ast::Stmt::Try(s) => {
+                body_opens_root_scope(&s.body)
+                    || s.catches.iter().any(|c| body_opens_root_scope(&c.body))
+                    || s.finally.as_ref().is_some_and(body_opens_root_scope)
+            }
+            ast::Stmt::Unsafe(s) => body_opens_root_scope(&s.body),
+            ast::Stmt::Commit(s) => body_opens_root_scope(&s.body),
+            _ => false,
+        }
+    }
+
+    fn expr_opens(expr: &ast::Expr) -> bool {
+        match expr {
+            ast::Expr::Spawn(_) => true,
+            ast::Expr::Call(call) => {
+                let timer_ambient = matches!(&*call.callee, ast::Expr::Field(field)
+                    if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Timer")
+                        && matches!(field.name.name.as_str(), "after" | "every"));
+                timer_ambient
+                    || expr_opens(&call.callee)
+                    || call.args.iter().any(|arg| expr_opens(&arg.value))
+            }
+            ast::Expr::Binary(e) => expr_opens(&e.left) || expr_opens(&e.right),
+            ast::Expr::Unary(e) => expr_opens(&e.operand),
+            ast::Expr::Field(e) => expr_opens(&e.object),
+            ast::Expr::Ternary(e) => {
+                expr_opens(&e.condition) || expr_opens(&e.when_true) || expr_opens(&e.when_false)
+            }
+            _ => false,
+        }
+    }
+
+    block.statements.iter().any(stmt_opens)
 }
 
 #[derive(Clone, Copy)]
@@ -2962,6 +3030,19 @@ struct FunctionLowering<'a> {
     /// and, for an `inner class`, the hidden `outer` reference resolve
     /// against.
     current_class: Option<u32>,
+    /// The slot holding each enclosing structured-concurrency scope's runtime
+    /// id, innermost last (`concurrent-blocks-and-timers`) — a `concurrent { }`
+    /// block, or `main`'s implicit root scope. A slot, not an SSA value,
+    /// because a `spawn` or `Timer.*` deep inside a loop or nested block would
+    /// otherwise read the id across a basic-block boundary (ADR-007).
+    scope_stack: Vec<SlotId>,
+}
+
+/// A branch body handed to [`FunctionLowering::lift_branch_body`]: a `spawn`
+/// expression's or a `concurrent` binding's initializer.
+enum BranchBody<'b> {
+    Expr(&'b ast::Expr),
+    Block(&'b ast::Block),
 }
 
 /// One active `try`'s catches and `finally`, as [`FunctionLowering::try_stack`]
@@ -3046,6 +3127,9 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
         let f = &self.0.fn_types[id as usize];
         let params: Vec<String> = f.params.iter().map(|p| describe(*p, self)).collect();
         format!("Fn({}) -> {}", params.join(", "), describe(f.returns, self))
+    }
+    fn job_result(&self, id: u32) -> Type {
+        self.0.job_types[id as usize]
     }
     fn class_name(&self, id: u32) -> String {
         self.0.classes[id as usize].name.clone()
@@ -3165,6 +3249,7 @@ impl<'a> FunctionLowering<'a> {
             next_scope_seq: 0,
             recursive_call: None,
             current_class: None,
+            scope_stack: Vec::new(),
         }
     }
 
@@ -3419,6 +3504,21 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Pointer<T> it type-checked")
                 as u32;
             return Type::of(Base::Pointer(id));
+        }
+
+        // `Job<T>` (`concurrent-blocks-and-timers`): the erased one-word branch
+        // handle. Looked up in `checked.job_types` by structural equality on
+        // the result `T`, matching the id `Checker::resolve_job_type_ref` used.
+        if reference.name == "Job" {
+            let result = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .job_types
+                .iter()
+                .position(|&t| t == result)
+                .expect("the checker interned every Job<T> it type-checked")
+                as u32;
+            return Type::of(Base::Job(id));
         }
 
         // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
@@ -4036,7 +4136,37 @@ impl<'a> FunctionLowering<'a> {
             .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span))
             .collect();
 
+        // `main` runs in an implicit `concurrent` scope
+        // (`concurrent-blocks-and-timers`, design D5) — opened only when the
+        // body directly starts a branch (`spawn`, `Timer.after` / `every`)
+        // outside any `concurrent { }` block of its own.
+        let root_scope_slot =
+            (function.name.name == "main" && body_opens_root_scope(&function.body)).then(|| {
+                let id = self.emit(
+                    InstKind::ScopeEnter,
+                    IrType::Int(IntWidth::I64),
+                    function.span,
+                );
+                let slot = self.declare_slot("<scope>", IrType::Int(IntWidth::I64), function.span);
+                self.emit_effect(InstKind::Store(slot, id), function.span);
+                slot
+            });
+        if let Some(slot) = root_scope_slot {
+            self.scope_stack.push(slot);
+        }
+
         self.lower_block(&function.body);
+
+        if let Some(slot) = root_scope_slot {
+            self.scope_stack.pop();
+            let scope = self.emit(
+                InstKind::Load(slot),
+                IrType::Int(IntWidth::I64),
+                function.span,
+            );
+            self.emit_effect(InstKind::ScopeExit { scope }, function.span);
+            self.lower_throws_check(scope, IrType::Void, function.span);
+        }
 
         // A `Void` function may end without an explicit return. In a non-`Void`
         // one the checker already proved every path returns, so an open block
@@ -4289,6 +4419,7 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Callable(_)
+            | IrType::Job
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -4670,6 +4801,7 @@ impl<'a> FunctionLowering<'a> {
             // deferred as its own D5/D6.
             ast::Stmt::Unsafe(s) => self.lower_unsafe_block(&s.body),
             ast::Stmt::Commit(s) => self.lower_commit_block(&s.body),
+            ast::Stmt::Concurrent(s) => self.lower_concurrent(s),
             // A local class emits nothing where it is declared: its members
             // lower as ordinary functions through `class_decls`, and its
             // name resolves to the same layout a top-level one gets.
@@ -6963,6 +7095,12 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if self.is_timer_call(e) {
+                    return self.lower_timer_call(e, span);
+                }
+                if self.is_job_method_call(e) {
+                    return self.lower_job_method_call(e, span);
+                }
                 if self.is_pointer_from_call(e) {
                     return self.lower_pointer_from(&e.args[0].value, span);
                 }
@@ -7129,6 +7267,7 @@ impl<'a> FunctionLowering<'a> {
             // statement form.
             ast::Expr::Unsafe(u) => self.lower_unsafe_block_value(&u.body),
             ast::Expr::Commit(c) => self.lower_commit_block_value(&c.body),
+            ast::Expr::Spawn(s) => self.lower_spawn(s),
             ast::Expr::Transfer(e) => self.lower_transfer(e, span),
 
             // `null` has no type of its own: it only appears where a
@@ -7480,6 +7619,378 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), result_type, span)
+    }
+
+    /// Lowers a `concurrent { }` block (`concurrent-blocks-and-timers`): opens
+    /// a scope, starts every branch as a `BranchStart` (bindings in dependency
+    /// order so a dependent branch sees its inputs joined, plain statements on
+    /// the block's own inline path), joins them at `ScopeExit`, and hoists each
+    /// binding's joined value into the enclosing scope.
+    fn lower_concurrent(&mut self, block: &ast::ConcurrentBlock) {
+        let span = block.span;
+        let plan = self
+            .checked
+            .concurrent_plans
+            .get(&span)
+            .expect("the checker records every concurrent block")
+            .clone();
+        let statements = &block.body.statements;
+
+        let scope_id = self.emit(InstKind::ScopeEnter, IrType::Int(IntWidth::I64), span);
+        let scope_slot = self.declare_slot("<scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope_id), span);
+        self.scope_stack.push(scope_slot);
+        self.scopes.push(HashMap::new());
+
+        let binding_statements: std::collections::HashSet<usize> = block
+            .bindings
+            .iter()
+            .map(|binding| binding.statement_index)
+            .collect();
+
+        let mut jobs: Vec<Option<Operand>> = vec![None; block.bindings.len()];
+        let mut joined = vec![false; block.bindings.len()];
+
+        for &i in &plan.order {
+            for dep in plan.deps[i].clone() {
+                self.join_concurrent_binding(block, dep, &jobs, &mut joined, span);
+            }
+            let binding = &block.bindings[i];
+            let statement_index = binding.statement_index;
+            let init = match statements.get(statement_index) {
+                Some(ast::Stmt::Let(let_stmt)) => let_stmt
+                    .init
+                    .as_ref()
+                    .expect("a concurrent binding has an initializer"),
+                _ => unreachable!("a concurrent binding is a `let` statement"),
+            };
+
+            // A binding whose initializer is already a `Job<T>` (an explicit
+            // `spawn`) is not wrapped again: its `spawn` is the branch, and the
+            // binding just names the handle. Lower it as an ordinary `let` —
+            // the `spawn` inside registers with this scope — and let the
+            // runtime join it at `ScopeExit`.
+            let branch_returns =
+                self.checked.fn_types[self.branch_fn_type(binding.span) as usize].returns;
+            if matches!(init, ast::Expr::Spawn(_)) || matches!(branch_returns.base, Base::Job(_)) {
+                if let Some(statement) = statements.get(statement_index) {
+                    self.lower_stmt(statement);
+                }
+                joined[i] = true;
+                continue;
+            }
+
+            let job = self.lower_branch_start(
+                binding.span,
+                BranchBody::Expr(init),
+                BranchKind::Spawn,
+                None,
+                span,
+            );
+            jobs[i] = Some(job);
+        }
+
+        // The block's own branch: the plain statements, in source order. The
+        // checker rejected any read of a sibling binding here, so lowering them
+        // inline against the branches is a valid execution.
+        for (index, statement) in statements.iter().enumerate() {
+            if binding_statements.contains(&index) {
+                continue;
+            }
+            self.lower_stmt(statement);
+        }
+
+        for i in 0..block.bindings.len() {
+            self.join_concurrent_binding(block, i, &jobs, &mut joined, span);
+        }
+
+        self.scope_stack.pop();
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExit { scope }, span);
+        // A branch's unhandled exception, surfaced by the scope close, is
+        // pending here and dispatches like any post-call throw.
+        self.lower_throws_check(scope, IrType::Void, span);
+
+        let inner = self.scopes.pop().expect("the concurrent scope frame");
+        for binding in &block.bindings {
+            if let Some(&slot) = inner.get(&binding.name.name)
+                && let Some(outer) = self.scopes.last_mut()
+            {
+                outer.insert(binding.name.name.clone(), slot);
+            }
+        }
+    }
+
+    /// The interned `fn_type` the checker recorded for a `spawn` / `concurrent`
+    /// branch body keyed by `key`.
+    fn branch_fn_type(&self, key: Span) -> u32 {
+        self.checked
+            .lambdas
+            .get(&key)
+            .expect("the checker records every branch body")
+            .fn_type
+    }
+
+    /// `JobWait`s one `concurrent` binding's branch (once) and stores the
+    /// result under the binding's name in the block's own scope frame, so
+    /// later branches capture the value and the enclosing scope hoists it.
+    fn join_concurrent_binding(
+        &mut self,
+        block: &ast::ConcurrentBlock,
+        index: usize,
+        jobs: &[Option<Operand>],
+        joined: &mut [bool],
+        span: Span,
+    ) {
+        if joined[index] {
+            return;
+        }
+        joined[index] = true;
+        let job = jobs[index].expect("a branch is started before it is joined");
+        let binding = &block.bindings[index];
+        let returns = {
+            let info = self
+                .checked
+                .lambdas
+                .get(&binding.span)
+                .expect("the checker records every branch");
+            self.checked.fn_types[info.fn_type as usize].returns
+        };
+        let result_ty = self.ir_type(returns);
+        let value = self.emit(
+            InstKind::JobWait {
+                job,
+                result: result_ty,
+            },
+            result_ty,
+            span,
+        );
+        let slot = self.declare_slot(&binding.name.name, result_ty, binding.span);
+        self.emit_effect(InstKind::Store(slot, value), span);
+    }
+
+    /// Lifts a `spawn` / `Timer` / `concurrent` branch body like a
+    /// zero-argument lambda and emits the `BranchStart` that registers it with
+    /// the innermost scope. Returns the branch's `Job` handle.
+    fn lower_branch_start(
+        &mut self,
+        key: Span,
+        body: BranchBody<'_>,
+        kind: BranchKind,
+        delay: Option<Operand>,
+        span: Span,
+    ) -> Operand {
+        let info = self
+            .checked
+            .lambdas
+            .get(&key)
+            .expect("the checker records every branch body")
+            .clone();
+        let capture_slots: Vec<SlotId> = info
+            .captures
+            .iter()
+            .map(|capture| self.lookup_slot(&capture.name))
+            .collect();
+        let capture_types: Vec<IrType> = capture_slots
+            .iter()
+            .map(|slot| self.slot_type(*slot))
+            .collect();
+        let returns = self.ir_type(self.checked.fn_types[info.fn_type as usize].returns);
+        let id = info.fn_type;
+        let name = format!("branch.{}.{}", key.file.0, key.start);
+
+        if !info.captures.is_empty() {
+            self.module.closures[id as usize] = ClosureLayout {
+                captures: capture_types.clone(),
+                params: Vec::new(),
+                returns,
+            };
+        }
+
+        let captures: Vec<Operand> = capture_slots
+            .iter()
+            .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+            .collect();
+        let names: Vec<String> = info.captures.iter().map(|c| c.name.clone()).collect();
+
+        let lifted = self.lift_branch_body(&name, &names, &capture_types, returns, body, span);
+        self.lifted.push(lifted);
+
+        let callable = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures,
+            },
+            IrType::Callable(id),
+            span,
+        );
+        let scope_slot = *self
+            .scope_stack
+            .last()
+            .expect("the checker requires a scope around every branch");
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit(
+            InstKind::BranchStart {
+                target: name,
+                body: callable,
+                scope,
+                kind,
+                delay,
+            },
+            IrType::Job,
+            span,
+        )
+    }
+
+    /// Lifts a branch body to its own zero-argument (capture-prefixed) module
+    /// function, mirroring [`Self::lift_lambda_body`].
+    fn lift_branch_body(
+        &mut self,
+        name: &str,
+        params: &[String],
+        types: &[IrType],
+        returns: IrType,
+        body: BranchBody<'_>,
+        span: Span,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = returns;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let slots: Vec<SlotId> = params
+            .iter()
+            .zip(types)
+            .map(|(name, ty)| inner.declare_slot(name, *ty, span))
+            .collect();
+
+        match body {
+            BranchBody::Expr(e) => {
+                let value = inner.lower_expr_as(e, returns);
+                inner.terminate(if returns == IrType::Void {
+                    Terminator::Return(None)
+                } else {
+                    Terminator::Return(Some(value))
+                });
+            }
+            BranchBody::Block(b) => {
+                inner.lower_block(b);
+                if returns == IrType::Void {
+                    inner.terminate(Terminator::Return(None));
+                } else {
+                    inner.terminate(Terminator::Unreachable);
+                }
+            }
+        }
+
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+
+        Function {
+            name: name.to_string(),
+            params: slots,
+            return_type: returns,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `spawn expr` / `spawn { block }` in expression position.
+    fn lower_spawn(&mut self, expr: &ast::SpawnExpr) -> Operand {
+        let body = match &expr.body {
+            ast::SpawnBody::Expr(inner) => BranchBody::Expr(inner),
+            ast::SpawnBody::Block(block) => BranchBody::Block(block),
+        };
+        self.lower_branch_start(expr.span, body, BranchKind::Spawn, None, expr.span)
+    }
+
+    /// Whether `call` is `Timer.sleep` / `Timer.after` / `Timer.every` — a
+    /// static call on the compiler-known `Timer` namespace, recognized the
+    /// same structural way the checker does (`Timer` is not a value).
+    fn is_timer_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if matches!(&*field.object, ast::Expr::Path(base)
+                if base.name == "Timer" && self.try_lookup_slot("Timer").is_none())
+                && matches!(field.name.name.as_str(), "sleep" | "after" | "every"))
+    }
+
+    /// Lowers a `Timer.*` call. `sleep` is a suspension point; `after` / `every`
+    /// arm an ambient branch on the innermost scope.
+    fn lower_timer_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("is_timer_call checked the shape")
+        };
+        let delay = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+        match field.name.name.as_str() {
+            "sleep" => {
+                self.emit_effect(InstKind::TimerSleep { nanos: delay }, span);
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            "after" | "every" => {
+                let kind = if field.name.name == "after" {
+                    BranchKind::TimerAfter
+                } else {
+                    BranchKind::TimerEvery
+                };
+                let callback = &call.args[1].value;
+                let ast::Expr::Lambda(lambda) = callback else {
+                    unreachable!("the checker requires a lambda callback for Timer.after/every")
+                };
+                let body = match &*lambda.body {
+                    ast::LambdaBody::Expr(inner) => BranchBody::Expr(inner),
+                    ast::LambdaBody::Block(block) => BranchBody::Block(block),
+                };
+                self.lower_branch_start(lambda.span, body, kind, Some(delay), span)
+            }
+            _ => unreachable!("is_timer_call restricts the member"),
+        }
+    }
+
+    /// Whether `call` is `job.wait()` / `job.cancel()` on a `Job` receiver.
+    fn is_job_method_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if matches!(field.name.name.as_str(), "wait" | "cancel")
+                && self.type_of(&field.object, field.object.span()) == IrType::Job)
+    }
+
+    fn lower_job_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("is_job_method_call checked the shape")
+        };
+        let job = self.lower_expr(&field.object);
+        match field.name.name.as_str() {
+            "wait" => {
+                let result_ty = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .map(|ty| self.ir_type(*ty))
+                    .unwrap_or(IrType::Void);
+                self.emit(
+                    InstKind::JobWait {
+                        job,
+                        result: result_ty,
+                    },
+                    result_ty,
+                    span,
+                )
+            }
+            "cancel" => {
+                self.emit_effect(InstKind::JobCancel { job }, span);
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            _ => unreachable!("is_job_method_call restricts the member"),
+        }
     }
 
     /// Lowers a lambda into a module function plus a boxed callable value.
@@ -15285,6 +15796,14 @@ impl<'a> FunctionLowering<'a> {
             return self.emit(InstKind::PointerIsNull(pointer), IrType::Boolean, span);
         }
 
+        // `job.done` (`concurrent-blocks-and-timers`): a terminal-state query
+        // on a branch handle.
+        if expr.name.name == "done" && self.type_of(&expr.object, expr.object.span()) == IrType::Job
+        {
+            let job = self.lower_expr(&expr.object);
+            return self.emit(InstKind::JobDone { job }, IrType::Boolean, span);
+        }
+
         // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`, design D4): the same
         // null-check `.upgrade()` does, without producing a new strong
         // reference.
@@ -17913,6 +18432,18 @@ impl<'a> FunctionLowering<'a> {
     /// them would leave a value nobody reads.
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
+            // `Timer.*` / `job.wait()` / `job.cancel()` / `spawn` as bare
+            // statements: recognized before any arm that would resolve the
+            // receiver (`Timer` is not a value; `method_of` would panic).
+            ast::Expr::Call(e) if self.is_timer_call(e) => {
+                self.lower_timer_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_job_method_call(e) => {
+                self.lower_job_method_call(e, expr.span());
+            }
+            ast::Expr::Spawn(s) => {
+                self.lower_spawn(s);
+            }
             // `.write(v)` as a bare statement (roadmap Phase 4e) — checked
             // ahead of the later "void call by name" arm below, whose own
             // guard calls `Self::callee_name` unconditionally and panics on
@@ -18851,6 +19382,13 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        // `Timer.*` and `job.wait()`/`.cancel()` (`concurrent-blocks-and-timers`):
+        // `Timer` is not a value and a `Job` handle has no method table, so the
+        // `type_of` probes below would fault on the callee.
+        if self.is_timer_call(call) || self.is_job_method_call(call) {
+            return false;
+        }
+
         // `Outer.Nested(...)`/`o.Inner(...)`: the callee's base names a type
         // (or is the hidden `outer` receiver), so every probe below would
         // ask for the type of something that is not one — the same failure
@@ -19105,6 +19643,31 @@ impl<'a> FunctionLowering<'a> {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
             ast::Expr::Call(e) if self.is_recursive_self_call(e) => self.return_type,
+            // `concurrent-blocks-and-timers`: `Timer.*` and `job.wait/cancel`.
+            ast::Expr::Call(e) if self.is_timer_call(e) => {
+                let ast::Expr::Field(field) = &*e.callee else {
+                    unreachable!("is_timer_call checked the shape")
+                };
+                if field.name.name == "sleep" {
+                    IrType::Void
+                } else {
+                    IrType::Job
+                }
+            }
+            ast::Expr::Call(e) if self.is_job_method_call(e) => {
+                let ast::Expr::Field(field) = &*e.callee else {
+                    unreachable!("is_job_method_call checked the shape")
+                };
+                if field.name.name == "cancel" {
+                    IrType::Void
+                } else {
+                    self.checked
+                        .expr_types
+                        .get(&e.span)
+                        .map(|ty| self.ir_type(*ty))
+                        .unwrap_or(IrType::Void)
+                }
+            }
             ast::Expr::Call(e) if self.is_callable_call(e) => {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
@@ -19454,6 +20017,8 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Interpolated(_) => IrType::String,
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
             ast::Expr::Commit(c) => self.block_value_type(&c.body),
+            // `spawn expr : Job<T>`; the erased one-word handle at the IR level.
+            ast::Expr::Spawn(_) => IrType::Job,
         }
     }
 

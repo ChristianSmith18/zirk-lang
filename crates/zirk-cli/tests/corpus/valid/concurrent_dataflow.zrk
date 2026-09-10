@@ -1,0 +1,18 @@
+// Rule B: a dependent binding's branch starts only after the branch it names
+// has produced its value (`concurrent-blocks-and-timers`, design D2).
+
+fn seed(): Int32 {
+    return 7;
+}
+
+fn refine(base: Int32): Int32 {
+    return base * 6;
+}
+
+fn main(): Void {
+    concurrent {
+        inmut base: Int32 = seed();
+        inmut refined: Int32 = refine(base);
+    }
+    stdout.println(refined);
+}

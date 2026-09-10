@@ -1,0 +1,10 @@
+// A plain statement inside the block may not read a sibling binding before the
+// block closes.
+fn load(): Int32 { return 1; }
+
+fn main(): Void {
+    concurrent {
+        inmut value: Int32 = load();
+        stdout.println(value);
+    }
+}

@@ -24,6 +24,125 @@ pub struct TaskId {
     generation: u32,
 }
 
+/// A generational reference to one structured-concurrency scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScopeId {
+    index: u32,
+    generation: u32,
+}
+
+impl ScopeId {
+    /// The packed one-word representation used at the runtime C ABI.
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+
+    /// Inverse of [`to_bits`](Self::to_bits). Registry generation checks
+    /// reject stale values before they can name a live scope.
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
+    }
+}
+
+/// Runtime bookkeeping for a lexical `concurrent` scope. Failures are kept as
+/// task ids: their outcome remains owned by the task control block until the
+/// scope has joined and propagated it.
+#[derive(Debug, Default)]
+pub struct ScopeControlBlock {
+    pub branches: Vec<TaskId>,
+    /// Timer jobs are owned by the lexical scope but do not participate in
+    /// its join. Closing the scope requests their cancellation so a periodic
+    /// timer cannot keep the block alive indefinitely.
+    pub ambient_timers: Vec<TaskId>,
+    pub cancel_requested: bool,
+    pub primary_failure: Option<TaskId>,
+    pub suppressed: Vec<TaskId>,
+}
+
+/// A generational slab of scope control blocks, parallel to [`TaskRegistry`].
+#[derive(Default)]
+pub struct ScopeRegistry {
+    slots: Vec<ScopeSlot>,
+    free: Vec<u32>,
+}
+
+enum ScopeSlot {
+    Live {
+        generation: u32,
+        scope: ScopeControlBlock,
+    },
+    Free {
+        generation: u32,
+    },
+}
+
+impl ScopeRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self) -> ScopeId {
+        if let Some(index) = self.free.pop() {
+            let generation = match &self.slots[index as usize] {
+                ScopeSlot::Free { generation } => *generation,
+                ScopeSlot::Live { .. } => unreachable!("free scope slot was live"),
+            };
+            self.slots[index as usize] = ScopeSlot::Live {
+                generation,
+                scope: ScopeControlBlock::default(),
+            };
+            ScopeId { index, generation }
+        } else {
+            let index = self.slots.len() as u32;
+            self.slots.push(ScopeSlot::Live {
+                generation: 0,
+                scope: ScopeControlBlock::default(),
+            });
+            ScopeId {
+                index,
+                generation: 0,
+            }
+        }
+    }
+
+    pub fn get(&self, id: ScopeId) -> Option<&ScopeControlBlock> {
+        match self.slots.get(id.index as usize)? {
+            ScopeSlot::Live { generation, scope } if *generation == id.generation => Some(scope),
+            _ => None,
+        }
+    }
+
+    pub fn get_mut(&mut self, id: ScopeId) -> Option<&mut ScopeControlBlock> {
+        match self.slots.get_mut(id.index as usize)? {
+            ScopeSlot::Live { generation, scope } if *generation == id.generation => Some(scope),
+            _ => None,
+        }
+    }
+
+    pub fn remove(&mut self, id: ScopeId) -> Option<ScopeControlBlock> {
+        let slot = self.slots.get_mut(id.index as usize)?;
+        match slot {
+            ScopeSlot::Live { generation, .. } if *generation == id.generation => {
+                let next_generation = generation.wrapping_add(1);
+                let ScopeSlot::Live { scope, .. } = std::mem::replace(
+                    slot,
+                    ScopeSlot::Free {
+                        generation: next_generation,
+                    },
+                ) else {
+                    unreachable!()
+                };
+                self.free.push(id.index);
+                Some(scope)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl TaskId {
     /// The raw `u64` carried across the internal C ABI.
     pub fn to_bits(self) -> u64 {
@@ -140,6 +259,8 @@ pub struct TaskControlBlock {
     /// the child has completed, including before its first body frame exists.
     pub capture_root: Option<*mut std::ffi::c_void>,
     pub cleanup_state: CleanupState,
+    /// The structured scope that owns this branch, if any.
+    pub parent: Option<ScopeId>,
 }
 
 impl TaskControlBlock {
@@ -157,6 +278,7 @@ impl TaskControlBlock {
             roots: Vec::new(),
             capture_root,
             cleanup_state: CleanupState::Done,
+            parent: None,
         }
     }
 }
@@ -350,6 +472,16 @@ mod tests {
         reg.remove(b);
         let live: Vec<_> = reg.live_ids().collect();
         assert_eq!(live, vec![a, c]);
+    }
+
+    #[test]
+    fn a_reused_scope_slot_rejects_the_old_id() {
+        let mut scopes = ScopeRegistry::new();
+        let old = scopes.insert();
+        scopes.remove(old);
+        let new = scopes.insert();
+        assert!(scopes.get(old).is_none());
+        assert!(scopes.get(new).is_some());
     }
 
     impl TaskId {

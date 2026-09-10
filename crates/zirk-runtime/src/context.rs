@@ -29,7 +29,7 @@
 //!
 //! A task body receives a `&Suspender` and can suspend directly. Generated code
 //! and runtime functions that must suspend from deep in a call stack (a future
-//! `zirk_rt_task_await`, channel operations) hold no such reference, so this
+//! `zirk_rt_job_wait`, channel operations) hold no such reference, so this
 //! module also exposes [`suspend_current`]: it suspends the running task through
 //! a thread-local pointer to its suspend handle, armed at body entry and
 //! re-armed after every resume. Because the executor is single-threaded and a

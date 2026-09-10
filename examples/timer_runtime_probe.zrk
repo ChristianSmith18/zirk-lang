@@ -1,0 +1,18 @@
+// Runtime probe for the concurrent-blocks-and-timers change.
+// Expected runtime order:
+//   before close
+//   after
+//   tick (one or more times)
+// `every` is ambient, so scope close cancels it and no later tick is allowed.
+
+fn main(): Void {
+    concurrent {
+        Timer.after(2ms, (): Void => stdout.println("after"));
+        Timer.every(1ms, (): Void => stdout.println("tick"));
+
+        Timer.sleep(5ms);
+        stdout.println("before close");
+    }
+
+    stdout.println("scope closed");
+}

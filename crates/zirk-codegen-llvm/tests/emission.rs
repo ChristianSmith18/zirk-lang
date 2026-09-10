@@ -578,3 +578,25 @@ fn binary_float_arithmetic_is_still_a_native_fadd() {
         "Float64 arithmetic stays a native LLVM fadd:\n{ir}"
     );
 }
+
+#[test]
+fn concurrent_block_emits_scope_calls_a_branch_thunk_and_a_spawn() {
+    let ir = llvm_ir(
+        "fn load(): Int32 { return 1; }\n         fn main(): Void {\n           concurrent {\n             inmut a: Int32 = load();\n           }\n           stdout.println(a);\n         }",
+    );
+    assert!(ir.contains(&format!("call i64 @{}", symbols::SCOPE_ENTER)));
+    assert!(ir.contains(&format!("call i1 @{}", symbols::SCOPE_EXIT)));
+    assert!(ir.contains(&format!("@{}", symbols::SPAWN)));
+    assert!(ir.contains(&format!("@{}", symbols::BRANCH_REGISTER)));
+    assert!(ir.contains("zk.branch_thunk."));
+    assert!(
+        ir.contains("uwtable"),
+        "generated functions carry an unwind table"
+    );
+}
+
+#[test]
+fn timer_sleep_emits_a_runtime_suspend_call() {
+    let ir = llvm_ir("fn main(): Void { Timer.sleep(1ms); }");
+    assert!(ir.contains(&format!("@{}", symbols::SLEEP)));
+}

@@ -10,4 +10,4 @@ operation.
 
 ---
 
-**Previous:** [← Structured Concurrency](04-structured-concurrency.md) · **Next:** [ Timeouts](06-timeouts.md)
+**Previous:** [← `Job<T>`](16-job.md) · **Next:** [ Timeouts](06-timeouts.md)

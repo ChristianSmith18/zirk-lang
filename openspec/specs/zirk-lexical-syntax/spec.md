@@ -105,19 +105,15 @@ The lexer SHALL recognize line comments `//` and block comments `/* ... */`, dis
 
 ### Requirement: Reserved words of the whole language
 
-The lexer SHALL recognize as keywords those of the whole language, not only those of the implemented subset. `task` and `await` are NOT keywords: they were removed from the language and the parser treats them, in a construct position, as removed constructs. `select`, `scope`, and `shield` are ordinary identifiers.
-
-Recognizing them allows the parser to distinguish an unimplemented construct from a syntax error, and makes the diagnostic understandable.
+The lexer SHALL recognize as keywords those of the whole language, not only those of the implemented subset. `concurrent` and `spawn` are keywords. `task` and `await` are NOT keywords (removed from the language; the parser treats them in a construct position as removed constructs). `select`, `scope`, `shield` are ordinary identifiers.
 
 #### Scenario: Keyword outside the subset
-
-- **WHEN** `class`, `for`, `match`, or another keyword of the whole language is tokenized
+- **WHEN** `class`, `for`, `match`, `concurrent`, or `spawn` is tokenized
 - **THEN** the corresponding keyword token is produced and no identifier is produced
 
 #### Scenario: Removed word is an identifier
-
-- **WHEN** `mut task = 1;` or `mut await = 2;` is tokenized
-- **THEN** `task` and `await` are produced as identifiers
+- **WHEN** `mut task = 1;` is tokenized
+- **THEN** `task` is produced as an identifier
 
 ### Requirement: Case sensitivity
 
@@ -397,3 +393,4 @@ The lexer SHALL continue emitting `DotDotDot` for `...`; parser context SHALL di
 #### Scenario: Object spread tokenization
 - **WHEN** `{ ...profile, name: "Grace" }` is tokenized
 - **THEN** `DotDotDot` precedes `profile` and the braces remain available for contextual object parsing
+

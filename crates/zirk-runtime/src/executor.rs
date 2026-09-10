@@ -27,7 +27,9 @@ use std::time::Instant;
 
 use crate::context::{self, TaskContext};
 use crate::failure::fatal;
-use crate::task::{CleanupState, TaskId, TaskOutcome, TaskRegistry, TaskState, WaitReason};
+use crate::task::{
+    CleanupState, ScopeId, ScopeRegistry, TaskId, TaskOutcome, TaskRegistry, TaskState, WaitReason,
+};
 
 /// Stack size for the root task — it runs the program's `main`, which used to
 /// run on the OS main-thread stack. 8 MiB matches a typical main-thread stack;
@@ -55,10 +57,30 @@ fn with_exec<R>(f: impl FnOnce(&mut Executor) -> R) -> R {
 /// The cooperative executor.
 pub struct Executor {
     registry: TaskRegistry,
+    scopes: ScopeRegistry,
     ready: VecDeque<TaskId>,
     timers: crate::timer::TimerService,
     root: Option<TaskId>,
 }
+
+/// The observable state of a scope close attempt. Lowered `ScopeExit` retries
+/// after the executor has driven the registered branches to a terminal cleanup
+/// state; it never permits control to leave the lexical scope early.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeExit {
+    Pending,
+    Complete {
+        primary_failure: Option<TaskId>,
+        suppressed: Vec<TaskId>,
+    },
+}
+
+/// Internal runtime representation of the compiler-known `CancelledError`.
+/// Lowered language exception handling will map this payload to its public
+/// throwable; keeping it distinct from a fatal runtime failure lets scope
+/// cleanup treat cancellation as an ordinary cooperative branch outcome.
+#[derive(Debug)]
+pub struct Cancelled;
 
 impl Default for Executor {
     fn default() -> Self {
@@ -70,9 +92,146 @@ impl Executor {
     pub fn new() -> Self {
         Executor {
             registry: TaskRegistry::new(),
+            scopes: ScopeRegistry::new(),
             ready: VecDeque::new(),
             timers: crate::timer::TimerService::new(),
             root: None,
+        }
+    }
+
+    /// Opens a structured-concurrency scope.
+    pub fn scope_enter(&mut self) -> ScopeId {
+        self.scopes.insert()
+    }
+
+    /// Makes `task` owned by `scope`. A branch can have exactly one lexical
+    /// owner; registering it twice is an executor bug rather than a recoverable
+    /// runtime condition.
+    pub fn branch_register(&mut self, scope: ScopeId, task: TaskId) {
+        assert!(self.scopes.get(scope).is_some(), "unknown scope");
+        let tcb = self.registry.get_mut(task).expect("unknown branch");
+        assert!(tcb.parent.is_none(), "branch already belongs to a scope");
+        tcb.parent = Some(scope);
+        self.scopes
+            .get_mut(scope)
+            .expect("scope was checked above")
+            .branches
+            .push(task);
+    }
+
+    /// Makes a timer job owned by `scope`. Ambient timers receive parent
+    /// cancellation, but `scope_exit` never waits for their natural result.
+    pub fn ambient_timer_register(&mut self, scope: ScopeId, task: TaskId) {
+        assert!(self.scopes.get(scope).is_some(), "unknown scope");
+        let tcb = self.registry.get_mut(task).expect("unknown timer job");
+        assert!(tcb.parent.is_none(), "timer job already belongs to a scope");
+        tcb.parent = Some(scope);
+        self.scopes
+            .get_mut(scope)
+            .expect("scope was checked above")
+            .ambient_timers
+            .push(task);
+    }
+
+    /// Requests cooperative cancellation. Suspending branches are requeued so
+    /// their next safe-point check can observe the request; ready/running and
+    /// terminal branches need no queue mutation.
+    pub fn request_cancel(&mut self, task: TaskId) {
+        let wake = match self.registry.get_mut(task) {
+            Some(tcb) if !tcb.state.is_terminal() => {
+                if tcb.cancel_requested {
+                    return;
+                }
+                tcb.cancel_requested = true;
+                tcb.state == TaskState::Suspended
+            }
+            _ => false,
+        };
+        if wake {
+            self.make_ready(task);
+        }
+    }
+
+    /// Requests cancellation for every branch currently owned by `scope`.
+    pub fn request_scope_cancel(&mut self, scope: ScopeId) {
+        let owned = {
+            let scope = self.scopes.get_mut(scope).expect("unknown scope");
+            if scope.cancel_requested {
+                return;
+            }
+            scope.cancel_requested = true;
+            scope
+                .branches
+                .iter()
+                .chain(&scope.ambient_timers)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        for branch in owned {
+            self.request_cancel(branch);
+        }
+    }
+
+    /// Advances the join-or-cancel-and-clean protocol for `scope`.
+    pub fn scope_exit(&mut self, scope: ScopeId) -> ScopeExit {
+        let (branches, ambient_timers) = {
+            let scope_tcb = self.scopes.get(scope).expect("unknown scope");
+            (scope_tcb.branches.clone(), scope_tcb.ambient_timers.clone())
+        };
+
+        // Ambient work is support work: cancellation happens when the lexical
+        // scope closes, but it must not make a scope wait for a timer's normal
+        // completion (notably an infinite `Timer.every`).
+        for timer in ambient_timers {
+            self.request_cancel(timer);
+        }
+
+        let failures: Vec<TaskId> = branches
+            .iter()
+            .copied()
+            .filter(|branch| {
+                self.registry
+                    .get(*branch)
+                    .is_some_and(|tcb| tcb.state == TaskState::Failed)
+            })
+            .collect();
+
+        if let Some(primary) = failures.first().copied() {
+            let should_cancel = {
+                let scope_tcb = self.scopes.get_mut(scope).expect("scope exists");
+                if scope_tcb.primary_failure.is_none() {
+                    scope_tcb.primary_failure = Some(primary);
+                    scope_tcb.suppressed = failures.into_iter().skip(1).collect();
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_cancel {
+                for branch in &branches {
+                    if *branch != primary {
+                        self.request_cancel(*branch);
+                    }
+                }
+            }
+        }
+
+        let all_clean = branches.iter().all(|branch| {
+            // A branch whose result was already consumed by `wait()` is
+            // reclaimed out of the registry — it finished and was cleaned, so
+            // its absence counts as terminal-and-clean here.
+            self.registry.get(*branch).is_none_or(|tcb| {
+                tcb.state.is_terminal() && tcb.cleanup_state == CleanupState::Done
+            })
+        });
+        if !all_clean {
+            return ScopeExit::Pending;
+        }
+
+        let scope_tcb = self.scopes.remove(scope).expect("scope exists");
+        ScopeExit::Complete {
+            primary_failure: scope_tcb.primary_failure,
+            suppressed: scope_tcb.suppressed,
         }
     }
 
@@ -280,7 +439,12 @@ fn run_one_turn(task: TaskId) {
                 exec.complete(task, TaskOutcome::Value(value), TaskState::Completed);
             }
             Err(payload) => {
-                exec.complete(task, TaskOutcome::Panicked(payload), TaskState::Failed);
+                let state = if payload.is::<Cancelled>() {
+                    TaskState::Cancelled
+                } else {
+                    TaskState::Failed
+                };
+                exec.complete(task, TaskOutcome::Panicked(payload), state);
             }
         }
     });
@@ -326,6 +490,75 @@ where
     spawn_with_capture_root(body, std::ptr::null_mut())
 }
 
+/// Opens a scope in the executor currently running this task.
+pub fn scope_enter_current() -> ScopeId {
+    with_exec(|exec| exec.scope_enter())
+}
+
+/// Registers a child branch with its lexical scope.
+pub fn branch_register_current(scope: ScopeId, branch: TaskId) {
+    with_exec(|exec| exec.branch_register(scope, branch));
+}
+
+/// Registers an ambient timer job with its lexical scope.
+pub fn ambient_timer_register_current(scope: ScopeId, timer: TaskId) {
+    with_exec(|exec| exec.ambient_timer_register(scope, timer));
+}
+
+/// Advances a scope close. `true` means every branch is terminal and cleanup
+/// finished; lowering retries after suspension while it is `false`.
+pub fn scope_exit_current(scope: ScopeId) -> bool {
+    matches!(
+        with_exec(|exec| exec.scope_exit(scope)),
+        ScopeExit::Complete { .. }
+    )
+}
+
+/// The unwind payload of a `concurrent` branch that ended on an unhandled Zirk
+/// exception. The `usize` is the pending-exception object pointer, taken from
+/// the thread slot by the branch thunk before it unwinds so a sibling running
+/// next does not mistake it for its own failure.
+pub struct BranchFailure(pub usize);
+
+/// One turn of the scope-close protocol. `None` means the scope is still
+/// waiting on a branch; `Some(exception)` means it is done, carrying the
+/// primary failure's exception pointer (as bits) to re-raise, or `None` inside
+/// the `Some` when every branch finished normally.
+pub fn scope_exit_poll(scope: ScopeId) -> Option<Option<usize>> {
+    match with_exec(|exec| exec.scope_exit(scope)) {
+        ScopeExit::Pending => None,
+        ScopeExit::Complete {
+            primary_failure, ..
+        } => Some(primary_failure.and_then(take_branch_failure)),
+    }
+}
+
+/// Takes a terminal branch's [`BranchFailure`] payload, if that is how it
+/// ended. Leaves any other outcome in place.
+fn take_branch_failure(task: TaskId) -> Option<usize> {
+    with_exec(|exec| {
+        let tcb = exec.registry.get_mut(task)?;
+        match tcb.outcome.take() {
+            Some(TaskOutcome::Panicked(payload)) => match payload.downcast::<BranchFailure>() {
+                Ok(failure) => Some(failure.0),
+                Err(payload) => {
+                    tcb.outcome = Some(TaskOutcome::Panicked(payload));
+                    None
+                }
+            },
+            other => {
+                tcb.outcome = other;
+                None
+            }
+        }
+    })
+}
+
+/// Requests cancellation of a job idempotently.
+pub fn cancel_current(branch: TaskId) {
+    with_exec(|exec| exec.request_cancel(branch));
+}
+
 /// Spawns generated code and roots its callable capture block for the task's
 /// entire lifetime, including before the body installs compiler frame roots.
 pub fn spawn_with_capture_root<F>(body: F, capture_root: *mut std::ffi::c_void) -> TaskId
@@ -356,12 +589,31 @@ pub fn yield_now() {
 /// (This is the timer safe point `await ... timeout` and `select { after ... }`
 /// will build on.)
 pub fn sleep(delay_nanos: i64) {
+    check_cancelled();
     let me = CURRENT_TASK.get().expect("sleep outside a task body");
     let timer = with_exec(|exec| match exec.timers.arm(delay_nanos, me.to_bits()) {
         Ok(id) => id,
         Err(_) => fatal("sleep with a negative duration"),
     });
     suspend_current(WaitReason::Timer(timer.to_bits()));
+    check_cancelled();
+}
+
+/// Delivers a pending cancellation at an explicit safe point. There is no
+/// shielded region in this change, but preserving the depth check makes the
+/// rule forward-compatible with the non-cancellable region introduced later.
+pub fn check_cancelled() {
+    let me = CURRENT_TASK
+        .get()
+        .expect("check_cancelled outside a task body");
+    let cancelled = with_exec(|exec| {
+        exec.registry
+            .get(me)
+            .is_some_and(|tcb| tcb.cancel_requested && tcb.shield_depth == 0)
+    });
+    if cancelled {
+        std::panic::panic_any(Cancelled);
+    }
 }
 
 /// Records `reason` on the current task and suspends it. The executor decides
@@ -445,6 +697,83 @@ mod tests {
             TaskOutcome::Value(v) => v,
             TaskOutcome::Panicked(p) => std::panic::resume_unwind(p),
         }
+    }
+
+    fn dormant_context() -> TaskContext {
+        crate::context::spawn_default(|_s| 0)
+    }
+
+    #[test]
+    fn scope_exit_waits_for_each_registered_branch() {
+        let mut exec = Executor::new();
+        let scope = exec.scope_enter();
+        let a = exec.registry.insert(dormant_context());
+        let b = exec.registry.insert(dormant_context());
+        exec.branch_register(scope, a);
+        exec.branch_register(scope, b);
+
+        assert_eq!(exec.scope_exit(scope), ScopeExit::Pending);
+        exec.registry.get_mut(a).unwrap().state = TaskState::Completed;
+        exec.registry.get_mut(b).unwrap().state = TaskState::Completed;
+        assert_eq!(
+            exec.scope_exit(scope),
+            ScopeExit::Complete {
+                primary_failure: None,
+                suppressed: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn first_scope_failure_cancels_and_wakes_suspended_siblings() {
+        let mut exec = Executor::new();
+        let scope = exec.scope_enter();
+        let failed = exec.registry.insert(dormant_context());
+        let sibling = exec.registry.insert(dormant_context());
+        exec.branch_register(scope, failed);
+        exec.branch_register(scope, sibling);
+        exec.registry.get_mut(failed).unwrap().state = TaskState::Failed;
+        let sibling_tcb = exec.registry.get_mut(sibling).unwrap();
+        sibling_tcb.state = TaskState::Suspended;
+        sibling_tcb.wait = WaitReason::Timer(1);
+
+        assert_eq!(exec.scope_exit(scope), ScopeExit::Pending);
+        let sibling_tcb = exec.registry.get(sibling).unwrap();
+        assert!(sibling_tcb.cancel_requested);
+        assert_eq!(sibling_tcb.state, TaskState::Ready);
+    }
+
+    #[test]
+    fn scope_exit_cancels_ambient_timers_without_joining_them() {
+        let mut exec = Executor::new();
+        let scope = exec.scope_enter();
+        let timer = exec.registry.insert(dormant_context());
+        exec.ambient_timer_register(scope, timer);
+
+        assert_eq!(
+            exec.scope_exit(scope),
+            ScopeExit::Complete {
+                primary_failure: None,
+                suppressed: vec![]
+            }
+        );
+        assert!(exec.registry.get(timer).unwrap().cancel_requested);
+    }
+
+    #[test]
+    fn cancellation_is_delivered_when_a_sleeping_branch_is_woken() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let child = spawn(|| {
+                    sleep(1_000_000_000);
+                    0
+                });
+                yield_now(); // let the child arm its timer and suspend
+                with_exec(|exec| exec.request_cancel(child));
+                await_task(child)
+            })
+        });
+        assert!(outcome.is_err());
     }
 
     #[test]

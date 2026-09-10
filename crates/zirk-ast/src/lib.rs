@@ -575,6 +575,9 @@ pub enum Stmt {
     Expr(ExprStmt),
     /// A nested block.
     Block(Block),
+    /// `concurrent { ... }`, a structured scope whose direct bindings are
+    /// concurrent branches and whose result bindings hoist after the close.
+    Concurrent(ConcurrentBlock),
     /// `throw expr;` / `throw;` (rethrow, roadmap Phase 4b).
     Throw(ThrowStmt),
     /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
@@ -607,6 +610,7 @@ impl Stmt {
             Stmt::Return(s) => s.span,
             Stmt::Expr(s) => s.span,
             Stmt::Block(b) => b.span,
+            Stmt::Concurrent(s) => s.span,
             Stmt::Throw(s) => s.span,
             Stmt::Try(s) => s.span,
             Stmt::Unsafe(s) => s.span,
@@ -614,6 +618,27 @@ impl Stmt {
             Stmt::LocalClass(c) => c.span,
         }
     }
+}
+
+/// A structured `concurrent { ... }` scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConcurrentBlock {
+    /// The source body, including direct bindings and ordinary statements.
+    pub body: Block,
+    /// Direct binding statements in source order. The parser records these
+    /// explicitly so the checker can construct Rule B's dependency DAG without
+    /// reclassifying nested blocks.
+    pub bindings: Vec<ConcurrentBinding>,
+    pub span: Span,
+}
+
+/// One direct binding that becomes a branch of a [`ConcurrentBlock`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConcurrentBinding {
+    pub name: Ident,
+    /// Index into [`ConcurrentBlock::body`]'s statements.
+    pub statement_index: usize,
+    pub span: Span,
 }
 
 /// `unsafe { ... }`, in either statement or expression position (roadmap
@@ -959,6 +984,23 @@ pub enum Expr {
     Transfer(TransferExpr),
     /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
     Tuple(TupleExpr),
+    /// `spawn expr` or `spawn { ... }`, a dynamic branch owned by the nearest
+    /// concurrent scope.
+    Spawn(SpawnExpr),
+}
+
+/// The body of a [`SpawnExpr`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpawnBody {
+    Expr(Box<Expr>),
+    Block(Block),
+}
+
+/// A dynamic branch expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnExpr {
+    pub body: SpawnBody,
+    pub span: Span,
 }
 
 /// `expr as Type`, `expr as? Type`, or `<Type>expr`.
@@ -1014,6 +1056,7 @@ impl Expr {
             Expr::Commit(e) => e.span,
             Expr::Transfer(e) => e.span,
             Expr::Tuple(e) => e.span,
+            Expr::Spawn(e) => e.span,
         }
     }
 }
@@ -1686,6 +1729,14 @@ mod tests {
                 statements: vec![],
                 span: S,
             }),
+            Stmt::Concurrent(ConcurrentBlock {
+                body: Block {
+                    statements: vec![],
+                    span: S,
+                },
+                bindings: vec![],
+                span: S,
+            }),
             Stmt::Expr(ExprStmt {
                 expr: Expr::Bool(BoolLit {
                     value: true,
@@ -1713,6 +1764,10 @@ mod tests {
                 span: S,
             }),
             Expr::Path(Ident::new("x", S)),
+            Expr::Spawn(SpawnExpr {
+                body: SpawnBody::Expr(Box::new(Expr::Path(Ident::new("work", S)))),
+                span: S,
+            }),
         ];
 
         for expr in exprs {

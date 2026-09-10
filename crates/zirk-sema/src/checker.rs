@@ -31,6 +31,9 @@ pub struct CheckedProgram {
     pub contracts: Vec<ContractType>,
     /// Function types, indexed by the id their [`Base::Function`] carries.
     pub fn_types: Vec<FnType>,
+    /// Interned `Job<T>` result types, indexed by the id their [`Base::Job`]
+    /// carries.
+    pub job_types: Vec<Type>,
     /// What each lambda captures, keyed by the lambda's span.
     ///
     /// Lowering needs this to build the environment, and a span identifies a
@@ -201,6 +204,20 @@ pub struct CheckedProgram {
     /// `stack_trace` to construct the empty stub `Throwable::stack_trace()`
     /// returns without a real unwind-time frame capture.
     pub native_exceptions: Option<NativeExceptions>,
+    /// The Rule B branch plan of every `concurrent { }` block, keyed by the
+    /// block's span (`concurrent-blocks-and-timers`). Lowering starts and
+    /// joins the branches in `order` and, before starting branch `i`, waits
+    /// the branches in `deps[i]` so a dependent branch sees its inputs.
+    pub concurrent_plans: HashMap<Span, ConcurrentPlan>,
+}
+
+/// See [`CheckedProgram::concurrent_plans`].
+#[derive(Debug, Clone)]
+pub struct ConcurrentPlan {
+    /// The block's direct bindings in a valid dependency order.
+    pub order: Vec<usize>,
+    /// `deps[i]` is the sibling bindings binding `i`'s initializer names.
+    pub deps: Vec<Vec<usize>>,
 }
 
 /// See [`CheckedProgram::native_exceptions`].
@@ -308,6 +325,7 @@ pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) 
 struct Names<'t> {
     enums: &'t [EnumType],
     fn_types: &'t [FnType],
+    job_types: &'t [Type],
     classes: &'t [ClassType],
     contracts: &'t [ContractType],
     type_params: &'t [TypeParamInfo],
@@ -357,6 +375,13 @@ impl TypeNames for Names<'_> {
         };
         let params: Vec<String> = f.params.iter().map(|t| describe(*t, self)).collect();
         format!("({}) => {}", params.join(", "), describe(f.returns, self))
+    }
+
+    fn job_result(&self, id: u32) -> Type {
+        self.job_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
     }
 
     fn type_param_name(&self, id: u32) -> String {
@@ -506,7 +531,10 @@ struct Checker<'a> {
     classes: Vec<ClassType>,
     contracts: Vec<ContractType>,
     fn_types: Vec<FnType>,
+    /// Interned result types for `Job<T>`.
+    job_types: Vec<Type>,
     lambdas: HashMap<Span, LambdaInfo>,
+    concurrent_plans: HashMap<Span, ConcurrentPlan>,
     matches: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
     scalar_static_accesses: std::collections::HashSet<Span>,
@@ -547,6 +575,12 @@ struct Checker<'a> {
     ///
     /// Zero means `break` and `continue` have nothing to jump out of.
     loop_depth: u32,
+    /// Nested explicit `concurrent` blocks. `main` supplies one implicit
+    /// scope through `in_main_scope` below.
+    concurrent_depth: u32,
+    /// Whether the function currently being checked is the implicit root
+    /// concurrency scope (`main`).
+    in_main_scope: bool,
     /// How many `unsafe` boundaries (an `unsafe {}` block or an `unsafe fn`
     /// body) enclose the statement being checked (design D3, roadmap Phase
     /// 4e). Zero means a pointer operation or an extern call has nothing
@@ -790,7 +824,9 @@ impl<'a> Checker<'a> {
             classes: Vec::new(),
             contracts: Vec::new(),
             fn_types: Vec::new(),
+            job_types: Vec::new(),
             lambdas: HashMap::new(),
+            concurrent_plans: HashMap::new(),
             matches: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
@@ -803,6 +839,8 @@ impl<'a> Checker<'a> {
             this_type: None,
             in_constructor: false,
             loop_depth: 0,
+            concurrent_depth: 0,
+            in_main_scope: false,
             unsafe_depth: 0,
             commit_depth: 0,
             capture_stack: Vec::new(),
@@ -985,6 +1023,7 @@ impl<'a> Checker<'a> {
             &Names {
                 enums: &self.enums,
                 fn_types: &self.fn_types,
+                job_types: &self.job_types,
                 classes: &self.classes,
                 contracts: &self.contracts,
                 type_params: &self.type_params,
@@ -1095,7 +1134,9 @@ impl<'a> Checker<'a> {
             classes: self.classes,
             contracts: self.contracts,
             fn_types: self.fn_types,
+            job_types: self.job_types,
             lambdas: self.lambdas,
+            concurrent_plans: self.concurrent_plans,
             matches: self.matches,
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
@@ -5346,6 +5387,7 @@ impl<'a> Checker<'a> {
                 Base::Never => (9, 0),
                 Base::Enum(id) => (10, id),
                 Base::Function(id) => (11, id),
+                Base::Job(id) => (12, id),
                 Base::Contract(id) => (12, id),
                 Base::Class(id) => (13, id),
                 Base::Param(id) => (14, id),
@@ -5410,6 +5452,38 @@ impl<'a> Checker<'a> {
         let id = self.intern_fn_type(FnType { params, returns });
         let ty = Type::of(Base::Function(id));
         if nullable { ty.as_nullable() } else { ty }
+    }
+
+    /// `Job<T>` is a compiler-known one-parameter handle type.  It is
+    /// interned structurally so the same result type always has the same
+    /// `Base::Job` id.
+    fn resolve_job_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Job<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Job<T>` naming the branch result type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let result = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_job_type(result);
+        let ty = Type::of(Base::Job(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    fn intern_job_type(&mut self, result: Type) -> u32 {
+        if let Some(index) = self.job_types.iter().position(|&ty| ty == result) {
+            return index as u32;
+        }
+        self.job_types.push(result);
+        (self.job_types.len() - 1) as u32
     }
 
     /// `Pointer<T>` (roadmap Phase 4e, design D1/D2): resolves `T` and
@@ -5900,6 +5974,9 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Pointer" {
             return self.resolve_pointer_type_ref(reference);
+        }
+        if reference.name == "Job" {
+            return self.resolve_job_type_ref(reference);
         }
         if reference.name == "Weak" {
             return self.resolve_weak_type_ref(reference);
@@ -6496,8 +6573,15 @@ impl<'a> Checker<'a> {
     }
 
     /// Interns a function type, returning the id its `Base::Function` carries.
+    ///
+    /// An id a capturing lambda or a `concurrent` / `spawn` branch owns is
+    /// never reused (design D14): its `ClosureLayout` slot is sized for that
+    /// one body's captures, so a same-shaped but capture-less value must get a
+    /// fresh id rather than alias onto it.
     fn intern_fn_type(&mut self, fn_type: FnType) -> u32 {
-        if let Some(index) = self.fn_types.iter().position(|f| *f == fn_type) {
+        if let Some(index) = self.fn_types.iter().position(|f| *f == fn_type)
+            && self.capturing_lambda_span(index as u32).is_none()
+        {
             return index as u32;
         }
         self.fn_types.push(fn_type);
@@ -6518,6 +6602,8 @@ impl<'a> Checker<'a> {
             .map(|s| s.throws.clone())
             .unwrap_or_default();
         let outer_pending = std::mem::take(&mut self.pending_throws);
+        let outer_main_scope = self.in_main_scope;
+        self.in_main_scope = f.name.name == "main";
 
         // A function body cannot see the locals of another: the barrier is what
         // makes a name from outside a capture rather than a plain read.
@@ -6598,6 +6684,7 @@ impl<'a> Checker<'a> {
 
         self.report_uncaught_throws(f.body.span, &f.name.name);
         self.pending_throws = outer_pending;
+        self.in_main_scope = outer_main_scope;
         self.leave_type_params();
     }
 
@@ -6689,11 +6776,236 @@ impl<'a> Checker<'a> {
             Stmt::Try(s) => self.check_try(s),
             Stmt::Unsafe(s) => self.check_unsafe_block(s),
             Stmt::Commit(s) => self.check_commit_block(s),
+            // Concurrent blocks have their own semantic pass.  Until that
+            // pass is reached, still walk the body so ordinary diagnostics
+            // are never skipped merely because it is structurally grouped.
+            Stmt::Concurrent(s) => self.check_concurrent(s),
             Stmt::LocalClass(decl) => {
                 self.check_local_class(decl);
                 false
             }
         }
+    }
+
+    /// Checks a structural concurrent scope. Direct bindings are deliberately
+    /// copied to the enclosing lexical level once all branch bodies have been
+    /// checked; that gives users the post-join names without leaking them into
+    /// ordinary nested blocks.
+    fn check_concurrent(&mut self, scope: &ConcurrentBlock) -> bool {
+        self.concurrent_depth += 1;
+        self.scopes.push();
+
+        let statements = &scope.body.statements;
+        let binding_names: Vec<&str> = scope
+            .bindings
+            .iter()
+            .map(|binding| binding.name.name.as_str())
+            .collect();
+
+        // --- Rule B: the dependency DAG over the block's direct bindings ---
+        //
+        // `deps[i]` lists the sibling bindings binding `i`'s initializer names.
+        // Branches without an edge between them run concurrently; a dependent
+        // branch waits for the ones it names.
+        let count = scope.bindings.len();
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for (i, binding) in scope.bindings.iter().enumerate() {
+            let mut refs = Vec::new();
+            if let Some(Stmt::Let(let_stmt)) = statements.get(binding.statement_index)
+                && let Some(init) = &let_stmt.init
+            {
+                collect_path_names(init, &mut refs);
+            }
+            for (name, _) in &refs {
+                if let Some(j) = binding_names.iter().position(|candidate| candidate == name)
+                    && j != i
+                    && !deps[i].contains(&j)
+                {
+                    deps[i].push(j);
+                }
+            }
+        }
+
+        // A depth-first walk yields a valid branch order and, via a grey (=1)
+        // node reached again, the first binding caught in a cycle.
+        fn topo(
+            node: usize,
+            deps: &[Vec<usize>],
+            state: &mut [u8],
+            order: &mut Vec<usize>,
+            cycle: &mut Option<usize>,
+        ) {
+            state[node] = 1;
+            for &next in &deps[node] {
+                match state[next] {
+                    0 => topo(next, deps, state, order, cycle),
+                    1 => {
+                        if cycle.is_none() {
+                            *cycle = Some(next);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            state[node] = 2;
+            order.push(node);
+        }
+
+        let mut state = vec![0u8; count];
+        let mut order = Vec::with_capacity(count);
+        let mut cycle = None;
+        for i in 0..count {
+            if state[i] == 0 {
+                topo(i, &deps, &mut state, &mut order, &mut cycle);
+            }
+        }
+        if let Some(idx) = cycle {
+            let binding = &scope.bindings[idx];
+            self.error(
+                codes::CONCURRENT_BINDING_CYCLE,
+                binding.name.span,
+                format!(
+                    "binding `{}` is part of a dependency cycle in this `concurrent` block",
+                    binding.name.name
+                ),
+                "each binding's initializer may only name bindings that can finish before it",
+                Some("break the cycle by removing one of the cross-references".into()),
+            );
+        }
+
+        // --- Check the branch bindings in dependency order ----------------
+        let locals_at_entry = self.local_class_names.len();
+        self.local_class_marks.push(locals_at_entry);
+        // Every branch's unhandled exception is caught by this scope, not by
+        // the enclosing function (`concurrent-scopes`, "Structured failure").
+        let outer_pending = std::mem::take(&mut self.pending_throws);
+
+        let binding_statement: HashSet<usize> = scope
+            .bindings
+            .iter()
+            .map(|binding| binding.statement_index)
+            .collect();
+
+        for &i in &order {
+            if let Some(stmt) = statements.get(scope.bindings[i].statement_index) {
+                self.check_stmt(stmt);
+            }
+        }
+
+        // --- Non-binding statements share the block's own branch ---------
+        //
+        // They run in source order and may not read a sibling binding: those
+        // names belong to the enclosing scope only once the block closes.
+        for (index, stmt) in statements.iter().enumerate() {
+            if binding_statement.contains(&index) {
+                continue;
+            }
+            // `_ = job;` is the deliberate discharge of a sibling `Job` handle
+            // (design D4) — written inside the block, not an early read.
+            if let Stmt::Assign(assign) = stmt
+                && matches!(&assign.target, AssignTarget::Name(name) if name.name == "_")
+                && matches!(&assign.value, Expr::Path(_))
+            {
+                self.check_stmt(stmt);
+                continue;
+            }
+            let mut refs = Vec::new();
+            collect_stmt_path_names(stmt, &mut refs);
+            for (name, span) in refs {
+                if binding_names.iter().any(|candidate| *candidate == name) {
+                    self.error(
+                        codes::CONCURRENT_EARLY_READ,
+                        span,
+                        format!("`{name}` is not available until the `concurrent` block closes"),
+                        "a sibling binding may only be named by another binding's initializer",
+                        Some("read it after the block, or move this work into a binding that depends on it".into()),
+                    );
+                }
+            }
+            self.check_stmt(stmt);
+        }
+
+        self.local_class_names.truncate(locals_at_entry);
+        self.local_class_marks.pop();
+        self.pending_throws = outer_pending;
+
+        // --- Must-use: a Job that never joined explicitly ----------------
+        for binding in &scope.bindings {
+            if let Some(found) = self.scopes.lookup(&binding.name.name)
+                && matches!(found.ty.base, Base::Job(_))
+                && !found.moved
+            {
+                self.error(
+                    codes::UNUSED_JOB,
+                    binding.name.span,
+                    format!("Job `{}` is never waited or cancelled", binding.name.name),
+                    "the scope still joins the branch, but an unused handle is usually a mistake",
+                    Some("call `.wait()` / `.cancel()`, or write `_ = job;` to discard it deliberately".into()),
+                );
+            }
+        }
+
+        // --- Record the branch plan for lowering ------------------------
+        //
+        // Each binding is a branch whose body is its initializer; `zirk-ir`
+        // lifts it like a zero-argument lambda, so it needs the same capture
+        // list. A sibling binding named in the initializer is a capture (it is
+        // a value slot in the block's own scope by the time that branch
+        // starts); a plain function name is not.
+        for binding in &scope.bindings {
+            let mut refs = Vec::new();
+            if let Some(Stmt::Let(let_stmt)) = statements.get(binding.statement_index)
+                && let Some(init) = &let_stmt.init
+            {
+                collect_path_names(init, &mut refs);
+            }
+            let mut captures = Vec::new();
+            let mut seen = HashSet::new();
+            for (name, _) in refs {
+                if name == binding.name.name || !seen.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(resolved) = self.scopes.resolve(&name) {
+                    captures.push(Capture {
+                        name,
+                        ty: resolved.binding.ty,
+                    });
+                }
+            }
+            let result = self
+                .scopes
+                .lookup(&binding.name.name)
+                .map(|found| found.ty)
+                .unwrap_or(Type::UNKNOWN);
+            self.fn_types.push(FnType {
+                params: Vec::new(),
+                returns: result,
+            });
+            let fn_type = (self.fn_types.len() - 1) as u32;
+            self.lambdas.insert(
+                binding.span,
+                LambdaInfo {
+                    captures,
+                    fn_type,
+                    recursive_binding: None,
+                },
+            );
+        }
+        self.concurrent_plans
+            .insert(scope.span, ConcurrentPlan { order, deps });
+
+        let hoisted: Vec<Binding> = scope
+            .bindings
+            .iter()
+            .filter_map(|binding| self.scopes.lookup(&binding.name.name).cloned())
+            .collect();
+        self.scopes.pop();
+        self.concurrent_depth -= 1;
+
+        for binding in hoisted {
+            self.declare_local(binding);
+        }
+        false
     }
 
     /// A `class` declaration inside a body. It is registered here, at its
@@ -7068,6 +7380,11 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
+                Stmt::Concurrent(s) => {
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                }
                 // A local class body is its own function scope: it cannot
                 // mutate the enclosing method's receiver.
                 Stmt::LocalClass(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
@@ -7240,6 +7557,10 @@ impl<'a> Checker<'a> {
             }),
             Expr::Unsafe(u) => self.stmts_mutate_receiver(ctx, &u.body.statements, aliases),
             Expr::Commit(c) => self.stmts_mutate_receiver(ctx, &c.body.statements, aliases),
+            Expr::Spawn(s) => match &s.body {
+                SpawnBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
+                SpawnBody::Block(b) => self.stmts_mutate_receiver(ctx, &b.statements, aliases),
+            },
             Expr::Transfer(t) => self.expr_mutates_receiver(ctx, &t.expr, aliases),
             Expr::Tuple(t) => t
                 .elements
@@ -7932,6 +8253,13 @@ impl<'a> Checker<'a> {
         if let AssignTarget::Name(name) = &stmt.target
             && name.name == "_"
         {
+            // Discharging a `Job<T>` handle: the scope still joins the branch,
+            // but `_ = job;` is the deliberate opt-out of the must-use check.
+            if let Expr::Path(handle) = &stmt.value
+                && matches!(value.base, Base::Job(_))
+            {
+                self.scopes.mark_moved(&handle.name, true);
+            }
             return;
         }
 
@@ -8830,6 +9158,10 @@ impl<'a> Checker<'a> {
             Expr::Interpolated(e) => self.check_interpolated(e),
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
+            // The dedicated spawn rule below will replace this traversal as
+            // soon as Job typing is installed.  Keep the body checked now so
+            // adding the AST node does not hide errors from the checker.
+            Expr::Spawn(e) => self.check_spawn(e),
             Expr::Transfer(e) => self.check_transfer(e, expected),
         };
         self.expr_types.insert(expr.span(), ty);
@@ -8852,6 +9184,61 @@ impl<'a> Checker<'a> {
             }
         }
         Type::STRING
+    }
+
+    /// `spawn` creates a linear `Job<T>`. Its body is checked behind the same
+    /// function/capture boundary used by lambdas, so it cannot inherit an
+    /// enclosing loop's `break`/`continue` targets.
+    fn check_spawn(&mut self, expr: &SpawnExpr) -> Type {
+        if self.concurrent_depth == 0 && !self.in_main_scope {
+            self.error(
+                codes::SPAWN_OUTSIDE_SCOPE,
+                expr.span,
+                "`spawn` requires a concurrent scope",
+                "a branch must belong to a `concurrent { ... }` block or the implicit scope of `main`",
+                Some("move it into `concurrent { ... }`, or start it from `main`".into()),
+            );
+        }
+
+        let enclosing_return = self.current_return;
+        let enclosing_depth = self.begin_capture_scope();
+        // A branch's unhandled exception is caught by its scope
+        // (`concurrent-scopes`, "Structured failure"), not by the enclosing
+        // function — so it must not add to that function's throws obligation.
+        let outer_pending = std::mem::take(&mut self.pending_throws);
+        let result = match &expr.body {
+            SpawnBody::Expr(body) => self.check_expr(body),
+            SpawnBody::Block(body) => {
+                // A block body's result comes from its explicit `return`s, the
+                // same way a lambda block's does.
+                self.current_return = Type::UNKNOWN;
+                let value = self.check_block_value(body);
+                self.current_return = enclosing_return;
+                value
+            }
+        };
+        self.pending_throws = outer_pending;
+        let captures = self.finish_capture_scope(enclosing_depth);
+
+        // The branch body is lifted like a zero-argument lambda: `zirk-ir`
+        // reuses the same capture-block machinery to build its thunk. A fresh
+        // `fn_type` (never interned) so a capturing branch's placeholder
+        // closure layout can never be shared with an unrelated `Fn(): T`.
+        self.fn_types.push(FnType {
+            params: Vec::new(),
+            returns: result,
+        });
+        let fn_type = (self.fn_types.len() - 1) as u32;
+        self.lambdas.insert(
+            expr.span,
+            LambdaInfo {
+                captures,
+                fn_type,
+                recursive_binding: None,
+            },
+        );
+
+        Type::of(Base::Job(self.intern_job_type(result)))
     }
 
     /// `expr as Type` or `<Type>expr` (`ZIRK_LANGUAGE_SPEC.md` section 11).
@@ -9447,13 +9834,23 @@ impl<'a> Checker<'a> {
         };
 
         if resolved.binding.moved {
-            self.error(
-                codes::USE_OF_TRANSFERRED_RESOURCE,
-                ident.span,
-                format!("use of transferred resource `{}`", ident.name),
-                "this binding was invalidated by an earlier `transfer`",
-                None,
-            );
+            if matches!(resolved.binding.ty.base, Base::Job(_)) {
+                self.error(
+                    codes::SECOND_WAIT,
+                    ident.span,
+                    format!("Job `{}` was already consumed", ident.name),
+                    "`wait()` consumes a Job handle exactly once",
+                    Some("keep the result of the first `wait()` and use it instead".into()),
+                );
+            } else {
+                self.error(
+                    codes::USE_OF_TRANSFERRED_RESOURCE,
+                    ident.span,
+                    format!("use of transferred resource `{}`", ident.name),
+                    "this binding was invalidated by an earlier `transfer`",
+                    None,
+                );
+            }
         }
 
         if !resolved.binding.initialized {
@@ -11784,6 +12181,10 @@ impl<'a> Checker<'a> {
         // (roadmap Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
 
+        if matches!(object.base, Base::Job(_)) && member.name == "done" {
+            return Type::BOOLEAN;
+        }
+
         // `.is_null` (roadmap Phase 4e): the one `Pointer<T>` operation that
         // needs no `unsafe` (spec scenario "Null raw pointer is inspected").
         if let Base::Pointer(_) = object.base
@@ -12802,6 +13203,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Unsafe(s) => self.check_recursive_reference_block(&s.body, name, nested),
             Stmt::Commit(s) => self.check_recursive_reference_block(&s.body, name, nested),
+            Stmt::Concurrent(s) => self.check_recursive_reference_block(&s.body, name, nested),
         }
     }
 
@@ -12961,6 +13363,10 @@ impl<'a> Checker<'a> {
             Expr::Transfer(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Unsafe(e) => self.check_recursive_reference_block(&e.body, name, nested),
             Expr::Commit(e) => self.check_recursive_reference_block(&e.body, name, nested),
+            Expr::Spawn(e) => match &e.body {
+                SpawnBody::Expr(body) => self.check_recursive_reference(body, name, nested),
+                SpawnBody::Block(body) => self.check_recursive_reference_block(body, name, nested),
+            },
         }
     }
 
@@ -13416,6 +13822,52 @@ impl<'a> Checker<'a> {
         // `Pin<T>` dereferences automatically for method access (roadmap
         // Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
+
+        if let Base::Job(id) = object.base {
+            let result = self.job_types[id as usize];
+            match field.name.name.as_str() {
+                "wait" => {
+                    if !expr.args.is_empty() {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            expr.span,
+                            "`Job.wait()` takes no arguments",
+                            format!("received {}", expr.args.len()),
+                            None,
+                        );
+                        for arg in &expr.args {
+                            self.check_expr(&arg.value);
+                        }
+                    }
+                    if let Expr::Path(handle) = &*field.object {
+                        self.scopes.mark_moved(&handle.name, true);
+                    }
+                    return result;
+                }
+                "cancel" => {
+                    if !expr.args.is_empty() {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            expr.span,
+                            "`Job.cancel()` takes no arguments",
+                            format!("received {}", expr.args.len()),
+                            None,
+                        );
+                        for arg in &expr.args {
+                            self.check_expr(&arg.value);
+                        }
+                    }
+                    // `cancel()` discharges the must-use obligation the same
+                    // way `wait()` does: once cancelled the handle has served
+                    // its purpose and the scope joins the branch on exit.
+                    if let Expr::Path(handle) = &*field.object {
+                        self.scopes.mark_moved(&handle.name, true);
+                    }
+                    return Type::VOID;
+                }
+                _ => {}
+            }
+        }
 
         // `.clone()` on an enum (roadmap Phase 7, derived `Clone` on `enum`):
         // decided structurally — every variant's associated fields must
@@ -14494,6 +14946,85 @@ impl<'a> Checker<'a> {
         Some(self.check_direct_call(expr, &signature))
     }
 
+    /// Compiler-known `Timer` static operations.
+    fn check_timer_call(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        let expected_count = if field.name.name == "sleep" { 1 } else { 2 };
+        if expr.args.len() != expected_count || expr.args.iter().any(|arg| arg.name.is_some()) {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!(
+                    "`Timer.{}` takes {expected_count} positional argument(s)",
+                    field.name.name
+                ),
+                format!("received {}", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let duration = self.check_expr(&expr.args[0].value);
+        self.expect_assignable(
+            Type::DURATION,
+            duration,
+            expr.args[0].value.span(),
+            "the timer duration",
+        );
+        if field.name.name == "sleep" {
+            return Type::VOID;
+        }
+
+        let thunk = self.check_expr(&expr.args[1].value);
+        // A lambda literal specifically (not just any `Fn(): T` value): its
+        // body is what `zirk-ir` lifts into the ambient timer branch, and the
+        // checker only records the capture list for a literal.
+        if !matches!(&expr.args[1].value, Expr::Lambda(_)) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a timer callback must be written as a lambda",
+                format!("found `{}`", self.name(thunk)),
+                Some("write `(): T => f()` instead of passing the function by name".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let Base::Function(fn_id) = thunk.base else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a timer callback must be a zero-argument function",
+                format!("found `{}`", self.name(thunk)),
+                Some("write `(): T => ...`".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let shape = self.fn_types[fn_id as usize].clone();
+        if !shape.params.is_empty() {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a timer callback must take no arguments",
+                format!("it takes {} argument(s)", shape.params.len()),
+                Some("write `(): T => ...`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        if field.name.name == "every" && !Type::VOID.accepts(shape.returns) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "`Timer.every` requires a `Void` callback",
+                format!("the callback returns `{}`", self.name(shape.returns)),
+                Some("discard the value inside the callback, or use `Timer.after`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        Type::of(Base::Job(self.intern_job_type(shape.returns)))
+    }
+
     /// `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
     /// constructs a weak handle to `value`'s referent, typed `Weak<T>`
     /// where `T` is `value`'s own type — which must itself be a reference
@@ -15010,6 +15541,18 @@ impl<'a> Checker<'a> {
             return self.check_weak_from(expr);
         }
 
+        // `Timer` is a compiler-known static namespace, not a runtime value.
+        // Keep its signatures here beside the other compiler-built-in static
+        // calls so a local named `Timer` can still shadow it normally.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Timer"
+            && self.scopes.lookup(&base.name).is_none()
+            && matches!(field.name.name.as_str(), "sleep" | "after" | "every")
+        {
+            return self.check_timer_call(expr, field);
+        }
+
         // `Int32.parse("5")`, `Float64.parse("1.5")`, `Regex.parse(p)`
         // (`native-type-member-surface`): static calls on type names, decided
         // here for the same reason `Pointer.from`/`Weak.from` above are —
@@ -15253,8 +15796,8 @@ impl<'a> Checker<'a> {
                 && !field.safe
                 && !object.nullable
                 && !matches!(
-                    object.base,
-                    Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+                object.base,
+                Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_) | Base::Job(_)
                 )
                 // `v.to_string(radix: n)` on an integer is its own member
                 // (`native-type-member-surface`) — the dedicated integer
@@ -16245,6 +16788,7 @@ impl<'a> Checker<'a> {
                     | Base::Param(_)
                     | Base::Instance(_)
                     | Base::Function(_)
+                    | Base::Job(_)
                     | Base::Enum(_)
                     | Base::EnumInstance(_)
             ) {
@@ -17501,6 +18045,161 @@ fn collect_assigned_fields(statements: &[Stmt], found: &mut std::collections::Ha
             Stmt::Block(block) => collect_assigned_fields(&block.statements, found),
             _ => {}
         }
+    }
+}
+
+/// Collects every bare-name reference (`Expr::Path`) reachable in `expr`, with
+/// its span. The `concurrent` block checker uses it to build Rule B's
+/// dependency DAG and to catch a non-dependent statement reading a sibling
+/// binding early.
+///
+/// The walk stops at binders (`Expr::Lambda`, `Expr::Match` arms): a sibling
+/// reference hidden inside a nested lambda is rare, and a missed edge only
+/// costs a little concurrency — never soundness, since a branch cannot mutate
+/// an enclosing binding.
+fn collect_path_names(expr: &Expr, out: &mut Vec<(String, Span)>) {
+    match expr {
+        Expr::Path(ident) => out.push((ident.name.clone(), ident.span)),
+        Expr::Unary(e) => collect_path_names(&e.operand, out),
+        Expr::Binary(e) => {
+            collect_path_names(&e.left, out);
+            collect_path_names(&e.right, out);
+        }
+        Expr::Call(e) => {
+            collect_path_names(&e.callee, out);
+            for arg in &e.args {
+                collect_path_names(&arg.value, out);
+            }
+        }
+        Expr::Field(e) => collect_path_names(&e.object, out),
+        Expr::Index(e) => {
+            collect_path_names(&e.receiver, out);
+            collect_path_names(&e.index, out);
+        }
+        Expr::Slice(e) => {
+            collect_path_names(&e.receiver, out);
+            for part in [&e.start, &e.end, &e.step].into_iter().flatten() {
+                collect_path_names(part, out);
+            }
+        }
+        Expr::Range(e) => {
+            collect_path_names(&e.start, out);
+            collect_path_names(&e.end, out);
+            if let Some(step) = &e.step {
+                collect_path_names(step, out);
+            }
+        }
+        Expr::Ternary(e) => {
+            collect_path_names(&e.condition, out);
+            collect_path_names(&e.when_true, out);
+            collect_path_names(&e.when_false, out);
+        }
+        Expr::Cast(e) => collect_path_names(&e.expr, out),
+        Expr::Transfer(e) => collect_path_names(&e.expr, out),
+        Expr::Tuple(e) => {
+            for element in &e.elements {
+                collect_path_names(element, out);
+            }
+        }
+        Expr::Collection(e) => {
+            for element in &e.elements {
+                match element {
+                    CollectionElement::Scalar(inner) => collect_path_names(inner, out),
+                    CollectionElement::Spread(spread) => collect_path_names(&spread.expr, out),
+                }
+            }
+        }
+        Expr::Record(e) => {
+            for element in &e.elements {
+                match element {
+                    RecordLiteralElement::Field(field) => collect_path_names(&field.value, out),
+                    RecordLiteralElement::Spread(spread) => collect_path_names(&spread.expr, out),
+                }
+            }
+        }
+        Expr::Interpolated(e) => {
+            for part in &e.parts {
+                if let InterpolatedPart::Expr(inner) = part {
+                    collect_path_names(inner, out);
+                }
+            }
+        }
+        Expr::Println(e) => collect_path_names(&e.arg, out),
+        Expr::Spawn(e) => match &e.body {
+            SpawnBody::Expr(inner) => collect_path_names(inner, out),
+            SpawnBody::Block(block) => {
+                for stmt in &block.statements {
+                    collect_stmt_path_names(stmt, out);
+                }
+            }
+        },
+        Expr::Increment(e) => {
+            if let AssignTarget::Name(name) = &e.target {
+                out.push((name.name.clone(), name.span));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The statement-level companion of [`collect_path_names`]. Recurses through
+/// the ordinary control-flow statements a `concurrent` block body can hold.
+fn collect_stmt_path_names(stmt: &Stmt, out: &mut Vec<(String, Span)>) {
+    match stmt {
+        Stmt::Expr(s) => collect_path_names(&s.expr, out),
+        Stmt::Let(s) => {
+            if let Some(init) = &s.init {
+                collect_path_names(init, out);
+            }
+        }
+        Stmt::Assign(s) => collect_path_names(&s.value, out),
+        Stmt::Return(s) => {
+            if let Some(value) = &s.value {
+                collect_path_names(value, out);
+            }
+        }
+        Stmt::Throw(s) => {
+            if let Some(value) = &s.value {
+                collect_path_names(value, out);
+            }
+        }
+        Stmt::If(s) => {
+            collect_path_names(&s.condition, out);
+            for inner in &s.then_branch.statements {
+                collect_stmt_path_names(inner, out);
+            }
+            match &s.else_branch {
+                Some(ElseBranch::Block(b)) => {
+                    for inner in &b.statements {
+                        collect_stmt_path_names(inner, out);
+                    }
+                }
+                Some(ElseBranch::If(nested)) => {
+                    collect_stmt_path_names(&Stmt::If((**nested).clone()), out)
+                }
+                None => {}
+            }
+        }
+        Stmt::Loop(s) => {
+            if let Some(condition) = &s.condition {
+                collect_path_names(condition, out);
+            }
+            for inner in &s.body.statements {
+                collect_stmt_path_names(inner, out);
+            }
+        }
+        Stmt::ForIn(s) => {
+            collect_path_names(&s.iterable, out);
+            for inner in &s.body.statements {
+                collect_stmt_path_names(inner, out);
+            }
+        }
+        Stmt::Block(b) => {
+            for inner in &b.statements {
+                collect_stmt_path_names(inner, out);
+            }
+        }
+        _ => {}
     }
 }
 

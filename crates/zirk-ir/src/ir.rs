@@ -166,6 +166,10 @@ pub enum IrType {
     /// allocated capture block plus the function pointer that knows how to
     /// use it.
     Callable(u32),
+    /// A one-word structured-concurrency handle. Its result type belongs to
+    /// the source-level `Job<T>` and is recovered by `JobWait`; the portable
+    /// IR only carries the opaque scheduler id.
+    Job,
     /// A reference to an object, identified by its layout in the module.
     ///
     /// It is a reference and not a value: an object has identity, and identity
@@ -351,6 +355,7 @@ impl IrType {
             IrType::Char => "Char",
             IrType::Closure(_) => "closure",
             IrType::Callable(_) => "Callable",
+            IrType::Job => "Job",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
             IrType::Value(_) => "value",
@@ -454,6 +459,7 @@ impl IrType {
                 .iter()
                 .any(|c| c.is_managed_reference(module)),
             IrType::Callable(_) => true,
+            IrType::Job => false,
             _ => false,
         }
     }
@@ -1194,6 +1200,58 @@ pub enum InstKind {
         args: Vec<Operand>,
     },
 
+    /// Opens a structured-concurrency scope (`concurrent-blocks-and-timers`,
+    /// `concurrent { }` / `spawn` / `Timer`). Produces the runtime scope id as
+    /// a one-word `IrType::Int(I64)`; `ScopeExit` and `BranchStart` thread it
+    /// back. A function body that opens no scope emits none of these.
+    ScopeEnter,
+    /// Runs the join-or-cancel-and-clean protocol for the scope named by
+    /// `scope` and does not return until it completes — a suspension point,
+    /// installed on every exit edge of a `concurrent` block the same way
+    /// `finally` cleanup is.
+    ScopeExit {
+        scope: Operand,
+    },
+    /// Starts a branch of `scope` from the boxed capture block of `body` (an
+    /// `IrType::Callable`). `target` names the lifted branch-body function,
+    /// kept explicit so codegen's per-site `extern "C" fn(ptr) -> i64` thunk
+    /// calls it by name rather than reverse-engineering an SSA producer for a
+    /// cross-function function pointer. `kind` selects the runtime entry
+    /// point: `Spawn` is awaited by the scope, while `TimerAfter` /
+    /// `TimerEvery` are ambient — cancelled on scope exit — and read `delay`
+    /// (an `Int64` nanosecond `Duration`). Produces the branch's one-word
+    /// `IrType::Job` handle.
+    BranchStart {
+        target: String,
+        body: Operand,
+        scope: Operand,
+        kind: BranchKind,
+        delay: Option<Operand>,
+    },
+    /// Suspends until the branch named by `job` completes, then yields its
+    /// statically known `result` (`IrType::Job` is an erased one-word handle,
+    /// so the result type is repeated here) or re-raises its unhandled failure.
+    JobWait {
+        job: Operand,
+        result: IrType,
+    },
+    /// Whether the branch named by `job` has reached a terminal state
+    /// (`job.done`). Produces `IrType::Boolean`.
+    JobDone {
+        job: Operand,
+    },
+    /// Requests cooperative cancellation of the branch named by `job`
+    /// (`job.cancel()`). Idempotent; produces `IrType::Void`.
+    JobCancel {
+        job: Operand,
+    },
+    /// `Timer.sleep(d)` — suspends the current branch until a monotonic
+    /// deadline `nanos` (an `Int64` nanosecond `Duration`) from now. A
+    /// cancellation safe point; produces `IrType::Void`.
+    TimerSleep {
+        nanos: Operand,
+    },
+
     /// `Pointer.from(place)` where `place` is a local/parameter slot
     /// (roadmap Phase 4e, design D8) — codegen reuses the `alloca` already
     /// computed for that slot; no new storage.
@@ -1548,6 +1606,25 @@ pub enum UnaryOp {
     Neg,
     Not,
     BitNot,
+}
+
+/// Which runtime entry point a [`InstKind::BranchStart`] uses, and whether the
+/// scope awaits the branch or cancels it on exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchKind {
+    /// `spawn` — the scope registers and awaits the branch.
+    Spawn,
+    /// `Timer.after` — ambient one-shot; the scope cancels it on exit.
+    TimerAfter,
+    /// `Timer.every` — ambient fixed-delay loop; the scope cancels it on exit.
+    TimerEvery,
+}
+
+impl BranchKind {
+    /// Whether the scope cancels the branch on exit rather than joining it.
+    pub const fn is_ambient(self) -> bool {
+        matches!(self, BranchKind::TimerAfter | BranchKind::TimerEvery)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

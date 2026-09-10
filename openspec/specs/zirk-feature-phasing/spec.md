@@ -88,20 +88,21 @@ once Phase 5 steps 1 to 3 are delivered; they resolve as ordinary known types.
 
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured concurrency semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
 
-Roadmap Phase 5 SHALL deliver the concurrency surface `concurrent { }` / `parallel { }` / `spawn` and the method API on `Concurrent` / `Timer` / `Channel<T>` / `Thread`, on a single-threaded cooperative executor for the I/O surface and a separate worker pool for the CPU surface. Within Phase 5 the runtime infrastructure — the cooperative executor, the branch control block, the stackful-coroutine suspend/resume driver, the timer service, per-branch garbage-collection roots, and the executor lifecycle around `main` — SHALL be delivered and independently verified before any concurrency syntax is parsed, checked, lowered, or emitted.
-
-The `task` and `await` keywords, `Task<T>`, `task scope`, `select`, and `cancellation shield` are **removed** from the language. Source using them SHALL receive a removed-construct diagnostic naming the replacement, not a deferred-construct diagnostic. `parallel`, `thread`, `Atomic`, and the synchronizer library remain deferred within Phase 5 until their sub-change lands.
+Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every` — a program using these forms SHALL be compiled and run with no phase diagnostic. `parallel-cpu-regions` (`parallel`), `typed-channels` (`Channel<T>`), and `concurrency-completion` (`Concurrent.of` combinators, `Concurrent.detach`, `Thread.run`, `Atomic` / `Mutex` / the synchronizer library) remain deferred until their sub-change lands, reporting the sub-change that delivers them.
 
 #### Scenario: Phase planning reaches concurrency
 - **WHEN** implementation work starts branch scheduling
-- **THEN** typed scopes, cancellation, transfer/share analysis, and cleanup behavior are already specified as prerequisites
+- **THEN** structured scopes, cancellation, transfer/share analysis, and cleanup behaviour are already specified as prerequisites
+
+#### Scenario: The concurrent and Timer surface is delivered
+- **WHEN** a program uses `concurrent { }`, `spawn`, `Job<T>`, `Timer.sleep`, `Timer.after`, or `Timer.every`
+- **THEN** no phase diagnostic is emitted and the construct is compiled and run
+
+#### Scenario: Later concurrency sub-changes stay deferred
+- **WHEN** a program uses `parallel`, `Channel<T>`, `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
+- **THEN** the diagnostic names the construct and the Phase 5 sub-change that delivers it
 
 #### Scenario: Removed constructs are reported as removed
-
 - **WHEN** a program uses `task`, `await`, `select`, or `cancellation shield`
-- **THEN** the diagnostic states the construct was removed and names its replacement, rather than naming a future phase
+- **THEN** the diagnostic states the construct was removed and names its replacement
 
-#### Scenario: The concurrency surface is the Phase 5 deliverable
-
-- **WHEN** a program uses `concurrent { }`, `spawn`, `parallel { }`, `Timer`, or `Channel<T>` after Phase 5 delivers each
-- **THEN** no phase diagnostic is emitted and the construct is compiled and run

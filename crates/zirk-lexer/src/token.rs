@@ -86,6 +86,10 @@ pub enum Keyword {
     As,
     Is,
     Unsafe,
+    /// Opens a structured-concurrency scope.
+    Concurrent,
+    /// Starts a dynamic branch owned by the current concurrency scope.
+    Spawn,
     Parallel,
     Thread,
     Sync,
@@ -172,6 +176,8 @@ impl Keyword {
             "as" => As,
             "is" => Is,
             "unsafe" => Unsafe,
+            "concurrent" => Concurrent,
+            "spawn" => Spawn,
             "parallel" => Parallel,
             "thread" => Thread,
             "sync" => Sync,
@@ -241,6 +247,8 @@ impl Keyword {
             As => "as",
             Is => "is",
             Unsafe => "unsafe",
+            Concurrent => "concurrent",
+            Spawn => "spawn",
             Parallel => "parallel",
             Thread => "thread",
             Sync => "sync",
@@ -286,8 +294,8 @@ impl Keyword {
             // `task` / `await` were removed from the language by
             // `remove-task-await-model`: they are no longer keywords, and the
             // parser reports them in a construct position as removed constructs.
-            // `parallel` / `thread` / `sync` stay deferred to their Phase 5
-            // sub-changes.
+            // `concurrent` / `spawn` are the delivered I/O surface. `parallel`
+            // / `thread` / `sync` stay deferred to their Phase 5 sub-changes.
             Parallel | Thread | Sync => Phase::FIVE,
             // Generators are the functional style of `LANGUAGE_SPEC` section 8,
             // which the roadmap places after the collections they iterate.
@@ -656,6 +664,16 @@ mod tests {
     fn later_phase_keywords_declare_their_phase() {
         assert!(!Keyword::Parallel.in_subset());
         assert_eq!(Keyword::Parallel.phase(), Some(Phase::FIVE));
+    }
+
+    #[test]
+    fn concurrent_and_spawn_are_implemented_keywords() {
+        for k in [Keyword::Concurrent, Keyword::Spawn] {
+            assert!(k.in_subset(), "`{}` should be implemented", k.as_str());
+            assert_eq!(k.phase(), None, "`{}`", k.as_str());
+        }
+        assert_eq!(Keyword::from_text("concurrent"), Some(Keyword::Concurrent));
+        assert_eq!(Keyword::from_text("spawn"), Some(Keyword::Spawn));
     }
 
     #[test]

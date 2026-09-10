@@ -1,0 +1,11 @@
+// `Timer.every` is ambient: the enclosing scope cancels it on exit rather than
+// waiting for it, so the block does not hang (`concurrent-blocks-and-timers`,
+// design D5).
+
+fn main(): Void {
+    concurrent {
+        Timer.every(1ms, (): Void => { });
+        Timer.sleep(4ms);
+    }
+    stdout.println(99);
+}

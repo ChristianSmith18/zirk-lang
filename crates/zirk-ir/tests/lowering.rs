@@ -3270,3 +3270,177 @@ fn temporal_parse_and_duration_interop_lower() {
         "the i128→i64 narrowing cast is missing"
     );
 }
+
+// --- Concurrent scopes and timers (`concurrent-blocks-and-timers`) ----------
+
+/// The instructions of every function in a module, flattened.
+fn all_instructions(module: &Module) -> Vec<InstKind> {
+    module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter().map(|i| i.kind.clone()))
+        .collect()
+}
+
+#[test]
+fn concurrent_block_lowers_to_scope_enter_branches_and_scope_exit() {
+    let module = compile(
+        "fn a(): Int32 { return 1; }\n\
+         fn b(): Int32 { return 2; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut x: Int32 = a();\n\
+             inmut y: Int32 = b();\n\
+           }\n\
+           stdout.println(x + y);\n\
+         }",
+    );
+    let kinds = instructions(module.function("main").expect("main"));
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::ScopeEnter)));
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| matches!(
+                k,
+                InstKind::BranchStart {
+                    kind: BranchKind::Spawn,
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "one BranchStart per binding"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeExit { .. }))
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| matches!(k, InstKind::JobWait { .. }))
+            .count(),
+        2,
+        "each branch is joined by a JobWait"
+    );
+}
+
+#[test]
+fn dependent_binding_waits_before_its_branch_starts() {
+    let module = compile(
+        "fn seed(): Int32 { return 7; }\n\
+         fn plus(n: Int32): Int32 { return n + 1; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut base: Int32 = seed();\n\
+             inmut derived: Int32 = plus(base);\n\
+           }\n\
+           stdout.println(derived);\n\
+         }",
+    );
+    let kinds = instructions(module.function("main").expect("main"));
+    let first_wait = kinds
+        .iter()
+        .position(|k| matches!(k, InstKind::JobWait { .. }));
+    let last_branch = kinds
+        .iter()
+        .rposition(|k| matches!(k, InstKind::BranchStart { .. }));
+    assert!(
+        first_wait < last_branch,
+        "the dependent branch's BranchStart follows its predecessor's JobWait"
+    );
+}
+
+#[test]
+fn spawn_lowers_to_a_branch_start_yielding_a_job() {
+    let module = compile(
+        "fn work(): Int32 { return 3; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut h: Job<Int32> = spawn work();\n\
+             inmut v: Int32 = h.wait();\n\
+           }\n\
+           stdout.println(v);\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    assert!(kinds.iter().any(|k| matches!(
+        k,
+        InstKind::BranchStart {
+            kind: BranchKind::Spawn,
+            ..
+        }
+    )));
+    assert!(kinds.iter().any(|k| matches!(k, InstKind::JobWait { .. })));
+}
+
+#[test]
+fn timer_sleep_and_ambient_timers_lower() {
+    let module = compile(
+        "fn main(): Void {\n\
+           concurrent {\n\
+             Timer.every(1ms, (): Void => { });\n\
+             Timer.after(1ms, (): Void => { });\n\
+             Timer.sleep(2ms);\n\
+           }\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::TimerSleep { .. }))
+    );
+    assert!(kinds.iter().any(|k| matches!(
+        k,
+        InstKind::BranchStart {
+            kind: BranchKind::TimerEvery,
+            delay: Some(_),
+            ..
+        }
+    )));
+    assert!(kinds.iter().any(|k| matches!(
+        k,
+        InstKind::BranchStart {
+            kind: BranchKind::TimerAfter,
+            delay: Some(_),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_function_with_no_concurrency_emits_no_scope_instructions() {
+    let f = main_body("stdout.println(1);");
+    assert!(
+        !instructions(&f)
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeEnter | InstKind::ScopeExit { .. })),
+    );
+}
+
+#[test]
+fn spawn_inside_a_loop_threads_the_scope_id_through_a_slot() {
+    // The scope id must survive the block boundary a loop introduces
+    // (ADR-007): `BranchStart` reads it back from a slot, not across blocks.
+    let module = compile(
+        "fn work(n: Int32): Void { stdout.println(n); }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             for n in 1..=3 {\n\
+               spawn work(n);\n\
+             }\n\
+           }\n\
+         }",
+    );
+    // `verify` already ran inside `compile`; just confirm the branch is there.
+    assert!(all_instructions(&module).iter().any(|k| matches!(
+        k,
+        InstKind::BranchStart {
+            kind: BranchKind::Spawn,
+            ..
+        }
+    )));
+}

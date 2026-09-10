@@ -151,11 +151,28 @@ pub unsafe extern "C" fn zirk_rt_init() {
 /// function taking no arguments. Invoked by generated code exactly once,
 /// after [`zirk_rt_init`] and before [`zirk_rt_shutdown`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_run_main(zirk_main: extern "C" fn()) {
+pub unsafe extern "C-unwind" fn zirk_rt_run_main(zirk_main: extern "C-unwind" fn()) {
+    // A cancelled branch and a branch's unhandled exception travel as a native
+    // unwind through the branch's own stack (`concurrent-blocks-and-timers`,
+    // ADR-017). Those are ordinary control flow, not runtime bugs — keep the
+    // default hook's backtrace noise off stderr for them, but let a genuine
+    // runtime panic through untouched.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let internal =
+            payload.is::<executor::Cancelled>() || payload.is::<executor::BranchFailure>();
+        if !internal {
+            previous(info);
+        }
+    }));
+
     let outcome = executor::Executor::new().run_with_root(move || {
         zirk_main();
         0
     });
+    let _ = std::panic::take_hook();
+
     if let task::TaskOutcome::Panicked(payload) = outcome {
         std::panic::resume_unwind(payload);
     }
@@ -183,8 +200,8 @@ unsafe impl Send for TaskArg {}
 /// driven by [`zirk_rt_run_main`]). `body` must be a valid function pointer and
 /// `arg` must be the compiler-emitted callable capture-block pointer (or null).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_task_spawn(
-    body: extern "C" fn(*mut std::ffi::c_void) -> usize,
+pub unsafe extern "C" fn zirk_rt_spawn(
+    body: extern "C-unwind" fn(*mut std::ffi::c_void) -> usize,
     arg: *mut std::ffi::c_void,
 ) -> u64 {
     let arg = TaskArg(arg);
@@ -205,9 +222,9 @@ pub unsafe extern "C" fn zirk_rt_task_spawn(
 /// # Safety
 ///
 /// Must be called from inside a running task. `id` must come from
-/// [`zirk_rt_task_spawn`].
+/// [`zirk_rt_spawn`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_task_await(id: u64) -> usize {
+pub unsafe extern "C-unwind" fn zirk_rt_job_wait(id: u64) -> usize {
     executor::await_task(task::TaskId::from_bits(id))
 }
 
@@ -218,8 +235,163 @@ pub unsafe extern "C" fn zirk_rt_task_await(id: u64) -> usize {
 ///
 /// Must be called from inside a running task.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_task_is_done(id: u64) -> bool {
+pub unsafe extern "C" fn zirk_rt_job_done(id: u64) -> bool {
     executor::is_done(task::TaskId::from_bits(id))
+}
+
+/// Opens a structured-concurrency scope in the running executor and returns its
+/// packed [`task::ScopeId`].
+///
+/// # Safety
+///
+/// Must be called from inside a running task driven by [`zirk_rt_run_main`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_scope_enter() -> u64 {
+    executor::scope_enter_current().to_bits()
+}
+
+/// Runs the join-or-cancel-and-clean protocol for `scope`, yielding until every
+/// registered branch is terminal, then re-raises a primary branch failure into
+/// the pending-exception slot and returns.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `scope` must come from
+/// [`zirk_rt_scope_enter`] and not already have been closed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn zirk_rt_scope_exit(scope: u64) -> bool {
+    let scope = task::ScopeId::from_bits(scope);
+    loop {
+        match executor::scope_exit_poll(scope) {
+            None => executor::yield_now(),
+            Some(primary_failure) => {
+                if let Some(bits) = primary_failure {
+                    // Re-raise the branch's exception into this frame; the
+                    // enclosing function's own pending-exception check picks
+                    // it up right after the `concurrent` block.
+                    unsafe { exceptions::zirk_rt_throw(bits as *const std::ffi::c_void) };
+                }
+                return true;
+            }
+        }
+    }
+}
+
+/// A `concurrent` branch thunk calls this after its body returned with the
+/// pending-exception slot set: it carries the taken exception pointer into an
+/// unwind the executor records as a branch failure, so the owning scope
+/// cancels the siblings and re-raises it on close.
+///
+/// # Safety
+///
+/// Must be called from inside a running branch task. `exception` must be the
+/// object pointer just taken from the pending slot (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn zirk_rt_branch_fail(exception: *const std::ffi::c_void) -> ! {
+    std::panic::panic_any(executor::BranchFailure(exception as usize));
+}
+
+/// Registers `branch` as a joinable child of `scope`.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `scope` must come from
+/// [`zirk_rt_scope_enter`] and `branch` from [`zirk_rt_spawn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_branch_register(scope: u64, branch: u64) {
+    executor::branch_register_current(
+        task::ScopeId::from_bits(scope),
+        task::TaskId::from_bits(branch),
+    );
+}
+
+/// Requests cooperative cancellation of `job`, idempotently.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `job` must come from
+/// [`zirk_rt_spawn`] (a stale id is ignored).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_cancel(job: u64) {
+    executor::cancel_current(task::TaskId::from_bits(job));
+}
+
+/// Suspends the current branch until a monotonic deadline `delay_nanos` from
+/// now — a cooperative-cancellation safe point.
+///
+/// # Safety
+///
+/// Must be called from inside a running task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn zirk_rt_sleep(delay_nanos: i64) {
+    executor::sleep(delay_nanos);
+}
+
+/// Arms a one-shot ambient timer job in `scope`. The callback runs after the
+/// delay unless the owning scope closes first.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `scope` must come from
+/// [`zirk_rt_scope_enter`]; `body` must be a valid thunk and `arg` its
+/// compiler-emitted capture-block pointer (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_timer_after(
+    scope: u64,
+    delay_nanos: i64,
+    body: extern "C-unwind" fn(*mut std::ffi::c_void) -> usize,
+    arg: *mut std::ffi::c_void,
+) -> u64 {
+    if delay_nanos < 0 {
+        failure::fatal("timer with a negative duration");
+    }
+    let arg = TaskArg(arg);
+    let capture_root = arg.0;
+    let timer = executor::spawn_with_capture_root(
+        move || {
+            let arg = arg;
+            executor::sleep(delay_nanos);
+            body(arg.0)
+        },
+        capture_root,
+    );
+    executor::ambient_timer_register_current(task::ScopeId::from_bits(scope), timer);
+    timer.to_bits()
+}
+
+/// Arms a fixed-delay ambient timer job in `scope`. Each delay is armed only
+/// after the preceding callback returns, and cancellation is observed by the
+/// `sleep` safe point before the next callback can run.
+///
+/// # Safety
+///
+/// Must be called from inside a running task. `scope` must come from
+/// [`zirk_rt_scope_enter`]; `body` must be a valid thunk and `arg` its
+/// compiler-emitted capture-block pointer (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_timer_every(
+    scope: u64,
+    delay_nanos: i64,
+    body: extern "C-unwind" fn(*mut std::ffi::c_void) -> usize,
+    arg: *mut std::ffi::c_void,
+) -> u64 {
+    if delay_nanos < 0 {
+        failure::fatal("timer with a negative duration");
+    }
+    let arg = TaskArg(arg);
+    let capture_root = arg.0;
+    let timer = executor::spawn_with_capture_root(
+        move || {
+            let arg = arg;
+            loop {
+                executor::sleep(delay_nanos);
+                body(arg.0);
+            }
+        },
+        capture_root,
+    );
+    executor::ambient_timer_register_current(task::ScopeId::from_bits(scope), timer);
+    timer.to_bits()
 }
 
 /// Shuts the runtime down after `main` returns.
@@ -305,7 +477,7 @@ mod tests {
 
         // Stand-in for the compiler-emitted Zirk entrypoint: it spawns a
         // background task and returns while that task is still running.
-        extern "C" fn fake_zirk_main() {
+        extern "C-unwind" fn fake_zirk_main() {
             MAIN_RAN.store(1, Ordering::SeqCst);
             executor::spawn(|| {
                 for _ in 0..8 {
@@ -337,7 +509,7 @@ mod tests {
 
         static RESULT: AtomicU64 = AtomicU64::new(0);
 
-        extern "C" fn child(arg: *mut std::ffi::c_void) -> usize {
+        extern "C-unwind" fn child(arg: *mut std::ffi::c_void) -> usize {
             // `arg` carries a plain integer for this test.
             for _ in 0..4 {
                 executor::yield_now();
@@ -345,14 +517,14 @@ mod tests {
             arg as usize + 1
         }
 
-        extern "C" fn driver() {
-            let id = unsafe { zirk_rt_task_spawn(child, 41 as *mut std::ffi::c_void) };
+        extern "C-unwind" fn driver() {
+            let id = unsafe { zirk_rt_spawn(child, 41 as *mut std::ffi::c_void) };
             assert!(
-                !unsafe { zirk_rt_task_is_done(id) },
+                !unsafe { zirk_rt_job_done(id) },
                 "child ran before a safe point"
             );
-            let value = unsafe { zirk_rt_task_await(id) };
-            assert!(unsafe { zirk_rt_task_is_done(id) });
+            let value = unsafe { zirk_rt_job_wait(id) };
+            assert!(unsafe { zirk_rt_job_done(id) });
             RESULT.store(value as u64, Ordering::SeqCst);
         }
 
@@ -363,5 +535,42 @@ mod tests {
             zirk_rt_shutdown();
         }
         assert_eq!(RESULT.load(Ordering::SeqCst), 42);
+    }
+
+    #[test]
+    fn the_c_abi_timer_surface_runs_and_stops_ambient_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static AFTER: AtomicUsize = AtomicUsize::new(0);
+        static TICKS: AtomicUsize = AtomicUsize::new(0);
+
+        extern "C-unwind" fn after(_: *mut std::ffi::c_void) -> usize {
+            AFTER.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+
+        extern "C-unwind" fn tick(_: *mut std::ffi::c_void) -> usize {
+            TICKS.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+
+        extern "C-unwind" fn driver() {
+            let scope = unsafe { zirk_rt_scope_enter() };
+            unsafe {
+                zirk_rt_timer_after(scope, 1_000_000, after, std::ptr::null_mut());
+                zirk_rt_timer_every(scope, 1_000_000, tick, std::ptr::null_mut());
+                zirk_rt_sleep(7_000_000);
+            }
+            assert!(unsafe { zirk_rt_scope_exit(scope) });
+        }
+
+        AFTER.store(0, Ordering::SeqCst);
+        TICKS.store(0, Ordering::SeqCst);
+        unsafe { zirk_rt_run_main(driver) };
+        let ticks_at_exit = TICKS.load(Ordering::SeqCst);
+        assert_eq!(AFTER.load(Ordering::SeqCst), 1);
+        assert!(ticks_at_exit >= 2, "Timer.every did not re-arm");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        assert_eq!(TICKS.load(Ordering::SeqCst), ticks_at_exit);
     }
 }

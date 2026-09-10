@@ -21,11 +21,30 @@ pub mod symbols {
     /// Starts a child scheduler task from a body thunk and boxed-callable
     /// capture block. This provisional symbol is reused and renamed by
     /// `concurrent-blocks-and-timers`.
-    pub const TASK_SPAWN: &str = "zirk_rt_task_spawn";
+    pub const SPAWN: &str = "zirk_rt_spawn";
     /// Suspends the current scheduler task until a child result is available.
     /// This provisional symbol is reused and renamed by
     /// `concurrent-blocks-and-timers`.
-    pub const TASK_AWAIT: &str = "zirk_rt_task_await";
+    pub const JOB_WAIT: &str = "zirk_rt_job_wait";
+    /// Reports whether a job has reached a terminal state.
+    pub const JOB_DONE: &str = "zirk_rt_job_done";
+    /// Opens a structured-concurrency scope.
+    pub const SCOPE_ENTER: &str = "zirk_rt_scope_enter";
+    /// Advances the close protocol for a structured-concurrency scope.
+    pub const SCOPE_EXIT: &str = "zirk_rt_scope_exit";
+    /// Registers a joinable branch with a scope.
+    pub const BRANCH_REGISTER: &str = "zirk_rt_branch_register";
+    /// Requests cooperative cancellation of a job.
+    pub const CANCEL: &str = "zirk_rt_cancel";
+    /// Creates an ambient one-shot timer job.
+    pub const TIMER_AFTER: &str = "zirk_rt_timer_after";
+    /// Creates an ambient fixed-delay timer job.
+    pub const TIMER_EVERY: &str = "zirk_rt_timer_every";
+    /// Suspends the current job until a monotonic timer deadline.
+    pub const SLEEP: &str = "zirk_rt_sleep";
+    /// Carries a branch's unhandled Zirk exception into a scheduler-visible
+    /// branch failure so the owning scope cancels its siblings.
+    pub const BRANCH_FAIL: &str = "zirk_rt_branch_fail";
     /// Shuts the runtime down after `main`.
     pub const SHUTDOWN: &str = "zirk_rt_shutdown";
     /// Builds a `String` from UTF-8 bytes and a length.
@@ -299,8 +318,17 @@ pub mod symbols {
 pub struct Runtime<'ctx> {
     pub init: FunctionValue<'ctx>,
     pub run_main: FunctionValue<'ctx>,
-    pub task_spawn: FunctionValue<'ctx>,
-    pub task_await: FunctionValue<'ctx>,
+    pub spawn: FunctionValue<'ctx>,
+    pub job_wait: FunctionValue<'ctx>,
+    pub job_done: FunctionValue<'ctx>,
+    pub scope_enter: FunctionValue<'ctx>,
+    pub scope_exit: FunctionValue<'ctx>,
+    pub branch_register: FunctionValue<'ctx>,
+    pub cancel: FunctionValue<'ctx>,
+    pub timer_after: FunctionValue<'ctx>,
+    pub timer_every: FunctionValue<'ctx>,
+    pub sleep: FunctionValue<'ctx>,
+    pub branch_fail: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
     pub str_from_i8: FunctionValue<'ctx>,
@@ -464,14 +492,51 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[ptr.into()], false),
         external,
     );
-    let task_spawn = module.add_function(
-        symbols::TASK_SPAWN,
+    let spawn = module.add_function(
+        symbols::SPAWN,
         i64.fn_type(&[ptr.into(), ptr.into()], false),
         external,
     );
-    let task_await = module.add_function(
-        symbols::TASK_AWAIT,
+    let job_wait = module.add_function(
+        symbols::JOB_WAIT,
         i64.fn_type(&[i64.into()], false),
+        external,
+    );
+    let job_done = module.add_function(
+        symbols::JOB_DONE,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let scope_enter = module.add_function(symbols::SCOPE_ENTER, i64.fn_type(&[], false), external);
+    let scope_exit = module.add_function(
+        symbols::SCOPE_EXIT,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let branch_register = module.add_function(
+        symbols::BRANCH_REGISTER,
+        void.fn_type(&[i64.into(), i64.into()], false),
+        external,
+    );
+    let cancel = module.add_function(
+        symbols::CANCEL,
+        void.fn_type(&[i64.into()], false),
+        external,
+    );
+    let timer_after = module.add_function(
+        symbols::TIMER_AFTER,
+        i64.fn_type(&[i64.into(), i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let timer_every = module.add_function(
+        symbols::TIMER_EVERY,
+        i64.fn_type(&[i64.into(), i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let sleep = module.add_function(symbols::SLEEP, void.fn_type(&[i64.into()], false), external);
+    let branch_fail = module.add_function(
+        symbols::BRANCH_FAIL,
+        void.fn_type(&[ptr.into()], false),
         external,
     );
     let shutdown = module.add_function(symbols::SHUTDOWN, void.fn_type(&[], false), external);
@@ -1147,8 +1212,17 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     Runtime {
         init,
         run_main,
-        task_spawn,
-        task_await,
+        spawn,
+        job_wait,
+        job_done,
+        scope_enter,
+        scope_exit,
+        branch_register,
+        cancel,
+        timer_after,
+        timer_every,
+        sleep,
+        branch_fail,
         shutdown,
         str_from_utf8,
         str_from_i8,

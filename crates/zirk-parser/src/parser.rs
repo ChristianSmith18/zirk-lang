@@ -2145,6 +2145,9 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Commit) {
             return self.parse_commit_block().map(Stmt::Commit);
         }
+        if self.check_keyword(Keyword::Concurrent) {
+            return self.parse_concurrent().map(Stmt::Concurrent);
+        }
         // A local class: `class` / `final class` / `abstract class` inside a
         // body, scoped to its block.
         if self.check_keyword(Keyword::Class)
@@ -2172,6 +2175,36 @@ impl<'a> Parser<'a> {
         }
 
         self.parse_expr_or_assign()
+    }
+
+    /// `concurrent { ... }`. Direct single bindings become the branch list;
+    /// nested declarations stay ordinary body statements and are not inferred
+    /// later by the checker.
+    fn parse_concurrent(&mut self) -> Option<ConcurrentBlock> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Concurrent);
+        let body = self.parse_block()?;
+        let bindings = body
+            .statements
+            .iter()
+            .enumerate()
+            .filter_map(|(statement_index, statement)| match statement {
+                Stmt::Let(let_stmt) => match &let_stmt.pattern {
+                    Pattern::Binding(name) => Some(ConcurrentBinding {
+                        name: name.clone(),
+                        statement_index,
+                        span: let_stmt.span,
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        Some(ConcurrentBlock {
+            span: start.to(body.span),
+            body,
+            bindings,
+        })
     }
 
     /// `while cond { }`
@@ -2936,8 +2969,30 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Commit) {
             return self.parse_commit_block().map(|b| Expr::Commit(Box::new(b)));
         }
+        if self.check_keyword(Keyword::Spawn) {
+            return self.parse_spawn();
+        }
 
         self.parse_ternary()
+    }
+
+    /// `spawn expr` or `spawn { ... }`.
+    fn parse_spawn(&mut self) -> Option<Expr> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Spawn);
+        let body = if matches!(self.peek(), TokenKind::LBrace) {
+            SpawnBody::Block(self.parse_block()?)
+        } else {
+            SpawnBody::Expr(Box::new(self.parse_expr()?))
+        };
+        let end = match &body {
+            SpawnBody::Expr(expr) => expr.span(),
+            SpawnBody::Block(block) => block.span,
+        };
+        Some(Expr::Spawn(SpawnExpr {
+            body,
+            span: start.to(end),
+        }))
     }
 
     /// Whether the tokens ahead start a lambda rather than a parenthesized

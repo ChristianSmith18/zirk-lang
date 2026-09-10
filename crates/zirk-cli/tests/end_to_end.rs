@@ -154,6 +154,21 @@ fn the_reference_program_runs_without_the_zrk_extension() {
 }
 
 #[test]
+fn the_concurrent_examples_program_runs() {
+    // `examples/concurrent_examples.zrk` — the normative showcase for
+    // `concurrent-blocks-and-timers`.
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("concurrent_examples.zrk");
+    let output = zirk("run", &source, "concurrent_examples", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "10\n1\n2\n3\n42\ncaught: boom\n");
+}
+
+#[test]
 fn build_produces_an_executable_that_runs_on_its_own() {
     let source = corpus("valid").join("hello.zrk");
     let dir = workspace("build_only");

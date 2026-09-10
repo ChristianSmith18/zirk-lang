@@ -1,0 +1,8 @@
+// `Timer.sleep` is a cooperative suspension point: the branch yields and then
+// resumes past it.
+
+fn main(): Void {
+    stdout.println(1);
+    Timer.sleep(1ms);
+    stdout.println(2);
+}

@@ -75,6 +75,141 @@ fn valid_minimal_program() {
     accepted("fn main(): Void { }");
 }
 
+// --- Concurrent scopes and timers -----------------------------------------
+
+#[test]
+fn valid_job_spawn_wait_and_timer_static_members() {
+    accepted(
+        "fn compute(): Int32 { return 7; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut h: Job<Int32> = spawn compute();\n\
+             inmut value: Int32 = h.wait();\n\
+           }\n\
+           Timer.sleep(1s);\n\
+           inmut later: Job<Int32> = Timer.after(1s, (): Int32 => 9);\n\
+           inmut answer: Int32 = later.wait();\n\
+           Timer.every(1s, (): Void => { });\n\
+         }",
+    );
+}
+
+#[test]
+fn invalid_spawn_outside_main_or_concurrent_scope() {
+    let output = rejected(
+        "fn worker(): Void { inmut handle = spawn 1; }\n\
+         fn main(): Void { worker(); }",
+    );
+    assert!(
+        output.contains(codes::SPAWN_OUTSIDE_SCOPE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_timer_every_requires_a_void_callback() {
+    let output = rejected_body("Timer.every(1s, (): Int32 => 1);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_job_waited_twice() {
+    let output =
+        rejected_body("inmut h = spawn 1; inmut first = h.wait(); inmut second = h.wait();");
+    assert!(output.contains(codes::SECOND_WAIT.as_str()), "{output}");
+}
+
+#[test]
+fn valid_concurrent_bindings_hoist_after_the_block() {
+    accepted(
+        "fn f(): Int32 { return 1; }\n\
+         fn g(): Int32 { return 2; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut a: Int32 = f();\n\
+             inmut b: Int32 = g();\n\
+           }\n\
+           inmut total: Int32 = a + b;\n\
+         }",
+    );
+}
+
+#[test]
+fn valid_concurrent_dependent_binding_names_its_input() {
+    accepted(
+        "fn f(): Int32 { return 1; }\n\
+         fn g(x: Int32): Int32 { return x + 1; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut a: Int32 = f();\n\
+             inmut b: Int32 = g(a);\n\
+           }\n\
+           inmut _seen: Int32 = b;\n\
+         }",
+    );
+}
+
+#[test]
+fn invalid_concurrent_binding_cycle_is_rejected() {
+    let output = rejected(
+        "fn f(x: Int32): Int32 { return x; }\n\
+         fn g(x: Int32): Int32 { return x; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut a: Int32 = f(b);\n\
+             inmut b: Int32 = g(a);\n\
+           }\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::CONCURRENT_BINDING_CYCLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_concurrent_early_read_of_sibling_binding() {
+    let output = rejected(
+        "fn f(): Int32 { return 1; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut a: Int32 = f();\n\
+             stdout.println(a);\n\
+           }\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::CONCURRENT_EARLY_READ.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_unused_job_handle_is_diagnosed() {
+    let output = rejected(
+        "fn work(): Int32 { return 1; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut h: Job<Int32> = spawn work();\n\
+           }\n\
+         }",
+    );
+    assert!(output.contains(codes::UNUSED_JOB.as_str()), "{output}");
+}
+
+#[test]
+fn valid_unused_job_handle_discharged_with_wildcard() {
+    accepted(
+        "fn work(): Int32 { return 1; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut h: Job<Int32> = spawn work();\n\
+             _ = h;\n\
+           }\n\
+         }",
+    );
+}
+
 #[test]
 fn invalid_program_without_main() {
     let output = rejected("fn other(): Void { }");

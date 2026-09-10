@@ -1,0 +1,10 @@
+// `spawn` outside any `concurrent { }` block (and outside `main`'s implicit
+// scope) is rejected and directed to wrap it.
+fn worker(): Void {
+    inmut handle = spawn 1;
+    _ = handle;
+}
+
+fn main(): Void {
+    worker();
+}

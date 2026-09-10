@@ -1,0 +1,10 @@
+// Two bindings whose initializers name each other form a dependency cycle.
+fn f(x: Int32): Int32 { return x; }
+fn g(x: Int32): Int32 { return x; }
+
+fn main(): Void {
+    concurrent {
+        inmut a: Int32 = f(b);
+        inmut b: Int32 = g(a);
+    }
+}

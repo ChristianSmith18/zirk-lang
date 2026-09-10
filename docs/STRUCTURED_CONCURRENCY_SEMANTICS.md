@@ -1,10 +1,9 @@
 # Zirk Structured Concurrency Semantics
 
-> **Surface status:** this document specifies the model-neutral concurrency
-> invariants that remain after removing `task`, `await`, `Task<T>`, `select`,
-> and cancellation shields. The language surface is defined by the pending
-> `concurrent-blocks-and-timers`, `parallel-cpu-regions`, `typed-channels`, and
-> `concurrency-completion` changes.
+> **Surface status:** `concurrent`, `spawn`, `Job<T>`, and `Timer` are the
+> delivered structured-concurrency surface. `parallel-cpu-regions`,
+> `typed-channels`, and `concurrency-completion` remain separate follow-up
+> changes.
 
 ## 1. Execution domains
 
@@ -27,6 +26,34 @@ becomes ownerless through an implicit detach.
 Long-lived services belong to an application-level supervisor. That supervisor
 owns startup failure, cancellation, ordered shutdown, resource cleanup, and
 final diagnostics.
+
+### `concurrent` and `spawn`
+
+`concurrent { ... }` opens a lexical structured scope. A direct `inmut` or
+`mut` declaration in the block is a branch whose binding is available in the
+enclosing scope only after the block closes. Independent bindings may run
+together; a binding that reads a sibling is ordered after that sibling. Cycles
+and reads that occur before a sibling is available are compile-time errors.
+
+`spawn expr` and `spawn { ... }` create dynamic, joinable branches. They are
+valid only in a `concurrent` block or in `main`'s implicit root scope. Their
+result is `Job<T>`; `job.wait()` consumes the handle and returns `T`,
+`job.cancel()` requests cancellation, and `job.done` reports terminal state.
+An unconsumed job is diagnosed unless explicitly discharged with `_ = job`.
+
+### Timers
+
+`Timer.sleep(Duration)` suspends the current branch and is a cancellation safe
+point. `Timer.after(Duration, callback)` runs the callback once after the
+deadline. `Timer.every(Duration, callback)` re-arms after each callback until
+cancelled. Negative durations are controlled runtime errors before a wait is
+armed.
+
+`after` and `every` return `Job<T>` but are ambient: they belong to the nearest
+lexical `concurrent` scope (or `main`) and scope close cancels them instead of
+waiting for their natural completion. This prevents a periodic timer from
+keeping a finite scope alive. A program that explicitly waits a timer job owns
+that wait in the ordinary way.
 
 ## 3. Failure propagation
 

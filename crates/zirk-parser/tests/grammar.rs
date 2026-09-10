@@ -221,6 +221,10 @@ fn shape(e: &Expr) -> String {
             )
         }
         Expr::Regex(r) => format!("re'{:?}'", r.pattern),
+        Expr::Spawn(s) => match &s.body {
+            SpawnBody::Expr(expr) => format!("spawn {}", shape(expr)),
+            SpawnBody::Block(block) => format!("spawn({} stmts)", block.statements.len()),
+        },
     }
 }
 
@@ -2244,4 +2248,61 @@ fn invalid_select_and_cancellation_shield_are_removed_constructs() {
             "{output}"
         );
     }
+}
+
+// --- Structured concurrency (`concurrent-blocks-and-timers`) --------------
+
+#[test]
+fn valid_concurrent_block_records_direct_bindings() {
+    let p = program("fn main(): Void { concurrent { inmut a = load(); mut b = save(); } }");
+    let Stmt::Concurrent(scope) = &p.functions[0].body.statements[0] else {
+        panic!("expected a concurrent statement");
+    };
+    assert_eq!(scope.bindings.len(), 2);
+    assert_eq!(scope.bindings[0].name.name, "a");
+    assert_eq!(scope.bindings[1].name.name, "b");
+}
+
+#[test]
+fn valid_spawn_expression_and_block_parse() {
+    let p = program("fn main(): Void { concurrent { inmut h = spawn work(); spawn { work(); } } }");
+    let Stmt::Concurrent(scope) = &p.functions[0].body.statements[0] else {
+        panic!("expected a concurrent statement");
+    };
+    let Stmt::Let(binding) = &scope.body.statements[0] else {
+        panic!("expected a binding");
+    };
+    assert!(matches!(binding.init, Some(Expr::Spawn(_))));
+    let Stmt::Expr(ExprStmt {
+        expr:
+            Expr::Spawn(SpawnExpr {
+                body: SpawnBody::Block(_),
+                ..
+            }),
+        ..
+    }) = &scope.body.statements[1]
+    else {
+        panic!("expected a block spawn");
+    };
+}
+
+#[test]
+fn valid_spawn_in_a_loop_and_outside_a_concurrent_block_parse() {
+    let p = program(
+        "fn main(): Void { for item in items { inmut h = spawn work(item); } spawn work(); }",
+    );
+    let Stmt::ForIn(loop_stmt) = &p.functions[0].body.statements[0] else {
+        panic!("expected a for-in statement");
+    };
+    let Stmt::Let(binding) = &loop_stmt.body.statements[0] else {
+        panic!("expected a loop-local binding");
+    };
+    assert!(matches!(binding.init, Some(Expr::Spawn(_))));
+    assert!(matches!(
+        p.functions[0].body.statements[1],
+        Stmt::Expr(ExprStmt {
+            expr: Expr::Spawn(_),
+            ..
+        })
+    ));
 }

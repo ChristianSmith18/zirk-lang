@@ -394,8 +394,12 @@ function coloring.
    the cooperative executor, scheduler control block, stackful-coroutine
    suspend/resume, monotonic timer, per-task garbage-collection root chains, and
    `zirk_rt_run_main` running `main` as the executor's root scheduler task.
-1. `concurrent { }`, dynamic `spawn`, cleanup edges, cancellation, timers, and
-   application-root supervision (`concurrent-blocks-and-timers`).
+1. `concurrent { }`, dynamic `spawn`, `Job<T>`, cleanup edges, cooperative
+   cancellation, and `Timer.sleep` / `after` / `every`
+   (`concurrent-blocks-and-timers`, **delivered**): the block hoists its
+   bindings and orders branches by a Rule B dataflow DAG; a branch's
+   cancellation or unhandled exception unwinds natively through its own stack
+   and the scope aggregates the failure; `main` runs in an implicit scope.
 2. Ordered/unordered `parallel` operations and associative/deterministic
    reductions on a multicore pool (`parallel-cpu-regions`).
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure

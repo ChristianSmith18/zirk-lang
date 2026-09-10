@@ -400,6 +400,8 @@ fn llvm_type_in<'ctx>(
         // the captured values are read back at the call site
         // (`phase-4d-callables`).
         ir::IrType::Callable(_) => callable_struct(context).into(),
+        // Jobs cross the runtime boundary as packed generational ids.
+        ir::IrType::Job => context.i64_type().into(),
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
         // carries no pointee type; a load/store through it supplies `T`'s
@@ -750,6 +752,23 @@ fn weak_cell_struct_type<'ctx>(context: &'ctx Context) -> inkwell::types::Struct
     )
 }
 
+/// Marks a generated function as needing an unwind table.
+///
+/// The runtime propagates a cancelled branch (`CancelledError`) and a branch's
+/// unhandled exception as a native unwind through the branch's own stack
+/// (`concurrent-blocks-and-timers`, ADR-017's stackful model). Without a
+/// `uwtable` the unwinder hits generated frames it cannot cross and the
+/// process aborts with "panic in a function that cannot unwind".
+fn set_uwtable<'ctx>(context: &'ctx Context, function: FunctionValue<'ctx>) {
+    let kind = inkwell::attributes::Attribute::get_named_enum_kind_id("uwtable");
+    if kind != 0 {
+        function.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            context.create_enum_attribute(kind, 2),
+        );
+    }
+}
+
 fn declare_function<'ctx>(
     context: &'ctx Context,
     llvm: &LlvmModule<'ctx>,
@@ -779,11 +798,13 @@ fn declare_function<'ctx>(
         None => context.void_type().fn_type(&params, false),
     };
 
-    llvm.add_function(
+    let declared = llvm.add_function(
         &format!("{FUNCTION_PREFIX}{}", function.name),
         signature,
         None,
-    )
+    );
+    set_uwtable(context, declared);
+    declared
 }
 
 /// `extern "C" fn` (roadmap Phase 4e, design D7, `ADR-015`): an ordinary
@@ -901,6 +922,7 @@ fn emit_c_entrypoint<'ctx>(
         i32_type.fn_type(&[], false),
         Some(Linkage::External),
     );
+    set_uwtable(context, main);
     let entry = context.append_basic_block(main, "entry");
     builder.position_at_end(entry);
 
@@ -1235,6 +1257,232 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .i64_type()
             .const_int(CAPTURE_BLOCK_HEADER_BYTES as u64, false);
         field_offset.const_add(header)
+    }
+
+    /// Widens a branch-body result to the runtime's one-word (`i64`)
+    /// branch-result value. `Void` / `Never` become zero
+    /// (`concurrent-blocks-and-timers`, native codegen "BranchStart emits a
+    /// thunk").
+    fn widen_to_branch_word(
+        &self,
+        value: Option<BasicValueEnum<'ctx>>,
+        ty: ir::IrType,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let word = self.context.i64_type();
+        match ty {
+            ir::IrType::Void | ir::IrType::Never => word.const_zero(),
+            ir::IrType::Boolean => self
+                .builder
+                .build_int_z_extend(
+                    value.expect("branch value").into_int_value(),
+                    word,
+                    "branch_word",
+                )
+                .expect("widen bool"),
+            ir::IrType::Int(width) => {
+                let raw = value.expect("branch value").into_int_value();
+                if width.bits() >= 64 {
+                    raw
+                } else {
+                    self.builder
+                        .build_int_z_extend(raw, word, "branch_word")
+                        .expect("widen int")
+                }
+            }
+            ir::IrType::Float(width) => {
+                let bits = self
+                    .builder
+                    .build_bit_cast(
+                        value.expect("branch value").into_float_value(),
+                        self.context
+                            .custom_width_int_type(
+                                std::num::NonZeroU32::new(width.bits()).expect("float width"),
+                            )
+                            .expect("float bits type"),
+                        "branch_float_bits",
+                    )
+                    .expect("float bits")
+                    .into_int_value();
+                self.builder
+                    .build_int_z_extend(bits, word, "branch_word")
+                    .expect("widen float")
+            }
+            _ => self
+                .builder
+                .build_ptr_to_int(
+                    value.expect("branch value").into_pointer_value(),
+                    word,
+                    "branch_word",
+                )
+                .expect("branch pointer bits"),
+        }
+    }
+
+    /// The inverse of [`Self::widen_to_branch_word`]: recovers a `JobWait`
+    /// result from the runtime's one-word value.
+    fn narrow_from_branch_word(
+        &self,
+        raw: inkwell::values::IntValue<'ctx>,
+        ty: ir::IrType,
+    ) -> Option<BasicValueEnum<'ctx>> {
+        match ty {
+            ir::IrType::Void | ir::IrType::Never => None,
+            ir::IrType::Boolean => Some(
+                self.builder
+                    .build_int_truncate(raw, self.context.bool_type(), "job_value")
+                    .expect("job bool")
+                    .into(),
+            ),
+            ir::IrType::Int(width) => {
+                if width.bits() >= 64 {
+                    Some(raw.into())
+                } else {
+                    Some(
+                        self.builder
+                            .build_int_truncate(
+                                raw,
+                                self.context
+                                    .custom_width_int_type(
+                                        std::num::NonZeroU32::new(width.bits()).expect("int width"),
+                                    )
+                                    .expect("int type"),
+                                "job_value",
+                            )
+                            .expect("job narrow")
+                            .into(),
+                    )
+                }
+            }
+            ir::IrType::Float(width) => {
+                let bits = self
+                    .builder
+                    .build_int_truncate(
+                        raw,
+                        self.context
+                            .custom_width_int_type(
+                                std::num::NonZeroU32::new(width.bits()).expect("float width"),
+                            )
+                            .expect("float bits type"),
+                        "job_float_bits",
+                    )
+                    .expect("job float bits");
+                Some(
+                    self.builder
+                        .build_bit_cast(bits, self.llvm_type(ty).expect("float type"), "job_value")
+                        .expect("job float"),
+                )
+            }
+            other => Some(
+                self.builder
+                    .build_int_to_ptr(
+                        raw,
+                        self.llvm_type(other)
+                            .expect("pointer type")
+                            .into_pointer_type(),
+                        "job_value",
+                    )
+                    .expect("job pointer")
+                    .into(),
+            ),
+        }
+    }
+
+    /// Builds the per-site `extern "C" fn(ptr) -> i64` thunk a `BranchStart`
+    /// hands to `zirk_rt_spawn` / `zirk_rt_timer_*`: it reloads the captured
+    /// values from the boxed capture block, calls through the callable's own
+    /// function pointer, turns a pending Zirk exception into a branch failure,
+    /// and widens the normal result to the runtime's branch-result word. The
+    /// builder's insert position is saved and restored.
+    ///
+    fn build_branch_thunk(&self, target: &str, layout_id: u32, site: u32) -> FunctionValue<'ctx> {
+        let layout = &self.module.closures[layout_id as usize];
+
+        let thunk = self.llvm.add_function(
+            &format!("zk.branch_thunk.{site}"),
+            self.context.i64_type().fn_type(
+                &[self.context.ptr_type(AddressSpace::default()).into()],
+                false,
+            ),
+            Some(Linkage::Private),
+        );
+        thunk.set_call_conventions(0);
+        set_uwtable(self.context, thunk);
+
+        let resume = self.builder.get_insert_block().expect("instruction block");
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+
+        let capture_arg = thunk
+            .get_first_param()
+            .expect("capture argument")
+            .into_pointer_value();
+        let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+        for (index, ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let slot = unsafe {
+                self.builder
+                    .build_gep(self.context.i8_type(), capture_arg, &[offset], "capture")
+            }
+            .expect("branch capture gep");
+            args.push(
+                self.builder
+                    .build_load(self.llvm_type(*ty).expect("capture type"), slot, "capture")
+                    .expect("branch capture load")
+                    .into(),
+            );
+        }
+
+        let returns = self
+            .module
+            .function(target)
+            .expect("branch target is a module function")
+            .return_type;
+        let call = self
+            .builder
+            .build_call(self.functions[target], &args, "branch_body")
+            .expect("branch body call");
+        let value = call.try_as_basic_value().basic();
+
+        // A branch that threw returns normally with the pending-exception slot
+        // set; hand it to the scope as a branch failure so siblings are
+        // cancelled (`concurrent-scopes`, "Structured failure").
+        let pending = self
+            .builder
+            .build_call(self.runtime.has_pending_exception, &[], "branch_pending")
+            .expect("has_pending_exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("has_pending_exception returns a bool")
+            .into_int_value();
+        let failed = self.context.append_basic_block(thunk, "failed");
+        let ok = self.context.append_basic_block(thunk, "ok");
+        self.builder
+            .build_conditional_branch(pending, failed, ok)
+            .expect("branch pending check");
+
+        self.builder.position_at_end(failed);
+        let exception = self
+            .builder
+            .build_call(self.runtime.take_pending_exception, &[], "branch_exc")
+            .expect("take_pending_exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("take_pending_exception returns a pointer");
+        self.builder
+            .build_call(self.runtime.branch_fail, &[exception.into()], "branch_fail")
+            .expect("branch_fail");
+        self.builder
+            .build_unreachable()
+            .expect("branch_fail diverges");
+
+        self.builder.position_at_end(ok);
+        let packed = self.widen_to_branch_word(value, returns);
+        self.builder
+            .build_return(Some(&packed))
+            .expect("branch thunk return");
+
+        self.builder.position_at_end(resume);
+        thunk
     }
 
     /// Walks a live GC reference path (`gc_reference_paths`) from a real base
@@ -4134,6 +4382,124 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("indirect callable call");
 
                 call.try_as_basic_value().basic()
+            }
+
+            // --- Structured concurrency (`concurrent-blocks-and-timers`) ---
+            ir::InstKind::ScopeEnter => Some(
+                self.builder
+                    .build_call(self.runtime.scope_enter, &[], "scope")
+                    .expect("zirk_rt_scope_enter")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("scope id"),
+            ),
+            ir::InstKind::ScopeExit { scope } => {
+                let scope_id = self.operand(*scope);
+                self.builder
+                    .build_call(self.runtime.scope_exit, &[scope_id.into()], "scope_close")
+                    .expect("zirk_rt_scope_exit");
+                None
+            }
+            ir::InstKind::BranchStart {
+                target,
+                body,
+                scope,
+                kind,
+                delay,
+            } => {
+                let callable = self.operand(*body).into_struct_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "branch_capture")
+                    .expect("branch capture pointer")
+                    .into_pointer_value();
+                let layout_id = match self.value_types.get(&body.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("BranchStart body is not a Callable: {other:?}"),
+                };
+                let site = instruction.result.expect("BranchStart has a result").0;
+                let thunk = self.build_branch_thunk(target.as_str(), layout_id, site);
+                let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                let scope_id = self.operand(*scope);
+
+                let handle = match kind {
+                    ir::BranchKind::Spawn => {
+                        let job = self
+                            .builder
+                            .build_call(
+                                self.runtime.spawn,
+                                &[thunk_ptr.into(), capture.into()],
+                                "branch",
+                            )
+                            .expect("zirk_rt_spawn")
+                            .try_as_basic_value()
+                            .basic()
+                            .expect("job handle");
+                        self.builder
+                            .build_call(
+                                self.runtime.branch_register,
+                                &[scope_id.into(), job.into()],
+                                "",
+                            )
+                            .expect("zirk_rt_branch_register");
+                        job
+                    }
+                    ir::BranchKind::TimerAfter | ir::BranchKind::TimerEvery => {
+                        let entry = if matches!(kind, ir::BranchKind::TimerAfter) {
+                            self.runtime.timer_after
+                        } else {
+                            self.runtime.timer_every
+                        };
+                        let nanos = self.operand(delay.expect("an ambient branch has a delay"));
+                        self.builder
+                            .build_call(
+                                entry,
+                                &[
+                                    scope_id.into(),
+                                    nanos.into(),
+                                    thunk_ptr.into(),
+                                    capture.into(),
+                                ],
+                                "timer",
+                            )
+                            .expect("zirk_rt_timer_*")
+                            .try_as_basic_value()
+                            .basic()
+                            .expect("timer job handle")
+                    }
+                };
+                Some(handle)
+            }
+            ir::InstKind::JobWait { job, result } => {
+                let raw = self
+                    .builder
+                    .build_call(self.runtime.job_wait, &[self.operand(*job).into()], "wait")
+                    .expect("zirk_rt_job_wait")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("job result word")
+                    .into_int_value();
+                self.narrow_from_branch_word(raw, *result)
+            }
+            ir::InstKind::JobDone { job } => Some(
+                self.builder
+                    .build_call(self.runtime.job_done, &[self.operand(*job).into()], "done")
+                    .expect("zirk_rt_job_done")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("job done flag"),
+            ),
+            ir::InstKind::JobCancel { job } => {
+                self.builder
+                    .build_call(self.runtime.cancel, &[self.operand(*job).into()], "")
+                    .expect("zirk_rt_cancel");
+                None
+            }
+            ir::InstKind::TimerSleep { nanos } => {
+                self.builder
+                    .build_call(self.runtime.sleep, &[self.operand(*nanos).into()], "")
+                    .expect("zirk_rt_sleep");
+                None
             }
 
             // `Dependent.from(base, field_ptr)` (roadmap Phase 4e,

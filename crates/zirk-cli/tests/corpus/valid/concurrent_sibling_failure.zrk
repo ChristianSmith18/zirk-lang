@@ -1,0 +1,44 @@
+// One branch throws: the scope makes it the primary failure, cancels the
+// sibling (observed at its `Timer.sleep` safe point), and re-raises the
+// exception out of the block (`concurrent-blocks-and-timers`).
+
+class Boom implements Throwable {
+    construct() { }
+
+    message(): String {
+        return "boom";
+    }
+
+    code(): String {
+        return "BOOM";
+    }
+
+    cause(): Error? {
+        return null;
+    }
+
+    stack_trace(): StackTrace {
+        return StackTrace();
+    }
+}
+
+fn explode(): Void throws Boom {
+    throw Boom();
+}
+
+fn linger(): Void {
+    Timer.sleep(500ms);
+    stdout.println("linger finished");
+}
+
+fn main(): Void {
+    try {
+        concurrent {
+            spawn explode();
+            spawn linger();
+        }
+        stdout.println("block completed");
+    } catch Boom(e) {
+        stdout.println("caught: " + e.message());
+    }
+}

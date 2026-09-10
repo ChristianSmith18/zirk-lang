@@ -218,6 +218,8 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
   - [Concurrency](./02-handbook/18-concurrency/README.md)
     - [Concurrency and Parallelism](./02-handbook/18-concurrency/01-concurrency-vs-parallelism.md)
     - [Structured Concurrency](./02-handbook/18-concurrency/04-structured-concurrency.md)
+    - [`Timer`](./02-handbook/18-concurrency/15-timer.md)
+    - [`Job<T>`](./02-handbook/18-concurrency/16-job.md)
     - [Cancellation](./02-handbook/18-concurrency/05-cancellation.md)
     - [Timeouts](./02-handbook/18-concurrency/06-timeouts.md)
     - [Channels](./02-handbook/18-concurrency/07-channels.md)

@@ -4,8 +4,9 @@ Compiled, object-oriented programming language with static typing and inference.
 
 > **Easy by default, explicit when you need control.**
 
-Zirk's planned concurrency surface is structured `concurrent` blocks, `spawn`,
-`parallel`, typed channels, and explicit thread APIs. Binaries are standalone:
+Zirk's structured concurrency surface uses `concurrent` blocks, `spawn`,
+`Job<T>`, and `Timer`. `parallel`, typed channels, and explicit thread APIs
+remain planned. Binaries are standalone:
 they require no Node.js, Python, Java, or any other installation.
 
 ```zirk
@@ -38,7 +39,7 @@ zirk build hello.zrk    # compiles to a native executable
 zirk run hello.zrk      # compiles and runs
 ```
 
-Artifacts land in `build/`. Still in progress or not yet implemented: `Array<T>`/`List<T>` completion, `Range<T>`, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); concurrency (`concurrent`/`spawn`/`parallel`/channels/atomics, Phase 5); the multi-file project system and `.zkinit` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
+Artifacts land in `build/`. Still in progress or not yet implemented: `Array<T>`/`List<T>` completion, `Range<T>`, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); remaining concurrency (`parallel`/channels/atomics, Phase 5); the multi-file project system and `.zkinit` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
 
 ## Architecture
 

@@ -1,0 +1,81 @@
+// Normative examples for `concurrent-blocks-and-timers`: the `concurrent { }`
+// block, dynamic `spawn` with a `Job<T>` handle, Rule B dataflow ordering,
+// ambient timers, and structured sibling-failure.
+//
+// Run: `zirk run examples/concurrent_examples.zrk`
+
+class Boom implements Throwable {
+    construct() { }
+    message(): String { return "boom"; }
+    code(): String { return "BOOM"; }
+    cause(): Error? { return null; }
+    stack_trace(): StackTrace { return StackTrace(); }
+}
+
+fn fetch_users(): Int32 {
+    return 3;
+}
+
+fn fetch_orders(): Int32 {
+    return 7;
+}
+
+fn summarize(users: Int32, orders: Int32): Int32 {
+    return users + orders;
+}
+
+fn render(n: Int32): Void {
+    stdout.println(n);
+}
+
+fn explode(): Void throws Boom {
+    throw Boom();
+}
+
+fn linger(): Void {
+    Timer.sleep(500ms);
+    stdout.println("linger finished");
+}
+
+fn main(): Void {
+    // 1. Dashboard fan-out: two independent branches overlap, a third
+    //    (`total`) waits for both by Rule B, and every result is hoisted.
+    concurrent {
+        inmut users: Int32 = fetch_users();
+        inmut orders: Int32 = fetch_orders();
+        inmut total: Int32 = summarize(users, orders);
+    }
+    stdout.println(total);
+
+    // 2. A dynamic spawn loop: the block waits for every branch.
+    concurrent {
+        for n in 1..=3 {
+            spawn render(n);
+        }
+    }
+
+    // 3. An explicit `Job<T>` handle, consumed exactly once.
+    concurrent {
+        inmut work: Job<Int32> = spawn fetch_orders();
+        inmut result: Int32 = work.wait();
+    }
+
+    // 4. Ambient timers: `Timer.every` is cancelled on scope close, so the
+    //    block does not hang.
+    concurrent {
+        Timer.every(1ms, (): Void => { });
+        Timer.sleep(3ms);
+    }
+    stdout.println(42);
+
+    // 5. Structured sibling failure: one branch throws, the sibling is
+    //    cancelled at its safe point, and the exception leaves the block.
+    try {
+        concurrent {
+            spawn explode();
+            spawn linger();
+        }
+    } catch Boom(e) {
+        stdout.println("caught: " + e.message());
+    }
+}
