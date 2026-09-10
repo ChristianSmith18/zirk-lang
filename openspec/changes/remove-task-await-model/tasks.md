@@ -61,7 +61,7 @@
 
 ## 9. Website + closeout
 
-- [ ] 9.1 Commit the zirk-lang changes; record the revision
+- [x] 9.1 Commit the zirk-lang changes; record the revision (`8ed6a86`)
 - [ ] 9.2 `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`
 - [ ] 9.3 Review `../zirk-lang-site` diff + site-owned Phase 5 status catalog; confirm no stale `task` / `await`
 - [ ] 9.4 Commit `../zirk-lang-site` separately; record both revisions
