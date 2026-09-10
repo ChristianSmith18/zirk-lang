@@ -4,4 +4,4 @@ These essays explain why Zirk chooses particular contracts. They connect languag
 
 ---
 
-**Previous:** [← Reference](../11-reference/README.md) · **Next:** [ Why Static Types?](01-why-static-types.md)
+**Previous:** [← Temporal Reference](../11-reference/14-temporal-reference.md) · **Next:** [ Why Static Types?](01-why-static-types.md)

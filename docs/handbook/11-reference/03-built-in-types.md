@@ -95,10 +95,9 @@ Complete reference variables alias when moved. Reads through an attribute,
 index, slice, destructuring, pattern, iterator, argument, return, or closure
 capture are independent projections and require `Clone` when reference-backed.
 
-`Task<T>` awaits to exactly `T`; see the [`Task<T>` reference](15-task.md).
-`TaskSettlement<T>` is
-`Fulfilled(T) | Rejected(Throwable) | Cancelled(CancelledError)`. Internal
-transfer/share properties are compiler-derived rather than user-declared types.
+The removed `Task<T>` and `TaskSettlement<T>` types are replaced by the pending
+concurrency-surface changes. Internal transfer/share properties are
+compiler-derived rather than user-declared types.
 
 ## Universal and conditional members
 
