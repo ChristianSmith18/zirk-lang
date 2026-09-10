@@ -694,18 +694,14 @@ The checker SHALL retain compiler-internal permission-effect metadata on declara
 - **THEN** the call site and application acquire the secret-read requirement in compiler metadata
 
 ### Requirement: Memory and task type family
-The type system SHALL define `Weak<T>`, `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>`, `Task<T>`, `TaskSettlement<T>`, `Channel<T>`, synchronization types, and their capability constraints without exposing mandatory ownership or lifetime parameters.
-
-#### Scenario: Await type is inferred
-- **WHEN** an expression has type `Task<Result<User, LoadError>>`
-- **THEN** awaiting it has type `Result<User, LoadError>`
+The type system SHALL define `Weak<T>`, `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>`, and their capability constraints without exposing mandatory ownership or lifetime parameters. Concurrency handle types (`Job<T>`, `Channel<T>`, `Atomic<T>`, `Mutex<T>`, `Outcome<T>`) are defined by the concurrency-surface changes, not here.
 
 #### Scenario: NativeSlice element type is ABI-safe only
 - **WHEN** `NativeSlice<T>`/`NativeSliceMut<T>` is instantiated with an element type outside the ABI-safe subset (`Void`/`Boolean`/fixed-width `Int`/`UInt`/`Float32`/`Float64`/nested `Pointer<T>`)
 - **THEN** the checker rejects the instantiation, naming the unsupported element type
 
 ### Requirement: Derived concurrent capabilities
-Transferability and shareability SHALL be compiler-derived, non-forgeable properties based on the complete reachable type graph, mutability, resource ownership, and synchronization contract.
+Transferability and shareability SHALL be compiler-derived, non-forgeable properties based on the complete reachable type graph, mutability, resource ownership, and synchronization contract. They SHALL NOT appear in ordinary `Fn` annotations.
 
 #### Scenario: Class contains mutex
 - **WHEN** a class safely encapsulates mutable state behind a supported mutex
@@ -932,73 +928,6 @@ The checker SHALL replace a type parameter appearing inside a nested generic ins
 - **WHEN** a generic enum's own variant payload names another generic instantiation containing the enum's type parameter (for example `Bar<Baz<T>>`)
 - **THEN** substituting `T` with a concrete type produces the fully-substituted nested instantiation, not a partially-substituted one
 
-### Requirement: Async core types are known
-
-The checker SHALL recognize `Task<T>`, `Channel<T>`, and the generic enum
-`TaskSettlement<T>` with variants `Fulfilled(T)`, `Rejected(Throwable)`, and
-`Cancelled(CancelledError)` as ordinary known types, parameterized over any valid
-element type. `CancellationReason` SHALL be a known enum whose default value is
-`Cancelled`.
-
-#### Scenario: Task annotation resolves
-
-- **WHEN** `mut u: Task<Result<User, LoadError>> = task load_user(42);` is checked
-- **THEN** the binding type is `Task<Result<User, LoadError>>` and the initializer must produce that task element type
-
-#### Scenario: Settlement enum is matchable
-
-- **WHEN** a `match` over a `TaskSettlement<User>` value handles `Fulfilled`, `Rejected`, and `Cancelled`
-- **THEN** the match is exhaustive
-
-### Requirement: `task` produces a typed handle and `await` produces the element type
-
-The checker SHALL type `task expression` as `Task<T>` where `T` is the type the
-expression produces, and SHALL type `task scope { block }` as `Task<T>` where `T`
-is the block's result type. `await handle` SHALL be typed as exactly `T` for a
-`handle` of type `Task<T>`; `await` SHALL NOT introduce implicit `Result`,
-nullability, or exception wrapping. `await expression timeout duration` SHALL
-require `duration` to be `Duration` and SHALL be typed as `T`.
-
-#### Scenario: Await unwraps exactly the element type
-
-- **WHEN** `mut r = await someTask;` is checked where `someTask: Task<Int32>`
-- **THEN** `r` has type `Int32`
-
-#### Scenario: Timeout operand must be a duration
-
-- **WHEN** `await op timeout 5;` is checked with an integer where a duration is expected
-- **THEN** compilation fails naming the required `Duration` type
-
-### Requirement: A task result is consumed exactly once
-
-The checker SHALL treat the result of a `Task<T>` as a linear value: `await` on a
-handle SHALL consume it, and a second `await` on the same statically tracked
-handle SHALL be a compile-time use-after-consume error that identifies the first
-consuming `await`. An ignored `Task<T>` result SHALL be diagnosed under the same
-must-use policy as other must-use results, and SHALL be dischargeable with `_ =
-handle`, which SHALL NOT detach the task.
-
-#### Scenario: Second await is rejected
-
-- **WHEN** a program awaits a handle and later awaits the same handle again
-- **THEN** compilation rejects the second `await` and points at the first
-
-#### Scenario: Explicit discard does not detach
-
-- **WHEN** a program writes `_ = handle;` for a task whose value it does not need
-- **THEN** the must-use diagnostic is satisfied and the owning scope still awaits the task's completion and cleanup
-
-### Requirement: Multiple observers do not implicitly clone a task result
-
-The checker SHALL reject an attempt to observe one `Task<T>` result from more than
-one place and SHALL direct the developer to `watch`, `broadcast`, a channel, or a
-shared deeply immutable value.
-
-#### Scenario: Two consumers of one handle
-
-- **WHEN** two different code paths each `await` the same handle
-- **THEN** compilation fails and names the explicit multi-observer mechanisms
-
 ### Requirement: Derived Transfer and Share properties
 
 The checker SHALL derive two properties that user code cannot name or forge:
@@ -1030,41 +959,17 @@ contracts permit.
 
 ### Requirement: Concurrency boundary and capture checking
 
-The checker SHALL apply the `Transfer` and `Share` rules at every `task`
-creation, `task scope` result, channel `send` and `receive`, and `select` branch
-value. A task or `select` capture of a mutable reference that is neither an
-exclusive transfer nor statically non-overlapping with the parent's continued use
-SHALL be rejected with a diagnostic that names transfer, strict immutable
-sharing, `clone()`, or a channel as resolutions. A projected capture (`users[0]`)
-SHALL follow the ordinary projection rule and yield an independent value.
+The checker SHALL apply the `Transfer` and `Share` rules at every concurrent-branch creation and capture, at a `concurrent { }` result, and at channel `send` and `receive`. A branch capture of a mutable reference that is neither an exclusive transfer nor statically non-overlapping with the parent's continued use SHALL be rejected with a diagnostic naming transfer, strict immutable sharing, `clone()`, or a channel. A projected capture (`users[0]`) SHALL follow the ordinary projection rule and yield an independent value. A branch SHALL NOT mutate a variable captured from an enclosing scope.
 
 #### Scenario: Ambiguous mutable capture is rejected
 
-- **WHEN** a task body captures `users` mutably while the parent continues to mutate `users`
+- **WHEN** a branch body captures `users` mutably while the parent continues to mutate `users`
 - **THEN** compilation fails and lists the resolutions
 
 #### Scenario: Projected capture is independent
 
-- **WHEN** a task body captures `users[0]` rather than `users`
+- **WHEN** a branch body captures `users[0]` rather than `users`
 - **THEN** the child receives the independent projected value and the parent's later list mutations do not affect it
-
-### Requirement: `Task.all`, `Task.first`, and `Task.settled` typing
-
-The checker SHALL type `Task.all(tasks)` over an iterable of `Task<T>` as
-producing `List<T>` in input order, `Task.first(tasks)` as producing `T`, and
-`Task.settled(tasks)` as producing `List<TaskSettlement<T>>` in input order. A
-`Task<Result<U, E>>` input to `Task.settled` SHALL settle as `Fulfilled(Result<U,
-E>)`, never as `Rejected` for an ordinary `Error(e)` value.
-
-#### Scenario: All-aggregation result type
-
-- **WHEN** `mut users = await Task.all(taskList);` is checked where `taskList` holds `Task<User>` values
-- **THEN** `users` has type `List<User>`
-
-#### Scenario: Settled result type
-
-- **WHEN** `mut settlements = await Task.settled(taskList);` is checked
-- **THEN** `settlements` has type `List<TaskSettlement<User>>`
 
 ### Requirement: Object spread and rest typing
 
@@ -1077,4 +982,3 @@ Object spread SHALL require a known nominal record/object shape, SHALL verify fi
 #### Scenario: Invalid object spread field
 - **WHEN** an object spread adds an unknown field to a nominal record
 - **THEN** a field/type diagnostic is emitted
-

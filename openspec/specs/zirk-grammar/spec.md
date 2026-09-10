@@ -163,14 +163,11 @@ The parser SHALL allow omitting the semicolon when there is no ambiguity, per `Z
 
 ### Requirement: Constructs outside the subset
 
-The parser SHALL emit a specific diagnostic for constructs that exist in the language but are not yet implemented, distinguishing them from syntax errors.
+The parser SHALL emit a specific diagnostic for constructs that exist in the language but are not yet implemented, distinguishing them from syntax errors, and a distinct removed-construct diagnostic for constructs that were removed from the language.
 
 This phase removes from that list `class`, `construct`, `this`, `record`, `type`, `public`, `private`, `protected`, `abstract`, `implements`, `extends`, `from`, `as`, and `is`.
 
-The structured-async forms `task`, `await`, `task scope`, `select`, and
-`cancellation shield` are also removed from that list and are parsed as real
-grammar. `parallel`, `thread`, and `task.blocking` remain outside the subset and
-keep receiving the diagnostic.
+The words `task`, `await`, `select`, and `scope` / `shield` in a construct position SHALL produce a removed-construct diagnostic that names the replacement (`concurrent { }` / `spawn`, `job.wait()`, `Concurrent.of(...).first()`, `Concurrent.protect`). `scope` and `shield` SHALL otherwise be ordinary identifiers. `parallel` and `thread` remain in the language and are handled by `parallel-cpu-regions` and `concurrency-completion`.
 
 #### Scenario: Construct from a later phase
 
@@ -179,10 +176,15 @@ keep receiving the diagnostic.
 - **AND** SHALL indicate that it is not implemented yet
 - **AND** SHALL NOT be reported as an unexpected token
 
-#### Scenario: Structured-async form is parsed, not deferred
+#### Scenario: Removed construct is reported as removed
 
-- **WHEN** `task`, `await`, `task scope`, `select`, or `cancellation shield` is parsed
-- **THEN** the parser produces the corresponding node and emits no phase diagnostic
+- **WHEN** `task f()`, `await h`, `select { }`, or `cancellation shield { }` is parsed
+- **THEN** the diagnostic states the construct was removed and names its replacement, and is not a bare token error
+
+#### Scenario: Freed word is an identifier
+
+- **WHEN** `mut scope = 1;` or `mut shield = true;` is parsed
+- **THEN** `scope` and `shield` are ordinary identifiers
 
 #### Scenario: `.zkinit` out of scope
 
@@ -674,12 +676,12 @@ remain distinct from tuple construction and destructuring patterns.
 
 ### Requirement: Safety and concurrency grammar
 
-The grammar SHALL parse unsafe function modifiers and blocks, `commit` regions, `task` blocks and callable sugar, `task scope`, `cancellation shield`, await timeouts, and `select` branches with `after`, `default`, and cancellation cases without introducing `async fn`.
+The grammar SHALL parse unsafe function modifiers and blocks and `commit` regions without introducing `async fn`. It SHALL NOT provide `task` blocks, `task scope`, `cancellation shield`, `await` timeouts, or `select` branches; the concurrency surface is `concurrent { }` / `parallel { }` / `spawn`, defined by their own changes.
 
-#### Scenario: Select statement is parsed
+#### Scenario: No task or select grammar
 
-- **WHEN** source contains task, channel, timer, and default select branches
-- **THEN** the parser produces distinct guarded branches and their result bindings
+- **WHEN** source contains `task { }` or `select { }`
+- **THEN** the parser emits the removed-construct diagnostic, not a grammar production
 
 ### Requirement: Contextual safety restrictions
 
@@ -1024,7 +1026,7 @@ The parser SHALL recognize `#name` member markers on their own prefix position b
 
 ### Requirement: `final` modifier positions
 
-The parser SHALL accept `final` before `class` and in the member-modifier sequence before a method. `final` in any other position (fields, constructors, `interface`, `trait`, `record`, parameters, variables) SHALL produce a targeted diagnostic.
+The parser SHALL accept `final` before `class` and in the member-modifier sequence before a method. `final` in any other position (fields, constructors, `interface`, `trait`, `record`, parameters, variables, and any expression position) SHALL produce a targeted diagnostic.
 
 #### Scenario: Final class and method
 
@@ -1035,86 +1037,6 @@ The parser SHALL accept `final` before `class` and in the member-modifier sequen
 
 - **WHEN** a class body contains `final x: Int32;`
 - **THEN** a diagnostic is emitted indicating attributes use `inmut`, not `final`
-
-### Requirement: Task creation and scope syntax
-
-The parser SHALL recognize `task expression`, `task { block }`, and `task scope {
-block }` as expressions that produce, respectively, a task node over a call, a
-task node over a block, and a structured-scope node over a block. `task scope`
-SHALL be usable where an expression is expected and its value SHALL be the block's
-value. A control transfer that would leave a `task scope` block other than
-`return` or normal completion SHALL be rejected with a diagnostic.
-
-#### Scenario: Task over a call
-
-- **WHEN** source contains `mut u: Task<User> = task load_user(42);`
-- **THEN** the parser produces a mutable binding whose initializer is a task node over the call `load_user(42)`
-
-#### Scenario: Task scope as an expression
-
-- **WHEN** source contains `mut dashboard = task scope { mut a = task load_a(); return combine(await a); };`
-- **THEN** the parser produces a structured-scope node whose value is the block result
-
-#### Scenario: Illegal jump out of a task scope
-
-- **WHEN** a `break` targeting an outer loop appears directly inside a `task scope` block
-- **THEN** compilation fails and identifies the crossed `task scope` boundary
-
-### Requirement: Await and timeout syntax
-
-The parser SHALL recognize `await expression` as an expression and `await
-expression timeout duration` as an expression whose `timeout` operand is a
-duration-typed expression. `timeout` in this position SHALL be a contextual
-keyword and SHALL remain usable as an identifier elsewhere.
-
-#### Scenario: Plain await
-
-- **WHEN** source contains `mut r = await handle;`
-- **THEN** the parser produces an await node over `handle` with no timeout operand
-
-#### Scenario: Await with a timeout
-
-- **WHEN** source contains `mut r = await operation timeout 5s;`
-- **THEN** the parser produces an await node whose timeout operand is the duration expression `5s`
-
-#### Scenario: `timeout` as an identifier
-
-- **WHEN** source declares `mut timeout: Int32 = 30;` outside an await expression
-- **THEN** the parser accepts `timeout` as an ordinary identifier
-
-### Requirement: Select syntax
-
-The parser SHALL recognize `select { arm, ... }` where each arm is a guard
-followed by `=>` and a branch expression or block. A guard SHALL be one of a
-binding `pattern = await channel-or-handle operation`, `after duration`,
-`cancelled`, or `default`. At most one `default` arm SHALL be allowed. `select`,
-`after`, and `cancelled` SHALL be contextual in this position.
-
-#### Scenario: Select with mixed guards
-
-- **WHEN** source contains a `select` with a channel-receive arm, an `after 5s` arm, and a `cancelled` arm
-- **THEN** the parser produces a select node with three guarded arms and no default
-
-#### Scenario: Select with a default arm
-
-- **WHEN** a `select` contains a `default =>` arm
-- **THEN** the parser records it as the non-suspending fallback arm
-
-#### Scenario: Two default arms are rejected
-
-- **WHEN** a `select` contains two `default =>` arms
-- **THEN** compilation fails with a duplicate-default diagnostic
-
-### Requirement: Cancellation shield syntax
-
-The parser SHALL recognize `cancellation shield { block }` as a statement whose
-block is a bounded non-interruptible region. `shield` SHALL be contextual after
-`cancellation`.
-
-#### Scenario: Shielded cleanup block
-
-- **WHEN** source contains `cancellation shield { await persist_commit(); }`
-- **THEN** the parser produces a cancellation-shield node wrapping the block
 
 ### Requirement: Object spread and rest grammar
 
@@ -1127,4 +1049,3 @@ The parser SHALL accept field-based object/record spread in a record-typed expre
 #### Scenario: Object rest pattern
 - **WHEN** `{ id, ...details }` appears in a destructuring declaration
 - **THEN** the parser produces a record pattern with a final rest binding
-

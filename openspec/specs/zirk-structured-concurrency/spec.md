@@ -1,23 +1,11 @@
 # zirk-structured-concurrency Specification
 
 ## Purpose
-Defines typed structured tasks, cancellation, aggregation, fair selection,
-channels, transfer/share safety, threads, parallelism, and synchronization.
+Defines model-neutral structured concurrency, cancellation, transfer/share
+safety, channels, threads, parallelism, and synchronization.
 ## Requirements
-### Requirement: Task results have one consumer
-Creating a task SHALL start it immediately as a child of the current structured
-scope, and awaiting its `Task<T>` handle SHALL consume the result exactly once.
-A second await SHALL be a compile-time use-after-consume error; multiple
-observers SHALL use an explicit watch, broadcast, channel, or shared deeply
-immutable value rather than implicit result cloning.
-
-#### Scenario: Task is awaited twice
-- **WHEN** a program awaits one task handle and later attempts to await it again
-- **THEN** compilation rejects the second await and identifies the first consume
-
 ### Requirement: Cancellation metadata and scheduling remain safe
-Task cancellation SHALL be idempotent, MAY carry an optional typed reason whose
-default is `Cancelled`, and SHALL NOT expose user-controlled task priority.
+Cancellation of a concurrent operation SHALL be idempotent, MAY carry an optional typed `CancellationReason` whose default is `Cancelled`, and SHALL NOT expose user-controlled scheduling priority.
 The runtime SHALL schedule fairly and prevent starvation as an implementation
 responsibility.
 
@@ -25,18 +13,11 @@ responsibility.
 - **WHEN** source invokes `operation.cancel()`
 - **THEN** observers receive the default `CancellationReason.Cancelled`
 
-### Requirement: Typed structured tasks
-`task` SHALL create a child in the current structured scope and return `Task<T>`, while `await` SHALL produce exactly `T` and scope exit MUST NOT abandon unfinished children.
-
-#### Scenario: Scope exits with running child
-- **WHEN** control reaches the end of a scope containing an unfinished child task
-- **THEN** the scope awaits completion or requests cancellation and awaits cleanup before exiting
-
-### Requirement: Structured task failure
-An unhandled task exception SHALL fail that task, cancel its siblings, await their cleanup, propagate the primary failure, and attach additional cleanup or sibling failures as suppressed; `Result.Error` SHALL remain an ordinary successful task value.
+### Requirement: Structured failure propagation
+An unhandled exception in a concurrent branch SHALL fail that branch, cancel its sibling branches in the same scope, await their cleanup, propagate the primary failure out of the scope, and attach additional cleanup or sibling failures as suppressed. A returned `Result.Error` SHALL remain an ordinary successful branch value, never a branch failure.
 
 #### Scenario: One child throws
-- **WHEN** a child throws while sibling tasks are active
+- **WHEN** a branch throws while sibling branches in the same scope are active
 - **THEN** the siblings are cancelled and cleaned before the primary exception propagates
 
 ### Requirement: Supervised long-lived services
@@ -46,40 +27,12 @@ Zirk MUST NOT provide unrestricted task detachment, and long-lived work SHALL be
 - **WHEN** ordinary code attempts to detach a task from all scopes
 - **THEN** compilation fails and directs the developer to an application service supervisor
 
-### Requirement: Cooperative cancellation and shielding
-Cancellation SHALL be cooperative, idempotent, observable at defined safe points, and propagated from parent to child; `cancellation shield` SHALL defer delivery only for its bounded region and deliver pending cancellation afterward.
+### Requirement: Cooperative cancellation
+Cancellation SHALL be cooperative, idempotent, observable only at defined safe points (a blocking channel operation, a timer wait, `Timer.sleep`, an explicit check), and propagated from a parent scope to its child branches. Cancellation SHALL throw the compiler-known `CancelledError` at the safe point and SHALL NOT stop a branch at an arbitrary instruction; the branch runs ordinary cleanup.
 
-#### Scenario: Cancelled task enters cleanup shield
-- **WHEN** cancellation is requested while a task performs shielded commit cleanup
-- **THEN** cleanup completes and cancellation is observed immediately after the shield
-
-### Requirement: Structured timeout
-`await operation timeout duration` SHALL cancel the operation at expiry, await its cleanup, and throw `TimeoutError` without leaving background work.
-
-#### Scenario: Operation exceeds timeout
-- **WHEN** an awaited operation remains incomplete after its timeout
-- **THEN** it is cancelled and cleaned before `TimeoutError` escapes
-
-### Requirement: Task aggregation policies
-`Task.all` SHALL cancel remaining tasks after the first unhandled exception, `Task.first` SHALL return the first completed task and cancel the rest, and `Task.settled` SHALL allow every task to finish and preserve input order as `TaskSettlement<T>`.
-
-#### Scenario: Settled aggregation includes failures
-- **WHEN** one task fulfills, one throws, and one is cancelled
-- **THEN** `Task.settled` returns ordered `Fulfilled`, `Rejected`, and `Cancelled` settlements without sibling failure cancellation
-
-### Requirement: Result and settlement separation
-A fulfilled `Task<Result<T,E>>` SHALL contain either `Ok` or `Error` inside `TaskSettlement.Fulfilled`, while only an unhandled throwable SHALL produce `Rejected`.
-
-#### Scenario: Task returns Result Error
-- **WHEN** a task returns `Error(problem)` normally
-- **THEN** settled aggregation records `Fulfilled(Error(problem))`
-
-### Requirement: Fair selection
-`select` SHALL wait for the first ready task, channel operation, timer, or cancellation signal; execute exactly one branch; preserve losing operations; support `default`; treat closure as a ready channel outcome; and avoid permanent starvation when multiple branches are ready.
-
-#### Scenario: Message arrives before timer
-- **WHEN** a selected channel receive becomes ready before `after 5s`
-- **THEN** the message branch executes and the timer branch does not
+#### Scenario: Parent scope is cancelled
+- **WHEN** a scope is cancelled while a child branch is suspended at a safe point
+- **THEN** the child observes `CancelledError` at that point and runs its cleanup before finishing
 
 ### Requirement: Typed channels and closure
 `Channel<T>` SHALL support explicit bounded construction, zero-capacity
@@ -106,11 +59,11 @@ The compiler SHALL derive non-user-forgeable `Transfer` and `Share` properties: 
 - **WHEN** a mutable reference would remain usable by the parent while a child can mutate it concurrently
 - **THEN** compilation fails and suggests transfer, strict sharing, synchronization, or cloning
 
-### Requirement: Safe task captures
-Task captures SHALL snapshot values and projections, share strict immutable or synchronization-aware references, and reject mutable reference captures that are neither exclusive transfers nor statically non-overlapping.
+### Requirement: Safe concurrent captures
+A concurrent branch SHALL capture by the ordinary closure rules: values and projections are snapshots, strict immutable complete references may be shared, exclusive mutable references may transfer when statically safe, and an ambiguous shared mutable alias is a compile-time error. A branch SHALL NOT mutate a variable captured from an enclosing scope.
 
 #### Scenario: Projected child is captured
-- **WHEN** a task captures `users[0]` rather than the complete `users` reference
+- **WHEN** a branch captures `users[0]` rather than the complete `users` reference
 - **THEN** it receives the independent projected value under the ordinary projection rule
 
 ### Requirement: Parallel CPU operations
@@ -212,4 +165,3 @@ strict immutable sharing, cloning, or a channel as the resolution.
 
 - **WHEN** a parent transfers an exclusive mutable reference into a child task
 - **THEN** the parent cannot use that reference again until it returns through a structured result or a channel
-
