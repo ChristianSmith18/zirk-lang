@@ -62,9 +62,9 @@
 ## 9. Website + closeout
 
 - [x] 9.1 Commit the zirk-lang changes; record the revision (`8ed6a86`)
-- [ ] 9.2 `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`
-- [ ] 9.3 Review `../zirk-lang-site` diff + site-owned Phase 5 status catalog; confirm no stale `task` / `await`
-- [ ] 9.4 Commit `../zirk-lang-site` separately; record both revisions
+- [x] 9.2 `./scripts/sync-website-content.sh --audit-date 2026-09-09`
+- [x] 9.3 Review `../zirk-lang-site` diff + site-owned Phase 5 status catalog; confirm no stale `task` / `await`
+- [x] 9.4 Commit `../zirk-lang-site` separately; record both revisions (`0d26d34`, `5b256ca`)
 - [ ] 9.5 `cargo test --workspace` green; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] 9.6 `rm -r openspec/changes/fase-5-structured-tasks/`
 - [x] 9.7 `openspec validate remove-task-await-model --strict`
