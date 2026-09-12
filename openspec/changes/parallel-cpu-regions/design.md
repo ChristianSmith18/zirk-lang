@@ -188,6 +188,19 @@ along; it was only ever exposed *by* this bug, not the cause of a separate one.
 `cargo test --workspace` (1277 tests), `cargo fmt --check`, and
 `cargo clippy --workspace --all-targets` are all clean with the fix in place.
 
+## Formal dependency: `collection-sequence-pipeline` (filed 2026-09-12)
+
+Tasks 5.2 (`.parallel`'s real per-method adapter behavior, `ParallelSeq<T>`)
+and 5.3 (the associativity check on a parallel `reduce`) are blocked on a
+gap this change found but does not own fixing: `List<T>`/`Array<T>` have no
+`map`/`filter`/`reduce`/`sum`/`count`/`collect`/`for_each` at all, not even
+sequentially. `openspec/changes/collection-sequence-pipeline` is the formal
+proposal that adds this surface (validated, not yet implemented as of this
+writing) across `List<T>`/`Array<T>`/`Range<T>`/`Tuple`. Its own design
+explicitly defers the associativity check to task 5.3 here rather than
+implementing it there — `reduce`'s call site is what 5.3 needs, not the
+check itself. Resume 5.2/5.3 once that change lands.
+
 ## Open Questions
 
 - `chunk` in this change or deferred? Proposed: grammar reserved now,
