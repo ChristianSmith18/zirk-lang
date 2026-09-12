@@ -79,6 +79,9 @@ pub mod symbols {
     pub const STR_FROM_F32: &str = "zirk_str_from_f32";
     /// Converts a `Float64` into a `String`.
     pub const STR_FROM_F64: &str = "zirk_str_from_f64";
+    /// Converts a `Float128`'s raw bits (taken by pointer, like
+    /// `STR_FROM_I128`) to the nearest `Float64`, for `ToString`.
+    pub const FLOAT128_TO_F64: &str = "zirk_float128_to_f64";
     /// Formats a `Float64` according to a `spec` string.
     pub const FLOAT_FORMAT: &str = "zirk_float_format";
     /// Converts a `Boolean` into a `String`.
@@ -348,6 +351,7 @@ pub struct Runtime<'ctx> {
     pub str_from_u128: FunctionValue<'ctx>,
     pub str_from_f32: FunctionValue<'ctx>,
     pub str_from_f64: FunctionValue<'ctx>,
+    pub float128_to_f64: FunctionValue<'ctx>,
     pub float_format: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
     pub str_grapheme_offset: FunctionValue<'ctx>,
@@ -628,6 +632,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let str_from_f64 = module.add_function(
         symbols::STR_FROM_F64,
         ptr.fn_type(&[context.f64_type().into()], false),
+        external,
+    );
+    let float128_to_f64 = module.add_function(
+        symbols::FLOAT128_TO_F64,
+        context.f64_type().fn_type(&[ptr.into()], false),
         external,
     );
     let float_format = module.add_function(
@@ -1258,6 +1267,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_from_u128,
         str_from_f32,
         str_from_f64,
+        float128_to_f64,
         float_format,
         str_from_bool,
         str_grapheme_offset,

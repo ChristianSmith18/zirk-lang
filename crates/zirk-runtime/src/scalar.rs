@@ -1037,3 +1037,99 @@ pub unsafe extern "C" fn zirk_float_format(value: f64, spec: *const c_void) -> *
         .unwrap_or("");
     alloc_owned(&format_float(value, spec))
 }
+
+/// Converts the raw bit pattern of an IEEE 754 binary128 (`Float128`)
+/// value to the nearest `f64`, entirely in integer arithmetic.
+///
+/// `Float128` printing (`ToString`) truncates to `Float64` for display,
+/// since Rust has no stable `f128` type to format through. The natural
+/// alternative — an LLVM `fptrunc` from `fp128` straight to `double` —
+/// depends on the target's quad-precision libcalls (`__trunctfdf2` and
+/// friends); on the Windows/MSVC target those are unreliable (observed:
+/// truncating `1.5_Float128` silently produced `0.0`). Decoding the bit
+/// pattern by hand sidesteps hardware/libcall quad-float support
+/// entirely, so the result is identical on every target.
+fn f128_bits_to_f64(bits: u128) -> f64 {
+    let sign = (bits >> 127) & 1;
+    let biased_exp = ((bits >> 112) & 0x7FFF) as i32;
+    let frac = bits & ((1u128 << 112) - 1);
+    let sign_f = if sign == 1 { -1.0f64 } else { 1.0f64 };
+
+    // Binary128 has 15 exponent bits (bias 16383) and 112 fraction bits;
+    // binary64 has 11 exponent bits (bias 1023) and 52 fraction bits.
+    if biased_exp == 0x7FFF {
+        return if frac == 0 {
+            sign_f * f64::INFINITY
+        } else {
+            f64::NAN
+        };
+    }
+
+    if biased_exp == 0 {
+        // Every binary128 subnormal is far below binary64's smallest
+        // subnormal (2^-16494 vs. 2^-1074), so this always underflows.
+        return sign_f * 0.0;
+    }
+
+    let unbiased_exp = biased_exp - 16383;
+    let mut new_exp = unbiased_exp + 1023;
+
+    if new_exp >= 0x7FF {
+        return sign_f * f64::INFINITY;
+    }
+
+    // Round the 112-bit fraction down to `f64`'s 52 bits, nearest-even.
+    const SHIFT: u32 = 112 - 52;
+    let mut mantissa = (frac >> SHIFT) as u64;
+    let remainder = frac & ((1u128 << SHIFT) - 1);
+    let halfway = 1u128 << (SHIFT - 1);
+    let round_up = remainder > halfway || (remainder == halfway && (mantissa & 1) == 1);
+
+    if new_exp <= 0 {
+        // The result is subnormal (or zero) in `f64`. Shift the implicit
+        // leading `1` back in and denormalize by shifting further right.
+        if new_exp <= -52 {
+            return sign_f * 0.0;
+        }
+        let full = (1u128 << 112) | frac;
+        let extra_shift = (1 - new_exp) as u32;
+        let total_shift = SHIFT + extra_shift;
+        let denorm_mantissa = (full >> total_shift) as u64;
+        let denorm_remainder = full & ((1u128 << total_shift) - 1);
+        let denorm_halfway = 1u128 << (total_shift - 1);
+        let mut denorm_mantissa = denorm_mantissa;
+        if denorm_remainder > denorm_halfway
+            || (denorm_remainder == denorm_halfway && (denorm_mantissa & 1) == 1)
+        {
+            denorm_mantissa += 1;
+        }
+        let bits64 = ((sign as u64) << 63) | denorm_mantissa;
+        return f64::from_bits(bits64);
+    }
+
+    if round_up {
+        mantissa += 1;
+        if mantissa == (1u64 << 52) {
+            mantissa = 0;
+            new_exp += 1;
+            if new_exp >= 0x7FF {
+                return sign_f * f64::INFINITY;
+            }
+        }
+    }
+
+    let bits64 = ((sign as u64) << 63) | ((new_exp as u64) << 52) | mantissa;
+    f64::from_bits(bits64)
+}
+
+/// `Float128.to_string()`'s bridge to `Float64`'s formatter: converts the
+/// bit pattern of `bits` (a `Float128` reinterpreted as `i128`/`u128`, not
+/// numerically converted) to the nearest `f64`.
+///
+/// # Safety
+///
+/// `bits` must be a valid `i128` pointer holding a `Float128`'s raw bits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_to_f64(bits: *const i128) -> f64 {
+    f128_bits_to_f64(unsafe { *bits } as u128)
+}

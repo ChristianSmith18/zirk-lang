@@ -2950,16 +2950,53 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             // lossy conversion for values that are not exactly
                             // representable in `f64`; it is a pragmatic
                             // bridge rather than an exact formatter.
+                            //
+                            // The truncation itself is done by hand in
+                            // `zirk-runtime` (`zirk_float128_to_f64`,
+                            // decoding the raw bit pattern), not through
+                            // LLVM's native `fptrunc fp128 to double`: that
+                            // instruction depends on the target's
+                            // quad-precision libcalls (`__trunctfdf2`),
+                            // which are unreliable on Windows/MSVC
+                            // (confirmed: `1.5_Float128` silently printed
+                            // `0`). A `bitcast` to `i128` is always exact —
+                            // same bit width, no arithmetic — so the value
+                            // crosses the FFI boundary by the same
+                            // pointer-passing convention `declare_extern_fn`
+                            // already uses for `zirk_int_*`/128-bit values.
+                            // `zirk_float128_to_f64` is declared directly on
+                            // `self.runtime` (like `str_from_f64`), not
+                            // through the `ir::ExternFn` list, since no
+                            // user-visible IR ever names it — the spill to a
+                            // stack slot is done by hand here rather than
+                            // through `emit_decimal_call`, which looks its
+                            // callee up by name in that list.
                             ir::FloatWidth::F128 => {
-                                value = self
+                                let bits = self
                                     .builder
-                                    .build_float_trunc(
+                                    .build_bit_cast(
                                         value.into_float_value(),
-                                        self.context.f64_type(),
-                                        "to_string.f128_trunc",
+                                        self.context.i128_type(),
+                                        "to_string.f128_bits",
                                     )
-                                    .expect("truncating f128 to f64 for printing")
-                                    .into();
+                                    .expect("bitcasting f128 to i128 for printing");
+                                let slot = self
+                                    .aligned_alloca(self.context.i128_type().into(), "f128.bits");
+                                self.builder
+                                    .build_store(slot, bits)
+                                    .expect("store f128 bits for printing");
+                                let call = self
+                                    .builder
+                                    .build_call(
+                                        self.runtime.float128_to_f64,
+                                        &[slot.into()],
+                                        "f128.to_f64",
+                                    )
+                                    .expect("call zirk_float128_to_f64");
+                                value = call
+                                    .try_as_basic_value()
+                                    .basic()
+                                    .expect("zirk_float128_to_f64 returns a value");
                                 self.runtime.str_from_f64
                             }
                             ir::FloatWidth::F16 => {
