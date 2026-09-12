@@ -157,28 +157,40 @@ fn dead_strip_flag() -> &'static str {
 
 /// System libraries the runtime needs, per platform.
 fn system_libraries() -> Vec<String> {
-    if !cfg!(windows) {
-        return Vec::new();
+    if cfg!(windows) {
+        return [
+            "advapi32",
+            "bcrypt",
+            "dbghelp",
+            "kernel32",
+            "ntdll",
+            "ole32",
+            "oleaut32",
+            "shell32",
+            "synchronization",
+            "user32",
+            "userenv",
+            "uuid",
+            "ws2_32",
+        ]
+        .iter()
+        .map(|lib| format!("-l{lib}"))
+        .collect();
     }
 
-    [
-        "advapi32",
-        "bcrypt",
-        "dbghelp",
-        "kernel32",
-        "ntdll",
-        "ole32",
-        "oleaut32",
-        "shell32",
-        "synchronization",
-        "user32",
-        "userenv",
-        "uuid",
-        "ws2_32",
-    ]
-    .iter()
-    .map(|lib| format!("-l{lib}"))
-    .collect()
+    if cfg!(target_os = "linux") {
+        // Rust's own `std` calls into libm (`f64::log10` and friends,
+        // `zirk-runtime`'s temporal/decimal formatting reaches these) and
+        // libpthread (`crates/zirk-runtime/src/pool.rs`'s worker threads,
+        // `Mutex`/`Condvar`). `cargo build`'s own linker invocation gets
+        // these transitively from `libstd.so`'s own recorded dependencies;
+        // linking `libzirk_runtime.a` directly through `clang` here does
+        // not, so they must be named explicitly. macOS/Windows resolve both
+        // through their own C runtime by default and need neither.
+        return vec!["-lm".to_string(), "-lpthread".to_string()];
+    }
+
+    Vec::new()
 }
 
 /// Finds the runtime static library.

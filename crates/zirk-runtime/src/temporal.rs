@@ -275,44 +275,99 @@ pub extern "C" fn zirk_rt_time_to_string(nanos: i64) -> *mut c_void {
     alloc_owned(&format_time(nanos))
 }
 
-/// `DateTime(date, time)` / `Date + Time`: packs the day count and the
-/// day's nanoseconds into the `i128` civil timestamp.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_new(days: i64, nanos: i64) -> i128 {
+/// The `i128` civil timestamp `DateTime(date, time)`/`Date + Time` pack —
+/// factored out so every Rust call site here (which never crosses the C
+/// boundary) keeps calling it as an ordinary by-value function; only the
+/// `extern "C"` entry point below takes the pointer-based ABI a 128-bit
+/// value needs at the boundary (see that function's own doc for why).
+fn datetime_pack(days: i64, nanos: i64) -> i128 {
     days as i128 * NANOS_PER_DAY as i128 + nanos as i128
 }
 
-/// The `Date` half of a `DateTime` (its day count).
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_days(value: i128) -> i64 {
+/// The `Date` half of a `DateTime` (its day count) — the by-value Rust
+/// helper every call site in this file uses directly.
+fn datetime_days(value: i128) -> i64 {
     value.div_euclid(NANOS_PER_DAY as i128) as i64
 }
 
-/// The `Time` half of a `DateTime` (its day's nanoseconds).
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_nanos(value: i128) -> i64 {
+/// The `Time` half of a `DateTime` (its day's nanoseconds) — see
+/// [`datetime_days`].
+fn datetime_nanos(value: i128) -> i64 {
     value.rem_euclid(NANOS_PER_DAY as i128) as i64
 }
 
-/// `DateTime.now_utc()` — the current UTC civil timestamp.
+/// `DateTime(date, time)` / `Date + Time`: packs the day count and the
+/// day's nanoseconds into the `i128` civil timestamp.
+///
+/// # Safety
+///
+/// `out` must point to a valid, writable `i128`-sized, 16-byte-aligned
+/// location — this is what `zirk-codegen-llvm`'s `declare_extern_fn`/
+/// `emit_decimal_call` always allocate for a by-pointer 128-bit result
+/// (design note there: Rust's own `i128` C ABI is not guaranteed to agree
+/// with LLVM's default lowering for a plain 128-bit value on every target,
+/// so every such value crosses this boundary through an explicit pointer
+/// on both sides instead of relying on either one's by-value convention).
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_now_utc() -> i128 {
+pub unsafe extern "C" fn zirk_rt_datetime_new(out: *mut i128, days: i64, nanos: i64) {
+    unsafe { out.write(datetime_pack(days, nanos)) };
+}
+
+/// The `Date` half of a `DateTime` (its day count).
+///
+/// # Safety
+///
+/// `value` must point to a valid, readable `i128` — see
+/// [`zirk_rt_datetime_new`]'s own safety note for why this crosses by
+/// pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_days(value: *const i128) -> i64 {
+    datetime_days(unsafe { value.read_unaligned() })
+}
+
+/// The `Time` half of a `DateTime` (its day's nanoseconds).
+///
+/// # Safety
+///
+/// See [`zirk_rt_datetime_days`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_nanos(value: *const i128) -> i64 {
+    datetime_nanos(unsafe { value.read_unaligned() })
+}
+
+/// `DateTime.now_utc()` — the current UTC civil timestamp.
+///
+/// # Safety
+///
+/// See [`zirk_rt_datetime_new`]'s own safety note.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_datetime_now_utc(out: *mut i128) {
     let (days, nanos) = utc_civil_now();
-    zirk_rt_datetime_new(days, nanos)
+    unsafe { out.write(datetime_pack(days, nanos)) };
 }
 
 /// `DateTime.now_local()` — the host's current civil timestamp.
+///
+/// # Safety
+///
+/// See [`zirk_rt_datetime_new`]'s own safety note.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_now_local() -> i128 {
+pub unsafe extern "C" fn zirk_rt_datetime_now_local(out: *mut i128) {
     let (days, nanos) = local_civil_now();
-    zirk_rt_datetime_new(days, nanos)
+    unsafe { out.write(datetime_pack(days, nanos)) };
 }
 
 /// ISO 8601 `YYYY-MM-DDTHH:MM:SS[.fffffffff]`.
+///
+/// # Safety
+///
+/// `value` must point to a valid, readable `i128` — see
+/// [`zirk_rt_datetime_new`]'s own safety note.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_datetime_to_string(value: i128) -> *mut c_void {
-    let (year, month, day) = civil_from_days(zirk_rt_datetime_days(value));
-    let time = format_time(zirk_rt_datetime_nanos(value));
+pub unsafe extern "C" fn zirk_rt_datetime_to_string(value: *const i128) -> *mut c_void {
+    let value = unsafe { value.read_unaligned() };
+    let (year, month, day) = civil_from_days(datetime_days(value));
+    let time = format_time(datetime_nanos(value));
     alloc_owned(&format!("{year:04}-{month:02}-{day:02}T{time}"))
 }
 
@@ -513,18 +568,28 @@ pub unsafe extern "C" fn zirk_rt_datetime_start_of_ok(unit: *const c_void) -> bo
 /// The `DateTime` start-of boundary: date units zero the clock, time units
 /// keep the day.
 fn datetime_start_of(value: i128, unit: &str) -> i128 {
-    let days = zirk_rt_datetime_days(value);
-    let nanos = zirk_rt_datetime_nanos(value);
+    let days = datetime_days(value);
+    let nanos = datetime_nanos(value);
     if date_unit_ok(unit) {
-        zirk_rt_datetime_new(date_start_of(days, unit), 0)
+        datetime_pack(date_start_of(days, unit), 0)
     } else {
-        zirk_rt_datetime_new(days, time_start_of(nanos, unit))
+        datetime_pack(days, time_start_of(nanos, unit))
     }
 }
 
+/// # Safety
+///
+/// `out` must point to a valid, writable `i128` and `value` to a valid,
+/// readable one — see [`zirk_rt_datetime_new`]'s own safety note.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_datetime_start_of_value(value: i128, unit: *const c_void) -> i128 {
-    datetime_start_of(value, unsafe { unit_str(unit) })
+pub unsafe extern "C" fn zirk_rt_datetime_start_of_value(
+    out: *mut i128,
+    value: *const i128,
+    unit: *const c_void,
+) {
+    let value = unsafe { value.read_unaligned() };
+    let result = datetime_start_of(value, unsafe { unit_str(unit) });
+    unsafe { out.write(result) };
 }
 
 #[unsafe(no_mangle)]
@@ -533,18 +598,27 @@ pub unsafe extern "C" fn zirk_rt_datetime_end_of_ok(unit: *const c_void) -> bool
 }
 
 fn datetime_end_of(value: i128, unit: &str) -> i128 {
-    let days = zirk_rt_datetime_days(value);
-    let nanos = zirk_rt_datetime_nanos(value);
+    let days = datetime_days(value);
+    let nanos = datetime_nanos(value);
     if date_unit_ok(unit) {
-        zirk_rt_datetime_new(date_end_of(days, unit), NANOS_PER_DAY - 1)
+        datetime_pack(date_end_of(days, unit), NANOS_PER_DAY - 1)
     } else {
-        zirk_rt_datetime_new(days, time_end_of(nanos, unit))
+        datetime_pack(days, time_end_of(nanos, unit))
     }
 }
 
+/// # Safety
+///
+/// See [`zirk_rt_datetime_start_of_value`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_datetime_end_of_value(value: i128, unit: *const c_void) -> i128 {
-    datetime_end_of(value, unsafe { unit_str(unit) })
+pub unsafe extern "C" fn zirk_rt_datetime_end_of_value(
+    out: *mut i128,
+    value: *const i128,
+    unit: *const c_void,
+) {
+    let value = unsafe { value.read_unaligned() };
+    let result = datetime_end_of(value, unsafe { unit_str(unit) });
+    unsafe { out.write(result) };
 }
 
 // --- ISO 8601 parsing (`temporal-rich-api`) --------------------------------
@@ -617,7 +691,7 @@ fn parse_datetime_text(text: &str) -> Option<i128> {
     }
     let days = parse_date_text(&text[..10])?;
     let nanos = parse_time_text(&text[11..])?;
-    Some(zirk_rt_datetime_new(days, nanos))
+    Some(datetime_pack(days, nanos))
 }
 
 /// `Date.parse(text)` — `ok` flag: the text is a strict `YYYY-MM-DD`.
@@ -674,10 +748,13 @@ pub unsafe extern "C" fn zirk_rt_datetime_parse_ok(text: *const c_void) -> bool 
 ///
 /// # Safety
 ///
-/// `text` must be a `String` handle produced by this runtime.
+/// `out` must point to a valid, writable `i128` (see
+/// [`zirk_rt_datetime_new`]'s own safety note) and `text` must be a
+/// `String` handle produced by this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_datetime_parse_value(text: *const c_void) -> i128 {
-    parse_datetime_text(unsafe { unit_str(text) }).unwrap_or(0)
+pub unsafe extern "C" fn zirk_rt_datetime_parse_value(out: *mut i128, text: *const c_void) {
+    let result = parse_datetime_text(unsafe { unit_str(text) }).unwrap_or(0);
+    unsafe { out.write(result) };
 }
 
 // --- Pattern formatting ----------------------------------------------------
@@ -774,14 +851,17 @@ pub unsafe extern "C" fn zirk_rt_time_format(nanos: i64, pattern: *const c_void)
 ///
 /// # Safety
 ///
-/// `pattern` must be a `String` handle produced by this runtime.
+/// `value` must point to a valid, readable `i128` (see
+/// [`zirk_rt_datetime_new`]'s own safety note) and `pattern` must be a
+/// `String` handle produced by this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_datetime_format(
-    value: i128,
+    value: *const i128,
     pattern: *const c_void,
 ) -> *mut c_void {
-    let (year, month, day) = civil_from_days(zirk_rt_datetime_days(value));
-    let nanos = zirk_rt_datetime_nanos(value);
+    let value = unsafe { value.read_unaligned() };
+    let (year, month, day) = civil_from_days(datetime_days(value));
+    let nanos = datetime_nanos(value);
     alloc_owned(&format_pattern(
         unsafe { unit_str(pattern) },
         year,
