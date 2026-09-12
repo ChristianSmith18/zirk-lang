@@ -16,6 +16,17 @@
 //! `value` call: the helpers are pure, so computing them twice is cheap
 //! and keeps the `Result<T, E>` construction in lowering, where the
 //! `Ok`/`Error` variants live.
+//!
+//! Every `zirk_int_*` extern here that touches an `i128` (as a parameter
+//! or as the return) crosses the FFI boundary by pointer, not by value:
+//! Rust's `i128`/`u128` C-ABI lowering is not guaranteed to match LLVM's
+//! default lowering for a plain 128-bit value on every target, and on
+//! Windows x64 the two genuinely disagree, producing a
+//! `STATUS_ACCESS_VIOLATION` at the call site. `crates/zirk-codegen-llvm`'s
+//! `emit.rs` recognizes the `zirk_int_` prefix and spills/loads through
+//! `alloca`d stack slots to match. Each public wrapper here is a thin
+//! pointer-marshalling shim around a private, ordinary-by-value `_impl`
+//! helper, so the arithmetic itself stays simple and testable.
 
 use std::ffi::c_void;
 
@@ -60,56 +71,121 @@ fn width_max(bits: i32, signed: i32) -> i128 {
 
 /// `v.abs()` — the magnitude. The `MIN` case never reaches here: lowering
 /// throws `ArithmeticOverflowError` first.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_abs(value: i128, bits: i32, signed: i32) -> i128 {
+fn abs_impl(value: i128, bits: i32, signed: i32) -> i128 {
     normalize(value, bits, signed).wrapping_abs()
 }
 
-/// `v.sign()` — `-1`, `0`, or `1`.
+/// # Safety
+///
+/// `out` and `value` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_sign(value: i128, bits: i32, signed: i32) -> i32 {
+pub unsafe extern "C" fn zirk_int_abs(out: *mut i128, value: *const i128, bits: i32, signed: i32) {
+    unsafe { *out = abs_impl(*value, bits, signed) };
+}
+
+/// `v.sign()` — `-1`, `0`, or `1`.
+fn sign_impl(value: i128, bits: i32, signed: i32) -> i32 {
     normalize(value, bits, signed).signum() as i32
 }
 
-/// `v.min(other)`.
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_min(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_sign(value: *const i128, bits: i32, signed: i32) -> i32 {
+    sign_impl(unsafe { *value }, bits, signed)
+}
+
+/// `v.min(other)`.
+fn min_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(value, bits, signed).min(normalize(other, bits, signed))
 }
 
-/// `v.max(other)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_max(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_min(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = min_impl(*value, *other, bits, signed) };
+}
+
+/// `v.max(other)`.
+fn max_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(value, bits, signed).max(normalize(other, bits, signed))
 }
 
-/// `v.clamp(lo, hi)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_clamp(value: i128, lo: i128, hi: i128, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_max(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = max_impl(*value, *other, bits, signed) };
+}
+
+/// `v.clamp(lo, hi)`.
+fn clamp_impl(value: i128, lo: i128, hi: i128, bits: i32, signed: i32) -> i128 {
     normalize(value, bits, signed).clamp(normalize(lo, bits, signed), normalize(hi, bits, signed))
 }
 
-/// `v.is_zero()`.
+/// # Safety
+///
+/// `out`, `value`, `lo`, and `hi` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_is_zero(value: i128) -> bool {
-    value == 0
+pub unsafe extern "C" fn zirk_int_clamp(
+    out: *mut i128,
+    value: *const i128,
+    lo: *const i128,
+    hi: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = clamp_impl(*value, *lo, *hi, bits, signed) };
+}
+
+/// `v.is_zero()`.
+///
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_is_zero(value: *const i128) -> bool {
+    (unsafe { *value }) == 0
 }
 
 /// `v.is_even()`.
+///
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_is_even(value: i128) -> bool {
-    value % 2 == 0
+pub unsafe extern "C" fn zirk_int_is_even(value: *const i128) -> bool {
+    (unsafe { *value }) % 2 == 0
 }
 
 /// `v.is_odd()`.
+///
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_is_odd(value: i128) -> bool {
-    value % 2 != 0
+pub unsafe extern "C" fn zirk_int_is_odd(value: *const i128) -> bool {
+    (unsafe { *value }) % 2 != 0
 }
 
 /// `v.bit_count()` — one bits within the width.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_bit_count(value: i128, bits: i32) -> i32 {
+fn bit_count_impl(value: i128, bits: i32) -> i32 {
     let bits = bits.clamp(1, 128) as u32;
     let mask: u128 = if bits == 128 {
         u128::MAX
@@ -119,9 +195,16 @@ pub extern "C" fn zirk_int_bit_count(value: i128, bits: i32) -> i32 {
     ((value as u128) & mask).count_ones() as i32
 }
 
-/// `v.leading_zeros()` — width-scoped, so `(0: UInt8)` answers `8`.
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_leading_zeros(value: i128, bits: i32) -> i32 {
+pub unsafe extern "C" fn zirk_int_bit_count(value: *const i128, bits: i32) -> i32 {
+    bit_count_impl(unsafe { *value }, bits)
+}
+
+/// `v.leading_zeros()` — width-scoped, so `(0: UInt8)` answers `8`.
+fn leading_zeros_impl(value: i128, bits: i32) -> i32 {
     let bits = bits.clamp(1, 128) as u32;
     let mask: u128 = if bits == 128 {
         u128::MAX
@@ -132,9 +215,16 @@ pub extern "C" fn zirk_int_leading_zeros(value: i128, bits: i32) -> i32 {
     (narrowed.leading_zeros() - (128 - bits)) as i32
 }
 
-/// `v.trailing_zeros()`.
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_trailing_zeros(value: i128, bits: i32) -> i32 {
+pub unsafe extern "C" fn zirk_int_leading_zeros(value: *const i128, bits: i32) -> i32 {
+    leading_zeros_impl(unsafe { *value }, bits)
+}
+
+/// `v.trailing_zeros()`.
+fn trailing_zeros_impl(value: i128, bits: i32) -> i32 {
     let bits = bits.clamp(1, 128) as u32;
     let mask: u128 = if bits == 128 {
         u128::MAX
@@ -145,9 +235,16 @@ pub extern "C" fn zirk_int_trailing_zeros(value: i128, bits: i32) -> i32 {
     narrowed.trailing_zeros().min(bits) as i32
 }
 
-/// `v.rotate_left(n)` — wraps bits within the width.
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_rotate_left(value: i128, n: i64, bits: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_trailing_zeros(value: *const i128, bits: i32) -> i32 {
+    trailing_zeros_impl(unsafe { *value }, bits)
+}
+
+/// `v.rotate_left(n)` — wraps bits within the width.
+fn rotate_left_impl(value: i128, n: i64, bits: i32) -> i128 {
     let bits = bits.clamp(1, 128) as u32;
     let mask: u128 = if bits == 128 {
         u128::MAX
@@ -163,17 +260,41 @@ pub extern "C" fn zirk_int_rotate_left(value: i128, n: i64, bits: i32) -> i128 {
     (rotated & mask) as i128
 }
 
-/// `v.rotate_right(n)`.
+/// # Safety
+///
+/// `out` and `value` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_rotate_right(value: i128, n: i64, bits: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_rotate_left(
+    out: *mut i128,
+    value: *const i128,
+    n: i64,
+    bits: i32,
+) {
+    unsafe { *out = rotate_left_impl(*value, n, bits) };
+}
+
+/// `v.rotate_right(n)`.
+fn rotate_right_impl(value: i128, n: i64, bits: i32) -> i128 {
     let width = bits.clamp(1, 128) as i64;
-    zirk_int_rotate_left(value, width - n.rem_euclid(width), bits)
+    rotate_left_impl(value, width - n.rem_euclid(width), bits)
+}
+
+/// # Safety
+///
+/// `out` and `value` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_rotate_right(
+    out: *mut i128,
+    value: *const i128,
+    n: i64,
+    bits: i32,
+) {
+    unsafe { *out = rotate_right_impl(*value, n, bits) };
 }
 
 /// `v.wrapping_add(other)` — and `sub`/`mul` below: arithmetic that wraps
 /// at the width, the deliberate form of what `+` traps on.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_add(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+fn wrapping_add_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_add(normalize(other, bits, signed)),
         bits,
@@ -181,9 +302,22 @@ pub extern "C" fn zirk_int_wrapping_add(value: i128, other: i128, bits: i32, sig
     )
 }
 
-/// `v.wrapping_sub(other)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_sub(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_wrapping_add(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = wrapping_add_impl(*value, *other, bits, signed) };
+}
+
+/// `v.wrapping_sub(other)`.
+fn wrapping_sub_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_sub(normalize(other, bits, signed)),
         bits,
@@ -191,9 +325,22 @@ pub extern "C" fn zirk_int_wrapping_sub(value: i128, other: i128, bits: i32, sig
     )
 }
 
-/// `v.wrapping_mul(other)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_wrapping_mul(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_wrapping_sub(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = wrapping_sub_impl(*value, *other, bits, signed) };
+}
+
+/// `v.wrapping_mul(other)`.
+fn wrapping_mul_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     normalize(
         normalize(value, bits, signed).wrapping_mul(normalize(other, bits, signed)),
         bits,
@@ -201,40 +348,78 @@ pub extern "C" fn zirk_int_wrapping_mul(value: i128, other: i128, bits: i32, sig
     )
 }
 
-/// `v.saturating_add(other)` — clamps at the width's bounds.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_saturating_add(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_wrapping_mul(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) {
+    unsafe { *out = wrapping_mul_impl(*value, *other, bits, signed) };
+}
+
+/// `v.saturating_add(other)` — clamps at the width's bounds.
+fn saturating_add_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     let result = normalize(value, bits, signed).saturating_add(normalize(other, bits, signed));
     result.clamp(width_min(bits, signed), width_max(bits, signed))
 }
 
-/// `v.saturating_sub(other)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_saturating_sub(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_saturating_add(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) {
+    unsafe { *out = saturating_add_impl(*value, *other, bits, signed) };
+}
+
+/// `v.saturating_sub(other)`.
+fn saturating_sub_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     let result = normalize(value, bits, signed).saturating_sub(normalize(other, bits, signed));
     result.clamp(width_min(bits, signed), width_max(bits, signed))
 }
 
-/// `v.saturating_mul(other)`.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_saturating_mul(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_saturating_sub(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) {
+    unsafe { *out = saturating_sub_impl(*value, *other, bits, signed) };
+}
+
+/// `v.saturating_mul(other)`.
+fn saturating_mul_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     let result = normalize(value, bits, signed).saturating_mul(normalize(other, bits, signed));
     result.clamp(width_min(bits, signed), width_max(bits, signed))
+}
+
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_saturating_mul(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = saturating_mul_impl(*value, *other, bits, signed) };
 }
 
 /// Whether the operation fits the width — the `ok` half of `checked_*`.
@@ -247,86 +432,116 @@ fn checked_ok(result: Option<i128>, bits: i32, signed: i32) -> bool {
 
 /// `v.checked_add(other)` — `ok` flag; `zirk_int_checked_add_value` reads
 /// the wrapped result.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_add_ok(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> bool {
+fn checked_add_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     checked_ok(a.checked_add(b), bits, signed)
 }
 
-/// The wrapped `v + other` — only read when `checked_add_ok` is true.
+/// # Safety
+///
+/// `value` and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_add_value(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
-    zirk_int_wrapping_add(value, other, bits, signed)
-}
-
-/// `v.checked_sub(other)` — `ok` flag.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_sub_ok(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_add_ok(
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
 ) -> bool {
+    checked_add_ok_impl(unsafe { *value }, unsafe { *other }, bits, signed)
+}
+
+/// The wrapped `v + other` — only read when `checked_add_ok` is true.
+///
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_checked_add_value(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = wrapping_add_impl(*value, *other, bits, signed) };
+}
+
+/// `v.checked_sub(other)` — `ok` flag.
+fn checked_sub_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     checked_ok(a.checked_sub(b), bits, signed)
 }
 
-/// The wrapped `v - other`.
+/// # Safety
+///
+/// `value` and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_sub_value(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> i128 {
-    zirk_int_wrapping_sub(value, other, bits, signed)
-}
-
-/// `v.checked_mul(other)` — `ok` flag.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_mul_ok(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_sub_ok(
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
 ) -> bool {
+    checked_sub_ok_impl(unsafe { *value }, unsafe { *other }, bits, signed)
+}
+
+/// The wrapped `v - other`.
+///
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_checked_sub_value(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = wrapping_sub_impl(*value, *other, bits, signed) };
+}
+
+/// `v.checked_mul(other)` — `ok` flag.
+fn checked_mul_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     checked_ok(a.checked_mul(b), bits, signed)
 }
 
-/// The wrapped `v * other`.
+/// # Safety
+///
+/// `value` and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_mul_value(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_mul_ok(
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
-    zirk_int_wrapping_mul(value, other, bits, signed)
+) -> bool {
+    checked_mul_ok_impl(unsafe { *value }, unsafe { *other }, bits, signed)
+}
+
+/// The wrapped `v * other`.
+///
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_checked_mul_value(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = wrapping_mul_impl(*value, *other, bits, signed) };
 }
 
 /// `v.checked_div(other)` — `ok` flag; `other == 0` and the `MIN / -1`
 /// wrap both fail.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_div_ok(
-    value: i128,
-    other: i128,
-    bits: i32,
-    signed: i32,
-) -> bool {
+fn checked_div_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     if b == 0 {
@@ -335,14 +550,21 @@ pub extern "C" fn zirk_int_checked_div_ok(
     checked_ok(a.checked_div(b), bits, signed)
 }
 
-/// `v / other` — only read when `checked_div_ok` is true.
+/// # Safety
+///
+/// `value` and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_div_value(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_div_ok(
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) -> bool {
+    checked_div_ok_impl(unsafe { *value }, unsafe { *other }, bits, signed)
+}
+
+/// `v / other` — only read when `checked_div_ok` is true.
+fn checked_div_value_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     if b == 0 {
@@ -351,14 +573,22 @@ pub extern "C" fn zirk_int_checked_div_value(
     normalize(a.wrapping_div(b), bits, signed)
 }
 
-/// `v.checked_rem(other)` — `ok` flag.
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_rem_ok(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_div_value(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> bool {
+) {
+    unsafe { *out = checked_div_value_impl(*value, *other, bits, signed) };
+}
+
+/// `v.checked_rem(other)` — `ok` flag.
+fn checked_rem_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     if b == 0 {
@@ -367,20 +597,41 @@ pub extern "C" fn zirk_int_checked_rem_ok(
     checked_ok(a.checked_rem(b), bits, signed)
 }
 
-/// `v % other` — only read when `checked_rem_ok` is true.
+/// # Safety
+///
+/// `value` and `other` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_rem_value(
-    value: i128,
-    other: i128,
+pub unsafe extern "C" fn zirk_int_checked_rem_ok(
+    value: *const i128,
+    other: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) -> bool {
+    checked_rem_ok_impl(unsafe { *value }, unsafe { *other }, bits, signed)
+}
+
+/// `v % other` — only read when `checked_rem_ok` is true.
+fn checked_rem_value_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
     let a = normalize(value, bits, signed);
     let b = normalize(other, bits, signed);
     if b == 0 {
         return 0;
     }
     normalize(a.wrapping_rem(b), bits, signed)
+}
+
+/// # Safety
+///
+/// `out`, `value`, and `other` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_checked_rem_value(
+    out: *mut i128,
+    value: *const i128,
+    other: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = checked_rem_value_impl(*value, *other, bits, signed) };
 }
 
 /// `IntN.parse(text)` — `ok` flag: the text is a valid decimal literal in
@@ -408,9 +659,15 @@ pub unsafe extern "C" fn zirk_int_parse_ok(text: *const c_void, bits: i32, signe
 ///
 /// # Safety
 ///
-/// `text` must be a `String` handle produced by this runtime.
+/// `out` must be a valid `i128` pointer, and `text` must be a `String`
+/// handle produced by this runtime.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_int_parse_value(text: *const c_void, bits: i32, signed: i32) -> i128 {
+pub unsafe extern "C" fn zirk_int_parse_value(
+    out: *mut i128,
+    text: *const c_void,
+    bits: i32,
+    signed: i32,
+) {
     let text = unsafe { borrow(text) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
@@ -420,7 +677,7 @@ pub unsafe extern "C" fn zirk_int_parse_value(text: *const c_void, bits: i32, si
     } else {
         text.parse::<u128>().map(|v| v as i128).unwrap_or(0)
     };
-    normalize(parsed, bits, signed)
+    unsafe { *out = normalize(parsed, bits, signed) };
 }
 
 /// `v.abs()` on a float.
@@ -543,12 +800,7 @@ pub unsafe extern "C" fn zirk_float_parse_ok(text: *const c_void) -> bool {
 }
 
 /// `v.to_string(radix: n)` — integer rendering in radix 2–36.
-///
-/// # Safety
-///
-/// `text` must be a `String` handle produced by this runtime.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_int_to_string_radix(value: i128, radix: i32) -> *mut c_void {
+fn to_string_radix_impl(value: i128, radix: i32) -> String {
     let radix = radix.clamp(2, 36) as u32;
     let unsigned = if value < 0 {
         (-value) as u128
@@ -558,7 +810,7 @@ pub unsafe extern "C" fn zirk_int_to_string_radix(value: i128, radix: i32) -> *m
     let mut digits = Vec::new();
     let mut remainder = unsigned;
     if remainder == 0 {
-        return crate::string::alloc_owned("0");
+        return "0".to_string();
     }
     while remainder > 0 {
         let d = (remainder % radix as u128) as u32;
@@ -570,12 +822,19 @@ pub unsafe extern "C" fn zirk_int_to_string_radix(value: i128, radix: i32) -> *m
     if value < 0 {
         text.insert(0, '-');
     }
-    crate::string::alloc_owned(&text)
+    text
+}
+
+/// # Safety
+///
+/// `value` must be a valid `i128` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_to_string_radix(value: *const i128, radix: i32) -> *mut c_void {
+    alloc_owned(&to_string_radix_impl(unsafe { *value }, radix))
 }
 
 /// `v.checked_pow(exp)` — `ok` flag.
-#[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_pow_ok(value: i128, exp: i128, bits: i32, signed: i32) -> bool {
+fn checked_pow_ok_impl(value: i128, exp: i128, bits: i32, signed: i32) -> bool {
     if exp < 0 || exp > i32::MAX as i128 {
         return false;
     }
@@ -584,20 +843,41 @@ pub extern "C" fn zirk_int_checked_pow_ok(value: i128, exp: i128, bits: i32, sig
     checked_ok(a.checked_pow(e), bits, signed)
 }
 
-/// `v.checked_pow(exp)` value — only read when `ok` is true.
+/// # Safety
+///
+/// `value` and `exp` must be valid, non-aliasing `i128` pointers.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_int_checked_pow_value(
-    value: i128,
-    exp: i128,
+pub unsafe extern "C" fn zirk_int_checked_pow_ok(
+    value: *const i128,
+    exp: *const i128,
     bits: i32,
     signed: i32,
-) -> i128 {
+) -> bool {
+    checked_pow_ok_impl(unsafe { *value }, unsafe { *exp }, bits, signed)
+}
+
+/// `v.checked_pow(exp)` value — only read when `ok` is true.
+fn checked_pow_value_impl(value: i128, exp: i128, bits: i32, signed: i32) -> i128 {
     if exp < 0 {
         return 0;
     }
     let a = normalize(value, bits, signed);
     let e = exp as u32;
     normalize(a.wrapping_pow(e), bits, signed)
+}
+
+/// # Safety
+///
+/// `out`, `value`, and `exp` must be valid, non-aliasing `i128` pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_int_checked_pow_value(
+    out: *mut i128,
+    value: *const i128,
+    exp: *const i128,
+    bits: i32,
+    signed: i32,
+) {
+    unsafe { *out = checked_pow_value_impl(*value, *exp, bits, signed) };
 }
 
 /// `IntN.parse(text, radix: n)` — `ok` flag.
@@ -629,14 +909,16 @@ pub unsafe extern "C" fn zirk_int_parse_radix_ok(
 ///
 /// # Safety
 ///
-/// `text` must be a `String` handle produced by this runtime.
+/// `out` must be a valid `i128` pointer, and `text` must be a `String`
+/// handle produced by this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_int_parse_radix_value(
+    out: *mut i128,
     text: *const c_void,
     radix: i32,
     bits: i32,
     signed: i32,
-) -> i128 {
+) {
     let text = unsafe { borrow(text) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
@@ -649,7 +931,7 @@ pub unsafe extern "C" fn zirk_int_parse_radix_value(
             .map(|v| v as i128)
             .unwrap_or(0)
     };
-    normalize(parsed, bits, signed)
+    unsafe { *out = normalize(parsed, bits, signed) };
 }
 
 /// `FloatN.parse(text)` — the value; only read when

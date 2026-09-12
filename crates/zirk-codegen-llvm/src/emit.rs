@@ -873,31 +873,33 @@ fn declare_extern_fn<'ctx>(
     values: &[ir::ValueLayout],
     enums: &[ir::EnumLayout],
 ) -> FunctionValue<'ctx> {
-    // The exact-`Float` runtime helpers, and the `DateTime` civil-timestamp
-    // ones, cross the C boundary with every `Decimal`/128-bit-integer value
-    // passed by pointer, and such a *result* returned through a leading
-    // out-pointer instead — the same reason `zirk_str_from_i128` takes its
-    // argument by pointer rather than by value. This is deliberately scoped
-    // to these two families *by name*, not to "every i128/u128 anywhere":
-    // this compiler's checked-arithmetic overflow intermediates also widen
-    // to `i128` extremely pervasively and cross this same kind of extern
-    // call correctly by value — a first attempt at generalizing this
-    // unconditionally by type alone broke exactly that (confirmed:
-    // `2 ** 3` — an ordinary `Int32.pow`, no `Decimal`/`DateTime` in sight —
-    // started throwing). What *is* real and worth keeping the pointer path
-    // for: `zirk_rt_datetime_new`'s by-value `i128` return caused a genuine
-    // Windows x64 access violation crossing into `zirk-runtime` (itself
-    // compiled by rustc for the same target) — Rust's own `i128`/`u128` C
-    // ABI is not guaranteed to agree with LLVM's default lowering for a
-    // plain 128-bit integer on every target, even when both sides' IR/source
-    // says `i128`. Until that is understood precisely enough to generalize
-    // safely, only the two families already known to need it (by name) get
-    // it. LLVM declarations are `ptr`-shaped accordingly; `emit_decimal_call`
+    // The exact-`Float` runtime helpers, the `DateTime` civil-timestamp
+    // ones, and the `Int`/`UInt` scalar-member ones (`zirk_int_*`) all cross
+    // the C boundary with every `Decimal`/128-bit-integer value passed by
+    // pointer, and such a *result* returned through a leading out-pointer
+    // instead — the same reason `zirk_str_from_i128` takes its argument by
+    // pointer rather than by value. Rust's own `i128`/`u128` C ABI is not
+    // guaranteed to agree with LLVM's default lowering for a plain 128-bit
+    // integer on every target, even when both sides' IR/source says `i128`:
+    // confirmed on Windows x64, where a by-value `i128` crossing into
+    // `zirk-runtime` (itself compiled by rustc for the same target) produced
+    // a genuine access violation, first in `zirk_rt_datetime_new`'s return
+    // and then in `zirk_int_checked_pow_*` — both fixed by switching the
+    // Rust side of each family to take/return the 128-bit value by pointer
+    // and matching that here. This is scoped *by name* to the families
+    // actually rewritten that way in `zirk-runtime`, not to "every i128/u128
+    // anywhere": an earlier attempt at generalizing this unconditionally by
+    // type alone (before `zirk_int_*` itself had been converted) broke
+    // ordinary checked-arithmetic, because the two sides of the ABI
+    // disagreed about which convention to use — the fix there is to convert
+    // both sides together, not to avoid the type-based gate in principle.
+    // LLVM declarations are `ptr`-shaped accordingly; `emit_decimal_call`
     // (generic over any such value, despite its name) materializes the
     // matching call sites.
     let needs_pointer_abi = extern_fn.name.starts_with("zirk_rt_decimal_")
         || extern_fn.name == "zirk_str_from_decimal"
-        || extern_fn.name.starts_with("zirk_rt_datetime_");
+        || extern_fn.name.starts_with("zirk_rt_datetime_")
+        || extern_fn.name.starts_with("zirk_int_");
     let ptr = context.ptr_type(AddressSpace::default());
     let by_pointer = |ty: ir::IrType| {
         needs_pointer_abi
@@ -2847,17 +2849,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Call { callee, args } => {
-                // The exact-`Float` helpers and the `DateTime` civil-
-                // timestamp ones cross the boundary by pointer
-                // (`declare_extern_fn`'s own doc has the full "why", and why
-                // this is deliberately scoped by name rather than to every
-                // i128/u128 callee — this compiler's own pervasive checked-
-                // arithmetic overflow intermediates also widen to `i128` and
-                // must NOT take this path); `emit_decimal_call` (generic
-                // despite its name) handles the spill/out-parameter shape.
+                // The exact-`Float` helpers, the `DateTime` civil-timestamp
+                // ones, and the `zirk_int_*` scalar-member ones cross the
+                // boundary by pointer (`declare_extern_fn`'s own doc has the
+                // full "why"); `emit_decimal_call` (generic despite its
+                // name) handles the spill/out-parameter shape. This must
+                // stay in exact sync with `declare_extern_fn`'s own
+                // `needs_pointer_abi` gate — a caller/callee mismatch there
+                // produces garbage values, not necessarily a crash.
                 if callee.starts_with("zirk_rt_decimal_")
                     || callee == "zirk_str_from_decimal"
                     || callee.starts_with("zirk_rt_datetime_")
+                    || callee.starts_with("zirk_int_")
                 {
                     let typed: Vec<_> = args
                         .iter()
