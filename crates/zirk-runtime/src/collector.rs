@@ -4,9 +4,21 @@
 //! strategy this module implements: non-moving mark-sweep, root enumeration
 //! through a function-granularity shadow stack built by codegen
 //! (`crates/zirk-codegen-llvm/src/emit.rs`), collection triggered
-//! cooperatively inside [`crate::memory::zirk_rt_alloc`] itself. No threads
-//! exist yet (Phase 5), so "stop the world" needs nothing special: there is
-//! nothing else running to stop.
+//! cooperatively inside [`crate::memory::zirk_rt_alloc`] itself.
+//!
+//! # Threads (`ADR-019`, `parallel-cpu-regions`)
+//!
+//! The cooperative executor is still single-threaded, but a `parallel` region
+//! runs CPU work on a pool of OS worker threads that allocate onto the same
+//! heap. Collection is therefore *thread-aware* when — and only when — such a
+//! region is active (`mod heap` picks the running executor's published heap;
+//! `worker_pool_is_multithreaded` gates the path): a threshold crossing raises
+//! [`stw::REQUESTED`] instead of collecting inline, every worker parks at its
+//! next [`safepoint_poll`], and the executor thread coordinates one
+//! stop-the-world collection over every parked worker's shadow-stack chain plus
+//! its own task chains. With no `parallel` region, and for any thread outside
+//! the executor's world, collection stays exactly the inline single-threaded
+//! mark-sweep it has always been.
 //!
 //! # Object header
 //!
@@ -182,23 +194,189 @@ thread_local! {
     /// [`crate::clone::mark_clone_roots`].
     static TASK_ROOT_WALKER: Cell<Option<TaskRootWalker>> =
         const { Cell::new(None) };
+}
 
-    /// Head of the intrusive all-allocations list `next` threads through
-    /// (design D1/D6) — every object ever handed out by
-    /// [`crate::memory::zirk_rt_alloc`] and not yet swept.
-    static ALL_OBJECTS: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
+/// The non-moving heap (`ADR-003`).
+///
+/// # Which heap
+///
+/// Before `parallel-cpu-regions` every allocation and collection happened on
+/// the one executor thread, so this state was `thread_local!`. The worker pool
+/// now allocates from other OS threads while running a `parallel` region, and
+/// those allocations must land on the *same* list the executor's collector
+/// sweeps.
+///
+/// So there are two heaps and [`with_heap`] picks between them:
+///
+/// - a **published** heap owned by the running [`crate::executor::Executor`]
+///   (a boxed, address-stable [`HeapState`] behind a `Mutex`, its pointer in
+///   [`PUBLISHED_HEAP`]) — used whenever an executor is running, by the
+///   executor thread *and* by every `parallel` worker thread;
+/// - a per-thread **bootstrap** heap ([`BOOTSTRAP_HEAP`]) — used before any
+///   executor starts and by unit tests that allocate without one.
+///
+/// `crate::executor::Executor::run_with_root` holds a process-wide mutex for
+/// its whole run and publishes its heap for the duration, so at most one
+/// executor heap is ever live and a stop-the-world collection over it only
+/// races the executor's own parked workers (`ADR-019` D4) — never another
+/// executor.
+mod heap {
+    use super::c_void;
+    use std::cell::RefCell;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicPtr, Ordering};
 
-    /// Sum of every live allocation's own `size` — what [`maybe_collect`]
-    /// compares against [`THRESHOLD`] before serving a new allocation
-    /// (design D3).
-    static LIVE_BYTES: Cell<usize> = const { Cell::new(0) };
+    pub(super) struct HeapState {
+        /// Head of the intrusive all-allocations list `next` threads through
+        /// (design D1/D6).
+        pub(super) head: *mut c_void,
+        /// Sum of every live allocation's own `size` — compared against
+        /// `threshold` before serving a new allocation (design D3).
+        pub(super) live_bytes: usize,
+        /// Bytes of live allocation allowed before a collection runs.
+        pub(super) threshold: usize,
+    }
 
-    /// Bytes of live allocation allowed before a collection runs (design
-    /// D3). Configurable through `ZIRK_GC_THRESHOLD` (bytes) so a test can
-    /// force frequent collections without needing a program that actually
-    /// allocates a default-sized threshold's worth of memory — read once,
-    /// lazily, the first time it is needed.
-    static THRESHOLD: Cell<usize> = Cell::new(default_threshold());
+    impl HeapState {
+        fn new() -> Self {
+            HeapState {
+                head: std::ptr::null_mut(),
+                live_bytes: 0,
+                threshold: super::default_threshold().max(1),
+            }
+        }
+    }
+
+    /// A published executor heap. `Mutex` because several `parallel` worker
+    /// threads register allocations onto it concurrently.
+    pub(crate) struct PublishedHeap(pub(super) Mutex<HeapState>);
+    impl PublishedHeap {
+        pub(crate) fn new() -> Box<Self> {
+            Box::new(PublishedHeap(Mutex::new(HeapState::new())))
+        }
+    }
+
+    static PUBLISHED_HEAP: AtomicPtr<PublishedHeap> = AtomicPtr::new(std::ptr::null_mut());
+
+    thread_local! {
+        static BOOTSTRAP_HEAP: RefCell<HeapState> = RefCell::new(HeapState::new());
+        /// Whether *this* thread is part of the running executor's world — the
+        /// executor thread itself, and a `parallel` worker while it runs a
+        /// chunk. Only such threads allocate onto the published heap; every
+        /// other thread (bootstrap, and unrelated threads in the unit-test
+        /// binary) keeps using its own bootstrap heap. This is what stops a
+        /// published heap from hijacking allocations it has nothing to do with.
+        static IN_EXECUTOR_WORLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Publishes `heap` as the current executor heap. Called by
+    /// `Executor::run_with_root` under the process-wide GC-world mutex, so
+    /// there is never a second publisher.
+    pub(super) fn publish(heap: *mut PublishedHeap) {
+        PUBLISHED_HEAP.store(heap, Ordering::Release);
+    }
+
+    pub(super) fn unpublish() {
+        PUBLISHED_HEAP.store(std::ptr::null_mut(), Ordering::Release);
+    }
+
+    /// Marks the calling thread as part of the executor's world for as long as
+    /// the returned guard lives.
+    pub(super) fn enter_world() -> WorldGuard {
+        let previous = IN_EXECUTOR_WORLD.replace(true);
+        WorldGuard(previous)
+    }
+
+    pub(crate) struct WorldGuard(bool);
+    impl Drop for WorldGuard {
+        fn drop(&mut self) {
+            IN_EXECUTOR_WORLD.with(|c| c.set(self.0));
+        }
+    }
+
+    pub(crate) fn in_executor_world() -> bool {
+        IN_EXECUTOR_WORLD.with(std::cell::Cell::get)
+    }
+
+    /// Runs `f` against whichever heap is current: the published executor heap
+    /// if this thread is in the executor's world, else this thread's bootstrap
+    /// heap.
+    pub(super) fn with_heap<R>(f: impl FnOnce(&mut HeapState) -> R) -> R {
+        if in_executor_world() {
+            let published = PUBLISHED_HEAP.load(Ordering::Acquire);
+            debug_assert!(
+                !published.is_null(),
+                "in executor world with no published heap"
+            );
+            // SAFETY: the pointer targets a boxed `PublishedHeap` kept alive by
+            // the running `Executor` for its whole run; a thread only has
+            // `IN_EXECUTOR_WORLD` set while that run is in progress. Concurrent
+            // access is serialized by the inner `Mutex`.
+            let heap: &PublishedHeap = unsafe { &*published };
+            f(&mut heap.0.lock().unwrap())
+        } else {
+            BOOTSTRAP_HEAP.with(|h| f(&mut h.borrow_mut()))
+        }
+    }
+}
+
+use heap::with_heap;
+pub(crate) use heap::{WorldGuard, in_executor_world};
+
+/// RAII guard: the calling thread is part of the running executor's world (uses
+/// the published heap, may take the stop-the-world path) until it is dropped.
+pub(crate) fn enter_executor_world() -> heap::WorldGuard {
+    heap::enter_world()
+}
+
+/// The head of the intrusive all-allocations list, as a raw pointer.
+#[cfg(test)]
+fn all_objects_head() -> *mut c_void {
+    with_heap(|h| h.head)
+}
+
+/// Current live-byte total.
+#[cfg(test)]
+fn live_bytes_total() -> usize {
+    with_heap(|h| h.live_bytes)
+}
+
+/// The executor publishes its heap for the duration of a run — re-exported so
+/// `crate::executor` can call it without reaching into `mod heap`.
+pub(crate) fn publish_executor_heap(heap: *mut heap::PublishedHeap) {
+    heap::publish(heap);
+}
+pub(crate) fn unpublish_executor_heap() {
+    heap::unpublish();
+}
+pub(crate) use heap::PublishedHeap;
+
+/// Frees every allocation still on `heap`'s list — the executor calls this on
+/// its own heap right after unpublishing it, at the end of a run, so a program
+/// does not leak its whole live set until process exit (`ADR-003`'s bound is
+/// now met eagerly). No marking: at end of run nothing is a root any more.
+pub(crate) fn free_all(heap: &mut heap::PublishedHeap) {
+    let state = heap.0.get_mut().unwrap();
+    let _ = sweep(state.head);
+    state.head = std::ptr::null_mut();
+    state.live_bytes = 0;
+}
+
+/// Test-only: free every object currently on the heap list (none is marked
+/// outside a collection) and zero the totals.
+#[cfg(test)]
+fn heap_hard_reset() {
+    with_heap(|heap| {
+        let _ = sweep(heap.head);
+        heap.head = std::ptr::null_mut();
+        heap.live_bytes = 0;
+    });
+}
+
+/// Test-only: set the current heap's collection threshold.
+#[cfg(test)]
+fn set_threshold_bytes(bytes: usize) {
+    with_heap(|heap| heap.threshold = bytes.max(1));
 }
 
 /// 1 MiB: generous enough that an ordinary short-lived program never
@@ -356,14 +534,173 @@ pub(crate) fn set_task_root_walker(walker: Option<TaskRootWalker>) {
     TASK_ROOT_WALKER.set(walker);
 }
 
+/// The stop-the-world safepoint protocol (`ADR-019` D4, `parallel-cpu-regions`
+/// tasks 3.1–3.3).
+///
+/// A garbage collection triggered while `parallel` worker threads are active
+/// cannot run inline: the triggering thread cannot walk another worker's stack
+/// while that worker is mutating it. Instead [`REQUESTED`] is raised; every
+/// worker parks at its next [`safepoint_poll`], the executor thread coordinates
+/// once every active worker is parked, walks all roots (its own task chains and
+/// every parked worker's chain), sweeps under [`heap::HEAP`]'s lock, clears the
+/// flag, and releases the workers.
+///
+/// The single-threaded path (no `parallel` region, or a size-1 pool) never
+/// raises [`REQUESTED`] — [`maybe_collect`] collects inline exactly as before.
+mod stw {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+
+    /// A stop-the-world collection has been requested and not yet completed.
+    pub(super) static REQUESTED: AtomicBool = AtomicBool::new(false);
+    /// Worker threads that have dequeued a region chunk and not yet passed
+    /// their post-chunk safepoint — the set the coordinator waits to see fully
+    /// parked before it walks roots.
+    pub(super) static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    /// Worker threads currently parked at a safepoint for this collection.
+    static PARKED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Generation counter, bumped once per completed collection. A parked
+    /// worker waits for either [`REQUESTED`] to clear or the generation to
+    /// move past the one it parked in — the second guard absorbs a lost or
+    /// spurious wake-up.
+    static GATE: Mutex<u64> = Mutex::new(0);
+    static PARK_CV: Condvar = Condvar::new();
+    static ALL_PARKED_CV: Condvar = Condvar::new();
+
+    pub(super) fn worker_active_enter() {
+        ACTIVE_WORKERS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn worker_active_leave() {
+        ACTIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// A worker parks here until the coordinator finishes the collection.
+    pub(super) fn park_worker() {
+        let mut generation = GATE.lock().unwrap();
+        let parked_in = *generation;
+        PARKED_WORKERS.fetch_add(1, Ordering::SeqCst);
+        ALL_PARKED_CV.notify_all();
+        while REQUESTED.load(Ordering::SeqCst) && *generation == parked_in {
+            generation = PARK_CV.wait(generation).unwrap();
+        }
+        PARKED_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// The executor thread coordinates one collection: wait for every active
+    /// worker to park, run `collect`, then release them.
+    pub(super) fn coordinate(collect: impl FnOnce()) {
+        {
+            let mut generation = GATE.lock().unwrap();
+            while PARKED_WORKERS.load(Ordering::SeqCst) < ACTIVE_WORKERS.load(Ordering::SeqCst) {
+                let (g, _timeout) = ALL_PARKED_CV
+                    .wait_timeout(generation, std::time::Duration::from_millis(1))
+                    .unwrap();
+                generation = g;
+            }
+        }
+
+        collect();
+
+        let mut generation = GATE.lock().unwrap();
+        REQUESTED.store(false, Ordering::SeqCst);
+        *generation += 1;
+        PARK_CV.notify_all();
+    }
+}
+
+/// Registered frame chains of live `parallel` worker threads (`ADR-019` D4):
+/// one `*mut Vec<Frame>` per pool thread, pointing at that thread's own
+/// `BOOTSTRAP_FRAMES` inner vector. The coordinator walks each during a
+/// stop-the-world collection — sound because every worker is parked and thus
+/// not mutating its chain.
+mod worker_chains {
+    use super::Frame;
+    use std::sync::Mutex;
+
+    pub(super) struct ChainPtr(pub(super) *mut Vec<Frame>);
+    // SAFETY: dereferenced only by the coordinator, only while every worker is
+    // parked at a safepoint (`stw::coordinate`), so the pointed-at vector is
+    // never concurrently mutated.
+    unsafe impl Send for ChainPtr {}
+
+    pub(super) static CHAINS: Mutex<Vec<ChainPtr>> = Mutex::new(Vec::new());
+}
+
+/// A `parallel` worker thread calls this once at startup to publish its own
+/// shadow-stack chain for the coordinator to walk (`ADR-019` D4).
+pub(crate) fn register_worker_chain() {
+    BOOTSTRAP_FRAMES.with(|frames| {
+        worker_chains::CHAINS
+            .lock()
+            .unwrap()
+            .push(worker_chains::ChainPtr(frames.as_ptr()));
+    });
+}
+
+/// A `parallel` worker calls this around each region chunk so the coordinator
+/// knows how many threads it must see parked before it may collect.
+pub(crate) fn worker_active_enter() {
+    stw::worker_active_enter();
+}
+pub(crate) fn worker_active_leave() {
+    stw::worker_active_leave();
+}
+
+/// Whether a multi-threaded `parallel` region is running right now — the
+/// condition under which a threshold crossing defers to a safepoint instead of
+/// collecting inline (`ADR-019` D4). False whenever the pool is size 1 or no
+/// region is active.
+fn worker_pool_is_multithreaded() -> bool {
+    // Only a thread inside the executor's world (the executor thread or a
+    // `parallel` worker running a chunk) ever takes the stop-the-world path;
+    // any other thread collects inline on its own bootstrap heap.
+    in_executor_world() && crate::pool::pool_is_multithreaded()
+}
+
+/// Whether this is the cooperative-executor thread (the only thread that may
+/// coordinate a collection, since it alone can enumerate task roots).
+fn on_executor_thread() -> bool {
+    TASK_ROOT_WALKER.get().is_some()
+}
+
 /// Runs a collection if serving an allocation of `incoming` bytes would
 /// cross the configured threshold (design D3) — called by
 /// [`crate::memory::zirk_rt_alloc`] before it allocates anything.
+///
+/// While a multi-threaded `parallel` region is active this raises
+/// [`stw::REQUESTED`] and cooperates at a [`safepoint_poll`] instead of
+/// collecting inline (`ADR-019` D4): the running thread cannot safely walk
+/// another worker's stack until every worker has parked.
 pub(crate) fn maybe_collect(incoming: usize) {
-    let live = LIVE_BYTES.with(Cell::get);
-    let threshold = THRESHOLD.with(Cell::get);
-    if live + incoming > threshold {
+    let over_threshold = with_heap(|heap| heap.live_bytes + incoming > heap.threshold);
+    if !over_threshold {
+        return;
+    }
+    if worker_pool_is_multithreaded() {
+        stw::REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::executor::notify_pool_event();
+        safepoint_poll();
+    } else {
         collect();
+    }
+}
+
+/// A safepoint: called at every `parallel` loop back-edge (via
+/// [`crate::pool::safepoint_poll_rust`] / `zirk_rt_safepoint_poll`), after each
+/// region chunk on a worker thread, and by the executor at its next scheduling
+/// turn. If a stop-the-world collection has been requested, the thread
+/// cooperates (`ADR-019` D4): a worker parks, the executor thread coordinates.
+#[inline]
+pub(crate) fn safepoint_poll() {
+    if !stw::REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if on_executor_thread() {
+        stw::coordinate(collect_stw);
+    } else {
+        stw::park_worker();
     }
 }
 
@@ -377,15 +714,17 @@ pub(crate) fn maybe_collect(incoming: usize) {
 /// `object` must be a fresh, zeroed allocation of at least `size` bytes,
 /// not yet reachable from any root.
 pub(crate) unsafe fn register(object: *mut c_void, size: usize) {
-    let head = ALL_OBJECTS.with(Cell::get);
-    unsafe {
-        // `head` is itself either null or `GC_ALIGN`-aligned, so its low
-        // bit is already the clear mark bit this fresh object needs.
-        set_next_raw(object, head as usize);
-        set_size(object, size);
-    }
-    ALL_OBJECTS.with(|cell| cell.set(object));
-    LIVE_BYTES.with(|cell| cell.set(cell.get() + size));
+    with_heap(|heap| {
+        let head = heap.head;
+        unsafe {
+            // `head` is itself either null or `GC_ALIGN`-aligned, so its low
+            // bit is already the clear mark bit this fresh object needs.
+            set_next_raw(object, head as usize);
+            set_size(object, size);
+        }
+        heap.head = object;
+        heap.live_bytes += size;
+    });
 }
 
 /// The alignment every collector allocation actually uses: always exactly
@@ -408,13 +747,35 @@ pub(crate) fn allocation_align(requested: usize) -> usize {
     GC_ALIGN
 }
 
+/// A single-threaded / bootstrap collection: only this thread runs Zirk code,
+/// so only this thread's roots (and the clone-in-progress set) are walked.
 fn collect() {
-    mark();
-    clear_dead_weak_cells();
-    sweep();
+    collect_with(false);
 }
 
-fn mark() {
+/// A stop-the-world collection, run by the executor thread once every
+/// `parallel` worker has parked at a safepoint (`ADR-019` D4). It additionally
+/// walks every parked worker's shadow-stack chain — safe precisely because
+/// they are parked and not mutating those chains.
+fn collect_stw() {
+    collect_with(true);
+}
+
+fn collect_with(walk_worker_chains: bool) {
+    // One lock on the current heap for the whole collection. Every other Zirk
+    // thread is either parked at a safepoint (multi-threaded `parallel`
+    // region) or does not exist (single-threaded / bootstrap), so nothing
+    // mutates the list or an object header while mark / weak-clear / sweep run.
+    with_heap(|heap| {
+        mark(walk_worker_chains);
+        clear_dead_weak_cells(heap.head);
+        let (survivors, live_bytes) = sweep(heap.head);
+        heap.head = survivors;
+        heap.live_bytes = live_bytes;
+    });
+}
+
+fn mark(walk_worker_chains: bool) {
     let mark_frame = |frame: &Frame| {
         for index in 0..frame.count {
             let root_addr = unsafe { *frame.roots.add(index) };
@@ -432,6 +793,22 @@ fn mark() {
             mark_frame(frame);
         }
     });
+
+    // Every parked `parallel` worker thread's own shadow-stack chain
+    // (`ADR-019` D4). Only during a stop-the-world collection: `stw::coordinate`
+    // has confirmed every active worker is parked, so none is mutating its
+    // chain. An ordinary bootstrap / single-threaded collection must NOT touch
+    // these — an idle-vs-running worker would be a data race — and does not
+    // need to, since worker roots only matter to the executor heap a STW walks.
+    if walk_worker_chains {
+        let chains = worker_chains::CHAINS.lock().unwrap();
+        for chain in chains.iter() {
+            let frames = unsafe { &*chain.0 };
+            for frame in frames.iter() {
+                mark_frame(frame);
+            }
+        }
+    }
 
     // Every live task's chain (design D4) — including the one running right now
     // (whose chain `ACTIVE_FRAMES` also points at); marking is idempotent, so
@@ -490,7 +867,7 @@ fn mark_object(object: *mut c_void) {
 /// skips the walk entirely when no `Weak<T>` has ever been allocated in the
 /// running program (design's own risk mitigation) — a program that never
 /// uses `Weak<T>` pays only [`weak_cell_ever_allocated`]'s own check.
-fn clear_dead_weak_cells() {
+fn clear_dead_weak_cells(list_head: *mut c_void) {
     if !weak_cell_ever_allocated() {
         return;
     }
@@ -498,7 +875,7 @@ fn clear_dead_weak_cells() {
     #[cfg(test)]
     tests::note_clear_dead_weak_cells_ran();
 
-    let mut current = ALL_OBJECTS.with(Cell::get);
+    let mut current = list_head;
     while !current.is_null() {
         let next_raw = unsafe { get_next_raw(current) };
 
@@ -519,8 +896,8 @@ fn clear_dead_weak_cells() {
     }
 }
 
-fn sweep() {
-    let mut current = ALL_OBJECTS.with(Cell::get);
+fn sweep(list_head: *mut c_void) -> (*mut c_void, usize) {
+    let mut current = list_head;
     let mut survivors: *mut c_void = std::ptr::null_mut();
     let mut live_bytes = 0usize;
 
@@ -545,8 +922,7 @@ fn sweep() {
         current = next_object;
     }
 
-    ALL_OBJECTS.with(|cell| cell.set(survivors));
-    LIVE_BYTES.with(|cell| cell.set(live_bytes));
+    (survivors, live_bytes)
 }
 
 /// Test-only support for `crate::clone`'s own synthetic-object tests
@@ -557,6 +933,19 @@ fn sweep() {
 pub(crate) mod test_support {
     use super::*;
     use std::alloc::alloc_zeroed;
+
+    /// The one process-wide lock every collector-touching test holds for its
+    /// whole body. The heap list, the live-byte total and the WeakCell
+    /// "ever allocated" flag are all process-global now (`ADR-019` made the
+    /// heap process-wide), and libtest runs `#[test]`s across worker threads,
+    /// so `collector`'s own tests and `crate::clone`'s synthetic-object tests
+    /// must serialize against the *same* mutex.
+    pub(crate) static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use = "hold the guard for the whole test body"]
+    pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     /// See `mod tests`' own `synthetic_object` — identical shape, exposed
     /// across the module boundary. `extra_bytes` is in bytes, not fields.
@@ -585,7 +974,7 @@ pub(crate) mod test_support {
     /// program, set directly here so a test can force a collection without
     /// depending on process environment variables.
     pub(crate) fn set_threshold_for_tests(bytes: usize) {
-        THRESHOLD.with(|c| c.set(bytes));
+        set_threshold_bytes(bytes);
     }
 
     /// Resets every piece of this thread's own collector state to a fresh
@@ -596,10 +985,8 @@ pub(crate) mod test_support {
     pub(crate) fn reset_state_for_tests() {
         BOOTSTRAP_FRAMES.with(|f| f.borrow_mut().clear());
         ACTIVE_FRAMES.set(std::ptr::null_mut());
-        sweep();
-        ALL_OBJECTS.with(|c| c.set(std::ptr::null_mut()));
-        LIVE_BYTES.with(|c| c.set(0));
-        THRESHOLD.with(|c| c.set(default_threshold()));
+        heap_hard_reset();
+        set_threshold_bytes(default_threshold());
     }
 }
 #[cfg(test)]
@@ -659,21 +1046,15 @@ mod tests {
     /// flag to `0` could race a different thread's in-flight `collect()`
     /// that still needed it `true`. [`reset_state`]'s returned guard must be
     /// held for the whole test body, not just its own call.
-    static TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[must_use = "the guard must stay bound for the whole test body, not just this call"]
     fn reset_state() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = test_support::test_guard();
         BOOTSTRAP_FRAMES.with(|f| f.borrow_mut().clear());
         ACTIVE_FRAMES.set(std::ptr::null_mut());
-        // Sweeps away anything a previous test in this thread left behind,
-        // without asserting on it — tests run single-threaded within one
-        // process but share this thread's statics across `#[test]`s.
-        sweep();
-        ALL_OBJECTS.with(|c| c.set(std::ptr::null_mut()));
-        LIVE_BYTES.with(|c| c.set(0));
+        // Frees anything a previous test left behind (the heap list is
+        // process-global now — `TEST_GUARD` serializes collector tests so this
+        // is safe) and zeroes the totals.
+        heap_hard_reset();
         unsafe { zirk_rt_weak_cell_ever_allocated = 0 };
         CLEAR_DEAD_WEAK_CELLS_RUNS.with(|c| c.set(0));
         guard
@@ -693,14 +1074,14 @@ mod tests {
             *((b as usize + 24) as *mut *mut c_void) = a;
         }
 
-        assert!(LIVE_BYTES.with(Cell::get) > 0);
+        assert!(live_bytes_total() > 0);
         collect();
         assert_eq!(
-            LIVE_BYTES.with(Cell::get),
+            live_bytes_total(),
             0,
             "a cycle with no root must be fully collected"
         );
-        assert!(ALL_OBJECTS.with(Cell::get).is_null());
+        assert!(all_objects_head().is_null());
     }
 
     #[test]
@@ -715,7 +1096,7 @@ mod tests {
         unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
         collect();
         assert_eq!(
-            LIVE_BYTES.with(Cell::get),
+            live_bytes_total(),
             unsafe { get_size(object) },
             "a rooted object must survive collection"
         );
@@ -723,7 +1104,7 @@ mod tests {
 
         collect();
         assert_eq!(
-            LIVE_BYTES.with(Cell::get),
+            live_bytes_total(),
             0,
             "once its frame pops, an unrooted object is reclaimed on the next collection"
         );
@@ -762,7 +1143,7 @@ mod tests {
             executor::yield_now(); // the sibling runs `collect()` here
 
             assert_eq!(
-                LIVE_BYTES.with(Cell::get),
+                live_bytes_total(),
                 size,
                 "the suspended task's rooted object was swept"
             );
@@ -787,7 +1168,7 @@ mod tests {
 
         // Frame popped, object now unrooted: the next collection reclaims it.
         collect();
-        assert_eq!(LIVE_BYTES.with(Cell::get), 0);
+        assert_eq!(live_bytes_total(), 0);
     }
 
     #[test]
@@ -807,7 +1188,7 @@ mod tests {
 
             collect();
             assert_eq!(
-                LIVE_BYTES.with(Cell::get),
+                live_bytes_total(),
                 get_size(parent) + get_size(leaf),
                 "a field reached transitively through a root must survive too"
             );
@@ -818,16 +1199,16 @@ mod tests {
     #[test]
     fn the_threshold_trigger_fires_at_the_configured_point_and_not_before() {
         let _guard = reset_state();
-        THRESHOLD.with(|c| c.set(16));
+        set_threshold_bytes(16);
 
         // Below the threshold: no collection, nothing to reclaim yet since
         // nothing is unreachable.
         maybe_collect(8);
-        assert!(ALL_OBJECTS.with(Cell::get).is_null());
+        assert!(all_objects_head().is_null());
 
         let descriptor = descriptor_with_fields(&[]);
         unsafe { synthetic_object(descriptor.as_ptr() as *const c_void, 0) };
-        let live_before = LIVE_BYTES.with(Cell::get);
+        let live_before = live_bytes_total();
         assert!(live_before > 0);
 
         // An allocation request that would cross the threshold triggers a
@@ -836,12 +1217,12 @@ mod tests {
         // only checks the trigger) allocation would be served.
         maybe_collect(1024);
         assert_eq!(
-            LIVE_BYTES.with(Cell::get),
+            live_bytes_total(),
             0,
             "crossing the threshold must trigger a collection"
         );
 
-        THRESHOLD.with(|c| c.set(default_threshold()));
+        set_threshold_bytes(default_threshold());
     }
 
     // --- Weak<T> (`fase-4e-weak`) -------------------------------------------
@@ -909,7 +1290,7 @@ mod tests {
                  reclaimed, never left dangling"
             );
             assert_eq!(
-                LIVE_BYTES.with(Cell::get),
+                live_bytes_total(),
                 get_size(cell),
                 "only the WeakCell itself should remain live; its collected referent's bytes \
                  must be gone from the live total"
@@ -924,14 +1305,14 @@ mod tests {
         unsafe {
             let _cell = synthetic_weak_cell(std::ptr::null_mut());
 
-            assert!(LIVE_BYTES.with(Cell::get) > 0);
+            assert!(live_bytes_total() > 0);
             collect();
             assert_eq!(
-                LIVE_BYTES.with(Cell::get),
+                live_bytes_total(),
                 0,
                 "an unrooted WeakCell is an ordinary allocation once nothing reaches it"
             );
-            assert!(ALL_OBJECTS.with(Cell::get).is_null());
+            assert!(all_objects_head().is_null());
         }
     }
 

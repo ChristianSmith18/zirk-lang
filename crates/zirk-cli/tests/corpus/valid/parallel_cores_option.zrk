@@ -1,0 +1,24 @@
+// The `cores` option (spec `parallel-regions`, "The `cores` option"):
+// `cores: N` (exact) and `cores: A..=B` (a runtime-picked range) both resolve
+// safely regardless of how many cores the machine actually has — unlike
+// `cores: -N`, which is a runtime error if the machine has too few, this
+// fixture only uses forms that always resolve, so it is safe to run in CI.
+
+fn touch(n: Int32): Int32 {
+    return n * n;
+}
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8];
+    parallel; cores: 2 {
+        for v in values {
+            touch(v);
+        }
+    }
+    parallel; cores: 1..=4 {
+        for v in values {
+            touch(v);
+        }
+    }
+    stdout.println("done");
+}

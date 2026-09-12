@@ -251,4 +251,11 @@ pub mod codes {
     pub const CONCURRENT_BINDING_CYCLE: Code = Code::new("E0470");
     /// A `Job<T>` handle left its `concurrent` scope neither waited nor cancelled.
     pub const UNUSED_JOB: Code = Code::new("E0471");
+    /// A `parallel` region's `cores` operand is not `Int` or an inclusive `Int` range,
+    /// or its `chunk` operand is not `Int`.
+    pub const PARALLEL_OPTION_TYPE: Code = Code::new("E0472");
+    /// A `parallel` region performs I/O, suspension, `spawn`, or `concurrent {}`.
+    pub const PARALLEL_REGION_IO: Code = Code::new("E0473");
+    /// A parallel `reduce` combiner the checker cannot establish as associative.
+    pub const PARALLEL_NONASSOCIATIVE_REDUCE: Code = Code::new("E0474");
 }

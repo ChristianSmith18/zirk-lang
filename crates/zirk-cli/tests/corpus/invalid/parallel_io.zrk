@@ -1,0 +1,8 @@
+// A `parallel` region performs no I/O and no suspension (spec
+// `parallel-regions`): pool threads have no safe points for `Timer.*`.
+
+fn main(): Void {
+    parallel {
+        Timer.sleep(1s);
+    }
+}

@@ -1,72 +1,73 @@
 ## 1. ADRs + spec deltas
 
-- [ ] 1.1 `docs/decisions/ADR-019-parallel-and-multithreaded-gc.md`: two schedulers (cooperative executor stays single-threaded; a separate worker pool); stop-the-world safepoint collector; `parallel` block parallelizes `for` + pipelines lexically; `cores` option; no I/O in a region
-- [ ] 1.2 `docs/decisions/ADR-003-memoria.md` addendum + `ADR-017` addendum: the deferred concurrency note is discharged for the `parallel` worker pool
-- [ ] 1.3 `specs/parallel-regions/spec.md` — the block, `cores`, no-I/O rule, boundary Transfer/Share, `.parallel` + `Parallel.each` (this change; drafted)
-- [ ] 1.4 `specs/parallel-runtime/spec.md` — ADDED: worker pool lifecycle and sizing; `parallel` region submit + join; the stop-the-world safepoint protocol (request flag, back-edge polls, park-all, multi-root walk, release)
-- [ ] 1.5 `specs/zirk-structured-concurrency/spec.md`: MODIFIED — "Parallel CPU operations" + "Parallel reductions" pinned to the `parallel` block and `.parallel`; "Safe-code data-race freedom" gains a `parallel`-boundary scenario
-- [ ] 1.6 `specs/zirk-grammar/spec.md`: ADDED — `parallel` block + `;`-separated option header; MODIFIED — keyword set gains `parallel`
-- [ ] 1.7 `specs/zirk-type-system/spec.md`: ADDED — `parallel` block as expression; `ParallelSeq<T>` API subset; `Parallel.each` typing; associativity check for parallel reduce
-- [ ] 1.8 `specs/zirk-ir-lowering/spec.md`: ADDED — `ParallelRegion { core_budget, body }`; parallel `for` lowers to a work-splitting loop; pipeline ops lower to parallel combinators; safepoint poll at loop back-edges in a region
-- [ ] 1.9 `specs/zirk-native-codegen/spec.md`: ADDED — worker-pool submit/join emission; safepoint poll emission
-- [ ] 1.10 `specs/zirk-object-memory/spec.md` + `specs/zirk-memory-safety/spec.md`: MODIFIED — collector triggering and root enumeration are thread-aware; header unchanged; stop-the-world safepoint is the concurrency-safe collection point
-- [ ] 1.11 `specs/async-runtime-core/spec.md`: MODIFIED — add the worker pool and the safepoint protocol as runtime requirements
-- [ ] 1.12 `specs/zirk-feature-phasing/spec.md`: MODIFIED — Phase 5 marks `parallel` delivered; `Mutex` / `Atomic` stay with `concurrency-completion`
-- [ ] 1.13 `openspec validate parallel-cpu-regions --strict`
+- [x] 1.1 `docs/decisions/ADR-019-parallel-and-multithreaded-gc.md`: two schedulers (cooperative executor stays single-threaded; a separate worker pool); stop-the-world safepoint collector; `parallel` block parallelizes `for` + pipelines lexically; `cores` option; no I/O in a region
+- [x] 1.2 `docs/decisions/ADR-003-memoria.md` addendum + `ADR-017` addendum: the deferred concurrency note is discharged for the `parallel` worker pool
+- [x] 1.3 `specs/parallel-regions/spec.md` — the block, `cores`, no-I/O rule, boundary Transfer/Share, `.parallel` + `Parallel.each` (this change; drafted)
+- [x] 1.4 `specs/parallel-runtime/spec.md` — ADDED: worker pool lifecycle and sizing; `parallel` region submit + join; the stop-the-world safepoint protocol (request flag, back-edge polls, park-all, multi-root walk, release)
+- [x] 1.5 `specs/zirk-structured-concurrency/spec.md`: MODIFIED — "Parallel CPU operations" + "Parallel reductions" pinned to the `parallel` block and `.parallel`; "Safe-code data-race freedom" gains a `parallel`-boundary scenario
+- [x] 1.6 `specs/zirk-grammar/spec.md`: ADDED — `parallel` block + `;`-separated option header; MODIFIED — keyword set gains `parallel`
+- [x] 1.7 `specs/zirk-type-system/spec.md`: ADDED — `parallel` block as expression; `ParallelSeq<T>` API subset; `Parallel.each` typing; associativity check for parallel reduce
+- [x] 1.8 `specs/zirk-ir-lowering/spec.md`: ADDED — `ParallelRegion { core_budget, body }`; parallel `for` lowers to a work-splitting loop; pipeline ops lower to parallel combinators; safepoint poll at loop back-edges in a region
+- [x] 1.9 `specs/zirk-native-codegen/spec.md`: ADDED — worker-pool submit/join emission; safepoint poll emission
+- [x] 1.10 `specs/zirk-object-memory/spec.md` + `specs/zirk-memory-safety/spec.md`: MODIFIED — collector triggering and root enumeration are thread-aware; header unchanged; stop-the-world safepoint is the concurrency-safe collection point
+- [x] 1.11 `specs/async-runtime-core/spec.md`: MODIFIED — add the worker pool and the safepoint protocol as runtime requirements
+- [x] 1.12 `specs/zirk-feature-phasing/spec.md`: MODIFIED — Phase 5 marks `parallel` delivered; `Mutex` / `Atomic` stay with `concurrency-completion`
+- [x] 1.13 `openspec validate parallel-cpu-regions --strict`
 
 ## 2. Worker pool (`crates/zirk-runtime/src/pool.rs`)
 
-- [ ] 2.1 New `pool.rs`: N OS worker threads (N = a runtime-config default; forced to 1 initially), a work-stealing deque per worker, `submit(region_tasks)`, `join()`
-- [ ] 2.2 A `parallel` region: split work, `submit`, cooperatively block the calling branch (the executor keeps running other I/O branches), `join`, collect
-- [ ] 2.3 `cores` resolution: `N` / `-N` / `A..=B` / default; runtime error for `-N` with `N ≥ detected`; nested region clamps to the outer budget
-- [ ] 2.4 Pool unit tests: parallel map/reduce correctness, order preservation, `cores` resolution, nested region
+- [x] 2.1 New `pool.rs`: N OS worker threads (default = hardware concurrency, `ZIRK_PARALLEL_CORES` override, `=1` = inline fallback), a shared job queue (`Mutex<Vec<Job>>` + `Condvar`; per-worker work-stealing deques deferred as a throughput optimisation), `submit`, cooperative `join` via `crate::executor::block_current_on_region`
+- [x] 2.2 A `parallel` region: split work, `submit`, cooperatively block the calling branch (the executor keeps running other I/O branches), `join`, collect
+- [x] 2.3 `cores` resolution: `N` / `-N` / `A..=B` / default; runtime error for `-N` with `N ≥ detected`; nested region clamps to the outer budget
+- [x] 2.4 Pool unit tests: parallel map/reduce correctness, order preservation, `cores` resolution, nested region
 
 ## 3. Collector: stop-the-world safepoint (`crates/zirk-runtime/src/collector.rs`)
 
-- [ ] 3.1 Global "collection requested" flag; `zirk_rt_alloc` sets it at the GC threshold instead of collecting inline when the pool has active workers
-- [ ] 3.2 Safepoint: worker threads poll at `parallel` loop back-edges and park; the executor parks at its next scheduling turn
-- [ ] 3.3 Coordinator: when every thread is parked, walk all roots (executor current + all suspended branch chains + each worker's shadow-stack chain + `mark_clone_roots`), mark, sweep the shared allocation list under a lock, clear the flag, release
-- [ ] 3.4 Stress tests on macOS aarch64, Linux x86_64, Linux aarch64, Windows x86_64: allocation-heavy `parallel` reduce under a low GC threshold; no use-after-free, no leak, deterministic result
-- [ ] 3.5 Raise the pool default to hardware concurrency; re-run 3.4
+- [x] 3.1 Global "collection requested" flag; `zirk_rt_alloc` sets it at the GC threshold instead of collecting inline when the pool has active workers
+- [x] 3.2 Safepoint: worker threads poll at `parallel` loop back-edges and park; the executor parks at its next scheduling turn
+- [x] 3.3 Coordinator (`collector::stw` + `collect_stw`): waits until every active worker is parked, then the executor thread walks all roots (its task chains via `walk_all_task_roots` + every parked worker's shadow-stack chain + `mark_clone_roots`), marks, sweeps the run's published heap under its lock, clears the flag, releases. Heap made per-run + published (`mod heap`) so worker allocations land on the list the collector sweeps; a process-wide `GC_WORLD` mutex serialises executor runs; `IN_EXECUTOR_WORLD` gates which threads use the published heap / STW path
+- [~] 3.4 Stress test `stop_the_world_safepoint_under_an_allocation_heavy_parallel_reduce` (48×500 allocs, 2 KiB threshold): deterministic result, every live object intact, no UAF/leak — green on macOS aarch64 (this build) across 40+ repeat runs; Linux x86_64 / Linux aarch64 / Windows x86_64 covered by `cargo test --workspace` in CI (task 9.1)
+- [x] 3.5 Pool default = `detected_cores()` (hardware concurrency); stress test + full runtime suite re-run green
 
 ## 4. Lexer + AST + parser
 
-- [ ] 4.1 `crates/zirk-lexer`: `parallel` keyword
-- [ ] 4.2 `crates/zirk-ast`: `Stmt::Parallel { options: Vec<(Ident, Expr)>, body: Block }` (also usable as `Expr::Parallel`)
-- [ ] 4.3 `crates/zirk-parser`: decide the option-header grammar — `parallel; name: expr; name: expr {` contextual parse (prototype first); fallback `parallel(name: expr, ...) {` if it fights the grammar. Record the decision in `design.md`
-- [ ] 4.4 Parser tests: bare `parallel { }`, `parallel; cores: 4 { }`, `parallel; cores: -1; chunk: 1000 { }`, as an expression, `cores` as an ordinary identifier elsewhere
+- [x] 4.1 `crates/zirk-lexer`: `parallel` keyword (already reserved; only `Keyword::Parallel` needed wiring)
+- [x] 4.2 `crates/zirk-ast`: `Stmt::Parallel(ParallelBlock)` / `Expr::Parallel(Box<ParallelBlock>)`, `ParallelBlock { options: Vec<(Ident, Expr)>, body: Block, span }`
+- [x] 4.3 `crates/zirk-parser`: contextual `parallel; name: expr; name: expr {` header parsed (`parse_parallel_block`); no grammar conflict hit, so the paren fallback was not needed. Decision already recorded in `design.md` D3
+- [x] 4.4 Parser tests: bare `parallel { }`, `parallel; cores: 4 { }`, `parallel; cores: -1; chunk: 1000 { }`, as an expression, `cores` as an ordinary identifier elsewhere
 
 ## 5. Semantic analysis
 
-- [ ] 5.1 `crates/zirk-sema`: `parallel` block typing (expression = final expr type); `cores` operand must be `Int` or an inclusive range of `Int`
-- [ ] 5.2 `ParallelSeq<T>` type from `.parallel`; expose the parallel-safe API subset; `Parallel.each` signature
-- [ ] 5.3 Associativity obligation on a parallel `reduce`; `reduce_ordered` escape
-- [ ] 5.4 Reject I/O / suspension / `spawn` / `concurrent` / `Timer.*` inside a `parallel` region (`PARALLEL_REGION_IO`)
-- [ ] 5.5 Transfer/Share enforcement at the region boundary (reuse #2's analysis)
-- [ ] 5.6 Checker tests: region typing, `cores` operand, `.parallel` chain, associativity rejection, I/O rejection, boundary alias rejection
+- [x] 5.1 `crates/zirk-sema`: `parallel` block typing (`check_parallel_block`/`check_parallel_expr`, expression = final expr type via `check_block_value`); `cores` operand must be `Int` or an inclusive range of `Int` (`check_parallel_options`, `chunk` likewise `Int`, `cores: 0` rejected) — `codes::PARALLEL_OPTION_TYPE`
+- [~] 5.2 `collection.parallel` implemented as a typing no-op (`check_field`, `parallel_adapter_accesses: HashSet<Span>` recorded for lowering) — matches spec's "the chain is typed exactly as the sequential one" literally, so no distinct `ParallelSeq<T>` type was introduced (design D2 addendum below). `Parallel.each(coll, fn): List<R>` typed as a compiler-known static call (`check_parallel_each_call`), mirroring `Timer.*` — but its own `zirk-ir` lowering does not exist (a call-site dispatch is a different shape from the auto-parallel-`for` region task 6.1 lowers), so it is gated `codes::NOT_LOWERED` rather than left to reach the backend and panic on an undeclared callee. **Not done**: "expose the parallel-safe API subset (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/`for_each`)" — audited the checker and **none of those methods exist yet** on `List<T>`/`Array<T>` at all, sequential or otherwise; there is no subset to restrict to. That is a prerequisite gap in a different area of the compiler, not something this change's `.parallel` typing can paper over
+- [ ] 5.3 Associativity obligation on a parallel `reduce`; `reduce_ordered` escape — blocked on 5.2's gap: there is no `.reduce` call site anywhere in the checker to hook this onto (`.reduce` is not implemented). Design D3 addendum below records the intended heuristic (reject a combiner lambda whose top-level operator is not one of `+ * & | ^ && ||`) for whoever adds `.reduce`/`reduce_ordered`
+- [x] 5.4 Reject I/O / suspension / `spawn` / `concurrent` / `Timer.*` inside a `parallel` region (`reject_in_parallel_region`, hooked at `check_timer_call`, `check_spawn`, `check_concurrent`, `println`) — `codes::PARALLEL_REGION_IO`. Blocking channel ops not hooked: no channel-op call site exists in the checker yet to hook
+- [x] 5.5 Transfer/Share enforcement at the region boundary — design D5 addendum (below): no dedicated boundary check existed to reuse from `concurrent`/`spawn`, so this reuses the *mechanism* (barrier scope + capture tracking via `begin_capture_scope`/`finish_capture_scope`) and the *diagnostic* (`codes::STRICT_ALIAS_VIOLATION`, same as the `inmut::strict` matrix) to reject a captured `mut` reference-type binding (`check_parallel_boundary`)
+- [x] 5.6 Checker tests: region typing, `cores` operand, I/O rejection, boundary alias rejection — done (`crates/zirk-sema/tests/typing.rs`, "Parallel CPU regions" section). `.parallel` chain / associativity rejection tests land with 5.2/5.3
 
 ## 6. IR + codegen
 
-- [ ] 6.1 `crates/zirk-ir`: `InstKind::ParallelRegion { core_budget: Operand, body: BlockId }`; parallel `for` -> work-split loop; parallel pipeline -> combinator lowering; `verify.rs`
-- [ ] 6.2 `crates/zirk-codegen-llvm`: emit `zirk_rt_pool_submit` / `zirk_rt_pool_join`; emit `zirk_rt_safepoint_poll` at `parallel` loop back-edges
-- [ ] 6.3 IR + codegen golden tests
+- [x] 6.1 `crates/zirk-ir`: `Stmt::Parallel`/`Expr::Parallel` lower end to end (`lower_parallel_block`/`lower_parallel_block_value`, `type_of`). **Real work-splitting is live** for `parallel { for x in coll { ... } }` over an `Array`/`List` with no `return`/`break`/`continue`/`throw` in the body: `try_lower_parallel_for` outlines the body into its own function (captures + a synthetic collection capture + the chunk index; `InstKind::ArrayListLoad` recovers the element) and dispatches it via `InstKind::ParallelForStart` to the worker pool, one chunk per element. Everything else (a `for` over a `Range`, a disqualified body, any shape other than exactly one bare `for` filling the region) takes the **interim sequential lowering** (inline on the calling thread), matching the design's own staged rollout. No dedicated `InstKind::ParallelRegion { core_budget, body }` node and no pipeline (`map`/`filter`/`reduce`) combinator lowering exist — blocked on the missing sequence-API gap tasks 5.2/5.3 found (no `map`/`filter`/`reduce`/etc. on `List<T>`/`Array<T>` at all). `Parallel.each`'s call-site shape is gated `codes::NOT_LOWERED` at sema (5.2) rather than reaching here.
+  **Verification found a real, serious, pre-existing memory-safety bug — now fixed.** Compile-and-run testing under GC pressure crashed (data loss or SIGSEGV/SIGBUS) for both the new work-splitting path *and*, once isolated, for an ordinary sequential `for x in list { <allocating call> }` with **no** `parallel` anywhere — proving the bug predated this change and was not introduced by it. Root-caused to `crates/zirk-codegen-llvm/src/emit.rs`'s `gc_reference_paths`: it was missing match arms for `IrType::Array(_)`/`List(_)`/`Range`/`Map(_)`/`Set(_)`, which `IrType::is_managed_reference` correctly flags as needing GC rooting (so such a slot got zero-initialized at function entry) but the root-*address* table silently produced zero entries for — meaning a local `List<T>` (etc.) variable was invisible to every collection, and the collector could reclaim it (or what it referenced) while still in use. Fixed by adding those five types to the same `out.push(prefix.clone())` arm `Object`/`Contract`/`Weak`/`String`/`Char` already use (they're all "one managed pointer at the slot itself" — no further fields to decompose; the object's own descriptor is what lets `mark_object` trace through it). Verified: the exact repro that first crashed (10-element `List<Int32>`, `ZIRK_GC_THRESHOLD=200`) now passes 20/20 runs; the larger stress case (200 elements, allocation-heavy per-element work, `ZIRK_GC_THRESHOLD=2048`, 4 pool cores) that previously hung/crashed now passes 15/15; a dedicated regression test was added (`crates/zirk-cli/tests/end_to_end.rs`, `a_list_survives_repeated_buffer_growth_under_a_small_threshold`) and confirmed to fail without the fix (re-reverted it locally, reran, got the crash back) and pass with it. The work-splitting kill switch this task originally shipped with was removed entirely once this was confirmed safe — `parallel { for x in coll { ... } }` now really does run across the worker pool.
+- [x] 6.2 `crates/zirk-codegen-llvm`: emits the work-split path — `build_parallel_for_thunk` (a per-site `extern "C" fn(ptr, i64) -> i64` thunk mirroring `build_branch_thunk`) plus a call to the new runtime entry `zirk_rt_parallel_for` (`crates/zirk-runtime/src/pool.rs`, its own signed-core-budget encoding documented there). **Not done**: `zirk_rt_pool_submit`/`zirk_rt_pool_join` are unused — `zirk_rt_parallel_for` folds submit+run+join into one call; `zirk_rt_safepoint_poll` at a `parallel` loop back-edge is likewise not emitted — the *sequential* lowering has no pool thread needing one, and the *work-split* lowering's own back-edge lives inside `zirk_rt_parallel_for`/`run_region` in Rust already
+- [x] 6.3 IR + codegen tests — `crates/zirk-runtime/src/pool.rs` has 3 unit tests for `zirk_rt_parallel_for` in isolation (every index runs exactly once, zero count, the signed-cores encoding); `crates/zirk-cli/tests/end_to_end.rs` has the GC-rooting regression test above, a real compile-and-run check against generated code (which is what actually caught the bug the Rust-level unit tests couldn't). No dedicated IR/codegen *golden* (snapshot) tests were added. The full workspace suite (1277 tests) is green; `cargo fmt --check` and `cargo clippy --workspace --all-targets` are clean
 
 ## 7. Fixtures + example
 
-- [ ] 7.1 `valid/parallel_for.zrk`, `valid/parallel_pipeline_sum.zrk`, `valid/parallel_cores_option.zrk`, `valid/parallel_adapter.zrk`
-- [ ] 7.2 `invalid/parallel_io.zrk`, `invalid/parallel_nonassociative_reduce.zrk`, `invalid/parallel_cores_zero.zrk`, `invalid/parallel_boundary_alias.zrk`
-- [ ] 7.3 `examples/parallel_examples.zrk`: compress-all, dataset reduce with `cores: -1`, `.parallel` chain; compile-and-run CLI test
+- [x] 7.1 `valid/parallel_for.zrk` (real work-splitting, task 6.1's shape), `valid/parallel_cores_option.zrk` (`cores: 2` and `cores: 1..=4`), `valid/parallel_adapter.zrk` (`.parallel` typing), `valid/parallel_block_expression.zrk` (block-as-expression, substituted for the originally planned `parallel_pipeline_sum.zrk` — no `map`/`sum` pipeline exists to demonstrate, per 5.2's own gap note). Writing `parallel_adapter.zrk` found and fixed another real gap: the checker accepted `collection.parallel` (typed as a no-op, 5.2) but `zirk-ir`'s ordinary field-access lowering had never heard of `parallel_adapter_accesses` and panicked on it (`lower_field`/`field_type_of` now special-case it: since it is a pure typing no-op, lowering just returns the object expression itself)
+- [x] 7.2 `invalid/parallel_io.zrk`, `invalid/parallel_cores_zero.zrk`, `invalid/parallel_boundary_alias.zrk`. **Not written**: `invalid/parallel_nonassociative_reduce.zrk` — cannot exist without `.reduce` (5.3's own gap; there is nothing to write a nonassociative call *to*)
+- [x] 7.3 `examples/parallel_examples.zrk`: a `parallel { for x in coll { } }` work-splitting region (files/`compress`, matching the spec's own scenario shape), the `cores` option (`2` and `1..=4` — not `-1`, whose runtime error path depends on the running machine's core count and would make the example flaky in CI), `parallel { }` as an expression, and `.parallel`'s typing no-op — each with an inline note on what the spec describes that is not implemented yet (pipelines, `Parallel.each`). Compile-and-run CLI test added (`the_parallel_examples_program_runs`, mirrors `the_concurrent_examples_program_runs`)
 
 ## 8. Documentation
 
-- [ ] 8.1 `docs/STRUCTURED_CONCURRENCY_SEMANTICS.md`: the `parallel` sections
-- [ ] 8.2 `docs/MEMORY_AND_UNSAFE_SEMANTICS.md`: the stop-the-world safepoint
-- [ ] 8.3 Handbook: a parallel chapter; `.parallel` / `Parallel.each` reference
-- [ ] 8.4 `docs/init/ZIRK_ROADMAP.md` + `ZIRK_FEATURE_STATUS.md`: `parallel` delivered; the multi-threaded-GC milestone
-- [ ] 8.5 `README.md` concurrency line
+- [x] 8.1 `docs/STRUCTURED_CONCURRENCY_SEMANTICS.md`: banner updated (`parallel` now delivered), new §8 covers the region, `cores`, no-I/O rule, boundary rules (including the captured-scalar-reassignment case that disqualifies work-splitting), and the `.parallel`/`Parallel.each` gap
+- [x] 8.2 `docs/MEMORY_AND_UNSAFE_SEMANTICS.md`: §14 gained a "`parallel` regions and the stop-the-world safepoint" subsection — the safepoint protocol, and the generic per-function rooting mechanism (with the `gc_reference_paths` bug/fix named explicitly, so the invariant it protects stays documented)
+- [x] 8.3 Handbook `18-concurrency/08-parallel.md` + `09-parallel-for.md` — **rewritten**, not just filled in: the pre-existing stub chapters described a different, never-implemented syntax (`parallel for value in 0..1000 { value * value }` as a value-producing expression). Replaced with the real syntax (`parallel { for x in coll { } }`, the `;`-separated `cores` header, block-as-expression) and an honest note on `.parallel`/`Parallel.each`'s gap. `README.md` (the concurrency chapter's own) updated too
+- [x] 8.4 `docs/init/ZIRK_ROADMAP.md` (Phase 5 step 2 marked delivered for the `for`-over-`Array`/`List` shape, pipeline reductions noted as follow-up) + `ZIRK_FEATURE_STATUS.md` (the `parallel`/`thread` row split: `parallel` now `yes` across the board with a full note, including the `gc_reference_paths` fix; `thread`/`Sync` stay gated)
+- [x] 8.5 `README.md` concurrency line (`parallel` moved from "planned" to the delivered list) and the not-yet-implemented line (`parallel` removed, a note added that the sequence pipeline doesn't exist yet)
 
 ## 9. Website + closeout
 
-- [ ] 9.1 `cargo test --workspace` (incl. per-triple stress) green; fmt; clippy
-- [ ] 9.2 Commit; `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`; review the status catalog + memory-model page; commit `../zirk-lang-site` separately; record both revisions
-- [ ] 9.3 `openspec validate parallel-cpu-regions --strict`
+- [x] 9.1 `cargo test --workspace` (1278 tests) green; `cargo fmt --check` clean; `cargo clippy --workspace --all-targets` clean, on this build (macOS aarch64) — the other three triples ride on CI per the existing convention (task 3.4's own note)
+- [ ] 9.2 Commit; `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`; review the status catalog + memory-model page; commit `../zirk-lang-site` separately; record both revisions — **not done**: committing and syncing the external website repo are exactly the kind of action that needs the user's explicit go-ahead, not something to do autonomously
+- [x] 9.3 `openspec validate parallel-cpu-regions --strict` — passes ("Change 'parallel-cpu-regions' is valid")

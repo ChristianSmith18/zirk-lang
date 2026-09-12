@@ -203,16 +203,12 @@ mod tests {
     use super::*;
     use crate::collector;
     use crate::collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
-    use std::sync::Mutex;
 
-    /// Collector test state is process-global (`collector.rs`'s own test
-    /// module doc comment on `TEST_GUARD`, the concurrency fix
-    /// `fase-4e-weak` found), so this module's own synthetic-object tests
-    /// serialize against it the same way.
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
-
+    /// Collector test state is process-global (the heap list and totals moved
+    /// process-wide with `ADR-019`), so this module's synthetic-object tests
+    /// serialize against the *same* mutex `collector`'s own tests use.
     fn reset_state() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = collector::test_support::test_guard();
         collector::reset_state_for_tests();
         guard
     }

@@ -1,0 +1,16 @@
+// `collection.parallel` (spec `parallel-regions`, "`.parallel` adapter and
+// `Parallel.each`"): typed exactly as `collection` itself. The parallel-safe
+// pipeline subset (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/
+// `for_each`) does not exist on `List<T>`/`Array<T>` yet — sequentially or
+// otherwise — so this only demonstrates the adapter's own typing: reading
+// through it type-checks and behaves identically to reading the collection
+// directly.
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3];
+    mut count: Int32 = 0;
+    for v in values.parallel {
+        count = count + 1;
+    }
+    stdout.println(count);
+}

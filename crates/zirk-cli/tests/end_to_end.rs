@@ -169,6 +169,24 @@ fn the_concurrent_examples_program_runs() {
 }
 
 #[test]
+fn the_parallel_examples_program_runs() {
+    // `examples/parallel_examples.zrk` — the normative showcase for
+    // `parallel-cpu-regions`.
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("parallel_examples.zrk");
+    let output = zirk("run", &source, "parallel_examples", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "compressed\ncores option ok\n36\n8\n"
+    );
+}
+
+#[test]
 fn build_produces_an_executable_that_runs_on_its_own() {
     let source = corpus("valid").join("hello.zrk");
     let dir = workspace("build_only");
@@ -948,6 +966,41 @@ fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "done\n");
+}
+
+/// A regression test for a real bug found while implementing
+/// `parallel-cpu-regions`: `crates/zirk-codegen-llvm/src/emit.rs`'s
+/// `gc_reference_paths` was missing match arms for `Array<T>`/`List<T>`/
+/// `Range`/`Map<K,V>`/`Set<T>` — those types are correctly flagged by
+/// `IrType::is_managed_reference` (so a slot of one of them gets zero-
+/// initialized at function entry), but the table that turns a gc-root slot
+/// into an actual root *address* silently produced zero entries for them, so
+/// such a local variable was invisible to every collection. `List<T>`
+/// exposed it easily: each `.add()` can trigger its own buffer-growth
+/// allocation, and if a collection lands during one of those while nothing
+/// else roots the list, the collector can reclaim the list itself (or the
+/// buffer it referenced) while it is still very much in use — silently
+/// wrong results (elements read back as zero) or a crash, depending on
+/// exact memory reuse. `Array<T>` (built in one allocation, no further
+/// allocation while filling it) happened not to expose it in ordinary use.
+/// This grows a `List<Int32>` one element at a time under a small forced
+/// threshold — this exact shape crashed or printed the wrong sum before the
+/// fix (verified by re-reverting the fix locally and re-running this test).
+#[test]
+fn a_list_survives_repeated_buffer_growth_under_a_small_threshold() {
+    let source = "fn main(): Void {\n\
+        mut values: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n\
+        mut total: Int32 = 0;\n\
+        for v in values {\n\
+            total = total + v * v;\n\
+        }\n\
+        stdout.println(total);\n\
+    }";
+
+    let output = zirk_with_env(source, "gc_list_growth", &[("ZIRK_GC_THRESHOLD", "200")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "385\n");
 }
 
 /// An object reachable only from a still-active *outer* frame (`main`'s own

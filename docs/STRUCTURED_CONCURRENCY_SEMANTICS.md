@@ -1,9 +1,8 @@
 # Zirk Structured Concurrency Semantics
 
-> **Surface status:** `concurrent`, `spawn`, `Job<T>`, and `Timer` are the
-> delivered structured-concurrency surface. `parallel-cpu-regions`,
-> `typed-channels`, and `concurrency-completion` remain separate follow-up
-> changes.
+> **Surface status:** `concurrent`, `spawn`, `Job<T>`, `Timer`, and `parallel`
+> (section 8) are the delivered structured-concurrency surface. `typed-channels`
+> and `concurrency-completion` remain separate follow-up changes.
 
 ## 1. Execution domains
 
@@ -118,3 +117,39 @@ executor lifecycle around `main`. It does not define language syntax by itself.
 `parallel-cpu-regions` supplies CPU regions and their safe points;
 `typed-channels` supplies typed communication; and
 `concurrency-completion` supplies the remaining policy and outcome APIs.
+
+## 8. `parallel` CPU regions
+
+`parallel { ... }` opens a CPU-bound region, run on the worker pool
+(`crates/zirk-runtime/src/pool.rs`) rather than the cooperative executor. A
+`for x in coll { ... }` that fills the whole region body, over an
+`Array<T>`/`List<T>`, and whose body has no `return`/`break`/`continue`/
+`throw` and reassigns no captured name, is split into one chunk per element
+and dispatched across the pool. A `parallel` block used where a value is
+expected types as its final expression. Every other shape (a `for` over a
+`Range`, a disqualified loop body, anything other than one bare `for` filling
+the region) runs the body sequentially, inline, on the calling thread — still
+correct, just without the parallel speedup.
+
+An optional `;`-separated header sets `cores` before the block: `cores: N`
+(`N > 0`) uses exactly `N` worker threads; `cores: -N` uses the detected core
+count minus `N` (a runtime error if that is not positive); `cores: A..=B`
+lets the runtime pick within that range; absent, the region uses every
+detected core. `cores: 0` is a compile-time error. `chunk` is grammar-reserved
+for a future chunk-size option; not implemented yet.
+
+A `parallel` region performs no I/O and no suspension: `Timer.*`, `spawn`,
+`concurrent { }`, and `println` are all rejected inside one, because pool
+threads have no safe points for them. The capture rules of section 5 apply at
+the region boundary too, with one narrower addition: a captured *scalar* (not
+just a reference type) that the loop body reassigns disqualifies the region
+from work-splitting and falls back to the sequential lowering above, because
+each chunk would otherwise mutate its own private copy and the reassignment
+would go nowhere.
+
+`collection.parallel` types identically to `collection` itself — today a pure
+typing no-op, not yet an actual parallel adapter, because the sequence
+pipeline (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/`for_each`) does not
+exist on `List<T>`/`Array<T>` yet, sequentially or otherwise. `Parallel.each`
+is typed by the checker but has no lowering (`codes::NOT_LOWERED`) for the
+same reason. Both are follow-up work once the sequence pipeline lands.

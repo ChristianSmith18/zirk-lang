@@ -1,0 +1,15 @@
+// A `parallel { }` block used where an expression is expected (spec
+// `parallel-regions`, "parallel block as an expression") types as its final
+// expression. The spec's own scenario is `rows.map(cost).sum()`, but that
+// pipeline API does not exist on `List<T>`/`Array<T>` yet — sequentially or
+// otherwise — so this uses a plain function call instead to exercise the
+// same expression-position typing.
+
+fn answer(): Int32 {
+    return 42;
+}
+
+fn main(): Void {
+    inmut total: Int32 = parallel { answer() };
+    stdout.println(total);
+}

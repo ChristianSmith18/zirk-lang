@@ -28,6 +28,10 @@ pub mod symbols {
     pub const JOB_WAIT: &str = "zirk_rt_job_wait";
     /// Reports whether a job has reached a terminal state.
     pub const JOB_DONE: &str = "zirk_rt_job_done";
+    /// `zirk_rt_parallel_for(kind, a, b, count, thunk, capture)` — the
+    /// `parallel { for x in coll { ... } }` work-splitting dispatch
+    /// (`parallel-cpu-regions` task 6.1).
+    pub const PARALLEL_FOR: &str = "zirk_rt_parallel_for";
     /// Opens a structured-concurrency scope.
     pub const SCOPE_ENTER: &str = "zirk_rt_scope_enter";
     /// Advances the close protocol for a structured-concurrency scope.
@@ -321,6 +325,7 @@ pub struct Runtime<'ctx> {
     pub spawn: FunctionValue<'ctx>,
     pub job_wait: FunctionValue<'ctx>,
     pub job_done: FunctionValue<'ctx>,
+    pub parallel_for: FunctionValue<'ctx>,
     pub scope_enter: FunctionValue<'ctx>,
     pub scope_exit: FunctionValue<'ctx>,
     pub branch_register: FunctionValue<'ctx>,
@@ -505,6 +510,21 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let job_done = module.add_function(
         symbols::JOB_DONE,
         context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let parallel_for = module.add_function(
+        symbols::PARALLEL_FOR,
+        void.fn_type(
+            &[
+                context.i8_type().into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
         external,
     );
     let scope_enter = module.add_function(symbols::SCOPE_ENTER, i64.fn_type(&[], false), external);
@@ -1215,6 +1235,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         spawn,
         job_wait,
         job_done,
+        parallel_for,
         scope_enter,
         scope_exit,
         branch_register,

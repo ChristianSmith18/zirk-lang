@@ -201,6 +201,11 @@ pub enum WaitReason {
     /// Blocked on a timer; wakes when it fires. The `u64` is the timer id
     /// (`crate::timer::TimerId`), stored untyped to keep this module leaf.
     Timer(u64),
+    /// Blocked inside a `parallel` region: the branch submitted the region's
+    /// chunks to the worker pool and yields the executor thread so other I/O
+    /// branches keep running; it wakes when every chunk has joined
+    /// (`ADR-019` D1, `parallel-cpu-regions`).
+    Parallel,
 }
 
 /// What a finished task produced.

@@ -1228,6 +1228,27 @@ pub enum InstKind {
         kind: BranchKind,
         delay: Option<Operand>,
     },
+    /// `parallel { for x in coll { ... } }` (`parallel-cpu-regions` task 6.1,
+    /// interim work-splitting lowering — no `InstKind::ParallelRegion`/
+    /// pipeline-combinator lowering exists yet; tasks 5.2/5.3's own gap: no
+    /// `map`/`filter`/`reduce` to lower to). Submits one chunk per index in
+    /// `0..count` to the worker pool, each running `target`'s lifted
+    /// function with the captures baked into `body`'s boxed capture block —
+    /// the loop's collection is one of them, so the lifted function indexes
+    /// it itself (`InstKind::ArrayListLoad`) before running the loop body —
+    /// plus that chunk's own index. Blocks the calling branch until every
+    /// chunk has joined. `budget_kind`/`budget_a`/`budget_b` are the same
+    /// one-`i64`-sign encoding `zirk_rt_parallel_for` documents (`0` = all
+    /// cores, `1` = a signed count, `2` = a range). Produces `IrType::Void`
+    /// — the source loop runs for effect only.
+    ParallelForStart {
+        target: String,
+        body: Operand,
+        count: Operand,
+        budget_kind: u8,
+        budget_a: Operand,
+        budget_b: Operand,
+    },
     /// Suspends until the branch named by `job` completes, then yields its
     /// statically known `result` (`IrType::Job` is an erased one-word handle,
     /// so the result type is repeated here) or re-raises its unhandled failure.

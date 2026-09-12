@@ -339,6 +339,36 @@ and `Share` rules in
 Unsafe does not waive them. Tentative transaction state cannot cross a boundary,
 and weak atomic ordering requires both an unsafe proof and the atomic contract.
 
+### `parallel` regions and the stop-the-world safepoint
+
+The collector stays non-moving mark-sweep with the same 3-word header
+regardless of whether a `parallel` region is running. An allocation that
+crosses the collection threshold while the worker pool has active workers
+raises a "collection requested" flag instead of collecting inline; each
+worker polls this at loop back-edges inside a region and after each chunk,
+parking when it is set, and the executor parks at its next scheduling turn.
+Once every active thread is parked, one thread walks every root — the
+executor's own task chains, every parked worker's shadow-stack chain, and
+deep-clone's in-progress roots — marks, sweeps the run's published heap,
+clears the flag, and releases every parked thread.
+
+Every managed reference a running function holds — a local, a parameter, a
+captured value — is rooted the same way regardless of its shape: the
+generic per-function prologue zero-initializes every reference-typed slot
+and pushes their addresses as one shadow-stack frame, and this collection
+walk reads that same frame set. A type that is a *single* managed pointer
+(`Object`/`Contract`/`Weak`/`Dependent`/`Pin`/`String`/`Char`/`Array<T>`/
+`List<T>`/`Range`/`Map<K,V>`/`Set<T>`) needs no further decomposition here —
+its own descriptor is what lets the mark pass trace through it. A type
+missing from that root-address table would still be zero-initialized (safe
+on its own) but never actually walked — invisible to every collection, so a
+threshold crossing anywhere in the program could reclaim it, or whatever it
+alone referenced, while still in use. This exact gap (`Array`/`List`/`Range`/
+`Map`/`Set` were missing from it) was found and fixed while implementing
+`parallel-cpu-regions`; `crates/zirk-cli/tests/end_to_end.rs`'s
+`a_list_survives_repeated_buffer_growth_under_a_small_threshold` guards
+against it regressing.
+
 ## 15. Implementation checklist
 
 An implementation is conforming only if it can:

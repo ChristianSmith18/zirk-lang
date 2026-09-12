@@ -1,0 +1,12 @@
+// Transfer/Share at the `parallel` boundary (spec `parallel-regions`,
+// "Transfer and Share at the `parallel` boundary", design D5): a mutable
+// reference type the enclosing scope still holds may not be captured into a
+// `parallel` region.
+
+fn main(): Void {
+    mut values: List<Int32> = [1, 2, 3];
+    parallel {
+        for v in values {
+        }
+    }
+}

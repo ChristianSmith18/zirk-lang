@@ -578,6 +578,11 @@ pub enum Stmt {
     /// `concurrent { ... }`, a structured scope whose direct bindings are
     /// concurrent branches and whose result bindings hoist after the close.
     Concurrent(ConcurrentBlock),
+    /// `parallel { ... }` / `parallel; cores: N { ... }`, a CPU-bound region
+    /// whose `for` loops and pipelines run across the worker pool. Also
+    /// usable as [`Expr::Parallel`], the same way [`UnsafeBlock`] is shared
+    /// between `Stmt::Unsafe` and `Expr::Unsafe`.
+    Parallel(ParallelBlock),
     /// `throw expr;` / `throw;` (rethrow, roadmap Phase 4b).
     Throw(ThrowStmt),
     /// `try { } catch Type(name) { } ... finally { }` (roadmap Phase 4b).
@@ -611,6 +616,7 @@ impl Stmt {
             Stmt::Expr(s) => s.span,
             Stmt::Block(b) => b.span,
             Stmt::Concurrent(s) => s.span,
+            Stmt::Parallel(s) => s.span,
             Stmt::Throw(s) => s.span,
             Stmt::Try(s) => s.span,
             Stmt::Unsafe(s) => s.span,
@@ -638,6 +644,18 @@ pub struct ConcurrentBinding {
     pub name: Ident,
     /// Index into [`ConcurrentBlock::body`]'s statements.
     pub statement_index: usize,
+    pub span: Span,
+}
+
+/// `parallel { ... }` / `parallel; name: expr; ... { ... }`, a lexically
+/// scoped CPU region (design D2/D3 of `parallel-cpu-regions`). `options` are
+/// the `;`-separated `name: expr` header entries in source order (e.g.
+/// `cores`, reserved `chunk`); empty when the bare `parallel { }` form is
+/// used. Shared between `Stmt::Parallel` and `Expr::Parallel`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParallelBlock {
+    pub options: Vec<(Ident, Expr)>,
+    pub body: Block,
     pub span: Span,
 }
 
@@ -980,6 +998,9 @@ pub enum Expr {
     Unsafe(Box<UnsafeBlock>),
     /// `commit { ... }` used where a value is expected (roadmap Phase 4e).
     Commit(Box<CommitBlock>),
+    /// `parallel { ... }` used where a value is expected. Shares
+    /// [`ParallelBlock`] with `Stmt::Parallel`.
+    Parallel(Box<ParallelBlock>),
     /// `transfer(expr)` — ownership transfer of a `TransferableResource`.
     Transfer(TransferExpr),
     /// `(a, b, ...)` — a tuple literal (roadmap Phase 3b).
@@ -1054,6 +1075,7 @@ impl Expr {
             Expr::Interpolated(e) => e.span,
             Expr::Unsafe(e) => e.span,
             Expr::Commit(e) => e.span,
+            Expr::Parallel(e) => e.span,
             Expr::Transfer(e) => e.span,
             Expr::Tuple(e) => e.span,
             Expr::Spawn(e) => e.span,

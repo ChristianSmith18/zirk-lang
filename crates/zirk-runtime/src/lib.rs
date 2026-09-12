@@ -58,6 +58,12 @@ mod list;
 mod map;
 mod memory;
 mod native_slice;
+// The `parallel` CPU-region worker pool (`ADR-019`, `parallel-cpu-regions`).
+// Staged at pool size 1 until the stop-the-world safepoint collector lands;
+// the C-ABI surface (`zirk_rt_pool_submit` / `_join` / `zirk_rt_safepoint_poll`)
+// is exercised by generated code from the start.
+#[allow(dead_code)]
+mod pool;
 mod range;
 mod regex;
 mod resource;
@@ -92,6 +98,7 @@ pub use journal::{
 };
 pub use list::*;
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
+pub use pool::{zirk_rt_pool_join, zirk_rt_pool_submit, zirk_rt_safepoint_poll};
 pub use range::{
     zirk_range_element_at, zirk_range_end, zirk_range_inclusive, zirk_range_length, zirk_range_new,
     zirk_range_slice, zirk_range_start, zirk_range_step,

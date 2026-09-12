@@ -177,6 +177,7 @@ fn shape(e: &Expr) -> String {
         }
         Expr::Unsafe(u) => format!("unsafe({} stmts)", u.body.statements.len()),
         Expr::Commit(c) => format!("commit({} stmts)", c.body.statements.len()),
+        Expr::Parallel(p) => format!("parallel({} stmts)", p.body.statements.len()),
         Expr::Transfer(t) => format!("transfer({})", shape(&t.expr)),
         Expr::Tuple(t) => format!(
             "({})",
@@ -739,8 +740,8 @@ fn invalid_constructs_from_other_phases_say_which() {
         // `try`/`catch`/`finally` (roadmap Phase 4b) and `match ... with`
         // (roadmap Phase 4c) are both implemented now.
         // Bare `task` / `await` are implemented as of `fase-5-task-await`;
-        // `parallel` / `thread` stay deferred to their Phase 5 sub-steps.
-        ("fn main(): Void { parallel { } }", "parallel", "Phase 5"),
+        // `parallel` is implemented as of `parallel-cpu-regions`; `thread`
+        // stays deferred to its own Phase 5 sub-step.
         ("fn main(): Void { thread { } }", "thread", "Phase 5"),
         // Generators belong to the functional style, not to the objects of
         // Phase 3 they used to be filed under.
@@ -2305,4 +2306,58 @@ fn valid_spawn_in_a_loop_and_outside_a_concurrent_block_parse() {
             ..
         })
     ));
+}
+
+// --- Parallel CPU regions (`parallel-cpu-regions`) -------------------------
+
+#[test]
+fn valid_bare_parallel_block_parses_with_no_options() {
+    let p = program("fn main(): Void { parallel { work(); } }");
+    let Stmt::Parallel(region) = &p.functions[0].body.statements[0] else {
+        panic!("expected a parallel statement");
+    };
+    assert!(region.options.is_empty());
+    assert_eq!(region.body.statements.len(), 1);
+}
+
+#[test]
+fn valid_parallel_block_with_a_cores_option_parses() {
+    let p = program("fn main(): Void { parallel; cores: 4 { work(); } }");
+    let Stmt::Parallel(region) = &p.functions[0].body.statements[0] else {
+        panic!("expected a parallel statement");
+    };
+    assert_eq!(region.options.len(), 1);
+    assert_eq!(region.options[0].0.name, "cores");
+    assert!(matches!(region.options[0].1, Expr::Int(_)));
+}
+
+#[test]
+fn valid_parallel_block_with_cores_and_chunk_options_parses() {
+    let p = program("fn main(): Void { parallel; cores: -1; chunk: 1000 { work(); } }");
+    let Stmt::Parallel(region) = &p.functions[0].body.statements[0] else {
+        panic!("expected a parallel statement");
+    };
+    assert_eq!(region.options.len(), 2);
+    assert_eq!(region.options[0].0.name, "cores");
+    assert_eq!(shape(&region.options[0].1), "-1");
+    assert_eq!(region.options[1].0.name, "chunk");
+    assert!(matches!(region.options[1].1, Expr::Int(_)));
+}
+
+#[test]
+fn valid_parallel_block_as_an_expression_parses() {
+    let p = program("fn main(): Void { mut total = parallel { reduce_all() }; }");
+    let Stmt::Let(binding) = &p.functions[0].body.statements[0] else {
+        panic!("expected a binding");
+    };
+    assert!(matches!(binding.init, Some(Expr::Parallel(_))));
+}
+
+#[test]
+fn valid_cores_as_an_ordinary_identifier_outside_a_parallel_header() {
+    let p = program("fn main(): Void { mut cores = 4; report(cores); }");
+    let Stmt::Let(binding) = &p.functions[0].body.statements[0] else {
+        panic!("expected a binding");
+    };
+    assert!(matches!(binding.init, Some(Expr::Int(_))));
 }

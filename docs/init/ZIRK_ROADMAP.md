@@ -400,8 +400,14 @@ function coloring.
    bindings and orders branches by a Rule B dataflow DAG; a branch's
    cancellation or unhandled exception unwinds natively through its own stack
    and the scope aggregates the failure; `main` runs in an implicit scope.
-2. Ordered/unordered `parallel` operations and associative/deterministic
-   reductions on a multicore pool (`parallel-cpu-regions`).
+2. CPU-bound `parallel { }` regions on a real multicore worker pool
+   (`parallel-cpu-regions`, **delivered for the `for`-over-`Array`/`List`
+   shape**): a separate worker pool and a multi-threaded stop-the-world
+   safepoint collector, alongside `concurrent`/`spawn`'s single-threaded
+   executor. Ordered/unordered pipeline operations and associative/
+   deterministic reductions remain follow-up work — they need a sequence
+   pipeline (`map`/`filter`/`reduce`/etc.) that does not exist on
+   `List<T>`/`Array<T>` yet, sequentially or otherwise.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
    (`typed-channels`).
 4. Outcomes, aggregation policy, safe-default synchronization, scoped

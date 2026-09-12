@@ -2148,6 +2148,9 @@ impl<'a> Parser<'a> {
         if self.check_keyword(Keyword::Concurrent) {
             return self.parse_concurrent().map(Stmt::Concurrent);
         }
+        if self.check_keyword(Keyword::Parallel) {
+            return self.parse_parallel_block().map(Stmt::Parallel);
+        }
         // A local class: `class` / `final class` / `abstract class` inside a
         // body, scoped to its block.
         if self.check_keyword(Keyword::Class)
@@ -2204,6 +2207,32 @@ impl<'a> Parser<'a> {
             span: start.to(body.span),
             body,
             bindings,
+        })
+    }
+
+    /// `parallel { ... }` / `parallel; name: expr; ... { ... }` (design D3).
+    /// `parallel` is a leading token in a block position, so once it is seen
+    /// the parser switches to option-header mode until `{`: an optional `;`
+    /// begins a `name: expr` header, and further options are each preceded by
+    /// another `;`. Parses in both statement and expression position — see
+    /// [`Stmt::Parallel`]/[`Expr::Parallel`].
+    fn parse_parallel_block(&mut self) -> Option<ParallelBlock> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Parallel);
+
+        let mut options = Vec::new();
+        while self.eat(&TokenKind::Semicolon) {
+            let name = self.expect_identifier("in a `parallel` region option")?;
+            self.expect(&TokenKind::Colon, "after the `parallel` region option name");
+            let value = self.parse_expr_before_block()?;
+            options.push((name, value));
+        }
+
+        let body = self.parse_block()?;
+        Some(ParallelBlock {
+            span: start.to(body.span),
+            options,
+            body,
         })
     }
 
@@ -2968,6 +2997,11 @@ impl<'a> Parser<'a> {
         }
         if self.check_keyword(Keyword::Commit) {
             return self.parse_commit_block().map(|b| Expr::Commit(Box::new(b)));
+        }
+        if self.check_keyword(Keyword::Parallel) {
+            return self
+                .parse_parallel_block()
+                .map(|b| Expr::Parallel(Box::new(b)));
         }
         if self.check_keyword(Keyword::Spawn) {
             return self.parse_spawn();
@@ -4318,19 +4352,24 @@ impl<'a> Parser<'a> {
                     // `from` is `Keyword::From` everywhere else (`implements
                     // X from Y`), but unambiguously a field name right after
                     // `.`/`?.` — nothing else can follow the access operator.
-                    // The same applies to the universal `.type` member.
-                    let name =
-                        if let TokenKind::Keyword(Keyword::From | Keyword::Type) = self.peek() {
-                            let span = self.peek_span();
-                            let text = match self.peek() {
-                                TokenKind::Keyword(k) => k.as_str().to_string(),
-                                _ => unreachable!("matched above"),
-                            };
-                            self.pos += 1;
-                            Ident::new(text, span)
-                        } else {
-                            self.expect_identifier("after the access operator")?
+                    // The same applies to the universal `.type` member and to
+                    // `collection.parallel` (design D2/D3 of
+                    // `parallel-cpu-regions`), the adapter that runs one
+                    // pipeline chain across cores.
+                    let name = if let TokenKind::Keyword(
+                        Keyword::From | Keyword::Type | Keyword::Parallel,
+                    ) = self.peek()
+                    {
+                        let span = self.peek_span();
+                        let text = match self.peek() {
+                            TokenKind::Keyword(k) => k.as_str().to_string(),
+                            _ => unreachable!("matched above"),
                         };
+                        self.pos += 1;
+                        Ident::new(text, span)
+                    } else {
+                        self.expect_identifier("after the access operator")?
+                    };
                     object = Expr::Field(FieldExpr {
                         span: object.span().to(name.span),
                         object: Box::new(object),

@@ -77,6 +77,12 @@ pub struct CheckedProgram {
     /// names a type, not a function — lowering emits the runtime validation
     /// call instead of resolving the path as a value.
     pub temporal_constructions: std::collections::HashSet<Span>,
+    /// `.parallel` adapter accesses (`collection.parallel`, design D2/D3 of
+    /// `parallel-cpu-regions`), by the field expression's span. Typed
+    /// identically to `collection` itself (spec `zirk-type-system`, "adapter
+    /// chain type") — this records only that lowering should run the chain
+    /// rooted here across the worker pool instead of sequentially.
+    pub parallel_adapter_accesses: std::collections::HashSet<Span>,
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     pub type_params: Vec<TypeParamInfo>,
@@ -542,6 +548,8 @@ struct Checker<'a> {
     enum_static_accesses: std::collections::HashSet<Span>,
     /// See [`CheckedProgram::temporal_constructions`].
     temporal_constructions: std::collections::HashSet<Span>,
+    /// See [`CheckedProgram::parallel_adapter_accesses`].
+    parallel_adapter_accesses: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
     /// Use sites whose written name differs from the declaration's.
@@ -590,6 +598,11 @@ struct Checker<'a> {
     /// (design D3, roadmap Phase 4e). Zero means an extern call is still
     /// missing its irreversible-effect boundary even inside `unsafe`.
     commit_depth: u32,
+    /// How many `parallel {}` regions enclose the statement being checked
+    /// (design D5 of `parallel-cpu-regions`). Zero means I/O, `spawn`,
+    /// `concurrent {}`, and `Timer.*` are all still legal. Mirrors
+    /// `unsafe_depth` exactly.
+    parallel_depth: u32,
     /// Captures collected for the lambda being checked, innermost last.
     capture_stack: Vec<Vec<Capture>>,
     /// The name of a recursive lambda's own binding, set only around
@@ -832,6 +845,7 @@ impl<'a> Checker<'a> {
             scalar_static_accesses: std::collections::HashSet::new(),
             enum_static_accesses: std::collections::HashSet::new(),
             temporal_constructions: std::collections::HashSet::new(),
+            parallel_adapter_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
@@ -843,6 +857,7 @@ impl<'a> Checker<'a> {
             in_main_scope: false,
             unsafe_depth: 0,
             commit_depth: 0,
+            parallel_depth: 0,
             capture_stack: Vec::new(),
             recursive_binding: None,
             current_throws: Vec::new(),
@@ -1142,6 +1157,7 @@ impl<'a> Checker<'a> {
             scalar_static_accesses: self.scalar_static_accesses,
             enum_static_accesses: self.enum_static_accesses,
             temporal_constructions: self.temporal_constructions,
+            parallel_adapter_accesses: self.parallel_adapter_accesses,
             aliases: self.aliases,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -6780,6 +6796,7 @@ impl<'a> Checker<'a> {
             // pass is reached, still walk the body so ordinary diagnostics
             // are never skipped merely because it is structurally grouped.
             Stmt::Concurrent(s) => self.check_concurrent(s),
+            Stmt::Parallel(s) => self.check_parallel_block(s),
             Stmt::LocalClass(decl) => {
                 self.check_local_class(decl);
                 false
@@ -6792,6 +6809,7 @@ impl<'a> Checker<'a> {
     /// checked; that gives users the post-join names without leaking them into
     /// ordinary nested blocks.
     fn check_concurrent(&mut self, scope: &ConcurrentBlock) -> bool {
+        self.reject_in_parallel_region(scope.span, "`concurrent {}`");
         self.concurrent_depth += 1;
         self.scopes.push();
 
@@ -7385,6 +7403,11 @@ impl<'a> Checker<'a> {
                         return true;
                     }
                 }
+                Stmt::Parallel(s) => {
+                    if self.stmts_mutate_receiver(ctx, &s.body.statements, aliases) {
+                        return true;
+                    }
+                }
                 // A local class body is its own function scope: it cannot
                 // mutate the enclosing method's receiver.
                 Stmt::LocalClass(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
@@ -7557,6 +7580,7 @@ impl<'a> Checker<'a> {
             }),
             Expr::Unsafe(u) => self.stmts_mutate_receiver(ctx, &u.body.statements, aliases),
             Expr::Commit(c) => self.stmts_mutate_receiver(ctx, &c.body.statements, aliases),
+            Expr::Parallel(p) => self.stmts_mutate_receiver(ctx, &p.body.statements, aliases),
             Expr::Spawn(s) => match &s.body {
                 SpawnBody::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
                 SpawnBody::Block(b) => self.stmts_mutate_receiver(ctx, &b.statements, aliases),
@@ -7601,6 +7625,169 @@ impl<'a> Checker<'a> {
         let returns = self.check_block(&stmt.body);
         self.unsafe_depth -= 1;
         returns
+    }
+
+    /// `parallel { ... }` (design D2/D3/D5 of `parallel-cpu-regions`): a
+    /// CPU-only region. Its `cores`/`chunk` options are checked, its body
+    /// checked normally, and any I/O, suspension, `spawn`, or `concurrent {}`
+    /// reached while `parallel_depth > 0` is rejected at its own use site
+    /// (`Self::reject_in_parallel_region`).
+    fn check_parallel_block(&mut self, stmt: &ParallelBlock) -> bool {
+        self.check_parallel_options(&stmt.options);
+        self.parallel_depth += 1;
+        // A barrier scope (`Self::begin_capture_scope`, shared with
+        // `spawn`/lambdas) is what makes a name resolved from outside the
+        // region register in `self.capture_stack` — the only way to find out
+        // which enclosing bindings the region boundary needs to check
+        // (design D5). It also isolates `loop_depth`, which is correct here:
+        // `break`/`continue` cannot reach past a `parallel` region into a
+        // loop outside it.
+        let enclosing_depth = self.begin_capture_scope();
+        let returns = self.check_block(&stmt.body);
+        let captures = self.finish_capture_scope(enclosing_depth);
+        self.check_parallel_boundary(stmt.span, &captures);
+
+        // Registered for `zirk-ir` (task 6.1) the same way a `spawn`/
+        // `concurrent` branch body is: when this region's body is exactly one
+        // auto-parallelized `for` loop over an `Array`/`List`, lowering
+        // outlines the loop body into its own function taking these captures
+        // plus the loop element, mirroring `Self::check_spawn`. `returns` is
+        // `Void` regardless of the block's own type — the interim
+        // work-splitting lowering only supports a `for` used for effect, and
+        // an unsupported shape simply never looks this entry up.
+        self.fn_types.push(FnType {
+            params: Vec::new(),
+            returns: Type::VOID,
+        });
+        let fn_type = (self.fn_types.len() - 1) as u32;
+        self.lambdas.insert(
+            stmt.span,
+            LambdaInfo {
+                captures,
+                fn_type,
+                recursive_binding: None,
+            },
+        );
+
+        self.parallel_depth -= 1;
+        returns
+    }
+
+    /// `parallel { ... }` used where a value is expected — see
+    /// [`Self::check_parallel_block`] for the shared option/region rules.
+    fn check_parallel_expr(&mut self, e: &ParallelBlock) -> Type {
+        self.check_parallel_options(&e.options);
+        self.parallel_depth += 1;
+        let enclosing_depth = self.begin_capture_scope();
+        let ty = self.check_block_value(&e.body);
+        let captures = self.finish_capture_scope(enclosing_depth);
+        self.check_parallel_boundary(e.span, &captures);
+        self.parallel_depth -= 1;
+        ty
+    }
+
+    /// Transfer/Share at the `parallel` boundary (design D5, spec
+    /// `parallel-regions` "Transfer and Share at the `parallel` boundary"):
+    /// a captured value or projection copies in and a strict-immutable
+    /// complete reference may be shared, but a `mut` reference-type binding
+    /// the enclosing scope still holds is exactly the shape of alias the
+    /// `mut`/`inmut::strict` matrix (`Self::check_strict_alias`) already
+    /// polices elsewhere, so it is rejected here with the same diagnostic.
+    fn check_parallel_boundary(&mut self, span: Span, captures: &[Capture]) {
+        for capture in captures {
+            if !self.is_reference_type(capture.ty) {
+                continue;
+            }
+            let Some(resolved) = self.scopes.resolve(&capture.name) else {
+                continue;
+            };
+            if resolved.binding.mutability == Mutability::Mutable {
+                self.error(
+                    codes::STRICT_ALIAS_VIOLATION,
+                    span,
+                    format!(
+                        "`{}` would be a mutable alias shared with this `parallel` region",
+                        capture.name
+                    ),
+                    format!(
+                        "`{}` was declared `mut`, and a `parallel` region runs its work across worker threads that would alias it",
+                        capture.name
+                    ),
+                    Some(format!(
+                        "transfer `{0}` into the region, declare it `inmut::strict` to share it, clone it, or send it through a channel",
+                        capture.name
+                    )),
+                );
+            }
+        }
+    }
+
+    /// `cores`/`chunk` option typing (spec `zirk-type-system`, "Parallel
+    /// block and adapter typing"): `cores` accepts `Int` or an inclusive
+    /// `Int` range; `chunk` accepts `Int`. `cores: 0` is rejected outright —
+    /// a region with zero worker threads can never make progress.
+    fn check_parallel_options(&mut self, options: &[(Ident, Expr)]) {
+        for (name, value) in options {
+            let ty = self.check_expr(value);
+            let is_int = matches!(ty.base, Base::Int(_));
+            let is_int_range = matches!(ty.base, Base::Range(id) if self
+                .range_types
+                .get(id as usize)
+                .is_some_and(|elem| matches!(elem.base, Base::Int(_))));
+
+            match name.name.as_str() {
+                "cores" if !is_int && !is_int_range && !ty.is_unknown() => {
+                    self.error(
+                        codes::PARALLEL_OPTION_TYPE,
+                        value.span(),
+                        "`cores` must be an `Int` or an inclusive `Int` range",
+                        format!("found `{}`", self.name(ty)),
+                        Some("use a positive `Int` count, a negative `Int` offset from all cores, or `A..=B`".into()),
+                    );
+                }
+                "cores" => {
+                    if let Expr::Int(lit) = value
+                        && lit.value == 0
+                    {
+                        self.error(
+                            codes::PARALLEL_OPTION_TYPE,
+                            value.span(),
+                            "`cores: 0` leaves the region with no worker threads",
+                            "a `parallel` region needs at least one worker thread to make progress",
+                            Some("use a positive count, omit `cores` for all of them, or use `-N` to reserve some".into()),
+                        );
+                    }
+                }
+                "chunk" if !is_int && !ty.is_unknown() => {
+                    self.error(
+                        codes::PARALLEL_OPTION_TYPE,
+                        value.span(),
+                        "`chunk` must be an `Int`",
+                        format!("found `{}`", self.name(ty)),
+                        None,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Rejects `construct_name` when it is reached inside a `parallel`
+    /// region (design D5, spec `parallel-regions` "A `parallel` region
+    /// performs no I/O and no suspension"): pool threads have no safe
+    /// points, so I/O, suspension, `spawn`, and `concurrent {}` are all
+    /// statically illegal there.
+    fn reject_in_parallel_region(&mut self, span: Span, construct_name: &str) {
+        if self.parallel_depth == 0 {
+            return;
+        }
+        self.error(
+            codes::PARALLEL_REGION_IO,
+            span,
+            format!("{construct_name} is not allowed inside a `parallel` region"),
+            "`parallel` is for CPU work only; pool threads have no safe points for I/O or suspension",
+            Some("move this to a `concurrent {}` block, or do it before/after the `parallel` region".into()),
+        );
     }
 
     /// `commit { ... }` (roadmap Phase 4e, design D3): requires an enclosing
@@ -9150,6 +9337,7 @@ impl<'a> Checker<'a> {
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
+                self.reject_in_parallel_region(e.span, "`println`");
                 let ty = self.check_expr(&e.arg);
                 self.require_printable(ty, e.arg.span());
                 Type::VOID
@@ -9158,6 +9346,7 @@ impl<'a> Checker<'a> {
             Expr::Interpolated(e) => self.check_interpolated(e),
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
+            Expr::Parallel(e) => self.check_parallel_expr(e),
             // The dedicated spawn rule below will replace this traversal as
             // soon as Job typing is installed.  Keep the body checked now so
             // adding the AST node does not hide errors from the checker.
@@ -9190,6 +9379,7 @@ impl<'a> Checker<'a> {
     /// function/capture boundary used by lambdas, so it cannot inherit an
     /// enclosing loop's `break`/`continue` targets.
     fn check_spawn(&mut self, expr: &SpawnExpr) -> Type {
+        self.reject_in_parallel_region(expr.span, "`spawn`");
         if self.concurrent_depth == 0 && !self.in_main_scope {
             self.error(
                 codes::SPAWN_OUTSIDE_SCOPE,
@@ -12136,6 +12326,17 @@ impl<'a> Checker<'a> {
         }
 
         let object = self.check_expr(&expr.object);
+
+        // `collection.parallel` (design D2/D3 of `parallel-cpu-regions`):
+        // typed identically to `collection` itself (spec `zirk-type-system`,
+        // "adapter chain type") — only recorded, so the rest of the chain
+        // (`.map`/`.filter`/`.reduce`/...) type-checks exactly as it would
+        // without the adapter.
+        if expr.name.name == "parallel" && !expr.safe && self.element_type_of(object).is_some() {
+            self.parallel_adapter_accesses.insert(expr.span);
+            return object;
+        }
+
         self.member_type(object, &expr.name, expr.object.span(), expr.safe)
     }
 
@@ -13204,6 +13405,7 @@ impl<'a> Checker<'a> {
             Stmt::Unsafe(s) => self.check_recursive_reference_block(&s.body, name, nested),
             Stmt::Commit(s) => self.check_recursive_reference_block(&s.body, name, nested),
             Stmt::Concurrent(s) => self.check_recursive_reference_block(&s.body, name, nested),
+            Stmt::Parallel(s) => self.check_recursive_reference_block(&s.body, name, nested),
         }
     }
 
@@ -13363,6 +13565,7 @@ impl<'a> Checker<'a> {
             Expr::Transfer(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Unsafe(e) => self.check_recursive_reference_block(&e.body, name, nested),
             Expr::Commit(e) => self.check_recursive_reference_block(&e.body, name, nested),
+            Expr::Parallel(e) => self.check_recursive_reference_block(&e.body, name, nested),
             Expr::Spawn(e) => match &e.body {
                 SpawnBody::Expr(body) => self.check_recursive_reference(body, name, nested),
                 SpawnBody::Block(body) => self.check_recursive_reference_block(body, name, nested),
@@ -14948,6 +15151,8 @@ impl<'a> Checker<'a> {
 
     /// Compiler-known `Timer` static operations.
     fn check_timer_call(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        self.reject_in_parallel_region(expr.span, &format!("`Timer.{}`", field.name.name));
+
         let expected_count = if field.name.name == "sleep" { 1 } else { 2 };
         if expr.args.len() != expected_count || expr.args.iter().any(|arg| arg.name.is_some()) {
             self.error(
@@ -15023,6 +15228,95 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         Type::of(Base::Job(self.intern_job_type(shape.returns)))
+    }
+
+    /// `Parallel.each(coll, fn)` (spec `parallel-regions`): runs `fn` per
+    /// element of `coll` in parallel and returns `List<R>` in input order,
+    /// for `fn: (T): R`. `coll`'s element type is read off with the same
+    /// `Self::element_type_of` a `for ... in` loop uses; `fn` follows
+    /// `Self::check_timer_call`'s lambda-literal requirement, since its body
+    /// is what lowering lifts into a pool-thread branch.
+    fn check_parallel_each_call(&mut self, expr: &CallExpr) -> Type {
+        if expr.args.len() != 2 || expr.args.iter().any(|arg| arg.name.is_some()) {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Parallel.each` takes 2 positional arguments",
+                format!("received {}", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let coll = self.check_expr(&expr.args[0].value);
+        let Some(element) = self.element_type_of(coll) else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                "`Parallel.each`'s first argument must be an iterable collection",
+                format!("found `{}`", self.name(coll)),
+                None,
+            );
+            self.check_expr(&expr.args[1].value);
+            return Type::UNKNOWN;
+        };
+
+        let thunk = self.check_expr(&expr.args[1].value);
+        if !matches!(&expr.args[1].value, Expr::Lambda(_)) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a `Parallel.each` callback must be written as a lambda",
+                format!("found `{}`", self.name(thunk)),
+                Some("write `(item: T): R => ...` instead of passing the function by name".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let Base::Function(fn_id) = thunk.base else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a `Parallel.each` callback must take exactly one argument",
+                format!("found `{}`", self.name(thunk)),
+                Some("write `(item: T): R => ...`".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let shape = self.fn_types[fn_id as usize].clone();
+        if shape.params.len() != 1 || !shape.params[0].accepts(element) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                "a `Parallel.each` callback must take exactly one argument of the collection's element type",
+                format!(
+                    "the collection yields `{}`, and the callback takes {} argument(s)",
+                    self.name(element),
+                    shape.params.len()
+                ),
+                Some("write `(item: T): R => ...`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        // `Parallel.each` is pure CPU work: legal even nested inside a
+        // `parallel` region (design D5's "Nested `parallel` regions" —
+        // the inner call shares the outer's pool), unlike I/O/suspension.
+        //
+        // Its own lowering is `NOT_LOWERED` (`Self::not_lowered`'s own doc):
+        // the grammar and this typing exist, but `zirk-ir` only lowers the
+        // auto-parallel-`for` shape a bare `parallel { for x in coll { } }`
+        // takes (task 6.1) — a call-site dispatch is a different shape, not
+        // yet wired. Reported here, at the type that already exists, rather
+        // than left to reach `zirk-ir` and panic on an undeclared callee.
+        self.not_lowered(
+            expr.span,
+            "`Parallel.each`",
+            "use a `parallel { for item in coll { ... } }` region instead for now",
+        );
+        Type::of(Base::List(self.intern_list_type(shape.returns)))
     }
 
     /// `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
@@ -15551,6 +15845,18 @@ impl<'a> Checker<'a> {
             && matches!(field.name.name.as_str(), "sleep" | "after" | "every")
         {
             return self.check_timer_call(expr, field);
+        }
+
+        // `Parallel.each(coll, fn)` (design D2/D3 of `parallel-cpu-regions`,
+        // spec `parallel-regions` "`.parallel` adapter and `Parallel.each`"):
+        // a compiler-known static namespace, same treatment as `Timer` above.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Parallel"
+            && self.scopes.lookup(&base.name).is_none()
+            && field.name.name == "each"
+        {
+            return self.check_parallel_each_call(expr);
         }
 
         // `Int32.parse("5")`, `Float64.parse("1.5")`, `Regex.parse(p)`

@@ -4802,6 +4802,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Stmt::Unsafe(s) => self.lower_unsafe_block(&s.body),
             ast::Stmt::Commit(s) => self.lower_commit_block(&s.body),
             ast::Stmt::Concurrent(s) => self.lower_concurrent(s),
+            ast::Stmt::Parallel(s) => self.lower_parallel_block(s),
             // A local class emits nothing where it is declared: its members
             // lower as ordinary functions through `class_decls`, and its
             // name resolves to the same layout a top-level one gets.
@@ -7267,6 +7268,7 @@ impl<'a> FunctionLowering<'a> {
             // statement form.
             ast::Expr::Unsafe(u) => self.lower_unsafe_block_value(&u.body),
             ast::Expr::Commit(c) => self.lower_commit_block_value(&c.body),
+            ast::Expr::Parallel(p) => self.lower_parallel_block_value(p),
             ast::Expr::Spawn(s) => self.lower_spawn(s),
             ast::Expr::Transfer(e) => self.lower_transfer(e, span),
 
@@ -10704,6 +10706,341 @@ impl<'a> FunctionLowering<'a> {
         let value = self.lower_block_value(block);
         self.end_unsafe_frame(journal_slot, block.span);
         value
+    }
+
+    /// `parallel { ... }` in statement position (design D1/D2 of
+    /// `parallel-cpu-regions`).
+    ///
+    /// Tries the real work-splitting lowering first
+    /// ([`Self::try_lower_parallel_for`]); everything that shape does not
+    /// cover falls back to running the body sequentially, inline, on the
+    /// calling thread — exactly like an ordinary block. `cores`/`chunk` are
+    /// still lowered for their side effects in the fallback so an operand
+    /// with one (e.g. a call) is not silently dropped.
+    fn lower_parallel_block(&mut self, stmt: &ast::ParallelBlock) {
+        if self.try_lower_parallel_for(stmt) {
+            return;
+        }
+        for (_, value) in &stmt.options {
+            self.lower_expr_for_effect(value);
+        }
+        self.lower_block(&stmt.body);
+    }
+
+    /// Whether `block` contains a `return`/`break`/`continue`/`throw`
+    /// statement, or an assignment/increment whose target names one of
+    /// `captured`, anywhere in its (possibly nested) control flow — see
+    /// [`Self::try_lower_parallel_for`]'s own doc for why any of these
+    /// disqualifies a loop from the auto-parallel lowering. The assignment
+    /// check exists because a capture is copied into each chunk
+    /// independently (`Self::lower_branch_start`'s own capture mechanism,
+    /// reused here): writing to a captured *scalar* name (a reference-typed
+    /// one is already rejected at the region boundary, `Self::
+    /// check_parallel_boundary`) would silently mutate that chunk's own
+    /// private copy and go nowhere — correct under the sequential fallback,
+    /// silently wrong here, so this bails to that fallback instead.
+    /// Deliberately syntactic and over-conservative throughout: it does not
+    /// distinguish a `break` targeting a nested loop from one targeting this
+    /// one (both disqualify), and it does not look inside a lambda literal's
+    /// body (whose own captures and control flow are its own).
+    fn block_has_loop_incompatible_control_flow(
+        block: &ast::Block,
+        captured: &std::collections::HashSet<&str>,
+    ) -> bool {
+        block
+            .statements
+            .iter()
+            .any(|stmt| Self::stmt_has_loop_incompatible_control_flow(stmt, captured))
+    }
+
+    fn stmt_has_loop_incompatible_control_flow(
+        stmt: &ast::Stmt,
+        captured: &std::collections::HashSet<&str>,
+    ) -> bool {
+        match stmt {
+            ast::Stmt::Return(_)
+            | ast::Stmt::Break(_)
+            | ast::Stmt::Continue(_)
+            | ast::Stmt::Throw(_) => true,
+            ast::Stmt::Assign(s) => {
+                matches!(&s.target, ast::AssignTarget::Name(name) if captured.contains(name.name.as_str()))
+            }
+            ast::Stmt::MultiAssign(s) => s.targets.iter().any(|target| {
+                matches!(target, ast::AssignTarget::Name(name) if captured.contains(name.name.as_str()))
+            }),
+            ast::Stmt::Expr(e) => matches!(
+                &e.expr,
+                ast::Expr::Increment(inc)
+                    if matches!(&inc.target, ast::AssignTarget::Name(name) if captured.contains(name.name.as_str()))
+            ),
+            ast::Stmt::If(s) => {
+                Self::block_has_loop_incompatible_control_flow(&s.then_branch, captured)
+                    || match &s.else_branch {
+                        Some(ast::ElseBranch::Block(b)) => {
+                            Self::block_has_loop_incompatible_control_flow(b, captured)
+                        }
+                        Some(ast::ElseBranch::If(i)) => Self::stmt_has_loop_incompatible_control_flow(
+                            &ast::Stmt::If((**i).clone()),
+                            captured,
+                        ),
+                        None => false,
+                    }
+            }
+            ast::Stmt::Loop(s) => Self::block_has_loop_incompatible_control_flow(&s.body, captured),
+            ast::Stmt::ForIn(s) => Self::block_has_loop_incompatible_control_flow(&s.body, captured),
+            ast::Stmt::Block(b) => Self::block_has_loop_incompatible_control_flow(b, captured),
+            ast::Stmt::Try(s) => {
+                Self::block_has_loop_incompatible_control_flow(&s.body, captured)
+                    || s.catches
+                        .iter()
+                        .any(|c| Self::block_has_loop_incompatible_control_flow(&c.body, captured))
+                    || s.finally
+                        .as_ref()
+                        .is_some_and(|f| Self::block_has_loop_incompatible_control_flow(f, captured))
+            }
+            ast::Stmt::Unsafe(u) => Self::block_has_loop_incompatible_control_flow(&u.body, captured),
+            ast::Stmt::Commit(c) => Self::block_has_loop_incompatible_control_flow(&c.body, captured),
+            ast::Stmt::Concurrent(c) => {
+                Self::block_has_loop_incompatible_control_flow(&c.body, captured)
+            }
+            ast::Stmt::Parallel(p) => Self::block_has_loop_incompatible_control_flow(&p.body, captured),
+            ast::Stmt::Let(_) | ast::Stmt::MultiLet(_) | ast::Stmt::LocalClass(_) => false,
+        }
+    }
+
+    /// The work-splitting lowering for `parallel { for x in coll { ... } }`
+    /// (design D2, task 6.1's interim lowering — see
+    /// [`InstKind::ParallelForStart`]'s own doc for the scope this covers and
+    /// does not). Returns `true` when it applied; `false` means the caller
+    /// falls back to the ordinary sequential lowering.
+    fn try_lower_parallel_for(&mut self, region: &ast::ParallelBlock) -> bool {
+        let [ast::Stmt::ForIn(for_in)] = region.body.statements.as_slice() else {
+            return false;
+        };
+        let iterable_ty = self.type_of(&for_in.iterable, for_in.iterable.span());
+        if !matches!(iterable_ty, IrType::Array(_) | IrType::List(_)) {
+            return false;
+        }
+
+        let span = region.span;
+        let info = self
+            .checked
+            .lambdas
+            .get(&region.span)
+            .expect("the checker records a parallel region's captures (Self::check_parallel_block)")
+            .clone();
+
+        // Each chunk here is one dispatch of the outlined loop body, run
+        // independently on any worker thread that happens to be free: there
+        // is no shared "keep going" state a `break` could act on, no
+        // enclosing function for a `return` to leave (the outlined function
+        // *is* the chunk, not the caller), an uncaught `throw` would set
+        // only that worker's own thread-local pending-exception slot
+        // (`crates/zirk-runtime/src/exceptions.rs`) with nothing here ever
+        // checking it, and a captured *scalar* a chunk reassigns mutates
+        // only that chunk's own private copy and goes nowhere (a captured
+        // reference-typed name is already rejected at the region boundary,
+        // `Self::check_parallel_boundary`). Each is correct under the
+        // sequential fallback and silently wrong here, so a loop whose body
+        // might do any of them is not auto-parallelized. Checked
+        // over-conservatively (see `Self::block_has_loop_incompatible_control_flow`'s
+        // own doc) — never unsound, only occasionally too cautious or, for
+        // an exception a *called* function raises without a `throw` keyword
+        // textually inside this loop, silently short of parallelizing
+        // something that in fact could not safely be.
+        let captured_names: std::collections::HashSet<&str> = info
+            .captures
+            .iter()
+            .map(|capture| capture.name.as_str())
+            .collect();
+        if Self::block_has_loop_incompatible_control_flow(&for_in.body, &captured_names) {
+            return false;
+        }
+
+        // `cores` resolves to the one-`i64`-sign encoding
+        // `InstKind::ParallelForStart`/`zirk_rt_parallel_for` document;
+        // absent defaults to "all cores" (`budget_kind = 0`). `chunk` is
+        // grammar-reserved only (design's own Open Questions) — evaluated
+        // for effect and otherwise ignored, same as any other option.
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let mut budget_kind = 0u8;
+        let mut budget_a = self.emit(InstKind::ConstInt(0), i64_ty, span);
+        let mut budget_b = budget_a;
+        for (name, value) in &region.options {
+            if name.name != "cores" {
+                self.lower_expr_for_effect(value);
+                continue;
+            }
+            if let ast::Expr::Range(range) = value {
+                budget_kind = 2;
+                budget_a = self.lower_expr_as(&range.start, i64_ty);
+                budget_b = self.lower_expr_as(&range.end, i64_ty);
+            } else {
+                budget_kind = 1;
+                budget_a = self.lower_expr_as(value, i64_ty);
+            }
+        }
+
+        // The collection is evaluated once, here in the region's own
+        // function, and becomes an extra synthetic capture appended after
+        // the checker's own list: the lifted body indexes it itself
+        // (`InstKind::ArrayListLoad`), once per chunk.
+        let collection = self.lower_expr(&for_in.iterable);
+
+        let capture_slots: Vec<SlotId> = info
+            .captures
+            .iter()
+            .map(|capture| self.lookup_slot(&capture.name))
+            .collect();
+        let mut capture_types: Vec<IrType> = capture_slots
+            .iter()
+            .map(|slot| self.slot_type(*slot))
+            .collect();
+        let mut captures: Vec<Operand> = capture_slots
+            .iter()
+            .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+            .collect();
+        let mut names: Vec<String> = info.captures.iter().map(|c| c.name.clone()).collect();
+        capture_types.push(iterable_ty);
+        captures.push(collection);
+        names.push("<parallel_for_collection>".to_string());
+
+        let id = info.fn_type;
+        let name = format!("parallel_for.{}.{}", span.file.0, span.start);
+
+        self.module.closures[id as usize] = ClosureLayout {
+            captures: capture_types.clone(),
+            params: Vec::new(),
+            returns: IrType::Void,
+        };
+
+        let lifted =
+            self.lift_parallel_for_body(&name, &names, &capture_types, for_in, iterable_ty, span);
+        self.lifted.push(lifted);
+
+        let callable = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures,
+            },
+            IrType::Callable(id),
+            span,
+        );
+
+        let length = self.emit(
+            if matches!(iterable_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(collection)
+            } else {
+                InstKind::ListLength(collection)
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let count = self.emit(InstKind::IntCast(length), i64_ty, span);
+
+        self.emit_effect(
+            InstKind::ParallelForStart {
+                target: name,
+                body: callable,
+                count,
+                budget_kind,
+                budget_a,
+                budget_b,
+            },
+            span,
+        );
+        true
+    }
+
+    /// Lifts a `parallel`-region `for` loop's body to its own module
+    /// function, mirroring [`Self::lift_branch_body`]: leading params are
+    /// `capture_names`/`capture_types` (the checker's own captures, plus the
+    /// synthetic collection appended last by
+    /// [`Self::try_lower_parallel_for`]), and a trailing `Int64` chunk index
+    /// is added here. The function's own first two instructions recover
+    /// this chunk's element (`InstKind::ArrayListLoad`) and bind it under
+    /// the loop's own binding name before the loop body itself lowers
+    /// exactly as it would inline.
+    fn lift_parallel_for_body(
+        &mut self,
+        name: &str,
+        capture_names: &[String],
+        capture_types: &[IrType],
+        for_in: &ast::ForInStmt,
+        iterable_ty: IrType,
+        span: Span,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = IrType::Void;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+
+        let mut slots: Vec<SlotId> = capture_names
+            .iter()
+            .zip(capture_types)
+            .map(|(name, ty)| inner.declare_slot(name, *ty, span))
+            .collect();
+        let collection_slot = *slots
+            .last()
+            .expect("try_lower_parallel_for appends the collection as the last capture");
+        let index_slot =
+            inner.declare_slot("<parallel_for_index>", IrType::Int(IntWidth::I64), span);
+        slots.push(index_slot);
+
+        let collection_value = inner.emit(InstKind::Load(collection_slot), iterable_ty, span);
+        let index_value = inner.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let index_u64 = inner.emit(
+            InstKind::IntCast(index_value),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let element_ty = inner.array_list_element_type(iterable_ty);
+        let element = inner.emit(
+            InstKind::ArrayListLoad {
+                receiver: collection_value,
+                index: index_u64,
+            },
+            element_ty,
+            span,
+        );
+        let binding = inner.declare_slot(&for_in.binding.name, element_ty, for_in.binding.span);
+        inner.emit_effect(InstKind::Store(binding, element), for_in.binding.span);
+
+        inner.lower_block(&for_in.body);
+        if !inner.is_terminated(inner.current) {
+            inner.terminate(Terminator::Return(None));
+        }
+
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+
+        Function {
+            name: name.to_string(),
+            params: slots,
+            return_type: IrType::Void,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `parallel { ... }` in expression-value position — see
+    /// [`Self::lower_parallel_block`] for the interim sequential lowering.
+    fn lower_parallel_block_value(&mut self, stmt: &ast::ParallelBlock) -> Operand {
+        for (_, value) in &stmt.options {
+            self.lower_expr_for_effect(value);
+        }
+        self.lower_block_value(&stmt.body)
     }
 
     /// `commit { ... }`'s own entry (design D2): durably commits the
@@ -15773,6 +16110,15 @@ impl<'a> FunctionLowering<'a> {
     /// The checker already decided which one it is and recorded the answer, so
     /// this reads the decision rather than repeating it with the same tables.
     fn lower_field(&mut self, expr: &ast::FieldExpr, span: Span) -> Operand {
+        // `collection.parallel` (design D2/D3 of `parallel-cpu-regions`):
+        // the checker types this identically to `collection` itself
+        // (`Self::check_field`'s own doc — "adapter chain type") and only
+        // records the span in `parallel_adapter_accesses`, so there is
+        // nothing to lower here beyond the object itself.
+        if self.checked.parallel_adapter_accesses.contains(&expr.span) {
+            return self.lower_expr(&expr.object);
+        }
+
         // Universal `.type` member: materialise the type's name as a `String`.
         if expr.name.name == "type" {
             let ty = self
@@ -17003,6 +17349,11 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        // `collection.parallel` — see `Self::lower_field`'s own note.
+        if self.checked.parallel_adapter_accesses.contains(&expr.span) {
+            return self.type_of(&expr.object, expr.object.span());
+        }
+
         // `ClassName.field` that names a `static` field of a user class.
         if let ast::Expr::Path(base) = &*expr.object
             && let Some(class_id) = self
@@ -20017,6 +20368,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Interpolated(_) => IrType::String,
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
             ast::Expr::Commit(c) => self.block_value_type(&c.body),
+            ast::Expr::Parallel(p) => self.block_value_type(&p.body),
             // `spawn expr : Job<T>`; the erased one-word handle at the IR level.
             ast::Expr::Spawn(_) => IrType::Job,
         }

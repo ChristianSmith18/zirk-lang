@@ -173,8 +173,30 @@ does not require an effect or function-color system. In this document, “task�
 therefore denotes an internal scheduler coroutine unless a superseded language
 surface is being discussed historically.
 
+## Addendum — `parallel-cpu-regions` (Phase 5 steps 4–6, worker pool only)
+
+The deferred note *"the full stop-the-world question returns with steps 4–6"* is
+discharged, scoped to the `parallel` surface. `parallel-cpu-regions` adds a
+**second scheduler**: a fixed pool of OS worker threads
+(`crates/zirk-runtime/src/pool.rs`) that runs `parallel` regions. The
+cooperative executor in this ADR stays single-threaded and keeps owning every
+I/O branch; a branch that enters a `parallel` region submits the region's work
+to the pool and blocks cooperatively — other I/O branches keep running — until
+the region joins. Worker threads run only pure-CPU Zirk code with no safe
+points.
+
+The stop-the-world safepoint that this required lives in `ADR-019` and its
+`ADR-003` addendum: an allocation crossing the GC threshold while workers are
+active raises a global request flag; every thread parks at a safepoint (workers
+at `parallel` loop back-edges, the executor at its next scheduling turn); one
+thread walks every branch chain and every parked worker's shadow-stack chain,
+collects, and releases. See
+[ADR-019](./ADR-019-parallel-and-multithreaded-gc.md).
+
 ## Related
 
+- [ADR-019](./ADR-019-parallel-and-multithreaded-gc.md) — the worker pool and the
+  stop-the-world safepoint that discharge this ADR's deferred steps 4–6.
 - [ADR-003](./ADR-003-memoria.md) — the shadow stack and cooperative collection
   this ADR generalizes.
 - [ADR-004](./ADR-004-portabilidad.md) — the target triples the switch shim must

@@ -23,7 +23,9 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::context::{self, TaskContext};
 use crate::failure::fatal;
@@ -54,6 +56,31 @@ fn with_exec<R>(f: impl FnOnce(&mut Executor) -> R) -> R {
     f(unsafe { &mut *ptr })
 }
 
+/// Cross-thread wake channel (`ADR-019` D1). A `parallel` worker signals this
+/// when a region's chunks have all joined, and the collector signals it when a
+/// stop-the-world collection is requested — either way the executor thread
+/// leaves an idle wait promptly instead of only at its 1 ms backstop.
+static POOL_EVENT: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// Woken from a worker thread or the collector — see [`POOL_EVENT`].
+pub fn notify_pool_event() {
+    let (flag, cv) = &POOL_EVENT;
+    *flag.lock().unwrap() = true;
+    cv.notify_all();
+}
+
+/// The executor thread waits here when it has nothing ready to run but a
+/// `parallel` region is still outstanding. `timeout` is a backstop; a
+/// [`notify_pool_event`] wakes it immediately.
+fn wait_pool_event(timeout: Duration) {
+    let (flag, cv) = &POOL_EVENT;
+    let mut set = flag.lock().unwrap();
+    if !*set {
+        set = cv.wait_timeout(set, timeout).unwrap().0;
+    }
+    *set = false;
+}
+
 /// The cooperative executor.
 pub struct Executor {
     registry: TaskRegistry,
@@ -61,6 +88,10 @@ pub struct Executor {
     ready: VecDeque<TaskId>,
     timers: crate::timer::TimerService,
     root: Option<TaskId>,
+    /// Branches suspended inside a `parallel` region: each entry is the
+    /// region's outstanding-chunk counter and the branch to wake when it hits
+    /// zero (`ADR-019` D1, `parallel-cpu-regions`).
+    parallel_regions: Vec<(std::sync::Arc<AtomicUsize>, TaskId)>,
 }
 
 /// The observable state of a scope close attempt. Lowered `ScopeExit` retries
@@ -96,7 +127,24 @@ impl Executor {
             ready: VecDeque::new(),
             timers: crate::timer::TimerService::new(),
             root: None,
+            parallel_regions: Vec::new(),
         }
+    }
+
+    /// Wakes every branch whose `parallel` region has finished, and reports
+    /// whether any region is still outstanding.
+    fn service_parallel_regions(&mut self) -> bool {
+        let mut still_running = Vec::new();
+        for (remaining, owner) in std::mem::take(&mut self.parallel_regions) {
+            if remaining.load(Ordering::SeqCst) == 0 {
+                self.make_ready(owner);
+            } else {
+                still_running.push((remaining, owner));
+            }
+        }
+        let outstanding = !still_running.is_empty();
+        self.parallel_regions = still_running;
+        outstanding
     }
 
     /// Opens a structured-concurrency scope.
@@ -254,6 +302,19 @@ impl Executor {
         self.root = Some(root);
         self.ready.push_back(root);
 
+        // One executor runs at a time, process-wide: a real program runs
+        // `run_with_root` exactly once, and serializing it in the unit-test
+        // binary is what keeps this run's stop-the-world collection from
+        // racing another test's executor over the shared collector state
+        // (`ADR-019`).
+        static GC_WORLD: Mutex<()> = Mutex::new(());
+        let _gc_world = GC_WORLD.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Publish a fresh heap for this run — the executor thread and every
+        // `parallel` worker thread allocate onto it (`crate::collector`'s
+        // `mod heap`). Dropped (and its list freed) when the run ends.
+        let heap_scope = HeapScope::new();
+
         // Publish `self` and drive the loop through `with_exec` only. `self` is
         // not touched again until `drive` returns, so no `&mut Executor` is ever
         // live at the same time as one created inside a task body.
@@ -262,6 +323,7 @@ impl Executor {
         let restore = Restore(previous);
         drive();
         drop(restore);
+        drop(heap_scope);
 
         let mut root_tcb = self
             .registry
@@ -339,6 +401,35 @@ impl Executor {
     }
 }
 
+/// Owns this run's published collector heap. On drop it unpublishes the heap
+/// (so later bootstrap allocations fall back to the thread-local one) and frees
+/// everything still on its list.
+struct HeapScope {
+    heap: Box<crate::collector::PublishedHeap>,
+    _world: crate::collector::WorldGuard,
+}
+
+impl HeapScope {
+    fn new() -> Self {
+        let mut heap = crate::collector::PublishedHeap::new();
+        crate::collector::publish_executor_heap(&mut *heap as *mut _);
+        // The executor thread is now in its own world: its allocations go to
+        // the published heap.
+        let _world = crate::collector::enter_executor_world();
+        HeapScope { heap, _world }
+    }
+}
+
+impl Drop for HeapScope {
+    fn drop(&mut self) {
+        // `_world` drops after this (field order) — but unpublish + free must
+        // see this thread still "in world" is irrelevant; what matters is no
+        // other thread races. Unpublish first, then free the list.
+        crate::collector::unpublish_executor_heap();
+        crate::collector::free_all(&mut self.heap);
+    }
+}
+
 /// Restores the collector hooks (and the previous `EXEC`) on every exit path
 /// of a run, including an unwinding task panic.
 struct Restore(*mut Executor);
@@ -357,11 +448,17 @@ impl Drop for Restore {
 /// and it holds no executor borrow while it does.
 fn drive() {
     loop {
+        // The executor parks at a safepoint at its next scheduling turn so a
+        // stop-the-world collection requested from a `parallel` worker can run
+        // (`ADR-019` D4, `parallel-cpu-regions` task 3.2).
+        crate::collector::safepoint_poll();
         let next = with_exec(|exec| {
             exec.wake_expired_timers();
+            let regions_outstanding = exec.service_parallel_regions();
             match exec.ready.pop_front() {
                 Some(task) => NextStep::Run(task),
-                None if exec.all_tasks_terminal() => NextStep::Done,
+                None if exec.all_tasks_terminal() && !regions_outstanding => NextStep::Done,
+                None if regions_outstanding => NextStep::WaitPool,
                 None => match exec.timers.peek_deadline() {
                     Some(deadline) => NextStep::SleepUntil(deadline),
                     None => NextStep::Unresolvable,
@@ -371,6 +468,10 @@ fn drive() {
         match next {
             NextStep::Run(task) => run_one_turn(task),
             NextStep::Done => break,
+            // A `parallel` region is running on the worker pool and no I/O
+            // branch is ready. Wait for a chunk to join (or a GC request);
+            // the 1 ms is only a backstop, `notify_pool_event` wakes us.
+            NextStep::WaitPool => wait_pool_event(Duration::from_millis(1)),
             NextStep::SleepUntil(deadline) => {
                 let now = Instant::now();
                 if deadline > now {
@@ -390,6 +491,7 @@ fn drive() {
 enum NextStep {
     Run(TaskId),
     Done,
+    WaitPool,
     SleepUntil(Instant),
     Unresolvable,
 }
@@ -584,6 +686,22 @@ pub fn yield_now() {
     suspend_current(WaitReason::Yielded);
 }
 
+/// Suspends the current branch inside a `parallel` region: it has submitted the
+/// region's chunks to the worker pool, and yields the executor thread so other
+/// I/O branches keep running (`ADR-019` D1). The branch wakes when `remaining`
+/// reaches zero — a worker decrements it as each chunk joins and calls
+/// [`notify_pool_event`] on the last one.
+pub fn block_current_on_region(remaining: std::sync::Arc<AtomicUsize>) {
+    let me = CURRENT_TASK
+        .get()
+        .expect("a parallel region runs inside a task body");
+    if remaining.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    with_exec(|exec| exec.parallel_regions.push((remaining, me)));
+    suspend_current(WaitReason::Parallel);
+}
+
 /// Suspends the current task until at least `delay_nanos` from now, letting the
 /// executor run other tasks meanwhile. A negative delay is a fatal error.
 /// (This is the timer safe point `await ... timeout` and `select { after ... }`
@@ -674,6 +792,15 @@ pub fn await_task(target: TaskId) -> usize {
             TaskOutcome::Panicked(payload) => std::panic::resume_unwind(payload),
         }
     })
+}
+
+/// Whether the calling thread is currently running a task body on the
+/// cooperative executor — false on a `parallel` worker thread and during
+/// bootstrap. [`crate::pool`] uses it to decide whether a `parallel` region
+/// can block cooperatively (executor thread) or must run inline (worker
+/// thread, for a nested region).
+pub fn in_task_context() -> bool {
+    CURRENT_TASK.get().is_some()
 }
 
 /// Whether `target` has reached a terminal state. Safe to call on a stale id

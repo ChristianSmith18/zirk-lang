@@ -1,0 +1,60 @@
+// Normative examples for `parallel-cpu-regions`: the `parallel { }` region,
+// its `cores` option, real work-splitting for a `for` loop over a `List`,
+// the `.parallel` adapter, and the region-boundary and no-I/O rules a
+// `parallel` region enforces.
+//
+// Two things the spec describes that this file does *not* demonstrate,
+// because the compiler does not implement them yet: `map`/`filter`/`reduce`/
+// `sum`/`collect`/`for_each` on `List<T>`/`Array<T>` (so no pipeline chain
+// inside a region, and `.parallel` is a typing no-op rather than an actual
+// adapter), and `Parallel.each` (typed by the checker, but not lowered —
+// `codes::NOT_LOWERED`).
+//
+// Run: `zirk run examples/parallel_examples.zrk`
+
+fn compress(name: Int32): Int32 {
+    return name * name;
+}
+
+fn main(): Void {
+    // 1. A `parallel { for x in coll { ... } }` region: real work-splitting
+    //    across the worker pool (`crates/zirk-runtime/src/pool.rs`) when the
+    //    loop body has no `return`/`break`/`continue`/`throw` and does not
+    //    reassign a captured name. The region boundary forbids capturing a
+    //    `mut` reference type, so `files` is shared `inmut::strict`.
+    inmut::strict files: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8];
+    parallel {
+        for name in files {
+            compress(name);
+        }
+    }
+    stdout.println("compressed");
+
+    // 2. The `cores` option: an exact count and a runtime-picked range both
+    //    resolve safely regardless of how many cores this machine has.
+    parallel; cores: 2 {
+        for name in files {
+            compress(name);
+        }
+    }
+    parallel; cores: 1..=4 {
+        for name in files {
+            compress(name);
+        }
+    }
+    stdout.println("cores option ok");
+
+    // 3. `parallel { }` used where a value is expected types as its final
+    //    expression.
+    inmut total: Int32 = parallel { compress(6) };
+    stdout.println(total);
+
+    // 4. `.parallel` on a collection: today a pure typing no-op (see this
+    //    file's own header note) — reading through it behaves identically
+    //    to reading the collection directly.
+    mut count: Int32 = 0;
+    for name in files.parallel {
+        count = count + 1;
+    }
+    stdout.println(count);
+}

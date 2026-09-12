@@ -1,0 +1,7 @@
+// `cores: 0` is a compile-time error (spec `parallel-regions`, "The `cores`
+// option"): a region with zero worker threads can never make progress.
+
+fn main(): Void {
+    parallel; cores: 0 {
+    }
+}

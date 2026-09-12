@@ -601,13 +601,32 @@ fn gc_reference_paths(
         // `fase-4e-weak`) — the path stops at the field itself; the
         // collector's own mark pass is what stops short of tracing *through*
         // the WeakCell (design D2), not this table.
+        // `Array<T>`/`List<T>`/`Range`/`Map<K,V>`/`Set<T>` are each a single
+        // managed pointer at the slot itself (their own descriptor is what
+        // tells the collector's `mark_object` how to trace *through* them,
+        // same as `Object`/`Contract` above) — not decomposed into further
+        // fields here. Missing these five arms means `IrType::
+        // is_managed_reference`'s zero-init/gc_roots pass still walks such a
+        // slot and zero-initializes it (safe on its own), but no root
+        // address is ever registered for it: a local `List<T>` (etc.)
+        // variable would be invisible to every collection, so an
+        // allocation-triggered sweep could reclaim it — and anything only
+        // reachable through it — while it is still very much in use. Found
+        // and fixed while investigating a real, reproducible `List<T>`
+        // data-loss/crash bug under GC pressure (an ordinary `for x in list`
+        // with no `parallel` involved).
         ir::IrType::Object(_)
         | ir::IrType::Contract(_)
         | ir::IrType::Weak(_)
         | ir::IrType::Dependent(_)
         | ir::IrType::Pin(_)
         | ir::IrType::String
-        | ir::IrType::Char => out.push(prefix.clone()),
+        | ir::IrType::Char
+        | ir::IrType::Array(_)
+        | ir::IrType::List(_)
+        | ir::IrType::Range
+        | ir::IrType::Map(_)
+        | ir::IrType::Set(_) => out.push(prefix.clone()),
         ir::IrType::Nullable(n) => {
             let inner = n.inner();
             if inner.is_managed_reference(module) {
@@ -1480,6 +1499,89 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.builder
             .build_return(Some(&packed))
             .expect("branch thunk return");
+
+        self.builder.position_at_end(resume);
+        thunk
+    }
+
+    /// Builds the per-site `extern "C" fn(ptr, i64) -> i64` thunk a
+    /// `ParallelForStart` hands to `zirk_rt_parallel_for`
+    /// (`parallel-cpu-regions` task 6.1): like [`Self::build_branch_thunk`],
+    /// it reloads the captured values from the boxed capture block — the
+    /// last of which is the loop's own collection
+    /// (`Self::try_lower_parallel_for`'s synthetic capture) — then calls the
+    /// lifted per-chunk function with those captures plus this call's own
+    /// index (the chunk's element is recovered *inside* that function, via
+    /// an ordinary `ArrayListLoad`, not here).
+    ///
+    /// Unlike a branch thunk, there is no scope to fail: the auto-parallel
+    /// lowering only applies to a loop body with no `throw` of its own
+    /// (`Self::block_has_loop_incompatible_control_flow`), so a pending
+    /// exception here can only come from a *called* function's own throw —
+    /// a documented residual gap (`InstKind::ParallelForStart`'s own doc).
+    /// It is still taken unconditionally before returning, so it cannot leak
+    /// into whatever this pool thread runs next.
+    fn build_parallel_for_thunk(
+        &self,
+        target: &str,
+        layout_id: u32,
+        site: &str,
+    ) -> FunctionValue<'ctx> {
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+
+        let thunk = self.llvm.add_function(
+            &format!("zk.parallel_for_thunk.{site}"),
+            i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false),
+            Some(Linkage::Private),
+        );
+        thunk.set_call_conventions(0);
+        set_uwtable(self.context, thunk);
+
+        let resume = self.builder.get_insert_block().expect("instruction block");
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+
+        let capture_arg = thunk
+            .get_nth_param(0)
+            .expect("capture argument")
+            .into_pointer_value();
+        let index_arg = thunk.get_nth_param(1).expect("index argument");
+
+        let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
+        for (index, ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let slot = unsafe {
+                self.builder
+                    .build_gep(self.context.i8_type(), capture_arg, &[offset], "capture")
+            }
+            .expect("parallel_for capture gep");
+            args.push(
+                self.builder
+                    .build_load(self.llvm_type(*ty).expect("capture type"), slot, "capture")
+                    .expect("parallel_for capture load")
+                    .into(),
+            );
+        }
+        args.push(index_arg.into());
+
+        self.builder
+            .build_call(self.functions[target], &args, "parallel_for_body")
+            .expect("parallel_for body call");
+
+        self.builder
+            .build_call(
+                self.runtime.take_pending_exception,
+                &[],
+                "parallel_for_drop_exc",
+            )
+            .expect("take_pending_exception");
+
+        let zero = i64_type.const_zero();
+        self.builder
+            .build_return(Some(&zero))
+            .expect("parallel_for thunk return");
 
         self.builder.position_at_end(resume);
         thunk
@@ -4469,6 +4571,54 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     }
                 };
                 Some(handle)
+            }
+            ir::InstKind::ParallelForStart {
+                target,
+                body,
+                count,
+                budget_kind,
+                budget_a,
+                budget_b,
+            } => {
+                let callable = self.operand(*body).into_struct_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "parallel_for_capture")
+                    .expect("parallel_for capture pointer")
+                    .into_pointer_value();
+                let layout_id = match self.value_types.get(&body.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("ParallelForStart body is not a Callable: {other:?}"),
+                };
+                // `target` is already unique per source `parallel { for ... }`
+                // (`Self::try_lower_parallel_for` names it from the region's
+                // own span), so it doubles as the thunk's own unique suffix —
+                // unlike `BranchStart`'s thunk, there is no `instruction.result`
+                // to use instead: this instruction produces no value.
+                let thunk =
+                    self.build_parallel_for_thunk(target.as_str(), layout_id, target.as_str());
+                let thunk_ptr = thunk.as_global_value().as_pointer_value();
+
+                let kind_value = self.context.i8_type().const_int(*budget_kind as u64, false);
+                let a_value = self.operand(*budget_a);
+                let b_value = self.operand(*budget_b);
+                let count_value = self.operand(*count);
+
+                self.builder
+                    .build_call(
+                        self.runtime.parallel_for,
+                        &[
+                            kind_value.into(),
+                            a_value.into(),
+                            b_value.into(),
+                            count_value.into(),
+                            thunk_ptr.into(),
+                            capture.into(),
+                        ],
+                        "",
+                    )
+                    .expect("zirk_rt_parallel_for");
+                None
             }
             ir::InstKind::JobWait { job, result } => {
                 let raw = self

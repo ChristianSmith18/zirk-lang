@@ -6025,3 +6025,151 @@ fn valid_record_spread_and_rest_type_check() {
          }",
     );
 }
+
+// --- Parallel CPU regions (OpenSpec `parallel-cpu-regions`) -----------------
+
+#[test]
+fn valid_parallel_block_types_as_its_final_expression() {
+    accepted(
+        "fn work(): Int32 { return 7; }\n\
+         fn main(): Void {\n\
+           mut total: Int32 = parallel { work() };\n\
+         }",
+    );
+}
+
+#[test]
+fn valid_parallel_block_with_cores_options_type_check() {
+    accepted_body("parallel; cores: 4 { }");
+    accepted_body("parallel; cores: -1 { }");
+    accepted_body("parallel; cores: 1..=4 { }");
+    accepted_body("parallel; cores: -1; chunk: 1000 { }");
+}
+
+#[test]
+fn invalid_parallel_cores_operand_type_is_rejected() {
+    let output = rejected_body("parallel; cores: \"four\" { }");
+    assert!(
+        output.contains(codes::PARALLEL_OPTION_TYPE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_parallel_cores_zero_is_rejected() {
+    let output = rejected_body("parallel; cores: 0 { }");
+    assert!(
+        output.contains(codes::PARALLEL_OPTION_TYPE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_parallel_chunk_operand_type_is_rejected() {
+    let output = rejected_body("parallel; cores: 4; chunk: \"big\" { }");
+    assert!(
+        output.contains(codes::PARALLEL_OPTION_TYPE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_io_inside_a_parallel_region_is_rejected() {
+    for body in [
+        "parallel { Timer.sleep(1s); }",
+        "parallel { concurrent { } }",
+        "parallel { inmut h = spawn 1; }",
+        "parallel { stdout.println(1); }",
+    ] {
+        let output = rejected_body(body);
+        assert!(
+            output.contains(codes::PARALLEL_REGION_IO.as_str()),
+            "for `{body}`:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn invalid_shared_mutable_alias_into_a_parallel_region_is_rejected() {
+    let output = rejected_body(
+        "mut rows: List<Int32> = [1, 2, 3];\n\
+         parallel { rows.push(4); }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_strict_shared_or_copied_value_into_a_parallel_region_type_checks() {
+    accepted_body(
+        "inmut::strict rows: List<Int32> = [1, 2, 3];\n\
+         parallel { inmut first: Int32 = rows[0]; }",
+    );
+    accepted_body("parallel { mut total: Int32 = 0; total = total + 1; }");
+}
+
+#[test]
+fn valid_parallel_adapter_types_exactly_as_the_receiver() {
+    accepted_body(
+        "mut rows: List<Int32> = [1, 2, 3];\n\
+         mut first: Int32 = rows.parallel[0];",
+    );
+    accepted_body("for i in (0..10).parallel { }");
+}
+
+#[test]
+fn invalid_parallel_adapter_on_a_non_iterable_is_rejected() {
+    let output = rejected_body("mut n: Int32 = 4; mut x = n.parallel;");
+    assert!(
+        output.contains(codes::UNKNOWN_MEMBER.as_str()) || output.contains("not"),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_parallel_each_types_a_list_but_is_not_lowered_yet() {
+    // `Parallel.each` types correctly (`List<Int32>` here) but has no
+    // `zirk-ir` lowering yet (task 6.1's own scope note) — reported
+    // `NOT_LOWERED` rather than silently reaching a backend that would
+    // panic on it.
+    let output = rejected_body(
+        "mut rows: List<Int32> = [1, 2, 3];\n\
+         mut doubled: List<Int32> = Parallel.each(rows, (item: Int32): Int32 => item * 2);",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_parallel_each_argument_count_is_rejected() {
+    let output = rejected_body("mut rows: List<Int32> = [1]; Parallel.each(rows);");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_parallel_each_non_iterable_first_argument_is_rejected() {
+    let output = rejected_body("Parallel.each(4, (item: Int32): Int32 => item);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_parallel_each_callback_arity_is_rejected() {
+    let output = rejected_body(
+        "mut rows: List<Int32> = [1]; Parallel.each(rows, (a: Int32, b: Int32): Int32 => a);",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn valid_io_outside_a_parallel_region_still_type_checks() {
+    accepted_body(
+        "parallel { }\n\
+         Timer.sleep(1s);\n\
+         concurrent { }\n\
+         stdout.println(1);",
+    );
+}

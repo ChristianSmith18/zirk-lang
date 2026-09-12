@@ -109,6 +109,85 @@ threads have no safe points).
 8. Fixtures + `examples/parallel_examples.zrk`.
 9. Docs; `cargo test` + fmt + clippy; commit; website sync with reviewed date.
 
+## Implementation addenda (sema, task 5)
+
+Recorded once implementation reached the checker and found the design's
+assumptions did not all hold against the current codebase.
+
+**D2 addendum — `.parallel` is a typing no-op.** Spec `zirk-type-system`'s own
+scenario says `rows.parallel.map(cost).sum()` "is typed exactly as the
+sequential `rows.map(cost).sum()`". Taken literally: `.parallel` does not
+introduce a `ParallelSeq<T>` type at all — `check_field` returns the receiver's
+own type unchanged and records the field-expression span in
+`parallel_adapter_accesses` for lowering to consume later. This also sidesteps
+a real gap found while implementing it: **`map`/`filter`/`reduce`/`sum`/
+`count`/`collect`/`for_each` do not exist on `List<T>`/`Array<T>` yet, not even
+sequentially** — so "expose the parallel-safe subset" has no subset to define
+today. `Parallel.each(coll, fn)` needed none of those methods (it is a
+self-contained static call, `check_parallel_each_call`, typed `List<R>` off the
+callback's own return type) and is implemented.
+
+**D3 addendum — reduce associativity is future work, not implementable yet.**
+The same gap blocks 5.3: there is no `.reduce` call site in the checker to
+attach an associativity check to. Recorded for whoever adds `.reduce`: reject
+a combiner lambda whose body's top-level operator is not one of
+`+ * & | ^ && ||` (conservative — real associative operations only), requiring
+`reduce_ordered` otherwise. This directly rejects the spec's own example,
+`(a, b) => a - b`.
+
+**D5 addendum — boundary reuse via the capture/barrier mechanism.** #2
+(`concurrent-blocks-and-timers`) turned out not to have a dedicated
+boundary-alias check to reuse — only the general `mut`/`inmut::strict` matrix
+(`check_strict_alias`, `STRICT_ALIAS_VIOLATION`) exists. Implemented by reusing
+*that* mechanism at the region boundary: `check_parallel_block`/
+`check_parallel_expr` open a capture-tracking barrier scope (the same
+`begin_capture_scope`/`finish_capture_scope` pair `spawn` and lambdas use, which
+also correctly isolates `loop_depth` — `break`/`continue` cannot cross into a
+`parallel` region from outside or escape one), then `check_parallel_boundary`
+rejects a captured reference-type binding whose declared mutability is `mut`
+with `STRICT_ALIAS_VIOLATION`. A `return` inside a `parallel` region is left
+targeting the enclosing function, same as `unsafe {}`/`commit {}` — its
+runtime semantics across worker threads are an IR/codegen question, not
+addressed here.
+
+## Implementation addenda (IR/codegen, task 6)
+
+**D1/D4 addendum — a real, pre-existing GC-rooting bug, found and fixed.**
+Verifying `try_lower_parallel_for`'s work-splitting end to end (compiling and
+running real programs under `ZIRK_GC_THRESHOLD` pressure, not just unit-testing
+each piece in isolation) turned up a crash. Isolating it further — by
+reproducing the *same* crash with a plain sequential `for x in list { }` and
+no `parallel` anywhere — proved it was not something this change introduced:
+`crates/zirk-codegen-llvm/src/emit.rs`'s `gc_reference_paths` was missing
+match arms for `IrType::Array(_)`/`List(_)`/`Range`/`Map(_)`/`Set(_)`. Those
+five types are correctly flagged by `IrType::is_managed_reference` (so a slot
+holding one gets zero-initialized at function entry, and is *counted* in
+`Function::gc_roots`), but the separate table that turns a gc-root slot into
+an actual shadow-stack root *address* fell through to `_ => {}` for all five —
+producing zero root addresses. A local `List<T>` (or `Array<T>`/`Range`/
+`Map<K,V>`/`Set<T>`) variable was therefore invisible to every collection: the
+collector could — and, under a small enough threshold, did — reclaim it (or
+the buffer/elements it alone referenced) while the program was still using it.
+`List<T>` exposed this easily, since each `.add()` can trigger its own
+buffer-growth allocation, i.e. its own chance for a collection to land while
+nothing else roots the list; `Array<T>` (built in one allocation, filled with
+no further allocation) happened not to expose it under ordinary use.
+
+Fixed by adding those five types to the same arm `Object`/`Contract`/`Weak`/
+`Dependent`/`Pin`/`String`/`Char` already use (each is "one managed pointer at
+the slot itself," with the object's own descriptor — not this table — telling
+`mark_object` how to trace through it). Verified: the original 10-element
+`List<Int32>` repro (`ZIRK_GC_THRESHOLD=200`) passes 20/20 runs; a 200-element,
+allocation-heavy, 4-pool-core stress case that previously hung/crashed passes
+15/15; a dedicated regression test was added
+(`crates/zirk-cli/tests/end_to_end.rs`,
+`a_list_survives_repeated_buffer_growth_under_a_small_threshold`) and confirmed
+to fail without the fix. Once this was root-caused and fixed, the
+work-splitting lowering itself needed no further changes — it was correct all
+along; it was only ever exposed *by* this bug, not the cause of a separate one.
+`cargo test --workspace` (1277 tests), `cargo fmt --check`, and
+`cargo clippy --workspace --all-targets` are all clean with the fix in place.
+
 ## Open Questions
 
 - `chunk` in this change or deferred? Proposed: grammar reserved now,

@@ -1,0 +1,21 @@
+// `parallel { for x in coll { ... } }` runs across the worker pool
+// (`parallel-cpu-regions` task 6.1) when the loop body has no `return` /
+// `break` / `continue` / `throw` and does not reassign a captured name.
+// The region boundary forbids capturing a `mut` reference type (design D5),
+// so this has no directly observable side effect from inside the region —
+// it demonstrates the region itself compiles, dispatches, and joins
+// correctly before ordinary code after it runs.
+
+fn touch(n: Int32): Int32 {
+    return n * n;
+}
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3, 4, 5];
+    parallel {
+        for v in values {
+            touch(v);
+        }
+    }
+    stdout.println("done");
+}

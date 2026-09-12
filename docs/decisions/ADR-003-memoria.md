@@ -79,3 +79,27 @@ The choice will be closed by evaluating, on real Zirk programs:
 - `Weak<T>` and the `Clone` contract (`MEMORY_AND_UNSAFE_SEMANTICS.md` §4 and §6) go from "no strategy to build on" to implementable — they are the natural extension once a real collector distinguishes alive from dead.
 - Criterion 2 (barrier in `parallel for`) and criterion 4 (pauses against a budget) remain as post-implementation follow-up validation, not as a closing condition — this ADR documents why requiring them as a precondition would have been circular (they depended on phases later than the one this ADR gates).
 - The shadow stack's single process-global head is generalized to one head per task by [ADR-017](./ADR-017-modelo-de-suspension.md) (Phase 5 steps 1–3): a task that suspends at `await` keeps its own root chain, and root enumeration walks every live task's chain. The SSA-spill rule above is what keeps a suspended frame's roots visible. The object header is unchanged.
+
+## Addendum — `parallel-cpu-regions` (Phase 5 steps 4–6, `parallel` surface)
+
+The deferred concurrency note — *"Correct by construction until Phase 5
+introduces real concurrency — at that point, triggering and 'stop the world'
+need to be revisited"* — is discharged for the `parallel` worker pool.
+
+- **Triggering becomes thread-aware.** When the worker pool has active threads,
+  an allocation that crosses the GC threshold (on a pool thread or the executor
+  thread) SHALL raise a global "collection requested" flag instead of collecting
+  inline. With no active workers, inline cooperative triggering is unchanged.
+- **Stop-the-world safepoint.** Every worker thread polls a safepoint at
+  `parallel` loop back-edges and parks when the flag is set; the executor thread
+  parks at its next scheduling turn. When every thread is parked, one thread
+  walks all roots — the executor's current branch chain, every suspended branch
+  chain, each parked worker's shadow-stack chain, and `mark_clone_roots` — then
+  marks, sweeps the shared intrusive allocation list under a lock, clears the
+  flag, and releases every thread.
+- **What does not change.** Non-moving mark-sweep, the one shared heap, the
+  3-word object header (`ADR-012`), and the per-frame SSA-spill rule. Only
+  triggering and root enumeration gain thread-awareness.
+
+See [ADR-019](./ADR-019-parallel-and-multithreaded-gc.md) for the full worker
+pool + safepoint design and the per-triple stress-test plan.

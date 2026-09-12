@@ -2152,6 +2152,49 @@ fn verify_instruction(
                 (false, None) => {}
             }
         }
+        InstKind::ParallelForStart {
+            target,
+            body,
+            count,
+            budget_kind,
+            budget_a,
+            budget_b,
+        } => {
+            expect(inst.ty, IrType::Void, position, "ParallelForStart", report);
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: ParallelForStart targets `{target}`, which is not a module function"
+                ));
+            }
+            if !matches!(type_of(body), Some(IrType::Callable(_))) {
+                report(format!(
+                    "{position}: ParallelForStart body is not a Callable"
+                ));
+            }
+            if let Some(ty) = type_of(count)
+                && !matches!(ty, IrType::Int(_))
+            {
+                report(format!(
+                    "{position}: ParallelForStart count is {}, expected an integer",
+                    ty.as_str()
+                ));
+            }
+            if *budget_kind > 2 {
+                report(format!(
+                    "{position}: ParallelForStart budget_kind is {budget_kind}, expected 0, 1, or 2"
+                ));
+            }
+            for (name, operand) in [("budget_a", budget_a), ("budget_b", budget_b)] {
+                if let Some(ty) = type_of(operand)
+                    && !matches!(ty, IrType::Int(_))
+                {
+                    report(format!(
+                        "{position}: ParallelForStart {name} is {}, expected an integer",
+                        ty.as_str()
+                    ));
+                }
+            }
+        }
         InstKind::JobWait { job, result } => {
             if inst.ty != *result {
                 report(format!(
@@ -2460,5 +2503,12 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             vec![*job]
         }
         InstKind::TimerSleep { nanos } => vec![*nanos],
+        InstKind::ParallelForStart {
+            body,
+            count,
+            budget_a,
+            budget_b,
+            ..
+        } => vec![*body, *count, *budget_a, *budget_b],
     }
 }
