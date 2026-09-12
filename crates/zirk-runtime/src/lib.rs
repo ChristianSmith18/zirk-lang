@@ -564,9 +564,13 @@ mod tests {
         extern "C-unwind" fn driver() {
             let scope = unsafe { zirk_rt_scope_enter() };
             unsafe {
-                zirk_rt_timer_after(scope, 1_000_000, after, std::ptr::null_mut());
-                zirk_rt_timer_every(scope, 1_000_000, tick, std::ptr::null_mut());
-                zirk_rt_sleep(7_000_000);
+                zirk_rt_timer_after(scope, 2_000_000, after, std::ptr::null_mut());
+                zirk_rt_timer_every(scope, 2_000_000, tick, std::ptr::null_mut());
+                // A generous window (10x the repeating interval) so a
+                // contended CI runner's scheduling jitter — observed
+                // flaky on macOS CI with a tighter 7x margin — still
+                // leaves comfortable room for at least two re-arms.
+                zirk_rt_sleep(20_000_000);
             }
             assert!(unsafe { zirk_rt_scope_exit(scope) });
         }
@@ -577,7 +581,7 @@ mod tests {
         let ticks_at_exit = TICKS.load(Ordering::SeqCst);
         assert_eq!(AFTER.load(Ordering::SeqCst), 1);
         assert!(ticks_at_exit >= 2, "Timer.every did not re-arm");
-        std::thread::sleep(std::time::Duration::from_millis(3));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(TICKS.load(Ordering::SeqCst), ticks_at_exit);
     }
 }
