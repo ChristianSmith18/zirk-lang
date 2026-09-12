@@ -234,8 +234,6 @@ pub mod symbols {
     pub const REGEX_REPLACE: &str = "zirk_regex_replace";
     /// Renders a `Regex` as its pattern string.
     pub const REGEX_TO_STRING: &str = "zirk_regex_to_string";
-    /// Finds the first match of a `Regex` in `text`.
-    pub const REGEX_FIND: &str = "zirk_regex_find";
     /// Returns the nth positional capture group of a `Regex.Match`.
     pub const REGEX_MATCH_GROUP_POS: &str = "zirk_regex_match_group_pos";
     /// Returns the named capture group of a `Regex.Match`.
@@ -429,8 +427,6 @@ pub struct Runtime<'ctx> {
     pub regex_replace: FunctionValue<'ctx>,
     /// `zirk_regex_to_string(handle, out_len) -> *mut u8`.
     pub regex_to_string: FunctionValue<'ctx>,
-    /// `zirk_regex_find(handle, text) -> {bool, *mut c_void}`.
-    pub regex_find: FunctionValue<'ctx>,
     /// `zirk_regex_match_group_pos(match_object, n) -> *mut c_void`.
     pub regex_match_group_pos: FunctionValue<'ctx>,
     /// `zirk_regex_match_group_name(match_object, name) -> *mut c_void`.
@@ -819,15 +815,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[ptr.into()], false),
         external,
     );
-    // `Regex.find` returns a `Regex.Match?` object, represented as a
-    // present flag followed by an opaque object pointer — the same shape as
-    // every other nullable object/reference type.
-    let nullable_object_ty = context.struct_type(&[context.bool_type().into(), ptr.into()], false);
-    let regex_find = module.add_function(
-        symbols::REGEX_FIND,
-        nullable_object_ty.fn_type(&[ptr.into(), ptr.into()], false),
-        external,
-    );
+    // `Regex.find`'s extern declaration lives entirely in `emit.rs`'s
+    // `declare_extern_fn` (through the `ir::ExternFn` list), not here: its
+    // `Nullable<T>` return crosses by a leading out-pointer for ABI
+    // reasons `declare_extern_fn`'s own doc covers, and every call site
+    // goes through `self.functions`, never `self.runtime`.
     let regex_match_group_pos = module.add_function(
         symbols::REGEX_MATCH_GROUP_POS,
         ptr.fn_type(&[ptr.into(), i64.into()], false),
@@ -1323,7 +1315,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         regex_is_match,
         regex_replace,
         regex_to_string,
-        regex_find,
         regex_match_group_pos,
         regex_match_group_name,
         str_trim,

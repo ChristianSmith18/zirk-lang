@@ -926,7 +926,20 @@ fn declare_extern_fn<'ctx>(
         }
     }
 
-    let signature = if returns_by_pointer {
+    // `zirk_regex_find` is the only extern function returning a
+    // `Nullable<T>` (a `{ bool, ptr }` aggregate) — every other one is
+    // built and consumed entirely by our own codegen, never crossing this
+    // boundary. x86-64 Windows/MSVC and SysV disagree on how a 16-byte
+    // `{ bool, ptr }` is returned by value (confirmed: access violation on
+    // Windows), so — like the 128-bit families above — it takes a leading
+    // out-pointer instead; see `zirk_regex_find`'s own doc for the ABI
+    // specifics. This is scoped by name, the same as the families above.
+    let returns_nullable_by_pointer = extern_fn.name == "zirk_regex_find";
+    if returns_nullable_by_pointer {
+        params.insert(0, ptr.into());
+    }
+
+    let signature = if returns_by_pointer || returns_nullable_by_pointer {
         context.void_type().fn_type(&params, false)
     } else {
         match llvm_type_in(context, extern_fn.return_type, closures, values, enums) {
@@ -2887,6 +2900,27 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .map(|a| (self.operand(*a), self.value_types[&a.0]))
                         .collect();
                     Some(self.emit_decimal_call(callee, &typed, instruction.ty))
+                } else if callee == "zirk_regex_find" {
+                    // The `Nullable<T>` return crosses by a leading
+                    // out-pointer instead — `declare_extern_fn`'s doc has
+                    // the ABI "why"; this must stay in sync with that gate.
+                    let result_ty = self
+                        .llvm_type(instruction.ty)
+                        .expect("zirk_regex_find's Nullable return is never Void");
+                    let slot = self.aligned_alloca(result_ty, "regex_find.out");
+                    let mut arguments: Vec<BasicMetadataValueEnum> = vec![slot.into()];
+                    arguments.extend(
+                        args.iter()
+                            .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
+                    );
+                    self.builder
+                        .build_call(self.functions[callee], &arguments, "call")
+                        .expect("call to zirk_regex_find");
+                    Some(
+                        self.builder
+                            .build_load(result_ty, slot, "regex_find.result")
+                            .expect("load zirk_regex_find's result"),
+                    )
                 } else {
                     let arguments: Vec<_> = args.iter().map(|a| self.operand(*a).into()).collect();
                     let call = self

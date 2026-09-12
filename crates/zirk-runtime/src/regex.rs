@@ -253,26 +253,46 @@ unsafe fn alloc_regex_match(
 
 /// Finds the first match of the regex in `handle` within `text`.
 ///
-/// Returns a `Regex.Match?`: present when a match exists, absent otherwise.
-/// Both `handle` and `text` are Zirk opaque handles.
+/// Writes a `Regex.Match?` through `out`: present when a match exists,
+/// absent otherwise. Both `handle` and `text` are Zirk opaque handles.
+///
+/// `out` is written through a pointer rather than returned by value:
+/// `NullableObject` is a 16-byte `{ bool, ptr }` aggregate, and the x86-64
+/// Windows/MSVC and SysV (Linux/macOS) C ABIs disagree on how such a
+/// struct is returned by value (SysV packs it into two registers; MSVC's
+/// aggregate-return rule only allows that for sizes that are themselves a
+/// power of two — 1/2/4/8 bytes — and demands a hidden out-pointer
+/// otherwise) — confirmed: this crashed with `STATUS_ACCESS_VIOLATION` on
+/// Windows while working correctly on every other platform. Every other
+/// `Nullable<T>` in this compiler is built and consumed entirely by our
+/// own codegen (never crossing an `extern "C"` boundary), so this
+/// function was the only place the ambiguity could bite.
 ///
 /// # Safety
 ///
-/// `handle` must be a non-null regex handle returned by `zirk_regex_from_pattern`.
+/// `out` must be a valid, writable `NullableObject` pointer. `handle` must
+/// be a non-null regex handle returned by `zirk_regex_from_pattern`.
 /// `text` must be a non-null Zirk `String` handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_regex_find(handle: *mut c_void, text: *mut c_void) -> NullableObject {
+pub unsafe extern "C" fn zirk_regex_find(
+    out: *mut NullableObject,
+    handle: *mut c_void,
+    text: *mut c_void,
+) {
     if handle.is_null() {
-        return NullableObject {
-            present: false,
-            value: std::ptr::null_mut(),
+        unsafe {
+            *out = NullableObject {
+                present: false,
+                value: std::ptr::null_mut(),
+            }
         };
+        return;
     }
 
     let re = unsafe { &*(handle as *const Regex) };
     let hay = unsafe { regex_string(text) };
 
-    match re.find(hay) {
+    let result = match re.find(hay) {
         Some(m) => {
             let text_handle = crate::string::alloc_owned(m.as_str());
             let haystack_handle = crate::string::alloc_owned(hay);
@@ -294,7 +314,8 @@ pub unsafe extern "C" fn zirk_regex_find(handle: *mut c_void, text: *mut c_void)
             present: false,
             value: std::ptr::null_mut(),
         },
-    }
+    };
+    unsafe { *out = result };
 }
 
 /// Returns a `List<Regex.Match>` holding every non-overlapping match of the
