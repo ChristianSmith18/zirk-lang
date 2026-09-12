@@ -1133,3 +1133,55 @@ fn f128_bits_to_f64(bits: u128) -> f64 {
 pub unsafe extern "C" fn zirk_float128_to_f64(bits: *const i128) -> f64 {
     f128_bits_to_f64(unsafe { *bits } as u128)
 }
+
+/// Encodes `value` as the raw bit pattern of the equivalent IEEE 754
+/// binary128 (`Float128`) value — the reverse of
+/// [`f128_bits_to_f64`]. Every `f64` value is exactly representable in
+/// binary128 (112 fraction bits comfortably holds `f64`'s 52), so this
+/// is a widening, not a rounding, conversion — including subnormal `f64`
+/// inputs, which are renormalized rather than truncated.
+fn f64_to_f128_bits(value: f64) -> u128 {
+    let bits64 = value.to_bits();
+    let sign = (bits64 >> 63) & 1;
+    let biased_exp64 = ((bits64 >> 52) & 0x7FF) as i64;
+    let frac64 = bits64 & ((1u64 << 52) - 1);
+
+    if biased_exp64 == 0x7FF {
+        // Inf or NaN.
+        let frac128 = (frac64 as u128) << (112 - 52);
+        return ((sign as u128) << 127) | (0x7FFFu128 << 112) | frac128;
+    }
+
+    if biased_exp64 == 0 {
+        if frac64 == 0 {
+            return (sign as u128) << 127;
+        }
+        // A subnormal `f64`: shift its fraction left until the leading
+        // bit lands where a normal significand's implicit `1` would be,
+        // and fold that shift into the exponent.
+        let msb = 63 - frac64.leading_zeros() as i64;
+        let shift_amount = 52 - msb;
+        let normalized_exp = 1 - 1023 - shift_amount;
+        let mantissa = (frac64 << shift_amount) & ((1u64 << 52) - 1);
+        let biased_exp128 = (normalized_exp + 16383) as u128;
+        let frac128 = (mantissa as u128) << (112 - 52);
+        return ((sign as u128) << 127) | (biased_exp128 << 112) | frac128;
+    }
+
+    let unbiased_exp = biased_exp64 - 1023;
+    let biased_exp128 = (unbiased_exp + 16383) as u128;
+    let frac128 = (frac64 as u128) << (112 - 52);
+    ((sign as u128) << 127) | (biased_exp128 << 112) | frac128
+}
+
+/// The reverse bridge of `zirk_float128_to_f64`: widens `value` to
+/// `Float128`'s bit pattern, written through `out` (by pointer, for the
+/// same reason every other 128-bit value here crosses this way).
+///
+/// # Safety
+///
+/// `out` must be a valid `i128` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_f64_to_float128(out: *mut i128, value: f64) {
+    unsafe { *out = f64_to_f128_bits(value) as i128 };
+}

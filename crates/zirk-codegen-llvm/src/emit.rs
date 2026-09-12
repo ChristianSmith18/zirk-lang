@@ -2112,24 +2112,44 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     unreachable!("FloatCast always declares a Float destination")
                 };
                 let target_ty = self.float_type(target_width);
+                let ir::IrType::Float(source_width) = self.value_types[&operand.0] else {
+                    unreachable!("FloatCast always converts from a Float source")
+                };
 
-                let converted = match self.value_types[&operand.0] {
-                    ir::IrType::Float(source_width)
-                        if source_width.bits() == target_width.bits() =>
-                    {
-                        value
-                    }
-                    ir::IrType::Float(source_width)
-                        if source_width.bits() < target_width.bits() =>
-                    {
+                // `Float128` never takes LLVM's native `fpext`/`fptrunc`
+                // path to or from another width: both depend on the
+                // target's quad-precision libcalls, unreliable on
+                // Windows/MSVC (`emit_f128_to_f64`'s doc has the specifics).
+                // Every other pair is a plain hardware-backed conversion,
+                // same as before.
+                let converted = if source_width.bits() == target_width.bits() {
+                    value
+                } else if source_width == ir::FloatWidth::F128 {
+                    let as_f64 = self.emit_f128_to_f64(value);
+                    if target_width == ir::FloatWidth::F64 {
+                        as_f64
+                    } else {
                         self.builder
-                            .build_float_ext(value, target_ty, "fpext")
-                            .expect("float extension")
+                            .build_float_trunc(as_f64, target_ty, "fptrunc")
+                            .expect("float truncation")
                     }
-                    _ => self
-                        .builder
+                } else if target_width == ir::FloatWidth::F128 {
+                    let as_f64 = if source_width == ir::FloatWidth::F64 {
+                        value
+                    } else {
+                        self.builder
+                            .build_float_ext(value, self.context.f64_type(), "fpext")
+                            .expect("float extension")
+                    };
+                    self.emit_f64_to_f128(as_f64)
+                } else if source_width.bits() < target_width.bits() {
+                    self.builder
+                        .build_float_ext(value, target_ty, "fpext")
+                        .expect("float extension")
+                } else {
+                    self.builder
                         .build_float_trunc(value, target_ty, "fptrunc")
-                        .expect("float truncation"),
+                        .expect("float truncation")
                 };
                 Some(converted.into())
             }
@@ -2967,36 +2987,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             // `zirk_float128_to_f64` is declared directly on
                             // `self.runtime` (like `str_from_f64`), not
                             // through the `ir::ExternFn` list, since no
-                            // user-visible IR ever names it — the spill to a
-                            // stack slot is done by hand here rather than
-                            // through `emit_decimal_call`, which looks its
-                            // callee up by name in that list.
+                            // user-visible IR ever names it — `emit_f128_to_f64`
+                            // does the spill to a stack slot by hand.
                             ir::FloatWidth::F128 => {
-                                let bits = self
-                                    .builder
-                                    .build_bit_cast(
-                                        value.into_float_value(),
-                                        self.context.i128_type(),
-                                        "to_string.f128_bits",
-                                    )
-                                    .expect("bitcasting f128 to i128 for printing");
-                                let slot = self
-                                    .aligned_alloca(self.context.i128_type().into(), "f128.bits");
-                                self.builder
-                                    .build_store(slot, bits)
-                                    .expect("store f128 bits for printing");
-                                let call = self
-                                    .builder
-                                    .build_call(
-                                        self.runtime.float128_to_f64,
-                                        &[slot.into()],
-                                        "f128.to_f64",
-                                    )
-                                    .expect("call zirk_float128_to_f64");
-                                value = call
-                                    .try_as_basic_value()
-                                    .basic()
-                                    .expect("zirk_float128_to_f64 returns a value");
+                                value = self.emit_f128_to_f64(value.into_float_value()).into();
                                 self.runtime.str_from_f64
                             }
                             ir::FloatWidth::F16 => {
@@ -4796,6 +4790,57 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .set_alignment(16)
             .expect("16 is a valid alignment");
         slot
+    }
+
+    /// Converts an `fp128` value to `double` by decoding its IEEE 754
+    /// binary128 bit pattern in `zirk-runtime` (`zirk_float128_to_f64`),
+    /// not through LLVM's native `fptrunc fp128 to double`: that
+    /// instruction depends on the target's quad-precision libcalls
+    /// (`__trunctfdf2`), which are unreliable on Windows/MSVC (confirmed:
+    /// `1.5_Float128` silently truncated to `0`). The `bitcast` to `i128`
+    /// is always exact — same bit width, no arithmetic — so the value
+    /// crosses the FFI boundary by the same pointer-passing convention
+    /// `declare_extern_fn` uses for `zirk_int_*`/128-bit values.
+    fn emit_f128_to_f64(&mut self, value: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        let bits = self
+            .builder
+            .build_bit_cast(value, self.context.i128_type(), "f128.bits")
+            .expect("bitcasting f128 to i128");
+        let slot = self.aligned_alloca(self.context.i128_type().into(), "f128.bits.slot");
+        self.builder
+            .build_store(slot, bits)
+            .expect("store f128 bits");
+        let call = self
+            .builder
+            .build_call(self.runtime.float128_to_f64, &[slot.into()], "f128.to_f64")
+            .expect("call zirk_float128_to_f64");
+        call.try_as_basic_value()
+            .basic()
+            .expect("zirk_float128_to_f64 returns a value")
+            .into_float_value()
+    }
+
+    /// The reverse bridge of [`Self::emit_f128_to_f64`]: widens a `double`
+    /// to `fp128` by encoding its bit pattern in `zirk-runtime`
+    /// (`zirk_f64_to_float128`), sidestepping LLVM's native `fpext double
+    /// to fp128` for the same reason.
+    fn emit_f64_to_f128(&mut self, value: FloatValue<'ctx>) -> FloatValue<'ctx> {
+        let slot = self.aligned_alloca(self.context.i128_type().into(), "f128.from_f64.slot");
+        self.builder
+            .build_call(
+                self.runtime.f64_to_float128,
+                &[slot.into(), value.into()],
+                "f64.to_f128",
+            )
+            .expect("call zirk_f64_to_float128");
+        let bits = self
+            .builder
+            .build_load(self.context.i128_type(), slot, "f128.from_f64.bits")
+            .expect("load f128 bits");
+        self.builder
+            .build_bit_cast(bits, self.context.f128_type(), "f128.from_f64")
+            .expect("bitcasting i128 to f128")
+            .into_float_value()
     }
 
     /// Whether an exact-`Float` helper carries `ty` across the C boundary by
