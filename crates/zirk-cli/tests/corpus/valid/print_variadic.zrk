@@ -1,6 +1,6 @@
 fn main(): Void {
+    stdout.println();
     stdout.print("sum", 1 + 2, true);
     stdout.println("done", 3 * 4);
     stdout.print();
-    stdout.println();
 }
