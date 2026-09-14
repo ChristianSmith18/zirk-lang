@@ -60,7 +60,7 @@
 - [x] 8.2 Update `docs/handbook/02-handbook/03-everyday-types/09-string.md` and the member-index/conversions pages with the universal `to_string` contract and render table.
 - [x] 8.3 Update `docs/ZIRK_LANGUAGE_SPEC.md` (lexical + `to_string` contract), `docs/ZIRK_STDLIB_SPEC.md` section 3, `docs/ZIRK_COMPILER_SPEC.md` section 10 (first `zirk format` slice delivered).
 - [x] 8.4 Update `docs/handbook/11-reference/12-feature-status.md` and `13-appendices/07-current-limitations.md` (universal printing, `'''`, `zirk format` scope).
-- [ ] 8.5 After committing docs on a clean tree, run `./scripts/sync-website-content.sh` and pass `--audit-date` if project-status evidence changed.
+- [x] 8.5 After committing docs on a clean tree, run `./scripts/sync-website-content.sh` and pass `--audit-date` if project-status evidence changed.
 
 ## 9. Final verification
 
