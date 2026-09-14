@@ -36,7 +36,7 @@ Use pipelines when data movement is the story. Use explicit statements when bran
 ---
 
 **Previous:** [← Lazy Operations](07-lazy-operations.md) · **Next:** [ Pattern Matching](../14-pattern-matching/README.md)
-# Eager collection pipelines
+## Eager collection pipelines
 
 Lists, arrays, and ranges provide `map`, `filter`, `for_each`, `reduce`,
 `sum`, `count`, and `collect`. These operations are eager: each transform

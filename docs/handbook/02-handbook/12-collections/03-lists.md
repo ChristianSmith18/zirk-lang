@@ -233,7 +233,7 @@ indexed read/write (including negative-from-end indices), `add`, `insert`,
 ---
 
 **Previous:** [← Fixed Arrays](02-fixed-arrays.md) · **Next:** [ Maps](04-maps.md)
-# Sequence operations
+## Sequence operations
 
 `List<T>` supports eager sequence operations. `map` and `filter` return a new
 list, while `for_each` executes a callback for its side effects. `reduce`
