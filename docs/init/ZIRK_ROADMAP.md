@@ -406,7 +406,7 @@ function coloring.
    `for_each`, `Parallel.each`, `sum`, and associative `reduce` run through
    the worker path; `reduce_ordered` deliberately keeps sequential grouping.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
-   (`typed-channels`).
+   (`typed-channels`, delivered; `drain` and `select` remain follow-ups).
 4. Outcomes, aggregation policy, safe-default synchronization, scoped
    `thread`, and the remaining concurrency APIs (`concurrency-completion`).
 
