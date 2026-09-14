@@ -190,17 +190,17 @@ fn division_checks_the_divisor() {
     // and, on a hit, a `DivisionByZeroError` is built and handed to
     // `zirk_rt_throw`, the same mechanism an explicit `throw` uses.
     let ir = llvm_ir(&in_main(
-        "mut a: Int32 = 10;\nmut b: Int32 = 2;\nmut c: Int32 = a / b;",
+        "mut a: Int32 = 10;\nmut b: Int32 = 2;\nmut c: Decimal = a / b;",
     ));
     assert!(
         ir.contains(symbols::THROW),
         "division by zero must not be undefined behaviour:\n{ir}"
     );
     assert!(
-        ir.contains("icmp eq i32"),
-        "the divisor is compared to zero:\n{ir}"
+        ir.contains("@zirk_rt_decimal_is_zero"),
+        "the decimal divisor is checked for zero:\n{ir}"
     );
-    assert!(ir.contains("sdiv i32"));
+    assert!(ir.contains("@zirk_rt_decimal_div"));
 }
 
 #[test]
