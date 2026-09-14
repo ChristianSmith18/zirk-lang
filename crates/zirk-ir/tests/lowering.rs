@@ -129,6 +129,43 @@ fn parameters_become_slots() {
 }
 
 #[test]
+fn parallel_sequence_terminals_lower_to_worker_dispatch() {
+    let module = compile(
+        "fn main(): Void {\n\
+         inmut::strict values: List<Int32> = [1, 2, 3];\n\
+         mut mapped: List<Int32> = values.parallel.map((v: Int32): Int32 => v * 2);\n\
+         mut filtered: List<Int32> = values.parallel.filter((v: Int32): Boolean => v > 1);\n\
+         mut each: List<Int32> = Parallel.each(values, (v: Int32): Int32 => v + 1);\n\
+         values.parallel.for_each((v: Int32): Void => { });\n\
+         mut reduced: Int32 = values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a + b);\n\
+         mut total: Int32 = parallel { values.sum() };\n\
+         mut range_total: Int32 = (1..=3).parallel.sum();\n\
+         }",
+    );
+    let targets = module
+        .functions
+        .iter()
+        .flat_map(instructions)
+        .filter_map(|kind| match kind {
+            InstKind::ParallelForStart { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for prefix in [
+        "parallel_map.",
+        "parallel_each.",
+        "parallel_reduce.",
+        "parallel_sum.",
+    ] {
+        assert!(
+            targets.iter().any(|target| target.starts_with(prefix)),
+            "missing worker dispatch for {prefix}; saw {targets:?}"
+        );
+    }
+}
+
+#[test]
 fn every_block_has_exactly_one_terminator() {
     let f = main_body("mut x: Int32 = 1;\nif x > 0 { } else { }\nreturn;");
 
@@ -425,6 +462,62 @@ fn exact_float_division_guards_a_zero_divisor() {
         i,
         InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_div"
     )));
+}
+
+#[test]
+fn integer_division_lowers_in_the_decimal_domain() {
+    let f = main_body("mut quotient: Decimal = 3 / 4;");
+    let kinds = instructions(&f);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|i| matches!(i, InstKind::IntToDecimal(_)))
+            .count(),
+        2,
+        "both integer operands convert to Decimal before division"
+    );
+    assert!(kinds.iter().any(|i| matches!(
+        i,
+        InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_div"
+    )));
+}
+
+#[test]
+fn scalar_conversion_runs_after_the_completed_integer_quotient() {
+    let f = main_body("mut quotient: Int64 = Int64(3 / 4);");
+    let kinds = instructions(&f);
+    let division = kinds
+        .iter()
+        .position(|i| matches!(i, InstKind::Call { callee, .. } if callee == "zirk_rt_decimal_div"))
+        .expect("integer division must run as Decimal");
+    let conversion = kinds
+        .iter()
+        .position(|i| matches!(i, InstKind::DecimalToInt(_)))
+        .expect("the completed quotient must convert to Int64");
+    assert!(division < conversion);
+}
+
+#[test]
+fn scalar_conversion_does_not_widen_an_inner_integer_addition() {
+    let f = main_body("mut value: Int64 = Int64(2_000_000_000 + 2_000_000_000);");
+    let kinds = instructions(&f);
+    let addition = kinds
+        .iter()
+        .position(|i| {
+            matches!(
+                i,
+                InstKind::CheckedArithmetic {
+                    op: BinaryOp::Add,
+                    ..
+                }
+            )
+        })
+        .expect("the inner addition must remain checked Int32 arithmetic");
+    let conversion = kinds
+        .iter()
+        .position(|i| matches!(i, InstKind::IntCast(_)))
+        .expect("the completed Int32 result must convert to Int64");
+    assert!(addition < conversion);
 }
 
 #[test]

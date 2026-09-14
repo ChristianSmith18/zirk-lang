@@ -1718,6 +1718,25 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         },
     ]);
 
+    for (array_id, &element) in module.array_types.iter().enumerate() {
+        if let Some(list_id) = module
+            .list_types
+            .iter()
+            .position(|&candidate| candidate == element)
+        {
+            module.externs.push(ExternFn {
+                name: "zirk_rt_array_from_list".to_string(),
+                params: vec![
+                    IrType::List(list_id as u32),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Boolean,
+                ],
+                return_type: IrType::Array(array_id as u32),
+            });
+        }
+    }
+
     // Exact base-ten `Float` runtime helpers. The IR models a `Float` value
     // as by-value `IrType::Decimal`; codegen lowers each of these to the
     // by-pointer C ABI (`{ i128, i8 }` out-parameter), the same way it does
@@ -1776,11 +1795,11 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 params: vec![IrType::Int(IntWidth::I128)],
                 return_type: dec,
             },
-            decimal_unop_extern(
-                "zirk_rt_decimal_to_i128_checked",
-                dec,
-                IrType::Int(IntWidth::I128),
-            ),
+            ExternFn {
+                name: "zirk_rt_decimal_to_i128_checked".to_string(),
+                params: vec![dec, i32, IrType::Boolean],
+                return_type: IrType::Int(IntWidth::I128),
+            },
             ExternFn {
                 name: "zirk_rt_decimal_from_f64".to_string(),
                 params: vec![f64],
@@ -3036,6 +3055,9 @@ struct FunctionLowering<'a> {
     /// because a `spawn` or `Timer.*` deep inside a loop or nested block would
     /// otherwise read the id across a basic-block boundary (ADR-007).
     scope_stack: Vec<SlotId>,
+    /// Lexically active `parallel {}` bodies. Sequence calls in such a body
+    /// use the same worker-pool lowering as a `.parallel`-rooted chain.
+    parallel_depth: u32,
 }
 
 /// A branch body handed to [`FunctionLowering::lift_branch_body`]: a `spawn`
@@ -3250,6 +3272,7 @@ impl<'a> FunctionLowering<'a> {
             recursive_call: None,
             current_class: None,
             scope_stack: Vec::new(),
+            parallel_depth: 0,
         }
     }
 
@@ -6967,8 +6990,9 @@ impl<'a> FunctionLowering<'a> {
                 let left_ty = self.type_of(&e.left, e.left.span());
                 let right_ty = self.type_of(&e.right, e.right.span());
 
-                // Numeric operands are lowered to the common type the checker
-                // already computed, which is recorded in `checked.expr_types`.
+                // Numeric operands are lowered to the operation's result
+                // domain. Usually this is their smallest common type; for
+                // `Int / Int` it is Decimal by language rule.
                 // The semantic type may differ from the value's actual IR type
                 // for literals that were contextually inferred (e.g. `1.0`
                 // treated as `Int8`), so each operand is converted from its
@@ -6985,7 +7009,13 @@ impl<'a> FunctionLowering<'a> {
                             | BinaryOp::Rem
                     ) {
                         let common = self
-                            .common_numeric_ir_type(left_ty, right_ty)
+                            .checked
+                            .expr_types
+                            .get(&e.span)
+                            .copied()
+                            .filter(|ty| !ty.is_unknown())
+                            .map(|ty| self.ir_type(ty))
+                            .or_else(|| self.common_numeric_ir_type(left_ty, right_ty))
                             .unwrap_or(left_ty);
                         let left_actual = self.type_of_operand(left);
                         let right_actual = self.type_of_operand(right);
@@ -7074,7 +7104,7 @@ impl<'a> FunctionLowering<'a> {
             }
 
             // Calling a callable value goes through the boxed callable, not a name.
-            ast::Expr::Call(e) if self.is_callable_call(e) => {
+            ast::Expr::Call(e) if !Self::is_parallel_each_call(e) && self.is_callable_call(e) => {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
                 };
@@ -7098,6 +7128,9 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) => {
                 if self.is_timer_call(e) {
                     return self.lower_timer_call(e, span);
+                }
+                if let Some(operand) = self.lower_parallel_each_call(e, span) {
+                    return operand;
                 }
                 if self.is_job_method_call(e) {
                     return self.lower_job_method_call(e, span);
@@ -7123,9 +7156,9 @@ impl<'a> FunctionLowering<'a> {
                 if self.checked.temporal_constructions.contains(&e.span) {
                     return self.lower_temporal_construction(e, span);
                 }
-                if let Some(target) = self.context_conversion_target(e) {
+                if let Some(target) = self.scalar_conversion_target(e) {
                     let target_ty = self.ir_type(target);
-                    return self.lower_context_tree(target_ty, &e.args[0].value);
+                    return self.lower_scalar_conversion(target_ty, &e.args[0].value, span);
                 }
                 if self.is_fatal_error_call(e) {
                     return self.lower_fatal_error_call(e, span);
@@ -7191,6 +7224,9 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_array_list_method_call(e, span) {
                     return operand;
                 }
+                if let Some(operand) = self.lower_range_method_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_map_set_method_call(e, span) {
                     return operand;
                 }
@@ -7249,10 +7285,7 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
-            ast::Expr::Println(e) => {
-                let operand = self.lower_println_argument(e, span);
-                self.emit(InstKind::Println(operand), IrType::Void, span)
-            }
+            ast::Expr::Println(e) => self.lower_print_expr(e, span),
 
             // The checker rejects these before lowering runs; see
             // `zirk_sema` and the tasks still open for this phase.
@@ -10724,7 +10757,9 @@ impl<'a> FunctionLowering<'a> {
         for (_, value) in &stmt.options {
             self.lower_expr_for_effect(value);
         }
+        self.parallel_depth += 1;
         self.lower_block(&stmt.body);
+        self.parallel_depth -= 1;
     }
 
     /// Whether `block` contains a `return`/`break`/`continue`/`throw`
@@ -11040,7 +11075,10 @@ impl<'a> FunctionLowering<'a> {
         for (_, value) in &stmt.options {
             self.lower_expr_for_effect(value);
         }
-        self.lower_block_value(&stmt.body)
+        self.parallel_depth += 1;
+        let value = self.lower_block_value(&stmt.body);
+        self.parallel_depth -= 1;
+        value
     }
 
     /// `commit { ... }`'s own entry (design D2): durably commits the
@@ -14211,6 +14249,66 @@ impl<'a> FunctionLowering<'a> {
         ))
     }
 
+    /// Whether a receiver expression is rooted at the semantic `.parallel`
+    /// adapter. Calls in between remain part of the same sequence chain.
+    fn sequence_receiver_is_parallel(&self, receiver: &ast::Expr) -> bool {
+        match receiver {
+            ast::Expr::Field(field) => {
+                self.checked.parallel_adapter_accesses.contains(&field.span)
+                    || self.sequence_receiver_is_parallel(&field.object)
+            }
+            ast::Expr::Call(call) => self.sequence_receiver_is_parallel(&call.callee),
+            _ => false,
+        }
+    }
+
+    /// Lowers `Parallel.each(collection, callback)` through the same ordered
+    /// indexed result buffer as `.parallel.map(callback)`.
+    fn lower_parallel_each_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        if !Self::is_parallel_each_call(call) {
+            return None;
+        }
+        let written_ty = self.type_of(&call.args[0].value, call.args[0].value.span());
+        let (receiver, receiver_ty, element_ty) = match written_ty {
+            IrType::Array(_) | IrType::List(_) => {
+                let element = self.array_list_element_type(written_ty);
+                (self.lower_expr(&call.args[0].value), written_ty, element)
+            }
+            IrType::Range => {
+                let element = self.range_loop_element_type(call.args[0].value.span());
+                let range = self.lower_expr(&call.args[0].value);
+                let values = self.lower_range_collect_values(range, element, span);
+                let values_ty = self.type_of_operand(values);
+                (values, values_ty, element)
+            }
+            _ => return None,
+        };
+        let result_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("Parallel.each type"),
+        );
+        Some(self.lower_parallel_sequence_map(
+            receiver,
+            receiver_ty,
+            element_ty,
+            &call.args[1].value,
+            result_ty,
+            span,
+        ))
+    }
+
+    fn is_parallel_each_call(call: &ast::CallExpr) -> bool {
+        matches!(
+            &*call.callee,
+            ast::Expr::Field(field)
+                if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Parallel")
+                    && field.name.name == "each"
+        )
+    }
+
     /// `list.add(v)`, `list.insert(i, v)` and `list.remove(i)` are lowered to
     /// runtime calls through dedicated instructions; the checker has already
     /// validated the receiver and argument types.
@@ -14232,8 +14330,117 @@ impl<'a> FunctionLowering<'a> {
             IrType::Array(_) | IrType::List(_) => self.array_list_element_type(receiver_ty),
             _ => return None,
         };
+        let parallel = self.parallel_depth > 0 || self.sequence_receiver_is_parallel(&field.object);
         let receiver = self.lower_expr(&field.object);
         match (field.name.name.as_str(), call.args.len(), receiver_ty) {
+            ("map", 1, IrType::Array(_) | IrType::List(_)) if parallel => {
+                Some(self.lower_parallel_sequence_map(
+                    receiver,
+                    receiver_ty,
+                    element_ty,
+                    &call.args[0].value,
+                    self.ir_type(*self.checked.expr_types.get(&call.span).expect("map type")),
+                    span,
+                ))
+            }
+            ("map", 1, IrType::Array(_) | IrType::List(_)) => Some(self.lower_sequence_transform(
+                call,
+                receiver,
+                receiver_ty,
+                element_ty,
+                span,
+                false,
+            )),
+            ("filter", 1, IrType::Array(_) | IrType::List(_)) if parallel => {
+                Some(self.lower_parallel_sequence_filter(
+                    receiver,
+                    receiver_ty,
+                    element_ty,
+                    &call.args[0].value,
+                    span,
+                ))
+            }
+            ("filter", 1, IrType::Array(_) | IrType::List(_)) => Some(
+                self.lower_sequence_transform(call, receiver, receiver_ty, element_ty, span, true),
+            ),
+            ("for_each", 1, IrType::Array(_) | IrType::List(_)) => {
+                if parallel {
+                    self.lower_parallel_sequence_for_each(
+                        receiver,
+                        receiver_ty,
+                        element_ty,
+                        &call.args[0].value,
+                        span,
+                    );
+                } else {
+                    self.lower_sequence_transform(
+                        call,
+                        receiver,
+                        receiver_ty,
+                        element_ty,
+                        span,
+                        true,
+                    );
+                }
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("reduce", 2, IrType::Array(_) | IrType::List(_)) if parallel => Some(
+                self.lower_parallel_sequence_reduce(call, receiver, receiver_ty, element_ty, span),
+            ),
+            ("reduce" | "reduce_ordered", 2, IrType::Array(_) | IrType::List(_)) => {
+                Some(self.lower_sequence_reduce(call, receiver, receiver_ty, element_ty, span))
+            }
+            ("sum", 0, IrType::Array(_) | IrType::List(_)) if parallel => {
+                Some(self.lower_parallel_sequence_sum(receiver, receiver_ty, element_ty, span))
+            }
+            ("sum", 0, IrType::Array(_) | IrType::List(_)) => {
+                Some(self.lower_sequence_sum(receiver, receiver_ty, element_ty, span))
+            }
+            ("count", 0, IrType::Array(_) | IrType::List(_)) => {
+                let length = self.emit(
+                    if matches!(receiver_ty, IrType::Array(_)) {
+                        InstKind::ArrayLength(receiver)
+                    } else {
+                        InstKind::ListLength(receiver)
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                Some(self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I32), span))
+            }
+            ("collect", 0, IrType::Array(_) | IrType::List(_)) => {
+                Some(self.lower_sequence_collect(receiver, receiver_ty, element_ty, span))
+            }
+            ("contains", 1, IrType::Array(_) | IrType::List(_)) => {
+                let needle = self.lower_expr_as(&call.args[0].value, element_ty);
+                Some(self.lower_sequence_contains(receiver, receiver_ty, element_ty, needle, span))
+            }
+            ("reverse", 0, IrType::Array(_) | IrType::List(_)) => {
+                self.lower_sequence_reverse(receiver, receiver_ty, element_ty, span);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("sort", 0, IrType::Array(_) | IrType::List(_)) => {
+                self.lower_sequence_sort(call, receiver, receiver_ty, element_ty, span, false);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("sort_by", 1, IrType::Array(_) | IrType::List(_)) => {
+                self.lower_sequence_sort(call, receiver, receiver_ty, element_ty, span, true);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("first", 0, IrType::Array(_) | IrType::List(_)) => Some(self.lower_sequence_edge(
+                receiver,
+                receiver_ty,
+                element_ty,
+                false,
+                false,
+                span,
+            )),
+            ("last", 0, IrType::Array(_) | IrType::List(_)) => {
+                Some(self.lower_sequence_edge(receiver, receiver_ty, element_ty, true, false, span))
+            }
+            ("pop", 0, IrType::List(_)) => {
+                Some(self.lower_sequence_edge(receiver, receiver_ty, element_ty, true, true, span))
+            }
             ("add", 1, IrType::List(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
                 Some(self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span))
@@ -14285,6 +14492,2422 @@ impl<'a> FunctionLowering<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Runs a one-input callback across the worker pool. Each worker owns one
+    /// output index, so writes are disjoint and the completed Array remains in
+    /// source order independent of scheduling. A public List result is then
+    /// materialized from that ordered Array on the joining thread.
+    fn lower_parallel_sequence_map(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        callback_expr: &ast::Expr,
+        public_result_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let callback = self.lower_expr(callback_expr);
+        let callback_ty = self.type_of_operand(callback);
+        let IrType::Callable(callback_id) = callback_ty else {
+            unreachable!("parallel sequence callback is callable")
+        };
+        let result_element = self.module.closures[callback_id as usize].returns;
+        let result_array_id =
+            self.module
+                .array_types
+                .iter()
+                .position(|&ty| ty == result_element)
+                .expect("parallel result array type was interned by sema") as u32;
+        let result_array_ty = IrType::Array(result_array_id);
+        let length = self.sequence_length(receiver, receiver_ty, span);
+        let result = self.emit(
+            InstKind::ArrayNew {
+                element_id: result_array_id,
+                capacity: length,
+            },
+            result_array_ty,
+            span,
+        );
+
+        let captures = vec![receiver, callback, result];
+        let capture_types = vec![receiver_ty, callback_ty, result_array_ty];
+        let dispatch_id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: capture_types.clone(),
+            params: Vec::new(),
+            returns: IrType::Void,
+        });
+        let name = format!("parallel_map.{}.{}", span.file.0, span.start);
+        let lifted = self.lift_parallel_sequence_map_body(
+            &name,
+            &capture_types,
+            receiver_ty,
+            element_ty,
+            callback_ty,
+            result_array_ty,
+            result_element,
+            span,
+        );
+        self.lifted.push(lifted);
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures,
+            },
+            IrType::Callable(dispatch_id),
+            span,
+        );
+        let count = self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(
+            InstKind::ParallelForStart {
+                target: name,
+                body,
+                count,
+                budget_kind: 0,
+                budget_a: zero,
+                budget_b: zero,
+            },
+            span,
+        );
+
+        if matches!(public_result_ty, IrType::List(_)) {
+            self.lower_sequence_collect(result, result_array_ty, result_element, span)
+        } else {
+            result
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // The lifted ABI names every capture explicitly.
+    fn lift_parallel_sequence_map_body(
+        &mut self,
+        name: &str,
+        capture_types: &[IrType],
+        receiver_ty: IrType,
+        element_ty: IrType,
+        callback_ty: IrType,
+        result_array_ty: IrType,
+        result_element: IrType,
+        span: Span,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = IrType::Void;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let source_slot = inner.declare_slot("<parallel_source>", capture_types[0], span);
+        let callback_slot = inner.declare_slot("<parallel_callback>", capture_types[1], span);
+        let result_slot = inner.declare_slot("<parallel_result>", capture_types[2], span);
+        let index_slot = inner.declare_slot("<parallel_index>", IrType::Int(IntWidth::I64), span);
+
+        let source = inner.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let index = inner.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let index = inner.emit(InstKind::IntCast(index), IrType::Int(IntWidth::U64), span);
+        let value = inner.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let mapped = inner.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![value],
+            },
+            result_element,
+            span,
+        );
+        let output = inner.emit(InstKind::Load(result_slot), result_array_ty, span);
+        inner.emit_effect(
+            InstKind::ArrayListStore {
+                receiver: output,
+                index,
+                value: mapped,
+            },
+            span,
+        );
+        inner.terminate(Terminator::Return(None));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        Function {
+            name: name.to_string(),
+            params: vec![source_slot, callback_slot, result_slot, index_slot],
+            return_type: IrType::Void,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        }
+    }
+
+    fn lower_parallel_sequence_filter(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        predicate: &ast::Expr,
+        span: Span,
+    ) -> Operand {
+        let source_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let bool_array =
+            self.module
+                .array_types
+                .iter()
+                .position(|&ty| ty == IrType::Boolean)
+                .expect("parallel filter Boolean Array was interned by sema") as u32;
+        let flags = self.lower_parallel_sequence_map(
+            source,
+            receiver_ty,
+            element_ty,
+            predicate,
+            IrType::Array(bool_array),
+            span,
+        );
+        let flags_slot = self.spill(flags, IrType::Array(bool_array), span);
+        let list_id = self.list_id_for(element_ty);
+        let result = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            IrType::List(list_id),
+            span,
+        );
+        let result_slot = self.spill(result, IrType::List(list_id), span);
+        let source_for_length = self.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let len = self.sequence_length(source_for_length, receiver_ty, span);
+        let len_slot = self.spill(len, IrType::Int(IntWidth::U64), span);
+        let index_slot =
+            self.declare_slot("<parallel_filter_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let keep = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(InstKind::Load(len_slot), IrType::Int(IntWidth::U64), span);
+        let more = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: more,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let flags = self.emit(InstKind::Load(flags_slot), IrType::Array(bool_array), span);
+        let flag_index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let flag = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: flags,
+                index: flag_index,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: flag,
+            then_block: keep,
+            else_block: step,
+        });
+        self.current = keep;
+        let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let value_index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index: value_index,
+            },
+            element_ty,
+            span,
+        );
+        let output = self.emit(InstKind::Load(result_slot), IrType::List(list_id), span);
+        self.emit_effect(
+            InstKind::ListAdd {
+                receiver: output,
+                value,
+            },
+            span,
+        );
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let current = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: current,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        let list = self.emit(InstKind::Load(result_slot), IrType::List(list_id), span);
+        if let IrType::Array(array_id) = receiver_ty {
+            let args = vec![
+                list,
+                self.const_int_at(
+                    ir_abi_size(self.module, element_ty) as i128,
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                self.const_int_at(
+                    ir_abi_align(self.module, element_ty) as i128,
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                self.emit(
+                    InstKind::ConstBool(element_ty.is_managed_reference(self.module)),
+                    IrType::Boolean,
+                    span,
+                ),
+            ];
+            self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_array_from_list".into(),
+                    args,
+                },
+                IrType::Array(array_id),
+                span,
+            )
+        } else {
+            list
+        }
+    }
+
+    fn lower_parallel_sequence_for_each(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        callback_expr: &ast::Expr,
+        span: Span,
+    ) {
+        let callback = self.lower_expr(callback_expr);
+        let callback_ty = self.type_of_operand(callback);
+        let captures = vec![receiver, callback];
+        let capture_types = vec![receiver_ty, callback_ty];
+        let id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: capture_types.clone(),
+            params: Vec::new(),
+            returns: IrType::Void,
+        });
+        let name = format!("parallel_each.{}.{}", span.file.0, span.start);
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = IrType::Void;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let source_slot = inner.declare_slot("<parallel_source>", receiver_ty, span);
+        let callback_slot = inner.declare_slot("<parallel_callback>", callback_ty, span);
+        let index_slot = inner.declare_slot("<parallel_index>", IrType::Int(IntWidth::I64), span);
+        let source = inner.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let signed = inner.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let index = inner.emit(InstKind::IntCast(signed), IrType::Int(IntWidth::U64), span);
+        let value = inner.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+        inner.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![value],
+            },
+            IrType::Void,
+            span,
+        );
+        inner.terminate(Terminator::Return(None));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        self.lifted.push(Function {
+            name: name.clone(),
+            params: vec![source_slot, callback_slot, index_slot],
+            return_type: IrType::Void,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        });
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures,
+            },
+            IrType::Callable(id),
+            span,
+        );
+        let length = self.sequence_length(receiver, receiver_ty, span);
+        let count = self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(
+            InstKind::ParallelForStart {
+                target: name,
+                body,
+                count,
+                budget_kind: 0,
+                budget_a: zero,
+                budget_b: zero,
+            },
+            span,
+        );
+    }
+
+    /// Parallel reduction is deliberately kept behind this dedicated entry
+    /// point so `reduce_ordered` can continue using the sequential lowering.
+    /// The implementation is completed together with the result-buffer
+    /// lowering below; keeping the dispatch separate prevents an ordered call
+    /// from accidentally taking the regrouping path.
+    fn lower_parallel_sequence_reduce(
+        &mut self,
+        call: &ast::CallExpr,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        // The public `reduce` contract calls its first argument an identity.
+        // With an associative combiner, each worker may first fold that
+        // identity into one disjoint input element; the joining thread then
+        // combines the ordered partials.  `reduce_ordered` never reaches this
+        // function, so its exact left-to-right grouping remains intact.
+        let result_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("parallel reduce type"),
+        );
+        // A heterogeneous accumulator has no associative binary operation
+        // over two partial accumulator values. Keep that supported sequential
+        // shape honest rather than pretending it ran on the pool.
+        if result_ty != element_ty {
+            return self.lower_sequence_reduce(call, receiver, receiver_ty, element_ty, span);
+        }
+        let identity = self.lower_expr_as(&call.args[0].value, result_ty);
+        let callback = self.lower_expr(&call.args[1].value);
+        let callback_ty = self.type_of_operand(callback);
+        let IrType::Callable(_) = callback_ty else {
+            unreachable!("parallel reduce callback is callable")
+        };
+        let array_id = self
+            .module
+            .array_types
+            .iter()
+            .position(|&ty| ty == result_ty)
+            .expect("parallel reduce result array type was interned by sema")
+            as u32;
+        let array_ty = IrType::Array(array_id);
+        let length = self.sequence_length(receiver, receiver_ty, span);
+        let partials = self.emit(
+            InstKind::ArrayNew {
+                element_id: array_id,
+                capacity: length,
+            },
+            array_ty,
+            span,
+        );
+        let captures = vec![receiver, callback, identity, partials];
+        let capture_types = vec![receiver_ty, callback_ty, result_ty, array_ty];
+        let dispatch_id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: capture_types.clone(),
+            params: Vec::new(),
+            returns: IrType::Void,
+        });
+        let name = format!("parallel_reduce.{}.{}", span.file.0, span.start);
+        let lifted = self.lift_parallel_sequence_reduce_body(
+            &name,
+            &capture_types,
+            receiver_ty,
+            element_ty,
+            callback_ty,
+            result_ty,
+            array_ty,
+            span,
+        );
+        self.lifted.push(lifted);
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures,
+            },
+            IrType::Callable(dispatch_id),
+            span,
+        );
+        let count = self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(
+            InstKind::ParallelForStart {
+                target: name,
+                body,
+                count,
+                budget_kind: 0,
+                budget_a: zero,
+                budget_b: zero,
+            },
+            span,
+        );
+        self.lower_sequence_reduce_operands(
+            partials,
+            array_ty,
+            result_ty,
+            identity,
+            callback,
+            callback_ty,
+            span,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // The lifted ABI names every capture explicitly.
+    fn lift_parallel_sequence_reduce_body(
+        &mut self,
+        name: &str,
+        capture_types: &[IrType],
+        receiver_ty: IrType,
+        element_ty: IrType,
+        callback_ty: IrType,
+        result_ty: IrType,
+        result_array_ty: IrType,
+        span: Span,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = IrType::Void;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let source_slot = inner.declare_slot("<parallel_source>", capture_types[0], span);
+        let callback_slot = inner.declare_slot("<parallel_callback>", capture_types[1], span);
+        let identity_slot = inner.declare_slot("<parallel_identity>", capture_types[2], span);
+        let result_slot = inner.declare_slot("<parallel_result>", capture_types[3], span);
+        let index_slot = inner.declare_slot("<parallel_index>", IrType::Int(IntWidth::I64), span);
+        let source = inner.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let signed = inner.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let index = inner.emit(InstKind::IntCast(signed), IrType::Int(IntWidth::U64), span);
+        let value = inner.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let identity = inner.emit(InstKind::Load(identity_slot), result_ty, span);
+        let partial = inner.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![identity, value],
+            },
+            result_ty,
+            span,
+        );
+        let output = inner.emit(InstKind::Load(result_slot), result_array_ty, span);
+        inner.emit_effect(
+            InstKind::ArrayListStore {
+                receiver: output,
+                index,
+                value: partial,
+            },
+            span,
+        );
+        inner.terminate(Terminator::Return(None));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        Function {
+            name: name.to_string(),
+            params: vec![
+                source_slot,
+                callback_slot,
+                identity_slot,
+                result_slot,
+                index_slot,
+            ],
+            return_type: IrType::Void,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        }
+    }
+
+    /// `sum` is the built-in associative reduction. It has its own dispatch
+    /// point for the same reason as [`Self::lower_parallel_sequence_reduce`].
+    fn lower_parallel_sequence_sum(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let array_id =
+            self.module
+                .array_types
+                .iter()
+                .position(|&ty| ty == element_ty)
+                .expect("parallel sum result array type was interned by sema") as u32;
+        let array_ty = IrType::Array(array_id);
+        let length = self.sequence_length(receiver, receiver_ty, span);
+        let partials = self.emit(
+            InstKind::ArrayNew {
+                element_id: array_id,
+                capacity: length,
+            },
+            array_ty,
+            span,
+        );
+        let capture_types = vec![receiver_ty, array_ty];
+        let dispatch_id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: capture_types.clone(),
+            params: Vec::new(),
+            returns: IrType::Void,
+        });
+        let name = format!("parallel_sum.{}.{}", span.file.0, span.start);
+        let lifted = self.lift_parallel_sequence_sum_body(
+            &name,
+            &capture_types,
+            receiver_ty,
+            element_ty,
+            array_ty,
+            span,
+        );
+        self.lifted.push(lifted);
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: name.clone(),
+                captures: vec![receiver, partials],
+            },
+            IrType::Callable(dispatch_id),
+            span,
+        );
+        let count = self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(
+            InstKind::ParallelForStart {
+                target: name,
+                body,
+                count,
+                budget_kind: 0,
+                budget_a: zero,
+                budget_b: zero,
+            },
+            span,
+        );
+        self.lower_sequence_sum(partials, array_ty, element_ty, span)
+    }
+
+    fn lift_parallel_sequence_sum_body(
+        &mut self,
+        name: &str,
+        capture_types: &[IrType],
+        receiver_ty: IrType,
+        element_ty: IrType,
+        result_array_ty: IrType,
+        span: Span,
+    ) -> Function {
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = IrType::Void;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let source_slot = inner.declare_slot("<parallel_source>", capture_types[0], span);
+        let result_slot = inner.declare_slot("<parallel_result>", capture_types[1], span);
+        let index_slot = inner.declare_slot("<parallel_index>", IrType::Int(IntWidth::I64), span);
+        let source = inner.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let signed = inner.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let index = inner.emit(InstKind::IntCast(signed), IrType::Int(IntWidth::U64), span);
+        let value = inner.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let zero = inner
+            .default_value(element_ty, span)
+            .expect("numeric sum element has a zero value");
+        let partial = inner.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: zero,
+                right: value,
+            },
+            element_ty,
+            span,
+        );
+        let output = inner.emit(InstKind::Load(result_slot), result_array_ty, span);
+        inner.emit_effect(
+            InstKind::ArrayListStore {
+                receiver: output,
+                index,
+                value: partial,
+            },
+            span,
+        );
+        inner.terminate(Terminator::Return(None));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        Function {
+            name: name.to_string(),
+            params: vec![source_slot, result_slot, index_slot],
+            return_type: IrType::Void,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        }
+    }
+
+    fn lower_range_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return None;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        if receiver_ty != IrType::Range {
+            return None;
+        }
+        let parallel = self.parallel_depth > 0 || self.sequence_receiver_is_parallel(&field.object);
+        let element_ty = self.range_loop_element_type(field.object.span());
+        let range = self.lower_expr(&field.object);
+        let values = self.lower_range_collect_values(range, element_ty, span);
+        let values_ty = self.type_of_operand(values);
+        match field.name.name.as_str() {
+            "map" if call.args.len() == 1 && parallel => Some(
+                self.lower_parallel_sequence_map(
+                    values,
+                    values_ty,
+                    element_ty,
+                    &call.args[0].value,
+                    self.ir_type(
+                        *self
+                            .checked
+                            .expr_types
+                            .get(&call.span)
+                            .expect("range map type"),
+                    ),
+                    span,
+                ),
+            ),
+            "map" if call.args.len() == 1 => Some(
+                self.lower_sequence_transform(call, values, values_ty, element_ty, span, false),
+            ),
+            "filter" if call.args.len() == 1 && parallel => {
+                Some(self.lower_parallel_sequence_filter(
+                    values,
+                    values_ty,
+                    element_ty,
+                    &call.args[0].value,
+                    span,
+                ))
+            }
+            "filter" if call.args.len() == 1 => {
+                Some(self.lower_sequence_transform(call, values, values_ty, element_ty, span, true))
+            }
+            "for_each" if call.args.len() == 1 => {
+                if parallel {
+                    self.lower_parallel_sequence_for_each(
+                        values,
+                        values_ty,
+                        element_ty,
+                        &call.args[0].value,
+                        span,
+                    );
+                } else {
+                    self.lower_sequence_transform(call, values, values_ty, element_ty, span, true);
+                }
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            "reduce" if call.args.len() == 2 && parallel => {
+                Some(self.lower_parallel_sequence_reduce(call, values, values_ty, element_ty, span))
+            }
+            "reduce" | "reduce_ordered" if call.args.len() == 2 => {
+                Some(self.lower_sequence_reduce(
+                    call,
+                    values,
+                    IrType::List(self.list_id_for(element_ty)),
+                    element_ty,
+                    span,
+                ))
+            }
+            "sum" if call.args.is_empty() && parallel => {
+                Some(self.lower_parallel_sequence_sum(values, values_ty, element_ty, span))
+            }
+            "sum" if call.args.is_empty() => Some(self.lower_sequence_sum(
+                values,
+                IrType::List(self.list_id_for(element_ty)),
+                element_ty,
+                span,
+            )),
+            "count" if call.args.is_empty() => {
+                let length = self.emit(
+                    InstKind::ListLength(values),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                Some(self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I32), span))
+            }
+            "collect" if call.args.is_empty() => Some(values),
+            _ => None,
+        }
+    }
+
+    fn list_id_for(&self, element: IrType) -> u32 {
+        self.module
+            .list_types
+            .iter()
+            .position(|&ty| ty == element)
+            .expect("range collection list type") as u32
+    }
+
+    fn lower_range_collect_values(
+        &mut self,
+        range: Operand,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let list_id = self.list_id_for(element_ty);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            IrType::List(list_id),
+            span,
+        );
+        let list_slot = self.spill(list, IrType::List(list_id), span);
+        let range_slot = self.spill(range, IrType::Range, span);
+        let range_value = self.emit(InstKind::Load(range_slot), IrType::Range, span);
+        let length = self.emit(
+            InstKind::Call {
+                callee: "zirk_range_length".into(),
+                args: vec![range_value],
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::I64), span);
+        let index_slot =
+            self.declare_slot("<range_collect_index>", IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let range_value = self.emit(InstKind::Load(range_slot), IrType::Range, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let raw = self.emit(
+            InstKind::Call {
+                callee: "zirk_range_element_at".into(),
+                args: vec![range_value, index],
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let value = if element_ty == IrType::Int(IntWidth::I64) {
+            raw
+        } else {
+            self.emit(InstKind::IntCast(raw), element_ty, span)
+        };
+        let list = self.emit(InstKind::Load(list_slot), IrType::List(list_id), span);
+        self.emit_effect(
+            InstKind::ListAdd {
+                receiver: list,
+                value,
+            },
+            span,
+        );
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::I64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::I64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(list_slot), IrType::List(list_id), span)
+    }
+
+    /// Lowers the eager `map`/`filter`/`for_each` family. The source is held
+    /// in a slot because the loop opens several blocks; the callback is
+    /// likewise held so captured callables survive the back-edge. A temporary
+    /// list gives both concrete collection families one growable accumulation
+    /// path, then `Array` results are materialized by the runtime helper.
+    fn lower_sequence_transform(
+        &mut self,
+        call: &ast::CallExpr,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+        filtering: bool,
+    ) -> Operand {
+        let result_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("checker recorded the sequence call type"),
+        );
+        // A fixed array knows the exact cardinality of `map`: reserve its
+        // final contiguous storage immediately and write every callback
+        // result by index. `filter` intentionally remains on the one-pass
+        // list path below: evaluating a predicate twice to count first would
+        // duplicate observable callback effects.
+        if matches!(receiver_ty, IrType::Array(_))
+            && !filtering
+            && matches!(result_ty, IrType::Array(_))
+        {
+            return self.lower_array_map_direct(
+                call,
+                receiver,
+                receiver_ty,
+                element_ty,
+                result_ty,
+                span,
+            );
+        }
+        let callback = self.lower_expr(&call.args[0].value);
+        let callback_ty = self.type_of_operand(callback);
+        let callback_slot = self.spill(callback, callback_ty, span);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let receiver_for_length = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.emit(
+            if matches!(receiver_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(receiver_for_length)
+            } else {
+                InstKind::ListLength(receiver_for_length)
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let callable_id = match callback_ty {
+            IrType::Callable(id) => id,
+            _ => unreachable!("sequence callback is callable"),
+        };
+        let callback_returns = self.module.closures[callable_id as usize].returns;
+        let discarding = matches!(result_ty, IrType::Void);
+        let result_element = if filtering {
+            element_ty
+        } else {
+            callback_returns
+        };
+        let result_id =
+            self.module
+                .list_types
+                .iter()
+                .position(|&ty| ty == result_element)
+                .expect("sequence result list type was interned by the checker") as u32;
+        let result_slot = if discarding {
+            None
+        } else {
+            let result_list = self.emit(
+                InstKind::ListNew {
+                    element_id: result_id,
+                },
+                IrType::List(result_id),
+                span,
+            );
+            Some(self.spill(result_list, IrType::List(result_id), span))
+        };
+        let counter = self.declare_slot("<sequence_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(counter, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let callback_result = self.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![value],
+            },
+            callback_returns,
+            span,
+        );
+        if discarding {
+            // `for_each` deliberately discards the callback result.
+        } else if filtering {
+            let value_slot = self.spill(value, element_ty, span);
+            let add_block = self.new_block();
+            let next_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: callback_result,
+                then_block: add_block,
+                else_block: next_block,
+            });
+            self.current = add_block;
+            let list = self.emit(
+                InstKind::Load(result_slot.expect("filter result slot")),
+                IrType::List(result_id),
+                span,
+            );
+            let value = self.emit(InstKind::Load(value_slot), element_ty, span);
+            self.emit_effect(
+                InstKind::ListAdd {
+                    receiver: list,
+                    value,
+                },
+                span,
+            );
+            self.terminate(Terminator::Jump(next_block));
+            self.current = next_block;
+        } else {
+            let list = self.emit(
+                InstKind::Load(result_slot.expect("map result slot")),
+                IrType::List(result_id),
+                span,
+            );
+            self.emit_effect(
+                InstKind::ListAdd {
+                    receiver: list,
+                    value: callback_result,
+                },
+                span,
+            );
+        }
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(counter, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        if matches!(result_ty, IrType::Array(_)) {
+            let list = self.emit(
+                InstKind::Load(result_slot.expect("array result slot")),
+                IrType::List(result_id),
+                span,
+            );
+            let element = self.module.list_types[result_id as usize];
+            let args = vec![
+                list,
+                self.const_int_at(
+                    ir_abi_size(self.module, element) as i128,
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                self.const_int_at(
+                    ir_abi_align(self.module, element) as i128,
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                self.emit(
+                    InstKind::ConstBool(element.is_managed_reference(self.module)),
+                    IrType::Boolean,
+                    span,
+                ),
+            ];
+            self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_array_from_list".into(),
+                    args,
+                },
+                result_ty,
+                span,
+            )
+        } else if matches!(result_ty, IrType::Void) {
+            self.emit(InstKind::Undefined, IrType::Void, span)
+        } else {
+            self.emit(
+                InstKind::Load(result_slot.expect("sequence result slot")),
+                result_ty,
+                span,
+            )
+        }
+    }
+
+    /// Lowers `Array<T>.map((T) -> U)` without the growable `List<U>`
+    /// staging buffer. The result has exactly the source length, so its
+    /// allocation is fixed once before the loop starts.
+    fn lower_array_map_direct(
+        &mut self,
+        call: &ast::CallExpr,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        result_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let IrType::Array(result_id) = result_ty else {
+            unreachable!("direct array map requires an array result")
+        };
+        let callback = self.lower_expr(&call.args[0].value);
+        let callback_ty = self.type_of_operand(callback);
+        let IrType::Callable(callback_id) = callback_ty else {
+            unreachable!("array map callback is callable")
+        };
+        let callback_returns = self.module.closures[callback_id as usize].returns;
+        let callback_slot = self.spill(callback, callback_ty, span);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.emit(
+            InstKind::ArrayLength(source),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let capacity = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let result = self.emit(
+            InstKind::ArrayNew {
+                element_id: result_id,
+                capacity,
+            },
+            result_ty,
+            span,
+        );
+        let result_slot = self.spill(result, result_ty, span);
+        let counter = self.declare_slot("<array_map_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(counter, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let mapped = self.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![value],
+            },
+            callback_returns,
+            span,
+        );
+        let result = self.emit(InstKind::Load(result_slot), result_ty, span);
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        self.emit_effect(
+            InstKind::ArrayListStore {
+                receiver: result,
+                index,
+                value: mapped,
+            },
+            span,
+        );
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(counter), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(counter, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(result_slot), result_ty, span)
+    }
+
+    fn lower_sequence_reduce(
+        &mut self,
+        call: &ast::CallExpr,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let result_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("reduce type"),
+        );
+        let identity = self.lower_expr_as(&call.args[0].value, result_ty);
+        let accumulator = self.spill(identity, result_ty, span);
+        let callback = self.lower_expr(&call.args[1].value);
+        let callback_ty = self.type_of_operand(callback);
+        let callback_slot = self.spill(callback, callback_ty, span);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.emit(
+            if matches!(receiver_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(source)
+            } else {
+                InstKind::ListLength(source)
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let index_slot = self.declare_slot("<reduce_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let acc = self.emit(InstKind::Load(accumulator), result_ty, span);
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let callable_id = match callback_ty {
+            IrType::Callable(id) => id,
+            _ => unreachable!("reduce callback"),
+        };
+        let returns = self.module.closures[callable_id as usize].returns;
+        let next = self.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![acc, value],
+            },
+            returns,
+            span,
+        );
+        self.emit_effect(InstKind::Store(accumulator, next), span);
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(accumulator), result_ty, span)
+    }
+
+    /// The common, ordered join phase for a sequential reduction and for the
+    /// deterministic materialization of parallel partials. Inputs and the
+    /// callback are already evaluated by the caller, so a parallel reduction
+    /// never evaluates its identity expression or lambda twice.
+    #[allow(clippy::too_many_arguments)] // Operands and their IR types travel as explicit pairs.
+    fn lower_sequence_reduce_operands(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        identity: Operand,
+        callback: Operand,
+        callback_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let result_ty = self.type_of_operand(identity);
+        let accumulator = self.spill(identity, result_ty, span);
+        let callback_slot = self.spill(callback, callback_ty, span);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.sequence_length(source, receiver_ty, span);
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let index_slot = self.declare_slot("<reduce_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let acc = self.emit(InstKind::Load(accumulator), result_ty, span);
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let callable_id = match callback_ty {
+            IrType::Callable(id) => id,
+            _ => unreachable!("reduce callback"),
+        };
+        let returns = self.module.closures[callable_id as usize].returns;
+        let next = self.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![acc, value],
+            },
+            returns,
+            span,
+        );
+        self.emit_effect(InstKind::Store(accumulator, next), span);
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(accumulator), result_ty, span)
+    }
+
+    fn lower_sequence_sum(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let accumulator = self.declare_slot("<sum_accumulator>", element_ty, span);
+        let zero = self.emit(InstKind::ConstInt(0), element_ty, span);
+        self.emit_effect(InstKind::Store(accumulator, zero), span);
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let length = self.emit(
+            if matches!(receiver_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(source)
+            } else {
+                InstKind::ListLength(source)
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let index_slot = self.declare_slot("<sum_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let acc = self.emit(InstKind::Load(accumulator), element_ty, span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: acc,
+                right: value,
+            },
+            element_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(accumulator, next), span);
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(accumulator), element_ty, span)
+    }
+
+    fn lower_sequence_collect(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        if let IrType::List(_) = receiver_ty {
+            return self.emit(InstKind::ListClone { receiver }, receiver_ty, span);
+        }
+        let list_id = self
+            .module
+            .list_types
+            .iter()
+            .position(|&ty| ty == element_ty)
+            .expect("collect list type") as u32;
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            IrType::List(list_id),
+            span,
+        );
+        let list_slot = self.spill(list, IrType::List(list_id), span);
+        let source_slot = self.spill(receiver, receiver_ty, span);
+        let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let length = self.emit(
+            InstKind::ArrayLength(source),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let index_slot = self.declare_slot("<collect_index>", IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let bound = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: bound,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: source,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let list = self.emit(InstKind::Load(list_slot), IrType::List(list_id), span);
+        self.emit_effect(
+            InstKind::ListAdd {
+                receiver: list,
+                value,
+            },
+            span,
+        );
+        self.terminate(Terminator::Jump(step));
+        self.current = step;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        self.emit(InstKind::Load(list_slot), IrType::List(list_id), span)
+    }
+
+    fn sequence_length(&mut self, receiver: Operand, receiver_ty: IrType, span: Span) -> Operand {
+        self.emit(
+            if matches!(receiver_ty, IrType::Array(_)) {
+                InstKind::ArrayLength(receiver)
+            } else {
+                InstKind::ListLength(receiver)
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        )
+    }
+
+    // Raw-pointer adapters keep the operand-building helpers composable in
+    // the loop lowerers without creating overlapping mutable borrows. The
+    // pointer is derived from the active lowerer and never escapes it.
+    fn emit_ptr(this: *mut Self, kind: InstKind, ty: IrType, span: Span) -> Operand {
+        unsafe { (*this).emit(kind, ty, span) }
+    }
+
+    fn emit_effect_ptr(this: *mut Self, kind: InstKind, span: Span) {
+        unsafe { (*this).emit_effect(kind, span) }
+    }
+
+    fn sequence_length_ptr(
+        this: *mut Self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        unsafe { (*this).sequence_length(receiver, receiver_ty, span) }
+    }
+
+    fn sequence_load_ptr(
+        this: *mut Self,
+        receiver: Operand,
+        index: Operand,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        unsafe { (*this).sequence_load(receiver, index, element_ty, span) }
+    }
+
+    fn sequence_store_ptr(
+        this: *mut Self,
+        receiver: Operand,
+        index: Operand,
+        value: Operand,
+        span: Span,
+    ) {
+        unsafe { (*this).sequence_store(receiver, index, value, span) }
+    }
+
+    fn spill_ptr(this: *mut Self, operand: Operand, ty: IrType, span: Span) -> SlotId {
+        unsafe { (*this).spill(operand, ty, span) }
+    }
+
+    fn const_int_at_ptr(this: *mut Self, value: i128, ty: IrType, span: Span) -> Operand {
+        unsafe { (*this).const_int_at(value, ty, span) }
+    }
+
+    fn sequence_load(
+        &mut self,
+        receiver: Operand,
+        index: Operand,
+        element_ty: IrType,
+        span: Span,
+    ) -> Operand {
+        self.emit(
+            InstKind::ArrayListLoad { receiver, index },
+            element_ty,
+            span,
+        )
+    }
+
+    fn sequence_store(&mut self, receiver: Operand, index: Operand, value: Operand, span: Span) {
+        self.emit_effect(
+            InstKind::ArrayListStore {
+                receiver,
+                index,
+                value,
+            },
+            span,
+        );
+    }
+
+    fn lower_sequence_contains(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        needle: Operand,
+        span: Span,
+    ) -> Operand {
+        let this = self as *mut Self;
+        let result = self.declare_slot("<contains_result>", IrType::Boolean, span);
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                result,
+                Self::emit_ptr(this, InstKind::ConstBool(false), IrType::Boolean, span),
+            ),
+            span,
+        );
+        let receiver_slot = Self::spill_ptr(this, receiver, receiver_ty, span);
+        let needle_slot = Self::spill_ptr(this, needle, element_ty, span);
+        let index = self.declare_slot("<contains_index>", IrType::Int(IntWidth::U64), span);
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                index,
+                Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::U64), span),
+            ),
+            span,
+        );
+        let header = self.new_block();
+        let body = self.new_block();
+        let step = self.new_block();
+        let found = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let i = Self::emit_ptr(
+            this,
+            InstKind::Load(index),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let len = Self::sequence_length_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            receiver_ty,
+            span,
+        );
+        let keep = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: len,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let value = Self::sequence_load_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            Self::emit_ptr(
+                this,
+                InstKind::Load(index),
+                IrType::Int(IntWidth::U64),
+                span,
+            ),
+            element_ty,
+            span,
+        );
+        let equal = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: value,
+                right: Self::emit_ptr(this, InstKind::Load(needle_slot), element_ty, span),
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: equal,
+            then_block: found,
+            else_block: step,
+        });
+        self.current = found;
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                result,
+                Self::emit_ptr(this, InstKind::ConstBool(true), IrType::Boolean, span),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(done));
+        self.current = step;
+        let next = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: Self::emit_ptr(
+                    this,
+                    InstKind::Load(index),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        Self::emit_effect_ptr(this, InstKind::Store(index, next), span);
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+        Self::emit_ptr(this, InstKind::Load(result), IrType::Boolean, span)
+    }
+
+    fn lower_sequence_reverse(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+    ) {
+        let this = self as *mut Self;
+        let receiver_slot = Self::spill_ptr(this, receiver, receiver_ty, span);
+        let left = self.declare_slot("<reverse_left>", IrType::Int(IntWidth::U64), span);
+        let right = self.declare_slot("<reverse_right>", IrType::Int(IntWidth::U64), span);
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                left,
+                Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::U64), span),
+            ),
+            span,
+        );
+        let len = Self::sequence_length_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            receiver_ty,
+            span,
+        );
+        let one = Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span);
+        let last = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Sub,
+                left: len,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        Self::emit_effect_ptr(this, InstKind::Store(right, last), span);
+        let header = self.new_block();
+        let body = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(header));
+        self.current = header;
+        let l = Self::emit_ptr(this, InstKind::Load(left), IrType::Int(IntWidth::U64), span);
+        let r = Self::emit_ptr(
+            this,
+            InstKind::Load(right),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: l,
+                right: r,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: body,
+            else_block: done,
+        });
+        self.current = body;
+        let receiver = Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span);
+        let l = Self::emit_ptr(this, InstKind::Load(left), IrType::Int(IntWidth::U64), span);
+        let r = Self::emit_ptr(
+            this,
+            InstKind::Load(right),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let lv = Self::sequence_load_ptr(this, receiver, l, element_ty, span);
+        let receiver = Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span);
+        let rv = Self::sequence_load_ptr(this, receiver, r, element_ty, span);
+        let lv_slot = Self::spill_ptr(this, lv, element_ty, span);
+        let rv_slot = Self::spill_ptr(this, rv, element_ty, span);
+        Self::sequence_store_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            Self::emit_ptr(this, InstKind::Load(left), IrType::Int(IntWidth::U64), span),
+            Self::emit_ptr(this, InstKind::Load(rv_slot), element_ty, span),
+            span,
+        );
+        Self::sequence_store_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            Self::emit_ptr(
+                this,
+                InstKind::Load(right),
+                IrType::Int(IntWidth::U64),
+                span,
+            ),
+            Self::emit_ptr(this, InstKind::Load(lv_slot), element_ty, span),
+            span,
+        );
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                left,
+                Self::emit_ptr(
+                    this,
+                    InstKind::Binary {
+                        op: BinaryOp::Add,
+                        left: Self::emit_ptr(
+                            this,
+                            InstKind::Load(left),
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        ),
+                        right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            ),
+            span,
+        );
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                right,
+                Self::emit_ptr(
+                    this,
+                    InstKind::Binary {
+                        op: BinaryOp::Sub,
+                        left: Self::emit_ptr(
+                            this,
+                            InstKind::Load(right),
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        ),
+                        right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(header));
+        self.current = done;
+    }
+
+    fn lower_sequence_edge(
+        &mut self,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        last: bool,
+        remove: bool,
+        span: Span,
+    ) -> Operand {
+        let this = self as *mut Self;
+        let nullable = Nullable::of(element_ty).expect("sequence edge has nullable element");
+        let result_ty = IrType::Nullable(nullable);
+        let result = self.declare_slot("<sequence_edge>", result_ty, span);
+        let receiver_slot = Self::spill_ptr(this, receiver, receiver_ty, span);
+        let length = Self::sequence_length_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            receiver_ty,
+            span,
+        );
+        let length_slot = Self::spill_ptr(this, length, IrType::Int(IntWidth::U64), span);
+        let empty = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: Self::emit_ptr(
+                    this,
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                right: Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::U64), span),
+            },
+            IrType::Boolean,
+            span,
+        );
+        let absent = self.new_block();
+        let present = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: empty,
+            then_block: absent,
+            else_block: present,
+        });
+        self.current = absent;
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                result,
+                Self::emit_ptr(this, InstKind::NullValue(nullable), result_ty, span),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(done));
+        self.current = present;
+        let index = if last {
+            Self::emit_ptr(
+                this,
+                InstKind::Binary {
+                    op: BinaryOp::Sub,
+                    left: Self::emit_ptr(
+                        this,
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    ),
+                    right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+                },
+                IrType::Int(IntWidth::U64),
+                span,
+            )
+        } else {
+            Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::U64), span)
+        };
+        let value = Self::sequence_load_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            index,
+            element_ty,
+            span,
+        );
+        if remove {
+            Self::emit_effect_ptr(
+                this,
+                InstKind::ListRemove {
+                    receiver: Self::emit_ptr(
+                        this,
+                        InstKind::Load(receiver_slot),
+                        receiver_ty,
+                        span,
+                    ),
+                    index,
+                },
+                span,
+            );
+        }
+        let wrapped = Self::emit_ptr(
+            this,
+            InstKind::Wrap {
+                base: nullable,
+                value,
+            },
+            result_ty,
+            span,
+        );
+        Self::emit_effect_ptr(this, InstKind::Store(result, wrapped), span);
+        self.terminate(Terminator::Jump(done));
+        self.current = done;
+        Self::emit_ptr(this, InstKind::Load(result), result_ty, span)
+    }
+
+    /// Stable in-place insertion sort for the mutable sequence families.
+    /// `sort_by` callbacks follow the documented convention: a positive
+    /// result means the left value belongs after the right value.
+    fn lower_sequence_sort(
+        &mut self,
+        call: &ast::CallExpr,
+        receiver: Operand,
+        receiver_ty: IrType,
+        element_ty: IrType,
+        span: Span,
+        by: bool,
+    ) {
+        let this = self as *mut Self;
+        let receiver_slot = Self::spill_ptr(this, receiver, receiver_ty, span);
+        let length = Self::sequence_length_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            receiver_ty,
+            span,
+        );
+        let length_slot = Self::spill_ptr(this, length, IrType::Int(IntWidth::U64), span);
+        let outer = self.declare_slot("<sort_outer>", IrType::Int(IntWidth::U64), span);
+        let inner = self.declare_slot("<sort_inner>", IrType::Int(IntWidth::U64), span);
+        let callback = if by {
+            let callback_value = self.lower_expr(&call.args[0].value);
+            let callback_type = self.type_of_operand(callback_value);
+            Some(Self::spill_ptr(this, callback_value, callback_type, span))
+        } else {
+            None
+        };
+        let one = Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span);
+        Self::emit_effect_ptr(this, InstKind::Store(outer, one), span);
+        let oh = self.new_block();
+        let ob = self.new_block();
+        let ih = self.new_block();
+        let ib = self.new_block();
+        let swap = self.new_block();
+        let istep = self.new_block();
+        let ostep = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(oh));
+        self.current = oh;
+        let o = Self::emit_ptr(
+            this,
+            InstKind::Load(outer),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: o,
+                right: Self::emit_ptr(
+                    this,
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: ob,
+            else_block: done,
+        });
+        self.current = ob;
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                inner,
+                Self::emit_ptr(
+                    this,
+                    InstKind::Load(outer),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(ih));
+        self.current = ih;
+        let i = Self::emit_ptr(
+            this,
+            InstKind::Load(inner),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let keep = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: i,
+                right: Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::U64), span),
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: keep,
+            then_block: ib,
+            else_block: ostep,
+        });
+        self.current = ib;
+        let left_index = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Sub,
+                left: Self::emit_ptr(
+                    this,
+                    InstKind::Load(inner),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let right_index = Self::emit_ptr(
+            this,
+            InstKind::Load(inner),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let left = Self::sequence_load_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            left_index,
+            element_ty,
+            span,
+        );
+        let right = Self::sequence_load_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            right_index,
+            element_ty,
+            span,
+        );
+        let left_slot = Self::spill_ptr(this, left, element_ty, span);
+        let right_slot = Self::spill_ptr(this, right, element_ty, span);
+        let should_swap = if by {
+            let callback_ty = self.slot_type(callback.expect("sort callback"));
+            let result = Self::emit_ptr(
+                this,
+                InstKind::CallCallable {
+                    callable: Self::emit_ptr(
+                        this,
+                        InstKind::Load(callback.expect("sort callback")),
+                        callback_ty,
+                        span,
+                    ),
+                    args: vec![
+                        Self::emit_ptr(this, InstKind::Load(left_slot), element_ty, span),
+                        Self::emit_ptr(this, InstKind::Load(right_slot), element_ty, span),
+                    ],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            Self::emit_ptr(
+                this,
+                InstKind::Binary {
+                    op: BinaryOp::Gt,
+                    left: result,
+                    right: Self::const_int_at_ptr(this, 0, IrType::Int(IntWidth::I32), span),
+                },
+                IrType::Boolean,
+                span,
+            )
+        } else {
+            Self::emit_ptr(
+                this,
+                InstKind::Binary {
+                    op: BinaryOp::Gt,
+                    left: Self::emit_ptr(this, InstKind::Load(left_slot), element_ty, span),
+                    right: Self::emit_ptr(this, InstKind::Load(right_slot), element_ty, span),
+                },
+                IrType::Boolean,
+                span,
+            )
+        };
+        self.terminate(Terminator::Branch {
+            condition: should_swap,
+            then_block: swap,
+            else_block: istep,
+        });
+        self.current = swap;
+        let swap_left = Self::emit_ptr(
+            this,
+            InstKind::Binary {
+                op: BinaryOp::Sub,
+                left: Self::emit_ptr(
+                    this,
+                    InstKind::Load(inner),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+                right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let swap_right = Self::emit_ptr(
+            this,
+            InstKind::Load(inner),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        Self::sequence_store_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            swap_left,
+            Self::emit_ptr(this, InstKind::Load(right_slot), element_ty, span),
+            span,
+        );
+        Self::sequence_store_ptr(
+            this,
+            Self::emit_ptr(this, InstKind::Load(receiver_slot), receiver_ty, span),
+            swap_right,
+            Self::emit_ptr(this, InstKind::Load(left_slot), element_ty, span),
+            span,
+        );
+        self.terminate(Terminator::Jump(istep));
+        self.current = istep;
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                inner,
+                Self::emit_ptr(
+                    this,
+                    InstKind::Binary {
+                        op: BinaryOp::Sub,
+                        left: Self::emit_ptr(
+                            this,
+                            InstKind::Load(inner),
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        ),
+                        right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(ih));
+        self.current = ostep;
+        Self::emit_effect_ptr(
+            this,
+            InstKind::Store(
+                outer,
+                Self::emit_ptr(
+                    this,
+                    InstKind::Binary {
+                        op: BinaryOp::Add,
+                        left: Self::emit_ptr(
+                            this,
+                            InstKind::Load(outer),
+                            IrType::Int(IntWidth::U64),
+                            span,
+                        ),
+                        right: Self::const_int_at_ptr(this, 1, IrType::Int(IntWidth::U64), span),
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ),
+            ),
+            span,
+        );
+        self.terminate(Terminator::Jump(oh));
+        self.current = done;
     }
 
     /// `Array<T>(capacity)` and `List<T>()` are lowered to dedicated
@@ -14938,15 +17561,10 @@ impl<'a> FunctionLowering<'a> {
 
     /// The layout id a construction call builds.
     ///
-    /// The target type of a deep contextual conversion call, if this is one
-    /// (`ZIRK_LANGUAGE_SPEC.md` section 3, roadmap Phase 3b task 7):
-    /// `Float(3 / 4)`, `String("x=" + 42)`. A native scalar name can never
-    /// collide with a declared class (type names are reserved), so this is
-    /// checked ahead of `construction_class_id` — but a local binding could
-    /// still shadow the name (nothing stops `mut Float = 5;`), which is why
-    /// this checks the scopes the same way `is_callable_call` does before
-    /// trusting the name.
-    fn context_conversion_target(&self, call: &ast::CallExpr) -> Option<Type> {
+    /// The target type of a native scalar conversion call. A local binding
+    /// may shadow a native type name, so the scopes are checked before the
+    /// callee is interpreted as `T(expr)`.
+    fn scalar_conversion_target(&self, call: &ast::CallExpr) -> Option<Type> {
         let ast::Expr::Path(callee) = &*call.callee else {
             return None;
         };
@@ -14967,7 +17585,7 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Whether `call` is `fatalError(...)` (roadmap Phase 4a) — checked the
-    /// same way `context_conversion_target` protects `Float`/`String`: a
+    /// same way `scalar_conversion_target` protects `Float`/`String`: a
     /// local binding could shadow the name (`mut fatalError = 5;`), so the
     /// name alone is not enough.
     fn is_fatal_error_call(&self, call: &ast::CallExpr) -> bool {
@@ -15052,10 +17670,10 @@ impl<'a> FunctionLowering<'a> {
                         self.type_of(&e.left, e.left.span()),
                         IrType::Value(_)
                     ))
-                    // Arithmetic on `Int` (`+`, `-`, `*`, `/`, `%`) now throws
-                    // catchable `ArithmeticOverflowError`/`DivisionByZeroError`
-                    // through a branch, and `Float` arithmetic guards `NaN`
-                    // the same way. Shifts also throw `InvalidShiftError`.
+                    // Native numeric arithmetic may branch for overflow,
+                    // division by zero, or `NaN`. `Int / Int` is a Decimal
+                    // operation, so Decimal is included as well. Shifts also
+                    // throw `InvalidShiftError`.
                     || (matches!(
                         e.op,
                         ast::BinaryOp::Add
@@ -15067,7 +17685,7 @@ impl<'a> FunctionLowering<'a> {
                             | ast::BinaryOp::Shr
                     ) && matches!(
                         self.type_of(&ast::Expr::Binary(e.clone()), e.span),
-                        IrType::Int(_) | IrType::Float(_)
+                        IrType::Int(_) | IrType::Float(_) | IrType::Decimal
                     ))
                     // `String * Int` routes through `checked_repeat`, whose
                     // negative-count guard emits a `fail`/`cont` split exactly
@@ -15102,7 +17720,7 @@ impl<'a> FunctionLowering<'a> {
             // blocks of their own — spilling them is mandatory.
             ast::Expr::Slice(_) => true,
             ast::Expr::Call(_) => true,
-            ast::Expr::Println(e) => self.opens_blocks(&e.arg),
+            ast::Expr::Println(e) => e.args.iter().any(|arg| self.opens_blocks(arg)),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
                 ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
                 ast::InterpolatedPart::Literal(_) => false,
@@ -15453,94 +18071,9 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), payload, span)
     }
 
-    /// Lowers the operand tree of a deep contextual conversion (task 7),
-    /// converting at each leaf rather than the whole result after — mirrors
-    /// `zirk-sema/checker.rs`'s `check_context_tree`, which already proved
-    /// this tree is well-formed for `target`.
-    ///
-    /// Two operands of a compatible operator are held across each other the
-    /// same way any other binary operand is (`lower_and_hold`): a later one
-    /// that opens blocks would otherwise strand the earlier value across a
-    /// block boundary the IR forbids (ADR-007).
-    fn lower_context_tree(&mut self, target: IrType, expr: &ast::Expr) -> Operand {
-        let span = expr.span();
-        let numeric = matches!(target, IrType::Int(_) | IrType::Float(_));
-        let is_string = target == IrType::String;
-
-        let compatible_op = |op: ast::BinaryOp| {
-            (numeric
-                && matches!(
-                    op,
-                    ast::BinaryOp::Add
-                        | ast::BinaryOp::Sub
-                        | ast::BinaryOp::Mul
-                        | ast::BinaryOp::Div
-                        | ast::BinaryOp::Rem
-                ))
-                || (is_string && op == ast::BinaryOp::Add)
-        };
-
-        match expr {
-            ast::Expr::Binary(b) if compatible_op(b.op) => {
-                let held = self.lower_context_hold(target, &b.left, self.opens_blocks(&b.right));
-                let right = self.lower_context_tree(target, &b.right);
-                let left = self.reload(held, b.left.span());
-
-                if is_string {
-                    self.emit(InstKind::Concat { left, right }, IrType::String, span)
-                } else if target == IrType::Decimal {
-                    self.lower_decimal_binary(binary_op(b.op), left, right, span)
-                } else {
-                    let op = binary_op(b.op);
-                    self.emit_checked_binary(op, left, right, target, span)
-                }
-            }
-            ast::Expr::Unary(u) if numeric && u.op == ast::UnaryOp::Neg => {
-                let operand = self.lower_context_tree(target, &u.operand);
-                if matches!(target, IrType::Int(_)) {
-                    let zero = self.const_int_at(0, target, span);
-                    self.emit_checked_binary(BinaryOp::Sub, zero, operand, target, span)
-                } else if target == IrType::Decimal {
-                    self.emit(
-                        InstKind::Call {
-                            callee: "zirk_rt_decimal_neg".to_string(),
-                            args: vec![operand],
-                        },
-                        IrType::Decimal,
-                        span,
-                    )
-                } else {
-                    self.emit(
-                        InstKind::Unary {
-                            op: UnaryOp::Neg,
-                            operand,
-                        },
-                        target,
-                        span,
-                    )
-                }
-            }
-            _ => self.lower_context_leaf(target, expr, span),
-        }
-    }
-
-    /// [`Self::lower_and_hold`], for a value produced by `lower_context_tree`
-    /// rather than `lower_expr`.
-    fn lower_context_hold(&mut self, target: IrType, expr: &ast::Expr, will_branch: bool) -> Held {
-        let value = self.lower_context_tree(target, expr);
-        if !will_branch {
-            return Held::Value(value);
-        }
-        let slot = self.declare_slot("<context>", target, expr.span());
-        self.emit_effect(InstKind::Store(slot, value), expr.span());
-        Held::Spilled(slot, target)
-    }
-
-    /// A leaf of a contextual conversion tree: lowered with its own type,
-    /// then converted into `target` — a numeric leaf reaches any other
-    /// numeric target unchecked (the same as `as`), and any printable value
-    /// reaches `String` through `to_string()` (`Self::lower_to_string`).
-    fn lower_context_leaf(&mut self, target: IrType, expr: &ast::Expr, span: Span) -> Operand {
+    /// Evaluates one complete expression with its ordinary semantics, then
+    /// converts only that final value to the requested native scalar type.
+    fn lower_scalar_conversion(&mut self, target: IrType, expr: &ast::Expr, span: Span) -> Operand {
         let operand = self.lower_expr(expr);
         let actual = self.type_of_operand(operand);
 
@@ -18449,6 +20982,7 @@ impl<'a> FunctionLowering<'a> {
             .map(|t| t.base)
         {
             Some(Base::Enum(_) | Base::EnumInstance(_)) => return true,
+            Some(Base::Tuple(_)) => return true,
             Some(Base::Class(id)) => {
                 return self.checked.classes[id as usize].method("clone").is_none();
             }
@@ -18803,8 +21337,7 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_pointer_method_call(e, expr.span());
             }
             ast::Expr::Println(e) => {
-                let operand = self.lower_println_argument(e, expr.span());
-                self.emit_effect(InstKind::Println(operand), expr.span());
+                self.lower_print_expr(e, expr.span());
             }
             // `super(...)` and a method call know their own target, so they
             // need none of the name resolution the arm below does.
@@ -18837,6 +21370,11 @@ impl<'a> FunctionLowering<'a> {
             // methods are lowered to collection instructions/runtime calls.
             ast::Expr::Call(e) if self.is_array_list_method_call(e) => {
                 if let Some(result) = self.lower_array_list_method_call(e, expr.span()) {
+                    let _ = result;
+                }
+            }
+            ast::Expr::Call(e) if self.is_tuple_method_call(e) => {
+                if let Some(result) = self.lower_tuple_method_call(e, expr.span()) {
                     let _ = result;
                 }
             }
@@ -19316,15 +21854,67 @@ impl<'a> FunctionLowering<'a> {
         self.lower_to_string(operand, ty, span)
     }
 
-    /// Lowers the argument of a `println`, converting it via `to_string()`
-    /// when it is not already a `String`.
+    /// Lowers the arguments of `print`/`println`, converting each via
+    /// `to_string()` when it is not already a `String`.
     ///
     /// `ZIRK_STDLIB_SPEC.md` section 3: every printable value goes through
     /// `to_string()`. Without this the runtime would read an `Int32` as if it
-    /// were a pointer.
-    fn lower_println_argument(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
-        let operand = self.lower_expr(&expr.arg);
-        self.lower_to_string_expr(&expr.arg, operand, span)
+    /// were a pointer. Converted pieces are held across arguments that open
+    /// blocks; values do not cross blocks in this IR (ADR-007).
+    fn lower_print_expr(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
+        let mut pieces = Vec::with_capacity(expr.args.len());
+        for (position, arg) in expr.args.iter().enumerate() {
+            let operand = self.lower_expr(arg);
+            let text = self.lower_to_string_expr(arg, operand, span);
+            let branches_later = expr.args[position + 1..]
+                .iter()
+                .any(|later| self.opens_blocks(later));
+            pieces.push(if branches_later {
+                let slot = self.declare_slot("<print>", IrType::String, arg.span());
+                self.emit_effect(InstKind::Store(slot, text), arg.span());
+                Held::Spilled(slot, IrType::String)
+            } else {
+                Held::Value(text)
+            });
+        }
+
+        let mut rendered = None;
+        for piece in pieces {
+            let text = self.reload(piece, span);
+            rendered = Some(match rendered {
+                None => text,
+                Some(prefix) => {
+                    let separator = self.const_string(" ", span);
+                    let with_separator = self.emit(
+                        InstKind::Concat {
+                            left: prefix,
+                            right: separator,
+                        },
+                        IrType::String,
+                        span,
+                    );
+                    self.emit(
+                        InstKind::Concat {
+                            left: with_separator,
+                            right: text,
+                        },
+                        IrType::String,
+                        span,
+                    )
+                }
+            });
+        }
+
+        // `println()` is a newline-only operation. An empty String gives the
+        // existing runtime newline intrinsic a valid handle; `print()` writes
+        // that same empty string and therefore nothing.
+        let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
+        if expr.newline {
+            self.emit_effect(InstKind::Println(rendered), span);
+        } else {
+            self.emit_effect(InstKind::Print(rendered), span);
+        }
+        self.emit(InstKind::Undefined, IrType::Void, span)
     }
 
     /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each
@@ -19706,6 +22296,50 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    fn is_range_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Range
+        )
+    }
+
+    fn is_tuple_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        matches!(
+            self.checked
+                .expr_types
+                .get(&field.object.span())
+                .map(|ty| ty.base),
+            Some(Base::Tuple(_))
+        )
+    }
+
+    fn lower_tuple_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if !call.args.is_empty() || !matches!(field.name.name.as_str(), "clone" | "to_string") {
+            return None;
+        }
+        let receiver = self.lower_expr(&field.object);
+        let ty = self.type_of_operand(receiver);
+        Some(if field.name.name == "clone" {
+            self.lower_clone_value(receiver, ty, span)
+        } else {
+            self.lower_to_string(receiver, ty, span)
+        })
+    }
+
     /// Whether `call` is a built-in `Map<K, V>`/`Set<T>` method call.
     fn is_map_set_method_call(&self, call: &ast::CallExpr) -> bool {
         let ast::Expr::Field(field) = &*call.callee else {
@@ -19834,6 +22468,8 @@ impl<'a> FunctionLowering<'a> {
             || self.is_regex_method_call(call)
             || self.is_regex_match_group_call(call)
             || self.is_array_list_method_call(call)
+            || self.is_range_method_call(call)
+            || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
             || self.result_method(call).is_some()
         {
@@ -19853,6 +22489,8 @@ impl<'a> FunctionLowering<'a> {
             || self.is_scalar_method_call(call)
             || self.is_native_static_call(call)
             || self.is_array_list_method_call(call)
+            || self.is_range_method_call(call)
+            || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
             || self.result_method(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
@@ -20019,6 +22657,12 @@ impl<'a> FunctionLowering<'a> {
                         .unwrap_or(IrType::Void)
                 }
             }
+            ast::Expr::Call(e) if Self::is_parallel_each_call(e) => self
+                .checked
+                .expr_types
+                .get(&e.span)
+                .map(|ty| self.ir_type(*ty))
+                .expect("checker recorded Parallel.each type"),
             ast::Expr::Call(e) if self.is_callable_call(e) => {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
@@ -20026,8 +22670,8 @@ impl<'a> FunctionLowering<'a> {
                 self.module.closures[id as usize].returns
             }
             ast::Expr::Call(e) if matches!(&*e.callee, ast::Expr::Super(_)) => IrType::Void,
-            ast::Expr::Call(e) if self.context_conversion_target(e).is_some() => {
-                self.ir_type(self.context_conversion_target(e).expect("checked above"))
+            ast::Expr::Call(e) if self.scalar_conversion_target(e).is_some() => {
+                self.ir_type(self.scalar_conversion_target(e).expect("checked above"))
             }
             ast::Expr::Call(e) if self.is_fatal_error_call(e) => IrType::Never,
             ast::Expr::Call(e) if self.is_pointer_from_call(e) => {
@@ -20263,6 +22907,8 @@ impl<'a> FunctionLowering<'a> {
                         || self.is_char_method_call(e)
                         || self.is_native_to_string_call(e)
                         || self.is_array_list_method_call(e)
+                        || self.is_range_method_call(e)
+                        || self.is_tuple_method_call(e)
                         || self.is_map_set_method_call(e))
                 {
                     return self.ir_type(ty);
@@ -20999,6 +23645,48 @@ fn operator_method(op: ast::BinaryOp) -> Option<&'static str> {
         GtEq => "_greater_equal",
         _ => return None,
     })
+}
+
+fn ir_abi_align(module: &Module, ty: IrType) -> usize {
+    match ty {
+        IrType::Boolean => 1,
+        IrType::Int(width) => (width.bits() as usize / 8).clamp(1, 8),
+        IrType::Float(width) => (width.bits() as usize / 8).clamp(2, 16),
+        IrType::Decimal | IrType::Value(_) => 8,
+        _ => {
+            let _ = module;
+            8
+        }
+    }
+}
+
+fn ir_abi_size(module: &Module, ty: IrType) -> usize {
+    match ty {
+        IrType::Void | IrType::Never => 0,
+        IrType::Boolean => 1,
+        IrType::Int(width) => (width.bits() as usize / 8).max(1),
+        IrType::Float(width) => (width.bits() as usize / 8).max(2),
+        IrType::Decimal => 24,
+        IrType::String
+        | IrType::Char
+        | IrType::Regex
+        | IrType::Object(_)
+        | IrType::Callable(_)
+        | IrType::Closure(_)
+        | IrType::Array(_)
+        | IrType::List(_)
+        | IrType::Map(_)
+        | IrType::Set(_)
+        | IrType::Range
+        | IrType::Job => 8,
+        IrType::Value(id) => module.values[id as usize]
+            .fields
+            .iter()
+            .map(|field| ir_abi_size(module, field.ty))
+            .sum(),
+        IrType::Nullable(nullable) => 1 + ir_abi_size(module, nullable.inner()),
+        _ => 8,
+    }
 }
 
 /// Whether an operator on these operands is one of `String`'s.

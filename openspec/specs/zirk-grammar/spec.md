@@ -165,10 +165,10 @@ The parser SHALL allow omitting the semicolon when there is no ambiguity, per `Z
 
 The parser SHALL emit a specific diagnostic for constructs that exist in the language but are not yet implemented, distinguishing them from syntax errors, and a distinct removed-construct diagnostic for constructs that were removed.
 
-`concurrent` and `spawn` are implemented and parse as real grammar. The removed words `task`, `await`, `select`, `scope`, `shield` keep their removed-construct diagnostic. `parallel`, `thread` remain deferred until their own change.
+`concurrent`, `spawn`, and `parallel` are implemented and parse as real grammar. The removed words `task`, `await`, `select`, `scope`, `shield` keep their removed-construct diagnostic. `thread` remains deferred until its own change.
 
 #### Scenario: Implemented concurrency form parses
-- **WHEN** `concurrent { }` or `spawn f()` is parsed
+- **WHEN** `concurrent { }`, `spawn f()`, or `parallel { }` is parsed
 - **THEN** the parser produces the corresponding node and emits no diagnostic
 
 #### Scenario: Removed construct still reported as removed
@@ -475,25 +475,22 @@ The parser SHALL accept traditional enum cases without mappings and cases mapped
 - **WHEN** source contains `North -> "N";`
 - **THEN** the enum case retains `"N"` as its explicit observable mapping
 
-### Requirement: Contextual constructor expressions
+### Requirement: Scalar conversion expressions
 
 The grammar SHALL retain the complete contained operator tree of
 `Decimal(expression)`, `Float(expression)`, and `String(expression)` so
-semantic analysis can apply explicit deep contextual conversion before evaluating
-compatible contained arithmetic or concatenation operators. `Decimal(expression)`
-SHALL establish an exact-decimal domain; `Float(expression)` SHALL establish a
-binary domain.
+semantic analysis can evaluate that expression normally and convert only its
+completed result.
 
-#### Scenario: Nested contextual arithmetic
+#### Scenario: Nested arithmetic remains one conversion argument
 
-- **WHEN** `Decimal((a + 1) / (b * 2))` is parsed
-- **THEN** the constructor contains the entire nested arithmetic tree rather than
-  an already-evaluated integer result
+- **WHEN** `Float64((a + 1) / (b * 2))` is parsed
+- **THEN** the conversion contains the entire nested arithmetic expression as its single argument
 
-#### Scenario: Binary contextual constructor
+#### Scenario: Conversion does not encode an operand domain
 
 - **WHEN** `Float(3 / 4)` is parsed
-- **THEN** the constructor retains the division tree for a binary-domain conversion
+- **THEN** the AST records an ordinary division argument and a Float conversion, without a contextual-domain marker
 
 ### Requirement: Native String repetition syntax
 
@@ -1057,4 +1054,3 @@ expression, bindable (`inmut h = spawn f()`) or used as a statement (`spawn f()`
 #### Scenario: Spawn with a handle
 - **WHEN** source contains `inmut h = spawn compute();`
 - **THEN** the parser produces a binding whose initializer is a spawn node over `compute()`
-

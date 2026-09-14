@@ -23,13 +23,13 @@ additional permissions.
 
 ## Printing values
 
-`print` and `println` accept zero or more values. Each value is converted through
-its `to_string()` contract. Multiple values are joined with `separator`, whose
-default is one space.
+`print` and `println` accept zero or more values. Each value is evaluated from
+left to right and converted through its `to_string()` contract. Multiple values
+are joined with exactly one space; the space is inserted only between values.
 
 ```zirk
-fn print(values: Object..., separator: String = " "): Void throws IoError;
-fn println(values: Object..., separator: String = " "): Void throws IoError;
+fn print(...args: T[]): Void;
+fn println(...args: T[]): Void;
 ```
 
 `print` emits no line ending; `println` appends exactly the platform line ending.
@@ -38,8 +38,9 @@ names.
 
 ```zirk
 println("User:", user, "Age:", user.age);
-println("a", "b", "c", separator: ", ");
+print("a", "b", "c");       // a b c
 println();
+print();                       // no output
 ```
 
 The convenience operations propagate a catchable `IoError` if the destination

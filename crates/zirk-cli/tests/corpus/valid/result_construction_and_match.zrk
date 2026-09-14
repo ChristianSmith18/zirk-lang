@@ -6,7 +6,7 @@ fn divide(a: Int32, b: Int32): Result<Int32, String> {
     if b == 0 {
         return Error("division by zero");
     }
-    return Ok(a / b);
+    return Ok(Int32(a / b));
 }
 
 fn describe(r: Result<Int32, String>): String {

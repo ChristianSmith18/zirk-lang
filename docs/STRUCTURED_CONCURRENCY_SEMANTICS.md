@@ -147,9 +147,9 @@ from work-splitting and falls back to the sequential lowering above, because
 each chunk would otherwise mutate its own private copy and the reassignment
 would go nowhere.
 
-`collection.parallel` types identically to `collection` itself — today a pure
-typing no-op, not yet an actual parallel adapter, because the sequence
-pipeline (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/`for_each`) does not
-exist on `List<T>`/`Array<T>` yet, sequentially or otherwise. `Parallel.each`
-is typed by the checker but has no lowering (`codes::NOT_LOWERED`) for the
-same reason. Both are follow-up work once the sequence pipeline lands.
+`collection.parallel` keeps the collection's ordinary static type, but routes
+supported terminals (`map`, `filter`, `for_each`, associative `reduce`, and
+`sum`) through the worker pool. `Parallel.each(coll, fn)` uses the same ordered
+result-buffer path and returns `List<R>` in input order. `reduce_ordered`
+remains sequential by definition. Unsupported terminals retain their normal
+sequential lowering rather than being presented as parallel work.

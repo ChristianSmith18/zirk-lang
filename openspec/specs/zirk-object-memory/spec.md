@@ -91,3 +91,13 @@ A `Pin<T>` SHALL be released when the enclosing `unsafe`/`commit` block exits no
 - **WHEN** an `unsafe` block containing `Pointer.from(o.field)` returns
 - **THEN** the object is unpinned after the journal is rolled back and before the return value leaves the frame
 
+### Requirement: Collector triggering and root enumeration are thread-aware
+
+Allocation on a worker during a parallel region SHALL request collection through
+the runtime coordinator rather than collecting from that worker. The collector
+SHALL enumerate every registered worker and executor root chain while retaining
+the existing object-header layout.
+
+#### Scenario: Allocation during a parallel region defers collection
+- **WHEN** a worker reaches its allocation threshold while a region runs
+- **THEN** it requests coordinated collection and does not collect independently

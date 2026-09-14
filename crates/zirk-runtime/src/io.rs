@@ -1,8 +1,8 @@
 //! Standard output.
 //!
 //! `ZIRK_STDLIB_SPEC.md` section 3 defines `std.io` with three streams. Phase 1
-//! only implements `println` on standard output, reached through the
-//! `stdout.println` intrinsic while modules do not exist (design D4).
+//! only implements `print` and `println` on standard output, reached through
+//! the `stdout` intrinsics while modules do not exist (design D4).
 
 use crate::string;
 use std::ffi::c_void;
@@ -38,6 +38,24 @@ pub unsafe extern "C" fn zirk_io_println(handle: *const c_void) {
     // be closed —a pipe that ended— and that is not a program error. Typed I/O
     // errors arrive with `std.io` proper in Phase 7.
     let _ = write!(out, "{text}{LINE_BREAK}");
+}
+
+/// Writes a `String` to standard output without a line break.
+///
+/// # Safety
+///
+/// `handle` must come from `zirk_str_from_utf8` and must not have been
+/// released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_io_print(handle: *const c_void) {
+    let text = match unsafe { string::borrow(handle) } {
+        Some(string) => unsafe { string.as_str() },
+        None => "",
+    };
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = write!(out, "{text}");
 }
 
 /// Flushes the output streams.

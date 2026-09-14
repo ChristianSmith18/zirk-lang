@@ -1,4 +1,4 @@
-// `ArithmeticOverflowError` is catchable for integer +, *, and signed MIN / -1.
+// `ArithmeticOverflowError` is catchable for fixed-width integer + and *.
 fn main(): Void {
     try {
         mut a: Int8 = 120 as Int8;
@@ -25,15 +25,6 @@ fn main(): Void {
         stdout.println(c);
     } catch ArithmeticOverflowError(e) {
         stdout.println("uadd: " + e.message());
-    }
-
-    try {
-        mut a: Int32 = -2147483648;
-        mut b: Int32 = -1;
-        mut c: Int32 = a / b;
-        stdout.println(c);
-    } catch ArithmeticOverflowError(e) {
-        stdout.println("div: " + e.message());
     }
 
     stdout.println("done");

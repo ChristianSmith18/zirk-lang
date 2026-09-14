@@ -315,3 +315,13 @@ all descendants have completed or been cleaned.
 - **WHEN** a compiled program starts
 - **THEN** `main`'s body runs as the root task and the process does not exit while a descendant task is still running or cleaning up
 
+### Requirement: Codegen for parallel regions and the worker pool
+
+Code generation SHALL submit `ParallelRegion` chunks through
+`zirk_rt_pool_submit`, join them through `zirk_rt_pool_join` without stopping
+the cooperative executor, and emit `zirk_rt_safepoint_poll` at every region
+loop back-edge.
+
+#### Scenario: region submits to the pool and joins
+- **WHEN** codegen processes a `ParallelRegion`
+- **THEN** emitted code submits work to the pool and joins it before producing the region result

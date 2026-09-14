@@ -64,11 +64,13 @@ stderr.println("Diagnostic");
 mut line = stdin.read_line();
 ```
 
-- `print(values..., separator: " ")` converts each value through `to_string()`,
-  joins them with the separator and writes without a line break.
-- `println(values..., separator: " ")` performs the same conversion and adds
-  exactly the platform line break. Neither operation has an `end` parameter.
+- `print(...args: T[])` converts each value through `to_string()`, joins the
+  rendered values with one space, and writes without a line break.
+- `println(...args: T[])` performs the same conversion and adds exactly the
+  platform line break. Neither operation has a configurable separator or an
+  `end` parameter.
 - `println()` writes just a line break.
+- `print()` writes nothing.
 - `stdout` and `stderr` share the same formatting operations but different
   destinations.
 - every printable value uses `to_string(): String` or the corresponding

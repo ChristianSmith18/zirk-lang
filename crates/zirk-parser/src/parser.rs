@@ -4254,24 +4254,33 @@ impl<'a> Parser<'a> {
             let method_span = self.peek_span();
             let method = self.expect_identifier("after `stdout.`")?;
 
-            if method.name != "println" {
+            if !matches!(method.name.as_str(), "print" | "println") {
                 self.error(
                     codes::NOT_IMPLEMENTED,
                     method_span,
                     format!("`stdout.{}` is not available yet", method.name),
-                    "only `stdout.println` exists in this phase",
+                    "only `stdout.print` and `stdout.println` exist in this phase",
                     Some("the full standard library arrives in Phase 7".into()),
                 );
                 return None;
             }
 
             self.expect(&TokenKind::LParen, "after `println`");
-            let arg = self.parse_expr()?;
+            let mut args = Vec::new();
+            if !matches!(self.peek(), TokenKind::RParen) {
+                loop {
+                    args.push(self.parse_expr()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
             let end = self.peek_span();
             self.expect(&TokenKind::RParen, "to close the call");
 
             return Some(Expr::Println(PrintlnExpr {
-                arg: Box::new(arg),
+                args,
+                newline: method.name == "println",
                 span: ident.span.to(end),
             }));
         }

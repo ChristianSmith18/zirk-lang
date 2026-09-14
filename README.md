@@ -39,7 +39,7 @@ zirk build hello.zrk    # compiles to a native executable
 zirk run hello.zrk      # compiles and runs
 ```
 
-Artifacts land in `build/`. Still in progress or not yet implemented: `Array<T>`/`List<T>` completion (including the sequence pipeline — `map`/`filter`/`reduce`/etc. don't exist yet), `Range<T>`, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); remaining concurrency (channels/atomics/threads, Phase 5); the multi-file project system and `.zkinit` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
+Artifacts land in `build/`. Still in progress or not yet implemented: remaining collection operations beyond the delivered eager sequence pipeline, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); remaining concurrency (channels/atomics/threads, Phase 5); the multi-file project system and `.zkinit` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
 
 ## Architecture
 

@@ -20,17 +20,15 @@ private copy, silently going nowhere. A loop that does any of these still
 compiles; it just runs sequentially inside the region instead of splitting
 across the pool.
 
-`.parallel` on a collection and `Parallel.each(coll, fn)` are reserved for a
-per-element pipeline adapter and a parallel map, matching the sequence
-methods (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/`for_each`) that do
-not exist on `List<T>`/`Array<T>` yet — sequentially or otherwise. `.parallel`
-type-checks today, but only as an identity: it types and behaves exactly like
-the collection itself, with no adapter behavior. `Parallel.each` type-checks
-too, but has no lowering yet.
+`.parallel` runs the supported eager sequence terminals (`map`, `filter`,
+`for_each`, `reduce`, and `sum`) on the worker pool outside a region.
+`Parallel.each(coll, fn)` is the ordered parallel-map spelling and returns a
+`List<R>` in input order. `map` and `filter` preserve collection order; filter
+compacts only after every predicate result is available.
 
-An associative-combiner check for a parallel reduction, and a
-`reduce_ordered` deterministic escape, are follow-up work once a `reduce`
-method exists to check.
+Ordinary parallel `reduce` requires an associative lambda. Use
+`reduce_ordered` when grouping must remain left-to-right; it is sequential by
+definition.
 
 ---
 

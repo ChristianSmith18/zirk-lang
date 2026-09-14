@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut values: List<String> = ["a"];
+    values.sum();
+}

@@ -75,6 +75,98 @@ fn valid_minimal_program() {
     accepted("fn main(): Void { }");
 }
 
+// --- Collection sequence pipeline ----------------------------------------
+
+#[test]
+fn valid_collection_sequence_pipeline_types_and_preserves_families() {
+    accepted_body(
+        "inmut list: List<Int32> = [1, 2, 3];\n\
+         inmut array: Array<Int32> = [1, 2, 3];\n\
+         inmut mapped: List<Int32> = list.map((x: Int32): Int32 => x * 2);\n\
+         inmut filtered: Array<Int32> = array.filter((x: Int32): Boolean => x > 1);\n\
+         inmut reduced: String = [\"a\", \"b\"].reduce(\"\", (a: String, b: String): String => a + b);\n\
+         inmut total: Int32 = list.sum();\n\
+         inmut count: Int32 = list.count();\n\
+         inmut materialized: List<Int32> = array.collect();\n\
+         list.for_each((x: Int32): Void => { });",
+    );
+}
+
+#[test]
+fn invalid_collection_sum_requires_numeric_elements() {
+    let output = rejected_body(
+        "inmut values: List<String> = [\"a\"];\n\
+         inmut total = values.sum();",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn parallel_reduce_requires_an_associative_combiner_or_ordered_escape() {
+    accepted_body(
+        "inmut values: List<Int32> = [1, 2, 3];\n\
+         inmut total: Int32 = parallel { values.reduce(0, (a: Int32, b: Int32): Int32 => a + b) };",
+    );
+    accepted_body(
+        "inmut values: List<Int32> = [1, 2, 3];\n\
+         inmut total: Int32 = values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a * b);",
+    );
+    accepted_body(
+        "inmut values: List<Int32> = [1, 2, 3];\n\
+         inmut total: Int32 = parallel { values.reduce_ordered(0, (a: Int32, b: Int32): Int32 => a - b) };",
+    );
+
+    let in_region = rejected_body(
+        "inmut values: List<Int32> = [1, 2, 3];\n\
+         inmut total: Int32 = parallel { values.reduce(0, (a: Int32, b: Int32): Int32 => a - b) };",
+    );
+    assert!(
+        in_region.contains(codes::PARALLEL_NONASSOCIATIVE_REDUCE.as_str()),
+        "{in_region}"
+    );
+
+    let adapter = rejected_body(
+        "inmut values: List<Int32> = [1, 2, 3];\n\
+         inmut total: Int32 = values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a - b);",
+    );
+    assert!(
+        adapter.contains(codes::PARALLEL_NONASSOCIATIVE_REDUCE.as_str()),
+        "{adapter}"
+    );
+}
+
+#[test]
+fn invalid_collection_sort_requires_natural_ordering() {
+    let output = rejected_body(
+        "inmut values: List<List<Int32>> = [[1]];\n\
+         values.sort();",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("sort_by"), "{output}");
+}
+
+#[test]
+fn valid_collection_companions_and_range_tuple_methods() {
+    accepted_body(
+        "mut values: List<Int32> = [3, 1, 2];\n\
+         values.contains(2); values.reverse(); values.sort();\n\
+         values.sort_by((a: Int32, b: Int32): Int32 => a - b);\n\
+         inmut first: Int32? = values.first();\n\
+         inmut last: Int32? = values.last();\n\
+         inmut popped: Int32? = values.pop();\n\
+         inmut squares: List<Int32> = (1..=3).map((x: Int32): Int32 => x * x).collect();\n\
+         inmut text: String = (1, \"x\").to_string();\n\
+         inmut tuple_copy = (1, \"x\").clone();\n\
+         inmut arity: Int32 = (1, \"x\").length;",
+    );
+}
+
+#[test]
+fn invalid_tuple_does_not_have_sequence_methods() {
+    let output = rejected_body("(1, \"x\").map((x: Int32): Int32 => x);");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
 // --- Concurrent scopes and timers -----------------------------------------
 
 #[test]
@@ -1163,6 +1255,16 @@ fn valid_println_accepts_any_type() {
 }
 
 #[test]
+fn valid_print_and_println_accept_multiple_or_zero_arguments() {
+    accepted_body(
+        "stdout.print(\"sum\", 1 + 2, true);\n\
+         stdout.println(\"done\", 3 * 4);\n\
+         stdout.print();\n\
+         stdout.println();",
+    );
+}
+
+#[test]
 fn valid_the_reference_program_of_the_roadmap() {
     accepted("fn main(): Void {\n    stdout.println(\"Hola desde Zirk\");\n}");
 }
@@ -1254,44 +1356,58 @@ fn valid_to_string_through_a_contract_reference() {
     );
 }
 
-// --- Deep contextual conversion (roadmap Phase 3b, task 7) ------------------
+// --- Final-result scalar conversion ----------------------------------------
 
 #[test]
-fn valid_context_conversion_over_arithmetic() {
+fn valid_integer_division_produces_decimal() {
+    accepted_body("mut a: Decimal = 3 / 4;");
+}
+
+#[test]
+fn invalid_integer_division_is_not_implicitly_integer() {
+    let output = rejected_body("mut a: Int32 = 3 / 4;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_scalar_conversion_converts_the_completed_quotient() {
     accepted_body("mut a: Float64 = Float64(3 / 4);");
+    accepted_body("mut a: Int64 = Int64(3 / 4);");
 }
 
 #[test]
-fn valid_context_conversion_over_string_concatenation() {
-    accepted_body("mut a: String = String(\"x=\" + 42);");
+fn invalid_string_conversion_does_not_retype_its_operands() {
+    let output = rejected_body("mut a: String = String(\"x=\" + 42);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
-fn valid_context_conversion_reaches_any_numeric_target() {
+fn valid_scalar_conversion_of_an_ordinary_result() {
     accepted_body("mut a: Int64 = Int64(3 + 4);");
+    accepted_body("mut a: String = String(42);");
 }
 
 #[test]
-fn valid_context_conversion_over_unary_negation() {
+fn valid_scalar_conversion_after_unary_negation() {
     accepted_body("mut a: Float64 = Float64(-3 / 4);");
 }
 
 #[test]
-fn valid_context_conversion_stops_at_a_call() {
+fn valid_scalar_conversion_after_a_call() {
     accepted(
-        "fn half(n: Int32): Int32 { return n / 2; }
-         fn main(): Void { mut a: Float64 = Float64(half(3) + 0.5); }",
+        "fn half(n: Int32): Decimal { return n / 2; }
+         fn main(): Void { mut a: Float64 = Float64(half(3)); }",
     );
 }
 
 #[test]
-fn invalid_context_conversion_of_an_incompatible_leaf() {
+fn invalid_scalar_conversion_of_an_incompatible_result() {
     let output = rejected_body("mut a: Float64 = Float64(true + 4);");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
 }
 
 #[test]
-fn invalid_context_conversion_wrong_argument_count() {
+fn invalid_scalar_conversion_wrong_argument_count() {
     let output = rejected_body("mut a: Float64 = Float64(1, 2);");
     assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
 }
@@ -2508,8 +2624,9 @@ fn invalid_string_minus_string() {
 
 #[test]
 fn invalid_string_plus_a_number_without_a_conversion() {
-    // There is no implicit conversion: `String("count=" + 4)` is the form that
-    // works, and it arrives with contextual conversion.
+    // There is no implicit conversion. Convert the number itself with
+    // `String(4)` or use interpolation; wrapping the invalid addition does
+    // not change how its operands are checked.
     let output = rejected_body("mut x = \"count=\" + 4;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
@@ -4688,7 +4805,7 @@ fn valid_catch_native_failure_by_its_own_concrete_type() {
         "try {
              mut a: Int32 = 1;
              mut b: Int32 = 0;
-             mut c: Int32 = a / b;
+             mut c: Decimal = a / b;
          } catch DivisionByZeroError(e) {
              stdout.println(e.message());
          }",
@@ -4701,7 +4818,7 @@ fn valid_catch_native_failure_by_runtime_error_supertype() {
         "try {
              mut a: Int32 = 1;
              mut b: Int32 = 0;
-             mut c: Int32 = a / b;
+             mut c: Decimal = a / b;
          } catch RuntimeError(e) {
              stdout.println(e.message());
          }",
@@ -4714,7 +4831,7 @@ fn valid_catch_native_failure_by_throwable_supertype() {
         "try {
              mut a: Int32 = 1;
              mut b: Int32 = 0;
-             mut c: Int32 = a / b;
+             mut c: Decimal = a / b;
          } catch Throwable(e) {
              stdout.println(e.message());
          }",
@@ -4819,7 +4936,7 @@ fn valid_native_failure_is_never_declared_in_a_throws_clause() {
     // `throws DivisionByZeroError`, unlike a `throw` of its own.
     accepted(
         "fn divide(a: Int32, b: Int32): Int32 {
-             return a / b;
+             return Int32(a / b);
          }
          fn main(): Void {
              try {
@@ -6129,16 +6246,11 @@ fn invalid_parallel_adapter_on_a_non_iterable_is_rejected() {
 }
 
 #[test]
-fn valid_parallel_each_types_a_list_but_is_not_lowered_yet() {
-    // `Parallel.each` types correctly (`List<Int32>` here) but has no
-    // `zirk-ir` lowering yet (task 6.1's own scope note) — reported
-    // `NOT_LOWERED` rather than silently reaching a backend that would
-    // panic on it.
-    let output = rejected_body(
+fn valid_parallel_each_types_a_list() {
+    accepted_body(
         "mut rows: List<Int32> = [1, 2, 3];\n\
          mut doubled: List<Int32> = Parallel.each(rows, (item: Int32): Int32 => item * 2);",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]

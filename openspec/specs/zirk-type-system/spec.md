@@ -515,16 +515,16 @@ The spellings `BinaryFloat`, `BinaryFloat16`, `BinaryFloat32`, `BinaryFloat64`,
 - **THEN** a diagnostic states that the exact base-ten type is now `Decimal` and
   the binary type is `FloatN`
 
-### Requirement: Deep contextual conversion
-An explicit numeric or String constructor around an operator expression SHALL establish the target domain for the contained compatible arithmetic or concatenation tree, converting operands before those operators execute. The context SHALL NOT mutate operands or propagate through a called function's body.
+### Requirement: Final-result scalar conversion
+An explicit native scalar conversion `T(expression)` SHALL evaluate the complete expression under its ordinary rules and convert only its final result. The target SHALL NOT alter the types or behavior of contained operands or operators.
 
-#### Scenario: Contextual floating division
-- **WHEN** `a` and `b` are integers equal to 3 and 4 and `Float(a / b)` is evaluated
-- **THEN** division occurs in the Float domain and returns `0.75`
+#### Scenario: Final floating conversion
+- **WHEN** `a` and `b` are integers equal to 3 and 4 and `Float64(a / b)` is evaluated
+- **THEN** division first produces Decimal `0.75` and that completed value then converts to `Float64`
 
-#### Scenario: Contextual String concatenation
+#### Scenario: String conversion preserves inner typing
 - **WHEN** `String("value=" + 42)` is evaluated
-- **THEN** the integer operand is converted before concatenation and the result is `"value=42"`
+- **THEN** type checking rejects the mixed concatenation rather than converting its operands
 
 ### Requirement: Reference mutability and strict aliases
 For reference types, `mut` SHALL permit binding reassignment and referent mutation, `inmut` SHALL prohibit reassignment but permit referent mutation, and `inmut::strict` SHALL prohibit both. A strict reference SHALL NOT yield a mutable alias or be acquired while an accessible mutable alias exists; an independent `clone()` MAY be mutable.
@@ -564,7 +564,11 @@ For reference types, `mut` SHALL permit binding reassignment and referent mutati
 - **THEN** a controlled invalid-count error is produced
 
 ### Requirement: Native operator contracts by type
-Each native type SHALL expose only its documented operator set. Integer division SHALL truncate toward zero, remainder SHALL preserve the dividend sign, mixed integer/Decimal arithmetic SHALL produce Decimal, mixed integer/FloatN arithmetic SHALL produce the corresponding FloatN, Boolean SHALL have no truthiness, and unsupported operations SHALL fail at type checking.
+Each native type SHALL expose only its documented operator set. Integer division SHALL produce exact Decimal, remainder SHALL preserve the dividend sign, mixed integer/Decimal arithmetic SHALL produce Decimal, mixed integer/FloatN arithmetic SHALL produce the corresponding FloatN, Boolean SHALL have no truthiness, and unsupported operations SHALL fail at type checking.
+
+#### Scenario: Mathematical integer division
+- **WHEN** `3 / 4` is evaluated
+- **THEN** the result is Decimal `0.75`
 
 #### Scenario: Signed remainder
 - **WHEN** `-10 % 3` is evaluated
@@ -1029,3 +1033,15 @@ block's bindings SHALL be a compile-time error.
 - **WHEN** `inmut a = f(b)` and `inmut b = g(a)` appear in the same block
 - **THEN** compilation fails naming the cycle
 
+### Requirement: Parallel block and adapter typing
+
+A `parallel` expression SHALL have its final expression's type. `cores` SHALL
+accept an `Int` or inclusive `Int` range and `chunk` an `Int`.
+`collection.parallel` SHALL expose `ParallelSeq<T>` with `map`, `filter`,
+`reduce`, `sum`, `count`, `collect`, and `for_each`; `Parallel.each` SHALL
+return `List<R>` for a callback `(T): R`. A parallel reduce whose combiner is
+not established associative SHALL be rejected unless `reduce_ordered` is used.
+
+#### Scenario: adapter chain retains its sequential result type
+- **WHEN** `rows.parallel.map(cost).sum()` is checked
+- **THEN** its type equals the sequential `rows.map(cost).sum()` result type

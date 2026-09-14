@@ -80,6 +80,10 @@ Parallel reduction SHALL require an associative combiner, MAY regroup operations
 - **WHEN** floating values are reduced with the ordinary parallel reduction
 - **THEN** documentation and types do not promise bit-identical grouping to sequential evaluation
 
+#### Scenario: Non-associative combiner is rejected
+- **WHEN** a parallel reduction uses a combiner the checker cannot establish as associative
+- **THEN** compilation fails unless the caller selects `reduce_ordered`
+
 ### Requirement: Scoped threads and blocking adapter
 `thread` SHALL create scoped OS execution for native affinity or blocking isolation, and `task.blocking` SHALL execute legacy blocking work on a separate pool without blocking the task scheduler.
 
@@ -107,6 +111,10 @@ Safe Zirk SHALL reject concurrent unsynchronized accesses when at least one acce
 #### Scenario: Two tasks mutate shared list
 - **WHEN** two concurrent tasks mutate one ordinary `List<T>` without transfer or synchronization
 - **THEN** compilation fails regardless of whether testing happened to avoid overlap
+
+#### Scenario: Parallel region mutates a shared alias
+- **WHEN** a parallel region mutates an alias that remains mutable outside the region
+- **THEN** compilation fails and identifies the required safe boundary
 
 ### Requirement: Single-threaded cooperative executor is the Phase 5 step 1-3 vehicle
 

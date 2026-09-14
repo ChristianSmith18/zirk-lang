@@ -101,6 +101,8 @@ pub mod symbols {
     pub const STR_EQ: &str = "zirk_str_eq";
     /// Writes a `String` to standard output with a line break.
     pub const IO_PRINTLN: &str = "zirk_io_println";
+    /// Writes a `String` to standard output without a line break.
+    pub const IO_PRINT: &str = "zirk_io_print";
     /// Reports a division by zero and terminates.
     pub const DIVISION_BY_ZERO: &str = "zirk_rt_division_by_zero";
     /// Obtains storage for an object. The strategy behind it is the runtime's
@@ -361,6 +363,7 @@ pub struct Runtime<'ctx> {
     pub str_grapheme_slice: FunctionValue<'ctx>,
     pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
+    pub io_print: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
@@ -684,6 +687,12 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
 
     let io_println = module.add_function(
         symbols::IO_PRINTLN,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+
+    let io_print = module.add_function(
+        symbols::IO_PRINT,
         void.fn_type(&[ptr.into()], false),
         external,
     );
@@ -1279,6 +1288,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_grapheme_slice,
         str_eq,
         io_println,
+        io_print,
         alloc,
         contract_table,
         str_concat,

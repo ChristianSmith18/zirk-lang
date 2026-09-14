@@ -270,3 +270,12 @@ retrofit.
 - **WHEN** two concurrent tasks access one ordinary mutable collection with at least one mutation and without transfer or strict sharing
 - **THEN** compilation fails regardless of the single-threaded executor and regardless of whether an interleaving happened to be observed
 
+### Requirement: Parallel roots and race boundaries are safe
+
+Root enumeration SHALL include parked worker stacks as well as suspended task
+roots. The `Transfer` and `Share` analysis SHALL reject a mutable alias that
+crosses a parallel boundary while remaining usable outside it.
+
+#### Scenario: True race across a parallel boundary is rejected
+- **WHEN** a `parallel` region mutates a shared mutable list also accessible by its parent
+- **THEN** compilation fails and identifies the transfer, sharing, synchronization, or cloning boundary

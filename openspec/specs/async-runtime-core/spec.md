@@ -207,3 +207,13 @@ be cancelled, not waited for, on `ScopeExit`.
 - **WHEN** one branch throws while two siblings run
 - **THEN** the siblings are cancelled and cleaned and the scope resolves with the thrown exception plus any sibling failure suppressed
 
+### Requirement: Worker pool and thread-aware roots
+
+The runtime SHALL provide a fixed worker pool for `parallel` regions while the
+cooperative executor stays single-threaded. During a parallel region, collection
+SHALL park every worker at a safepoint and enumerate every task and worker
+shadow-stack chain before mark-sweep resumes the world.
+
+#### Scenario: Collection during a parallel region
+- **WHEN** an allocation-heavy parallel region crosses the GC threshold
+- **THEN** every worker and the executor park, live references survive, and the region resumes

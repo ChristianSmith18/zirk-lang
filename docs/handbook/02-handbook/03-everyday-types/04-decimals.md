@@ -37,18 +37,16 @@ Every integer converts to `Decimal` implicitly and exactly, and mixed
 integer/`Decimal` arithmetic produces `Decimal`:
 
 ```zirk
-3 / 4;     // 0: Int32
+3 / 4;     // 0.75: Decimal
 3 / 4.0;   // 0.75: Decimal
 1 + 0.5;   // 1.5: Decimal
 ```
 
-An explicit outer `Decimal(...)` establishes a deep context before the contained
-arithmetic runs — it does not modify the operands or reach into a called
-function:
+An explicit scalar conversion runs after the contained arithmetic:
 
 ```zirk
-Decimal(3 / 4);   // 0.75
-Decimal((a + 1) / (b * 2));
+Int32(3 / 4);     // 0: conversion of the completed Decimal quotient
+Float64((a + 1) / (b * 2)); // converts the completed Decimal quotient
 ```
 
 ## `Float` — IEEE 754 when you need it
@@ -95,7 +93,7 @@ normalized so `1.0 == 1.00` and `(2.50).scale()` is `1`.
 | `value.div(other)` / `value.div(other, places)` | `Decimal` | Division with a chosen place count |
 | `Decimal.parse(text)` | `Result<Decimal, ParseError>` | Parses decimal / scientific text |
 | `value.to_string()` | `String` | Exact decimal rendering |
-| `Int32(value)` | `Int32` | Checked conversion; fails on a fractional or out-of-range value |
+| `Int32(value)` | `Int32` | Truncates toward zero; fails when the result is out of range |
 
 > `Decimal.format(spec)` is specified but not yet implemented (as on `Float`).
 > `RoundingMode` selection for `div` / `round` is deferred; both default to

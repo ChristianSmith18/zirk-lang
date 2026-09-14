@@ -245,8 +245,9 @@ name, so there is nothing for a local to shadow.
 default — 128-bit coefficient + scale, no `NaN`/infinity, `0.1 + 0.2 == 0.3`),
 the binary floating family (`Float16`…`Float128`, `Float`
 aliasing `Float64`, `f` literal suffix), `Char`
-as one Unicode extended grapheme cluster, bitwise/shift operators, deep
-contextual conversion (`Float(3 / 4)`, `String("x=" + 42)`), and a real
+as one Unicode extended grapheme cluster, bitwise/shift operators,
+final-result scalar conversion (`T(expr)` evaluates first and converts once),
+integer `/` producing exact `Decimal`, and a real
 `to_string()` contract that `print`/`println` and string interpolation
 (`"{expr}"`) both route through, all compile to a native binary and run.
 

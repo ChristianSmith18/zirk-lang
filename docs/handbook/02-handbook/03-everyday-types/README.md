@@ -2,7 +2,7 @@
 
 This unit builds the mental model used throughout the language: what Zirk calls
 a primitive, which values are references, how contracts provide capabilities,
-how conversion context works, and how every built-in scalar or text type
+how final-result conversions work, and how every built-in scalar or text type
 behaves. Read the conceptual sequence before using the per-type API chapters as
 a reference.
 

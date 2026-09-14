@@ -150,11 +150,12 @@ converts implicitly and exactly to `Decimal`; mixed integer and `Decimal`
 arithmetic produces `Decimal`, and mixed integer and `Float` arithmetic
 produces `Float`.
 
-An explicit constructor may establish a deep contextual domain for the
-compatible operator tree directly inside it. `Decimal(3 / 4)` converts operands
-before division and yields `0.75`; `String("value=" + 42)` converts operands
-before concatenation. Context does not mutate operands or cross into a called
-function's body.
+`/` is mathematical division: two integer operands produce an exact `Decimal`,
+so `3 / 4 == 0.75`. A native scalar conversion `T(expression)` evaluates the
+complete expression under its ordinary rules and converts only the final
+result. It never propagates `T` into nested operands: `Int32(3 / 4)` converts
+the completed `Decimal` quotient, while `String("value=" + 42)` remains invalid
+because the mixed concatenation itself is invalid.
 
 ## 4. Nullability, equality and operators
 
@@ -170,8 +171,9 @@ uses `??`.
   postfix/prefix semantics.
 - Ternary: `condition ? when_true : when_false`.
 
-Integer division truncates toward zero and remainder keeps the dividend sign,
-so `-10 / 3 == -3` and `-10 % 3 == -1`. `String + String` concatenates;
+Integer remainder keeps the dividend sign, so `-10 % 3 == -1`. Converting a
+fractional result to an integer truncates toward zero after validating range,
+so `Int32(-10 / 3) == -3`. `String + String` concatenates;
 `String * Integer` and `Integer * String` repeat with a checked non-negative
 count (`"ja" * 3 == "jajaja"`). A negative/non-integer count or impossible
 allocation is a controlled error. Boolean admits only equality and

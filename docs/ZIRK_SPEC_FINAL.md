@@ -28,9 +28,10 @@ Distributable package: `.zpkg`
 > `Object` root. `Float` is an exact base-ten decimal (the default fractional
 > type, no `NaN`, no infinity); the IEEE 754 binary family is
 > `Float16`–`Float128` with `Float == Float64` and a
-> `f` literal suffix, also with no valid `NaN`. Explicit `Float(...)` and
-> `String(...)` constructors establish deep contextual evaluation for their
-> contained arithmetic or concatenation tree. `Char` is exactly one Unicode
+> `f` literal suffix, also with no valid `NaN`. Explicit `T(...)` scalar
+> conversions evaluate their argument completely and convert only its result;
+> they never retype a contained arithmetic or concatenation tree. `Char` is
+> exactly one Unicode
 > grapheme. `String` is a mutable shared reference governed by `mut`, `inmut`
 > and transitive `inmut::strict`, supports checked grapheme mutation and
 > slicing, cloning, concatenation and repetition. The sealed temporal family

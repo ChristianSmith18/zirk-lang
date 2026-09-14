@@ -121,19 +121,23 @@ introduce a `ParallelSeq<T>` type at all — `check_field` returns the receiver'
 own type unchanged and records the field-expression span in
 `parallel_adapter_accesses` for lowering to consume later. This also sidesteps
 a real gap found while implementing it: **`map`/`filter`/`reduce`/`sum`/
-`count`/`collect`/`for_each` do not exist on `List<T>`/`Array<T>` yet, not even
-sequentially** — so "expose the parallel-safe subset" has no subset to define
-today. `Parallel.each(coll, fn)` needed none of those methods (it is a
+`count`/`collect`/`for_each` did not exist on `List<T>`/`Array<T>` when this
+addendum was written, so "expose the parallel-safe subset" had no subset to
+define then. The `collection-sequence-pipeline` change now supplies those
+sequential call sites. `Parallel.each(coll, fn)` needed none of those methods (it is a
 self-contained static call, `check_parallel_each_call`, typed `List<R>` off the
 callback's own return type) and is implemented.
 
-**D3 addendum — reduce associativity is future work, not implementable yet.**
-The same gap blocks 5.3: there is no `.reduce` call site in the checker to
-attach an associativity check to. Recorded for whoever adds `.reduce`: reject
-a combiner lambda whose body's top-level operator is not one of
-`+ * & | ^ && ||` (conservative — real associative operations only), requiring
-`reduce_ordered` otherwise. This directly rejects the spec's own example,
-`(a, b) => a - b`.
+**D3 addendum — parallel reduce associativity is enforced conservatively.**
+`collection-sequence-pipeline` supplies the `reduce` call sites that were
+missing when this change first landed. `check_array_list_method_call` and
+`check_range_method_call` now reject ordinary `reduce` when it is inside a
+`parallel` block or descends from a `.parallel` adapter and its combiner lambda
+does not have one of `+`, `*`, `&`, `|`, `^`, `&&`, or `||` as its top-level
+operator. This deliberately conservative proof rejects the spec's `(a, b) =>
+a - b` example and named or block-bodied callbacks whose associativity cannot
+be established. `reduce_ordered` is the explicit escape: it preserves the
+existing sequential grouping, so it has no associativity obligation.
 
 **D5 addendum — boundary reuse via the capture/barrier mechanism.** #2
 (`concurrent-blocks-and-timers`) turned out not to have a dedicated

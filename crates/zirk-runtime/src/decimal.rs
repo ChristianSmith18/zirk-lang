@@ -951,17 +951,33 @@ pub unsafe extern "C" fn zirk_rt_decimal_from_i128(out: *mut Decimal, value: *co
     unsafe { *out = Decimal::new(value, 0) };
 }
 
-/// `Float -> Int128` (`as` cast, checked: fails on a fractional or huge value).
+/// `Decimal -> IntN` (`IntN(...)` / `as`): truncates toward zero and rejects
+/// a result outside the requested width or signedness.
 ///
 /// # Safety
 /// `value` points at a `Decimal`; `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_rt_decimal_to_i128_checked(out: *mut i128, value: *const Decimal) {
+pub unsafe extern "C" fn zirk_rt_decimal_to_i128_checked(
+    out: *mut i128,
+    value: *const Decimal,
+    bits: u32,
+    signed: bool,
+) {
     let value = unsafe { *value };
-    if value.scale != 0 {
+    let divisor = pow10_i128(value.scale as u32).unwrap_or_else(|| failure::zirk_rt_invalid_cast());
+    let truncated = value.coef / divisor;
+    let in_range = if signed {
+        bits == 128 || {
+            let magnitude = 1_i128 << (bits - 1);
+            truncated >= -magnitude && truncated < magnitude
+        }
+    } else {
+        truncated >= 0 && (bits == 128 || (truncated as u128) < (1_u128 << bits))
+    };
+    if !in_range {
         failure::zirk_rt_invalid_cast();
     }
-    unsafe { out.write_unaligned(value.coef) };
+    unsafe { out.write_unaligned(truncated) };
 }
 
 /// `Float64 -> Decimal` (`Decimal(x)` / `as`, checked: rejects non-finite).
@@ -1109,6 +1125,16 @@ mod tests {
         let one_tenth = d("0.1");
         assert_eq!(to_f64(one_tenth), 0.1);
         assert_eq!(s(Decimal::new(42, 0)), "42");
+    }
+
+    #[test]
+    fn decimal_to_integer_truncates_the_completed_value_toward_zero() {
+        for (text, expected) in [("0.75", 0), ("3.9", 3), ("-3.9", -3)] {
+            let value = d(text);
+            let mut result = i128::MIN;
+            unsafe { zirk_rt_decimal_to_i128_checked(&mut result, &value, 128, true) };
+            assert_eq!(result, expected);
+        }
     }
 
     #[test]

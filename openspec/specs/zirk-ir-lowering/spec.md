@@ -268,25 +268,23 @@ and zero-divisor checks appropriate to exact decimal arithmetic.
 - **WHEN** `a / b` on `Float` is lowered
 - **THEN** the IR emits a zero-divisor guard and no `NaN` check
 
-### Requirement: Desugaring of deep contextual conversion
+### Requirement: Lowering of final-result scalar conversion
 
-Lowering SHALL insert the conversion of each operand of a contextual operator
-tree before lowering the operation itself, instead of lowering the operation with
-its original type and converting the result afterward. `Float(expr)` SHALL
-convert operands to exact decimal; `BinaryFloat(expr)` SHALL convert operands to
-binary.
+Lowering SHALL lower a scalar conversion's complete argument with its ordinary
+semantic type and SHALL emit exactly one conversion of the completed result.
+It SHALL NOT insert target-directed conversions into nested operands. Integer
+division SHALL lower in the Decimal domain.
 
-#### Scenario: Division lowered with the exact context already applied
+#### Scenario: Integer division lowers as Decimal
 
-- **WHEN** `Float(3 / 4)` is lowered
-- **THEN** the operands of the division are already exact `Float` in the
-  resulting IR, and the result is `0.75`
+- **WHEN** `3 / 4` is lowered
+- **THEN** both integer operands convert to Decimal immediately before the
+  Decimal division
 
-#### Scenario: Division lowered with the binary context already applied
+#### Scenario: Outer conversion follows division
 
-- **WHEN** `BinaryFloat(3 / 4)` is lowered
-- **THEN** the operands of the division are already `BinaryFloat64` in the
-  resulting IR
+- **WHEN** `Float64(3 / 4)` is lowered
+- **THEN** Decimal division occurs before the single Decimal-to-Float64 conversion
 
 ### Requirement: Desugaring of string interpolation
 
@@ -529,3 +527,13 @@ awaits them.
 - **WHEN** a `Timer.every` branch is still running when its scope's `ScopeExit` runs
 - **THEN** `ScopeExit` cancels it rather than waiting for it
 
+### Requirement: Lowering of parallel regions
+
+Lowering SHALL represent a `parallel` block as a `ParallelRegion` with its
+resolved core budget and body. A loop in that region SHALL lower to work
+submitted to the worker pool; sequence pipelines SHALL lower to ordered
+parallel combinators, and region loop back-edges SHALL poll the safepoint.
+
+#### Scenario: parallel pipeline lowers to combinators
+- **WHEN** `parallel { rows.map(f).sum() }` is lowered
+- **THEN** the IR contains ordered parallel map and sum combinators under its `ParallelRegion`

@@ -129,6 +129,10 @@ inmut sum = values.reduce((acc, n) => acc + n, 0); // Int32
 runtime because it cannot be known statically. Use `to_list()` when you need a
 resizable collection.
 
+The compiler lowers `Array.map` directly into one exactly-sized contiguous
+allocation and indexed writes. It does not use a growable `List` buffer, so it
+is the preferred representation when the cardinality is stable.
+
 For lazy pipelines, use `.iterator()` and a terminal such as `.collect()`.
 
 ## When to choose an array

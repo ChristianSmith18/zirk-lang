@@ -142,6 +142,46 @@ unsafe fn grow_buffer(
     }
 }
 
+/// Releases excess backing storage after a list has become substantially
+/// smaller. The threshold avoids resize thrashing around a single boundary:
+/// a list grows by powers of two and only contracts once it is at most one
+/// quarter full.
+unsafe fn shrink_buffer(list: *mut c_void, elem_size: usize, elem_align: usize, is_ref: bool) {
+    let length = unsafe { zirk_rt_list_length(list) };
+    let current = unsafe { list_capacity(list) };
+    if current <= 1 || length.saturating_mul(4) > current {
+        return;
+    }
+    let new_capacity = length.max(1).max(current / 2);
+    if new_capacity >= current {
+        return;
+    }
+    let size = HEADER_BYTES.saturating_add(new_capacity.saturating_mul(elem_size));
+    let align = crate::collector::allocation_align(elem_align);
+    let new_data = unsafe { crate::memory::zirk_rt_alloc(size, align) };
+    let descriptor = if is_ref {
+        unsafe { make_descriptor(HEADER_BYTES, elem_size, new_capacity) }
+    } else {
+        &raw const crate::array::zirk_rt_array_descriptor as *mut c_void
+    };
+    unsafe { set_descriptor(new_data, descriptor) };
+    let old_data = unsafe { data_pointer(list) };
+    if length > 0 && !old_data.is_null() {
+        let bytes = length.saturating_mul(elem_size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (old_data as *mut u8).add(HEADER_BYTES),
+                (new_data as *mut u8).add(HEADER_BYTES),
+                bytes,
+            )
+        };
+    }
+    unsafe {
+        write_usize(list, CAPACITY_OFFSET, new_capacity);
+        set_ptr(list, DATA_PTR_OFFSET, new_data);
+    }
+}
+
 /// Returns a pointer to the element at `index`, or terminates on an out-of-bounds index.
 ///
 /// # Safety
@@ -252,6 +292,32 @@ pub unsafe extern "C" fn zirk_rt_list_clone(
     clone
 }
 
+/// Converts a temporary list into a fixed-size array. This is used by eager
+/// sequence transforms whose public result is `Array<T>`: the transform can
+/// grow while it evaluates, and only the final length is fixed here.
+/// Copies a list's elements into a newly allocated fixed array.
+///
+/// # Safety
+/// `list` must be a valid runtime list whose elements use the supplied ABI
+/// size and alignment. The caller must provide the matching managed-reference
+/// flag for the element type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_array_from_list(
+    list: *mut c_void,
+    elem_size: usize,
+    elem_align: usize,
+    is_ref: bool,
+) -> *mut c_void {
+    let length = unsafe { zirk_rt_list_length(list) };
+    let array = unsafe { crate::array::zirk_rt_array_new(length, elem_size, elem_align, is_ref) };
+    for index in 0..length {
+        let source = unsafe { zirk_rt_list_element(list, index as i64, elem_size) };
+        let target = unsafe { crate::array::zirk_rt_array_element(array, index as i64, elem_size) };
+        unsafe { std::ptr::copy_nonoverlapping(source as *const u8, target as *mut u8, elem_size) };
+    }
+    array
+}
+
 /// `list.remove(index)` — removes the element at `index`.
 ///
 /// # Safety
@@ -265,7 +331,6 @@ pub unsafe extern "C" fn zirk_rt_list_remove(
     elem_align: usize,
     is_ref: bool,
 ) {
-    let _ = (elem_align,);
     let length = unsafe { zirk_rt_list_length(list) } as i64;
     let index = if index < 0 { length + index } else { index };
     if index < 0 || index >= length {
@@ -285,6 +350,7 @@ pub unsafe extern "C" fn zirk_rt_list_remove(
         unsafe { *(last as *mut *mut c_void) = std::ptr::null_mut() };
     }
     unsafe { write_usize(list, LENGTH_OFFSET, length_u - 1) };
+    unsafe { shrink_buffer(list, elem_size, elem_align, is_ref) };
 }
 
 /// Whether `pointer` refers to a runtime `String`/`Char` object: those are
@@ -319,7 +385,6 @@ pub unsafe extern "C" fn zirk_rt_list_remove_value(
     elem_align: usize,
     is_ref: bool,
 ) -> bool {
-    let _ = (elem_align,);
     let length = unsafe { zirk_rt_list_length(list) };
     let data = unsafe { data_pointer(list) };
     if length == 0 || data.is_null() {
@@ -351,8 +416,46 @@ pub unsafe extern "C" fn zirk_rt_list_remove_value(
                 unsafe { *(last as *mut *mut c_void) = std::ptr::null_mut() };
             }
             unsafe { write_usize(list, LENGTH_OFFSET, length - 1) };
+            unsafe { shrink_buffer(list, elem_size, elem_align, is_ref) };
             return true;
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shrinking_after_removals_keeps_capacity_dynamic() {
+        unsafe {
+            let list = zirk_rt_list_new(
+                std::mem::size_of::<i64>(),
+                std::mem::align_of::<i64>(),
+                false,
+            );
+            for value in 0_i64..8 {
+                zirk_rt_list_add(
+                    list,
+                    &raw const value as *const c_void,
+                    std::mem::size_of::<i64>(),
+                    std::mem::align_of::<i64>(),
+                    false,
+                );
+            }
+            assert_eq!(list_capacity(list), 8);
+            for _ in 0..6 {
+                zirk_rt_list_remove(
+                    list,
+                    -1,
+                    std::mem::size_of::<i64>(),
+                    std::mem::align_of::<i64>(),
+                    false,
+                );
+            }
+            assert_eq!(zirk_rt_list_length(list), 2);
+            assert_eq!(list_capacity(list), 4);
+        }
+    }
 }

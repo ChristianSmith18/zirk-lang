@@ -162,7 +162,11 @@ fn shape(e: &Expr) -> String {
         Expr::Match(m) => format!("match({}, {} arms)", shape(&m.scrutinee), m.arms.len()),
         Expr::Lambda(l) => format!("lambda/{}", l.params.len()),
         Expr::Variant(v) => format!("{}.{}", v.enum_name.name, v.variant.name),
-        Expr::Println(p) => format!("println({})", shape(&p.arg)),
+        Expr::Println(p) => format!(
+            "{}({})",
+            if p.newline { "println" } else { "print" },
+            p.args.iter().map(shape).collect::<Vec<_>>().join(", ")
+        ),
         Expr::Cast(c) => format!("({} as {})", shape(&c.expr), c.target.name),
         Expr::Interpolated(s) => {
             let parts: Vec<_> = s
@@ -723,6 +727,16 @@ fn valid_println_with_expression() {
         shape(&expression("stdout.println(a + b)")),
         "println((a + b))"
     );
+}
+
+#[test]
+fn valid_print_and_println_accept_multiple_or_zero_arguments() {
+    assert_eq!(
+        shape(&expression("stdout.print(\"sum\", 1 + 2, true)")),
+        "print(\"sum\", (1 + 2), true)"
+    );
+    assert_eq!(shape(&expression("stdout.print()")), "print()");
+    assert_eq!(shape(&expression("stdout.println()")), "println()");
 }
 
 #[test]

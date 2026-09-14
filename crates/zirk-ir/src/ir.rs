@@ -1046,8 +1046,8 @@ pub enum InstKind {
     /// assignment/argument and for the integer operand of mixed
     /// `Int`/`Float` arithmetic. Lowers to `zirk_rt_decimal_from_i128`.
     IntToDecimal(Operand),
-    /// `value as <an integer width>` from an exact `Float` — checked: a
-    /// non-integer or out-of-range value is a controlled runtime error.
+    /// `IntN(value)` / `value as <an integer width>` from an exact Decimal —
+    /// truncates toward zero and rejects an out-of-range result.
     /// Lowers to `zirk_rt_decimal_to_i128_checked` then an integer cast.
     DecimalToInt(Operand),
     /// `Float(x)` / `x as Float*` from an exact `Decimal` — may
@@ -1134,6 +1134,9 @@ pub enum InstKind {
     /// Its operand is **always** a `String`: the lowering inserts a `ToString`
     /// when it is not, and the verifier enforces it.
     Println(Operand),
+    /// `stdout.print`, using the same already-converted `String` contract as
+    /// `Println` but without appending a platform line break.
+    Print(Operand),
 
     /// The absent value of a nullable type.
     NullValue(Nullable),

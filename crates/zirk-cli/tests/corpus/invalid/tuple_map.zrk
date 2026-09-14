@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut pair = (1, "x");
+    pair.map((x: Int32): Int32 => x);
+}

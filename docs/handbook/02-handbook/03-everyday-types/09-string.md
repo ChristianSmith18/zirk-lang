@@ -76,7 +76,7 @@ text[1:3] = "i";    // slice length mismatch
 text[0] = "Hello";  // expected Char
 ```
 
-## Concatenation and contextual conversion
+## Concatenation and conversion
 
 Only two Strings concatenate directly:
 
@@ -85,15 +85,16 @@ Only two Strings concatenate directly:
 "value=" + 42;   // type error
 ```
 
-Convert explicitly with `String(42)`/`to_string()`, or establish an explicit
-deep context around the concatenation tree:
+Convert the individual value explicitly with `String(42)`/`to_string()`, or use
+interpolation:
 
 ```zirk
-String("value=" + 42); // "value=42"
+"value=" + String(42); // "value=42"
+"value={42}";          // "value=42"
 ```
 
-The context converts operands before `+`; it does not leak outward or enter
-called function bodies.
+`String(expression)` evaluates the complete expression first and converts only
+its final result. It does not make `String("value=" + 42)` valid.
 
 ## Repetition
 
@@ -158,7 +159,7 @@ graphemes; `byte_length` counts encoded bytes.
 | `text.chars()` | `List<Char>` | Grapheme view | implemented |
 | `text.clone()` | `String` | Independent logical copy | implemented |
 | `text.to_string()` | `String` | Identity | implemented |
-| `String(value)` | `String` | Explicit conversion; also establishes a deep conversion context over a concatenation tree | implemented |
+| `String(value)` | `String` | Explicit conversion of one completed printable result; nested concatenation must already be valid | implemented |
 
 > Indexing `text[i]` yields `Char`; slicing `text[start:end:step]` copies.
 > Every bound is checked — Zirk never clamps silently. Negative indices

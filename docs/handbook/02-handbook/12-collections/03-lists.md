@@ -41,6 +41,10 @@ numbers.is_empty();           // false
 Insertion and removal shift the later elements. Indexing is bounds-checked: an
 out-of-range read or write is a controlled error.
 
+`List<T>` manages its capacity internally: it grows geometrically while values
+are appended and contracts only after becoming substantially sparse. There is
+no user-facing capacity setting; use `Array<T>` when the final size is fixed.
+
 ```zirk
 numbers[0];      // 5
 numbers[10];     // error: index out of bounds
@@ -229,3 +233,13 @@ indexed read/write (including negative-from-end indices), `add`, `insert`,
 ---
 
 **Previous:** [← Fixed Arrays](02-fixed-arrays.md) · **Next:** [ Maps](04-maps.md)
+# Sequence operations
+
+`List<T>` supports eager sequence operations. `map` and `filter` return a new
+list, while `for_each` executes a callback for its side effects. `reduce`
+folds left-to-right, `sum` handles numeric elements, `count` returns the
+length, and `collect` copies the sequence into a list.
+
+`contains` queries membership. `reverse`, `sort`, and `sort_by` mutate the
+list in place. `first`, `last`, and `pop` return `T?`; `pop` also removes the
+last element, so empty lists produce `null`.

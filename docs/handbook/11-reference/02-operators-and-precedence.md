@@ -27,7 +27,7 @@ Operators are grouped below from strongest to weakest binding. Parentheses alway
 
 | Operands | Supported operators | Result/notes |
 |---|---|---|
-| integer + integer | arithmetic, comparison, bitwise, shifts | promoted compatible integer; `/` truncates toward zero; `%` follows dividend sign |
+| integer + integer | arithmetic, comparison, bitwise, shifts | promoted compatible integer, except `/` returns exact `Decimal`; `%` follows dividend sign |
 | integer + Float | arithmetic, comparison | compatible Float width |
 | Float + Float | arithmetic, comparison | compatible Float; infinities allowed, `NaN`-producing operations fail |
 | Boolean | `!`, `&&`, `\|\|`, equality | `Boolean`; no truthiness, order, or arithmetic |

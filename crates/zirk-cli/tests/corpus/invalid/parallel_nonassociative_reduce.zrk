@@ -1,0 +1,9 @@
+// A parallel reduction may regroup work, so subtraction needs the explicit
+// `reduce_ordered` escape instead of ordinary `reduce`.
+
+fn main(): Void {
+    inmut values: List<Int32> = [1, 2, 3];
+    inmut total: Int32 = parallel {
+        values.reduce(0, (a: Int32, b: Int32): Int32 => a - b)
+    };
+}

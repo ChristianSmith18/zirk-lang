@@ -6,7 +6,7 @@ chapter explains the rules that apply across types.
 
 | Family | Native operations | Important result rule |
 | --- | --- | --- |
-| Signed integers | arithmetic, order, bitwise, increment | `/` truncates toward zero |
+| Signed integers | arithmetic, order, bitwise, increment | `/` returns exact `Decimal` |
 | Unsigned integers | signed set except unary `-` | signed mixing is explicit |
 | Decimal and Float | arithmetic and order | mixed integer arithmetic yields the fractional operand's type |
 | Boolean | `!`, `&&`, `||`, equality | no truthiness or ordering |

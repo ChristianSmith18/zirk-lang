@@ -182,7 +182,7 @@ fn the_parallel_examples_program_runs() {
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(
         normalize(&output.stdout),
-        "compressed\ncores option ok\n36\n8\n"
+        "compressed\ncores option ok\n36\n40\n2\n9\n"
     );
 }
 

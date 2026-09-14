@@ -7602,7 +7602,10 @@ impl<'a> Checker<'a> {
                     self.expr_mutates_receiver(ctx, &s.expr, aliases)
                 }
             }),
-            Expr::Println(p) => self.expr_mutates_receiver(ctx, &p.arg, aliases),
+            Expr::Println(p) => p
+                .args
+                .iter()
+                .any(|arg| self.expr_mutates_receiver(ctx, arg, aliases)),
             Expr::Variant(_)
             | Expr::Int(_)
             | Expr::Float(_)
@@ -9338,8 +9341,10 @@ impl<'a> Checker<'a> {
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
                 self.reject_in_parallel_region(e.span, "`println`");
-                let ty = self.check_expr(&e.arg);
-                self.require_printable(ty, e.arg.span());
+                for arg in &e.args {
+                    let ty = self.check_expr(arg);
+                    self.require_printable(ty, arg.span());
+                }
                 Type::VOID
             }
             Expr::Cast(e) => self.check_cast(e),
@@ -13553,7 +13558,11 @@ impl<'a> Checker<'a> {
                     LambdaBody::Block(b) => self.check_recursive_reference_block(b, name, true),
                 }
             }
-            Expr::Println(e) => self.check_recursive_reference(&e.arg, name, nested),
+            Expr::Println(e) => {
+                for arg in &e.args {
+                    self.check_recursive_reference(arg, name, nested);
+                }
+            }
             Expr::Cast(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Interpolated(e) => {
                 for part in &e.parts {
@@ -15311,11 +15320,7 @@ impl<'a> Checker<'a> {
         // takes (task 6.1) — a call-site dispatch is a different shape, not
         // yet wired. Reported here, at the type that already exists, rather
         // than left to reach `zirk-ir` and panic on an undeclared callee.
-        self.not_lowered(
-            expr.span,
-            "`Parallel.each`",
-            "use a `parallel { for item in coll { ... } }` region instead for now",
-        );
+        self.intern_array_type(shape.returns);
         Type::of(Base::List(self.intern_list_type(shape.returns)))
     }
 
@@ -15459,6 +15464,205 @@ impl<'a> Checker<'a> {
         .unwrap_or(Type::UNKNOWN);
 
         match field.name.name.as_str() {
+            "map" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "map", 1);
+                    return Some(Type::UNKNOWN);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let Some(result) = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "map",
+                ) else {
+                    return Some(Type::UNKNOWN);
+                };
+                // Array results use a temporary growable list during
+                // lowering too, so keep the corresponding list element type
+                // interned even though the public result preserves Array.
+                self.intern_list_type(result);
+                // Parallel map writes one result per source index into an
+                // exact temporary Array before materializing the receiver's
+                // public collection family. Keep that layout available even
+                // when the public result is a List.
+                self.intern_array_type(result);
+                let id = if matches!(object.base, Base::Array(_)) {
+                    self.intern_array_type(result)
+                } else {
+                    self.intern_list_type(result)
+                };
+                Some(if matches!(object.base, Base::Array(_)) {
+                    Type::of(Base::Array(id))
+                } else {
+                    Type::of(Base::List(id))
+                })
+            }
+            "filter" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "filter", 1);
+                    return Some(Type::UNKNOWN);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "filter",
+                );
+                self.require_sequence_return(
+                    result,
+                    Type::BOOLEAN,
+                    expr.args[0].value.span(),
+                    "filter",
+                );
+                if self.parallel_depth > 0 || self.sequence_receiver_is_parallel(&field.object) {
+                    self.intern_array_type(Type::BOOLEAN);
+                }
+                Some(object)
+            }
+            "for_each" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "for_each", 1);
+                    return Some(Type::VOID);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "for_each",
+                );
+                self.require_sequence_return(
+                    result,
+                    Type::VOID,
+                    expr.args[0].value.span(),
+                    "for_each",
+                );
+                Some(Type::VOID)
+            }
+            "reduce" | "reduce_ordered" => {
+                if expr.args.len() != 2 {
+                    self.sequence_wrong_arity(expr, field.name.name.as_str(), 2);
+                    return Some(Type::UNKNOWN);
+                }
+                let identity = self.check_expr(&expr.args[0].value);
+                let callback = self.check_expr(&expr.args[1].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[identity, element],
+                    expr.args[1].value.span(),
+                    "reduce",
+                );
+                if let Some(result) = result
+                    && !identity.is_unknown()
+                    && !result.is_unknown()
+                    && !identity.accepts(result)
+                {
+                    self.expect_assignable(
+                        identity,
+                        result,
+                        expr.args[1].value.span(),
+                        "the reduce result",
+                    );
+                }
+                self.require_associative_parallel_reduce(expr, field);
+                Some(identity)
+            }
+            "sum" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "sum", 0);
+                }
+                if !element.is_unknown() && !is_numeric_element(element) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        "`sum` requires a numeric element type",
+                        format!(
+                            "found {}; use `reduce` for other element types",
+                            self.name(element)
+                        ),
+                        None,
+                    );
+                }
+                Some(element)
+            }
+            "count" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "count", 0);
+                }
+                Some(Type::INT32)
+            }
+            "collect" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "collect", 0);
+                }
+                Some(Type::of(Base::List(self.intern_list_type(element))))
+            }
+            "contains" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "contains", 1);
+                    return Some(Type::BOOLEAN);
+                }
+                let value = self.check_expr(&expr.args[0].value);
+                if !value.is_unknown() && !element.accepts(value) {
+                    self.expect_assignable(element, value, expr.args[0].value.span(), "the value");
+                }
+                Some(Type::BOOLEAN)
+            }
+            "reverse" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "reverse", 0);
+                }
+                Some(Type::VOID)
+            }
+            "sort" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "sort", 0);
+                }
+                if !element.is_unknown() && !has_natural_order(element) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        "`sort` requires an element type with a natural ordering",
+                        "use `sort_by` with an explicit comparator",
+                        None,
+                    );
+                }
+                Some(Type::VOID)
+            }
+            "sort_by" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "sort_by", 1);
+                    return Some(Type::VOID);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element, element],
+                    expr.args[0].value.span(),
+                    "sort_by",
+                );
+                self.require_sequence_return(
+                    result,
+                    Type::INT32,
+                    expr.args[0].value.span(),
+                    "sort_by",
+                );
+                Some(Type::VOID)
+            }
+            "first" | "last" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, field.name.name.as_str(), 0);
+                }
+                Some(element.as_nullable())
+            }
+            "pop" if matches!(object.base, Base::List(_)) => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "pop", 0);
+                }
+                Some(element.as_nullable())
+            }
             "add" if matches!(object.base, Base::List(_)) => {
                 if expr.args.len() != 1 {
                     self.error(
@@ -15558,6 +15762,274 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Some(Type::STRING)
+            }
+            _ => None,
+        }
+    }
+
+    fn sequence_wrong_arity(&mut self, expr: &CallExpr, method: &str, expected: usize) {
+        self.error(
+            codes::WRONG_ARGUMENT_COUNT,
+            expr.span,
+            format!("`{method}` takes {expected} argument(s)"),
+            format!("received {}", expr.args.len()),
+            None,
+        );
+        for arg in &expr.args {
+            self.check_expr(&arg.value);
+        }
+    }
+
+    fn check_sequence_callback(
+        &mut self,
+        callback: Type,
+        params: &[Type],
+        span: Span,
+        method: &str,
+    ) -> Option<Type> {
+        let Base::Function(id) = callback.base else {
+            if !callback.is_unknown() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    span,
+                    format!("`{method}` requires a callback"),
+                    format!("found {}", self.name(callback)),
+                    None,
+                );
+            }
+            return None;
+        };
+        let shape = self.fn_types.get(id as usize).cloned()?;
+        if shape.params.len() != params.len()
+            || shape
+                .params
+                .iter()
+                .zip(params)
+                .any(|(actual, expected)| !expected.accepts(*actual))
+        {
+            self.error(
+                codes::TYPE_MISMATCH,
+                span,
+                format!("callback passed to `{method}` has the wrong parameter types"),
+                format!("expected {} parameter(s)", params.len()),
+                None,
+            );
+            return None;
+        }
+        Some(shape.returns)
+    }
+
+    fn require_sequence_return(
+        &mut self,
+        actual: Option<Type>,
+        expected: Type,
+        span: Span,
+        method: &str,
+    ) {
+        if let Some(actual) = actual
+            && !actual.is_unknown()
+            && !expected.accepts(actual)
+        {
+            self.expect_assignable(
+                expected,
+                actual,
+                span,
+                &format!("the `{method}` callback result"),
+            );
+        }
+    }
+
+    /// Ordinary `reduce` may regroup a parallel computation, so only accept a
+    /// combiner whose top-level operation is one of the conservative set we
+    /// can establish as associative. `reduce_ordered` deliberately keeps the
+    /// sequential grouping and is the escape hatch for every other combiner.
+    fn require_associative_parallel_reduce(&mut self, call: &CallExpr, field: &FieldExpr) {
+        if field.name.name != "reduce"
+            || !(self.parallel_depth > 0 || self.sequence_receiver_is_parallel(&field.object))
+            || self.is_associative_reduce_combiner(&call.args[1].value)
+        {
+            return;
+        }
+
+        self.error(
+            codes::PARALLEL_NONASSOCIATIVE_REDUCE,
+            call.args[1].value.span(),
+            "a parallel `reduce` requires an associative combiner",
+            "use a lambda whose top-level operation is `+`, `*`, `&`, `|`, `^`, `&&`, or `||`, or use `reduce_ordered` to preserve sequential grouping",
+            None,
+        );
+    }
+
+    /// Whether a chained receiver originates at `collection.parallel`.
+    /// Intervening calls such as `.map(...)` remain part of the same chain.
+    fn sequence_receiver_is_parallel(&self, receiver: &Expr) -> bool {
+        match receiver {
+            Expr::Field(field) => {
+                self.parallel_adapter_accesses.contains(&field.span)
+                    || self.sequence_receiver_is_parallel(&field.object)
+            }
+            Expr::Call(call) => self.sequence_receiver_is_parallel(&call.callee),
+            _ => false,
+        }
+    }
+
+    fn is_associative_reduce_combiner(&self, callback: &Expr) -> bool {
+        let Expr::Lambda(lambda) = callback else {
+            return false;
+        };
+        let LambdaBody::Expr(Expr::Binary(binary)) = &*lambda.body else {
+            return false;
+        };
+        matches!(
+            binary.op,
+            BinaryOp::Add
+                | BinaryOp::Mul
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::And
+                | BinaryOp::Or
+        )
+    }
+
+    fn check_range_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Range(id) = object.base else {
+            return None;
+        };
+        let element = self
+            .range_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        match field.name.name.as_str() {
+            "map" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "map", 1);
+                    return Some(Type::UNKNOWN);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "map",
+                )?;
+                self.intern_array_type(result);
+                Some(Type::of(Base::List(self.intern_list_type(result))))
+            }
+            "filter" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "filter", 1);
+                    return Some(Type::UNKNOWN);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "filter",
+                );
+                self.require_sequence_return(
+                    result,
+                    Type::BOOLEAN,
+                    expr.args[0].value.span(),
+                    "filter",
+                );
+                Some(Type::of(Base::List(self.intern_list_type(element))))
+            }
+            "for_each" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "for_each", 1);
+                    return Some(Type::VOID);
+                }
+                let callback = self.check_expr(&expr.args[0].value);
+                let result = self.check_sequence_callback(
+                    callback,
+                    &[element],
+                    expr.args[0].value.span(),
+                    "for_each",
+                );
+                self.require_sequence_return(
+                    result,
+                    Type::VOID,
+                    expr.args[0].value.span(),
+                    "for_each",
+                );
+                Some(Type::VOID)
+            }
+            "reduce" | "reduce_ordered" => {
+                if expr.args.len() != 2 {
+                    self.sequence_wrong_arity(expr, field.name.name.as_str(), 2);
+                    return Some(Type::UNKNOWN);
+                }
+                let identity = self.check_expr(&expr.args[0].value);
+                let callback = self.check_expr(&expr.args[1].value);
+                self.check_sequence_callback(
+                    callback,
+                    &[identity, element],
+                    expr.args[1].value.span(),
+                    "reduce",
+                );
+                self.require_associative_parallel_reduce(expr, field);
+                Some(identity)
+            }
+            "sum" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "sum", 0);
+                }
+                if !element.is_unknown() && !is_numeric_element(element) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        "`sum` requires a numeric range",
+                        "use `reduce` for other element types",
+                        None,
+                    );
+                }
+                Some(element)
+            }
+            "count" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "count", 0);
+                }
+                Some(Type::INT32)
+            }
+            "collect" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "collect", 0);
+                }
+                Some(Type::of(Base::List(self.intern_list_type(element))))
+            }
+            _ => None,
+        }
+    }
+
+    fn check_tuple_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Tuple(_) = object.base else {
+            return None;
+        };
+        match field.name.name.as_str() {
+            "to_string" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "to_string", 0);
+                }
+                Some(Type::STRING)
+            }
+            "clone" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "clone", 0);
+                }
+                Some(object)
             }
             _ => None,
         }
@@ -16077,6 +16549,22 @@ impl<'a> Checker<'a> {
                 && !field.safe
                 && !object.nullable
                 && let Some(ty) = self.check_array_list_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            if matches!(object.base, Base::Range(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_range_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            if matches!(object.base, Base::Tuple(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_tuple_method_call(expr, field, object)
             {
                 return ty;
             }
@@ -17160,16 +17648,15 @@ impl<'a> Checker<'a> {
                 return self.check_direct_call(expr, &signature);
             }
 
-            // `Float(3 / 4)` establishes a deep contextual conversion domain
-            // over the arithmetic tree directly inside it, and `String("x=" + 42)`
-            // does the same over concatenation (roadmap Phase 3b, task 7) —
+            // `T(expr)` on a native scalar evaluates `expr` with its ordinary
+            // semantics and converts only the completed result to `T`. It is
             // decided here, ahead of class construction, since a native
             // scalar name can never collide with one (type names are
             // reserved).
             // `Date(y, m, d)`, `Time(h, m, s?, ns?)` and `DateTime(date,
             // time)` (`date-and-time-types`): validated constructors for the
             // civil temporal types, decided here for the same reason the
-            // contextual conversions below are — a native scalar name can
+            // scalar conversions below are — a native scalar name can
             // never collide with a class constructor.
             if let Some(target) = Type::from_name(&callee.name)
                 && matches!(target.base, Base::Date | Base::Time | Base::DateTime)
@@ -17184,7 +17671,7 @@ impl<'a> Checker<'a> {
                     Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String
                 )
             {
-                return self.check_context_conversion(target, expr);
+                return self.check_scalar_conversion(target, expr);
             }
 
             // `Array<T>(capacity)` and `List<T>()` are compiler-built-in
@@ -17312,23 +17799,17 @@ impl<'a> Checker<'a> {
         fn_type.returns
     }
 
-    /// `Target(expr)`, a deep contextual conversion (`ZIRK_LANGUAGE_SPEC.md`
-    /// section 3, roadmap Phase 3b task 7): `Float(3 / 4)` converts `3` and
-    /// `4` to `Float` *before* dividing, yielding `0.75`, not `(3 / 4) as
-    /// Float` which would divide as `Int32` first and convert the
-    /// already-truncated `0` after. `String("x=" + 42)` is the same idea
-    /// over concatenation.
-    ///
-    /// Exactly one positional argument — the syntax reads like a
-    /// constructor call, and a constructor takes what it is given, not a
-    /// list of things to convert independently.
-    fn check_context_conversion(&mut self, target: Type, expr: &CallExpr) -> Type {
+    /// `Target(expr)`, a native scalar conversion. The argument is checked as
+    /// one complete ordinary expression first; only its final value converts
+    /// to `target`. No target type propagates into operators or leaves inside
+    /// the expression.
+    fn check_scalar_conversion(&mut self, target: Type, expr: &CallExpr) -> Type {
         if expr.args.len() != 1 || expr.args[0].name.is_some() {
             self.error(
                 codes::WRONG_ARGUMENT_COUNT,
                 expr.span,
                 format!("`{}` takes exactly one argument", self.name(target)),
-                "a contextual conversion converts one expression",
+                "a scalar conversion converts one completed expression",
                 None,
             );
             for arg in &expr.args {
@@ -17337,7 +17818,9 @@ impl<'a> Checker<'a> {
             return target;
         }
 
-        self.check_context_tree(target, &expr.args[0].value);
+        let value = &expr.args[0].value;
+        let actual = self.check_expr(value);
+        self.expect_scalar_convertible(target, actual, value.span());
         target
     }
 
@@ -17430,54 +17913,8 @@ impl<'a> Checker<'a> {
         target
     }
 
-    /// Walks an operand tree deciding, at each node, whether it still
-    /// belongs to `target`'s own compatible operator family (arithmetic for
-    /// a numeric target, `+` alone for `String` — repeating a `String` with
-    /// `*` is already native and needs no context) — recursing while it
-    /// does, and treating anything else as a boundary: checked with its own
-    /// type, then required to convert into `target` at that point.
-    ///
-    /// A boundary is also where this naturally stops at a call: a function
-    /// or method call is never one of the recognized operator shapes, so it
-    /// is always a leaf here — the context never reaches into a called
-    /// function's body, without needing a special case for it (task 7.3).
-    /// The tree itself is never rewritten, only read twice (once here to
-    /// check it, again in `zirk-ir/lower.rs`'s `lower_context_tree` to
-    /// lower it) — task 7.3's "does not mutate operands" the same way.
-    fn check_context_tree(&mut self, target: Type, expr: &Expr) {
-        let numeric = matches!(target.base, Base::Int(_) | Base::Float(_) | Base::Decimal);
-        let is_string = matches!(target.base, Base::String);
-
-        let compatible_op = |op: BinaryOp| {
-            (numeric
-                && matches!(
-                    op,
-                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
-                ))
-                || (is_string && op == BinaryOp::Add)
-        };
-
-        match expr {
-            Expr::Binary(b) if compatible_op(b.op) => {
-                self.check_context_tree(target, &b.left);
-                self.check_context_tree(target, &b.right);
-            }
-            Expr::Unary(u) if numeric && u.op == UnaryOp::Neg => {
-                self.check_context_tree(target, &u.operand);
-            }
-            _ => {
-                let actual = self.check_expr(expr);
-                self.expect_context_convertible(target, actual, expr.span());
-            }
-        }
-    }
-
-    /// Whether a leaf's own type can convert into a contextual target —
-    /// always unchecked where it applies, the same as an explicit `as`
-    /// (roadmap Phase 3b, task 4.3/7.2): a numeric leaf reaches any other
-    /// numeric target, and any printable value reaches `String` through
-    /// `to_string()` (task 8).
-    fn expect_context_convertible(&mut self, target: Type, actual: Type, span: Span) {
+    /// Whether the completed value can convert to a native scalar target.
+    fn expect_scalar_convertible(&mut self, target: Type, actual: Type, span: Span) {
         if actual.is_unknown() || target == actual {
             return;
         }
@@ -17495,8 +17932,8 @@ impl<'a> Checker<'a> {
         self.error(
             codes::TYPE_MISMATCH,
             span,
-            format!("cannot convert {actual_name} into the `{target_name}` context"),
-            format!("`{target_name}(...)` requires every leaf to reach {target_name}"),
+            format!("cannot convert {actual_name} to `{target_name}`"),
+            format!("`{target_name}(...)` converts the expression's completed value"),
             None,
         );
     }
@@ -18430,7 +18867,11 @@ fn collect_path_names(expr: &Expr, out: &mut Vec<(String, Span)>) {
                 }
             }
         }
-        Expr::Println(e) => collect_path_names(&e.arg, out),
+        Expr::Println(e) => {
+            for arg in &e.args {
+                collect_path_names(arg, out);
+            }
+        }
         Expr::Spawn(e) => match &e.body {
             SpawnBody::Expr(inner) => collect_path_names(inner, out),
             SpawnBody::Block(block) => {
@@ -18537,6 +18978,10 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
     }
 
     match (left.base, right.base, op) {
+        // `/` is mathematical division. Two integers therefore produce the
+        // exact base-ten `Decimal`; an explicit `IntN(...)` may convert the
+        // completed quotient afterwards when an integer result is wanted.
+        (Base::Int(_), Base::Int(_), Div) => Some(Type::FLOAT),
         // Numeric arithmetic is performed in the smallest common type that
         // can represent every value of both operands without loss. The
         // checker already guaranteed the common type exists; lower widens.
@@ -18609,4 +19054,15 @@ fn operator_method(op: BinaryOp) -> &'static str {
         // The rest are not overloadable through a reserved method.
         _ => "_unsupported",
     }
+}
+
+fn is_numeric_element(ty: Type) -> bool {
+    matches!(ty.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+}
+
+fn has_natural_order(ty: Type) -> bool {
+    matches!(
+        ty.base,
+        Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String | Base::Char | Base::Boolean
+    )
 }

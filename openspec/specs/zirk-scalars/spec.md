@@ -2,7 +2,7 @@
 
 ## Purpose
 Defines integer and floating families, Boolean and grapheme Char semantics,
-checked arithmetic, contextual conversion, and scalar formatting contracts.
+checked arithmetic, final-result scalar conversion, and scalar formatting contracts.
 ## Requirements
 ### Requirement: Complete family of integer widths
 
@@ -130,17 +130,21 @@ The type system SHALL recognize `Char` as exactly one extended Unicode grapheme,
 - **WHEN** a `for ... in` traverses a `String`
 - **THEN** each bound element is a `Char`, one per grapheme, not per byte or per code point
 
-### Requirement: Deep contextual conversion
+### Requirement: Final-result scalar conversion
 
-An explicit constructor of a scalar type (`Decimal(expr)`, `Float(expr)`, `String(expr)`, etc.) SHALL establish a conversion domain for the compatible operator tree it directly contains, converting each operand before the operation is evaluated. The context SHALL NOT mutate the original operands or cross into the body of a function called within the expression.
+An explicit scalar conversion `T(expression)` SHALL evaluate the complete expression under its ordinary semantics and convert only the completed result to `T`. The target type SHALL NOT propagate into nested operators or operands. Integer `/` SHALL produce an exact `Decimal` before any enclosing conversion runs.
 
-#### Scenario: Division converted before operating
-- **WHEN** `Decimal(3 / 4)` is written
-- **THEN** the result is `0.75`, not `0` truncated and then converted
+#### Scenario: Integer division produces Decimal
+- **WHEN** `3 / 4` is evaluated
+- **THEN** the result is exact `Decimal` `0.75`
 
-#### Scenario: The context does not cross a function call
-- **WHEN** an expression within a contextual constructor calls a function that internally performs an integer division
-- **THEN** that internal division does not adopt the context of the outer constructor
+#### Scenario: Conversion runs after the expression
+- **WHEN** `Int32(3 / 4)` is evaluated
+- **THEN** the Decimal quotient is computed first and only that result is converted to `Int32`
+
+#### Scenario: String conversion does not repair an invalid expression
+- **WHEN** `String("value=" + 42)` is checked
+- **THEN** it is rejected because the mixed concatenation is invalid before conversion
 
 ### Requirement: Bitwise and shift operators
 
@@ -165,4 +169,3 @@ The `String * n` operator SHALL accept an integer of any width for `n`, widening
 #### Scenario: Repeating with a signed narrow count
 - **WHEN** `"x" * (3 as Int8)` is evaluated
 - **THEN** the count is converted to `Int32` and the result is the repeated string
-

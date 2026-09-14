@@ -981,7 +981,7 @@ pub enum Expr {
     Lambda(LambdaExpr),
     /// `Direction.North`, the value of an enum variant.
     Variant(VariantExpr),
-    /// `stdout.println(expr)`.
+    /// `stdout.print(expr, ...)` and `stdout.println(expr, ...)`.
     ///
     /// A special syntactic form recognized by the compiler while neither
     /// modules nor a standard library exist. Deliberate debt, documented in
@@ -1730,7 +1730,10 @@ impl Arg {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrintlnExpr {
-    pub arg: Box<Expr>,
+    /// Arguments are evaluated and printed from left to right.
+    pub args: Vec<Expr>,
+    /// `true` for `println`, `false` for `print`.
+    pub newline: bool,
     pub span: Span,
 }
 

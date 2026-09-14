@@ -92,7 +92,7 @@ pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
     zirk_rt_index_out_of_bounds, zirk_rt_overflow,
 };
-pub use io::zirk_io_println;
+pub use io::{zirk_io_print, zirk_io_println};
 pub use journal::{
     zirk_rt_journal_begin, zirk_rt_journal_commit, zirk_rt_journal_record, zirk_rt_journal_rollback,
 };

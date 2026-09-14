@@ -37,7 +37,7 @@ count = 2;           // valid
 count = "two";       // type mismatch
 ```
 
-Numeric promotion, casts, contextual conversion, nullable widening, class
+Numeric promotion, casts, final-result scalar conversion, nullable widening, class
 subtyping, generics, unions, callable variance, and protocol conformance use the
 rules owned by their type-system chapters. The checker never inserts an
 undocumented implicit conversion merely to make a call succeed.

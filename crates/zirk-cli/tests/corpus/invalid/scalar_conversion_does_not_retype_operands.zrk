@@ -1,0 +1,5 @@
+fn main(): Void {
+    // The inner addition must be valid before String converts its result.
+    inmut text: String = String("value=" + 42);
+    stdout.println(text);
+}

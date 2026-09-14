@@ -7,7 +7,7 @@
 // the case that check alone could never have made sound.
 fn g(divisor: Int32): Int32 {
     mut a: Int32 = 100;
-    return a / divisor;
+    return Int32(a / divisor);
 }
 
 fn f(divisor: Int32): Int32 {

@@ -36,3 +36,13 @@ Use pipelines when data movement is the story. Use explicit statements when bran
 ---
 
 **Previous:** [← Lazy Operations](07-lazy-operations.md) · **Next:** [ Pattern Matching](../14-pattern-matching/README.md)
+# Eager collection pipelines
+
+Lists, arrays, and ranges provide `map`, `filter`, `for_each`, `reduce`,
+`sum`, `count`, and `collect`. These operations are eager: each transform
+executes immediately and materializes its result. A range materializes to a
+`List<T>` when `collect` is requested. Use `sort_by((left, right) => ...)`
+when the element type has no natural ordering.
+
+Tuples are fixed-size values rather than sequences; they support `length`,
+`clone()`, and `to_string()`.

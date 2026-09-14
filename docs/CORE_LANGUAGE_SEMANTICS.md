@@ -23,6 +23,9 @@ interaction boundaries.
   fractional type, no `NaN`, no infinity); the IEEE 754 binary family is
   `Float16`…`Float128` (`Float` = `Float64`), written
   with an `f` literal suffix. The two never combine implicitly.
+- Integer `/` produces an exact `Decimal`. Every `T(expression)` conversion
+  evaluates the complete expression normally and converts only its final
+  value; a target type never propagates into nested operands.
 - Classes, `String`, `Array`, `List`, `Map`, and `Set` are reference-backed.
   Assigning, passing, returning, or capturing a **complete variable** shares
   its referent.

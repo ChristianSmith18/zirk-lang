@@ -72,9 +72,9 @@ Every built-in type chapter SHALL explain purpose, construction/literals, infere
 ### Requirement: Operator and API tables remain explanatory
 Operator matrices and property/method catalogs SHALL state operand types, result types, mutation behavior, error conditions, and link to explanatory examples. A table SHALL NOT be the sole explanation of surprising behavior.
 
-#### Scenario: Contextual cast reference entry
-- **WHEN** the reference table lists `Float(a / b)`
-- **THEN** it links to prose that explains operand conversion before evaluation and contrasts ordinary integer division
+#### Scenario: Scalar conversion reference entry
+- **WHEN** the reference table lists `Float64(a / b)`
+- **THEN** it links to prose explaining that integer division produces Decimal before the completed result converts to Float64
 
 ### Requirement: Type documentation contradiction audit
 Completion SHALL include repository-wide checks for obsolete `Decimal*` naming, code-point-only `Char`, immutable or copy-on-write String claims, non-signed Duration claims, permissive strict aliases, and incompatible native operator examples.

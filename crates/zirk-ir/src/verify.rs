@@ -909,6 +909,18 @@ fn verify_instruction(
             }
         }
 
+        InstKind::Print(operand) => {
+            expect(inst.ty, IrType::Void, position, "Print", report);
+            if let Some(value) = type_of(operand)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: Print receives {}, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
         InstKind::NullValue(base) => {
             expect(
                 inst.ty,
@@ -2398,7 +2410,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
-        InstKind::Println(operand) => vec![*operand],
+        InstKind::Println(operand) | InstKind::Print(operand) => vec![*operand],
         InstKind::NullValue(_) => Vec::new(),
         InstKind::Wrap { value, .. } => vec![*value],
         InstKind::IsNull(operand) | InstKind::Unwrap(operand) => vec![*operand],

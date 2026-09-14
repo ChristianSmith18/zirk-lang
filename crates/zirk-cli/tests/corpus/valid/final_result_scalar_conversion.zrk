@@ -1,0 +1,30 @@
+// Scalar conversion is final-result-only: an invocation such as `T(expr)`
+// evaluates `expr` completely under its ordinary rules, then converts that
+// one result. No target type propagates into the expression's operands.
+fn main(): Void {
+    // Mathematical integer division produces an exact Decimal directly.
+    mut ratio: Decimal = 3 / 4;
+    stdout.println(ratio == 0.75);
+
+    // Variables follow the same rule.
+    mut numerator: Int32 = 3;
+    mut denominator: Int32 = 4;
+    mut variable_ratio: Decimal = numerator / denominator;
+    stdout.println(variable_ratio == 0.75);
+
+    // Float64 and Int64 convert the already-computed Decimal quotient.
+    mut binary: Float64 = Float64(3 / 4);
+    stdout.println(binary == 0.75f);
+
+    mut whole: Int64 = Int64(3 / 4);
+    stdout.println(whole);
+
+    // String converts one completed printable value. It does not make
+    // otherwise-invalid mixed concatenation valid.
+    mut text: String = String(42);
+    stdout.println(text == "42");
+
+    // Ordinary arithmetic completes before the outer conversion.
+    mut sum: Int64 = Int64(3 + 4);
+    stdout.println(sum);
+}

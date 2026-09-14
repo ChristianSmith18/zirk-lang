@@ -1,16 +1,18 @@
-// `collection.parallel` (spec `parallel-regions`, "`.parallel` adapter and
-// `Parallel.each`"): typed exactly as `collection` itself. The parallel-safe
-// pipeline subset (`map`/`filter`/`reduce`/`sum`/`count`/`collect`/
-// `for_each`) does not exist on `List<T>`/`Array<T>` yet — sequentially or
-// otherwise — so this only demonstrates the adapter's own typing: reading
-// through it type-checks and behaves identically to reading the collection
-// directly.
+// `.parallel.map` and `Parallel.each` execute callbacks through the CPU
+// worker pool and preserve input order in their materialized results.
 
 fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3];
-    mut count: Int32 = 0;
-    for v in values.parallel {
-        count = count + 1;
-    }
-    stdout.println(count);
+    mut mapped: List<Int32> = values.parallel.map((v: Int32): Int32 => v * 2);
+    mut filtered: List<Int32> = values.parallel.filter((v: Int32): Boolean => v > 1);
+    mut each: List<Int32> = Parallel.each(values, (v: Int32): Int32 => v + 1);
+    stdout.println(mapped[0]);
+    stdout.println(mapped[2]);
+    stdout.println(filtered[0]);
+    stdout.println(filtered[1]);
+    stdout.println(each[0]);
+    stdout.println(each[2]);
+    stdout.println(values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a + b));
+    stdout.println(values.parallel.sum());
+    stdout.println(parallel { values.sum() });
 }

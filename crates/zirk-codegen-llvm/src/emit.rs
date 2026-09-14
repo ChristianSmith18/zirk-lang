@@ -2266,14 +2266,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::DecimalToInt(operand) => {
                 let value = self.operand(*operand);
-                let wide = self.emit_decimal_call(
-                    "zirk_rt_decimal_to_i128_checked",
-                    &[(value, ir::IrType::Decimal)],
-                    ir::IrType::Int(ir::IntWidth::I128),
-                );
                 let ir::IrType::Int(target) = instruction.ty else {
                     unreachable!("DecimalToInt declares an integer destination")
                 };
+                let bits = self
+                    .context
+                    .i32_type()
+                    .const_int(target.bits() as u64, false);
+                let signed = self
+                    .context
+                    .bool_type()
+                    .const_int(u64::from(self.is_signed(instruction.ty)), false);
+                let wide = self.emit_decimal_call(
+                    "zirk_rt_decimal_to_i128_checked",
+                    &[
+                        (value, ir::IrType::Decimal),
+                        (bits.into(), ir::IrType::Int(ir::IntWidth::I32)),
+                        (signed.into(), ir::IrType::Boolean),
+                    ],
+                    ir::IrType::Int(ir::IntWidth::I128),
+                );
                 let target_ty = self
                     .context
                     .custom_width_int_type(
@@ -3078,6 +3090,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         "",
                     )
                     .expect("call to println");
+                None
+            }
+
+            ir::InstKind::Print(operand) => {
+                self.builder
+                    .build_call(self.runtime.io_print, &[self.operand(*operand).into()], "")
+                    .expect("call to print");
                 None
             }
 

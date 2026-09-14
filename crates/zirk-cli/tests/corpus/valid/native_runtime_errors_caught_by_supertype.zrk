@@ -7,7 +7,7 @@ fn main(): Void {
     try {
         mut a: Int32 = 5;
         mut b: Int32 = 0;
-        mut c: Int32 = a / b;
+        mut c: Decimal = a / b;
         stdout.println(c);
     } catch RuntimeError(e) {
         stdout.println("runtime: " + e.message());

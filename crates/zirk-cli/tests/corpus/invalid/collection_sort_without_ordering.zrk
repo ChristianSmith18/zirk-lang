@@ -1,0 +1,8 @@
+class Box {
+    value: List<Int32>;
+}
+
+fn main(): Void {
+    inmut values: List<Box> = [];
+    values.sort();
+}

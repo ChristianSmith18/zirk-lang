@@ -10,7 +10,7 @@ fn main(): Void {
     try {
         mut a: Int32 = 10;
         mut b: Int32 = 0;
-        mut c: Int32 = a / b;
+        mut c: Decimal = a / b;
         stdout.println(c);
     } catch DivisionByZeroError(e) {
         stdout.println("division: " + e.message());

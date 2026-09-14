@@ -60,6 +60,27 @@ iterator contract, and forcing one now to save a bit of table duplication
 would be exactly the kind of premature abstraction the four families don't
 need yet (each already has its own concrete representation).
 
+### D5: Inline stable ordering
+
+`sort` and `sort_by` use a stable in-place insertion sort emitted by the IR
+lowerer. This resolves the runtime-helper question without adding a second
+C ABI for every element layout: the existing indexed load/store primitives
+are sufficient for both `Array<T>` and `List<T>`, and the comparator remains a
+normal callable value.
+
+### D6: Distinct memory paths for fixed and dynamic sequences
+
+`Array.map` allocates its exact final contiguous result before the loop and
+writes each mapped value at the corresponding index. It never stages through
+`List`. `Array.filter` remains one-pass and uses the growable staging path:
+counting in a first pass would invoke a user callback twice and violate eager
+left-to-right callback semantics when it has observable effects.
+
+`List` keeps automatic geometric growth, and its runtime contracts its backing
+storage only when it becomes at most one quarter full. This is an internal
+dynamic policy, not a user-visible capacity API; it avoids both fixed capacity
+locks and repeated grow/shrink churn.
+
 ### D2: `reduce`'s signature and the associativity obligation
 
 `reduce(identity: R, combine: (R, T): R): R` — eager, strict left-to-right

@@ -26,7 +26,7 @@ deferred construct.
 - **THEN** the roadmap is corrected by assigning it a phase before implementing any part of it
 
 #### Scenario: Features orphaned by normative refinement
-- **WHEN** the `Float` family, graphemic `Char`, deep contextual conversion, the bitwise and shift operators, and string interpolation are consulted
+- **WHEN** the `Float` family, graphemic `Char`, final-result scalar conversion, mathematical integer division, the bitwise and shift operators, and string interpolation are consulted
 - **THEN** the roadmap assigns them to Phase 3b
 - **AND** assigns `inmut::strict` to Phase 4 and the temporal family to Phase 7
 
@@ -88,7 +88,7 @@ once Phase 5 steps 1 to 3 are delivered; they resolve as ordinary known types.
 
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured concurrency semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
 
-Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every` — a program using these forms SHALL be compiled and run with no phase diagnostic. `parallel-cpu-regions` (`parallel`), `typed-channels` (`Channel<T>`), and `concurrency-completion` (`Concurrent.of` combinators, `Concurrent.detach`, `Thread.run`, `Atomic` / `Mutex` / the synchronizer library) remain deferred until their sub-change lands, reporting the sub-change that delivers them.
+Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` (`Channel<T>`) and `concurrency-completion` (`Concurrent.of` combinators, `Concurrent.detach`, `Thread.run`, `Atomic` / `Mutex` / the synchronizer library) remain deferred until their sub-change lands.
 
 #### Scenario: Phase planning reaches concurrency
 - **WHEN** implementation work starts branch scheduling
@@ -99,10 +99,13 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 - **THEN** no phase diagnostic is emitted and the construct is compiled and run
 
 #### Scenario: Later concurrency sub-changes stay deferred
-- **WHEN** a program uses `parallel`, `Channel<T>`, `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
+- **WHEN** a program uses `Channel<T>`, `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
 - **THEN** the diagnostic names the construct and the Phase 5 sub-change that delivers it
+
+#### Scenario: The parallel surface is delivered
+- **WHEN** a program uses `parallel`, `.parallel`, or `Parallel.each`
+- **THEN** no phase diagnostic is emitted and the construct is compiled and run
 
 #### Scenario: Removed constructs are reported as removed
 - **WHEN** a program uses `task`, `await`, `select`, or `cancellation shield`
 - **THEN** the diagnostic states the construct was removed and names its replacement
-

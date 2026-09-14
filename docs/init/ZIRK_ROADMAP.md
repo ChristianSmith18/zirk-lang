@@ -197,15 +197,14 @@ phase. This one owns it:
   (`Float` = `Float64`) with explicit infinities and no valid `NaN`
   — an operation that would produce one is a controlled error.
 - `Char` as exactly one Unicode grapheme, which may span several code points.
-- Deep contextual conversion: `Float(3 / 4)` converts the operands before the
-  division rather than converting its integer result.
+- Final-result scalar conversion: `T(expression)` evaluates the complete
+  expression first and converts only its result. Integer `/` produces exact
+  `Decimal`, so `Float64(3 / 4)` converts that completed quotient.
 - Bitwise and shift operators, levels 7 to 10 of the operator table.
 - String interpolation, which needs the `to_string()` contract Phase 3 defines.
 
-They arrive together because they depend on each other: contextual conversion
-means nothing without `Float`, `Float` literals mean nothing without the family,
-and interpolation needs Phase 3's contracts. Splitting them would mean
-implementing each one twice.
+They arrive together because numeric conversions depend on the complete scalar
+family, while interpolation needs Phase 3's contracts.
 
 **Output:** the complete scalar surface of the spec — every numeric width, real
 `Char`, and the conversion rules that connect them.
@@ -401,13 +400,11 @@ function coloring.
    cancellation or unhandled exception unwinds natively through its own stack
    and the scope aggregates the failure; `main` runs in an implicit scope.
 2. CPU-bound `parallel { }` regions on a real multicore worker pool
-   (`parallel-cpu-regions`, **delivered for the `for`-over-`Array`/`List`
-   shape**): a separate worker pool and a multi-threaded stop-the-world
-   safepoint collector, alongside `concurrent`/`spawn`'s single-threaded
-   executor. Ordered/unordered pipeline operations and associative/
-   deterministic reductions remain follow-up work — they need a sequence
-   pipeline (`map`/`filter`/`reduce`/etc.) that does not exist on
-   `List<T>`/`Array<T>` yet, sequentially or otherwise.
+   (`parallel-cpu-regions`, **delivered**): a separate worker pool and a
+   multi-threaded stop-the-world safepoint collector, alongside
+   `concurrent`/`spawn`'s single-threaded executor. Ordered `map`/`filter`,
+   `for_each`, `Parallel.each`, `sum`, and associative `reduce` run through
+   the worker path; `reduce_ordered` deliberately keeps sequential grouping.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
    (`typed-channels`).
 4. Outcomes, aggregation policy, safe-default synchronization, scoped

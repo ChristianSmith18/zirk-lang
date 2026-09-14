@@ -15,33 +15,31 @@ inmut whole = Int32(3.8);        // explicit, documented truncation/check
 Mixed integer/Decimal arithmetic evaluates in the Decimal domain:
 
 ```zirk
-3 / 4;    // 0: Int32
+3 / 4;    // 0.75: Decimal
 3 / 4.0;  // 0.75: Decimal
 ```
 
-## Deep contextual conversion
+## Final-result conversion
 
-An explicit `Decimal(...)` constructor changes the compatible arithmetic tree
-inside it before operations execute:
-
-```zirk
-Decimal(3 / 4);                 // 0.75
-Decimal((a + 1) / (b * 2));
-```
-
-The second expression behaves conceptually like:
+An explicit `T(expression)` conversion evaluates the complete expression first
+and converts only its final result:
 
 ```zirk
-(Decimal(a) + Decimal(1)) / (Decimal(b) * Decimal(2));
+Int32(3 / 4);    // Decimal 0.75, then Int32 0
+Float64(3 / 4);  // Decimal 0.75, then Float64 0.75
+String(42);      // "42"
 ```
 
-Likewise, `String("value=" + 42)` converts the concatenation operands before
-joining them. Outside that explicit context, `"value=" + 42` is an error.
+The target never propagates into operands. For example:
 
-Context does not mutate operands, escape the constructor, or enter a called
-function's body. `Decimal(calculate() / 4)` converts the returned value and the
-literal for the division; it does not re-type arithmetic performed inside
-`calculate()`.
+```zirk
+Int64(2_000_000_000 + 2_000_000_000);
+```
+
+The addition still executes as `Int32` and may overflow before `Int64(...)`
+runs. Likewise, `String("value=" + 42)` is invalid because the mixed
+concatenation must be valid before its result can be converted. Use
+interpolation (`"value={42}"`) or pass separate values to `stdout.print`.
 
 Parsing text that can fail returns a typed result rather than relying on a cast:
 

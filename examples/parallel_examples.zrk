@@ -3,12 +3,9 @@
 // the `.parallel` adapter, and the region-boundary and no-I/O rules a
 // `parallel` region enforces.
 //
-// Two things the spec describes that this file does *not* demonstrate,
-// because the compiler does not implement them yet: `map`/`filter`/`reduce`/
-// `sum`/`collect`/`for_each` on `List<T>`/`Array<T>` (so no pipeline chain
-// inside a region, and `.parallel` is a typing no-op rather than an actual
-// adapter), and `Parallel.each` (typed by the checker, but not lowered —
-// `codes::NOT_LOWERED`).
+// Ordered `map`/`filter`, `for_each`, associative `reduce`, `sum`, and
+// `Parallel.each` dispatch their per-element work to the same pool. Results
+// that materialize a collection preserve the original input order.
 //
 // Run: `zirk run examples/parallel_examples.zrk`
 
@@ -49,12 +46,13 @@ fn main(): Void {
     inmut total: Int32 = parallel { compress(6) };
     stdout.println(total);
 
-    // 4. `.parallel` on a collection: today a pure typing no-op (see this
-    //    file's own header note) — reading through it behaves identically
-    //    to reading the collection directly.
-    mut count: Int32 = 0;
-    for name in files.parallel {
-        count = count + 1;
-    }
-    stdout.println(count);
+    // 4. A collection pipeline outside a region uses the `.parallel` adapter.
+    inmut doubled: List<Int32> = files.parallel.map((n: Int32): Int32 => n * 2);
+    inmut even: List<Int32> = doubled.parallel.filter((n: Int32): Boolean => n % 4 == 0);
+    stdout.println(even.sum());
+
+    // 5. `Parallel.each` is ordered even though callbacks finish independently.
+    inmut shifted: List<Int32> = Parallel.each(files, (n: Int32): Int32 => n + 1);
+    stdout.println(shifted[0]);
+    stdout.println(shifted[7]);
 }

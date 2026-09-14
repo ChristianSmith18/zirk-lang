@@ -3902,7 +3902,7 @@ stderr.println("Archivo inválido");
 Esto permitirá separar la salida normal de los errores y redirigir
 ambos streams de manera independiente.
 
-`print` y `println` aceptarán cualquier valor que pueda representarse
+`print` y `println` aceptarán cero o más valores que puedan representarse
 mediante:
 
 to_string(): String
@@ -3913,7 +3913,17 @@ stdout.println(42);
 stdout.println(true);
 stdout.println(user);
 
-Para mostrar varios valores se favorecerá la interpolación:
+Cada valor se evaluará de izquierda a derecha, se convertirá internamente a
+texto y se separará con un espacio, excepto después del último argumento:
+
+```text
+stdout.print("Total:", 10 + 20, true);   // Total: 30 true
+stdout.println("Total:", 10 + 20, true); // agrega salto de línea
+stdout.print();                           // no escribe nada
+stdout.println();                         // sólo salto de línea
+```
+
+Para textos complejos también se favorecerá la interpolación:
 
 stdout.println("Usuario: {user.name}, edad: {user.age}");
 
@@ -4686,17 +4696,19 @@ mut text: String = value.to_string();
 mut decimal: Float64 = Float64(count);
 ```
 
-Un constructor explícito aplicado a un árbol de operadores establecerá el
-dominio contextual antes de ejecutar esos operadores:
+Una conversión explícita `T(expresión)` evaluará primero la expresión completa
+y convertirá únicamente el resultado final:
 
 ```text
-Float(3 / 4)                 // 0.75, no 0.0
-String("value=" + 42)       // "value=42"
-Float((a + 1) / (b * 2))
+3 / 4                       // Decimal 0.75
+Int32(3 / 4)                // Int32 0
+Float64(3 / 4)              // Float64 0.75
+String(42)                  // "42"
 ```
 
-El contexto atravesará solo el árbol aritmético o de concatenación contenido;
-no modificará operandos ni entrará al cuerpo de funciones llamadas.
+El tipo exterior no se propagará a operadores ni operandos internos.
+`String("value=" + 42)` seguirá siendo inválido; se usará interpolación,
+`"value=" + String(42)` o argumentos separados de `stdout.print`.
 
 ---
 

@@ -21,22 +21,24 @@ Invalid: historical `catch<NetworkError> error`. Valid: a library requests and
 an application grants one scoped operation. Invalid: treating a `.zkinit`
 edit as developer approval or reusing approval after moving the project.
 
-Valid: the explicit Decimal context reaches the contained division.
+Valid: integer division is mathematical and produces an exact `Decimal`.
 
 ```zirk
-inmut ratio = Decimal(3 / 4); // 0.75
+inmut ratio = 3 / 4; // Decimal 0.75
 ```
 
-Without that context, integer division truncates toward zero. `3 / 4` is `0`, and wrapping the already-computed value inside a function does not retroactively change it.
+An outer conversion acts only on the completed result: `Int32(3 / 4)` is `0`,
+while `Float64(3 / 4)` is binary `0.75`. It never retypes operands internally.
 
-Valid String repetition and contextual conversion:
+Valid String repetition and explicit value conversion:
 
 ```zirk
-inmut laugh = "ja" * 3;             // "jajaja"
-inmut label = String("items=" + 4); // "items=4"
+inmut laugh = "ja" * 3;                   // "jajaja"
+inmut label = "items=" + String(4);       // "items=4"
 ```
 
-Invalid forms include `"ja" * -1`, `"ja" * 1.5`, and plain `"items=" + 4`.
+Invalid forms include `"ja" * -1`, `"ja" * 1.5`, `"items=" + 4`, and
+`String("items=" + 4)`.
 
 Valid shared reference mutation and strict isolation:
 
