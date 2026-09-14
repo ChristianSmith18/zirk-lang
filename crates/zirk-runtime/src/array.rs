@@ -117,6 +117,20 @@ pub unsafe extern "C" fn zirk_rt_array_clone(
     clone
 }
 
+/// Writes `value` into slot `index` of a word-sized-element array — the
+/// `i64` snapshots `zirk_rt_map_sorted_keys`/`zirk_rt_set_sorted_elements`
+/// build for `to_string()` (`universal-to-string-and-multiline-strings`).
+///
+/// # Safety
+///
+/// `array` must be a live array produced by `zirk_rt_array_new` with an
+/// element size of at least one word, and `index` must be in bounds.
+pub(crate) unsafe fn write_word(array: *mut c_void, index: usize, value: i64) {
+    unsafe {
+        *((array as *mut u8).add(DATA_OFFSET + index * WORD) as *mut i64) = value;
+    }
+}
+
 /// `array[start:end:step]` — a new array holding the selected elements
 /// (roadmap Phase 7, `Array` slicing). The copy is shallow: for a reference
 /// array the new header's descriptor already lists every slot as a GC field,

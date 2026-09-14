@@ -73,8 +73,8 @@ mut line = stdin.read_line();
 - `print()` writes nothing.
 - `stdout` and `stderr` share the same formatting operations but different
   destinations.
-- every printable value uses `to_string(): String` or the corresponding
-  formatting trait.
+- every value-producing type uses `to_string(): String`; `Void` and `Never`
+  are the only rejected arguments. Nullable absence renders `<Null>`.
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
 - an unqualified convenience call resolves through the imported standard object
   when unique; a collision requires `stdout.println(...)`.

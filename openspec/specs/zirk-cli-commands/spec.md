@@ -4,6 +4,14 @@
 
 Defines the commands that compile and run a program, and how diagnostics are presented.
 ## Requirements
+### Requirement: Format subcommand in the CLI
+
+The CLI SHALL expose `zirk format <file>` for the canonical triple-quoted-string layout rule; `--check` reports required changes without writing.
+
+#### Scenario: Formatting a file
+- **WHEN** `zirk format main.zrk` runs on a well-formed file
+- **THEN** it rewrites the file in canonical form
+
 ### Requirement: Compiling a file
 
 The CLI SHALL expose a subcommand that compiles a source file and produces a native executable. The source argument MAY be given with or without the `.zrk` extension; when it is omitted, the CLI SHALL append `.zrk` before reading the file.

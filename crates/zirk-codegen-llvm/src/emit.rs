@@ -2110,6 +2110,34 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(converted.into())
             }
 
+            // `word as <key/element type>` (`universal-to-string-and-multiline-strings`):
+            // the inverse of the `sext`/`ptr_to_int` a `MapSet`/`SetAdd`
+            // applies — the same conversion `MapGet` performs inline for
+            // values. The word is always an `i64` coming in.
+            ir::InstKind::WordCast(operand) => {
+                let word = self.operand(*operand).into_int_value();
+                let converted: BasicValueEnum<'ctx> =
+                    match self.llvm_type(instruction.ty).expect("word cast target") {
+                        BasicTypeEnum::PointerType(ptr_ty) => self
+                            .builder
+                            .build_int_to_ptr(word, ptr_ty, "word_ptr")
+                            .expect("word to pointer")
+                            .into(),
+                        BasicTypeEnum::IntType(int_ty) => {
+                            if int_ty.get_bit_width() == 64 {
+                                word.into()
+                            } else {
+                                self.builder
+                                    .build_int_truncate(word, int_ty, "word")
+                                    .expect("word truncation")
+                                    .into()
+                            }
+                        }
+                        other => panic!("WordCast target cannot be {other}"),
+                    };
+                Some(converted)
+            }
+
             // A fractional or scientific literal (roadmap Phase 3b). Parsed
             // once, here, straight from the source text through LLVM's own
             // literal parser — never through a Rust `f64` in between, which

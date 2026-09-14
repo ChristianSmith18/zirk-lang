@@ -76,7 +76,7 @@ Highlighting SHALL distinguish the lexical categories from one another: control 
 
 ### Requirement: Language configuration
 
-The editor SHALL know the language's comment delimiters and its opening/closing pairs.
+The editor SHALL know the language's comment delimiters and opening/closing pairs, including `'''…'''` triple-quoted delimiters.
 
 #### Scenario: Commenting a selection
 - **WHEN** the comment command is used
@@ -86,19 +86,23 @@ The editor SHALL know the language's comment delimiters and its opening/closing 
 - **WHEN** `{`, `(`, `[`, or a quote is typed
 - **THEN** the editor offers the corresponding closing character
 
+#### Scenario: Triple-quote highlighting
+- **WHEN** a `'''…'''` literal is opened
+- **THEN** its content is scoped as a string and `{expr}` retains expression scopes
+
 ### Requirement: The extension's formatter is provisional
 
-While `zirk format` does not exist, editor support MAY offer its own formatter, which SHALL NOT be considered the definition of Zirk's style.
+The extension formatter MUST remain provisional while `zirk format` does not cover the full style surface and MUST NOT be presented as the definition of Zirk style.
 
-`ZIRK_COMPILER_SPEC.md` section 10 defines the official formatter as canonical, idempotent, and free of configuration that would fragment the style. An editor formatter that respects user configuration does not meet that contract.
+`ZIRK_COMPILER_SPEC.md` section 10 defines the official formatter as canonical, idempotent, and configuration-free. For triple-quoted layout, the extension SHALL delegate to `zirk format` when it is available.
 
 #### Scenario: Provisional nature documented
 - **WHEN** the extension's documentation is consulted
-- **THEN** it states that its formatter is provisional and that the canonical one arrives with `zirk format`
+- **THEN** it states that its formatter is provisional and that the canonical one is `zirk format`
 
-#### Scenario: Arrival of the canonical formatter
-- **WHEN** `zirk format` becomes available
-- **THEN** the extension SHALL delegate to it and retire its own formatter
+#### Scenario: Delegation for delivered rules
+- **WHEN** the extension formats a file containing `'''` literals and `zirk format` is available
+- **THEN** `zirk format` produces the triple-quoted layout
 
 ### Requirement: Scope without a language server
 
@@ -113,6 +117,14 @@ This capability SHALL NOT include autocomplete, hover, navigation, or renaming p
 - **WHEN** the user requests autocomplete, hover, go-to-definition, or rename
 - **THEN** the editor does not provide them
 - **AND** it documents that they arrive with the LSP in Phase 9
+
+### Requirement: Triple-quote edge guide
+
+The extension SHALL draw a column-level guide connecting paired `'''` delimiters at their shared column, independently of optional editor settings.
+
+#### Scenario: Guide tracks edits
+- **WHEN** delimiters move or lines are inserted inside a triple-quoted literal
+- **THEN** the guide repaints at the current edge
 
 ### Requirement: Command palette integration
 The editor SHALL provide commands to check, build, and run the current `.zrk` file through the `editor-cli-bridge`.

@@ -35,6 +35,7 @@ fn main() {
 fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
+        Some("format") => format(&args[1..]),
 
         #[cfg(feature = "backend")]
         Some("build") => compile(&args[1..], Action::Build),
@@ -65,10 +66,10 @@ fn dispatch(args: &[String]) -> i32 {
         }
 
         // Subcommands of `COMPILER_SPEC` section 9 that arrive later.
-        Some(later @ ("test" | "bench" | "format" | "lint" | "new" | "init" | "doc")) => {
+        Some(later @ ("test" | "bench" | "lint" | "new" | "init" | "doc")) => {
             let phase = match later {
                 "test" | "new" | "init" => Phase::SIX,
-                "format" | "lint" => Phase::NINE,
+                "lint" => Phase::NINE,
                 _ => Phase::SEVEN,
             };
             fail(
@@ -87,6 +88,39 @@ fn dispatch(args: &[String]) -> i32 {
             "the subcommand is not part of the language CLI",
             Some("run `zirk --help` to see what is available"),
         ),
+    }
+}
+
+fn format(args: &[String]) -> i32 {
+    let json = args.iter().any(|arg| arg == "--json");
+    let check = args.iter().any(|arg| arg == "--check");
+    let files: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
+    if files.len() != 1 {
+        return fail(
+            codes::INVALID_USAGE,
+            "`zirk format` needs exactly one source file",
+            "the first formatter slice works on a single file",
+            Some("write `zirk format [--check] program.zrk`"),
+        );
+    }
+
+    let path = frontend::resolve_source_path(files[0]);
+    match zirk_cli::format::format_path(
+        &path,
+        check,
+        json,
+        frontend::resolve_color(color_choice(args).as_deref()),
+    ) {
+        zirk_cli::format::Outcome::Unchanged => 0,
+        zirk_cli::format::Outcome::Changed if check => {
+            eprintln!("{} needs formatting", path.display());
+            1
+        }
+        zirk_cli::format::Outcome::Changed => 0,
+        zirk_cli::format::Outcome::Invalid(diagnostic) => {
+            eprint!("{diagnostic}");
+            1
+        }
     }
 }
 
@@ -212,6 +246,7 @@ fn help() {
     println!();
     println!("Subcommands:");
     println!("  check <file>       validate the frontend only");
+    println!("  format [--check] <file>  canonicalize triple-quoted string layout");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");

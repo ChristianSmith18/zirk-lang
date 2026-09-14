@@ -17,6 +17,12 @@ Regex literals use `re'pattern'`. The lexer recognizes `**`, `**=`, `..=`,
 `do`, `gen`, and `yield`. An unterminated regex is diagnosed at its opening
 delimiter.
 
+Strings use either `"…"` or multiline `'''…'''` delimiters. The latter keeps
+physical content, escapes and interpolation, but removes the exact leading
+character prefix of the opening delimiter from every non-empty content line.
+The closing delimiter is alone on a line at or right of that edge; violations
+and unclosed literals are diagnostics.
+
 Conventions:
 
 - variables, functions, methods, parameters and files: `snake_case`;
@@ -156,6 +162,11 @@ complete expression under its ordinary rules and converts only the final
 result. It never propagates `T` into nested operands: `Int32(3 / 4)` converts
 the completed `Decimal` quotient, while `String("value=" + 42)` remains invalid
 because the mixed concatenation itself is invalid.
+
+Every value-producing type answers `to_string(): String`; `print`, `println`
+and string interpolation invoke it. `Void` and `Never` have no text form.
+Absent nullable values render `<Null>`, collections render recursively, ranges
+mirror their literals, and opaque handles render `<TypeName>`.
 
 ## 4. Nullability, equality and operators
 

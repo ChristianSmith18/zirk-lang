@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut message = '''
+    never closes
+}

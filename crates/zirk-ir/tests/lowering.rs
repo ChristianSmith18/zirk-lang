@@ -852,6 +852,59 @@ fn println_always_receives_a_string() {
 }
 
 #[test]
+fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
+    let module = compile(
+        "fn work(): Void { }\n\
+         class Marker { construct() { } }\n\
+         fn main(): Void {\n\
+             mut maybe: Int32? = null;\n\
+             mut map: Map<Int32, String> = Map();\n\
+             map.set(2, \"two\");\n\
+             mut set: Set<Int32> = Set();\n\
+             set.add(2);\n\
+             mut range = 1..=3:1;\n\
+             mut regex = re'a+';\n\
+             mut channel: Channel<Int32> = Channel(1);\n\
+             mut job = spawn work();\n\
+             mut value: Int32 = 1;\n\
+             mut pointer: Pointer<Int32> = unsafe { Pointer.from(value) };\n\
+             mut marker = Marker();\n\
+             mut pin: Pin<Marker> = Pin(marker);\n\
+             stdout.println(maybe, map, set, range, regex, channel, job, pointer, pin);\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    let calls = kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            InstKind::Call { callee, .. } => Some(callee.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for callee in [
+        "zirk_rt_map_sorted_keys",
+        "zirk_rt_set_sorted_elements",
+        "zirk_range_to_string",
+        "zirk_regex_to_string",
+    ] {
+        assert!(calls.contains(&callee), "missing {callee}; saw {calls:?}");
+    }
+    assert!(
+        kinds.iter().any(|kind| matches!(kind, InstKind::WordCast(_))),
+        "Map/Set snapshots must cast their words back to typed values: {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|kind| matches!(kind, InstKind::Unwrap(_))) && main.blocks.len() > 1,
+        "nullable rendering must branch before unwrapping: {kinds:?}"
+    );
+    for text in ["<Channel>", "<Job>", "<Pointer>", "<Pin>"] {
+        assert!(module.strings.iter().any(|value| value == text), "missing {text}");
+    }
+}
+
+#[test]
 fn a_conversion_requires_allocation() {
     let f = main_body("stdout.println(42);");
 

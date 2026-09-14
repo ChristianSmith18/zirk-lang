@@ -1361,6 +1361,28 @@ impl<'a> Checker<'a> {
             | Base::EnumInstance(_)
             | Base::Function(_)
             | Base::Weak(_) => true,
+            // `universal-to-string-and-multiline-strings`: every remaining
+            // value-producing type renders through the universal
+            // `to_string()` — collections render their elements, `Range`
+            // reproduces its literal spelling, `Regex` its pattern, the
+            // `null` literal renders `<Null>`, and each opaque handle its
+            // `<TypeName>`. `Void`, `Never`, `Union` and a bare `Param`
+            // stay out: none has a value the renderer can reach.
+            Base::Null
+            | Base::Array(_)
+            | Base::List(_)
+            | Base::Map(_)
+            | Base::Set(_)
+            | Base::Range(_)
+            | Base::Regex
+            | Base::Job(_)
+            | Base::Channel(_)
+            | Base::Pointer(_)
+            | Base::NativeSlice(_)
+            | Base::NativeSliceMut(_)
+            | Base::Dependent(_)
+            | Base::Pin(_)
+            | Base::Instance(_) => true,
             // A value reached through a contract that itself declares
             // `to_string()` — every implementer supplies one (either its own
             // or the contract's default body), so the dispatch table always
@@ -1369,43 +1391,47 @@ impl<'a> Checker<'a> {
             Base::Contract(id) => self.contracts[id as usize]
                 .method("to_string")
                 .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING),
+            // A generic contract instantiation resolves to the same dispatch
+            // the unparameterized contract gets (`ir_type`'s
+            // `ContractInstance` arm) — the check is the same lookup.
+            Base::ContractInstance(inst) => {
+                let contract = self.contract_instances[inst as usize].contract;
+                self.contracts[contract as usize]
+                    .method("to_string")
+                    .is_some_and(|m| m.params.is_empty() && m.returns == Type::STRING)
+            }
             _ => false,
         }
     }
 
     /// Reports printing a value the runtime cannot turn into text.
+    ///
+    /// `universal-to-string-and-multiline-strings`: a nullable receiver is
+    /// printable whenever its present form is — an absent value renders
+    /// `<Null>` — so the check looks through the `?` and only `Void`,
+    /// `Never`, a `Union` and an unconstrained `Param` still fail here.
     fn require_printable(&mut self, ty: Type, span: Span) {
         if ty.is_unknown() {
             return;
         }
-        if !ty.nullable && self.is_printable(ty) {
+        let ty = if ty.nullable { ty.without_null() } else { ty };
+        if self.is_printable(ty) {
             return;
         }
 
         let reason = match ty.base {
-            _ if ty.nullable => "a value that may be absent has no text form",
-            Base::Enum(_) => "an enum has no text for its variants yet",
-            Base::Function(_) => "a closure is code, not data",
             Base::Void => "`Void` is the absence of a value",
-            Base::Float(_) => {
-                "Float128 has no stable conversion to text yet (roadmap Phase 3b, task 8.3)"
-            }
+            Base::Never => "`Never` never produces a value",
             _ => "the runtime has no text form for it",
         };
 
         let name = self.name(ty);
-        let help = if ty.nullable {
-            "use `?? <fallback>` to provide a value to print"
-        } else {
-            "implement `fn to_string(): String` for a class, record"
-        };
-
         self.error(
             codes::TYPE_MISMATCH,
             span,
             format!("`{name}` cannot be printed"),
             reason,
-            Some(help.to_string()),
+            Some("implement `fn to_string(): String` for a class, record".to_string()),
         );
     }
 
@@ -16999,7 +17025,13 @@ impl<'a> Checker<'a> {
                     | Base::Enum(_)
                     | Base::EnumInstance(_)
                     | Base::Function(_)
-                    | Base::Weak(_) => true,
+                    | Base::Weak(_)
+                    // A `Job<T>` answers the opaque `<Job>` handle
+                    // (`universal-to-string-and-multiline-strings`); the
+                    // first `to_string` branch above excludes it because
+                    // `Job` has its own method table — which holds no
+                    // `to_string`.
+                    | Base::Job(_) => true,
                     Base::Class(id) => self.classes[id as usize].method("to_string").is_none(),
                     _ => false,
                 }
@@ -17887,6 +17919,36 @@ impl<'a> Checker<'a> {
                 && let Some(ty) = self.check_weak_method_call(expr, field, object)
             {
                 return ty;
+            }
+
+            // `x.to_string()` / `x?.to_string()` where `x` may be absent
+            // (`universal-to-string-and-multiline-strings`): the universal
+            // conversion covers every present form, so `.` answers `<Null>`
+            // for an absent value while `?.` propagates it as `String?`. A
+            // bare `Param` stays out — `?.` through one is still gated by
+            // the branch below.
+            if object.nullable
+                && field.name.name == "to_string"
+                && !matches!(object.base, Base::Param(_))
+                && self.is_printable(object.without_null())
+            {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`to_string` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                }
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return if field.safe {
+                    Type::STRING.as_nullable()
+                } else {
+                    Type::STRING
+                };
             }
 
             // Calling through a value that may be absent is the same mistake

@@ -11,6 +11,8 @@ const CONFIG_SECTION = 'zirk';
 let diagnosticCollection;
 let outputChannel;
 let statusBarItem;
+let tripleQuoteGuide;
+let tripleQuoteEndpoint;
 
 const pendingLiveChecks = new Map();
 const runningLiveChecks = new Set();
@@ -39,7 +41,7 @@ const BRAND_TEXTMATE_RULES = [
     // llamadas
     { scope: 'entity.name.function.call.zirk', settings: { foreground: '#38BDF8' } },
     // strings, chars, regex
-    { scope: ['string.quoted.double.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
+    { scope: ['string.quoted.double.zirk', 'string.quoted.triple.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
     // números y duraciones
     { scope: ['constant.numeric.integer.zirk', 'constant.numeric.float.zirk', 'constant.numeric.hex.zirk', 'constant.numeric.octal.zirk', 'constant.numeric.binary.zirk', 'constant.numeric.duration.zirk'], settings: { foreground: '#60A5FA' } },
     // constantes: true, false, null, Ok, Err, Some, None
@@ -112,6 +114,29 @@ function activate(context) {
 
     context.subscriptions.push(outputChannel, diagnosticCollection);
 
+    tripleQuoteGuide = vscode.window.createTextEditorDecorationType({
+        // Each content row gets the same `│` cap as the delimiters, anchored
+        // at the opening delimiter column. The thin space keeps content clear
+        // of the guide without changing the source or its indentation.
+        before: {
+            contentText: '│\u2009',
+            color: '#FF4FA3',
+        },
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    });
+    // The first quote becomes a cap for the ruler (`│''`) only when the
+    // scanner found a complete `''' … '''` pair. The source stays unchanged.
+    tripleQuoteEndpoint = vscode.window.createTextEditorDecorationType({
+        color: 'transparent',
+        before: {
+            contentText: '│',
+            color: '#FF4FA3',
+            margin: '0 -1ch 0 0',
+        },
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    });
+    context.subscriptions.push(tripleQuoteGuide, tripleQuoteEndpoint);
+
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
     statusBarItem.text = 'Zirk';
     statusBarItem.tooltip = 'Click to re-check the active Zirk file';
@@ -156,6 +181,7 @@ function activate(context) {
 
     const changeDisposable = vscode.workspace.onDidChangeTextDocument(event => {
         const document = event.document;
+        updateTripleQuoteGuideForDocument(document);
         if (document.languageId !== LANGUAGE_ID || document.isUntitled || document.uri.scheme !== 'file') {
             return;
         }
@@ -181,6 +207,7 @@ function activate(context) {
         if (editor?.document.languageId === LANGUAGE_ID) {
             updateStatusBarForDocument(editor.document);
         }
+        updateTripleQuoteGuide(editor);
     });
 
     context.subscriptions.push(openDisposable, saveDisposable, changeDisposable, closeDisposable, activeEditorDisposable);
@@ -198,6 +225,7 @@ function activate(context) {
             checkDocument(document);
         }
     }
+    updateTripleQuoteGuide(vscode.window.activeTextEditor);
 
     const taskProvider = vscode.tasks.registerTaskProvider('zirk', {
         provideTasks() {
@@ -231,6 +259,47 @@ function activate(context) {
     });
 
     context.subscriptions.push(formatter);
+}
+
+/** Paints the opening delimiter column strictly between each `'''` pair. */
+function updateTripleQuoteGuide(editor) {
+    if (!tripleQuoteGuide || !editor || editor.document.languageId !== LANGUAGE_ID) {
+        return;
+    }
+    const delimiters = [];
+    const matcher = /'''/g;
+    const text = editor.document.getText();
+    let match;
+    while ((match = matcher.exec(text)) !== null) {
+        delimiters.push(match.index);
+    }
+
+    const ranges = [];
+    const endpoints = [];
+    for (let i = 0; i + 1 < delimiters.length; i += 2) {
+        const open = editor.document.positionAt(delimiters[i]);
+        const close = editor.document.positionAt(delimiters[i + 1]);
+        endpoints.push(
+            new vscode.Range(open, open.translate(0, 1)),
+            new vscode.Range(close, close.translate(0, 1))
+        );
+        for (let line = open.line + 1; line < close.line; line += 1) {
+            const character = Math.min(open.character, editor.document.lineAt(line).text.length);
+            // Place the virtual cap at the same source column as the opening
+            // delimiter. The line's first content character remains editable.
+            const position = new vscode.Position(line, character);
+            ranges.push(new vscode.Range(position, position));
+        }
+    }
+    editor.setDecorations(tripleQuoteGuide, ranges);
+    editor.setDecorations(tripleQuoteEndpoint, endpoints);
+}
+
+function updateTripleQuoteGuideForDocument(document) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document === document) {
+        updateTripleQuoteGuide(editor);
+    }
 }
 
 function provisionalFormat(document, options) {

@@ -314,16 +314,18 @@ A traditional-enum case SHALL expose `name` (declared case name,
 
 ### Requirement: Universal rendering on structured values
 
-`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL
-answer `to_string()` with a readable default rendering when the type does
-not declare its own.
+`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL answer `to_string()` with a readable default rendering when no method is declared. It SHALL use the surface type name (strip `$local$N`, keep `Outer.Inner`), include enum payloads as `Variant(field: v, …)`, and omit compiler-synthesized fields such as an inner class `outer` capture.
 
 #### Scenario: Record default rendering
 
 
 - **WHEN** `Point(x: 1, y: 2).to_string()` runs on a record without a
   declared `to_string`
-- **THEN** the result is a `String` naming the type
+- **THEN** the result is `Point(x: 1, y: 2)`
+
+#### Scenario: Local class surface name
+- **WHEN** a local class is rendered
+- **THEN** its output never exposes `$local$` mangling
 
 ### Requirement: Type categories updated
 

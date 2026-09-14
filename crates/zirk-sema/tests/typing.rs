@@ -1319,9 +1319,11 @@ fn valid_string_interpolation_yields_string() {
 
 #[test]
 fn invalid_string_interpolation_of_a_type_without_a_text_form() {
-    let output = rejected(
-        "fn main(): Void { mut x = 42; mut p: Pointer<Int32> = unsafe { Pointer.from(x) }; mut s = \"p: {p}\"; }",
-    );
+    // `Void` and `Never` are the only types still without a text form
+    // (`universal-to-string-and-multiline-strings`): every value —
+    // including opaque handles like `Pointer<T>` — renders something.
+    let output =
+        rejected("fn nothing(): Void { }\nfn main(): Void { mut s = \"v: {nothing()}\"; }");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
     assert!(output.contains("cannot be printed"));
 }
@@ -1386,6 +1388,28 @@ fn valid_to_string_through_a_contract_reference() {
          class Widget implements Printable { construct() { }  to_string(): String { return \"w\"; } }
          fn describe(p: Printable): Void { stdout.println(p); }
          fn main(): Void { mut w = Widget(); describe(w); }",
+    );
+}
+
+#[test]
+fn valid_universal_to_string_members_and_nullable_receivers() {
+    accepted(
+        "class Marker { construct() { } }\n\
+         fn render(\n\
+             map: Map<Int32, String>, set: Set<Int32>, range: Range<Int32>, regex: Regex,\n\
+             channel: Channel<Int32>, job: Job<Int32>, pointer: Pointer<Int32>,\n\
+             native: NativeSlice<Int32>, native_mut: NativeSliceMut<Int32>,\n\
+             dependent: Dependent<Int32>, pin: Pin<Marker>, maybe: Int32?\n\
+         ): Void {\n\
+             mut a: String = map.to_string(); mut b: String = set.to_string();\n\
+             mut c: String = range.to_string(); mut d: String = regex.to_string();\n\
+             mut e: String = channel.to_string(); mut f: String = job.to_string();\n\
+             mut g: String = pointer.to_string(); mut h: String = native.to_string();\n\
+             mut i: String = native_mut.to_string(); mut j: String = dependent.to_string();\n\
+             mut k: String = pin.to_string(); mut direct: String = maybe.to_string();\n\
+             mut safe: String? = maybe?.to_string();\n\
+         }\n\
+         fn main(): Void { }",
     );
 }
 

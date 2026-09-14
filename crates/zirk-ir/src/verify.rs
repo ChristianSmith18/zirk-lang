@@ -439,6 +439,19 @@ fn verify_instruction(
             report,
         ),
 
+        // `WordCast` reads a stored `i64` word back as the destination the
+        // instruction itself declares (`universal-to-string-and-multiline-strings`).
+        InstKind::WordCast(operand) => {
+            if let Some(ty) = type_of(operand)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: WordCast converts {}, which is not an i64 word",
+                    ty.as_str()
+                ));
+            }
+        }
+
         InstKind::FloatCast(operand) => {
             if let Some(ty) = type_of(operand)
                 && !matches!(ty, IrType::Float(_))
@@ -2496,6 +2509,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         }
         InstKind::PointerFromSlot(_) => Vec::new(),
         InstKind::PointerFromField { object, .. } => vec![*object],
+        InstKind::WordCast(operand) => vec![*operand],
         InstKind::PointerRead(operand)
         | InstKind::PointerCast(operand)
         | InstKind::PointerIsNull(operand) => vec![*operand],

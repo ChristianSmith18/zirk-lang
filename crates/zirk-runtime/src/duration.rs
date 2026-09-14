@@ -293,7 +293,10 @@ pub extern "C" fn zirk_duration_truncate(nanos: i64, unit: i64) -> i64 {
 }
 
 /// Renders a nanosecond count as a normalized duration literal.
-fn format_duration(nanos: i64) -> String {
+///
+/// `pub(crate)` so `zirk_range_to_string` renders `Range<Duration>` bounds
+/// through the same spelling (`universal-to-string-and-multiline-strings`).
+pub(crate) fn format_duration(nanos: i64) -> String {
     // Largest first: the first unit the magnitude reaches is the one the
     // text is written in. `m` is minutes — a month is a `Period`, not an
     // exact span.

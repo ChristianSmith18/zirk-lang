@@ -108,8 +108,7 @@ accept negative indices, resolved as `length + index`.
 
 ### Requirement: Collection clone and rendering
 
-`Array<T>` and `List<T>` SHALL expose `clone()` producing an independent
-collection and `to_string()` producing a readable rendering.
+`Array<T>` and `List<T>` SHALL expose `clone()` producing an independent collection and `to_string()` producing `[e0, e1, …]`. `Map<K, V>`, `Set<T>`, and `Range<T>` SHALL expose deterministic `{k: v, …}`, `{e, …}`, and literal-mirroring rendering. All collection types SHALL be valid in print/println and string interpolation.
 
 #### Scenario: Clone separates
 
@@ -119,7 +118,11 @@ collection and `to_string()` producing a readable rendering.
 #### Scenario: Rendering
 
 - **WHEN** `List(1, 2).to_string()` runs
-- **THEN** the result renders both elements
+- **THEN** the result is `[1, 2]`
+
+#### Scenario: Map rendering
+- **WHEN** `Map<Int32, String>` holds keys `2` and `1`
+- **THEN** it renders `{1: a, 2: b}` in deterministic order
 
 ### Requirement: Array slicing
 
@@ -247,4 +250,3 @@ Any collection example or test that used `value class` for domain types SHALL be
 #### Scenario: Collection of domain values
 - **WHEN** `record UserId { value: UInt64; }` is used in a `List<UserId>`
 - **THEN** the program compiles and the list contains independent `UserId` values
-

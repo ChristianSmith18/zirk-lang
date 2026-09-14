@@ -10,7 +10,7 @@
 //! reaches this point.
 
 use crate::ir::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
@@ -411,6 +411,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .iter()
         .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
         .collect();
+
+    // `universal-to-string-and-multiline-strings`: entries the `to_string`
+    // lowering names — the key/element snapshots the runtime builds are
+    // `Array<Int64>` of stored words, and the snapshot externs declare
+    // their collection parameters through these stand-in ids. The word
+    // array reuses a checker-interned `Array<Int64>` when one already
+    // exists so `word_array_type` below resolves the same id the extern
+    // declares; the map/set stand-ins are appended past every
+    // checker-interned entry, which keeps each existing id intact.
+    let word_array_id = module
+        .array_types
+        .iter()
+        .position(|&t| t == IrType::Int(IntWidth::I64))
+        .map(|i| i as u32)
+        .unwrap_or_else(|| {
+            let id = module.array_types.len() as u32;
+            module.array_types.push(IrType::Int(IntWidth::I64));
+            id
+        });
+    let word_map_id = module.map_types.len() as u32;
+    module
+        .map_types
+        .push((IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)));
+    let word_set_id = module.set_types.len() as u32;
+    module.set_types.push(IrType::Int(IntWidth::I64));
 
     // `Regex.split` returns `List<String>` and `Regex.find_all` returns
     // `List<Regex.Match>`; the checker interns each element type only when
@@ -1079,6 +1104,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 IrType::Int(IntWidth::I64),
             ],
             return_type: IrType::Range,
+        },
+        // `universal-to-string-and-multiline-strings`: `Range` rendering and
+        // the `Map`/`Set` sorted-word snapshots `lower_map_to_string`/
+        // `lower_set_to_string` walk. The snapshot externs declare their
+        // collection parameters through the synthetic stand-in ids pushed
+        // above — the ABI is an opaque pointer either way.
+        ExternFn {
+            name: "zirk_range_to_string".to_string(),
+            params: vec![IrType::Range, IrType::Int(IntWidth::I64)],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_map_sorted_keys".to_string(),
+            params: vec![IrType::Map(word_map_id), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Array(word_array_id),
+        },
+        ExternFn {
+            name: "zirk_rt_set_sorted_elements".to_string(),
+            params: vec![IrType::Set(word_set_id), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Array(word_array_id),
         },
         // `Char` classification and normalization (roadmap Phase 7).
         ExternFn {
@@ -2715,6 +2760,14 @@ fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
         .any(|v| !v.associated.is_empty())
 }
 
+/// The name a user wrote for a class — a class declared inside a block is
+/// interned as `Name$local$N` so two blocks can each declare `Name`, but
+/// that suffix is a compiler detail that must never surface in rendered
+/// output (`universal-to-string-and-multiline-strings`).
+fn surface_name(interned: &str) -> &str {
+    interned.split("$local$").next().unwrap_or(interned)
+}
+
 /// Converts a frontend type into an IR type.
 ///
 /// `instance_base` is where the specialized copies of generic classes start
@@ -3483,9 +3536,16 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
+        self.ir_type(self.resolve_written_type_with_nullability(reference))
+    }
+
+    /// Resolves a written type and preserves its `?` marker. Generic
+    /// arguments reach lowering through `resolve_written_type` too, so they
+    /// must retain this bit before looking up the checker-interned shape.
+    fn resolve_written_type_with_nullability(&self, reference: &ast::TypeRef) -> Type {
         let mut ty = self.resolve_written_type(reference);
         ty.nullable = reference.nullable;
-        self.ir_type(ty)
+        ty
     }
 
     /// Resolves a written type reference the same way the checker's own
@@ -3530,7 +3590,7 @@ impl<'a> FunctionLowering<'a> {
         // structural equality, matching the exact id `Checker::resolve_pointer_type_ref`
         // used, rather than interning a second, unrelated table here.
         if reference.name == "Pointer" {
-            let pointee = self.resolve_written_type(&reference.arguments[0]);
+            let pointee = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .pointer_types
@@ -3545,7 +3605,7 @@ impl<'a> FunctionLowering<'a> {
         // handle. Looked up in `checked.job_types` by structural equality on
         // the result `T`, matching the id `Checker::resolve_job_type_ref` used.
         if reference.name == "Job" {
-            let result = self.resolve_written_type(&reference.arguments[0]);
+            let result = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .job_types
@@ -3557,7 +3617,7 @@ impl<'a> FunctionLowering<'a> {
         }
 
         if reference.name == "Channel" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .channel_types
@@ -3571,7 +3631,7 @@ impl<'a> FunctionLowering<'a> {
         // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
         // treatment as `Pointer<T>` above.
         if reference.name == "Weak" {
-            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .weak_types
@@ -3586,7 +3646,7 @@ impl<'a> FunctionLowering<'a> {
         // `fase-4e-native-slice`, design D1): same treatment as
         // `Pointer<T>`/`Weak<T>` above.
         if reference.name == "NativeSlice" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .native_slice_types
@@ -3597,7 +3657,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::NativeSlice(id));
         }
         if reference.name == "NativeSliceMut" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .native_slice_mut_types
@@ -3611,7 +3671,7 @@ impl<'a> FunctionLowering<'a> {
         // `Dependent<T>` / `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
         // design D1): same treatment as `Pointer<T>`/`Weak<T>` above.
         if reference.name == "Dependent" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .dependent_types
@@ -3622,7 +3682,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Dependent(id));
         }
         if reference.name == "Pin" {
-            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .pin_types
@@ -3635,7 +3695,7 @@ impl<'a> FunctionLowering<'a> {
 
         // `Array<T>` / `List<T>`: same interned-by-content treatment as slices.
         if reference.name == "Array" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .array_types
@@ -3646,7 +3706,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Array(id));
         }
         if reference.name == "List" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .list_types
@@ -3660,8 +3720,8 @@ impl<'a> FunctionLowering<'a> {
         // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
         // treatment — the checker already interned every shape.
         if reference.name == "Map" {
-            let key = self.resolve_written_type(&reference.arguments[0]);
-            let value = self.resolve_written_type(&reference.arguments[1]);
+            let key = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+            let value = self.resolve_written_type_with_nullability(&reference.arguments[1]);
             let id = self
                 .checked
                 .map_types
@@ -3672,7 +3732,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Map(id));
         }
         if reference.name == "Set" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .set_types
@@ -3687,7 +3747,7 @@ impl<'a> FunctionLowering<'a> {
         // the element type the checker stored is resolved and matched back
         // against `checked.range_types`.
         if reference.name == "Range" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .range_types
@@ -3703,7 +3763,7 @@ impl<'a> FunctionLowering<'a> {
             let elements: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
             let tuple = TupleType { elements };
             let id = self
@@ -3736,7 +3796,7 @@ impl<'a> FunctionLowering<'a> {
             let args: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
             let instance = self
                 .checked
@@ -3751,7 +3811,7 @@ impl<'a> FunctionLowering<'a> {
             let mut args: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
 
             // Apply trailing type-parameter defaults at use sites the same way
@@ -11442,8 +11502,20 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             unreachable!("checked by is_native_to_string_call")
         };
-        let receiver = self.lower_expr(&field.object);
+        let receiver = self.lower_render_operand(&field.object, span);
         Some(self.lower_to_string_expr(&field.object, receiver, span))
+    }
+
+    /// The operand a `to_string` render reads — `null` has no `IrType` and
+    /// no instruction produces it, so it lowers to an `Undefined`
+    /// placeholder the `Base::Null` arm never reads
+    /// (`universal-to-string-and-multiline-strings`).
+    fn lower_render_operand(&mut self, expr: &ast::Expr, span: Span) -> Operand {
+        if matches!(expr, ast::Expr::Null(_)) {
+            self.emit(InstKind::Undefined, IrType::Void, span)
+        } else {
+            self.lower_expr(expr)
+        }
     }
 
     fn lower_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
@@ -11524,6 +11596,78 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
+        })
+    }
+
+    /// `Self::opens_blocks` plus the *render* side
+    /// (`universal-to-string-and-multiline-strings`): converting a value to
+    /// its text opens blocks of its own — the nullable absent/present
+    /// split, a collection's loop, an algebraic enum's discriminant switch,
+    /// or a composite field recursing into one of those. `print`,
+    /// `println`, and interpolation parts go through `lower_to_string_expr`,
+    /// so their block-opening prediction must look through the render, not
+    /// just the expression.
+    fn to_string_opens_blocks(&self, expr: &ast::Expr) -> bool {
+        self.opens_blocks(expr)
+            || self
+                .semantic_type(expr)
+                .is_some_and(|ty| self.render_opens_blocks(ty, &mut HashSet::new()))
+    }
+
+    /// Whether `lower_to_string_of` on a value of type `ty` emits more than
+    /// one block. `seen` breaks the recursion on self-referential classes.
+    fn render_opens_blocks(&self, ty: zirk_sema::Type, seen: &mut HashSet<u32>) -> bool {
+        if ty.nullable {
+            return true;
+        }
+        match ty.base {
+            zirk_sema::Base::Array(_)
+            | zirk_sema::Base::List(_)
+            | zirk_sema::Base::Map(_)
+            | zirk_sema::Base::Set(_) => true,
+            zirk_sema::Base::Enum(id) => enum_has_payload(self.checked, id),
+            zirk_sema::Base::EnumInstance(id) => enum_has_payload(
+                self.checked,
+                self.checked.enum_instances[id as usize].enum_id,
+            ),
+            zirk_sema::Base::Class(id) => self.class_render_opens_blocks(id, &[], seen),
+            zirk_sema::Base::Instance(id) => {
+                let instance = &self.checked.generic_instances[id as usize];
+                let subst: Vec<(u32, zirk_sema::Type)> = self.checked.classes
+                    [instance.class as usize]
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                self.class_render_opens_blocks(instance.class, &subst, seen)
+            }
+            zirk_sema::Base::Tuple(id) => self.checked.tuple_types[id as usize]
+                .elements
+                .iter()
+                .any(|&t| self.render_opens_blocks(t, seen)),
+            zirk_sema::Base::Union(id) => self.checked.unions[id as usize]
+                .iter()
+                .any(|&base| self.render_opens_blocks(zirk_sema::Type::of(base), seen)),
+            _ => false,
+        }
+    }
+
+    /// The `Class`/`Instance` arm of `Self::render_opens_blocks`: a declared
+    /// `to_string` is a plain call that opens nothing in the caller; only
+    /// the default field-by-field render can branch.
+    fn class_render_opens_blocks(
+        &self,
+        class_id: u32,
+        subst: &[(u32, zirk_sema::Type)],
+        seen: &mut HashSet<u32>,
+    ) -> bool {
+        let class = &self.checked.classes[class_id as usize];
+        if class.method("to_string").is_some() || !seen.insert(class_id) {
+            return false;
+        }
+        class.fields.iter().any(|f| {
+            self.render_opens_blocks(substitute_generic_type(self.checked, f.ty, subst), seen)
         })
     }
 
@@ -17933,9 +18077,9 @@ impl<'a> FunctionLowering<'a> {
             // blocks of their own — spilling them is mandatory.
             ast::Expr::Slice(_) => true,
             ast::Expr::Call(_) => true,
-            ast::Expr::Println(e) => e.args.iter().any(|arg| self.opens_blocks(arg)),
+            ast::Expr::Println(e) => e.args.iter().any(|arg| self.to_string_opens_blocks(arg)),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
-                ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
+                ast::InterpolatedPart::Expr(inner) => self.to_string_opens_blocks(inner),
                 ast::InterpolatedPart::Literal(_) => false,
             }),
             ast::Expr::Record(r) => r.elements.iter().any(|e| match e {
@@ -19959,7 +20103,19 @@ impl<'a> FunctionLowering<'a> {
         match inner.inner() {
             IrType::Object(id) => {
                 let class = &self.checked.classes[id as usize];
-                let method = class.method(&field.name.name)?;
+                let Some(method) = class.method(&field.name.name) else {
+                    // `x?.to_string()` on a class that declares none renders
+                    // through the universal default, like any other
+                    // receiver shape (`universal-to-string-and-multiline-strings`).
+                    return (field.name.name == "to_string" && call.args.is_empty()).then(|| {
+                        (
+                            IrType::String,
+                            Vec::new(),
+                            SafeDispatch::ToString,
+                            inner.inner(),
+                        )
+                    });
+                };
                 let name = body_symbol(self.checked, method);
                 let returns = self.ir_type(method.returns);
                 let params = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
@@ -19982,6 +20138,17 @@ impl<'a> FunctionLowering<'a> {
             }
             // A generic parameter's constraint has no concrete body to call
             // yet — gated at the checker (`Self::check_call`'s `?.` branch).
+            //
+            // Every other receiver shape answers `x?.to_string()` through the
+            // universal conversion (`universal-to-string-and-multiline-strings`):
+            // the present block renders the unwrapped value exactly like the
+            // `.` form would, so no dispatch target is needed at all.
+            _ if field.name.name == "to_string" && call.args.is_empty() => Some((
+                IrType::String,
+                Vec::new(),
+                SafeDispatch::ToString,
+                inner.inner(),
+            )),
             _ => None,
         }
     }
@@ -20097,6 +20264,15 @@ impl<'a> FunctionLowering<'a> {
                 returns,
                 span,
             ),
+            SafeDispatch::ToString => {
+                let inner = self
+                    .semantic_type(&field.object)
+                    .map(|ty| ty.without_null());
+                match inner {
+                    Some(ty) => self.lower_to_string_of(unwrapped, ty, span),
+                    None => self.lower_to_string(unwrapped, unwrapped_ty, span),
+                }
+            }
         };
         if let Some(result) = result {
             let IrType::Nullable(base) = result_type else {
@@ -21708,20 +21884,37 @@ impl<'a> FunctionLowering<'a> {
             }
 
             // Default rendering for tuples and records that do
-            // not declare their own `to_string`.
-            let layout_name = self.module.values[id as usize].name.clone();
-            let is_tuple = layout_name.starts_with("Tuple(");
-            let prefix = if is_tuple {
-                "("
-            } else {
-                &format!("{layout_name}(")
-            };
-            let fields: Vec<_> = self.module.values[id as usize]
+            // not declare their own `to_string`. A `$local$N` suffix —
+            // produced by a class declared inside a block — is cut back to
+            // the surface name (`universal-to-string-and-multiline-strings`).
+            let is_tuple = id >= self.checked.tuple_base;
+            if is_tuple {
+                let tuple_id = id - self.checked.tuple_base;
+                let fields: Vec<(u32, String, zirk_sema::Type)> = self.checked.tuple_types
+                    [tuple_id as usize]
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &ty)| (i as u32, format!("_{i}"), ty))
+                    .collect();
+                return self.lower_default_render_to_string(operand, "(", &fields, true, span);
+            }
+            let class = &self.checked.classes[id as usize];
+            let layout_name = surface_name(&class.name);
+            let fields: Vec<(u32, String, zirk_sema::Type)> = class
                 .fields
                 .iter()
-                .map(|f| (f.name.clone(), f.ty))
+                .enumerate()
+                .filter(|(_, f)| !(f.is_static || f.name == "outer" && class.enclosing.is_some()))
+                .map(|(i, f)| (i as u32, f.name.clone(), f.ty))
                 .collect();
-            return self.lower_default_render_to_string(operand, prefix, &fields, is_tuple, span);
+            return self.lower_default_render_to_string(
+                operand,
+                &format!("{layout_name}("),
+                &fields,
+                false,
+                span,
+            );
         }
 
         if let IrType::Object(id) = ty {
@@ -21749,11 +21942,16 @@ impl<'a> FunctionLowering<'a> {
                 };
             }
 
-            let layout_name = self.module.objects[id as usize].name.clone();
-            let fields: Vec<_> = self.module.objects[id as usize]
+            // Same default for classes without their own `to_string` — the
+            // surface name (no `$local$N`) and no hidden `outer` reference.
+            let class = &self.checked.classes[id as usize];
+            let layout_name = surface_name(&class.name);
+            let fields: Vec<(u32, String, zirk_sema::Type)> = class
                 .fields
                 .iter()
-                .map(|f| (f.name.clone(), f.ty))
+                .enumerate()
+                .filter(|(_, f)| !(f.is_static || f.name == "outer" && class.enclosing.is_some()))
+                .map(|(i, f)| (i as u32, f.name.clone(), f.ty))
                 .collect();
             return self.lower_default_render_to_string(
                 operand,
@@ -21789,8 +21987,119 @@ impl<'a> FunctionLowering<'a> {
             return self.const_string("<Weak>", span);
         }
 
+        // `universal-to-string-and-multiline-strings`: a callable renders
+        // `<Function name>` when the operand still names its target — the
+        // `MakeCallable` that built it — and `<Function>` once the value has
+        // been moved through a slot and the target is no longer visible.
         if matches!(ty, IrType::Callable(_)) {
-            return self.const_string("<Callable>", span);
+            if let Some(target) = self.make_callable_target(operand) {
+                return self.const_string(&format!("<Function {target}>"), span);
+            }
+            return self.const_string("<Function>", span);
+        }
+
+        // `universal-to-string-and-multiline-strings`: the remaining opaque
+        // handles render their `<TypeName>`, matching `<Weak>`'s convention.
+        if matches!(ty, IrType::Job) {
+            return self.const_string("<Job>", span);
+        }
+        if matches!(ty, IrType::Channel(_)) {
+            return self.const_string("<Channel>", span);
+        }
+        if matches!(ty, IrType::Pointer(_)) {
+            return self.const_string("<Pointer>", span);
+        }
+        if matches!(ty, IrType::NativeSlice(_)) {
+            return self.const_string("<NativeSlice>", span);
+        }
+        if matches!(ty, IrType::NativeSliceMut(_)) {
+            return self.const_string("<NativeSliceMut>", span);
+        }
+        if matches!(ty, IrType::Dependent(_)) {
+            return self.const_string("<Dependent>", span);
+        }
+        if matches!(ty, IrType::Pin(_)) {
+            return self.const_string("<Pin>", span);
+        }
+
+        if let IrType::Map(id) = ty {
+            return self.lower_map_to_string(operand, id, span);
+        }
+        if let IrType::Set(id) = ty {
+            return self.lower_set_to_string(operand, id, span);
+        }
+        // Reached only without a semantic type in hand — every real path
+        // comes through `lower_to_string_of`, which knows the element type.
+        // `Int` is the only non-`Duration` element the checker allows, so
+        // `is_duration = 0` is the right fallback.
+        if ty == IrType::Range {
+            let not_duration = self.const_i64(0, span);
+            return self.emit(
+                InstKind::Call {
+                    callee: "zirk_range_to_string".to_string(),
+                    args: vec![operand, not_duration],
+                },
+                IrType::String,
+                span,
+            );
+        }
+        if ty == IrType::Regex {
+            let pattern = self.emit(
+                InstKind::Call {
+                    callee: "zirk_regex_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            );
+            let open = self.const_string("re'", span);
+            let close = self.const_string("'", span);
+            let wrapped = self.emit(
+                InstKind::Concat {
+                    left: open,
+                    right: pattern,
+                },
+                IrType::String,
+                span,
+            );
+            return self.emit(
+                InstKind::Concat {
+                    left: wrapped,
+                    right: close,
+                },
+                IrType::String,
+                span,
+            );
+        }
+        // An `IrType`-only caller (`lower_tuple_method_call`'s operand-typed
+        // dispatch) has no semantic `Type` to unwrap into — the inner
+        // renders through the same instruction set with its `IrType`.
+        if let IrType::Nullable(nullable) = ty {
+            let inner = nullable.inner();
+            let result = self.declare_slot("<nullable_to_string>", IrType::String, span);
+            let holder = self.declare_slot("<nullable_receiver>", ty, span);
+            self.emit_effect(InstKind::Store(holder, operand), span);
+            let test = self.emit(InstKind::IsNull(operand), IrType::Boolean, span);
+            let absent_block = self.new_block();
+            let present_block = self.new_block();
+            let continue_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: test,
+                then_block: absent_block,
+                else_block: present_block,
+            });
+            self.current = absent_block;
+            let absent = self.const_string("<Null>", span);
+            self.emit_effect(InstKind::Store(result, absent), span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = present_block;
+            let held = self.emit(InstKind::Load(holder), ty, span);
+            let unwrapped = self.emit(InstKind::Unwrap(held), inner, span);
+            let text = self.lower_to_string(unwrapped, inner, span);
+            self.emit_effect(InstKind::Store(result, text), span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = continue_block;
+            return self.emit(InstKind::Load(result), IrType::String, span);
         }
 
         self.emit(InstKind::ToString(operand), IrType::String, span)
@@ -21799,60 +22108,81 @@ impl<'a> FunctionLowering<'a> {
     /// Renders a tuple, record, or class as `Name(f0: v0, f1: v1)` or, for
     /// tuples, `(v0, v1)`. Each field is read with `LoadField` and converted
     /// recursively.
+    /// Renders `operand` as `prefix(field: v, …)` — the semantic type of
+    /// each field is recovered from `checked` so nested values render with
+    /// their real representation (`Range<Duration>` inside a record still
+    /// prints `a..b:step`, not an opaque handle). The first tuple element is
+    /// the layout index into the value/object layout — filtering the hidden
+    /// `outer` reference of an `inner class` shifts nothing.
     fn lower_default_render_to_string(
         &mut self,
         operand: Operand,
         prefix: &str,
-        fields: &[(String, IrType)],
+        fields: &[(u32, String, zirk_sema::Type)],
         is_tuple: bool,
         span: Span,
     ) -> Operand {
-        let mut result = self.const_string(prefix, span);
-        for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+        // `operand` and the accumulator go through slots: a field whose own
+        // render opens blocks (a nested nullable, collection or payload
+        // enum) moves `self.current` out from under a held operand.
+        let object_slot = self.spill(operand, self.type_of_operand(operand), span);
+        let object_ty = self.type_of_operand(operand);
+        let acc_slot = self.declare_slot("<render>", IrType::String, span);
+        let opening = self.const_string(prefix, span);
+        self.emit_effect(InstKind::Store(acc_slot, opening), span);
+        for (i, (index, field_name, field_ty)) in fields.iter().enumerate() {
             if i > 0 {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
                 let sep = self.const_string(", ", span);
-                result = self.emit(
+                let text = self.emit(
                     InstKind::Concat {
-                        left: result,
+                        left: text,
                         right: sep,
                     },
                     IrType::String,
                     span,
                 );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
             }
             if !is_tuple {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
                 let label = self.const_string(&format!("{field_name}: "), span);
-                result = self.emit(
+                let text = self.emit(
                     InstKind::Concat {
-                        left: result,
+                        left: text,
                         right: label,
                     },
                     IrType::String,
                     span,
                 );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
             }
+            let object = self.emit(InstKind::Load(object_slot), object_ty, span);
             let field = self.emit(
                 InstKind::LoadField {
-                    object: operand,
-                    index: i as u32,
+                    object,
+                    index: *index,
                 },
-                *field_ty,
+                self.ir_type(*field_ty),
                 span,
             );
-            let rendered = self.lower_to_string(field, *field_ty, span);
-            result = self.emit(
+            let rendered = self.lower_to_string_of(field, *field_ty, span);
+            let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+            let text = self.emit(
                 InstKind::Concat {
-                    left: result,
+                    left: text,
                     right: rendered,
                 },
                 IrType::String,
                 span,
             );
+            self.emit_effect(InstKind::Store(acc_slot, text), span);
         }
+        let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
         let close = self.const_string(")", span);
         self.emit(
             InstKind::Concat {
-                left: result,
+                left: text,
                 right: close,
             },
             IrType::String,
@@ -21861,12 +22191,18 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Default `to_string` for an algebraic enum: switch on the discriminant
-    /// and return the matching variant's name.
+    /// and return the matching variant's name — `Variant(field: v, …)` when
+    /// the variant carries data, each payload field rendered through the
+    /// same universal conversion
+    /// (`universal-to-string-and-multiline-strings`). A lone field named
+    /// `value` or `error` renders positionally — `Ok(5)` and `Error(boom)`,
+    /// not `Ok(value: 5)`/`Error(error: boom)`.
     fn lower_enum_to_string(&mut self, operand: Operand, enum_id: u32, span: Span) -> Operand {
         let result_slot = self.declare_slot("<enum_to_string>", IrType::String, span);
 
+        let has_payload = enum_has_payload(self.checked, enum_id);
         let disc_ty = IrType::Int(IntWidth::I32);
-        let disc = if enum_has_payload(self.checked, enum_id) {
+        let disc = if has_payload {
             self.emit(InstKind::Discriminant(operand), disc_ty, span)
         } else {
             operand
@@ -21874,8 +22210,14 @@ impl<'a> FunctionLowering<'a> {
         let disc_slot = self.declare_slot("<enum_disc>", disc_ty, span);
         self.emit_effect(InstKind::Store(disc_slot, disc), span);
 
+        // Payload arms read the value's fields inside their own block —
+        // operands do not cross blocks (ADR-007), so the enum value itself
+        // is spilled too.
+        let object_slot = has_payload.then(|| self.spill(operand, IrType::Enum(enum_id), span));
+
         let continue_block = self.new_block();
         let variants = self.checked.enums[enum_id as usize].variants.clone();
+        let variant_fields: Vec<Vec<u32>> = self.module.enums[enum_id as usize].variants.clone();
         let mut current = self.current;
 
         for (i, variant) in variants.iter().enumerate() {
@@ -21899,8 +22241,92 @@ impl<'a> FunctionLowering<'a> {
                 else_block: next,
             });
             self.current = arm;
-            let name = self.const_string(&variant.name, span);
-            self.emit_effect(InstKind::Store(result_slot, name), span);
+
+            // The accumulator lives in a slot: a payload field whose own
+            // render opens blocks (a nested nullable, collection or enum)
+            // moves `self.current`, and a held operand would be stranded in
+            // this arm's entry block.
+            let acc_slot = self.declare_slot("<enum_render>", IrType::String, span);
+            let positional = variant.associated.len() == 1
+                && matches!(variant.associated[0].name.as_str(), "value" | "error");
+            let opening = self.const_string(
+                &if variant.associated.is_empty() {
+                    variant.name.clone()
+                } else {
+                    format!("{}(", variant.name)
+                },
+                span,
+            );
+            self.emit_effect(InstKind::Store(acc_slot, opening), span);
+            for (position, field) in variant.associated.iter().enumerate() {
+                if position > 0 {
+                    let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                    let sep = self.const_string(", ", span);
+                    let text = self.emit(
+                        InstKind::Concat {
+                            left: text,
+                            right: sep,
+                        },
+                        IrType::String,
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(acc_slot, text), span);
+                }
+                if !positional {
+                    let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                    let label = self.const_string(&format!("{}: ", field.name), span);
+                    let text = self.emit(
+                        InstKind::Concat {
+                            left: text,
+                            right: label,
+                        },
+                        IrType::String,
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(acc_slot, text), span);
+                }
+                let object = self.emit(
+                    InstKind::Load(object_slot.expect("a payload arm has the value spilled")),
+                    IrType::Enum(enum_id),
+                    span,
+                );
+                let field_index = variant_fields[i][position];
+                let field_ir = self.module.enums[enum_id as usize].fields[field_index as usize].ty;
+                let value = self.emit(
+                    InstKind::LoadField {
+                        object,
+                        index: field_index,
+                    },
+                    field_ir,
+                    span,
+                );
+                let rendered = self.lower_to_string_of(value, field.ty, span);
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                let text = self.emit(
+                    InstKind::Concat {
+                        left: text,
+                        right: rendered,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
+            }
+            if !variant.associated.is_empty() {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                let close = self.const_string(")", span);
+                let text = self.emit(
+                    InstKind::Concat {
+                        left: text,
+                        right: close,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
+            }
+            let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+            self.emit_effect(InstKind::Store(result_slot, text), span);
             self.terminate(Terminator::Jump(continue_block));
             current = next;
         }
@@ -22007,7 +22433,21 @@ impl<'a> FunctionLowering<'a> {
             element_ty,
             span,
         );
-        let element_str = self.lower_to_string(element, element_ty, span);
+        // `module.array_types`/`list_types` share `checked`'s ids — the
+        // element's semantic type is recoverable, so a `List<Duration>`
+        // renders `1.5s` instead of bare nanos
+        // (`universal-to-string-and-multiline-strings`).
+        let element_str = match receiver_ty {
+            IrType::Array(id) => {
+                let ty = self.checked.array_types[id as usize];
+                self.lower_to_string_of(element, ty, span)
+            }
+            IrType::List(id) => {
+                let ty = self.checked.list_types[id as usize];
+                self.lower_to_string_of(element, ty, span)
+            }
+            _ => self.lower_to_string(element, element_ty, span),
+        };
         let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
         let result = self.emit(
             InstKind::Concat {
@@ -22051,51 +22491,558 @@ impl<'a> FunctionLowering<'a> {
     /// formatter instead. A bare enum variant access (`Color.Red`) is known
     /// at compile time, so its name is returned directly.
     fn lower_to_string_expr(&mut self, expr: &ast::Expr, operand: Operand, span: Span) -> Operand {
-        // `date-and-time-types`: the civil temporal types render through
-        // their ISO 8601 formatters in the runtime.
-        if let Some(callee) = match self.temporal_base(expr) {
-            Some(zirk_sema::Base::Date) => Some("zirk_rt_date_to_string"),
-            Some(zirk_sema::Base::Time) => Some("zirk_rt_time_to_string"),
-            Some(zirk_sema::Base::DateTime) => Some("zirk_rt_datetime_to_string"),
-            _ => None,
-        } {
-            return self.emit(
-                InstKind::Call {
-                    callee: callee.to_string(),
-                    args: vec![operand],
-                },
-                IrType::String,
-                span,
-            );
+        // A named function reference renders its name — the one piece of the
+        // universal conversion only the expression itself (not its type) can
+        // supply (`universal-to-string-and-multiline-strings`).
+        if let Some(name) = self.function_reference_name(expr) {
+            return self.const_string(&format!("<Function {name}>"), span);
         }
 
-        if self.is_duration(expr) {
-            return self.emit(
+        // `universal-to-string-and-multiline-strings`: the semantic type is
+        // the first dispatch — it alone carries what `IrType` erases:
+        // `Duration`/`Date`/`Time` share the integer `IrType`, `Range` drops
+        // its element type, `Map`/`Set` their parameter tables, and the
+        // `null` literal has no `IrType` at all.
+        if let Some(ty) = self.semantic_type(expr) {
+            return self.lower_to_string_of(operand, ty, span);
+        }
+
+        let ty = self.type_of(expr, expr.span());
+        self.lower_to_string(operand, ty, span)
+    }
+
+    /// `expr.to_string()`/`println(expr)`/`"{expr}"` rendering dispatched on
+    /// the *semantic* type — the entry every recursive render shares, so a
+    /// `Range<Duration>` inside a `Map`'s values spells its bounds as
+    /// durations exactly like the top-level expression would
+    /// (`universal-to-string-and-multiline-strings`).
+    fn lower_to_string_of(&mut self, operand: Operand, ty: zirk_sema::Type, span: Span) -> Operand {
+        if ty.nullable {
+            return self.lower_nullable_to_string(operand, ty.without_null(), span);
+        }
+        match ty.base {
+            // `null` itself — the `Null` base has no `IrType`, so only this
+            // semantic dispatch can see it.
+            zirk_sema::Base::Null => self.const_string("<Null>", span),
+            zirk_sema::Base::Duration => self.emit(
                 InstKind::Call {
                     callee: "zirk_rt_duration_to_string".to_string(),
                     args: vec![operand],
                 },
                 IrType::String,
                 span,
-            );
+            ),
+            // `date-and-time-types`: the civil temporal types render through
+            // their ISO 8601 formatters in the runtime.
+            zirk_sema::Base::Date => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_date_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Time => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::DateTime => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Enum(enum_id) => self.lower_enum_to_string(operand, enum_id, span),
+            zirk_sema::Base::Range(id) => {
+                let element = self.checked.range_types[id as usize];
+                self.lower_range_to_string(operand, element, span)
+            }
+            zirk_sema::Base::Map(id) => self.lower_map_to_string(operand, id, span),
+            zirk_sema::Base::Set(id) => self.lower_set_to_string(operand, id, span),
+            // `re'...'` — the runtime's `zirk_regex_to_string` returns the
+            // bare pattern; the literal spelling wraps it.
+            zirk_sema::Base::Regex => {
+                let pattern = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_to_string".to_string(),
+                        args: vec![operand],
+                    },
+                    IrType::String,
+                    span,
+                );
+                let open = self.const_string("re'", span);
+                let close = self.const_string("'", span);
+                let wrapped = self.emit(
+                    InstKind::Concat {
+                        left: open,
+                        right: pattern,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit(
+                    InstKind::Concat {
+                        left: wrapped,
+                        right: close,
+                    },
+                    IrType::String,
+                    span,
+                )
+            }
+            zirk_sema::Base::Job(_) => self.const_string("<Job>", span),
+            zirk_sema::Base::Channel(_) => self.const_string("<Channel>", span),
+            zirk_sema::Base::Pointer(_) => self.const_string("<Pointer>", span),
+            zirk_sema::Base::NativeSlice(_) => self.const_string("<NativeSlice>", span),
+            zirk_sema::Base::NativeSliceMut(_) => self.const_string("<NativeSliceMut>", span),
+            zirk_sema::Base::Dependent(_) => self.const_string("<Dependent>", span),
+            zirk_sema::Base::Pin(_) => self.const_string("<Pin>", span),
+            // A callable reached without an expression — a `Map` value, a
+            // record field — has no name to recover: `<Function>`.
+            zirk_sema::Base::Function(_) => self.const_string("<Function>", span),
+            _ => self.lower_to_string(operand, self.ir_type(ty), span),
         }
+    }
 
-        if let ast::Expr::Field(field) = expr
-            && self.checked.variant_accesses.contains(&field.span)
-            && let Some(&ty) = self.checked.expr_types.get(&expr.span())
-            && matches!(ty.base, Base::Enum(_) | Base::EnumInstance(_))
-        {
-            return self.const_string(&field.name.name, span);
+    /// `x.to_string()` on a `T?` receiver (`universal-to-string-and-multiline-strings`):
+    /// `<Null>` when absent, the inner value's own rendering when present —
+    /// the same absent/present block pair `lower_safe_method_call` builds.
+    fn lower_nullable_to_string(
+        &mut self,
+        operand: Operand,
+        inner: zirk_sema::Type,
+        span: Span,
+    ) -> Operand {
+        let ir_inner = self.ir_type(inner);
+        let nullable =
+            IrType::Nullable(Nullable::of(ir_inner).expect("the checker rejects `Void?`/`Never?`"));
+        let result = self.declare_slot("<nullable_to_string>", IrType::String, span);
+        let holder = self.declare_slot("<nullable_receiver>", nullable, span);
+        self.emit_effect(InstKind::Store(holder, operand), span);
+        let test = self.emit(InstKind::IsNull(operand), IrType::Boolean, span);
+
+        let absent_block = self.new_block();
+        let present_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: test,
+            then_block: absent_block,
+            else_block: present_block,
+        });
+
+        self.current = absent_block;
+        let absent = self.const_string("<Null>", span);
+        self.emit_effect(InstKind::Store(result, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = present_block;
+        let held = self.emit(InstKind::Load(holder), nullable, span);
+        let unwrapped = self.emit(InstKind::Unwrap(held), ir_inner, span);
+        let text = self.lower_to_string_of(unwrapped, inner, span);
+        self.emit_effect(InstKind::Store(result, text), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), IrType::String, span)
+    }
+
+    /// `range.to_string()` — the runtime's `zirk_range_to_string` reproduces
+    /// the literal spelling; `is_duration` is all it needs to know about the
+    /// element type, the only two the checker allows being `Int` and
+    /// `Duration`.
+    fn lower_range_to_string(
+        &mut self,
+        operand: Operand,
+        element: zirk_sema::Type,
+        span: Span,
+    ) -> Operand {
+        let is_duration = self.const_i64(
+            matches!(element.base, zirk_sema::Base::Duration) as i128,
+            span,
+        );
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_range_to_string".to_string(),
+                args: vec![operand, is_duration],
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// The surface name a `Path` expression refers to a declared function
+    /// by — `main` in `println(main)` — or `None` for anything else
+    /// (`universal-to-string-and-multiline-strings`). A local binding
+    /// shadowing the name is a variable, not a reference.
+    fn function_reference_name(&self, expr: &ast::Expr) -> Option<String> {
+        let ast::Expr::Path(ident) = expr else {
+            return None;
+        };
+        if self.try_lookup_slot(&ident.name).is_some() {
+            return None;
         }
+        self.named_function_value(&ident.name, ident.span)
+            .map(|_| ident.name.clone())
+    }
 
-        if let Some(&ty) = self.checked.expr_types.get(&expr.span())
-            && let Base::Enum(enum_id) = ty.base
-        {
-            return self.lower_enum_to_string(operand, enum_id, span);
-        }
+    /// The target name of the `MakeCallable` that produced `operand`, when
+    /// the operand is still that instruction — used by the `<Function name>`
+    /// rendering (`universal-to-string-and-multiline-strings`).
+    fn make_callable_target(&self, operand: Operand) -> Option<String> {
+        self.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find(|inst| inst.result == Some(operand.0))
+            .and_then(|inst| match &inst.kind {
+                InstKind::MakeCallable { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+    }
 
-        let ty = self.type_of(expr, expr.span());
-        self.lower_to_string(operand, ty, span)
+    /// The `Array<Int64>` `IrType` the `Map`/`Set` snapshots come back as —
+    /// reusing a checker-interned `Array<Int64>` when one exists, else the
+    /// synthetic entry `lower` appends past the checker's own
+    /// (`universal-to-string-and-multiline-strings`).
+    fn word_array_type(&mut self) -> IrType {
+        let word = IrType::Int(IntWidth::I64);
+        let id = match self.module.array_types.iter().position(|&t| t == word) {
+            Some(id) => id as u32,
+            None => {
+                let id = self.module.array_types.len() as u32;
+                self.module.array_types.push(word);
+                id
+            }
+        };
+        IrType::Array(id)
+    }
+
+    /// `map.to_string()` (`universal-to-string-and-multiline-strings`):
+    /// `{k0: v0, k1: v1, …}` over the runtime's sorted key snapshot — the
+    /// same loop shape `lower_collection_to_string` builds, with each stored
+    /// `i64` word read back as the key's own type by `WordCast` and the
+    /// value fetched through the ordinary `MapGet`/`Unwrap` pair.
+    fn lower_map_to_string(&mut self, receiver: Operand, map_id: u32, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let u64_ty = IrType::Int(IntWidth::U64);
+        let map_ty = IrType::Map(map_id);
+        let key_sem = self.checked.map_types[map_id as usize].key;
+        let value_sem = self.checked.map_types[map_id as usize].value;
+        let (key_ir, value_ir) = self.module.map_types[map_id as usize];
+        let words_ty = self.word_array_type();
+
+        let receiver_slot = self.spill(receiver, map_ty, span);
+        let string_keys = self.const_i64(
+            matches!(
+                key_sem.base,
+                zirk_sema::Base::String | zirk_sema::Base::Char
+            ) as i128,
+            span,
+        );
+        let keys = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_map_sorted_keys".to_string(),
+                args: vec![receiver, string_keys],
+            },
+            words_ty,
+            span,
+        );
+        let keys_slot = self.spill(keys, words_ty, span);
+        let length = self.emit(InstKind::ArrayLength(keys), u64_ty, span);
+        let length_slot = self.spill(length, u64_ty, span);
+
+        let open = self.const_string("{", span);
+        let result_slot = self.spill(open, IrType::String, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let i_slot = self.spill(zero, u64_ty, span);
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let comma = self.new_block();
+        let after_comma = self.new_block();
+        let end = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let length = self.emit(InstKind::Load(length_slot), u64_ty, span);
+        let cond = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: cond,
+            then_block: body,
+            else_block: end,
+        });
+
+        self.current = body;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: i,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: after_comma,
+            else_block: comma,
+        });
+
+        self.current = comma;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let sep = self.const_string(", ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: sep,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        self.terminate(Terminator::Jump(after_comma));
+
+        self.current = after_comma;
+        let keys = self.emit(InstKind::Load(keys_slot), words_ty, span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let word = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: keys,
+                index: i,
+            },
+            i64_ty,
+            span,
+        );
+        let key = self.emit(InstKind::WordCast(word), key_ir, span);
+        let key_str = self.lower_to_string_of(key, key_sem, span);
+        // The key's text is held across the value's render: that render can
+        // open blocks (a nullable or collection value) and a plain operand
+        // would be stranded in this block.
+        let key_str_slot = self.spill(key_str, IrType::String, span);
+        let receiver = self.emit(InstKind::Load(receiver_slot), map_ty, span);
+        let nullable_value = self.emit(
+            InstKind::MapGet { receiver, key },
+            IrType::Nullable(
+                Nullable::of(value_ir).expect("a map's value type has a nullable form"),
+            ),
+            span,
+        );
+        // The key came from the map's own snapshot — it is always present.
+        let value = self.emit(InstKind::Unwrap(nullable_value), value_ir, span);
+        let value_str = self.lower_to_string_of(value, value_sem, span);
+
+        let key_str = self.emit(InstKind::Load(key_str_slot), IrType::String, span);
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let colon = self.const_string(": ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: key_str,
+            },
+            IrType::String,
+            span,
+        );
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: colon,
+            },
+            IrType::String,
+            span,
+        );
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: value_str,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let one = self.const_int_at(1, u64_ty, span);
+        let i = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: i,
+                right: one,
+            },
+            u64_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(i_slot, i), span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = end;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let close = self.const_string("}", span);
+        self.emit(
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// `set.to_string()` (`universal-to-string-and-multiline-strings`):
+    /// `{v0, v1, …}` over the runtime's sorted element snapshot — the same
+    /// loop `lower_map_to_string` builds, minus the value lookup.
+    fn lower_set_to_string(&mut self, receiver: Operand, set_id: u32, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let u64_ty = IrType::Int(IntWidth::U64);
+        let _ = IrType::Set(set_id);
+        let elem_sem = self.checked.set_types[set_id as usize];
+        let elem_ir = self.module.set_types[set_id as usize];
+        let words_ty = self.word_array_type();
+
+        let string_elements = self.const_i64(
+            matches!(
+                elem_sem.base,
+                zirk_sema::Base::String | zirk_sema::Base::Char
+            ) as i128,
+            span,
+        );
+        let elements = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_set_sorted_elements".to_string(),
+                args: vec![receiver, string_elements],
+            },
+            words_ty,
+            span,
+        );
+        let elements_slot = self.spill(elements, words_ty, span);
+        let length = self.emit(InstKind::ArrayLength(elements), u64_ty, span);
+        let length_slot = self.spill(length, u64_ty, span);
+
+        let open = self.const_string("{", span);
+        let result_slot = self.spill(open, IrType::String, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let i_slot = self.spill(zero, u64_ty, span);
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let comma = self.new_block();
+        let after_comma = self.new_block();
+        let end = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let length = self.emit(InstKind::Load(length_slot), u64_ty, span);
+        let cond = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: cond,
+            then_block: body,
+            else_block: end,
+        });
+
+        self.current = body;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: i,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: after_comma,
+            else_block: comma,
+        });
+
+        self.current = comma;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let sep = self.const_string(", ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: sep,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        self.terminate(Terminator::Jump(after_comma));
+
+        self.current = after_comma;
+        let elements = self.emit(InstKind::Load(elements_slot), words_ty, span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let word = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: elements,
+                index: i,
+            },
+            i64_ty,
+            span,
+        );
+        let element = self.emit(InstKind::WordCast(word), elem_ir, span);
+        let element_str = self.lower_to_string_of(element, elem_sem, span);
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: element_str,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let one = self.const_int_at(1, u64_ty, span);
+        let i = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: i,
+                right: one,
+            },
+            u64_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(i_slot, i), span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = end;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let close = self.const_string("}", span);
+        self.emit(
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
+            IrType::String,
+            span,
+        )
     }
 
     /// Lowers the arguments of `print`/`println`, converting each via
@@ -22108,11 +23055,11 @@ impl<'a> FunctionLowering<'a> {
     fn lower_print_expr(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
         let mut pieces = Vec::with_capacity(expr.args.len());
         for (position, arg) in expr.args.iter().enumerate() {
-            let operand = self.lower_expr(arg);
+            let operand = self.lower_render_operand(arg, span);
             let text = self.lower_to_string_expr(arg, operand, span);
             let branches_later = expr.args[position + 1..]
                 .iter()
-                .any(|later| self.opens_blocks(later));
+                .any(|later| self.to_string_opens_blocks(later));
             pieces.push(if branches_later {
                 let slot = self.declare_slot("<print>", IrType::String, arg.span());
                 self.emit_effect(InstKind::Store(slot, text), arg.span());
@@ -22172,9 +23119,9 @@ impl<'a> FunctionLowering<'a> {
     fn lower_interpolated(&mut self, expr: &ast::InterpolatedStrExpr, span: Span) -> Operand {
         let mut held: Vec<Held> = Vec::with_capacity(expr.parts.len());
         for (position, part) in expr.parts.iter().enumerate() {
-            let branches_later = expr.parts[position + 1..]
-                .iter()
-                .any(|p| matches!(p, ast::InterpolatedPart::Expr(e) if self.opens_blocks(e)));
+            let branches_later = expr.parts[position + 1..].iter().any(
+                |p| matches!(p, ast::InterpolatedPart::Expr(e) if self.to_string_opens_blocks(e)),
+            );
 
             let value = match part {
                 ast::InterpolatedPart::Literal(text) => {
@@ -22182,7 +23129,7 @@ impl<'a> FunctionLowering<'a> {
                     self.emit(InstKind::ConstString(id), IrType::String, span)
                 }
                 ast::InterpolatedPart::Expr(inner) => {
-                    let operand = self.lower_expr(inner);
+                    let operand = self.lower_render_operand(inner, span);
                     self.lower_to_string_expr(inner, operand, span)
                 }
             };
@@ -22414,6 +23361,7 @@ impl<'a> FunctionLowering<'a> {
         };
         if field.name.name != "to_string"
             || !call.args.is_empty()
+            || field.safe
             || self.checked.variant_accesses.contains(&field.span)
         {
             return false;
@@ -24009,6 +24957,11 @@ enum SafeDispatch {
     },
     /// Through a contract's table.
     Contract { contract: u32, index: u32 },
+    /// `x?.to_string()` where the present value has no declared `to_string`
+    /// to call — scalars, collections, classes without one
+    /// (`universal-to-string-and-multiline-strings`). The present block
+    /// renders the unwrapped value through the universal conversion.
+    ToString,
 }
 
 /// The arguments `FunctionLowering::lower_native_slice_construction` needs

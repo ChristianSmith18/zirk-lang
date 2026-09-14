@@ -537,7 +537,6 @@ fn later_subcommands_name_their_phase() {
         // The CLI surface belongs to Phase 6, except for `check` which is now
         // implemented and no longer reports a future phase.
         ("test", "Phase 6"),
-        ("format", "Phase 9"),
         ("new", "Phase 6"),
         ("doc", "Phase 7"),
     ] {

@@ -121,6 +121,45 @@ pub unsafe extern "C" fn zirk_range_inclusive(handle: *const c_void) -> i64 {
     unsafe { borrow(handle) }.map(|r| r.inclusive).unwrap_or(0)
 }
 
+/// `range.to_string()` (`universal-to-string-and-multiline-strings`):
+/// reproduces the literal spelling — `start..end`, `..=` when inclusive,
+/// and `:step` only when the stored step differs from the one the
+/// constructor infers for an unwritten step (`1` ascending, `-1`
+/// descending), so `1..10` and `1..10:1` — the same sequence — render the
+/// same. `is_duration` marks a `Range<Duration>`: its parts are
+/// nanoseconds rendered as duration literals.
+///
+/// # Safety
+///
+/// `handle` must come from `zirk_range_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_range_to_string(
+    handle: *mut c_void,
+    is_duration: i64,
+) -> *mut c_void {
+    let Some(range) = (unsafe { borrow(handle) }) else {
+        return std::ptr::null_mut();
+    };
+    let part = |word: i64| -> String {
+        if is_duration != 0 {
+            crate::duration::format_duration(word)
+        } else {
+            word.to_string()
+        }
+    };
+    let mut text = format!(
+        "{}{}{}",
+        part(range.start),
+        if range.inclusive != 0 { "..=" } else { ".." },
+        part(range.end),
+    );
+    let inferred = if range.start < range.end { 1 } else { -1 };
+    if range.step != inferred {
+        text.push_str(&format!(":{}", part(range.step)));
+    }
+    crate::string::alloc_owned(&text)
+}
+
 /// How many elements the sequence produces, in `i128` so a huge range
 /// (`0..i64::MAX` stepping `1`) never overflows mid-computation.
 fn element_count(range: &ZirkRange) -> i128 {

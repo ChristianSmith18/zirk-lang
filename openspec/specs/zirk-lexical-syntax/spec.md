@@ -52,7 +52,7 @@ binary (`0b`) base, allowing `_` as a separator between digits, per
 
 ### Requirement: String literals
 
-The lexer SHALL recognize string literals delimited by double quotes, with escape sequences.
+The lexer SHALL recognize double-quoted strings and multiline triple-single-quoted `'''…'''` strings with escapes. The triple form follows the left-edge rule owned by `triple-quoted-strings`.
 
 #### Scenario: Simple string
 
@@ -63,6 +63,10 @@ The lexer SHALL recognize string literals delimited by double quotes, with escap
 
 - **WHEN** a string contains `\n`, `\t`, `\"`, or `\\`
 - **THEN** the literal represents them as a newline, tab, quote, and backslash
+
+#### Scenario: Triple-quoted string
+- **WHEN** `'''…'''` is tokenized
+- **THEN** it produces the same string/interpolation parts after left-edge stripping
 
 #### Scenario: Unclosed string
 
@@ -393,4 +397,3 @@ The lexer SHALL continue emitting `DotDotDot` for `...`; parser context SHALL di
 #### Scenario: Object spread tokenization
 - **WHEN** `{ ...profile, name: "Grace" }` is tokenized
 - **THEN** `DotDotDot` precedes `profile` and the braces remain available for contextual object parsing
-

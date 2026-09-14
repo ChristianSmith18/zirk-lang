@@ -3,6 +3,14 @@
 ## Purpose
 TBD - created by archiving change array-list-tuple-duration-regex. Update Purpose after archive.
 ## Requirements
+### Requirement: `Regex` text form
+
+Regex SHALL expose `to_string(): String` backed by `zirk_regex_to_string` and wrapped as `re'pattern'`.
+
+#### Scenario: Regex prints directly
+- **WHEN** a Regex value is passed to `println`
+- **THEN** it renders `re'…'`
+
 ### Requirement: Regex literal syntax
 
 The compiler SHALL support the `re'pattern'` literal form for plain regex patterns. The pattern SHALL be parsed at compile time and a diagnostic SHALL be emitted for invalid patterns.
@@ -77,4 +85,3 @@ A `match` expression SHALL support a `re'pattern'` pattern that binds a `Regex.M
 #### Scenario: Match with regex pattern
 - **WHEN** `match s { re'(?<name>\w+)' => { m } }` is evaluated with `s = "devin"`
 - **THEN** the branch is taken and `m` is a `Regex.Match` with `group("name") = "devin"`
-

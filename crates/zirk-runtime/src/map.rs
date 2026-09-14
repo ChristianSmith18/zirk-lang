@@ -9,6 +9,31 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 
+/// Sorts stored words for `to_string()`'s deterministic ordering
+/// (`universal-to-string-and-multiline-strings`): numerically for scalar
+/// words, by contents when `string_content` says the words name
+/// `String`/`Char` handles. Shared with `set.rs`.
+///
+/// # Safety
+///
+/// With `string_content` set, every non-zero word must be a live string
+/// handle produced by this runtime.
+pub(crate) unsafe fn sort_words(words: &mut [i64], string_content: bool) {
+    if !string_content {
+        words.sort_unstable();
+        return;
+    }
+    words.sort_by(|&a, &b| {
+        let read = |word: i64| -> &str {
+            if word == 0 {
+                return "";
+            }
+            unsafe { (*crate::string::payload_ptr(word as *mut c_void)).as_str() }
+        };
+        read(a).cmp(read(b))
+    });
+}
+
 /// `Map<K, V>()` — allocates an empty map.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_map_new() -> *mut c_void {
@@ -74,4 +99,65 @@ pub extern "C" fn zirk_rt_map_remove(map: *mut c_void, key: i64) -> i32 {
     }
     let map = unsafe { &mut *(map as *mut HashMap<i64, i64>) };
     map.remove(&key).is_some() as i32
+}
+
+/// `map.to_string()`'s key snapshot
+/// (`universal-to-string-and-multiline-strings`): the keys, sorted —
+/// numerically, or by contents when `string_keys` says the words are
+/// `String`/`Char` handles — written into a word-sized-element `Array` the
+/// generated loop then walks with `ArrayLength`/`ArrayListLoad`.
+///
+/// # Safety
+///
+/// `map` must be a handle produced by `zirk_rt_map_new`; with
+/// `string_keys` set, every stored key must be a live string handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_map_sorted_keys(
+    map: *mut c_void,
+    string_keys: i64,
+) -> *mut c_void {
+    let mut keys: Vec<i64> = if map.is_null() {
+        Vec::new()
+    } else {
+        let map = unsafe { &*(map as *const HashMap<i64, i64>) };
+        map.keys().copied().collect()
+    };
+    unsafe { sort_words(&mut keys, string_keys != 0) };
+    let array = unsafe {
+        crate::array::zirk_rt_array_new(
+            keys.len(),
+            std::mem::size_of::<i64>(),
+            std::mem::align_of::<i64>(),
+            false,
+        )
+    };
+    for (index, key) in keys.iter().enumerate() {
+        unsafe { crate::array::write_word(array, index, *key) };
+    }
+    array
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{zirk_rt_map_new, zirk_rt_map_set, zirk_rt_map_sorted_keys};
+
+    #[test]
+    fn sorted_key_snapshot_uses_numeric_order() {
+        let map = zirk_rt_map_new();
+        zirk_rt_map_set(map, 10, 0);
+        zirk_rt_map_set(map, 2, 0);
+        zirk_rt_map_set(map, 1, 0);
+
+        let snapshot = unsafe { zirk_rt_map_sorted_keys(map, 0) };
+        let words = unsafe {
+            (0..crate::array::zirk_rt_array_length(snapshot))
+                .map(|index| {
+                    let pointer = crate::array::zirk_rt_array_element(snapshot, index as i64, 8);
+                    *(pointer as *const i64)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(words, [1, 2, 10]);
+    }
 }

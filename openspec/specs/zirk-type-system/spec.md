@@ -841,11 +841,7 @@ per `docs/CORE_LANGUAGE_SEMANTICS.md`.
 
 ### Requirement: `to_string()` contract
 
-The language SHALL define `to_string()` as a reserved contract, in the same
-family as the operator contracts (`ZIRK_LANGUAGE_SPEC.md` section 4): every
-scalar native type implements it, and a user type —class, record, enum— may
-implement it to produce its own textual representation. `print`/`println` SHALL
-route through it instead of accepting only a closed list of types.
+The language SHALL define `to_string()` as a reserved contract: every value-producing type answers it through a compiler default or a user-declared method. This includes collections, structured values, callables, weak references, opaque handles, Regex, Range, Map, Set, and nullable types. Only Void and Never have no text form; print/println route through it rather than a closed list.
 
 #### Scenario: Native type printable without declaring anything
 - **WHEN** an `Int32`, `Float64`, `Boolean` or `Char` is printed
@@ -855,13 +851,17 @@ route through it instead of accepting only a closed list of types.
 - **WHEN** a class declares `to_string(): String` and an instance is passed to `println`
 - **THEN** the check succeeds and the printed value is the one produced by that method
 
-#### Scenario: User type that does not implement it
-- **WHEN** a class without `to_string()` is passed to `println`
-- **THEN** a diagnostic naming the type is emitted, distinct from a generic `TYPE_MISMATCH`
+#### Scenario: Nullable receiver
+- **WHEN** `x: Int32?` is passed to `x.to_string()` or `println(x)`
+- **THEN** it succeeds and absence renders `<Null>`
+
+#### Scenario: Non-value types rejected
+- **WHEN** Void or Never is printed, converted, or interpolated
+- **THEN** a dedicated diagnostic states that it has no text form
 
 ### Requirement: String interpolation
 
-A `String` literal SHALL allow `{expr}` inside it, desugared to concatenating
+A String literal, including `'''…'''`, SHALL allow `{expr}` inside it, desugared to concatenating
 the literal text with `expr.to_string()` for each interpolated expression, in
 the order they appear.
 
@@ -869,8 +869,8 @@ the order they appear.
 - **WHEN** `"User: {user.name}"` is written
 - **THEN** the result concatenates the literal text with `user.name.to_string()`
 
-#### Scenario: Interpolation of a non-printable type
-- **WHEN** the interpolated expression has a type without `to_string()`
+#### Scenario: Interpolation of a non-value type
+- **WHEN** the interpolated expression is Void or Never
 - **THEN** the same diagnostic is emitted as passing that value directly to `println`
 
 ### Requirement: Conversion rules use new scalar names

@@ -62,3 +62,70 @@ pub extern "C" fn zirk_rt_set_remove(set: *mut c_void, value: i64) -> i32 {
     let set = unsafe { &mut *(set as *mut HashSet<i64>) };
     set.remove(&value) as i32
 }
+
+/// `set.to_string()`'s element snapshot
+/// (`universal-to-string-and-multiline-strings`): the elements, sorted —
+/// numerically, or by contents when `string_elements` says the words are
+/// `String`/`Char` handles — written into a word-sized-element `Array` the
+/// generated loop then walks with `ArrayLength`/`ArrayListLoad`.
+///
+/// # Safety
+///
+/// `set` must be a handle produced by `zirk_rt_set_new`; with
+/// `string_elements` set, every stored element must be a live string handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_sorted_elements(
+    set: *mut c_void,
+    string_elements: i64,
+) -> *mut c_void {
+    let mut elements: Vec<i64> = if set.is_null() {
+        Vec::new()
+    } else {
+        let set = unsafe { &*(set as *const HashSet<i64>) };
+        set.iter().copied().collect()
+    };
+    unsafe { crate::map::sort_words(&mut elements, string_elements != 0) };
+    let array = unsafe {
+        crate::array::zirk_rt_array_new(
+            elements.len(),
+            std::mem::size_of::<i64>(),
+            std::mem::align_of::<i64>(),
+            false,
+        )
+    };
+    for (index, element) in elements.iter().enumerate() {
+        unsafe { crate::array::write_word(array, index, *element) };
+    }
+    array
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{zirk_rt_set_add, zirk_rt_set_new, zirk_rt_set_sorted_elements};
+
+    #[test]
+    fn sorted_element_snapshot_uses_string_contents() {
+        let set = zirk_rt_set_new();
+        for text in ["z", "a", "m"] {
+            zirk_rt_set_add(set, crate::string::alloc_owned(text) as i64);
+        }
+
+        let snapshot = unsafe { zirk_rt_set_sorted_elements(set, 1) };
+        let words = unsafe {
+            (0..crate::array::zirk_rt_array_length(snapshot))
+                .map(|index| {
+                    let pointer = crate::array::zirk_rt_array_element(snapshot, index as i64, 8);
+                    *(pointer as *const i64)
+                })
+                .collect::<Vec<_>>()
+        };
+        let text = unsafe {
+            words
+                .iter()
+                .map(|word| (*crate::string::payload_ptr(*word as *mut _)).as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(text, ["a", "m", "z"]);
+    }
+}

@@ -6,6 +6,7 @@
 //! enabled.
 
 pub mod codes;
+pub mod format;
 pub mod frontend;
 pub mod modules;
 

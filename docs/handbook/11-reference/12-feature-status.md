@@ -2,6 +2,11 @@
 
 Status values are **specified and implemented**, **partially implemented**, **specified but not implemented**, **historical/exploratory**, or **explicitly excluded**. A repository revision and evidence are required before claiming implementation.
 
+`universal-to-string-and-multiline-strings` delivers universal value rendering,
+`'''` literals, the narrow `zirk format` slice, and VS Code highlighting/edge
+guides; final delivery evidence is the crate and corpus verification recorded
+with this change.
+
 The type taxonomy, Decimal and Float families, grapheme Char, shared mutable String, binding
 permissions, native operators, temporal family, callable types, escaping
 closures, projection-copy semantics, object/contract model, complete generics,

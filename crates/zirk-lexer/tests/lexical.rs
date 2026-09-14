@@ -901,3 +901,177 @@ fn valid_ascii_literals_are_untouched() {
         TokenKind::Str("plain ascii".into())
     );
 }
+
+// --- Triple-quoted strings `'''…'''` -----------------------------------------
+//
+// The multiline literal of the `universal-to-string-and-multiline-strings`
+// change: literal newlines, the left-edge rule and its diagnostics.
+
+#[test]
+fn valid_triple_quoted_simple() {
+    assert_eq!(
+        tokens("'''\nhello\n'''"),
+        vec![TokenKind::Str("hello".into()), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_empty() {
+    // `''''''` is the empty literal.
+    assert_eq!(
+        tokens("''''''"),
+        vec![TokenKind::Str("".into()), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_quotes_inside() {
+    // Single and double quote runs are literal content.
+    assert_eq!(
+        tokens("'''\nit's ''quoted''\n'''"),
+        vec![TokenKind::Str("it's ''quoted''".into()), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_preserves_newlines_and_blank_lines() {
+    assert_eq!(
+        tokens("'''\na\n\nb\n'''"),
+        vec![TokenKind::Str("a\n\nb".into()), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_preserves_interior_spacing() {
+    assert_eq!(
+        tokens("'''\ntexto   con   espacios\n'''"),
+        vec![
+            TokenKind::Str("texto   con   espacios".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_escapes() {
+    assert_eq!(
+        tokens("'''\na\\tb\\nc\\\\d\\{e\\'f\n'''"),
+        vec![TokenKind::Str("a\tb\nc\\d{e'f".into()), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_interpolation() {
+    let kinds = tokens("'''\nvalue: {x}\n'''");
+    let TokenKind::InterpolatedStr(parts) = &kinds[0] else {
+        panic!("an interpolated string was expected, got {kinds:?}")
+    };
+    assert_eq!(parts[0], StrPart::Literal("value: ".into()));
+    let StrPart::Expr { text, .. } = &parts[1] else {
+        panic!("an expression part was expected, got {:?}", parts[1])
+    };
+    assert_eq!(text, "x");
+}
+
+#[test]
+fn valid_triple_quoted_left_edge_strips_indent() {
+    // The opening `'''` sits at column 4; content indented 4 loses it.
+    assert_eq!(
+        tokens("x = '''\n    hello\n    '''"),
+        vec![
+            id("x"),
+            TokenKind::Assign,
+            TokenKind::Str("hello".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_keeps_indent_beyond_the_edge() {
+    // Two spaces beyond the edge are content.
+    assert_eq!(
+        tokens("x = '''\n      hi\n    '''"),
+        vec![
+            id("x"),
+            TokenKind::Assign,
+            TokenKind::Str("  hi".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_whitespace_only_lines_are_empty() {
+    // A line of only spaces contributes a bare newline, whatever its width.
+    assert_eq!(
+        tokens("x = '''\n    a\n  \n    b\n    '''"),
+        vec![
+            id("x"),
+            TokenKind::Assign,
+            TokenKind::Str("a\n\nb".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_tabs_count_as_one_character() {
+    // Edge at column 2 written with tabs; a tab-indented line strips it.
+    assert_eq!(
+        tokens("x =\n\t\t'''\n\t\thello\n\t\t'''"),
+        vec![
+            id("x"),
+            TokenKind::Assign,
+            TokenKind::Str("hello".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn valid_triple_quoted_content_on_the_opening_line() {
+    // Content may share the opening line; the edge still rules later lines.
+    // `'''` opens at column 4, so `second` keeps the 4 spaces past it.
+    assert_eq!(
+        tokens("x = '''first\n        second\n        '''"),
+        vec![
+            id("x"),
+            TokenKind::Assign,
+            TokenKind::Str("first\n    second".into()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn invalid_triple_quoted_unterminated() {
+    let output = errors("x = '''\n    never closed");
+    assert!(output.contains(codes::UNTERMINATED_STRING.as_str()));
+}
+
+#[test]
+fn invalid_triple_quoted_content_left_of_edge() {
+    // `'''` opens at column 4; `oops` starts at column 2.
+    let output = errors("x = '''\n  oops\n    '''");
+    assert!(output.contains(codes::STRING_CONTENT_LEFT_OF_EDGE.as_str()));
+}
+
+#[test]
+fn invalid_triple_quoted_closing_left_of_edge() {
+    let output = errors("x = '''\n        text\n  '''");
+    assert!(output.contains(codes::STRING_CLOSING_LEFT_OF_EDGE.as_str()));
+}
+
+#[test]
+fn invalid_triple_quoted_closing_mid_line() {
+    let output = errors("x = '''\n        text '''");
+    assert!(output.contains(codes::STRING_CLOSING_MID_LINE.as_str()));
+}
+
+#[test]
+fn invalid_triple_quoted_inline_content_and_close() {
+    // `'''x'''` — only `''''''` may close on the opening line.
+    let output = errors("x = '''x'''");
+    assert!(output.contains(codes::STRING_CLOSING_MID_LINE.as_str()));
+}

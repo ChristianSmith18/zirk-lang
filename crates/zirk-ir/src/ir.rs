@@ -1024,6 +1024,13 @@ pub enum InstKind {
     /// operand's own signedness from its recorded type to choose sign- vs
     /// zero-extension when widening; truncation needs no such choice.
     IntCast(Operand),
+    /// Reads the `i64` word a `Map`/`Set` stores back as the key/element's
+    /// own type (`universal-to-string-and-multiline-strings`): the inverse
+    /// of the sign-extension/`ptr_to_int` codegen applies at
+    /// `MapSet`/`SetAdd` — truncation to narrower integers, `int_to_ptr`
+    /// for reference types, exactly the conversion `MapGet` performs
+    /// inline for values. The instruction's own `ty` is the destination.
+    WordCast(Operand),
     /// A fractional or scientific literal (roadmap Phase 3b). The text is
     /// carried verbatim rather than parsed to `f64` here, for the same
     /// reason `zirk_ast::FloatLit` keeps it as text: `Float128` may exceed

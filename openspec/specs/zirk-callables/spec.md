@@ -4,6 +4,14 @@
 Defines structural callable types, escaping closure environments, method
 values, generators, and pipeline adaptation.
 ## Requirements
+### Requirement: Callable rendering
+
+Function values SHALL render `<Function name>` when they refer to named functions and `<Function>` when anonymous, replacing `<Callable>`.
+
+#### Scenario: Named function reference
+- **WHEN** `println(main)` or `main.to_string()` is evaluated
+- **THEN** it produces `<Function main>`
+
 ### Requirement: Writable structural callable types
 
 The language SHALL recognize `Function(P...) => R` as the native callable type and `Fn(P...) => R` as its preferred exact alias. Named functions, contextually typed lambdas, bound/unbound methods, and explicit callable-contract values SHALL adapt when parameter labels/options/variadics, parameter types, result, mutability, safety, and permissions are compatible; parameters SHALL be contravariant and results covariant.
@@ -81,4 +89,3 @@ The language SHALL support `.clone()` on a callable when all captures are `Clone
 #### Scenario: Non-cloneable capture is rejected
 - **WHEN** a callable captures a non-`Clone` resource and `.clone()` is called
 - **THEN** compilation fails
-

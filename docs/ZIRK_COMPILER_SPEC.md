@@ -251,6 +251,12 @@ The formatter is canonical, idempotent and free of configuration that would
 fragment style. It adds `;`, and normalizes spacing, braces, line breaks and
 ordering where semantically neutral.
 
+The first delivered command is `zirk format [--check] <file>` and intentionally
+only canonicalizes `'''` layout: opening and closing delimiters align one
+indent deeper than their `=`/`(`/named-argument introducer, while content is
+re-indented relative to that edge. `--check` is report-only; syntax-invalid
+files are diagnosed and left untouched.
+
 The linter shares parser, resolution and types with the compiler. Fast rules run
 by default; expensive analyses are explicit. Automatic fixes must be safe and
 reviewable.

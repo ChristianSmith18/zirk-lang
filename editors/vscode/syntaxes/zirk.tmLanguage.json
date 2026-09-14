@@ -95,6 +95,31 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.quoted.triple.zirk",
+          "begin": "'''",
+          "end": "'''",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zirk",
+              "match": "\\\\(n|t|r|0|\\\\|'|\\{|\\})"
+            },
+            {
+              "name": "source.zirk",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.embedded.begin.zirk" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.section.embedded.end.zirk" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            }
+          ]
+        },
+        {
           "name": "string.regexp.zirk",
           "begin": "re'",
           "end": "'",
