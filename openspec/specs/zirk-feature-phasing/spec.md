@@ -88,7 +88,7 @@ once Phase 5 steps 1 to 3 are delivered; they resolve as ordinary known types.
 
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured concurrency semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
 
-Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` (`Channel<T>`) and `concurrency-completion` (`Concurrent.of` combinators, `Concurrent.detach`, `Thread.run`, `Atomic` / `Mutex` / the synchronizer library) remain deferred until their sub-change lands.
+Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` delivers `Channel<T>` with bounded, rendezvous, and limited-growable construction, suspension-safe send/receive, typed `try_*`, idempotent close, and drain. Only `concurrency-completion` remains deferred.
 
 #### Scenario: Phase planning reaches concurrency
 - **WHEN** implementation work starts branch scheduling
@@ -98,9 +98,13 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 - **WHEN** a program uses `concurrent { }`, `spawn`, `Job<T>`, `Timer.sleep`, `Timer.after`, or `Timer.every`
 - **THEN** no phase diagnostic is emitted and the construct is compiled and run
 
-#### Scenario: Later concurrency sub-changes stay deferred
-- **WHEN** a program uses `Channel<T>`, `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
+#### Scenario: Completion sub-change stays deferred
+- **WHEN** a program uses `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
 - **THEN** the diagnostic names the construct and the Phase 5 sub-change that delivers it
+
+#### Scenario: Channel surface is delivered
+- **WHEN** a program constructs `Channel<T>` and uses `send`, `receive`, `try_send`, `try_receive`, `close`, or `drain`
+- **THEN** no phase diagnostic is emitted
 
 #### Scenario: The parallel surface is delivered
 - **WHEN** a program uses `parallel`, `.parallel`, or `Parallel.each`

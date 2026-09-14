@@ -7,12 +7,19 @@ const HEADER_BYTES: usize = crate::collector::HEADER_BYTES;
 const LENGTH_OFFSET: usize = HEADER_BYTES;
 const CAPACITY_OFFSET: usize = HEADER_BYTES + WORD;
 const DATA_PTR_OFFSET: usize = HEADER_BYTES + 2 * WORD;
+const LAYOUT_PTR_OFFSET: usize = HEADER_BYTES + 3 * WORD;
+const LAYOUT_COUNT_OFFSET: usize = HEADER_BYTES + 4 * WORD;
 
 /// Descriptor for a `List<T>` header object: it has a single GC field, the
 /// pointer to the data buffer.
 #[unsafe(no_mangle)]
 #[allow(non_upper_case_globals)]
 pub static zirk_rt_list_descriptor: [usize; 5] = [0, 0, 0, 1, DATA_PTR_OFFSET];
+
+#[inline]
+pub(crate) fn list_descriptor() -> *mut c_void {
+    (&raw const zirk_rt_list_descriptor) as *mut c_void
+}
 
 unsafe fn set_descriptor(object: *mut c_void, descriptor: *mut c_void) {
     unsafe { *(object as *mut *mut c_void) = descriptor };
@@ -45,16 +52,70 @@ pub unsafe extern "C" fn zirk_rt_list_new(
     elem_align: usize,
     is_ref: bool,
 ) -> *mut c_void {
-    let _ = (elem_size, elem_align, is_ref);
-    let size = HEADER_BYTES + 3 * WORD;
+    let offsets = if is_ref { &[0usize][..] } else { &[] };
+    unsafe { zirk_rt_list_new_with_layout(elem_size, elem_align, offsets.as_ptr(), offsets.len()) }
+}
+
+/// Creates a list retaining the complete set of GC reference offsets for its
+/// elements. Subsequent resizes reuse this metadata.
+///
+/// # Safety
+///
+/// `reference_offsets` must be null when `reference_offset_count` is zero, or
+/// point to that many valid offsets within an element of `elem_size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_list_new_with_layout(
+    elem_size: usize,
+    elem_align: usize,
+    reference_offsets: *const usize,
+    reference_offset_count: usize,
+) -> *mut c_void {
+    let size = HEADER_BYTES + 5 * WORD;
     let object = unsafe { crate::memory::zirk_rt_alloc(size, 1) };
+    let offsets = if reference_offset_count == 0 {
+        Vec::new()
+    } else {
+        assert!(
+            !reference_offsets.is_null(),
+            "list reference offsets are null"
+        );
+        unsafe { std::slice::from_raw_parts(reference_offsets, reference_offset_count) }.to_vec()
+    };
+    for &offset in &offsets {
+        assert!(
+            offset + WORD <= elem_size,
+            "list GC offset is outside its element"
+        );
+    }
+    let (offset_ptr, offset_count) = if offsets.is_empty() {
+        (std::ptr::null_mut(), 0)
+    } else {
+        let boxed = offsets.into_boxed_slice();
+        let count = boxed.len();
+        (Box::into_raw(boxed) as *mut usize, count)
+    };
     unsafe {
         set_descriptor(object, &raw const zirk_rt_list_descriptor as *mut c_void);
         write_usize(object, LENGTH_OFFSET, 0);
         write_usize(object, CAPACITY_OFFSET, 0);
         set_ptr(object, DATA_PTR_OFFSET, std::ptr::null_mut());
+        set_ptr(object, LAYOUT_PTR_OFFSET, offset_ptr.cast());
+        write_usize(object, LAYOUT_COUNT_OFFSET, offset_count);
     }
+    let _ = elem_align;
     object
+}
+
+pub(crate) unsafe fn drop_body(list: *mut c_void) {
+    let pointer = unsafe { read_ptr(list, LAYOUT_PTR_OFFSET) } as *mut usize;
+    let count = unsafe { read_usize(list, LAYOUT_COUNT_OFFSET) };
+    if !pointer.is_null() {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                pointer, count,
+            )))
+        };
+    }
 }
 
 /// Returns the length of a `List<T>`.
@@ -79,22 +140,33 @@ unsafe fn element_pointer(data: *mut c_void, index: usize, elem_size: usize) -> 
     unsafe { (data as *mut u8).add(HEADER_BYTES + index * elem_size) as *mut c_void }
 }
 
-unsafe fn make_descriptor(base: usize, stride: usize, count: usize) -> *mut c_void {
+unsafe fn make_descriptor(
+    base: usize,
+    stride: usize,
+    count: usize,
+    reference_offsets: &[usize],
+) -> *mut c_void {
     use std::alloc::{Layout, alloc};
-    let words = 4usize.saturating_add(count);
+    let entry_count = count.saturating_mul(reference_offsets.len());
+    let words = 4usize.saturating_add(entry_count);
     let size = words.saturating_mul(WORD);
     let layout = Layout::from_size_align(size, WORD).expect("descriptor layout");
     let pointer = unsafe { alloc(layout) as *mut usize };
     if pointer.is_null() {
         crate::failure::zirk_rt_allocation_failed();
     }
+    crate::collector::register_dynamic_descriptor(pointer.cast(), layout);
     unsafe {
         pointer.add(0).write(0);
         pointer.add(1).write(0);
         pointer.add(2).write(0);
-        pointer.add(3).write(count);
+        pointer.add(3).write(entry_count);
+        let mut entry = 0;
         for i in 0..count {
-            pointer.add(4 + i).write(base + i * stride);
+            for &offset in reference_offsets {
+                pointer.add(4 + entry).write(base + i * stride + offset);
+                entry += 1;
+            }
         }
     }
     pointer as *mut c_void
@@ -116,8 +188,21 @@ unsafe fn grow_buffer(
     let align = crate::collector::allocation_align(elem_align);
     let new_data = unsafe { crate::memory::zirk_rt_alloc(size, align) };
 
-    let descriptor = if is_ref && new_capacity > 0 {
-        unsafe { make_descriptor(HEADER_BYTES, elem_size, new_capacity) }
+    let stored_count = unsafe { read_usize(list, LAYOUT_COUNT_OFFSET) };
+    let stored_offsets = if stored_count == 0 {
+        None
+    } else {
+        Some(unsafe {
+            std::slice::from_raw_parts(
+                read_ptr(list, LAYOUT_PTR_OFFSET) as *const usize,
+                stored_count,
+            )
+        })
+    };
+    let direct_offsets = [0usize];
+    let offsets = stored_offsets.unwrap_or(if is_ref { &direct_offsets } else { &[] });
+    let descriptor = if !offsets.is_empty() && new_capacity > 0 {
+        unsafe { make_descriptor(HEADER_BYTES, elem_size, new_capacity, offsets) }
     } else {
         &raw const crate::array::zirk_rt_array_descriptor as *mut c_void
     };
@@ -159,8 +244,21 @@ unsafe fn shrink_buffer(list: *mut c_void, elem_size: usize, elem_align: usize, 
     let size = HEADER_BYTES.saturating_add(new_capacity.saturating_mul(elem_size));
     let align = crate::collector::allocation_align(elem_align);
     let new_data = unsafe { crate::memory::zirk_rt_alloc(size, align) };
-    let descriptor = if is_ref {
-        unsafe { make_descriptor(HEADER_BYTES, elem_size, new_capacity) }
+    let stored_count = unsafe { read_usize(list, LAYOUT_COUNT_OFFSET) };
+    let stored_offsets = if stored_count == 0 {
+        None
+    } else {
+        Some(unsafe {
+            std::slice::from_raw_parts(
+                read_ptr(list, LAYOUT_PTR_OFFSET) as *const usize,
+                stored_count,
+            )
+        })
+    };
+    let direct_offsets = [0usize];
+    let offsets = stored_offsets.unwrap_or(if is_ref { &direct_offsets } else { &[] });
+    let descriptor = if !offsets.is_empty() {
+        unsafe { make_descriptor(HEADER_BYTES, elem_size, new_capacity, offsets) }
     } else {
         &raw const crate::array::zirk_rt_array_descriptor as *mut c_void
     };
@@ -275,7 +373,11 @@ pub unsafe extern "C" fn zirk_rt_list_clone(
     is_ref: bool,
 ) -> *mut c_void {
     let length = unsafe { zirk_rt_list_length(list) };
-    let clone = unsafe { zirk_rt_list_new(elem_size, elem_align, is_ref) };
+    let stored_count = unsafe { read_usize(list, LAYOUT_COUNT_OFFSET) };
+    let stored_ptr = unsafe { read_ptr(list, LAYOUT_PTR_OFFSET) };
+    let clone = unsafe {
+        zirk_rt_list_new_with_layout(elem_size, elem_align, stored_ptr.cast(), stored_count)
+    };
     let old_data = unsafe { data_pointer(list) };
     if length > 0 && !old_data.is_null() {
         unsafe { grow_buffer(clone, length, elem_size, elem_align, is_ref) };

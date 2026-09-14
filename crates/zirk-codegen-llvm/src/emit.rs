@@ -402,6 +402,8 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Callable(_) => callable_struct(context).into(),
         // Jobs cross the runtime boundary as packed generational ids.
         ir::IrType::Job => context.i64_type().into(),
+        // Channels are collector-tracked opaque endpoints.
+        ir::IrType::Channel(_) => context.ptr_type(AddressSpace::default()).into(),
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
         // carries no pointee type; a load/store through it supplies `T`'s
@@ -624,6 +626,7 @@ fn gc_reference_paths(
         | ir::IrType::Char
         | ir::IrType::Array(_)
         | ir::IrType::List(_)
+        | ir::IrType::Channel(_)
         | ir::IrType::Range
         | ir::IrType::Map(_)
         | ir::IrType::Set(_) => out.push(prefix.clone()),
@@ -1240,6 +1243,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 | ir::IrType::Pin(_)
                 | ir::IrType::Array(_)
                 | ir::IrType::List(_)
+                | ir::IrType::Channel(_)
         )
     }
 
@@ -4764,6 +4768,319 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_call(self.runtime.sleep, &[self.operand(*nanos).into()], "")
                     .expect("zirk_rt_sleep");
                 None
+            }
+            ir::InstKind::ChannelNew {
+                capacity,
+                limit,
+                element,
+            } => {
+                let element_size = self.byte_size_of(*element);
+                let element_align = self.byte_align_of(*element);
+                let paths = gc_reference_paths_of(self.module, *element);
+                let offset_values: Vec<_> = paths
+                    .iter()
+                    .map(|path| {
+                        if path.is_empty() {
+                            self.context.i64_type().const_zero()
+                        } else {
+                            let payload = self
+                                .llvm_type(*element)
+                                .expect("channel element has an LLVM layout")
+                                .into_struct_type();
+                            const_field_offset(self.context, payload, path)
+                        }
+                    })
+                    .collect();
+                let (offsets, count) = if offset_values.is_empty() {
+                    (
+                        self.context.ptr_type(AddressSpace::default()).const_null(),
+                        self.context.i64_type().const_zero(),
+                    )
+                } else {
+                    let offsets_array = self.context.i64_type().const_array(&offset_values);
+                    let site = instruction
+                        .result
+                        .expect("ChannelNew produces an endpoint")
+                        .0;
+                    let global = self.llvm.add_global(
+                        offsets_array.get_type(),
+                        None,
+                        &format!("zk.channel.offsets.{site}"),
+                    );
+                    global.set_initializer(&offsets_array);
+                    global.set_constant(true);
+                    (
+                        global.as_pointer_value(),
+                        self.context
+                            .i64_type()
+                            .const_int(offset_values.len() as u64, false),
+                    )
+                };
+                self.builder
+                    .build_call(
+                        self.runtime.chan_new,
+                        &[
+                            self.operand(*capacity).into(),
+                            self.operand(*limit).into(),
+                            element_size.into(),
+                            element_align.into(),
+                            offsets.into(),
+                            count.into(),
+                        ],
+                        "channel",
+                    )
+                    .expect("zirk_rt_chan_new")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::ChannelSend { channel, value } => {
+                let element = self.value_types[&value.0];
+                let source = self.element_value_ptr(self.operand(*value), element);
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.chan_send,
+                            &[self.operand(*channel).into(), source.into()],
+                            "channel_send",
+                        )
+                        .expect("zirk_rt_chan_send")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("zirk_rt_chan_send returns a status"),
+                )
+            }
+            ir::InstKind::ChannelTrySend { channel, value } => {
+                let element = self.value_types[&value.0];
+                let source = self.element_value_ptr(self.operand(*value), element);
+                self.builder
+                    .build_call(
+                        self.runtime.chan_try_send,
+                        &[self.operand(*channel).into(), source.into()],
+                        "channel_try_send",
+                    )
+                    .expect("zirk_rt_chan_try_send")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::ChannelRecv { channel, element } => {
+                let destination = self
+                    .builder
+                    .build_alloca(
+                        self.llvm_type(*element).expect("channel element is sized"),
+                        "channel_recv_value",
+                    )
+                    .expect("channel receive destination");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.chan_recv,
+                        &[self.operand(*channel).into(), destination.into()],
+                        "channel_recv",
+                    )
+                    .expect("zirk_rt_chan_recv")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_chan_recv returns a status")
+                    .into_int_value();
+                let payload_ty = self.llvm_type(*element).expect("channel element is sized");
+                let payload = self
+                    .builder
+                    .build_load(payload_ty, destination, "channel_recv_loaded")
+                    .expect("load channel receive destination");
+                let nullable = self
+                    .llvm_type(ir::IrType::Nullable(
+                        ir::Nullable::of(*element).expect("channel element is nullable"),
+                    ))
+                    .expect("nullable channel element has a representation")
+                    .into_struct_type();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "channel_received",
+                    )
+                    .expect("compare channel receive status");
+                let received = self
+                    .builder
+                    .build_insert_value(
+                        nullable.const_zero(),
+                        self.context.bool_type().const_int(1, false),
+                        0,
+                        "channel_present",
+                    )
+                    .expect("channel present flag")
+                    .into_struct_value();
+                let received = self
+                    .builder
+                    .build_insert_value(received, payload, 1, "channel_payload")
+                    .expect("channel payload")
+                    .into_struct_value();
+                Some(
+                    self.builder
+                        .build_select(present, received, nullable.const_zero(), "channel_result")
+                        .expect("select channel receive result"),
+                )
+            }
+            ir::InstKind::ChannelTryRecv { channel, element } => {
+                let destination = self
+                    .builder
+                    .build_alloca(
+                        self.llvm_type(*element).expect("channel element is sized"),
+                        "channel_try_recv_value",
+                    )
+                    .expect("channel try receive destination");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.chan_try_recv,
+                        &[self.operand(*channel).into(), destination.into()],
+                        "channel_try_recv",
+                    )
+                    .expect("zirk_rt_chan_try_recv")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("zirk_rt_chan_try_recv returns a status")
+                    .into_int_value();
+                let payload_ty = self.llvm_type(*element).expect("channel element is sized");
+                let payload = self
+                    .builder
+                    .build_load(payload_ty, destination, "channel_try_recv_loaded")
+                    .expect("load channel try receive destination");
+                let result_ty = self
+                    .llvm_type(instruction.ty)
+                    .expect("receive outcome has an LLVM representation")
+                    .into_struct_type();
+                let mut result = self
+                    .builder
+                    .build_insert_value(result_ty.const_zero(), status, 0, "channel_try_tag")
+                    .expect("channel try receive tag")
+                    .into_struct_value();
+                if let ir::IrType::Enum(id) = instruction.ty
+                    && let Some(&field) = self.module.enums[id as usize].variants[0].first()
+                {
+                    result = self
+                        .builder
+                        .build_insert_value(result, payload, field + 1, "channel_try_payload")
+                        .expect("channel try receive payload")
+                        .into_struct_value();
+                }
+                Some(result.into())
+            }
+            ir::InstKind::ChannelClose { channel } => {
+                self.builder
+                    .build_call(
+                        self.runtime.chan_close,
+                        &[self.operand(*channel).into()],
+                        "",
+                    )
+                    .expect("zirk_rt_chan_close");
+                None
+            }
+            ir::InstKind::ChannelLength(channel) => self
+                .builder
+                .build_call(
+                    self.runtime.chan_len,
+                    &[self.operand(*channel).into()],
+                    "channel_length",
+                )
+                .expect("zirk_rt_chan_len")
+                .try_as_basic_value()
+                .basic(),
+            ir::InstKind::ChannelIsClosed(channel) => self
+                .builder
+                .build_call(
+                    self.runtime.chan_is_closed,
+                    &[self.operand(*channel).into()],
+                    "channel_closed",
+                )
+                .expect("zirk_rt_chan_is_closed")
+                .try_as_basic_value()
+                .basic(),
+            ir::InstKind::ChannelCapacity(channel) => self
+                .builder
+                .build_call(
+                    self.runtime.chan_capacity,
+                    &[self.operand(*channel).into()],
+                    "channel_capacity",
+                )
+                .expect("zirk_rt_chan_capacity")
+                .try_as_basic_value()
+                .basic(),
+            ir::InstKind::ChannelDrain {
+                channel,
+                element_id,
+            } => {
+                let element = self.module.list_types[*element_id as usize];
+                let elem_size = self.byte_size_of(element);
+                let elem_align = self.byte_align_of(element);
+                let paths = gc_reference_paths_of(self.module, element);
+                let offset_values: Vec<_> = paths
+                    .iter()
+                    .map(|path| {
+                        if path.is_empty() {
+                            self.context.i64_type().const_zero()
+                        } else {
+                            let payload = self
+                                .llvm_type(element)
+                                .expect("channel drain element has an LLVM layout")
+                                .into_struct_type();
+                            const_field_offset(self.context, payload, path)
+                        }
+                    })
+                    .collect();
+                let (offsets, count) = if offset_values.is_empty() {
+                    (
+                        self.context.ptr_type(AddressSpace::default()).const_null(),
+                        self.context.i64_type().const_zero(),
+                    )
+                } else {
+                    let offsets_array = self.context.i64_type().const_array(&offset_values);
+                    let site = instruction.result.expect("ChannelDrain produces a list").0;
+                    let global = self.llvm.add_global(
+                        offsets_array.get_type(),
+                        None,
+                        &format!("zk.channel.drain.offsets.{site}"),
+                    );
+                    global.set_initializer(&offsets_array);
+                    global.set_constant(true);
+                    (
+                        global.as_pointer_value(),
+                        self.context
+                            .i64_type()
+                            .const_int(offset_values.len() as u64, false),
+                    )
+                };
+                let list = self
+                    .builder
+                    .build_call(
+                        self.runtime.list_new_with_layout,
+                        &[
+                            elem_size.into(),
+                            elem_align.into(),
+                            offsets.into(),
+                            count.into(),
+                        ],
+                        "channel_drain_list",
+                    )
+                    .expect("list allocation for channel drain")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("list_new returns a list");
+                self.builder
+                    .build_call(
+                        self.runtime.chan_drain,
+                        &[
+                            self.operand(*channel).into(),
+                            list.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                        ],
+                        "channel_drain",
+                    )
+                    .expect("zirk_rt_chan_drain");
+                Some(list)
             }
 
             // `Dependent.from(base, field_ptr)` (roadmap Phase 4e,

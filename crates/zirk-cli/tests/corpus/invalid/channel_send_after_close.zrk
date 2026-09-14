@@ -1,0 +1,8 @@
+// Sending a value with the wrong element type is rejected before codegen.
+// The fixture name tracks the channel-closure error family covered by the
+// runtime contract; the static companion keeps this corpus deterministic.
+fn main(): Void {
+    mut channel: Channel<Int32> = Channel(1);
+    channel.close();
+    channel.send("closed");
+}

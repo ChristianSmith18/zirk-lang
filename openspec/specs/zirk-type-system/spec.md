@@ -1033,6 +1033,25 @@ block's bindings SHALL be a compile-time error.
 - **WHEN** `inmut a = f(b)` and `inmut b = g(a)` appear in the same block
 - **THEN** compilation fails naming the cycle
 
+### Requirement: Channel type and members
+
+`Channel<T>` SHALL be a known one-parameter generic. It SHALL support the
+bounded constructor, the zero-capacity rendezvous form, and the explicitly
+limited `Channel.unbounded<T>(limit: N)` form. Its members are `send`,
+`receive: T?`, `try_send: SendOutcome`, `try_receive: ReceiveOutcome<T>`,
+`close`, `is_closed`, `length`, `capacity`, and `drain: List<T>`.
+`Channel<T>` SHALL be `Share`, so a branch may capture an endpoint without
+consuming it.
+
+#### Scenario: Endpoint can be captured by a branch
+- **WHEN** a `spawn` body captures a channel and the outer scope still uses it
+- **THEN** checking succeeds because the endpoint is shared
+
+#### Scenario: try receive exposes a typed closed outcome
+
+- **WHEN** `ch.try_receive()` is checked for `Channel<Int32>`
+- **THEN** its type is `ReceiveOutcome<Int32>` with `Received`, `Empty`, and `Closed` variants
+
 ### Requirement: Parallel block and adapter typing
 
 A `parallel` expression SHALL have its final expression's type. `cores` SHALL

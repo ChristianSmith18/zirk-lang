@@ -209,3 +209,24 @@ to a `Result.Error`.
 - **WHEN** a branch body lets a custom exception escape
 - **THEN** the branch fails, active siblings are cancelled and cleaned, and the exception propagates with secondary failures suppressed
 
+### Requirement: Channel closure is not an error
+
+`channel.close()` SHALL never raise. `send` after close SHALL raise the
+compiler-known channel-closed failure, while `try_send` after close SHALL return
+`SendOutcome.Closed`. A drained closed `receive` SHALL return `None` and a
+drained closed `try_receive` SHALL return `ReceiveOutcome.Closed`. A branch
+cancelled while suspended in a channel operation SHALL raise `CancelledError`.
+
+#### Scenario: try send after close is typed
+- **WHEN** `try_send` is called after a channel closes
+- **THEN** it returns `SendOutcome.Closed` without raising
+
+#### Scenario: Blocking send after close raises
+
+- **WHEN** `send` is called after a channel closes
+- **THEN** the compiler-known channel-closed failure is raised
+
+#### Scenario: Suspended receiver observes closure
+
+- **WHEN** a branch is suspended in `receive` and another branch closes the channel
+- **THEN** the receiver drains remaining values and then observes `None`

@@ -39,6 +39,7 @@
 //! concurrency-surface changes reuse these scheduler primitives.
 
 mod array;
+mod channel;
 mod char;
 mod clone;
 mod collector;
@@ -80,6 +81,7 @@ mod temporal;
 mod timer;
 
 pub use array::*;
+pub use channel::*;
 pub use char::*;
 pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
 // Stackful task contexts (ADR-017). Not yet a C-ABI surface — the executor

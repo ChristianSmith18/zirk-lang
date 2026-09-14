@@ -121,10 +121,20 @@ dynamically growing channel that reaches its configured limit SHALL apply
 backpressure or return its documented typed failure rather than allocating
 without bound.
 
+The implementation SHALL retain first-in-first-out suspended sender and
+receiver lists. A sender resumed after capacity becomes available SHALL enqueue
+its value; a receiver resumed after close SHALL first drain queued values and
+then observe closure. The executor thread SHALL never block on either operation.
+
 #### Scenario: Bounded channel applies backpressure
 
 - **WHEN** a sender calls suspendible send on a full bounded channel
 - **THEN** the sender suspends without blocking the operating-system thread until capacity is available or the channel is closed
+
+#### Scenario: Sender resumes when capacity frees
+
+- **WHEN** a branch is suspended in `send` on a full channel and another branch receives one value
+- **THEN** the suspended sender resumes and enqueues its value
 
 #### Scenario: Rendezvous channel pairs send with receive
 
@@ -148,10 +158,19 @@ enumerated as roots while they remain in the channel. A reference sent into a
 channel SHALL remain reachable until it is received or the channel is collected as
 unreachable.
 
+The collector trace hook SHALL enumerate queued values but SHALL NOT traverse
+the sender or receiver task-id lists: their live branches are already enumerated
+by the executor. This extension SHALL not alter the shared object header.
+
 #### Scenario: Queued reference survives collection
 
 - **WHEN** a reference value is sent into a channel, no other reference to it exists, and a collection runs before it is received
 - **THEN** the value is still receivable and intact after the collection
+
+#### Scenario: Close wakes every waiter
+
+- **WHEN** a channel with two suspended receivers and one suspended sender is closed
+- **THEN** the receivers resume observing drained closure and the suspended `send` raises
 
 ### Requirement: Aggregation runtime for task collections
 

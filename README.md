@@ -5,8 +5,9 @@ Compiled, object-oriented programming language with static typing and inference.
 > **Easy by default, explicit when you need control.**
 
 Zirk's structured concurrency surface uses `concurrent` blocks, `spawn`,
-`Job<T>`, `Timer`, and `parallel` for real multi-core CPU regions. Typed
-channels and explicit thread APIs remain planned. Binaries are standalone:
+`Job<T>`, `Timer`, and `parallel` for real multi-core CPU regions, plus typed
+channels for cooperative communication. Explicit thread APIs remain planned.
+Binaries are standalone:
 they require no Node.js, Python, Java, or any other installation.
 
 ```zirk

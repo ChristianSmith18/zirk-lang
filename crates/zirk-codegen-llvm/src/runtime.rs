@@ -46,6 +46,26 @@ pub mod symbols {
     pub const TIMER_EVERY: &str = "zirk_rt_timer_every";
     /// Suspends the current job until a monotonic timer deadline.
     pub const SLEEP: &str = "zirk_rt_sleep";
+    /// Creates a typed channel. Elements cross this ABI through indirect slots.
+    pub const CHAN_NEW: &str = "zirk_rt_chan_new";
+    /// Attempts to send an element through a channel without suspension.
+    pub const CHAN_TRY_SEND: &str = "zirk_rt_chan_try_send";
+    /// Attempts to receive an element through a channel without suspension.
+    pub const CHAN_TRY_RECV: &str = "zirk_rt_chan_try_recv";
+    /// Sends an element, suspending cooperatively when the channel is full.
+    pub const CHAN_SEND: &str = "zirk_rt_chan_send";
+    /// Receives an element, suspending cooperatively while the channel is empty.
+    pub const CHAN_RECV: &str = "zirk_rt_chan_recv";
+    /// Closes a channel, waking blocked senders and receivers.
+    pub const CHAN_CLOSE: &str = "zirk_rt_chan_close";
+    /// Returns the queued element count.
+    pub const CHAN_LEN: &str = "zirk_rt_chan_len";
+    /// Reports whether a channel has been closed.
+    pub const CHAN_IS_CLOSED: &str = "zirk_rt_chan_is_closed";
+    /// Returns a channel's declared capacity.
+    pub const CHAN_CAPACITY: &str = "zirk_rt_chan_capacity";
+    /// Drains queued values into a managed list.
+    pub const CHAN_DRAIN: &str = "zirk_rt_chan_drain";
     /// Carries a branch's unhandled Zirk exception into a scheduler-visible
     /// branch failure so the owning scope cancels its siblings.
     pub const BRANCH_FAIL: &str = "zirk_rt_branch_fail";
@@ -271,6 +291,8 @@ pub mod symbols {
     pub const ARRAY_NEW: &str = "zirk_rt_array_new";
     /// `zirk_rt_list_new(elem_size, elem_align, is_ref) -> *mut c_void`.
     pub const LIST_NEW: &str = "zirk_rt_list_new";
+    /// `zirk_rt_list_new_with_layout(elem_size, elem_align, offsets, count) -> *mut c_void`.
+    pub const LIST_NEW_WITH_LAYOUT: &str = "zirk_rt_list_new_with_layout";
     /// `zirk_rt_map_new() -> *mut c_void`.
     pub const MAP_NEW: &str = "zirk_rt_map_new";
     /// `zirk_rt_map_length(map) -> i64`.
@@ -339,6 +361,17 @@ pub struct Runtime<'ctx> {
     pub timer_after: FunctionValue<'ctx>,
     pub timer_every: FunctionValue<'ctx>,
     pub sleep: FunctionValue<'ctx>,
+    pub chan_new: FunctionValue<'ctx>,
+    pub chan_try_send: FunctionValue<'ctx>,
+    pub chan_try_recv: FunctionValue<'ctx>,
+    pub chan_send: FunctionValue<'ctx>,
+    pub chan_recv: FunctionValue<'ctx>,
+    pub chan_close: FunctionValue<'ctx>,
+    pub chan_len: FunctionValue<'ctx>,
+    pub chan_is_closed: FunctionValue<'ctx>,
+    pub chan_capacity: FunctionValue<'ctx>,
+    pub chan_drain: FunctionValue<'ctx>,
+    pub list_new_with_layout: FunctionValue<'ctx>,
     pub branch_fail: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
@@ -561,6 +594,68 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         external,
     );
     let sleep = module.add_function(symbols::SLEEP, void.fn_type(&[i64.into()], false), external);
+    // Channels carry values through caller-owned slots. The metadata supplied
+    // to construction makes the runtime independent of every concrete `T`.
+    let chan_new = module.add_function(
+        symbols::CHAN_NEW,
+        ptr.fn_type(
+            &[
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let chan_try_send = module.add_function(
+        symbols::CHAN_TRY_SEND,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let chan_try_recv = module.add_function(
+        symbols::CHAN_TRY_RECV,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let chan_send = module.add_function(
+        symbols::CHAN_SEND,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let chan_recv = module.add_function(
+        symbols::CHAN_RECV,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let chan_close = module.add_function(
+        symbols::CHAN_CLOSE,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let chan_len = module.add_function(
+        symbols::CHAN_LEN,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let chan_is_closed = module.add_function(
+        symbols::CHAN_IS_CLOSED,
+        context.bool_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let chan_capacity = module.add_function(
+        symbols::CHAN_CAPACITY,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let chan_drain = module.add_function(
+        symbols::CHAN_DRAIN,
+        void.fn_type(&[ptr.into(), ptr.into(), i64.into(), i64.into()], false),
+        external,
+    );
     let branch_fail = module.add_function(
         symbols::BRANCH_FAIL,
         void.fn_type(&[ptr.into()], false),
@@ -932,6 +1027,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
         external,
     );
+    let list_new_with_layout = module.add_function(
+        symbols::LIST_NEW_WITH_LAYOUT,
+        ptr.fn_type(&[i64.into(), i64.into(), ptr.into(), i64.into()], false),
+        external,
+    );
     let map_new = module.add_function(symbols::MAP_NEW, ptr.fn_type(&[], false), external);
     let map_length = module.add_function(
         symbols::MAP_LENGTH,
@@ -1264,6 +1364,17 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         timer_after,
         timer_every,
         sleep,
+        chan_new,
+        chan_try_send,
+        chan_try_recv,
+        chan_send,
+        chan_recv,
+        chan_close,
+        chan_len,
+        chan_is_closed,
+        chan_capacity,
+        chan_drain,
+        list_new_with_layout,
         branch_fail,
         shutdown,
         str_from_utf8,

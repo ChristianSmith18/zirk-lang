@@ -1,0 +1,101 @@
+// Showcase ejecutable de la concurrencia y el paralelismo disponibles.
+//
+// Ejecutar con:
+//   zirk check examples/concurrency_parallel_showcase.zrk
+//   zirk run examples/concurrency_parallel_showcase.zrk
+
+fn fetch_sales(): Int32 {
+    return 12;
+}
+
+fn fetch_returns(): Int32 {
+    return 3;
+}
+
+fn net_sales(sales: Int32, returns: Int32): Int32 {
+    return sales - returns;
+}
+
+// El productor llena un canal acotado y lo cierra. Cuando el consumidor aún
+// no alcanza a recibir, send() suspende esta rama sin bloquear el executor.
+fn produce_orders(channel: Channel<Int32>): Void {
+    channel.send(10);
+    channel.send(20);
+    channel.send(30);
+    channel.send(40);
+    channel.send(50);
+    channel.close();
+}
+
+fn consume_orders(channel: Channel<Int32>): Int32 {
+    mut total: Int32 = 0;
+    mut next: Int32? = channel.receive();
+    while true {
+        match next {
+            null => { break; },
+            order => {
+                total = total + order;
+                next = channel.receive();
+            }
+        };
+    }
+    return total;
+}
+
+fn square(value: Int32): Int32 {
+    return value * value;
+}
+
+fn main(): Void {
+    // 1. Fan-out estructurado: sales y returns corren en paralelo lógico;
+    //    net espera ambos resultados por Rule B antes de ejecutarse.
+    concurrent {
+        inmut sales: Int32 = fetch_sales();
+        inmut returns: Int32 = fetch_returns();
+        inmut net: Int32 = net_sales(sales, returns);
+    }
+    stdout.println("net sales");
+    stdout.println(net);
+
+    // 2. Canal real productor/consumidor: capacidad 2, FIFO, backpressure,
+    //    cierre y drain-before-closure mediante receive().
+    mut orders: Channel<Int32> = Channel(2);
+    concurrent {
+        spawn produce_orders(orders);
+        inmut consumer: Job<Int32> = spawn consume_orders(orders);
+        inmut processed: Int32 = consumer.wait();
+    }
+    stdout.println("orders total");
+    stdout.println(processed);
+
+    // 3. Timer.every es ambient: el scope lo cancela al salir después del
+    //    sleep, sin dejar una rama viva ni bloquear el programa.
+    concurrent {
+        Timer.every(1ms, (): Void => { });
+        Timer.sleep(3ms);
+    }
+    stdout.println("timer scope: done");
+
+    // 4. Región CPU: divide el trabajo de la colección en el pool de workers.
+    //    La entrada es estricta e inmutable, como exige el límite de parallel.
+    inmut::strict values: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8];
+    parallel; cores: 2 {
+        for value in values {
+            square(value);
+        }
+    }
+
+    // 5. Adaptadores paralelos: los resultados materializados mantienen el
+    //    orden original aunque los callbacks terminen en distinto momento.
+    inmut squares: List<Int32> = values.parallel.map((value: Int32): Int32 => value * value);
+    inmut even_squares: List<Int32> = squares.parallel.filter((value: Int32): Boolean => value % 2 == 0);
+    inmut shifted: List<Int32> = Parallel.each(values, (value: Int32): Int32 => value + 100);
+    stdout.println("parallel sum");
+    stdout.println(squares.parallel.sum());
+    stdout.println("parallel even count");
+    stdout.println(even_squares.length);
+    stdout.println("parallel first");
+    stdout.println(shifted[0]);
+    stdout.println("parallel last");
+    stdout.println(shifted[7]);
+}

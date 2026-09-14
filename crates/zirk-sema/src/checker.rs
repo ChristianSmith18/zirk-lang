@@ -34,6 +34,8 @@ pub struct CheckedProgram {
     /// Interned `Job<T>` result types, indexed by the id their [`Base::Job`]
     /// carries.
     pub job_types: Vec<Type>,
+    /// Interned `Channel<T>` element types, indexed by [`Base::Channel`].
+    pub channel_types: Vec<Type>,
     /// What each lambda captures, keyed by the lambda's span.
     ///
     /// Lowering needs this to build the environment, and a span identifies a
@@ -203,6 +205,8 @@ pub struct CheckedProgram {
     /// lowering to look up — only this id, to tell "a `Result` value" apart
     /// from any other enum.
     pub native_result: Option<u32>,
+    /// Compiler-known channel outcome enums.
+    pub native_channels: Option<NativeChannels>,
     /// The compiler-known exception hierarchy's class ids (roadmap Phase
     /// 4b): `Error`, `Throwable`, `RuntimeError`, `StackTrace`, in that
     /// registration order — `zirk-ir/lower.rs` needs `throwable` to build
@@ -332,6 +336,7 @@ struct Names<'t> {
     enums: &'t [EnumType],
     fn_types: &'t [FnType],
     job_types: &'t [Type],
+    channel_types: &'t [Type],
     classes: &'t [ClassType],
     contracts: &'t [ContractType],
     type_params: &'t [TypeParamInfo],
@@ -385,6 +390,13 @@ impl TypeNames for Names<'_> {
 
     fn job_result(&self, id: u32) -> Type {
         self.job_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn channel_element(&self, id: u32) -> Type {
+        self.channel_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -682,6 +694,7 @@ struct Checker<'a> {
     variant_constructions: HashMap<Span, u32>,
     /// See [`CheckedProgram::native_result`].
     native_result: Option<u32>,
+    native_channels: Option<NativeChannels>,
     /// See [`CheckedProgram::native_exceptions`].
     native_exceptions: Option<NativeExceptions>,
     /// Ids of the language's own `Resource<E>` interface and its `E`
@@ -719,6 +732,7 @@ struct Checker<'a> {
     /// Interned `Pin<T>` referent types, indexed by the id their [`Base::Pin`]
     /// carries (roadmap Phase 4e, `phase-4e-memory`).
     pin_types: Vec<Type>,
+    channel_types: Vec<Type>,
     /// Interned `Tuple(T...)` element types, indexed by the id their
     /// [`Base::Tuple`] carries (roadmap Phase 3b).
     tuple_types: Vec<TupleType>,
@@ -826,6 +840,12 @@ struct NativeIteration {
     iteration: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct NativeChannels {
+    pub send_outcome: u32,
+    pub receive_outcome: u32,
+}
+
 impl<'a> Checker<'a> {
     fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
         let mut checker = Self {
@@ -875,6 +895,7 @@ impl<'a> Checker<'a> {
             generic_constructions: HashMap::new(),
             native_iteration: None,
             native_result: None,
+            native_channels: None,
             native_exceptions: None,
             native_resource: None,
             native_transferable: None,
@@ -887,6 +908,7 @@ impl<'a> Checker<'a> {
             native_slice_mut_types: Vec::new(),
             dependent_types: Vec::new(),
             pin_types: Vec::new(),
+            channel_types: Vec::new(),
             tuple_types: Vec::new(),
             array_types: Vec::new(),
             range_types: Vec::new(),
@@ -1039,6 +1061,7 @@ impl<'a> Checker<'a> {
                 enums: &self.enums,
                 fn_types: &self.fn_types,
                 job_types: &self.job_types,
+                channel_types: &self.channel_types,
                 classes: &self.classes,
                 contracts: &self.contracts,
                 type_params: &self.type_params,
@@ -1069,6 +1092,7 @@ impl<'a> Checker<'a> {
         self.register_native_clone_contract();
         self.register_native_functions();
         self.register_native_result_enum();
+        self.register_native_channel_outcomes();
         self.register_native_exception_hierarchy();
         self.register_native_resource_contract();
         self.register_native_transferable_resource_contract();
@@ -1150,6 +1174,7 @@ impl<'a> Checker<'a> {
             contracts: self.contracts,
             fn_types: self.fn_types,
             job_types: self.job_types,
+            channel_types: self.channel_types,
             lambdas: self.lambdas,
             concurrent_plans: self.concurrent_plans,
             matches: self.matches,
@@ -1170,6 +1195,7 @@ impl<'a> Checker<'a> {
             for_in_iteration: self.for_in_iteration,
             variant_constructions: self.variant_constructions,
             native_result: self.native_result,
+            native_channels: self.native_channels,
             native_exceptions: self.native_exceptions,
             pointer_types: self.pointer_types,
             weak_types: self.weak_types,
@@ -1695,6 +1721,79 @@ impl<'a> Checker<'a> {
         });
 
         self.native_result = Some(result);
+    }
+
+    /// Registers the closed outcome enums used by `Channel<T>` operations.
+    fn register_native_channel_outcomes(&mut self) {
+        let at = Span::empty(0);
+        let send = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "SendOutcome".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Sent".into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Full".into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Closed".into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                },
+            ],
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+        let t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            default: None,
+            span: at,
+        });
+        let receive = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "ReceiveOutcome".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Received".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "value".into(),
+                        ty: Type::of(Base::Param(t)),
+                    }],
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Empty".into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Closed".into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                },
+            ],
+            type_params: vec![t],
+            shared: true,
+            span: at,
+        });
+        self.native_channels = Some(NativeChannels {
+            send_outcome: send,
+            receive_outcome: receive,
+        });
     }
 
     /// Registers `Error`/`Throwable`/`RuntimeError`/`StackTrace` (roadmap
@@ -5404,6 +5503,7 @@ impl<'a> Checker<'a> {
                 Base::Enum(id) => (10, id),
                 Base::Function(id) => (11, id),
                 Base::Job(id) => (12, id),
+                Base::Channel(id) => (12, id),
                 Base::Contract(id) => (12, id),
                 Base::Class(id) => (13, id),
                 Base::Param(id) => (14, id),
@@ -5500,6 +5600,38 @@ impl<'a> Checker<'a> {
         }
         self.job_types.push(result);
         (self.job_types.len() - 1) as u32
+    }
+
+    /// `Channel<T>` is an interned compiler-known endpoint type. Unlike
+    /// `Pointer<T>`, every Zirk value representation is supported: the
+    /// runtime receives its layout metadata at construction time.
+    fn resolve_channel_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Channel<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Channel<T>` naming the element type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_channel_type(element);
+        let ty = Type::of(Base::Channel(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    fn intern_channel_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.channel_types.iter().position(|&ty| ty == element) {
+            return index as u32;
+        }
+        self.channel_types.push(element);
+        (self.channel_types.len() - 1) as u32
     }
 
     /// `Pointer<T>` (roadmap Phase 4e, design D1/D2): resolves `T` and
@@ -5994,6 +6126,9 @@ impl<'a> Checker<'a> {
         if reference.name == "Job" {
             return self.resolve_job_type_ref(reference);
         }
+        if reference.name == "Channel" {
+            return self.resolve_channel_type_ref(reference);
+        }
         if reference.name == "Weak" {
             return self.resolve_weak_type_ref(reference);
         }
@@ -6389,6 +6524,25 @@ impl<'a> Checker<'a> {
         }
         self.enum_instances.push(instance);
         (self.enum_instances.len() - 1) as u32
+    }
+
+    fn native_send_outcome_type(&self) -> Type {
+        Type::of(Base::Enum(
+            self.native_channels
+                .expect("channel outcomes registered")
+                .send_outcome,
+        ))
+    }
+
+    fn native_receive_outcome_type(&mut self, element: Type) -> Type {
+        let id = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: self
+                .native_channels
+                .expect("channel outcomes registered")
+                .receive_outcome,
+            args: vec![element],
+        });
+        Type::of(Base::EnumInstance(id))
     }
 
     /// `Iterator` alone, or `Iterator<Int32>` with its arguments checked
@@ -8170,6 +8324,7 @@ impl<'a> Checker<'a> {
             }
             Base::Contract(_) | Base::ContractInstance(_) => true,
             Base::Array(_) | Base::List(_) => true,
+            Base::Channel(_) => true,
             _ => false,
         }
     }
@@ -12391,6 +12546,14 @@ impl<'a> Checker<'a> {
             return Type::BOOLEAN;
         }
 
+        if matches!(object.base, Base::Channel(_)) {
+            match member.name.as_str() {
+                "is_closed" => return Type::BOOLEAN,
+                "length" | "capacity" => return Type::INT32,
+                _ => {}
+            }
+        }
+
         // `.is_null` (roadmap Phase 4e): the one `Pointer<T>` operation that
         // needs no `unsafe` (spec scenario "Null raw pointer is inspected").
         if let Base::Pointer(_) = object.base
@@ -14595,6 +14758,118 @@ impl<'a> Checker<'a> {
         Type::of(Base::Array(id))
     }
 
+    /// `Channel<T>(capacity: N)` obtains `T` from its contextual type. The
+    /// generic spelling is resolved before call checking, so the constructor
+    /// follows the established `Array<T>`/`List<T>` contextual pattern.
+    fn check_channel_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`Channel<T>` needs a known element type",
+                "write `let ch: Channel<T> = Channel(...)`",
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+        let Base::Channel(id) = expected.base else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Channel` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return expected;
+        };
+        if expr.args.len() > 1 || expr.args.iter().any(|arg| arg.is_spread) {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Channel<T>` accepts at most one capacity argument",
+                format!("received {} argument(s)", expr.args.len()),
+                None,
+            );
+        }
+        for arg in &expr.args {
+            let capacity = self.check_expr(&arg.value);
+            if !capacity.is_unknown()
+                && (!matches!(capacity.base, Base::Int(_)) || capacity.nullable)
+            {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "`Channel<T>` capacity must be an integer",
+                    format!("found {}", self.name(capacity)),
+                    None,
+                );
+            }
+        }
+        Type::of(Base::Channel(id))
+    }
+
+    /// `Channel.unbounded<T>(limit: N)` uses contextual element typing while
+    /// selecting growable storage at lowering.
+    fn check_channel_unbounded_construction(
+        &mut self,
+        expr: &CallExpr,
+        expected: Option<Type>,
+    ) -> Type {
+        let Some(expected) = expected else {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                expr.span,
+                "`Channel.unbounded<T>` needs a known element type",
+                "write `let ch: Channel<T> = Channel.unbounded(limit: ...)`",
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+        let Base::Channel(id) = expected.base else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Channel.unbounded` does not match the expected type",
+                format!("expected {}", self.name(expected)),
+                None,
+            );
+            return expected;
+        };
+        if expr.args.len() != 1
+            || expr.args[0]
+                .name
+                .as_ref()
+                .is_some_and(|name| name.name != "limit")
+        {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Channel.unbounded` requires one `limit` argument",
+                format!("received {} argument(s)", expr.args.len()),
+                None,
+            );
+        }
+        for arg in &expr.args {
+            let limit = self.check_expr(&arg.value);
+            if !limit.is_unknown() && (!matches!(limit.base, Base::Int(_)) || limit.nullable) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "`Channel.unbounded` limit must be an integer",
+                    format!("found {}", self.name(limit)),
+                    None,
+                );
+            }
+        }
+        Type::of(Base::Channel(id))
+    }
+
     /// `List<T>()` — the element type is taken from the expected type.
     fn check_list_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         let Some(expected) = expected else {
@@ -16213,6 +16488,84 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Built-in methods on a typed channel. The outcome-enum methods are
+    /// deliberately held for the enum registration slice; this keeps the
+    /// public type contract from exposing raw runtime status integers.
+    fn check_channel_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Channel(id) = object.base else {
+            return None;
+        };
+        let element = self
+            .channel_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        match field.name.name.as_str() {
+            "send" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "send", 1);
+                } else {
+                    let value = self.check_expr(&expr.args[0].value);
+                    if !value.is_unknown() && !element.accepts(value) {
+                        self.expect_assignable(
+                            element,
+                            value,
+                            expr.args[0].value.span(),
+                            "the channel element",
+                        );
+                    }
+                }
+                Some(Type::VOID)
+            }
+            "receive" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "receive", 0);
+                }
+                Some(element.as_nullable())
+            }
+            "try_send" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "try_send", 1);
+                } else {
+                    let value = self.check_expr(&expr.args[0].value);
+                    if !value.is_unknown() && !element.accepts(value) {
+                        self.expect_assignable(
+                            element,
+                            value,
+                            expr.args[0].value.span(),
+                            "the channel element",
+                        );
+                    }
+                }
+                Some(self.native_send_outcome_type())
+            }
+            "try_receive" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "try_receive", 0);
+                }
+                Some(self.native_receive_outcome_type(element))
+            }
+            "close" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "close", 0);
+                }
+                Some(Type::VOID)
+            }
+            "drain" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "drain", 0);
+                }
+                Some(Type::of(Base::List(self.intern_list_type(element))))
+            }
+            _ => None,
+        }
+    }
+
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if matches!(&*expr.callee, Expr::Super(_)) {
@@ -16236,6 +16589,12 @@ impl<'a> Checker<'a> {
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
         {
+            if base.name == "Channel"
+                && field.name.name == "unbounded"
+                && self.scopes.lookup(&base.name).is_none()
+            {
+                return self.check_channel_unbounded_construction(expr, expected);
+            }
             let resolved = self.resolved_name(&base.name, base.span);
             if let Some(enum_id) = self.enums.iter().position(|e| e.name == resolved) {
                 // `enum-static-members`: `E.keys()`/`E.values()`/
@@ -16574,6 +16933,14 @@ impl<'a> Checker<'a> {
                 && !field.safe
                 && !object.nullable
                 && let Some(ty) = self.check_map_set_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            if matches!(object.base, Base::Channel(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_channel_method_call(expr, field, object)
             {
                 return ty;
             }
@@ -17688,6 +18055,9 @@ impl<'a> Checker<'a> {
             }
             if callee.name == "Set" && self.scopes.lookup(&callee.name).is_none() {
                 return self.check_set_construction(expr, expected);
+            }
+            if callee.name == "Channel" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_channel_construction(expr, expected);
             }
 
             // `User(1, "x")` builds an instance. There is no `new`: the type

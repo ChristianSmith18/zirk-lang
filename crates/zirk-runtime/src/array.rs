@@ -23,6 +23,7 @@ unsafe fn make_descriptor(base: usize, stride: usize, count: usize) -> *mut c_vo
     if pointer.is_null() {
         crate::failure::zirk_rt_allocation_failed();
     }
+    crate::collector::register_dynamic_descriptor(pointer.cast(), layout);
     unsafe {
         pointer.add(0).write(0);
         pointer.add(1).write(0);

@@ -1,8 +1,8 @@
 # Zirk Structured Concurrency Semantics
 
-> **Surface status:** `concurrent`, `spawn`, `Job<T>`, `Timer`, and `parallel`
-> (section 8) are the delivered structured-concurrency surface. `typed-channels`
-> and `concurrency-completion` remain separate follow-up changes.
+> **Surface status:** `concurrent`, `spawn`, `Job<T>`, `Timer`, `parallel`, and
+> typed `Channel<T>` (section 8) are delivered. `concurrency-completion`
+> remains a separate follow-up change.
 
 ## 1. Execution domains
 
@@ -118,7 +118,23 @@ executor lifecycle around `main`. It does not define language syntax by itself.
 `typed-channels` supplies typed communication; and
 `concurrency-completion` supplies the remaining policy and outcome APIs.
 
-## 8. `parallel` CPU regions
+## 8. Typed channels
+
+`Channel<T>` is a shareable endpoint. `Channel<T>()` creates a growable channel
+with a runtime defense limit; `Channel<T>(capacity)` creates a bounded channel,
+including rendezvous semantics at capacity zero. `Channel.unbounded<T>(limit)`
+is the explicit growable form. `send` and `receive` are cooperative safe
+points, while `try_send` and `try_receive` never suspend and return the typed
+`SendOutcome` / `ReceiveOutcome<T>` enums. Closing is idempotent: queued values
+remain receivable, then `receive` returns `None`; sends after closure fail and
+the non-blocking operations return their `Closed` outcome. `length`,
+`capacity`, and `is_closed` are runtime queries. `drain()` is specified to
+consume values in FIFO order through closure.
+
+`select` is removed from the language. Multi-source waiting uses
+`Concurrent.of(...).first()` from the completion change instead.
+
+## 9. `parallel` CPU regions
 
 `parallel { ... }` opens a CPU-bound region, run on the worker pool
 (`crates/zirk-runtime/src/pool.rs`) rather than the cooperative executor. A

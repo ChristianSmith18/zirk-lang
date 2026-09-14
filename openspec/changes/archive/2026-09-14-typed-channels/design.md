@@ -64,6 +64,41 @@ it. It participates in Share (multiple branches may hold and use it
 concurrently). Passing a `Channel<T>` into a `spawn` body is allowed and does not
 consume it.
 
+### D7: Indirect generic-value C ABI
+
+`Channel<T>` retains the element layout at construction: byte size, alignment,
+and the offsets of GC-managed reference slots in `T`. `ChannelNew` carries that
+metadata. The channel C ABI receives source and destination slot pointers for
+`send` and `receive`; it copies exactly the stored element width, so scalars,
+references, and value aggregates cross the same ABI without boxing. The
+collector traces every configured reference offset in every queued element.
+
+**Alternative**: box every element as an object. Rejected because it adds an
+allocation and changes the cost model for scalar channels without solving any
+language-level ownership problem.
+
+### D8: Stackful suspension and shared layout metadata
+
+The executor's established concurrency model is stackful: `chan_send` and
+`chan_recv` park the current branch and return through the executor when the
+branch is woken. There is no separate `zirk_rt_suspend` ABI in this runtime, so
+the code generator does not emit a synthetic suspend symbol or an unreachable
+resume block. The generated calls are unwind-capable and the runtime tests cover
+cancellation, FIFO wake-up, closure wake-up, and re-entry.
+
+Channel and list element layouts share the same complete reference-offset set.
+`drain()` creates a list retaining those offsets; every backing-buffer resize
+rebuilds its descriptor from the retained set. Dynamic descriptors are
+registered with the collector and released when their backing buffer is swept.
+
+### D9: Closed blocking send
+
+`zirk_rt_chan_send` returns `CHAN_CLOSED` without enqueuing the value. Lowering
+checks that status and constructs the existing compiler-known `NativeError`
+failure with the message `channel is closed`, so `send` after closure enters the
+normal pending-exception and `try`/`catch` machinery. `try_send` continues to
+return the typed `Closed` status without throwing.
+
 ## Risks / Trade-offs
 
 - **Unbounded channel memory** → the mandatory internal defense limit

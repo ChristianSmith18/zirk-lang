@@ -339,6 +339,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|&pointee| ir_type(pointee, instance_base, enum_instance_base, checked))
         .collect();
 
+    // `Channel<T>` follows the same lockstep interning rule as pointers: the
+    // semantic and IR ids name the same concrete element type.
+    module.channel_types = checked
+        .channel_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+
     // `checked.weak_types` is pushed first, in the same order, for the same
     // reason `pointer_types` is just above (roadmap Phase 4e, `fase-4e-weak`,
     // design D1).
@@ -2806,6 +2814,7 @@ fn ir_type(
         // A Job is an opaque one-word runtime handle. Its source-level result
         // type remains in the checker; IR operations recover it at `JobWait`.
         Base::Job(_) => IrType::Job,
+        Base::Channel(id) => IrType::Channel(id),
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -3152,6 +3161,9 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn job_result(&self, id: u32) -> Type {
         self.0.job_types[id as usize]
+    }
+    fn channel_element(&self, id: u32) -> Type {
+        self.0.channel_types[id as usize]
     }
     fn class_name(&self, id: u32) -> String {
         self.0.classes[id as usize].name.clone()
@@ -3542,6 +3554,18 @@ impl<'a> FunctionLowering<'a> {
                 .expect("the checker interned every Job<T> it type-checked")
                 as u32;
             return Type::of(Base::Job(id));
+        }
+
+        if reference.name == "Channel" {
+            let element = self.resolve_written_type(&reference.arguments[0]);
+            let id = self
+                .checked
+                .channel_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Channel<T> it type-checked")
+                as u32;
+            return Type::of(Base::Channel(id));
         }
 
         // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
@@ -4443,6 +4467,7 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Closure(_)
             | IrType::Callable(_)
             | IrType::Job
+            | IrType::Channel(_)
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -7076,6 +7101,15 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_checked_binary(op, left, right, operand_type, span)
             }
 
+            ast::Expr::Call(e)
+                if matches!(&*e.callee, ast::Expr::Field(field)
+                    if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Channel")
+                        && field.name.name == "unbounded") =>
+            {
+                self.lower_array_list_construction(e, span)
+                    .expect("checked Channel.unbounded construction")
+            }
+
             // A recursive lambda calling itself by its own binding name
             // (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d): an
             // ordinary, direct recursive call to this same lifted function,
@@ -7126,6 +7160,15 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let ast::Expr::Field(field) = &*e.callee
+                    && let ast::Expr::Path(base) = &*field.object
+                    && base.name == "Channel"
+                    && field.name.name == "unbounded"
+                {
+                    return self
+                        .lower_array_list_construction(e, span)
+                        .expect("checked Channel.unbounded construction");
+                }
                 if self.is_timer_call(e) {
                     return self.lower_timer_call(e, span);
                 }
@@ -7228,6 +7271,9 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_map_set_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_channel_method_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
@@ -17031,10 +17077,39 @@ impl<'a> FunctionLowering<'a> {
         call: &ast::CallExpr,
         span: Span,
     ) -> Option<Operand> {
+        if let ast::Expr::Field(field) = &*call.callee
+            && let ast::Expr::Path(base) = &*field.object
+            && base.name == "Channel"
+            && field.name.name == "unbounded"
+        {
+            let &ty = self.checked.expr_types.get(&call.span)?;
+            let Base::Channel(id) = ty.base else {
+                return None;
+            };
+            let limit = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::U64));
+            let capacity = self.emit(
+                InstKind::ConstInt(i64::MAX.into()),
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+            let element = self.module.channel_types[id as usize];
+            return Some(self.emit(
+                InstKind::ChannelNew {
+                    capacity,
+                    limit,
+                    element,
+                },
+                IrType::Channel(id),
+                span,
+            ));
+        }
         let ast::Expr::Path(callee) = &*call.callee else {
             return None;
         };
-        if !matches!(callee.name.as_str(), "Array" | "List" | "Map" | "Set") {
+        if !matches!(
+            callee.name.as_str(),
+            "Array" | "List" | "Map" | "Set" | "Channel"
+        ) {
             return None;
         }
         let &ty = self.checked.expr_types.get(&call.span)?;
@@ -17069,6 +17144,144 @@ impl<'a> FunctionLowering<'a> {
             }
             ("Set", Base::Set(id)) if call.args.is_empty() => {
                 Some(self.emit(InstKind::SetNew { set_id: id }, IrType::Set(id), span))
+            }
+            ("Channel", Base::Channel(id)) if call.args.len() <= 1 => {
+                let capacity = if let Some(argument) = call.args.first() {
+                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                } else {
+                    self.emit(
+                        InstKind::ConstInt(i64::MAX.into()),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    )
+                };
+                let limit = if call.args.is_empty() {
+                    self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::U64), span)
+                } else {
+                    capacity
+                };
+                let element = self.module.channel_types[id as usize];
+                Some(self.emit(
+                    InstKind::ChannelNew {
+                        capacity,
+                        limit,
+                        element,
+                    },
+                    IrType::Channel(id),
+                    span,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_channel_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if let ast::Expr::Path(ident) = &*field.object {
+            if ident.name == "Channel" && field.name.name == "unbounded" {
+                return None;
+            }
+            self.try_lookup_slot(&ident.name)?;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let IrType::Channel(id) = receiver_ty else {
+            return None;
+        };
+        let receiver = self.lower_expr(&field.object);
+        let element = self.module.channel_types[id as usize];
+        match (field.name.name.as_str(), call.args.len()) {
+            ("send", 1) => {
+                let value = self.lower_expr_as(&call.args[0].value, element);
+                let status = self.emit(
+                    InstKind::ChannelSend {
+                        channel: receiver,
+                        value,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let closed_status = self.const_int_at(2, IrType::Int(IntWidth::I32), span);
+                let closed = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: closed_status,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let fail = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: closed,
+                    then_block: fail,
+                    else_block: cont,
+                });
+                self.current = fail;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("a channel send registered the exception hierarchy");
+                self.throw_native_failure(native.native_error, "channel is closed", span);
+                self.current = cont;
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("receive", 0) => {
+                let nullable = Nullable::of(element)?;
+                Some(self.emit(
+                    InstKind::ChannelRecv {
+                        channel: receiver,
+                        element,
+                    },
+                    IrType::Nullable(nullable),
+                    span,
+                ))
+            }
+            ("try_send", 1) => {
+                let value = self.lower_expr_as(&call.args[0].value, element);
+                Some(self.emit(
+                    InstKind::ChannelTrySend {
+                        channel: receiver,
+                        value,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ))
+            }
+            ("try_receive", 0) => {
+                let result = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .copied()
+                    .map(|ty| self.ir_type(ty))
+                    .expect("checker records the receive outcome type");
+                Some(self.emit(
+                    InstKind::ChannelTryRecv {
+                        channel: receiver,
+                        element,
+                    },
+                    result,
+                    span,
+                ))
+            }
+            ("close", 0) => Some(self.emit(
+                InstKind::ChannelClose { channel: receiver },
+                IrType::Void,
+                span,
+            )),
+            ("drain", 0) => {
+                let list_id = self.list_id_for(element);
+                Some(self.emit(
+                    InstKind::ChannelDrain {
+                        channel: receiver,
+                        element_id: list_id,
+                    },
+                    IrType::List(list_id),
+                    span,
+                ))
             }
             _ => None,
         }
@@ -18681,6 +18894,34 @@ impl<'a> FunctionLowering<'a> {
         {
             let job = self.lower_expr(&expr.object);
             return self.emit(InstKind::JobDone { job }, IrType::Boolean, span);
+        }
+
+        // Typed-channel status properties are runtime queries, not fields in
+        // the opaque endpoint representation.
+        let channel_object = match &*expr.object {
+            ast::Expr::Path(path) => self.try_lookup_slot(&path.name).is_some(),
+            _ => true,
+        } && matches!(
+            self.type_of(&expr.object, expr.object.span()),
+            IrType::Channel(_)
+        );
+        if channel_object && matches!(expr.name.name.as_str(), "length" | "capacity" | "is_closed")
+        {
+            let channel = self.lower_expr(&expr.object);
+            return match expr.name.name.as_str() {
+                "length" => self.emit(
+                    InstKind::ChannelLength(channel),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ),
+                "capacity" => self.emit(
+                    InstKind::ChannelCapacity(channel),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ),
+                "is_closed" => self.emit(InstKind::ChannelIsClosed(channel), IrType::Boolean, span),
+                _ => unreachable!(),
+            };
         }
 
         // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`, design D4): the same
@@ -21384,6 +21625,9 @@ impl<'a> FunctionLowering<'a> {
                     let _ = result;
                 }
             }
+            ast::Expr::Call(e) if self.is_channel_method_call(e) => {
+                let _ = self.lower_channel_method_call(e, expr.span());
+            }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
             ast::Expr::Call(e)
@@ -22356,6 +22600,21 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    fn is_channel_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Channel(_)
+        )
+    }
+
     /// Whether `call` is a recursive lambda calling itself by its own
     /// binding name (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d)
     /// — see `Self::recursive_call`'s own doc comment.
@@ -22471,6 +22730,7 @@ impl<'a> FunctionLowering<'a> {
             || self.is_range_method_call(call)
             || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
+            || self.is_channel_method_call(call)
             || self.result_method(call).is_some()
         {
             return false;
@@ -22663,6 +22923,17 @@ impl<'a> FunctionLowering<'a> {
                 .get(&e.span)
                 .map(|ty| self.ir_type(*ty))
                 .expect("checker recorded Parallel.each type"),
+            ast::Expr::Call(e)
+                if matches!(&*e.callee, ast::Expr::Field(field)
+                    if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Channel")
+                        && field.name.name == "unbounded") =>
+            {
+                self.checked
+                    .expr_types
+                    .get(&e.span)
+                    .map(|ty| self.ir_type(*ty))
+                    .expect("checker recorded Channel.unbounded type")
+            }
             ast::Expr::Call(e) if self.is_callable_call(e) => {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")

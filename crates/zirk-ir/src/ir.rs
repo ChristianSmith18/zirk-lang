@@ -170,6 +170,9 @@ pub enum IrType {
     /// the source-level `Job<T>` and is recovered by `JobWait`; the portable
     /// IR only carries the opaque scheduler id.
     Job,
+    /// A one-word typed-channel endpoint. Its element type is kept in the
+    /// module's intern table; the handle itself is a managed reference.
+    Channel(u32),
     /// A reference to an object, identified by its layout in the module.
     ///
     /// It is a reference and not a value: an object has identity, and identity
@@ -356,6 +359,7 @@ impl IrType {
             IrType::Closure(_) => "closure",
             IrType::Callable(_) => "Callable",
             IrType::Job => "Job",
+            IrType::Channel(_) => "Channel",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
             IrType::Value(_) => "value",
@@ -437,6 +441,7 @@ impl IrType {
             | IrType::Char
             | IrType::Array(_)
             | IrType::List(_)
+            | IrType::Channel(_)
             | IrType::Range
             | IrType::Map(_)
             | IrType::Set(_) => true,
@@ -506,6 +511,8 @@ pub struct Module {
     /// Interned `Pointer<T>` pointee types, indexed by the id
     /// [`IrType::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<IrType>,
+    /// Interned `Channel<T>` element types, indexed by [`IrType::Channel`].
+    pub channel_types: Vec<IrType>,
     /// Interned `Weak<T>` referent types, indexed by the id
     /// [`IrType::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design
     /// D1).
@@ -708,6 +715,16 @@ impl Module {
         }
         self.pointer_types.push(pointee);
         (self.pointer_types.len() - 1) as u32
+    }
+
+    /// Interns a `Channel<T>` element type, returning the id its endpoint
+    /// [`IrType::Channel`] carries.
+    pub fn intern_channel_type(&mut self, element: IrType) -> u32 {
+        if let Some(index) = self.channel_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.channel_types.push(element);
+        (self.channel_types.len() - 1) as u32
     }
 
     /// Interns a `Weak<T>` referent type, returning the id
@@ -1274,6 +1291,52 @@ pub enum InstKind {
     /// cancellation safe point; produces `IrType::Void`.
     TimerSleep {
         nanos: Operand,
+    },
+
+    /// Creates a typed channel. `capacity` is `usize::MAX` for growable
+    /// channels; `limit` remains its defensive growth bound. The concrete
+    /// element layout is recovered from `element` by codegen.
+    ChannelNew {
+        capacity: Operand,
+        limit: Operand,
+        element: IrType,
+    },
+    /// Sends an element through an indirect source slot. The runtime may
+    /// cooperatively suspend when a bounded channel is full.
+    ChannelSend {
+        channel: Operand,
+        value: Operand,
+    },
+    /// Receives into an indirect destination slot. The result is a runtime
+    /// status word; codegen owns the slot and reconstructs the value.
+    ChannelRecv {
+        channel: Operand,
+        element: IrType,
+    },
+    /// Non-suspending send; returns the runtime status word.
+    ChannelTrySend {
+        channel: Operand,
+        value: Operand,
+    },
+    /// Non-suspending receive; returns the runtime status word.
+    ChannelTryRecv {
+        channel: Operand,
+        element: IrType,
+    },
+    /// Idempotently closes a channel.
+    ChannelClose {
+        channel: Operand,
+    },
+    /// Channel queue length.
+    ChannelLength(Operand),
+    /// Whether a channel has been closed.
+    ChannelIsClosed(Operand),
+    /// Channel declared capacity (`-1` for growable channels).
+    ChannelCapacity(Operand),
+    /// Drains queued values into a newly allocated `List<T>`.
+    ChannelDrain {
+        channel: Operand,
+        element_id: u32,
     },
 
     /// `Pointer.from(place)` where `place` is a local/parameter slot

@@ -452,11 +452,16 @@ nanoseconds for the `Date ± Duration` → `DateTime` promotion.
 
 ### Requirement: Lowering of channel operations
 
-The lowering SHALL translate `channel.send(value)` and `channel.receive()` into
-runtime calls that may suspend the current task, and `channel.try_send(value)` /
-`channel.try_receive()` into non-suspending runtime calls that return a typed
-outcome. A value crossing into or out of a channel SHALL be lowered under the
-`Transfer` rule that applies to its type.
+The lowering SHALL use `ChannelNew`, `ChannelSend`, `ChannelRecv`,
+`ChannelTrySend`, `ChannelTryRecv`, and `ChannelClose`. `ChannelSend` and
+`ChannelRecv` SHALL be cancellation-safe suspension points when backpressured or
+empty; in the stackful executor model the runtime call owns the park/resume
+transition and the IR SHALL NOT invent a separate suspend instruction or label.
+`ChannelTrySend` and `ChannelTryRecv` SHALL never suspend. A value crossing into
+or out of a channel SHALL be lowered under its `Transfer` rule.
+`ChannelNew` SHALL carry its element size, alignment, and GC-reference offsets;
+send and receive SHALL pass indirect element slots to preserve every `T`
+representation without boxing.
 
 #### Scenario: Suspending send lowers to a safe point
 

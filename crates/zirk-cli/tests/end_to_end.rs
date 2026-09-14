@@ -169,6 +169,19 @@ fn the_concurrent_examples_program_runs() {
 }
 
 #[test]
+fn the_channel_examples_program_runs() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("channel_examples.zrk");
+    let output = zirk("run", &source, "channel_examples", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "6\n60\n4\n16\n");
+}
+
+#[test]
 fn the_parallel_examples_program_runs() {
     // `examples/parallel_examples.zrk` — the normative showcase for
     // `parallel-cpu-regions`.

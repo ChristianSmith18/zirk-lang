@@ -50,7 +50,9 @@
 
 use std::alloc::{Layout, dealloc};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{Mutex, OnceLock};
 
 /// Every collector allocation is aligned to at least this many bytes,
 /// regardless of what codegen actually requested for a given class'
@@ -79,6 +81,33 @@ pub(crate) const HEADER_BYTES: usize = 3 * std::mem::size_of::<usize>();
 /// is [`GC_ALIGN`]-aligned, so a real `next` pointer's low bit is always
 /// zero on its own.
 const MARK_BIT: usize = 1;
+
+/// Raw descriptors used by dynamic array/list backing buffers. They are
+/// metadata rather than collector objects, so sweep must release them with
+/// the exact layout used at allocation time.
+static DYNAMIC_DESCRIPTORS: OnceLock<Mutex<HashMap<usize, Layout>>> = OnceLock::new();
+
+pub(crate) fn register_dynamic_descriptor(pointer: *mut c_void, layout: Layout) {
+    DYNAMIC_DESCRIPTORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("dynamic descriptor registry poisoned")
+        .insert(pointer as usize, layout);
+}
+
+pub(crate) unsafe fn release_dynamic_descriptor(pointer: *mut c_void) {
+    if pointer.is_null() {
+        return;
+    }
+    let layout = DYNAMIC_DESCRIPTORS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("dynamic descriptor registry poisoned")
+        .remove(&(pointer as usize));
+    if let Some(layout) = layout {
+        unsafe { dealloc(pointer as *mut u8, layout) };
+    }
+}
 
 /// Word offset of a WeakCell's own single field — the target's address
 /// (`fase-4e-weak`, design D1/D2) — right after the three-word header,
@@ -849,6 +878,15 @@ fn mark_object(object: *mut c_void) {
         return;
     }
 
+    // A channel keeps generic element bytes rather than ordinary object fields.
+    // Its registered element layout identifies the reference slots that must be
+    // traced while queued (and while a backpressured sender owns a copy).
+    if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
+        let mut mark = mark_object;
+        unsafe { crate::channel::mark_queued(object, &mut mark) };
+        return;
+    }
+
     let offsets = unsafe { gc_field_offsets(descriptor as *const c_void) };
     for &offset in offsets {
         let field_addr = (object as usize + offset) as *mut *mut c_void;
@@ -914,6 +952,15 @@ fn sweep(list_head: *mut c_void) -> (*mut c_void, usize) {
             live_bytes += unsafe { get_size(current) };
         } else {
             let size = unsafe { get_size(current) };
+            let descriptor = unsafe { object_descriptor(current) };
+            unsafe { release_dynamic_descriptor(descriptor) };
+            // A channel owns Rust collections after its three-word GC header.
+            // Run their destructor before freeing the raw collector block.
+            if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
+                unsafe { crate::channel::drop_body(current) };
+            } else if std::ptr::eq(descriptor, crate::list::list_descriptor()) {
+                unsafe { crate::list::drop_body(current) };
+            }
             let layout = Layout::from_size_align(size, GC_ALIGN)
                 .expect("this is the exact layout `zirk_rt_alloc` used to allocate it");
             unsafe { dealloc(current as *mut u8, layout) };

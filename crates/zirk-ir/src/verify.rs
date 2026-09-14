@@ -141,7 +141,7 @@ fn verify_instruction(
 
     match &inst.kind {
         InstKind::ConstInt(_) => {
-            if !matches!(inst.ty, IrType::Int(_)) {
+            if !matches!(inst.ty, IrType::Int(_) | IrType::Enum(_)) {
                 report(format!(
                     "{position}: ConstInt must produce an Int type, got {ty:?}",
                     ty = inst.ty
@@ -2242,6 +2242,80 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::ChannelNew {
+            capacity,
+            limit,
+            element: _,
+        } => {
+            if !matches!(type_of(capacity), Some(IrType::Int(_)))
+                || !matches!(type_of(limit), Some(IrType::Int(_)))
+            {
+                report(format!(
+                    "{position}: ChannelNew capacity and limit must be integers"
+                ));
+            }
+            if !matches!(inst.ty, IrType::Channel(_)) {
+                report(format!("{position}: ChannelNew must produce a Channel"));
+            }
+        }
+        InstKind::ChannelSend { channel, value: _ }
+        | InstKind::ChannelTrySend { channel, value: _ }
+        | InstKind::ChannelClose { channel } => {
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: channel operation receiver is not a Channel"
+                ));
+            }
+            if matches!(inst.kind, InstKind::ChannelSend { .. })
+                && !matches!(inst.ty, IrType::Int(_))
+            {
+                report(format!("{position}: ChannelSend must produce its status"));
+            }
+        }
+        InstKind::ChannelRecv { channel, element } => {
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: channel operation receiver is not a Channel"
+                ));
+            }
+            let expected = Nullable::of(*element).map(IrType::Nullable);
+            if Some(inst.ty) != expected {
+                report(format!(
+                    "{position}: ChannelRecv must produce the nullable channel element"
+                ));
+            }
+        }
+        InstKind::ChannelTryRecv { channel, .. } => {
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: channel operation receiver is not a Channel"
+                ));
+            }
+            if !matches!(inst.ty, IrType::Int(_) | IrType::Enum(_)) {
+                report(format!(
+                    "{position}: ChannelTryRecv status must be an integer"
+                ));
+            }
+        }
+        InstKind::ChannelLength(channel)
+        | InstKind::ChannelIsClosed(channel)
+        | InstKind::ChannelCapacity(channel) => {
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: channel property receiver is not a Channel"
+                ));
+            }
+        }
+        InstKind::ChannelDrain { channel, .. } => {
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: channel drain receiver is not a Channel"
+                ));
+            }
+            if !matches!(inst.ty, IrType::List(_)) {
+                report(format!("{position}: ChannelDrain must produce a List"));
+            }
+        }
     }
 }
 
@@ -2515,6 +2589,19 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             vec![*job]
         }
         InstKind::TimerSleep { nanos } => vec![*nanos],
+        InstKind::ChannelNew {
+            capacity, limit, ..
+        } => vec![*capacity, *limit],
+        InstKind::ChannelSend { channel, value } | InstKind::ChannelTrySend { channel, value } => {
+            vec![*channel, *value]
+        }
+        InstKind::ChannelRecv { channel, .. }
+        | InstKind::ChannelTryRecv { channel, .. }
+        | InstKind::ChannelClose { channel }
+        | InstKind::ChannelLength(channel)
+        | InstKind::ChannelIsClosed(channel)
+        | InstKind::ChannelCapacity(channel) => vec![*channel],
+        InstKind::ChannelDrain { channel, .. } => vec![*channel],
         InstKind::ParallelForStart {
             body,
             count,

@@ -600,3 +600,42 @@ fn timer_sleep_emits_a_runtime_suspend_call() {
     let ir = llvm_ir("fn main(): Void { Timer.sleep(1ms); }");
     assert!(ir.contains(&format!("@{}", symbols::SLEEP)));
 }
+
+#[test]
+fn typed_channel_operations_emit_the_channel_abi_and_typed_outcomes() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+           mut channel: Channel<Int32> = Channel(2);\n\
+           channel.send(1);\n\
+           mut sent: SendOutcome = channel.try_send(2);\n\
+           mut received: ReceiveOutcome<Int32> = channel.try_receive();\n\
+           mut value: Int32? = channel.receive();\n\
+           mut values: List<Int32> = channel.drain();\n\
+           channel.close();\n\
+         }",
+    );
+    for symbol in [
+        symbols::CHAN_NEW,
+        symbols::CHAN_SEND,
+        symbols::CHAN_TRY_SEND,
+        symbols::CHAN_TRY_RECV,
+        symbols::CHAN_RECV,
+        symbols::CHAN_DRAIN,
+        symbols::CHAN_CLOSE,
+    ] {
+        assert!(
+            ir.contains(&format!("@{symbol}")),
+            "missing channel ABI call {symbol}:\n{ir}"
+        );
+    }
+    assert!(
+        ir.contains("channel_try_tag")
+            && ir.contains("channel_recv")
+            && ir.contains("channel_result"),
+        "channel calls must reconstruct typed status/nullable values:\n{ir}"
+    );
+    assert!(
+        ir.contains("channel is closed") || ir.contains("E_NATIVE_ERROR"),
+        "send must route the closed status through the native failure path:\n{ir}"
+    );
+}

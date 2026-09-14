@@ -206,6 +206,12 @@ pub enum WaitReason {
     /// branches keep running; it wakes when every chunk has joined
     /// (`ADR-019` D1, `parallel-cpu-regions`).
     Parallel,
+    /// Blocked sending to a full channel. The channel owns a stable copy of
+    /// the element until it is accepted or the branch resumes for closure or
+    /// cancellation.
+    ChannelSend,
+    /// Blocked receiving from an empty open channel.
+    ChannelReceive,
 }
 
 /// What a finished task produced.

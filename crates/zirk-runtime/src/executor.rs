@@ -734,6 +734,29 @@ pub fn check_cancelled() {
     }
 }
 
+/// Identifies the branch currently executing a runtime operation.
+pub(crate) fn current_task() -> TaskId {
+    CURRENT_TASK
+        .get()
+        .expect("channel operation outside a task body")
+}
+
+/// Wakes a task parked by a channel operation. Stale task ids are harmless:
+/// registries validate generations before changing a slot.
+pub(crate) fn wake_task(task: TaskId) {
+    with_exec(|exec| exec.make_ready(task));
+}
+
+/// Whether a parked task was cancelled. Channel waiter queues use this to skip
+/// an entry whose owner was made ready to observe cancellation.
+pub(crate) fn task_cancel_requested(task: TaskId) -> bool {
+    with_exec(|exec| {
+        exec.registry
+            .get(task)
+            .is_some_and(|tcb| tcb.cancel_requested)
+    })
+}
+
 /// Records `reason` on the current task and suspends it. The executor decides
 /// (from `reason`) whether to re-enqueue it or leave it parked.
 pub fn suspend_current(reason: WaitReason) {

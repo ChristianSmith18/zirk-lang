@@ -333,12 +333,45 @@ fn valid_the_four_types_of_the_subset() {
 #[test]
 fn invalid_type_from_a_later_phase_states_its_phase() {
     // `Int64`/`Float64`/`Char` and the rest of the scalars in this phase's
-    // scope resolve now (roadmap Phase 3b, tasks 4.1/5.1/6.1); `Task<T>` is
-    // implemented as of `fase-5-task-await`, but `Channel` is still a
-    // genuinely pending name from Phase 5.
+    // scope resolve now; `Channel<T>` is known and therefore reports its
+    // generic arity when written without an element type.
     let output = rejected_body("mut x: Channel = 1;");
     assert!(output.contains(codes::UNKNOWN_TYPE.as_str()));
-    assert!(output.contains("Phase 5"), "{output}");
+    assert!(
+        output.contains("takes exactly one type argument"),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_typed_channel_construction_members_and_outcomes() {
+    accepted_body(
+        "mut bounded: Channel<Int32> = Channel(2);\n\
+         mut growable: Channel<Int32> = Channel.unbounded(8);\n\
+         bounded.send(1);\n\
+         mut sent: SendOutcome = bounded.try_send(2);\n\
+         mut received: ReceiveOutcome<Int32> = bounded.try_receive();\n\
+         mut value: Int32? = bounded.receive();\n\
+         mut closed: Boolean = bounded.is_closed;\n\
+         mut length: Int32 = bounded.length;\n\
+         mut capacity: Int32 = bounded.capacity;\n\
+         mut values: List<Int32> = bounded.drain();\n\
+         bounded.close();\n\
+         growable.close();",
+    );
+}
+
+#[test]
+fn valid_channel_endpoint_can_be_captured_by_a_spawn_branch() {
+    accepted(
+        "fn main(): Void {\n\
+           mut channel: Channel<Int32> = Channel(1);\n\
+           concurrent {\n\
+             spawn (): Void => { channel.send(1); };\n\
+             channel.close();\n\
+           }\n\
+         }",
+    );
 }
 
 #[test]

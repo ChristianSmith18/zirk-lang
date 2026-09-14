@@ -325,3 +325,25 @@ loop back-edge.
 #### Scenario: region submits to the pool and joins
 - **WHEN** codegen processes a `ParallelRegion`
 - **THEN** emitted code submits work to the pool and joins it before producing the region result
+
+### Requirement: Codegen for channel operations
+
+Code generation SHALL emit the `zirk_rt_chan_new`, send, receive, try, close,
+and accessor C-ABI calls. In the stackful executor model, a blocking send and
+receive SHALL follow the runtime suspension path, which parks and later resumes
+the current branch; no separate `zirk_rt_suspend` symbol is required. The try
+operations SHALL be plain calls that construct their typed outcome without a
+resume label.
+
+Construction SHALL pass the element size, alignment, and GC-reference offsets;
+send and receive SHALL pass source or destination element slots indirectly.
+
+#### Scenario: try receive is a plain call
+- **WHEN** codegen processes channel `try_receive`
+- **THEN** it calls the try-receive ABI without a suspension point
+
+#### Scenario: blocking receive uses stackful suspension
+
+- **WHEN** codegen processes a blocking channel `receive`
+- **THEN** it calls `zirk_rt_chan_recv` through the cooperative runtime path and
+  the generated function is unwind-capable

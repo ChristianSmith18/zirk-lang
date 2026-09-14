@@ -246,6 +246,9 @@ pub enum Base {
     /// `Job<T>`, the linear handle returned by `spawn`, identified by the
     /// result type in the checker's intern table.
     Job(u32),
+    /// `Channel<T>`, a shareable typed endpoint. The element type lives in
+    /// the checker's intern table so `Type` remains copyable.
+    Channel(u32),
     /// A declared interface or trait, identified by its index in the checker's
     /// table.
     ///
@@ -718,6 +721,7 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Enum(id) => names.enum_name(id),
         Base::Function(id) => names.function_type(id),
         Base::Job(id) => format!("Job<{}>", describe(names.job_result(id), names)),
+        Base::Channel(id) => format!("Channel<{}>", describe(names.channel_element(id), names)),
         Base::Class(id) => names.class_name(id),
         Base::Contract(id) => names.contract_name(id),
         Base::Param(id) => names.type_param_name(id),
@@ -763,6 +767,7 @@ pub trait TypeNames {
     fn enum_name(&self, id: u32) -> String;
     fn function_type(&self, id: u32) -> String;
     fn job_result(&self, id: u32) -> Type;
+    fn channel_element(&self, id: u32) -> Type;
     fn class_name(&self, id: u32) -> String;
     fn contract_name(&self, id: u32) -> String;
     fn type_param_name(&self, id: u32) -> String;

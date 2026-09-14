@@ -3366,6 +3366,73 @@ fn temporal_parse_and_duration_interop_lower() {
 
 // --- Concurrent scopes and timers (`concurrent-blocks-and-timers`) ----------
 
+#[test]
+fn typed_channel_operations_lower_to_channel_instructions() {
+    let function = main_body(
+        "mut channel: Channel<Int32> = Channel.unbounded(limit: 4);\n\
+         channel.send(1);\n\
+         mut sent: SendOutcome = channel.try_send(2);\n\
+         mut received: ReceiveOutcome<Int32> = channel.try_receive();\n\
+         mut value: Int32? = channel.receive();\n\
+         mut length: Int32 = channel.length;\n\
+         mut closed: Boolean = channel.is_closed;\n\
+         mut capacity: Int32 = channel.capacity;\n\
+         mut values: List<Int32> = channel.drain();\n\
+         channel.close();",
+    );
+    let kinds = instructions(&function);
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelNew { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelSend { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelTrySend { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelTryRecv { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelRecv { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelLength(_)))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelIsClosed(_)))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelCapacity(_)))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelDrain { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ChannelClose { .. }))
+    );
+}
+
 /// The instructions of every function in a module, flattened.
 fn all_instructions(module: &Module) -> Vec<InstKind> {
     module
