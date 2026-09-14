@@ -43,6 +43,6 @@
 ## 7. Closeout
 
 - [x] 7.1 `cargo test --workspace`; `cargo fmt --check`; `cargo clippy --workspace --all-targets`
-- [ ] 7.2 Commit `zirk-lang`; `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD`; review the status catalog; commit `../zirk-lang-site` separately; record both revisions
+- [x] 7.2 Committed `zirk-lang` as `22f1518` plus documentation hierarchy correction `a0f7157`; synchronized with `./scripts/sync-website-content.sh --audit-date 2026-09-14`; validated the 372-route catalog; committed `../zirk-lang-site` as `e9b4efa`.
 - [x] 7.3 `openspec validate collection-sequence-pipeline --strict`
 - [x] 7.4 Dependency notes for `parallel-cpu-regions` can now be resumed against real pipeline and `reduce` call sites.
