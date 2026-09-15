@@ -14,6 +14,12 @@ let statusBarItem;
 let tripleQuoteGuide;
 let tripleQuoteEndpoint;
 
+// Set while a `zirk-lsp` language client is running. The server then owns
+// diagnostics, hover and formatting for `zirk` documents, and the CLI bridge
+// code paths below stay silent (spec `zirk-lsp`, "Editor integration with
+// CLI fallback").
+let languageClient;
+
 const pendingLiveChecks = new Map();
 const runningLiveChecks = new Set();
 const liveTempFiles = new Set();
@@ -113,11 +119,20 @@ const DEPRECATED_TYPES = new Map([
     ['Decimal128', 'Decimal'],
 ]);
 
-function activate(context) {
+async function activate(context) {
     outputChannel = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
     diagnosticCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
 
     context.subscriptions.push(outputChannel, diagnosticCollection);
+
+    // The language server takes over diagnostics, hover and formatting when
+    // its binary exists; everything else below is untouched either way.
+    const serverRunning = await startLanguageClient(context);
+    if (serverRunning) {
+        // The bridge may already have run once while the client started —
+        // its entries would sit next to the server's own diagnostics.
+        diagnosticCollection.clear();
+    }
 
     tripleQuoteGuide = vscode.window.createTextEditorDecorationType({
         // Each content row gets the same `│` cap as the delimiters, anchored
@@ -143,9 +158,11 @@ function activate(context) {
     context.subscriptions.push(tripleQuoteGuide, tripleQuoteEndpoint);
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    statusBarItem.text = 'Zirk';
-    statusBarItem.tooltip = 'Click to re-check the active Zirk file';
-    statusBarItem.command = 'zirk.check';
+    statusBarItem.text = serverRunning ? '$(server) Zirk: LSP' : 'Zirk';
+    statusBarItem.tooltip = serverRunning
+        ? 'The Zirk language server is handling this file'
+        : 'Click to re-check the active Zirk file';
+    statusBarItem.command = serverRunning ? undefined : 'zirk.check';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
@@ -252,26 +269,28 @@ function activate(context) {
     });
     context.subscriptions.push(codeActions);
 
-    const formatter = vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, {
-        async provideDocumentFormattingEdits(document, options, token) {
-            const formatted = await tryZirkFormat(document);
-            if (formatted !== undefined) {
-                const lastLine = document.lineAt(document.lineCount - 1);
-                const fullRange = new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
-                return [vscode.TextEdit.replace(fullRange, formatted)];
+    if (!serverRunning) {
+        const formatter = vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, {
+            async provideDocumentFormattingEdits(document, options, token) {
+                const formatted = await tryZirkFormat(document);
+                if (formatted !== undefined) {
+                    const lastLine = document.lineAt(document.lineCount - 1);
+                    const fullRange = new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
+                    return [vscode.TextEdit.replace(fullRange, formatted)];
+                }
+                return provisionalFormat(document, options);
             }
-            return provisionalFormat(document, options);
-        }
-    });
+        });
 
-    context.subscriptions.push(formatter);
+        context.subscriptions.push(formatter);
 
-    const hover = vscode.languages.registerHoverProvider(LANGUAGE_ID, {
-        provideHover(document, position) {
-            return provideTypeHover(document, position);
-        }
-    });
-    context.subscriptions.push(hover);
+        const hover = vscode.languages.registerHoverProvider(LANGUAGE_ID, {
+            provideHover(document, position) {
+                return provideTypeHover(document, position);
+            }
+        });
+        context.subscriptions.push(hover);
+    }
 }
 
 /** Paints the opening delimiter column strictly between each `'''` pair. */
@@ -491,6 +510,10 @@ function scheduleLiveCheck(document) {
 }
 
 function liveCheckDocument(document) {
+    if (languageClient) {
+        // The server owns diagnostics for this document.
+        return;
+    }
     const key = document.uri.toString();
     if (runningLiveChecks.has(key)) {
         scheduleLiveCheck(document);
@@ -521,7 +544,7 @@ function liveCheckDocument(document) {
 }
 
 function checkDocument(document, manual = false) {
-    if (document.languageId !== LANGUAGE_ID) {
+    if (languageClient || document.languageId !== LANGUAGE_ID) {
         return;
     }
 
@@ -561,7 +584,12 @@ function runBuildOrRun(document, action) {
     }
 
     const filePath = document.uri.fsPath;
-    const commandName = action === 'build' ? 'Zirk: Build File' : 'Zirk: Run File';
+    if (action === 'run') {
+        runInTerminal(executable, document);
+        return;
+    }
+
+    const commandName = 'Zirk: Build File';
     outputChannel.appendLine(`> ${executable} ${action} ${filePath}`);
 
     const child = spawn(executable, [action, filePath], {
@@ -597,6 +625,86 @@ function runBuildOrRun(document, action) {
             }
         }
     });
+}
+
+/** Reused across runs; recreated when the user closes the panel. */
+let runTerminal;
+
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Runs `zirk run <file>` in an integrated terminal, like the Python play button. */
+async function runInTerminal(executable, document) {
+    if (document.isDirty) {
+        await document.save();
+    }
+    if (!runTerminal || runTerminal.exitStatus !== undefined) {
+        runTerminal = vscode.window.createTerminal({ name: 'Zirk', cwd: path.dirname(document.uri.fsPath) });
+    }
+    runTerminal.show();
+    runTerminal.sendText(`${shellQuote(executable)} run ${shellQuote(document.uri.fsPath)}`);
+}
+
+/**
+ * Finds the `zirk-lsp` executable: `zirk.lspPath` first, then the same search
+ * roots the compiler discovery uses (`target/{debug,release}/zirk-lsp`), then
+ * PATH.
+ */
+function findLanguageServer() {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
+    const config = vscode.workspace.getConfiguration(CONFIG_SECTION, root);
+    const configured = config.get('lspPath', '');
+    if (configured) {
+        if (fs.existsSync(configured)) {
+            return configured;
+        }
+        outputChannel.appendLine(`Configured zirk.lspPath not found: ${configured}`);
+    }
+    return findInSearchRoots(collectSearchRoots(root), ['zirk-lsp'])
+        ?? findOnAnyPath(['zirk-lsp']);
+}
+
+/**
+ * Spawns `zirk-lsp` through vscode-languageclient. Returns true when the
+ * client is running — the CLI bridge then stays silent for `zirk` documents.
+ */
+async function startLanguageClient(context) {
+    let LanguageClient;
+    try {
+        ({ LanguageClient } = require('vscode-languageclient/node'));
+    } catch (error) {
+        outputChannel.appendLine(`vscode-languageclient is not bundled: ${error.message}`);
+        outputChannel.appendLine('Falling back to the CLI bridge.');
+        return false;
+    }
+
+    const executable = findLanguageServer();
+    if (!executable) {
+        outputChannel.appendLine('No zirk-lsp executable found; falling back to the CLI bridge.');
+        outputChannel.appendLine('Build it with `cargo build -p zirk-lsp`.');
+        return false;
+    }
+
+    const client = new LanguageClient(
+        'zirk-lsp',
+        'Zirk Language Server',
+        { command: executable },
+        { documentSelector: [{ scheme: 'file', language: LANGUAGE_ID }] }
+    );
+
+    try {
+        await client.start();
+    } catch (error) {
+        outputChannel.appendLine(`zirk-lsp failed to start: ${error.message ?? error}`);
+        outputChannel.appendLine('Falling back to the CLI bridge.');
+        return false;
+    }
+
+    context.subscriptions.push({ dispose: () => client.stop() });
+    languageClient = client;
+    outputChannel.appendLine(`zirk-lsp running: ${executable}`);
+    return true;
 }
 
 function collectSearchRoots(documentUri) {
@@ -846,7 +954,7 @@ function updateStatusBar(documentUri, ok, detail) {
 }
 
 function updateStatusBarForDocument(document) {
-    if (!statusBarItem) {
+    if (!statusBarItem || languageClient) {
         return;
     }
 

@@ -37,10 +37,33 @@ pub struct Unit {
 
 /// Reads and parses the entry file and everything it imports.
 pub fn load(entry: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
+    load_with_overlay(entry, &HashMap::new(), sink)
+}
+
+/// Like [`load`], but files present in `overlay` are read from the map's text
+/// instead of the filesystem.
+///
+/// This is what the language server feeds with the editor's in-memory text:
+/// the open document is keyed by its filesystem path, so imports still
+/// resolve relative to its directory while the entry's own bytes are the ones
+/// the user is typing, saved or not.
+pub fn load_with_overlay(
+    entry: &Path,
+    overlay: &HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<Crate> {
+    // Keys are normalized once so callers may pass paths in any shape while
+    // lookups always see the normalized form `Loader::load` produces.
+    let overlay: HashMap<PathBuf, String> = overlay
+        .iter()
+        .map(|(path, text)| (normalize(path), text.clone()))
+        .collect();
+
     let mut loader = Loader {
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
+        overlay: &overlay,
         sink,
     };
 
@@ -57,6 +80,8 @@ struct Loader<'a> {
     units: Vec<Unit>,
     /// Files already loaded, so a diamond of imports reads each one once.
     by_path: HashMap<PathBuf, FileId>,
+    /// In-memory text that shadows the filesystem, keyed by normalized path.
+    overlay: &'a HashMap<PathBuf, String>,
     sink: &'a mut DiagnosticSink,
 }
 
@@ -72,7 +97,12 @@ impl Loader<'_> {
             return Some(());
         }
 
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let overlaid = self.overlay.get(&path).cloned();
+        let read = match overlaid {
+            Some(text) => Ok(text),
+            None => std::fs::read_to_string(&path),
+        };
+        let Ok(text) = read else {
             let mut diagnostic = Diagnostic::error(
                 codes::UNREADABLE_FILE,
                 format!("could not read `{}`", path.display()),
@@ -144,4 +174,64 @@ fn normalize(path: &Path) -> PathBuf {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Writes `text` to a fresh file under `dir` and returns its path.
+    fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// A scratch directory unique to this test process.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zirk-modules-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_overlay_shadows_the_entry_text() {
+        let dir = scratch("overlay-entry");
+        let entry = write(&dir, "main.zrk", "fn on_disk() { return 1; }\n");
+
+        let mut overlay = HashMap::new();
+        overlay.insert(entry.clone(), "fn in_memory() { return 2; }\n".to_string());
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load_with_overlay(&entry, &overlay, &mut sink).unwrap();
+
+        let text = krate.sources.entry().text();
+        assert!(text.contains("in_memory"));
+        assert!(!text.contains("on_disk"));
+        assert!(!sink.has_errors());
+    }
+
+    #[test]
+    fn imports_still_resolve_from_disk() {
+        let dir = scratch("overlay-import");
+        write(&dir, "lib.zrk", "fn helper() { return 7; }\n");
+        let entry = dir.join("main.zrk"); // never written: only in the overlay
+
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            entry.clone(),
+            "import { helper } from \"./lib\";\nfn main() { helper(); }\n".to_string(),
+        );
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load_with_overlay(&entry, &overlay, &mut sink).unwrap();
+
+        assert_eq!(krate.units.len(), 2);
+        assert!(!sink.has_errors());
+    }
 }

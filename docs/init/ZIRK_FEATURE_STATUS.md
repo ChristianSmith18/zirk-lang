@@ -245,7 +245,7 @@ merely because its frontend or native backend is delivered.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `.zpkg` / package manager | no | no | no | no | no | no | Phase 8. |
-| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | no | Phase 9. |
+| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-lsp` MVP serves diagnostics, hover, document symbols, and formatting over stdio; incremental snapshots, completion, navigation, and rename remain Phase 9. |
 | Decorators (`fn dec`) | yes | no | no | no | no | no | `Keyword::Dec` gated to Phase 10. |
 
 ---

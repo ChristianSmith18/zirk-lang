@@ -52,6 +52,27 @@ pub fn format_path(
     }
 }
 
+/// Formats source held in memory — the entry point the language server uses,
+/// where the text lives in the editor rather than on disk.
+///
+/// `name` only labels diagnostics. Returns the formatted text, or the
+/// rendered diagnostics when the source does not parse (an unformattable
+/// document is never rewritten halfway).
+pub fn format_source(name: &str, text: &str) -> Result<String, String> {
+    let source = SourceFile::new(name.to_string(), text.to_string());
+    let mut sink = DiagnosticSink::new();
+    let tokens = zirk_lexer::tokenize(&source, &mut sink);
+    let _ = zirk_parser::parse(&source, &tokens, &mut sink);
+    if sink.has_errors() {
+        return Err(frontend::render(
+            &sink,
+            false,
+            zirk_diagnostics::Color::Never,
+        ));
+    }
+    Ok(format_text(text, &tokens))
+}
+
 fn format_text(text: &str, tokens: &[zirk_lexer::Token]) -> String {
     let mut literals: Vec<(usize, usize)> = tokens
         .iter()
@@ -172,5 +193,23 @@ mod tests {
         let canonical =
             "fn main(): Void {\n    inmut text =\n        '''\n        hello\n        ''';\n}\n";
         assert_eq!(format(&format(canonical)), canonical);
+    }
+
+    #[test]
+    fn format_source_formats_in_memory_text() {
+        let formatted = super::format_source(
+            "mem.zrk",
+            "fn main(): Void {\n    inmut text = '''\n                 hello\n                 ''';\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            formatted,
+            "fn main(): Void {\n    inmut text =\n        '''\n        hello\n        ''';\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_source_rejects_unparseable_text() {
+        assert!(super::format_source("mem.zrk", "fn broken( {").is_err());
     }
 }

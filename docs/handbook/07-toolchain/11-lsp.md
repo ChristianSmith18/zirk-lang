@@ -18,8 +18,10 @@ application code merely because an editor opened a project. Operations needing
 authority return an explicit action for the user to run through the trusted
 CLI.
 
-> **Implementation status:** editor syntax support exists; the full incremental
-> semantic LSP remains Phase 9 work.
+> **Implementation status:** a `zirk-lsp` MVP exists and serves live
+> diagnostics, hover, document symbols, and formatting over stdio by
+> re-analyzing the in-memory document on each edit. The full incremental
+> semantic LSP described above remains Phase 9 work.
 
 ---
 

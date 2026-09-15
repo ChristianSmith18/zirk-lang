@@ -2,15 +2,22 @@
 
 VS Code extension offering syntax highlighting, diagnostics, and language configuration for the Zirk programming language.
 
+When the `zirk-lsp` language server is available, live diagnostics, hover, document symbols, and formatting are served in process by the server and the CLI bridge stays silent. Without the server, all commands, diagnostics, hover, and formatting continue to work through the CLI bridge. The CLI bridge commands remain available regardless.
+
 ## Features
 
+- **Language Server (LSP):** When `zirk-lsp` is running, the extension gets live in-memory diagnostics (including unsaved text), type-aware hover, document symbols, and canonical formatting from the server instead of the CLI bridge. Autocomplete, go-to-definition, find references, and rename remain Phase 9 work.
+
 - **Full Syntax Highlighting:** Covers the entire Zirk language specification including keywords, operators, range operators (`..`, `..=`), braced dynamic range operands (`{start}..{end}:{step}`) with normal embedded-expression highlighting, collection/index brackets, fixed array types (`T[n]`), decorators (`@test`, `@e2e`, `@bench`), variables, types, and strings (with escape sequence support and string interpolation).
-- **Compiler Diagnostics:** `zirk-check` runs on open, on save, and live while typing (debounced), and errors/warnings are shown as inline diagnostics with the compiler code, cause, and help text.
-- **Hover Types:** Hovering a function, method, variable, parameter, field, or expression shows the type the compiler resolved for it, read from `zirk check --types`. Inferred types (a `fn` with no return annotation, a `mut x = ...` binding) are marked *(inferred)*.
+- **Compiler Diagnostics:** `zirk-check` runs on open, on save, and live while typing (debounced), and errors/warnings are shown as inline diagnostics with the compiler code, cause, and help text. With `zirk-lsp` running, diagnostics come from the server instead and cover unsaved edits.
+- **Hover Types:** Hovering a function, method, variable, parameter, field, or expression shows the type the compiler resolved for it. Inferred types (a `fn` with no return annotation, a `mut x = ...` binding) are marked *(inferred)*. Served by `zirk-lsp` when available, otherwise read from `zirk check --types`.
+- **Document Symbols:** With `zirk-lsp`, functions, methods, classes, structs, traits, enums, and constants appear in the outline and breadcrumb views.
+- **Formatting:** With `zirk-lsp`, `Format Document` applies the compiler's canonical formatting. Without it, the extension delegates to `zirk fmt` when available and falls back to a provisional whitespace-formatting pass.
 - **Quick Fixes:** Code actions rename deprecated type spellings (`BinaryFloat*` → `Float*`, `Decimal16`/`32`/`64`/`128` → `Decimal`) in place.
 - **Snippets:** Built-in snippets for `fn`, `if`/`else`, `for`, `class`, and `import`.
 - **Check Command:** Run `Zirk: Check File` from the command palette to re-check the active file.
-- **Build & Run Commands:** Run `Zirk: Build File` and `Zirk: Run File` from the command palette. Build output and runtime output are streamed to the `Zirk` output channel.
+- **Run Button:** A ▶ play button in the editor title bar (like the Python extension) saves the file and runs `zirk run <file>` in an integrated `Zirk` terminal, so interactive programs work normally.
+- **Build & Run Commands:** Run `Zirk: Build File` and `Zirk: Run File` from the command palette. Build output streams to the `Zirk` output channel; run uses the integrated terminal.
 - **Status Bar:** Shows the latest check result for the active `.zrk` file. Click it to re-check.
 - **Task Provider:** Provides `zirk: build` and `zirk: run` tasks that can be invoked from the `Tasks: Run Task` command or configured in `.vscode/tasks.json`.
 - **Auto-Closing Pairs:** Automatic completion of curly braces `{}`, square brackets `[]`, parentheses `()`, and quotation marks `""`.
@@ -56,6 +63,7 @@ The extension reads two VS Code settings:
 - `zirk.checkOnSave` — run `zirk-check` automatically when a `.zrk` file is saved (default: `true`).
 - `zirk.checkOnType` — run `zirk-check` live while typing (default: `true`). The extension writes the current buffer to a hidden temporary `.zrk` next to the file so relative imports keep working, and removes it after each check.
 - `zirk.checkDelay` — debounce delay in milliseconds for live checking (default: `500`).
+- `zirk.lspPath` — full path to the `zirk-lsp` language server executable. Leave empty to let the extension search `target/debug/zirk-lsp`, `target/release/zirk-lsp`, and `PATH` from the same roots as `zirk.executablePath`. Build it with `cargo build -p zirk-lsp`.
 
 `zirk-check` is the frontend-only validator and does not require LLVM. If you need build/run commands later, build the full `zirk` binary with the `backend` feature enabled.
 

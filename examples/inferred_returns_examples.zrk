@@ -1,0 +1,107 @@
+// Inferred return types: a body-bearing `fn`, method, or trait default may
+// omit the `: Type` annotation. The checker reads the body's `return`s and
+// applies the same unification rule used for `if`-expression branches.
+// Run: `zirk run examples/inferred_returns_examples.zrk`
+
+// --- The motivating case: `main` no longer needs `: Void`. ---
+// This `fn main()` has no annotation and no `return`; it infers `Void`
+// and stays a valid entrypoint.
+
+// A single value-returning body infers the expression's type.
+fn square(n: Int32) {
+    return n * n;
+}
+
+// Several `return`s must agree on one type — here every path is `String`.
+fn describe(score: Int32) {
+    if (score >= 90) {
+        return "excellent";
+    }
+    if (score >= 50) {
+        return "pass";
+    }
+    return "fail";
+}
+
+// Inference is demand-driven: `caller` is resolved even though `later` is
+// declared afterwards — declaration order does not matter.
+fn caller() {
+    return later() + square(3);
+}
+
+fn later() {
+    return 33;
+}
+
+// A bare `return;` does not participate in unification but must fit the
+// inferred type — `Void` inside an `Int32` body would be an error.
+fn clamp_positive(n: Int32) {
+    if (n < 0) {
+        return 0;
+    }
+    return n;
+}
+
+// Methods infer the same way. The explicit annotation stays authoritative
+// when written — `name` below keeps its contract, the rest omit it.
+class Counter {
+    value: Int32;
+
+    construct() {
+        this.value = 0;
+    }
+
+    bump() {
+        this.value = this.value + 1;
+        return this.value;
+    }
+
+    reset() {
+        this.value = 0;
+    }
+
+    label() {
+        return "counter:{this.value}";
+    }
+}
+
+// A trait's default body may omit the annotation too; the adopter copies
+// the resolved signature.
+trait Named {
+    name(): String;
+    greet() {
+        return "hello, {this.name()}";
+    }
+}
+
+class User implements Named {
+    user_name: String;
+
+    construct(user_name: String) {
+        this.user_name = user_name;
+    }
+
+    name(): String {
+        return this.user_name;
+    }
+}
+
+fn main() {
+    // Inferred Int32, String and a forward call chain.
+    stdout.println(square(7));
+    stdout.println(describe(92));
+    stdout.println(describe(30));
+    stdout.println(caller());
+
+    // Inferred methods: Int32 from `bump`, Void from `reset`, String from
+    // `label` — and interpolation in the inferred body works as usual.
+    mut counter = Counter();
+    counter.bump();
+    stdout.println(counter.bump());
+    counter.reset();
+    stdout.println(counter.label());
+
+    // An inferred trait default adopted by the class.
+    mut user = User("zirk");
+    stdout.println(user.greet());
+}

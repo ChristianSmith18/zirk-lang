@@ -1,0 +1,22 @@
+[package]
+name = "zirk-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zirk-lsp"
+path = "src/main.rs"
+
+[lib]
+name = "zirk_lsp"
+path = "src/lib.rs"
+
+[dependencies]
+zirk-cli = { path = "../zirk-cli", default-features = false }
+zirk-diagnostics.workspace = true
+zirk-ast.workspace = true
+zirk-sema.workspace = true
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util"] }

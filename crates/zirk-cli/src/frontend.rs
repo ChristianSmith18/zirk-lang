@@ -45,7 +45,18 @@ pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendRe
 /// managed to resolve (spec `zirk-check`, "Type map on a file with
 /// errors").
 pub fn run_frontend_lenient(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendResult> {
-    let loaded = crate::modules::load(path, sink)?;
+    run_frontend_lenient_with_overlay(path, &std::collections::HashMap::new(), sink)
+}
+
+/// [`run_frontend_lenient`] reading entry text from `overlay` before the
+/// filesystem — the language server's entry point, where the open document
+/// is the editor's in-memory text rather than the bytes on disk.
+pub fn run_frontend_lenient_with_overlay(
+    path: &Path,
+    overlay: &std::collections::HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<FrontendResult> {
+    let loaded = crate::modules::load_with_overlay(path, overlay, sink)?;
     if sink.has_errors() {
         return None;
     }
