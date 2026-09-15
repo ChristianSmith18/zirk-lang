@@ -5,7 +5,7 @@ set -euo pipefail
 readonly root="$(cd "$(dirname "$0")/.." && pwd)"
 readonly package="${1:?usage: verify-browser-package.sh PACKAGE_DIRECTORY}"
 cd "$root"
-if [[ -n "$(git status --porcelain)" ]]; then
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     printf 'refusing to verify provenance against a dirty revision\n' >&2
     exit 1
 fi

@@ -10,7 +10,7 @@ readonly target="wasm32-unknown-unknown"
 readonly wasm="$root/target/$target/release/zirk_browser.wasm"
 
 cd "$root"
-if [[ -n "$(git status --porcelain)" ]]; then
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     printf 'refusing to build a provenance package from a dirty revision\n' >&2
     exit 1
 fi
