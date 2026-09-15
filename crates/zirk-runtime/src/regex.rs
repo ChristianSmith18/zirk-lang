@@ -23,7 +23,7 @@
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 
-use regex::Regex;
+use zirk_runtime_core::regex::{self as core_regex, Regex};
 
 /// Process-wide cache of compiled regexes, keyed by their source pattern.
 ///
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn zirk_regex_from_pattern(pattern: *mut c_void) -> *mut c
         return (*re) as *const Regex as *mut c_void;
     }
 
-    let re = match Regex::new(pattern) {
+    let re = match core_regex::compile(pattern) {
         Ok(re) => re,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn zirk_regex_from_pattern(pattern: *mut c_void) -> *mut c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_regex_is_valid_pattern(pattern: *mut c_void) -> bool {
     let pattern = unsafe { regex_string(pattern) };
-    !pattern.is_empty() && Regex::new(pattern).is_ok()
+    core_regex::is_valid(pattern)
 }
 
 /// Returns whether the regex in `handle` matches `text`.
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn zirk_regex_is_match(handle: *mut c_void, text: *mut c_v
     }
     let re = unsafe { &*(handle as *const Regex) };
     let text = unsafe { regex_string(text) };
-    re.is_match(text)
+    core_regex::is_match(re, text)
 }
 
 /// Replaces all non-overlapping matches of the regex in `handle` in `text`
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn zirk_regex_replace(
     let text = unsafe { regex_string(text) };
     let repl = unsafe { regex_string(repl) };
 
-    let result = re.replace_all(text, repl).into_owned();
+    let result = core_regex::replace(re, text, repl);
     crate::string::alloc_owned(&result)
 }
 
@@ -160,8 +160,8 @@ pub unsafe extern "C" fn zirk_regex_split(handle: *mut c_void, text: *mut c_void
         )
     };
 
-    for part in re.split(text) {
-        let value = crate::string::alloc_owned(part);
+    for part in core_regex::split(re, text) {
+        let value = crate::string::alloc_owned(&part);
         unsafe {
             crate::zirk_rt_list_add(
                 list,
@@ -195,7 +195,12 @@ pub unsafe extern "C" fn zirk_regex_to_string(handle: *mut c_void) -> *mut c_voi
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
+    fn text(handle: *mut std::ffi::c_void) -> String {
+        unsafe { (*crate::string::payload_ptr(handle)).as_str().to_owned() }
+    }
+
     #[test]
     fn to_string_returns_the_original_pattern() {
         let pattern = crate::string::alloc_owned("a+b*");
@@ -204,6 +209,24 @@ mod tests {
         let text = unsafe { (*crate::string::payload_ptr(rendered)).as_str() };
 
         assert_eq!(text, "a+b*");
+    }
+
+    #[test]
+    fn extracted_regex_operations_preserve_native_handle_results() {
+        let regex = unsafe { super::zirk_regex_from_pattern(crate::string::alloc_owned("a+")) };
+        let haystack = crate::string::alloc_owned("baacaa");
+        assert!(unsafe { super::zirk_regex_is_match(regex, haystack) });
+        let replacement =
+            unsafe { super::zirk_regex_replace(regex, haystack, crate::string::alloc_owned("x")) };
+        assert_eq!(text(replacement), "bxcx");
+        let mut found = super::NullableObject {
+            present: false,
+            value: std::ptr::null_mut(),
+        };
+        unsafe { super::zirk_regex_find(&mut found, regex, haystack) };
+        assert!(found.present);
+        let matched = unsafe { &*super::regex_match_payload(found.value) };
+        assert_eq!((matched.start, matched.end), (1, 3));
     }
 }
 
@@ -305,16 +328,16 @@ pub unsafe extern "C" fn zirk_regex_find(
     let re = unsafe { &*(handle as *const Regex) };
     let hay = unsafe { regex_string(text) };
 
-    let result = match re.find(hay) {
-        Some(m) => {
-            let text_handle = crate::string::alloc_owned(m.as_str());
+    let result = match core_regex::find(re, hay) {
+        Some((start, end)) => {
+            let text_handle = crate::string::alloc_owned(&hay[start..end]);
             let haystack_handle = crate::string::alloc_owned(hay);
             let object = unsafe {
                 alloc_regex_match(
                     text_handle,
                     haystack_handle,
-                    m.start() as i64,
-                    m.end() as i64,
+                    start as i64,
+                    end as i64,
                     handle,
                 )
             };
@@ -363,14 +386,14 @@ pub unsafe extern "C" fn zirk_regex_find_all(
     let hay = unsafe { regex_string(text) };
     let haystack_handle = crate::string::alloc_owned(hay);
 
-    for m in re.find_iter(hay) {
-        let text_handle = crate::string::alloc_owned(m.as_str());
+    for (start, end) in core_regex::find_all(re, hay) {
+        let text_handle = crate::string::alloc_owned(&hay[start..end]);
         let object = unsafe {
             alloc_regex_match(
                 text_handle,
                 haystack_handle,
-                m.start() as i64,
-                m.end() as i64,
+                start as i64,
+                end as i64,
                 handle,
             )
         };

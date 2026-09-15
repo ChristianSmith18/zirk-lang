@@ -157,58 +157,15 @@ pub unsafe extern "C" fn zirk_rt_array_slice(
     elem_align: usize,
     is_ref: bool,
 ) -> *mut c_void {
-    const MISSING: i64 = i64::MIN;
-
-    let step = if step == MISSING { 1 } else { step };
-    if step == 0 {
-        // `crate::failure` has no dedicated invalid-step handler yet; the
-        // shared `fatal` reports the same cause `Range` checks for.
-        crate::failure::fatal("a range's step cannot be zero");
-    }
-
-    let n = unsafe { zirk_rt_array_length(array) } as i64;
-    if n == 0 {
-        return unsafe { zirk_rt_array_new(0, elem_size, elem_align, is_ref) };
-    }
-
-    // Resolves a bound that counts from the end when negative, clamped
-    // into `0..=n` for a forward slice.
-    let forward = |bound: i64| -> i64 {
-        if bound < 0 {
-            (n + bound).max(0)
-        } else {
-            bound.min(n)
-        }
+    let indices = match zirk_runtime_core::collections::slice_indices(
+        unsafe { zirk_rt_array_length(array) },
+        start,
+        end,
+        step,
+    ) {
+        Ok(indices) => indices,
+        Err(message) => crate::failure::fatal(message),
     };
-
-    // Collects the source indices the slice selects — forward `[lo, hi)`,
-    // backward `(hi, lo]` with `-1` meaning "to the beginning".
-    let mut indices: Vec<usize> = Vec::new();
-    if step > 0 {
-        let lo = if start == MISSING { 0 } else { forward(start) };
-        let hi = if end == MISSING { n } else { forward(end) };
-        let mut i = lo;
-        while i < hi {
-            indices.push(i as usize);
-            i += step;
-        }
-    } else {
-        let lo = if start == MISSING {
-            n - 1
-        } else {
-            (if start < 0 { n + start } else { start }).clamp(-1, n - 1)
-        };
-        let hi = if end == MISSING {
-            -1
-        } else {
-            (if end < 0 { n + end } else { end }).clamp(-1, n - 1)
-        };
-        let mut i = lo;
-        while i > hi {
-            indices.push(i as usize);
-            i += step;
-        }
-    }
 
     let length = indices.len();
     let slice = unsafe { zirk_rt_array_new(length, elem_size, elem_align, is_ref) };

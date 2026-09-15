@@ -1,0 +1,11 @@
+[package]
+name = "zirk-interpreter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zirk-diagnostics.workspace = true
+zirk-ir.workspace = true
+zirk-runtime-core.workspace = true

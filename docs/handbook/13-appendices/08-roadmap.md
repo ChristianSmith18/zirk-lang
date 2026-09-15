@@ -27,6 +27,12 @@ Future features require an explicit specification change and compatibility
 analysis. Excluded 1.x ideas are not automatically roadmap commitments, and a
 completed documentation design is not an implementation-complete claim.
 
+An optional browser-hosted verified-IR interpreter is positioned as tooling
+alongside compiler validation, not as a roadmap target backend. Its browser
+package may grow only through reviewed compatibility policy, conformance
+fixtures, and resource-boundary tests; a Zirk-to-WebAssembly target would need
+a separate language, ABI, and code-generation proposal.
+
 ---
 
 **Previous:** [← Current Limitations](07-current-limitations.md) · **Next:** [ Normative Sources](09-normative-sources.md)

@@ -7,6 +7,12 @@ Status values are **specified and implemented**, **partially implemented**, **sp
 guides; final delivery evidence is the crate and corpus verification recorded
 with this change.
 
+The optional browser-hosted interpreter is tooling, not language-target
+delivery. It currently has a bounded verified-IR baseline for selected scalar,
+string/output, nullable, direct-call, capability-preflight and resource-limit
+paths. See the browser support matrix for the executable subset and exclusions;
+native delivery rows do not imply browser execution support.
+
 The type taxonomy, Decimal and Float families, grapheme Char, shared mutable String, binding
 permissions, native operators, temporal family, callable types, escaping
 closures, projection-copy semantics, object/contract model, complete generics,

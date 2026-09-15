@@ -3,13 +3,13 @@
 //! Minimal first implementation storing `i64` values in a `HashSet`.
 //! See `map.rs` for the same GC caveats.
 
-use std::collections::HashSet;
 use std::ffi::c_void;
+use zirk_runtime_core::collections::{self, WordSet};
 
 /// `Set<T>()` — allocates an empty set.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_set_new() -> *mut c_void {
-    let set = Box::new(HashSet::<i64>::new());
+    let set = Box::new(WordSet::new());
     Box::into_raw(set) as *mut c_void
 }
 
@@ -19,7 +19,7 @@ pub extern "C" fn zirk_rt_set_is_empty(set: *mut c_void) -> i32 {
     if set.is_null() {
         return 1;
     }
-    let set = unsafe { &*(set as *const HashSet<i64>) };
+    let set = unsafe { &*(set as *const WordSet) };
     set.is_empty() as i32
 }
 
@@ -29,7 +29,7 @@ pub extern "C" fn zirk_rt_set_length(set: *mut c_void) -> usize {
     if set.is_null() {
         return 0;
     }
-    let set = unsafe { &*(set as *const HashSet<i64>) };
+    let set = unsafe { &*(set as *const WordSet) };
     set.len()
 }
 
@@ -39,8 +39,8 @@ pub extern "C" fn zirk_rt_set_add(set: *mut c_void, value: i64) {
     if set.is_null() {
         return;
     }
-    let set = unsafe { &mut *(set as *mut HashSet<i64>) };
-    set.insert(value);
+    let set = unsafe { &mut *(set as *mut WordSet) };
+    collections::set_add(set, value);
 }
 
 /// `set.contains(value)` — returns `1` if `value` is present.
@@ -49,7 +49,7 @@ pub extern "C" fn zirk_rt_set_contains(set: *mut c_void, value: i64) -> i32 {
     if set.is_null() {
         return 0;
     }
-    let set = unsafe { &*(set as *const HashSet<i64>) };
+    let set = unsafe { &*(set as *const WordSet) };
     set.contains(&value) as i32
 }
 
@@ -59,8 +59,8 @@ pub extern "C" fn zirk_rt_set_remove(set: *mut c_void, value: i64) -> i32 {
     if set.is_null() {
         return 0;
     }
-    let set = unsafe { &mut *(set as *mut HashSet<i64>) };
-    set.remove(&value) as i32
+    let set = unsafe { &mut *(set as *mut WordSet) };
+    collections::set_remove(set, value) as i32
 }
 
 /// `set.to_string()`'s element snapshot
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn zirk_rt_set_sorted_elements(
     let mut elements: Vec<i64> = if set.is_null() {
         Vec::new()
     } else {
-        let set = unsafe { &*(set as *const HashSet<i64>) };
+        let set = unsafe { &*(set as *const WordSet) };
         set.iter().copied().collect()
     };
     unsafe { crate::map::sort_words(&mut elements, string_elements != 0) };
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn zirk_rt_set_sorted_elements(
 
 #[cfg(test)]
 mod tests {
-    use super::{zirk_rt_set_add, zirk_rt_set_new, zirk_rt_set_sorted_elements};
+    use super::*;
 
     #[test]
     fn sorted_element_snapshot_uses_string_contents() {
@@ -122,10 +122,26 @@ mod tests {
         let text = unsafe {
             words
                 .iter()
-                .map(|word| (*crate::string::payload_ptr(*word as *mut _)).as_str().to_string())
+                .map(|word| {
+                    (*crate::string::payload_ptr(*word as *mut _))
+                        .as_str()
+                        .to_string()
+                })
                 .collect::<Vec<_>>()
         };
 
         assert_eq!(text, ["a", "m", "z"]);
+    }
+
+    #[test]
+    fn native_set_adapter_matches_runtime_core_value_operations() {
+        let set = zirk_rt_set_new();
+        zirk_rt_set_add(set, 4);
+        zirk_rt_set_add(set, 4);
+        assert_eq!(zirk_rt_set_length(set), 1);
+        assert_eq!(zirk_rt_set_contains(set, 4), 1);
+        assert_eq!(zirk_rt_set_remove(set, 4), 1);
+        assert_eq!(zirk_rt_set_remove(set, 4), 0);
+        assert_eq!(zirk_rt_set_is_empty(set), 1);
     }
 }

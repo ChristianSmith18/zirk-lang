@@ -169,7 +169,10 @@ Resolution:
 A CLI target temporarily replaces `build_targets`. The compiler checks early for
 incompatible native libraries and explains which dependency blocks the target.
 
-WebAssembly, browser, DOM and platform directives are outside Zirk 1.x.
+WebAssembly, browser, DOM and platform directives are outside Zirk 1.x. An
+implementation may ship a browser-hosted interpreter as external developer
+tooling for verified IR; that tooling does not define a Zirk target, browser
+capability, or source-language semantic extension.
 
 ## 7. Incremental and reproducible builds
 

@@ -1,0 +1,27 @@
+# Browser package handoff
+
+The browser interpreter is a checked-source to verified-IR interpreter. It is
+not a Zirk-to-WebAssembly backend and must never be presented as one.
+
+Build a handoff only from a clean, committed compiler revision:
+
+```sh
+git diff --check
+git diff --quiet
+git rev-parse HEAD
+./scripts/audit-browser-dependencies.sh
+./scripts/build-browser-package.sh /absolute/empty/output/zirk-browser
+./scripts/check-browser-package-size.sh /absolute/empty/output/zirk-browser
+node ./scripts/smoke-browser-package.mjs /absolute/empty/output/zirk-browser
+```
+
+Record the resulting compiler revision with the package handoff. The output
+directory contains `zirk_browser_bg.wasm`, ESM glue, wasm-bindgen declarations,
+the strict browser contract declaration, and `LICENSE`. Do not overwrite an
+existing output directory: the build command rejects it so an artifact cannot
+silently lose provenance.
+
+The site repository consumes only this verified directory. Its worker must
+await WASM instantiation, create `BrowserApi`, call `initialize()`, then send
+JSON requests to `check` or `run`. Before initialization, the facade returns
+the deterministic `ZB103` request failure.

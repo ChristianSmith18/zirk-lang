@@ -1,0 +1,8 @@
+{
+  "name": "fatal-error",
+  "source": "fn main(): Void { fatalError(\"fixture failure\"); }",
+  "virtualName": "fixtures/fatal-error.zrk",
+  "expectedOutput": [],
+  "completion": "runtime",
+  "exclusions": []
+}

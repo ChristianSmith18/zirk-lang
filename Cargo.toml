@@ -12,12 +12,16 @@ license = "Apache-2.0"
 # Crates internos. Las dependencias entre etapas fluyen en un solo sentido
 # a lo largo del pipeline; zirk-diagnostics es la unica transversal permitida.
 zirk-ast = { path = "crates/zirk-ast" }
+zirk-browser = { path = "crates/zirk-browser" }
 zirk-codegen-llvm = { path = "crates/zirk-codegen-llvm" }
 zirk-diagnostics = { path = "crates/zirk-diagnostics" }
 zirk-ir = { path = "crates/zirk-ir" }
 zirk-lexer = { path = "crates/zirk-lexer" }
 zirk-parser = { path = "crates/zirk-parser" }
 zirk-sema = { path = "crates/zirk-sema" }
+zirk-runtime-core = { path = "crates/zirk-runtime-core" }
+zirk-interpreter = { path = "crates/zirk-interpreter" }
+zirk-cli = { path = "crates/zirk-cli", default-features = false }
 
 # Segmentación de graphemes extendidos (UAX #29), para `Char` (roadmap Fase
 # 3b): decidir si un literal `'...'` contiene exactamente un grapheme es
@@ -25,6 +29,11 @@ zirk-sema = { path = "crates/zirk-sema" }
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
 regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+wasm-bindgen = "0.2.128"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
 
 # inkwell no se declara acá: su conjunto de features depende del target y se
 # define en crates/zirk-codegen-llvm/Cargo.toml. Ver el issue #2.

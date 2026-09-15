@@ -23,6 +23,7 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-015](./ADR-015-declaracion-extern.md) | Native `extern "C" fn` declaration syntax | accepted |
 | [ADR-016](./ADR-016-module-system.md) | Module, import and entrypoint system | accepted |
 | [ADR-017](./ADR-017-modelo-de-suspension.md) | Task suspension: stackful coroutines on a single-threaded cooperative executor | accepted |
+| [ADR-020](./ADR-020-browser-ir-interpreter.md) | Browser-hosted verified-IR interpretation is tooling, not a Zirk target | accepted |
 
 ## Status of Phase 0 pending items
 
