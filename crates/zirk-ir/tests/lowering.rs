@@ -892,7 +892,9 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
         assert!(calls.contains(&callee), "missing {callee}; saw {calls:?}");
     }
     assert!(
-        kinds.iter().any(|kind| matches!(kind, InstKind::WordCast(_))),
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::WordCast(_))),
         "Map/Set snapshots must cast their words back to typed values: {kinds:?}"
     );
     assert!(
@@ -900,7 +902,10 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
         "nullable rendering must branch before unwrapping: {kinds:?}"
     );
     for text in ["<Channel>", "<Job>", "<Pointer>", "<Pin>"] {
-        assert!(module.strings.iter().any(|value| value == text), "missing {text}");
+        assert!(
+            module.strings.iter().any(|value| value == text),
+            "missing {text}"
+        );
     }
 }
 

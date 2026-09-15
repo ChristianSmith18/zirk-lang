@@ -1,0 +1,13 @@
+// Methods infer the same way functions do — the annotation stays a
+// contract when written, optional when the body says it.
+class Calc {
+    construct() { }
+    add(a: Int32, b: Int32) { return a + b; }
+    twice(a: Int32) { return this.add(a, a); }
+    reset() { }
+}
+
+fn main() {
+    mut c = Calc();
+    stdout.println(c.twice(21));
+}

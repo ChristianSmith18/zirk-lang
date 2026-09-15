@@ -38,13 +38,25 @@ fn check(path: &str, args: &[String]) -> i32 {
     }
 
     let json = args.iter().any(|a| a == "--json");
+    let types = args.iter().any(|a| a == "--types");
     let color = frontend::resolve_color(color_choice(args).as_deref());
     let file = frontend::resolve_source_path(path);
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
-    let _ = frontend::run_frontend(&file, &mut sink);
+    let result = if types {
+        frontend::run_frontend_lenient(&file, &mut sink)
+    } else {
+        frontend::run_frontend(&file, &mut sink)
+    };
 
     if !sink.is_empty() {
         eprint!("{}", frontend::render(&sink, json, color));
+    }
+
+    if types && let Some(result) = &result {
+        println!(
+            "{}",
+            frontend::render_type_map(&result.checked, &result.sources)
+        );
     }
 
     if sink.has_errors() { 1 } else { 0 }
@@ -78,6 +90,7 @@ fn help() {
     println!();
     println!("Options:");
     println!("      --json         emit diagnostics in structured form");
+    println!("      --types        emit the resolved type map as JSON");
     println!("      --color=<when> always, never or auto (default: auto)");
     println!("  -V, --version      show the version");
     println!("  -h, --help         show this help");

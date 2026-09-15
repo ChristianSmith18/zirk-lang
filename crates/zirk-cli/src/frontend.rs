@@ -40,6 +40,73 @@ pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendRe
     })
 }
 
+/// Like [`run_frontend`], but keeps the checked program when the checker
+/// reported errors: `zirk check --types` still renders the entries it
+/// managed to resolve (spec `zirk-check`, "Type map on a file with
+/// errors").
+pub fn run_frontend_lenient(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendResult> {
+    let loaded = crate::modules::load(path, sink)?;
+    if sink.has_errors() {
+        return None;
+    }
+
+    let program = merge(&loaded);
+    let checked = zirk_sema::check(&loaded.sources, &program, sink);
+    Some(FrontendResult {
+        program,
+        checked,
+        sources: loaded.sources,
+    })
+}
+
+/// Renders the checker's type map as structured JSON — sibling to the
+/// diagnostics, on stdout (spec `zirk-check`, "Type-map output mode").
+pub fn render_type_map(checked: &zirk_sema::CheckedProgram, sources: &SourceMap) -> String {
+    let mut out = String::from("{\"types\":[");
+    for (index, entry) in checked.type_map.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let file = sources.file(entry.span.file).name();
+        out.push_str(&format!(
+            "{{\"file\":\"{}\",\"start\":{},\"end\":{},\"kind\":\"{}\"",
+            json_escape(file),
+            entry.span.start,
+            entry.span.end,
+            entry.kind.as_str(),
+        ));
+        if let Some(name) = &entry.name {
+            out.push_str(&format!(",\"name\":\"{}\"", json_escape(name)));
+        }
+        out.push_str(&format!(
+            ",\"type\":\"{}\",\"inferred\":{}}}",
+            json_escape(&entry.text),
+            entry.inferred,
+        ));
+    }
+    out.push_str("]}");
+    out
+}
+
+/// Escapes a string for embedding in the JSON `render_type_map` writes —
+/// quotes, backslashes and control characters only; the type map's own
+/// field names are fixed ASCII.
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Merges the files of a crate into the program the checker sees.
 fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
     let mut program = zirk_ast::Program {

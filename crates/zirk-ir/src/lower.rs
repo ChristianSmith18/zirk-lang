@@ -4406,7 +4406,16 @@ impl<'a> FunctionLowering<'a> {
         body: &ast::Block,
         id: u32,
     ) -> (Function, Vec<Function>) {
-        self.return_type = self.ir_type_from_ref(&method.return_type);
+        // The checker's resolved return type — which is what an unannotated
+        // trait default's inferred type lives in (`return-type-inference`),
+        // not the AST's now-optional annotation.
+        let resolved_method = self
+            .checked
+            .contracts
+            .get(id as usize)
+            .and_then(|c| c.method(&method.name.name))
+            .expect("the checker records every contract method");
+        self.return_type = self.ir_type(resolved_method.returns);
 
         let entry = self.new_block();
         self.current = entry;
@@ -4414,13 +4423,11 @@ impl<'a> FunctionLowering<'a> {
 
         let this = self.declare_slot("this", IrType::Contract(id), contract.name.span);
 
-        let resolved: Vec<IrType> = self
-            .checked
-            .contracts
-            .get(id as usize)
-            .and_then(|c| c.method(&method.name.name))
-            .map(|m| m.params.iter().map(|p| self.ir_type(p.ty)).collect())
-            .expect("the checker records every contract method");
+        let resolved: Vec<IrType> = resolved_method
+            .params
+            .iter()
+            .map(|p| self.ir_type(p.ty))
+            .collect();
 
         let mut params = vec![this];
         params.extend(

@@ -242,7 +242,7 @@ fn valid_function_without_parameters() {
 
     assert_eq!(f.name.name, "main");
     assert!(f.params.is_empty());
-    assert_eq!(f.return_type.name, "Void");
+    assert_eq!(f.return_type.as_ref().unwrap().name, "Void");
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn valid_function_with_parameters() {
     assert_eq!(f.params.len(), 2);
     assert_eq!(f.params[0].name.name, "a");
     assert_eq!(f.params[0].ty.name, "Int32");
-    assert_eq!(f.return_type.name, "Int32");
+    assert_eq!(f.return_type.as_ref().unwrap().name, "Int32");
 }
 
 #[test]
@@ -263,8 +263,16 @@ fn valid_several_functions_in_one_file() {
 }
 
 #[test]
-fn invalid_function_without_return_type() {
-    let output = errors("fn main() { }");
+fn valid_function_without_return_type() {
+    // `return-type-inference`: a body gives the checker something to infer
+    // from, so the annotation may be omitted.
+    let p = program("fn main() { }");
+    assert!(p.functions[0].return_type.is_none());
+}
+
+#[test]
+fn invalid_signature_without_return_type() {
+    let output = errors("interface Runner { run(); }\nfn main(): Void { }");
     assert!(output.contains(codes::MISSING_RETURN_TYPE.as_str()));
     assert!(output.contains("= help:"));
 }
@@ -1325,7 +1333,7 @@ fn valid_function_type_alias_is_also_recognized() {
 #[test]
 fn valid_function_type_on_a_return_type() {
     let p = program("fn make(): Fn(Int32) => Int32 { }\nfn main(): Void { }");
-    let ty = &p.functions[0].return_type;
+    let ty = &p.functions[0].return_type.as_ref().unwrap();
     let function = ty.function.as_ref().expect("a callable type");
     assert_eq!(function.params.len(), 1);
 }
@@ -1705,7 +1713,7 @@ fn valid_every_node_exposes_its_span() {
 
     let f = &p.functions[0];
     assert_eq!(source.slice(f.name.span), "main");
-    assert_eq!(source.slice(f.return_type.span), "Void");
+    assert_eq!(source.slice(f.return_type.as_ref().unwrap().span), "Void");
 
     let Stmt::Let(l) = &f.body.statements[0] else {
         panic!("expected a declaration");
@@ -1718,7 +1726,7 @@ fn valid_every_node_exposes_its_span() {
 
 #[test]
 fn invalid_one_error_does_not_prevent_parsing_the_rest() {
-    let source = SourceFile::new("test.zrk", "fn a() { }\nfn b(): Void { }");
+    let source = SourceFile::new("test.zrk", "fn a(): Void;\nfn b(): Void { }");
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(&source, &mut sink);
     let p = parse(&source, &tokens, &mut sink);
@@ -2191,7 +2199,7 @@ fn valid_pointer_type_in_every_position() {
     assert_eq!(p.classes[0].fields[0].ty.name, "Pointer");
     assert_eq!(p.classes[0].fields[0].ty.arguments[0].name, "Int32");
     assert_eq!(p.functions[0].params[0].ty.name, "Pointer");
-    assert_eq!(p.functions[0].return_type.name, "Pointer");
+    assert_eq!(p.functions[0].return_type.as_ref().unwrap().name, "Pointer");
 }
 
 // --- `task` / `await` / `select` were removed (`remove-task-await-model`) ---

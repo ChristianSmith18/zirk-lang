@@ -1,0 +1,11 @@
+// The `return`s of one body must unify, the same rule `if`-expression
+// branches follow — Int32 and String do not.
+fn pick(flag: Boolean) {
+    if (flag) {
+        return 1;
+    }
+    return "one";
+}
+
+fn main() {
+}

@@ -1,0 +1,12 @@
+// A mutual cycle with no annotation anywhere cannot be inferred: one
+// member has to break it with an explicit return type.
+fn a() {
+    return b();
+}
+
+fn b() {
+    return a();
+}
+
+fn main() {
+}

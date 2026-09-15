@@ -2,7 +2,7 @@
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
   "description": "Syntax highlighting, diagnostics, build/run commands, and language support for the Zirk programming language",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "publisher": "ChristianSmith",
   "author": "Christian Smith",
   "icon": "images/icon.png",

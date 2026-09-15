@@ -978,10 +978,31 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
-        let return_type = self.parse_return_type(&name)?;
+        // A contract method's annotation is optional only when a body follows:
+        // a `trait` default may infer its return; a signature-only member of
+        // either contract kind has nothing to infer from
+        // (`return-type-inference`).
+        let had_colon = matches!(self.peek(), TokenKind::Colon);
+        let return_type = self.parse_optional_return_type();
         let throws = self.parse_throws_clause();
 
         let has_body = matches!(self.peek(), TokenKind::LBrace);
+
+        if !has_body && return_type.is_none() && !had_colon {
+            let span = self.peek_span();
+            self.error(
+                codes::MISSING_RETURN_TYPE,
+                span,
+                "missing return type on signature",
+                "a signature without a body must declare its return type",
+                Some(format!(
+                    "write `{}(...): Void` if the method returns nothing",
+                    name.name
+                )),
+            );
+            self.synchronize();
+            return None;
+        }
 
         if has_body && kind == ContractKind::Interface {
             let span = self.peek_span();
@@ -1371,7 +1392,13 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen, "after the method name");
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
-        let return_type = self.parse_return_type(&name)?;
+        // An `abstract` method has no body to infer a return type from; a
+        // concrete one may omit it (`return-type-inference`).
+        let return_type = if is_abstract {
+            Some(self.require_return_type(&name)?)
+        } else {
+            self.parse_optional_return_type()
+        };
         let throws = self.parse_throws_clause();
 
         // An `abstract` method declares a signature and stops there.
@@ -1557,7 +1584,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
-        let return_type = self.parse_return_type(&name)?;
+        let return_type = self.parse_optional_return_type();
         let throws = self.parse_throws_clause();
 
         let body = self.parse_block()?;
@@ -1621,7 +1648,7 @@ impl<'a> Parser<'a> {
         let params = self.parse_params();
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
-        let return_type = self.parse_return_type(&name)?;
+        let return_type = self.require_return_type(&name)?;
 
         let span = if matches!(self.peek(), TokenKind::LBrace) {
             let body_span = self.peek_span();
@@ -1651,8 +1678,21 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// The mandatory return type of a function or method.
-    fn parse_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
+    /// The return type of a `fn` or method with a body, which may omit it
+    /// (`return-type-inference`): `None` marks the signature for inference
+    /// by the checker. When a `:` is written the type parses as usual —
+    /// an explicit annotation stays the contract the body must satisfy.
+    fn parse_optional_return_type(&mut self) -> Option<TypeRef> {
+        if self.eat(&TokenKind::Colon) {
+            return self.parse_type();
+        }
+        None
+    }
+
+    /// The mandatory return type of a signature with no body to infer from:
+    /// `interface` members, `abstract` methods, `extern` declarations and
+    /// `fn dec`.
+    fn require_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
         if self.eat(&TokenKind::Colon) {
             return self.parse_type();
         }
@@ -1661,8 +1701,8 @@ impl<'a> Parser<'a> {
         self.error(
             codes::MISSING_RETURN_TYPE,
             span,
-            "missing return type on function",
-            "every function declares its return type",
+            "missing return type on signature",
+            "a signature without a body must declare its return type",
             Some(format!(
                 "write `fn {}(...): Void` if the function returns nothing",
                 name.name

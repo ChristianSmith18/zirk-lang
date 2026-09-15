@@ -122,7 +122,11 @@ mod tests {
         let text = unsafe {
             words
                 .iter()
-                .map(|word| (*crate::string::payload_ptr(*word as *mut _)).as_str().to_string())
+                .map(|word| {
+                    (*crate::string::payload_ptr(*word as *mut _))
+                        .as_str()
+                        .to_string()
+                })
                 .collect::<Vec<_>>()
         };
 

@@ -21,7 +21,9 @@ mod checker;
 mod scope;
 mod types;
 
-pub use checker::{Capture, CheckedProgram, ConcurrentPlan, LambdaInfo, check};
+pub use checker::{
+    Capture, CheckedProgram, ConcurrentPlan, LambdaInfo, TypeMapEntry, TypeMapKind, check,
+};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
@@ -258,4 +260,9 @@ pub mod codes {
     pub const PARALLEL_REGION_IO: Code = Code::new("E0473");
     /// A parallel `reduce` combiner the checker cannot establish as associative.
     pub const PARALLEL_NONASSOCIATIVE_REDUCE: Code = Code::new("E0474");
+    /// Return-type inference found `return` expressions whose types do not join.
+    pub const INCOMPATIBLE_INFERRED_RETURNS: Code = Code::new("E0475");
+    /// A return type cannot be inferred because the inference is recursive —
+    /// directly or through a cycle — and no member declares it.
+    pub const CIRCULAR_RETURN_INFERENCE: Code = Code::new("E0476");
 }

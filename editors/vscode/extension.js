@@ -18,6 +18,11 @@ const pendingLiveChecks = new Map();
 const runningLiveChecks = new Set();
 const liveTempFiles = new Set();
 
+// `zirk check --types` output, per document URI — refreshed by the same
+// bridge pass that produces diagnostics, so hover never spawns the
+// compiler on its own (`editor-cli-bridge`, "Type-map retrieval").
+const typeMaps = new Map();
+
 // Brand syntax palette (zirk-lang-site tokens). Every scope ends in `.zirk`,
 // so the rules only ever touch Zirk files — the active theme stays in charge
 // of everything else. Applied/removed at runtime by `applyBrandPalette`.
@@ -201,6 +206,7 @@ function activate(context) {
         runningLiveChecks.delete(key);
         removeLiveTempFile(document.uri.fsPath);
         diagnosticCollection.delete(document.uri);
+        typeMaps.delete(document.uri.toString());
     });
 
     const activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -259,6 +265,13 @@ function activate(context) {
     });
 
     context.subscriptions.push(formatter);
+
+    const hover = vscode.languages.registerHoverProvider(LANGUAGE_ID, {
+        provideHover(document, position) {
+            return provideTypeHover(document, position);
+        }
+    });
+    context.subscriptions.push(hover);
 }
 
 /** Paints the opening delimiter column strictly between each `'''` pair. */
@@ -435,6 +448,7 @@ function deactivate() {
     }
     pendingLiveChecks.clear();
     runningLiveChecks.clear();
+    typeMaps.clear();
     for (const tempPath of liveTempFiles) {
         try {
             fs.unlinkSync(tempPath);
@@ -713,10 +727,107 @@ function runCheck(document, executable, filePath, cleanup) {
             updateStatusBar(document.uri, false, 'check failed');
         }
 
+        refreshTypeMap(document, executable, filePath);
+
         if (cleanup) {
             cleanup();
         }
     });
+}
+
+/**
+ * Refreshes the cached type map for `document` by invoking the same
+ * executable the diagnostic check used, with `--types` (`editor-cli-bridge`).
+ * A failed or malformed response leaves the previous cache in place — the
+ * bridge reports no hover rather than an incorrect one.
+ */
+function refreshTypeMap(document, executable, filePath) {
+    const baseName = path.basename(executable, path.extname(executable));
+    const isZirkCheck = baseName === 'zirk-check';
+    const args = isZirkCheck ? [filePath, '--types'] : ['check', '--types', filePath];
+
+    const child = spawn(executable, args, {
+        cwd: path.dirname(filePath),
+    });
+
+    let stdout = '';
+    child.stdout.on('data', chunk => {
+        stdout += chunk.toString();
+    });
+
+    child.on('error', () => {
+        // keep the previous map
+    });
+    child.on('close', code => {
+        if (code !== 0 || !stdout.trim()) {
+            return;
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(stdout);
+        } catch {
+            return;
+        }
+        if (!parsed || !Array.isArray(parsed.types)) {
+            return;
+        }
+        const entries = parsed.types.filter(entry =>
+            entry
+            && typeof entry.start === 'number'
+            && typeof entry.end === 'number'
+            && typeof entry.kind === 'string'
+            && typeof entry.type === 'string'
+        );
+        typeMaps.set(document.uri.toString(), entries);
+    });
+}
+
+/**
+ * Answers a hover from the cached `zirk check --types` map: the smallest
+ * span containing the position wins, declaration kinds beat expressions on
+ * a tie (`editor-cli-bridge`, "Hover mapping").
+ */
+function provideTypeHover(document, position) {
+    const entries = typeMaps.get(document.uri.toString());
+    if (!entries) {
+        return undefined;
+    }
+
+    const offset = document.offsetAt(position);
+    let best;
+    for (const entry of entries) {
+        if (entry.start > offset || offset > entry.end) {
+            continue;
+        }
+        const better = !best
+            || (entry.end - entry.start) < (best.end - best.start)
+            || ((entry.end - entry.start) === (best.end - best.start) && best.kind === 'expression');
+        if (better) {
+            best = entry;
+        }
+    }
+    if (!best) {
+        return undefined;
+    }
+
+    let display;
+    if (best.kind === 'function' && best.name) {
+        display = `fn ${best.name}${best.type.slice(2)}`;
+    } else if ((best.kind === 'method' || best.kind === 'variable'
+        || best.kind === 'parameter' || best.kind === 'field') && best.name) {
+        display = best.kind === 'method'
+            ? `${best.name}${best.type.slice(2)}`
+            : `${best.name}: ${best.type}`;
+    } else {
+        display = best.type;
+    }
+
+    const markdown = new vscode.MarkdownString();
+    markdown.appendCodeblock(display, 'zirk');
+    if (best.inferred) {
+        markdown.appendMarkdown('\n\n*(inferred)*');
+    }
+    return new vscode.Hover(markdown);
 }
 
 function updateStatusBar(documentUri, ok, detail) {

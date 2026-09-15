@@ -1,0 +1,7 @@
+// Direct recursion has no base signature to infer from either.
+fn f(n: Int32) {
+    return f(n - 1);
+}
+
+fn main() {
+}

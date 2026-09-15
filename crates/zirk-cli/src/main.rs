@@ -126,6 +126,7 @@ fn format(args: &[String]) -> i32 {
 
 fn check(args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json");
+    let types = args.iter().any(|a| a == "--types");
     let color = frontend::resolve_color(color_choice(args).as_deref());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
@@ -149,10 +150,23 @@ fn check(args: &[String]) -> i32 {
 
     let path = frontend::resolve_source_path(files[0].as_str());
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
-    let _ = frontend::run_frontend(&path, &mut sink);
+    let result = if types {
+        // `--types` keeps the checked program even on errors: the map
+        // reports what the checker managed to resolve.
+        frontend::run_frontend_lenient(&path, &mut sink)
+    } else {
+        frontend::run_frontend(&path, &mut sink)
+    };
 
     if !sink.is_empty() {
         eprint!("{}", frontend::render(&sink, json, color));
+    }
+
+    if types && let Some(result) = &result {
+        println!(
+            "{}",
+            frontend::render_type_map(&result.checked, &result.sources)
+        );
     }
 
     if sink.has_errors() { 1 } else { 0 }

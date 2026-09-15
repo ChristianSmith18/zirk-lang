@@ -150,6 +150,11 @@ pub struct CheckedProgram {
     /// expressions whose IR type would otherwise be ambiguous after context-
     /// directed inference.
     pub expr_types: HashMap<Span, Type>,
+    /// `zirk check --types`: every declaration name and resolved expression
+    /// the checker saw, with its rendered type and whether the type was
+    /// inferred or written (`return-type-inference`, spec `zirk-check`).
+    /// Editor tooling reads it for hover; lowering never does.
+    pub type_map: Vec<TypeMapEntry>,
     /// The compiler-known `RegexMatch` record class id.
     pub regex_match_class: u32,
     /// `type` aliases, by name, holding the still-unresolved target they were
@@ -806,6 +811,117 @@ struct Checker<'a> {
     /// a contract or abstract-class requirement declared nowhere in the
     /// class's own chain. Validated by [`Self::require_pending_overrides`].
     override_pending: Vec<(u32, String, Span)>,
+    // --- Return-type inference (`inferred-return-types`, design D2) ------
+    /// Collect mode of [`Self::infer_return_types`]: while `Some`,
+    /// `check_return` records each `return` here instead of validating it —
+    /// the resolved type is written to the signature afterwards and every
+    /// `return` is validated against it exactly as a written annotation
+    /// would be. Set only inside `infer_one_*`, which restores it on exit.
+    inferred_returns: Option<ReturnCollection>,
+    /// Unannotated declarations whose inference has not run yet — the
+    /// demand-driven worklist [`Self::ensure_inferred`] resolves from, held
+    /// as the cloned bodies to collect-check. A function by name; a method
+    /// or contract member by `(owner id, name)` — `MethodInfo::owner` and
+    /// `MethodInfo::from_contract` say which id a resolved call names.
+    pending_fn_decls: HashMap<String, FnDecl>,
+    pending_method_decls: HashMap<(u32, String), MethodDecl>,
+    pending_contract_decls: HashMap<(u32, String), MethodDecl>,
+    /// Keys mid-inference *right now*: a demand for one of them is the
+    /// recursion `CIRCULAR_RETURN_INFERENCE` names.
+    inferring: HashSet<InferKey>,
+    /// Cycles already reported, so a recursive call graph does not re-emit
+    /// the same diagnostic at every edge of the loop.
+    inference_cycle_reported: HashSet<InferKey>,
+    /// Bodies the inference pass already ran through the checker: the
+    /// ordinary body pass skips them, so each diagnostic surfaces once
+    /// (tasks.md 2.7).
+    inferred_bodies: HashSet<InferKey>,
+    /// Conformance pairs whose return-type comparison was deferred because
+    /// inference had not resolved one side yet — `(class, contract, method
+    /// name, conformance span, implements substitution)` — re-verified by
+    /// [`Self::verify_pending_signatures`] once `infer_return_types` has run.
+    /// Needed because conformance runs *before* inference: a collected body
+    /// must already see adopted defaults among the class's methods.
+    pending_signature_checks: Vec<PendingSignatureCheck>,
+    /// Declaration-name entries for `zirk check --types` — rendered with
+    /// the resolved types once inference has run; joined with `expr_types`
+    /// into [`CheckedProgram::type_map`] at the end of [`Self::run`].
+    decl_type_entries: Vec<TypeMapEntry>,
+    /// Whether the bindings `check_let`/`check_multi_let` are about to
+    /// declare came without an annotation — the `inferred` flag of the
+    /// `Variable` type-map entries `declare_local` records for them. Reset
+    /// after each statement's binding loop; every other `declare_local`
+    /// caller leaves it `false` (a `for` variable, a `catch` binding, a
+    /// parameter is typed by its construct, not inferred from an
+    /// initializer).
+    binding_inferred: bool,
+}
+
+/// A conformance check deferred until inference ran: `(class, contract,
+/// method name, use-site span, contract generic args)`. The return type was
+/// `UNKNOWN` when first compared — `verify_pending_signatures` re-checks it.
+type PendingSignatureCheck = (u32, u32, String, Span, Vec<(u32, Type)>);
+
+/// A function, method or contract member whose return type
+/// [`Checker::infer_return_types`] resolves or is resolving.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum InferKey {
+    Fn(String),
+    Method(u32, String),
+    Contract(u32, String),
+}
+
+/// What a collect-mode body produced for return-type inference.
+#[derive(Debug, Default)]
+struct ReturnCollection {
+    /// `(span, type)` of every `return expr`, in body order — the inputs to
+    /// the join.
+    valued: Vec<(Span, Type)>,
+    /// Span of every bare `return;` — excluded from the join per the spec
+    /// ("bare returns do not participate in the unification") but validated
+    /// against the resolved type afterwards.
+    bare: Vec<Span>,
+}
+
+/// One `zirk check --types` entry: a declaration name or a resolved
+/// expression with the type the checker gave it (`return-type-inference`,
+/// tasks.md 3.1).
+#[derive(Debug, Clone)]
+pub struct TypeMapEntry {
+    /// The declaration's written name, absent on expression entries.
+    pub name: Option<String>,
+    /// What the span names.
+    pub kind: TypeMapKind,
+    pub span: Span,
+    /// The rendered type text — `fn name(params): Return` for callables,
+    /// the bare type for everything else.
+    pub text: String,
+    /// Whether the type was inferred (`true`) or written (`false`).
+    pub inferred: bool,
+}
+
+/// The symbol kind of a [`TypeMapEntry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeMapKind {
+    Function,
+    Method,
+    Variable,
+    Parameter,
+    Field,
+    Expression,
+}
+
+impl TypeMapKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TypeMapKind::Function => "function",
+            TypeMapKind::Method => "method",
+            TypeMapKind::Variable => "variable",
+            TypeMapKind::Parameter => "parameter",
+            TypeMapKind::Field => "field",
+            TypeMapKind::Expression => "expression",
+        }
+    }
 }
 
 /// See [`Checker::native_resource`].
@@ -927,6 +1043,16 @@ impl<'a> Checker<'a> {
             inner_constructions: HashMap::new(),
             resolved_constructions: HashMap::new(),
             override_pending: Vec::new(),
+            inferred_returns: None,
+            pending_fn_decls: HashMap::new(),
+            pending_method_decls: HashMap::new(),
+            pending_contract_decls: HashMap::new(),
+            inferring: HashSet::new(),
+            inference_cycle_reported: HashSet::new(),
+            inferred_bodies: HashSet::new(),
+            pending_signature_checks: Vec::new(),
+            binding_inferred: false,
+            decl_type_entries: Vec::new(),
         };
         checker.register_regex_match_class();
         checker
@@ -1140,20 +1266,31 @@ impl<'a> Checker<'a> {
         self.resolve_class_type_param_constraints(program);
         self.declare_members(program);
         self.check_generic_class_lowering(program);
+        // Conformance resolves before any function signature or body is
+        // checked — a `throws` clause names the adopter, and a body checked
+        // in inference's collect mode must already see adopted trait
+        // defaults among the class's methods (`return-type-inference`).
+        // A signature comparison needing a still-uninferred return type is
+        // deferred to `verify_pending_signatures`.
         self.check_conformance(program);
         self.require_pending_overrides(program);
         // Whether each method mutates its receiver is inferred — `mut` is no
         // longer written — before any body is checked, since `inmut::strict`
-        // call sites consult the flags during body checking.
+        // call sites consult the flags during body checking. Return-type
+        // inference runs bodies in collect mode, so it needs the flags too.
         self.infer_method_mutation(program);
 
-        // Signatures next, so a function can call another declared later.
+        // Signatures next, so a function can call another declared later —
+        // and so return-type inference can read them.
         for f in &program.functions {
             self.declare_function(f);
         }
         for e in &program.externs {
             self.declare_extern_fn(e);
         }
+
+        self.infer_return_types(program);
+        self.verify_pending_signatures();
 
         self.check_entrypoint(program);
 
@@ -1162,11 +1299,20 @@ impl<'a> Checker<'a> {
             self.check_class(c);
         }
         for f in &program.functions {
+            // A body the inference pass already ran — in collect mode — is
+            // not checked again: each diagnostic surfaces once (2.7).
+            if self
+                .inferred_bodies
+                .contains(&InferKey::Fn(f.name.name.clone()))
+            {
+                continue;
+            }
             self.check_function(f);
         }
         self.scopes.pop();
 
         let tuple_base = self.classes.len() as u32;
+        let type_map = self.build_type_map(program);
         CheckedProgram {
             functions: self.functions,
             enums: self.enums,
@@ -1212,9 +1358,148 @@ impl<'a> Checker<'a> {
             tuple_base,
             externs: self.externs,
             expr_types: self.expr_types,
+            type_map,
             regex_match_class: self.regex_match_class,
             type_aliases: self.type_aliases,
         }
+    }
+
+    /// The `zirk check --types` map: one entry per declaration name —
+    /// function, method, field, parameter, variable — and one per resolved
+    /// expression (`return-type-inference`, spec `zirk-check`). Built at the
+    /// end of checking so every signature carries its inferred-or-written
+    /// return type.
+    fn build_type_map(&mut self, program: &Program) -> Vec<TypeMapEntry> {
+        let mut entries = Vec::new();
+
+        for f in &program.functions {
+            let Some(signature) = self.functions.get(&f.name.name) else {
+                continue;
+            };
+            entries.push(TypeMapEntry {
+                name: Some(f.name.name.clone()),
+                kind: TypeMapKind::Function,
+                span: f.name.span,
+                text: self.signature_text(&signature.params, signature.returns),
+                inferred: f.return_type.is_none(),
+            });
+        }
+        for e in &program.externs {
+            let Some(signature) = self.externs.get(&e.name.name) else {
+                continue;
+            };
+            let params = signature
+                .params
+                .iter()
+                .map(|&ty| self.name(ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let returns = self.name(signature.returns);
+            entries.push(TypeMapEntry {
+                name: Some(e.name.name.clone()),
+                kind: TypeMapKind::Function,
+                span: e.name.span,
+                text: format!("fn({params}): {returns}"),
+                inferred: false,
+            });
+        }
+        for decl in Self::class_decls_flat(program) {
+            let Some(id) = self.class_decl_id(decl) else {
+                continue;
+            };
+            for method in &decl.methods {
+                let Some(info) = self.classes[id as usize]
+                    .methods
+                    .iter()
+                    .find(|m| m.owner == id && m.name == method.name.name)
+                else {
+                    continue;
+                };
+                entries.push(TypeMapEntry {
+                    name: Some(method.name.name.clone()),
+                    kind: TypeMapKind::Method,
+                    span: method.name.span,
+                    text: self.signature_text(&info.params, info.returns),
+                    inferred: method.return_type.is_none(),
+                });
+            }
+            for field in &decl.fields {
+                let Some(info) = self.classes[id as usize].field(&field.name.name) else {
+                    continue;
+                };
+                let text = self.name(info.ty);
+                entries.push(TypeMapEntry {
+                    name: Some(field.name.name.clone()),
+                    kind: TypeMapKind::Field,
+                    span: field.name.span,
+                    text,
+                    inferred: false,
+                });
+            }
+        }
+        for decl in &program.contracts {
+            let Some(id) = self.contract_id(&decl.name.name) else {
+                continue;
+            };
+            for method in &decl.methods {
+                let Some(info) = self.contracts[id as usize].method(&method.name.name) else {
+                    continue;
+                };
+                entries.push(TypeMapEntry {
+                    name: Some(method.name.name.clone()),
+                    kind: TypeMapKind::Method,
+                    span: method.name.span,
+                    text: self.signature_text(&info.params, info.returns),
+                    inferred: method.return_type.is_none(),
+                });
+            }
+        }
+
+        // A parameter's `declare_local` records a `Variable` entry at the
+        // same span the dedicated `Parameter` entry uses — keep the more
+        // specific one.
+        let parameter_spans: HashSet<(u32, u32, u32)> = self
+            .decl_type_entries
+            .iter()
+            .filter(|e| e.kind == TypeMapKind::Parameter)
+            .map(|e| (e.span.file.0, e.span.start, e.span.end))
+            .collect();
+        entries.extend(
+            self.decl_type_entries
+                .iter()
+                .filter(|e| {
+                    e.kind != TypeMapKind::Variable
+                        || !parameter_spans.contains(&(e.span.file.0, e.span.start, e.span.end))
+                })
+                .cloned(),
+        );
+
+        let mut expression_entries: Vec<TypeMapEntry> = self
+            .expr_types
+            .iter()
+            .map(|(span, ty)| TypeMapEntry {
+                name: None,
+                kind: TypeMapKind::Expression,
+                span: *span,
+                text: self.name(*ty),
+                inferred: true,
+            })
+            .collect();
+        expression_entries.sort_by_key(|e| (e.span.file.0, e.span.start, e.span.end));
+        entries.extend(expression_entries);
+
+        entries
+    }
+
+    /// `fn(a: Int32, b: Int32): Void` — the rendered signature type-map
+    /// entries carry (`return-type-inference`, spec `zirk-check`).
+    fn signature_text(&self, params: &[ParamInfo], returns: Type) -> String {
+        let params = params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, self.name(p.ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("fn({params}): {}", self.name(returns))
     }
 
     /// Notes which names each file brought in with `import`.
@@ -1280,6 +1565,18 @@ impl<'a> Checker<'a> {
     /// never triggers this: it is always read as `this.name`, never a bare
     /// name `Scopes` holds, so there is nothing for a local to shadow.
     fn declare_local(&mut self, binding: Binding) {
+        // `zirk check --types`: every local a body declares lands here —
+        // except the synthetic `this`, whose zero-width span gives it away.
+        if binding.span.start != binding.span.end {
+            let text = self.name(binding.ty);
+            self.decl_type_entries.push(TypeMapEntry {
+                name: Some(binding.name.clone()),
+                kind: TypeMapKind::Variable,
+                span: binding.span,
+                text,
+                inferred: self.binding_inferred,
+            });
+        }
         if let Some(resolution) = self.scopes.resolve(&binding.name) {
             let where_ = self.declared_at(resolution.binding.span, binding.span);
             self.error(
@@ -2409,7 +2706,14 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            let returns = self.resolve_type(&method.return_type);
+            // A `trait` default may omit the annotation — `UNKNOWN` marks it
+            // for `infer_return_types`; the parser has already forced one on
+            // every signature-only member.
+            let returns = method
+                .return_type
+                .as_ref()
+                .map(|r| self.resolve_type(r))
+                .unwrap_or(Type::UNKNOWN);
             let throws = self.resolve_throws_clause(&method.throws);
             methods.push(ContractMethod {
                 name: method.name.name.clone(),
@@ -3217,6 +3521,19 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            // Return-type inference has not resolved one side yet: params
+            // and visibility are checked now, the return type is
+            // re-verified by `verify_pending_signatures` once
+            // `infer_return_types` has run (`return-type-inference`).
+            if supplied.returns.is_unknown() || method.returns.is_unknown() {
+                self.pending_signature_checks.push((
+                    class,
+                    contract,
+                    method.name.clone(),
+                    at,
+                    subst.to_vec(),
+                ));
+            }
             self.require_matching_signature(&supplied, method, &contract_name, at);
         }
     }
@@ -3260,7 +3577,15 @@ impl<'a> Checker<'a> {
                 .zip(&required.params)
                 .all(|(a, b)| a.ty == b.ty);
 
-        if same_params && supplied.returns == required.returns {
+        // An `UNKNOWN` on either side is a still-pending inference, not a
+        // mismatch: the pair is registered for `verify_pending_signatures`
+        // and the return type compares once both are resolved
+        // (`return-type-inference`).
+        let same_returns = supplied.returns.is_unknown()
+            || required.returns.is_unknown()
+            || supplied.returns == required.returns;
+
+        if same_params && same_returns {
             if supplied.visibility != Visibility::Public {
                 let name = supplied.name.clone();
                 self.error(
@@ -3284,6 +3609,29 @@ impl<'a> Checker<'a> {
             Some("keep the parameters and the return type the contract asked for".into()),
         );
         let _ = at;
+    }
+
+    /// Re-verifies the conformance pairs `require_one_conformance` deferred:
+    /// the return type on at least one side was a still-pending inference
+    /// when conformance ran. Runs after `infer_return_types`, so both sides
+    /// are resolved — or `UNKNOWN`, which `require_matching_signature` reads
+    /// as "inference already reported the problem" rather than a mismatch
+    /// (`return-type-inference`).
+    fn verify_pending_signatures(&mut self) {
+        let pending = std::mem::take(&mut self.pending_signature_checks);
+        for (class, contract, name, at, subst) in pending {
+            let Some(supplied) = self.classes[class as usize].method(&name).cloned() else {
+                continue;
+            };
+            let Some(required) = self.contracts[contract as usize].method(&name).cloned() else {
+                continue;
+            };
+            // Re-apply the `implements` substitution — for a generic
+            // contract the stored `ContractMethod` still names its own `T`.
+            let required = self.substitute_contract_method(&required, &subst);
+            let contract_name = self.contracts[contract as usize].name.clone();
+            self.require_matching_signature(&supplied, &required, &contract_name, at);
+        }
     }
 
     /// Registers a class by name, before anything about it is resolved.
@@ -4210,7 +4558,13 @@ impl<'a> Checker<'a> {
             }
 
             self.enter_type_params(&method.type_params);
-            let returns = self.resolve_type(&method.return_type);
+            // `None` marks the signature for `infer_return_types` — the
+            // parser only allows the omission on a method with a body.
+            let returns = method
+                .return_type
+                .as_ref()
+                .map(|r| self.resolve_type(r))
+                .unwrap_or(Type::UNKNOWN);
             let throws = self.resolve_throws_clause(&method.throws);
             let resolved = MethodInfo {
                 name: method.name.name.clone(),
@@ -4777,8 +5131,24 @@ impl<'a> Checker<'a> {
 
         for method in &decl.methods {
             let Some(body) = &method.body else { continue };
+            // `return-type-inference`: an unannotated method's body already
+            // ran — in collect mode — during `infer_return_types`; running
+            // it again would print every diagnostic twice (tasks.md 2.7).
+            if self
+                .inferred_bodies
+                .contains(&InferKey::Method(id as u32, method.name.name.clone()))
+            {
+                continue;
+            }
             self.enter_type_params(&method.type_params);
-            let returns = self.resolve_type(&method.return_type);
+            // The signature as declared — the resolved annotation, or the
+            // type inference just wrote into it.
+            let returns = self.classes[id]
+                .methods
+                .iter()
+                .find(|m| m.name == method.name.name && m.owner == id as u32)
+                .map(|m| m.returns)
+                .unwrap_or(Type::UNKNOWN);
             let throws = self.resolve_throws_clause(&method.throws);
             let name = method.name.name.clone();
             let span = body.span;
@@ -4839,6 +5209,14 @@ impl<'a> Checker<'a> {
 
         for param in params {
             let info = self.resolve_param(param);
+            let text = self.name(info.ty);
+            self.decl_type_entries.push(TypeMapEntry {
+                name: Some(info.name.clone()),
+                kind: TypeMapKind::Parameter,
+                span: param.name.span,
+                text,
+                inferred: false,
+            });
             self.declare_local(Binding {
                 name: info.name,
                 ty: info.ty,
@@ -5210,7 +5588,13 @@ impl<'a> Checker<'a> {
             .map(|p| self.resolve_param(p))
             .collect::<Vec<_>>();
 
-        let returns = self.resolve_type(&f.return_type);
+        // `None` marks the signature for `infer_return_types`: `UNKNOWN`
+        // holds its place until the inference pass writes the resolved type.
+        let returns = f
+            .return_type
+            .as_ref()
+            .map(|r| self.resolve_type(r))
+            .unwrap_or(Type::UNKNOWN);
         let throws = self.resolve_throws_clause(&f.throws);
         let signature = Signature {
             name: f.name.name.clone(),
@@ -6786,7 +7170,10 @@ impl<'a> Checker<'a> {
 
     // --- Functions --------------------------------------------------------
 
-    fn check_function(&mut self, f: &FnDecl) {
+    /// Checks a function's body; returns whether every path through it
+    /// returns (or diverges), which [`Self::infer_fn`] reads to tell an
+    /// always-diverging `Never` body apart from an ordinary `Void` one.
+    fn check_function(&mut self, f: &FnDecl) -> bool {
         self.enter_type_params(&f.type_params);
         let signature = self.functions.get(&f.name.name).cloned();
         self.current_return = signature
@@ -6820,6 +7207,14 @@ impl<'a> Checker<'a> {
             } else {
                 info.ty
             };
+            let text = self.name(binding_ty);
+            self.decl_type_entries.push(TypeMapEntry {
+                name: Some(info.name.clone()),
+                kind: TypeMapKind::Parameter,
+                span: param.name.span,
+                text,
+                inferred: false,
+            });
             self.declare_local(Binding {
                 name: info.name.clone(),
                 ty: binding_ty,
@@ -6882,6 +7277,7 @@ impl<'a> Checker<'a> {
         self.pending_throws = outer_pending;
         self.in_main_scope = outer_main_scope;
         self.leave_type_params();
+        always_returns
     }
 
     /// Checks a block and reports whether every path through it returns.
@@ -6960,7 +7356,11 @@ impl<'a> Checker<'a> {
             Stmt::Expr(s) => {
                 let ty = self.check_expr(&s.expr);
                 self.require_result_consumed(ty, s.span);
-                false
+                // A `Never` result diverges the way `throw` does: nothing
+                // after it in this block runs. It is what lets
+                // `fn f() { fatalError("x"); }` infer `Never`
+                // (`return-type-inference`).
+                matches!(ty.base, Base::Never)
             }
             Stmt::Block(b) => self.check_block(b),
             Stmt::Throw(s) => {
@@ -7211,6 +7611,11 @@ impl<'a> Checker<'a> {
     /// are checked, and the statement's position is exactly where its
     /// block scope begins.
     fn check_local_class(&mut self, decl: &ClassDecl) {
+        // A local class's method bodies are their own function contexts:
+        // a `return` inside them is the method's, not the enclosing
+        // function's — so they stay out of return-type inference's
+        // collection while it is active (`return-type-inference`).
+        let outer_inferred = self.inferred_returns.take();
         // A local class may shadow an outer one; two in the same statement
         // list — the entries since the current mark — is a duplicate.
         let mark = self.local_class_marks.last().copied().unwrap_or(0);
@@ -7297,7 +7702,11 @@ impl<'a> Checker<'a> {
         // Its own methods may be mutually recursive, so infer to a fixed
         // point the same way the program-wide pass does.
         while self.infer_decl_mutation(decl) {}
+        // An unannotated method of a local class infers here — the
+        // program-wide pass ran before the class existed.
+        self.infer_local_methods(id, decl);
         self.check_class(decl);
+        self.inferred_returns = outer_inferred;
     }
 
     // --- Method receiver-mutation inference -------------------------------
@@ -7320,6 +7729,448 @@ impl<'a> Checker<'a> {
             if !changed {
                 break;
             }
+        }
+    }
+
+    // --- Return-type inference (`inferred-return-types`, design D2) ------
+
+    /// Resolves the return type of every `fn`/method declared without an
+    /// annotation, after all signatures are declared and before conformance,
+    /// override and entrypoint checking — and before any ordinary body —
+    /// reads them.
+    ///
+    /// Work is demand-driven ([`Self::ensure_inferred`]): a call that
+    /// resolves to a pending signature runs its inference first, so
+    /// `fn a() { return b(); }` sees `b`'s type regardless of declaration
+    /// order, and a recursive demand meets the key in `inferring`, which
+    /// `CIRCULAR_RETURN_INFERENCE` reports. The loop here is what forces
+    /// inference for the signatures nobody calls — an entrypoint, a dead
+    /// function, a trait default — so every signature is concrete before
+    /// conformance and lowering read it.
+    ///
+    /// Each pending body is checked in *collect mode*: `check_return`
+    /// records its `return`s into `inferred_returns` instead of validating
+    /// them. The join of the recorded types — `Type::unify`, the same rule
+    /// `if`-expression branches follow — becomes the signature's return
+    /// type: `Void` when nothing valued returns and the body can complete,
+    /// `Never` when every path diverges. The body is marked in
+    /// `inferred_bodies` so the ordinary pass does not check it twice
+    /// (tasks.md 2.7), and each recorded `return` is then validated against
+    /// the resolved type — the same diagnostics a written annotation
+    /// produces (tasks.md 2.6).
+    fn infer_return_types(&mut self, program: &Program) {
+        for f in &program.functions {
+            if f.return_type.is_none() && self.functions.contains_key(&f.name.name) {
+                self.pending_fn_decls.insert(f.name.name.clone(), f.clone());
+            }
+        }
+        for decl in Self::class_decls_flat(program) {
+            let Some(id) = self.class_decl_id(decl) else {
+                continue;
+            };
+            for method in &decl.methods {
+                // `body.is_some()` is implied by the parser (a signature-only
+                // method cannot omit the annotation) — belt and braces for a
+                // declaration synthesized elsewhere.
+                if method.return_type.is_none() && method.body.is_some() {
+                    self.pending_method_decls
+                        .insert((id, method.name.name.clone()), method.clone());
+                }
+            }
+        }
+        for contract in &program.contracts {
+            let Some(id) = self.contract_id(&contract.name.name) else {
+                continue;
+            };
+            for method in &contract.methods {
+                if method.return_type.is_none() && method.body.is_some() {
+                    self.pending_contract_decls
+                        .insert((id, method.name.name.clone()), method.clone());
+                }
+            }
+        }
+
+        let keys: Vec<InferKey> = self
+            .pending_fn_decls
+            .keys()
+            .map(|n| InferKey::Fn(n.clone()))
+            .chain(
+                self.pending_method_decls
+                    .keys()
+                    .map(|(id, n)| InferKey::Method(*id, n.clone())),
+            )
+            .chain(
+                self.pending_contract_decls
+                    .keys()
+                    .map(|(id, n)| InferKey::Contract(*id, n.clone())),
+            )
+            .collect();
+        for key in keys {
+            let span = self.infer_key_span(&key);
+            self.ensure_inferred(&key, span);
+        }
+    }
+
+    /// The declaration span an [`InferKey`] was registered with — for a
+    /// pending key, its still-stored declaration's name.
+    fn infer_key_span(&self, key: &InferKey) -> Span {
+        let fallback = Span::new(0, 0);
+        match key {
+            InferKey::Fn(name) => self
+                .pending_fn_decls
+                .get(name)
+                .map(|d| d.name.span)
+                .unwrap_or_else(|| self.functions.get(name).map(|s| s.span).unwrap_or(fallback)),
+            InferKey::Method(id, name) => self
+                .pending_method_decls
+                .get(&(*id, name.clone()))
+                .map(|d| d.name.span)
+                .unwrap_or(fallback),
+            InferKey::Contract(id, name) => self
+                .pending_contract_decls
+                .get(&(*id, name.clone()))
+                .map(|d| d.name.span)
+                .unwrap_or(fallback),
+        }
+    }
+
+    /// Resolves `key`'s return type now, if it is still pending — the
+    /// demand side of the inference pass: a call (or `main`, or
+    /// conformance) that needs the signature runs this first. A demand for
+    /// a key already in `inferring` is the recursion
+    /// `CIRCULAR_RETURN_INFERENCE` names: the caller reads `UNKNOWN`, and
+    /// the signature resolves to `UNKNOWN` when its own frame finishes.
+    fn ensure_inferred(&mut self, key: &InferKey, at: Span) {
+        if self.inferring.contains(key) {
+            if self.inference_cycle_reported.insert(key.clone()) {
+                let name = match key {
+                    InferKey::Fn(n) | InferKey::Method(_, n) | InferKey::Contract(_, n) => {
+                        n.clone()
+                    }
+                };
+                self.error(
+                    codes::CIRCULAR_RETURN_INFERENCE,
+                    at,
+                    format!("cannot infer the return type of `{name}`"),
+                    "the inference is recursive — the body reaches back to this signature before it resolves",
+                    Some(format!(
+                        "give `{name}` (or another member of the cycle) an explicit return type"
+                    )),
+                );
+            }
+            return;
+        }
+
+        // A nested inference runs a different function's body inside this
+        // one's check — `a` calling still-pending `b`, or a local class's
+        // method. The enclosing body's context is not the inner body's: a
+        // method cannot see the locals of a function that merely called it
+        // (the `ORDINARY_SHADOWING` false positive a raw run would report),
+        // and its `this`, loop depth and `unsafe` depth are not inherited
+        // either. Reset the per-function state for the inner run and
+        // restore it afterwards (tasks.md 2.5).
+        let outer_scopes = std::mem::replace(&mut self.scopes, Scopes::new());
+        let outer_this = self.this_type.take();
+        let outer_ctor = std::mem::replace(&mut self.in_constructor, false);
+        let outer_loops = std::mem::replace(&mut self.loop_depth, 0);
+        let outer_unsafe = std::mem::replace(&mut self.unsafe_depth, 0);
+        let outer_main = std::mem::replace(&mut self.in_main_scope, false);
+        let outer_expected = self.expected_type.take();
+        let outer_recursive = self.recursive_binding.take();
+
+        match key {
+            InferKey::Fn(name) => {
+                if let Some(decl) = self.pending_fn_decls.remove(name) {
+                    self.infer_fn(&decl);
+                }
+            }
+            InferKey::Method(id, name) => {
+                if let Some(decl) = self.pending_method_decls.remove(&(*id, name.clone())) {
+                    self.infer_method(*id, &decl);
+                }
+            }
+            InferKey::Contract(id, name) => {
+                if let Some(decl) = self.pending_contract_decls.remove(&(*id, name.clone())) {
+                    self.infer_contract_method(*id, &decl);
+                }
+            }
+        }
+
+        self.scopes = outer_scopes;
+        self.this_type = outer_this;
+        self.in_constructor = outer_ctor;
+        self.loop_depth = outer_loops;
+        self.unsafe_depth = outer_unsafe;
+        self.in_main_scope = outer_main;
+        self.expected_type = outer_expected;
+        self.recursive_binding = outer_recursive;
+    }
+
+    /// Collect-checks a function's body and writes the joined return type
+    /// into its signature.
+    fn infer_fn(&mut self, decl: &FnDecl) {
+        let key = InferKey::Fn(decl.name.name.clone());
+        self.inferring.insert(key.clone());
+        let outer_inferred = self.inferred_returns.replace(ReturnCollection::default());
+        // `check_function` leaves `current_return` pointing at the body's
+        // signature; restore it so a nested inference does not leak into
+        // the enclosing body check (tasks.md 2.5).
+        let outer_return = self.current_return;
+        let always_returns = self.check_function(decl);
+        self.current_return = outer_return;
+        let collected =
+            std::mem::replace(&mut self.inferred_returns, outer_inferred).unwrap_or_default();
+        self.inferring.remove(&key);
+
+        let (resolved, unjoined) = self.resolve_collection(&collected, always_returns);
+        if let Some(signature) = self.functions.get_mut(&decl.name.name) {
+            signature.returns = resolved;
+        }
+        self.inferred_bodies.insert(key);
+        self.validate_inferred(
+            &collected,
+            resolved,
+            always_returns,
+            &decl.name.name,
+            decl.body.span,
+            &unjoined,
+        );
+    }
+
+    /// Collect-checks a class method's body and writes the joined return
+    /// type into its `MethodInfo` — and into the inherited copies a
+    /// subclass seeded before inference ran.
+    fn infer_method(&mut self, class: u32, decl: &MethodDecl) {
+        let key = InferKey::Method(class, decl.name.name.clone());
+        self.inferring.insert(key.clone());
+        let collected = self.collect_method_body(Type::of(Base::Class(class)), decl);
+        self.inferring.remove(&key);
+
+        let body_span = decl.body.as_ref().map(|b| b.span).unwrap_or(decl.span);
+        let (resolved, unjoined) = self.resolve_collection(&collected.0, collected.1);
+        for class_ty in &mut self.classes {
+            for m in &mut class_ty.methods {
+                if m.owner == class && m.name == decl.name.name {
+                    m.returns = resolved;
+                }
+            }
+        }
+        self.inferred_bodies.insert(key);
+        self.validate_inferred(
+            &collected.0,
+            resolved,
+            collected.1,
+            &decl.name.name,
+            body_span,
+            &unjoined,
+        );
+    }
+
+    /// Collect-checks a trait's default body — where `this` is the contract
+    /// — and writes the joined return type into its `ContractMethod` (and
+    /// any already-adopted copy).
+    fn infer_contract_method(&mut self, contract: u32, decl: &MethodDecl) {
+        let key = InferKey::Contract(contract, decl.name.name.clone());
+        self.inferring.insert(key.clone());
+        let collected = self.collect_method_body(Type::of(Base::Contract(contract)), decl);
+        self.inferring.remove(&key);
+
+        let body_span = decl.body.as_ref().map(|b| b.span).unwrap_or(decl.span);
+        let (resolved, unjoined) = self.resolve_collection(&collected.0, collected.1);
+        if let Some(m) = self.contracts[contract as usize]
+            .methods
+            .iter_mut()
+            .find(|m| m.name == decl.name.name)
+        {
+            m.returns = resolved;
+        }
+        for class_ty in &mut self.classes {
+            for m in &mut class_ty.methods {
+                if m.from_contract == Some(contract) && m.name == decl.name.name {
+                    m.returns = resolved;
+                }
+            }
+        }
+        self.inferred_bodies.insert(key);
+        self.validate_inferred(
+            &collected.0,
+            resolved,
+            collected.1,
+            &decl.name.name,
+            body_span,
+            &unjoined,
+        );
+    }
+
+    /// The shared collect-mode run of a method body: `this` bound to
+    /// `this_type` (the class, or the contract for a trait default),
+    /// `current_return` unknown, `return`s recorded. Returns the collected
+    /// `return`s and whether every path returns or diverges.
+    fn collect_method_body(
+        &mut self,
+        this_type: Type,
+        decl: &MethodDecl,
+    ) -> (ReturnCollection, bool) {
+        let outer_inferred = self.inferred_returns.replace(ReturnCollection::default());
+        let outer_pending = std::mem::take(&mut self.pending_throws);
+        self.enter_type_params(&decl.type_params);
+        self.current_throws = self.resolve_throws_clause(&decl.throws);
+        let mut always_returns = false;
+        let body_span = decl.body.as_ref().map(|b| b.span).unwrap_or(decl.span);
+        if let Some(body) = &decl.body {
+            self.check_member_body(
+                this_type,
+                &decl.params,
+                Type::UNKNOWN,
+                !decl.is_static,
+                |checker| {
+                    always_returns = checker.check_block(body);
+                },
+            );
+        }
+        self.report_uncaught_throws(body_span, &decl.name.name);
+        self.pending_throws = outer_pending;
+        self.leave_type_params();
+        (
+            std::mem::replace(&mut self.inferred_returns, outer_inferred).unwrap_or_default(),
+            always_returns,
+        )
+    }
+
+    /// The joined type of a collected body: `Type::unify` over every valued
+    /// `return`, the same rule `if`-expression branches follow. `Void` when
+    /// nothing valued returns and the body can complete; `Never` when every
+    /// path diverges (a `throw`, an endless `loop`, a `Never` tail).
+    ///
+    /// Returns the resolved type and the spans the join already diagnosed —
+    /// [`Self::validate_inferred`] skips them so one `return` does not print
+    /// two errors.
+    fn resolve_collection(
+        &mut self,
+        collected: &ReturnCollection,
+        always_returns: bool,
+    ) -> (Type, Vec<Span>) {
+        let mut joined: Option<Type> = None;
+        let mut unjoined = Vec::new();
+        for (span, ty) in &collected.valued {
+            joined = Some(match joined {
+                None => *ty,
+                Some(acc) => match acc.unify(*ty) {
+                    Some(u) => u,
+                    None => {
+                        let expected = self.name(acc);
+                        let found = self.name(*ty);
+                        self.error(
+                            codes::INCOMPATIBLE_INFERRED_RETURNS,
+                            *span,
+                            "the `return`s in this body have incompatible types",
+                            format!("an earlier `return` gives `{expected}` and this one gives `{found}`"),
+                            Some("give the function an explicit return type that covers both".into()),
+                        );
+                        unjoined.push(*span);
+                        acc
+                    }
+                },
+            });
+        }
+        let resolved = match joined {
+            Some(ty) => ty,
+            None if always_returns && collected.bare.is_empty() => Type::of(Base::Never),
+            None => Type::VOID,
+        };
+        (resolved, unjoined)
+    }
+
+    /// Validates a collected body against the resolved return type — the
+    /// same diagnostics a written annotation produces (tasks.md 2.6): a
+    /// bare `return;` reports `Void` against a value type, a valued
+    /// `return` reports its type against the signature's, and a non-`Void`
+    /// body must return on every path.
+    fn validate_inferred(
+        &mut self,
+        collected: &ReturnCollection,
+        resolved: Type,
+        always_returns: bool,
+        name: &str,
+        body_span: Span,
+        unjoined: &[Span],
+    ) {
+        if resolved.is_unknown() {
+            return; // inference already said what was wrong
+        }
+        let expects_value = resolved != Type::VOID && !matches!(resolved.base, Base::Never);
+        for span in &collected.bare {
+            if expects_value {
+                let expected = self.name(resolved);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    *span,
+                    "the returned type does not match the signature",
+                    format!("the function's inferred return type is `{expected}` and this returns `Void`"),
+                    None,
+                );
+            }
+        }
+        for (span, actual) in &collected.valued {
+            if unjoined.contains(span) {
+                continue; // `INCOMPATIBLE_INFERRED_RETURNS` already named it
+            }
+            if !resolved.accepts(*actual)
+                && !self.is_subclass_of(*actual, resolved)
+                && !self.bare_enum_matches_instance(*actual, resolved)
+                && !self.callable_assignable(resolved, *actual)
+            {
+                let expected = self.name(resolved);
+                let found = self.name(*actual);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    *span,
+                    "the returned type does not match the signature",
+                    format!("the function's inferred return type is `{expected}` and this returns `{found}`"),
+                    None,
+                );
+            }
+        }
+        if expects_value && !always_returns {
+            let expected = self.name(resolved);
+            self.error(
+                codes::MISSING_RETURN,
+                body_span,
+                format!("not every path of `{name}` returns a value"),
+                format!("the function's inferred return type is `{expected}`"),
+                Some("add a `return` at the end of the function".into()),
+            );
+        }
+    }
+
+    /// A local class's unannotated methods infer at their declaration
+    /// statement — the program-wide [`Self::infer_return_types`] ran before
+    /// the class existed.
+    fn infer_local_methods(&mut self, class: u32, decl: &ClassDecl) {
+        for method in &decl.methods {
+            if method.return_type.is_none() && method.body.is_some() {
+                self.pending_method_decls
+                    .insert((class, method.name.name.clone()), method.clone());
+            }
+        }
+        let keys: Vec<InferKey> = decl
+            .methods
+            .iter()
+            .filter(|m| m.return_type.is_none() && m.body.is_some())
+            .map(|m| InferKey::Method(class, m.name.name.clone()))
+            .collect();
+        for key in keys {
+            self.ensure_inferred(&key, decl.name.span);
+        }
+    }
+
+    /// The [`InferKey`] a resolved call names — a method by the class (or
+    /// the contract, for an adopted default) that declares the body it
+    /// reaches.
+    fn call_infer_key(method: &MethodInfo) -> InferKey {
+        match method.from_contract {
+            Some(contract) => InferKey::Contract(contract, method.name.clone()),
+            None => InferKey::Method(method.owner, method.name.clone()),
         }
     }
 
@@ -8175,12 +9026,14 @@ impl<'a> Checker<'a> {
         }
 
         let recursive_name = self_recursive.then(|| binding_name.unwrap().to_string());
+        self.binding_inferred = stmt.ty.is_none();
         for binding in bindings {
             if recursive_name.as_ref().is_some_and(|n| n == &binding.name) {
                 continue;
             }
             self.declare_local(binding);
         }
+        self.binding_inferred = false;
     }
 
     /// `mut first, second: String;` (roadmap Phase 4d) — the comma-grouped
@@ -8243,6 +9096,7 @@ impl<'a> Checker<'a> {
             );
         }
 
+        self.binding_inferred = stmt.ty.is_none();
         for (i, name) in stmt.names.iter().enumerate() {
             if arity_matches {
                 // Position 0 was already checked above to infer `ty` when
@@ -8271,6 +9125,7 @@ impl<'a> Checker<'a> {
                 pinned: false,
             });
         }
+        self.binding_inferred = false;
     }
 
     /// The `mut`/`inmut`/`inmut::strict` matrix (D11), applied to objects and
@@ -9181,6 +10036,21 @@ impl<'a> Checker<'a> {
             None => Type::VOID,
         };
 
+        // `return-type-inference` collect mode: a body being checked for
+        // inference contributes its `return`s to the join instead of being
+        // validated — the resolved type is written to the signature, and
+        // every `return` is then validated against it exactly as a written
+        // annotation would be. A bare `return;` does not participate in the
+        // join (the spec says so) but its span is kept for the validation
+        // step.
+        if let Some(collected) = self.inferred_returns.as_mut() {
+            match &stmt.value {
+                Some(expr) => collected.valued.push((expr.span(), actual)),
+                None => collected.bare.push(stmt.span),
+            }
+            return;
+        }
+
         if let Some(expr) = &stmt.value
             && self.reject_pointer_escape(actual, expr.span(), "returned from a function")
         {
@@ -9582,6 +10452,10 @@ impl<'a> Checker<'a> {
         // (`concurrent-scopes`, "Structured failure"), not by the enclosing
         // function — so it must not add to that function's throws obligation.
         let outer_pending = std::mem::take(&mut self.pending_throws);
+        // A branch body is its own function context: a `return` inside it is
+        // the branch's, not the enclosing function's — so it stays out of
+        // return-type inference's collection too.
+        let outer_inferred = self.inferred_returns.take();
         let result = match &expr.body {
             SpawnBody::Expr(body) => self.check_expr(body),
             SpawnBody::Block(body) => {
@@ -9593,6 +10467,7 @@ impl<'a> Checker<'a> {
                 value
             }
         };
+        self.inferred_returns = outer_inferred;
         self.pending_throws = outer_pending;
         let captures = self.finish_capture_scope(enclosing_depth);
 
@@ -10180,6 +11055,7 @@ impl<'a> Checker<'a> {
         // A bare function name is a value: that is what lets a function be
         // passed where a closure is expected.
         let declared = self.resolved_name(&ident.name, ident.span);
+        self.ensure_inferred(&InferKey::Fn(declared.clone()), ident.span);
         if let Some(signature) = self.functions.get(&declared).cloned()
             && self.scopes.lookup(&ident.name).is_none()
         {
@@ -13805,6 +14681,10 @@ impl<'a> Checker<'a> {
         let returns = self.resolve_type(&expr.return_type);
 
         let enclosing_return = self.current_return;
+        // A lambda is its own function context: a `return` inside its block
+        // body belongs to the lambda, not to the enclosing function — so it
+        // stays out of return-type inference's collection too.
+        let enclosing_inferred = self.inferred_returns.take();
         // A lambda body is not inside the enclosing loop: `break` in it has
         // nothing to leave.
         self.current_return = returns;
@@ -13854,6 +14734,7 @@ impl<'a> Checker<'a> {
         }
         let captures = self.finish_capture_scope(enclosing_depth);
         self.current_return = enclosing_return;
+        self.inferred_returns = enclosing_inferred;
 
         let shape = FnType {
             params: params.iter().map(|p| p.ty).collect(),
@@ -13923,7 +14804,7 @@ impl<'a> Checker<'a> {
     fn check_contract_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
         let contract = &self.contracts[id as usize];
         let contract_name = contract.name.clone();
-        let Some(method) = contract.method(&field.name.name) else {
+        let Some(method) = contract.method(&field.name.name).cloned() else {
             let known: Vec<&str> = contract.methods.iter().map(|m| m.name.as_str()).collect();
             let help = if known.is_empty() {
                 format!("`{contract_name}` declares no methods")
@@ -13942,6 +14823,18 @@ impl<'a> Checker<'a> {
             }
             return Type::UNKNOWN;
         };
+
+        // `return-type-inference`: an unannotated trait default resolves on
+        // demand — then re-read, since inference may have just written the
+        // return type into the `ContractMethod`.
+        self.ensure_inferred(
+            &InferKey::Contract(id, method.name.clone()),
+            field.name.span,
+        );
+        let method = self.contracts[id as usize]
+            .method(&method.name)
+            .cloned()
+            .unwrap_or(method);
 
         let signature = Signature {
             name: method.name.clone(),
@@ -13998,6 +14891,19 @@ impl<'a> Checker<'a> {
             }
             return Type::UNKNOWN;
         };
+
+        // `return-type-inference`: an unannotated trait default resolves on
+        // demand — then re-read, since inference may have just written the
+        // return type into the `ContractMethod`.
+        self.ensure_inferred(
+            &InferKey::Contract(instance.contract, method.name.clone()),
+            field.name.span,
+        );
+        let method = self.contracts[instance.contract as usize]
+            .method(&method.name)
+            .cloned()
+            .unwrap_or(method);
+
         let signature = Signature {
             name: method.name.clone(),
             params: method
@@ -14487,6 +15393,15 @@ impl<'a> Checker<'a> {
             }
             return Type::UNKNOWN;
         };
+
+        // `return-type-inference`: an unannotated callee resolves on
+        // demand — then re-read, since inference may have just written the
+        // return type into the `MethodInfo`.
+        self.ensure_inferred(&Self::call_infer_key(&method), field.name.span);
+        let method = self.classes[id as usize]
+            .method(&field.name.name)
+            .cloned()
+            .unwrap_or(method);
 
         if method.is_static {
             self.error(
@@ -16871,6 +17786,14 @@ impl<'a> Checker<'a> {
             if let Some(class_id) = self.class_id(&resolved) {
                 let class = self.classes[class_id as usize].clone();
                 if let Some(method) = class.method(&field.name.name).cloned() {
+                    // `return-type-inference`: resolve the callee on demand
+                    // — then re-read, since inference may have just written
+                    // the return type into the `MethodInfo`.
+                    self.ensure_inferred(&Self::call_infer_key(&method), field.name.span);
+                    let method = self.classes[class_id as usize]
+                        .method(&field.name.name)
+                        .cloned()
+                        .unwrap_or(method);
                     if !method.is_static {
                         let class_name = class.name.clone();
                         self.error(
@@ -18072,6 +18995,9 @@ impl<'a> Checker<'a> {
                 return self.check_direct_call(expr, &synthetic);
             }
 
+            // `return-type-inference`: an unannotated callee resolves on
+            // demand — before its return type is read below.
+            self.ensure_inferred(&InferKey::Fn(declared.clone()), expr.span);
             if let Some(signature) = self.functions.get(&declared).cloned() {
                 self.require_visible(signature.span, signature.shared, callee, "function");
                 return self.check_direct_call(expr, &signature);

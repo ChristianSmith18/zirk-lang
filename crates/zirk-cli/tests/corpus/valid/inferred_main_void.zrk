@@ -1,0 +1,5 @@
+// `fn main()` omits the annotation: the body returns nothing, so the
+// checker infers `Void` and the entrypoint stays valid.
+fn main() {
+    stdout.println("main sin anotar");
+}

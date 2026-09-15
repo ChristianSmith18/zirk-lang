@@ -19,7 +19,7 @@ The evidence for each row is the archived OpenSpec change, the relevant
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last updated with `spread-rest-operators`, **2026-09-13**.
+Last updated with `inferred-return-types`, **2026-09-15**.
 
 ---
 
@@ -165,6 +165,7 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Recursive lambda with explicit binding | yes | yes | yes | yes | yes | yes | `fase-4d-callables` corpus. |
 | Multiple declarations, simultaneous assignment | yes | yes | yes | yes | yes | yes | `fase-4d-declaraciones-multiples`; `left, right = right, left` swaps. |
 | General callable polymorphism | yes | yes | yes | yes | yes | yes | `MakeCallable`/`CallCallable` works end-to-end. `.clone()` on callables, GC tracking of capture blocks, and stored/returned callables are implemented. |
+| Optional return annotation (inferred return types) | yes | yes | yes | yes | yes | yes | `inferred-return-types`: `fn`, methods, and trait default bodies may omit `: T`; demand-driven inference unifies the body's `return`s, detects recursion cycles, and keeps the explicit annotation authoritative. `zirk check --types` emits the declaration/expression type map consumed by the VS Code hover. |
 
 ## Phase 4e — Managed memory and unsafe
 

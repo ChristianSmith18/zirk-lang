@@ -306,7 +306,11 @@ pub struct MethodDecl {
     /// `static` methods have no receiver and are not dispatched virtually.
     pub is_static: bool,
     pub params: Vec<Param>,
-    pub return_type: TypeRef,
+    /// Return type. Optional when a body is present: omitting it marks the
+    /// signature for return-type inference by the checker
+    /// (`return-type-inference`). Mandatory on `abstract` methods, which
+    /// have no body to infer from.
+    pub return_type: Option<TypeRef>,
     /// `throws Type (| Type)*` (roadmap Phase 4b) — reuses `TypeRef`'s own
     /// union syntax (`union_with`) rather than a `Vec<TypeRef>` of its own,
     /// since `A | B` after `throws` is exactly the same grammar `parse_type`
@@ -343,8 +347,9 @@ pub struct FnDecl {
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
-    /// Return type. Mandatory in this phase.
-    pub return_type: TypeRef,
+    /// Return type. Optional: omitting it marks the signature for
+    /// return-type inference by the checker (`return-type-inference`).
+    pub return_type: Option<TypeRef>,
     /// `throws Type (| Type)*` (roadmap Phase 4b) — see `MethodDecl::throws`.
     pub throws: Option<TypeRef>,
     pub body: Block,
