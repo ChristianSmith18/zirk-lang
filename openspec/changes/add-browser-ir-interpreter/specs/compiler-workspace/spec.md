@@ -23,7 +23,7 @@ The crates are: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema`, `zirk-ir`,
 
 Dependencies between frontend pipeline crates SHALL flow in a single direction. `zirk-diagnostics` is the only cross-cutting compiler dependency. `zirk-codegen-llvm` and `zirk-interpreter` SHALL be sibling consumers of `zirk-ir`; neither execution engine SHALL depend on the other. `zirk-runtime` and `zirk-interpreter` MAY depend on `zirk-runtime-core`, while `zirk-runtime-core` SHALL NOT depend on either consumer.
 
-#### Scenario: Backward frontend dependency
+#### Scenario: Backward dependency
 - **WHEN** a crate from an early frontend stage declares a dependency on a later stage
 - **THEN** it is considered a violation of this specification
 
@@ -45,7 +45,7 @@ Dependencies between frontend pipeline crates SHALL flow in a single direction. 
 
 `zirk-runtime` SHALL be built as a `staticlib` and SHALL NOT be a dependency of any compiler, interpreter, or browser-binding crate. It is linked into native binaries that Zirk produces, not into the compiler or browser package. Platform-neutral semantic helpers shared with the interpreter SHALL live in `zirk-runtime-core` without exposing native handles or C ABI behavior.
 
-#### Scenario: Produced native artifact
+#### Scenario: Produced artifact
 - **WHEN** `zirk-runtime` is built
 - **THEN** it produces a linkable static library (`.a` on Unix, `.lib` on Windows)
 
@@ -76,7 +76,7 @@ Each frontend stage of the pipeline in `ZIRK_COMPILER_SPEC.md` section 2 SHALL b
 - **THEN** the parser produces the tree without error
 - **AND** the type error is emitted by the type checker
 
-#### Scenario: The LLVM backend is isolated
+#### Scenario: The backend is the only crate that knows about LLVM
 - **WHEN** crates in the workspace are inspected
 - **THEN** only `zirk-codegen-llvm` depends on `inkwell`
 
@@ -89,7 +89,7 @@ Each frontend stage of the pipeline in `ZIRK_COMPILER_SPEC.md` section 2 SHALL b
 - **THEN** it coordinates the in-memory compiler pipeline and converts boundary types
 - **AND** language execution semantics remain in `zirk-interpreter` and platform-neutral runtime helpers
 
-#### Scenario: Linking does not happen in an execution engine
+#### Scenario: Linking does not happen in the backend
 - **WHEN** a native executable is produced
 - **THEN** `zirk-codegen-llvm` emits the object
 - **AND** the linker invocation happens in the CLI

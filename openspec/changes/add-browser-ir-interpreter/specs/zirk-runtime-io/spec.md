@@ -4,7 +4,7 @@
 
 Native runtime execution SHALL expose stable `extern "C"` functions that write a `String` to standard output with the requested newline behavior. Interpreted execution SHALL emit the same logical UTF-8 text and newline sequence through an injected bounded host output sink without requiring a native process stream.
 
-#### Scenario: Print through the native runtime
+#### Scenario: Printing a string
 - **WHEN** a native program invokes the print function with a `String`
 - **THEN** the content appears on native standard output with the requested newline behavior
 
@@ -17,7 +17,7 @@ Native runtime execution SHALL expose stable `extern "C"` functions that write a
 - **WHEN** either execution engine prints Unicode characters outside ASCII
 - **THEN** the host receives them correctly encoded in UTF-8
 
-#### Scenario: Flush native output before terminating
+#### Scenario: Flushed before terminating
 - **WHEN** a native program terminates
 - **THEN** standard output is flushed before the process ends
 
