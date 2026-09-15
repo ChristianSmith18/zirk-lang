@@ -1,0 +1,8 @@
+{
+  "name": "regex",
+  "source": "fn main(): Void { inmut pattern = re'a+'; stdout.println(pattern.matches(\"baac\")); stdout.println(pattern.replace(\"baac\", \"x\")); }",
+  "virtualName": "fixtures/regex.zrk",
+  "expectedOutput": ["true\n", "bxc\n"],
+  "completion": "completed",
+  "exclusions": []
+}

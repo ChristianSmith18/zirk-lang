@@ -1,0 +1,6326 @@
+//! # zirk-interpreter
+//!
+//! **Responsibility:** execute verified typed Zirk IR with an explicit value
+//! model, resource budgets and a narrow host-effect boundary.
+//!
+//! **Boundary:** this crate consumes `zirk-ir` and platform-neutral
+//! `zirk-runtime-core`; it does not parse source, invoke LLVM, link binaries,
+//! access the browser, or depend on the native runtime.
+
+#![forbid(unsafe_code)]
+
+use std::collections::HashMap;
+
+use zirk_diagnostics::Span;
+use zirk_ir::{
+    BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Terminator, UnaryOp,
+    ValueId, verify,
+};
+
+/// Browser compatibility classification used by preflight and maintained as
+/// exhaustive matches so new IR variants cannot silently acquire support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserSupport {
+    Direct,
+    RuntimeCore,
+    BoundedHost,
+    StructuredFailure,
+    Excluded,
+}
+
+/// Resource limits accepted by one interpreter execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterpreterLimits {
+    pub instructions: u64,
+    pub call_depth: u32,
+    pub heap_bytes: usize,
+    pub output_bytes: usize,
+    pub output_events: u32,
+    pub stack_frames: u32,
+}
+
+impl InterpreterLimits {
+    pub const MAX_INSTRUCTIONS: u64 = 20_000_000;
+    pub const MAX_CALL_DEPTH: u32 = 1_024;
+    pub const MAX_HEAP_BYTES: usize = 64 * 1024 * 1024;
+    pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+    pub const MAX_OUTPUT_EVENTS: u32 = 8_192;
+    pub const MAX_STACK_FRAMES: u32 = 256;
+
+    pub const fn validate(self) -> Result<Self, LimitConfigurationError> {
+        if self.instructions == 0 || self.instructions > Self::MAX_INSTRUCTIONS {
+            return Err(LimitConfigurationError::Instructions);
+        }
+        if self.call_depth == 0 || self.call_depth > Self::MAX_CALL_DEPTH {
+            return Err(LimitConfigurationError::CallDepth);
+        }
+        if self.heap_bytes == 0 || self.heap_bytes > Self::MAX_HEAP_BYTES {
+            return Err(LimitConfigurationError::Heap);
+        }
+        if self.output_bytes == 0 || self.output_bytes > Self::MAX_OUTPUT_BYTES {
+            return Err(LimitConfigurationError::OutputBytes);
+        }
+        if self.output_events == 0 || self.output_events > Self::MAX_OUTPUT_EVENTS {
+            return Err(LimitConfigurationError::OutputEvents);
+        }
+        if self.stack_frames == 0 || self.stack_frames > Self::MAX_STACK_FRAMES {
+            return Err(LimitConfigurationError::StackFrames);
+        }
+        Ok(self)
+    }
+}
+
+impl Default for InterpreterLimits {
+    fn default() -> Self {
+        Self {
+            instructions: 2_000_000,
+            call_depth: 128,
+            heap_bytes: 16 * 1024 * 1024,
+            output_bytes: 256 * 1024,
+            output_events: 2_048,
+            stack_frames: 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitConfigurationError {
+    Instructions,
+    CallDepth,
+    Heap,
+    OutputBytes,
+    OutputEvents,
+    StackFrames,
+}
+
+/// Opaque, stable identity of a value owned by one interpreter execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HeapId(u32);
+
+/// Closed value representation. No value borrows from the host or exposes an
+/// address; identity-bearing values use `HeapId`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Void,
+    Never,
+    Int(IntegerValue),
+    Float { width: FloatWidth, text: String },
+    Decimal(String),
+    Boolean(bool),
+    Nullable(Option<Box<Value>>),
+    Heap(HeapId),
+    Undefined,
+}
+
+/// Integer bits together with their declared Zirk width. Keeping the width
+/// prevents `UInt128` values from being narrowed through Rust's `i128` and
+/// lets arithmetic reject overflow rather than silently wrapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegerValue {
+    bits: u128,
+    width: IntWidth,
+}
+
+impl IntegerValue {
+    fn from_literal(value: i128, width: IntWidth) -> Result<Self, String> {
+        if width.signed() {
+            let minimum = if width.bits() == 128 {
+                i128::MIN
+            } else {
+                -(1_i128 << (width.bits() - 1))
+            };
+            let maximum = if width.bits() == 128 {
+                i128::MAX
+            } else {
+                (1_i128 << (width.bits() - 1)) - 1
+            };
+            if !(minimum..=maximum).contains(&value) {
+                return Err(format!("integer literal {value} does not fit {width:?}"));
+            }
+            Ok(Self::from_bits(value as u128, width))
+        } else {
+            if value < 0 {
+                return Err(format!("integer literal {value} does not fit {width:?}"));
+            }
+            Ok(Self::from_bits(value as u128, width))
+        }
+    }
+
+    const fn from_bits(bits: u128, width: IntWidth) -> Self {
+        let masked = if width.bits() == 128 {
+            bits
+        } else {
+            bits & ((1_u128 << width.bits()) - 1)
+        };
+        Self {
+            bits: masked,
+            width,
+        }
+    }
+
+    const fn unsigned(self) -> u128 {
+        self.bits
+    }
+
+    const fn signed(self) -> i128 {
+        if self.width.bits() == 128 {
+            self.bits as i128
+        } else {
+            let sign_bit = 1_u128 << (self.width.bits() - 1);
+            if self.bits & sign_bit == 0 {
+                self.bits as i128
+            } else {
+                (self.bits | (!0_u128 << self.width.bits())) as i128
+            }
+        }
+    }
+
+    fn checked_binary(self, op: BinaryOp, right: Self) -> Result<Value, String> {
+        if self.width != right.width {
+            return Err("integer binary operands have different widths".into());
+        }
+        use BinaryOp::*;
+        let comparison = |result| Ok(Value::Boolean(result));
+        match op {
+            Eq => comparison(self.bits == right.bits),
+            NotEq => comparison(self.bits != right.bits),
+            Lt => comparison(if self.width.signed() {
+                self.signed() < right.signed()
+            } else {
+                self.unsigned() < right.unsigned()
+            }),
+            LtEq => comparison(if self.width.signed() {
+                self.signed() <= right.signed()
+            } else {
+                self.unsigned() <= right.unsigned()
+            }),
+            Gt => comparison(if self.width.signed() {
+                self.signed() > right.signed()
+            } else {
+                self.unsigned() > right.unsigned()
+            }),
+            GtEq => comparison(if self.width.signed() {
+                self.signed() >= right.signed()
+            } else {
+                self.unsigned() >= right.unsigned()
+            }),
+            Add | Sub | Mul | Div | Rem => self.checked_arithmetic(op, right).map(Value::Int),
+            BitAnd => Ok(Value::Int(Self::from_bits(
+                self.bits & right.bits,
+                self.width,
+            ))),
+            BitOr => Ok(Value::Int(Self::from_bits(
+                self.bits | right.bits,
+                self.width,
+            ))),
+            BitXor => Ok(Value::Int(Self::from_bits(
+                self.bits ^ right.bits,
+                self.width,
+            ))),
+            Shl | Shr => self.checked_shift(op, right).map(Value::Int),
+            And | Or | Identical => Err(format!("operator {op:?} is not defined for integers")),
+        }
+    }
+
+    fn checked_arithmetic(self, op: BinaryOp, right: Self) -> Result<Self, String> {
+        use BinaryOp::*;
+        if self.width.signed() {
+            let result = match op {
+                Add => self.signed().checked_add(right.signed()),
+                Sub => self.signed().checked_sub(right.signed()),
+                Mul => self.signed().checked_mul(right.signed()),
+                Div => self.signed().checked_div(right.signed()),
+                Rem => self.signed().checked_rem(right.signed()),
+                _ => unreachable!("arithmetic operator already filtered"),
+            }
+            .ok_or_else(|| format!("integer {op:?} overflow or invalid domain"))?;
+            let minimum = if self.width.bits() == 128 {
+                i128::MIN
+            } else {
+                -(1_i128 << (self.width.bits() - 1))
+            };
+            let maximum = if self.width.bits() == 128 {
+                i128::MAX
+            } else {
+                (1_i128 << (self.width.bits() - 1)) - 1
+            };
+            if !(minimum..=maximum).contains(&result) {
+                return Err(format!("integer {op:?} overflow"));
+            }
+            Ok(Self::from_bits(result as u128, self.width))
+        } else {
+            let result = match op {
+                Add => self.unsigned().checked_add(right.unsigned()),
+                Sub => self.unsigned().checked_sub(right.unsigned()),
+                Mul => self.unsigned().checked_mul(right.unsigned()),
+                Div => self.unsigned().checked_div(right.unsigned()),
+                Rem => self.unsigned().checked_rem(right.unsigned()),
+                _ => unreachable!("arithmetic operator already filtered"),
+            }
+            .ok_or_else(|| format!("integer {op:?} overflow or invalid domain"))?;
+            if self.width.bits() < 128 && result >= (1_u128 << self.width.bits()) {
+                return Err(format!("integer {op:?} overflow"));
+            }
+            Ok(Self::from_bits(result, self.width))
+        }
+    }
+
+    fn checked_shift(self, op: BinaryOp, right: Self) -> Result<Self, String> {
+        let amount = if right.width.signed() {
+            u32::try_from(right.signed()).map_err(|_| "invalid negative or oversized shift")?
+        } else {
+            u32::try_from(right.unsigned()).map_err(|_| "oversized shift")?
+        };
+        if amount >= self.width.bits() {
+            return Err("shift count exceeds integer width".into());
+        }
+        let bits = match op {
+            BinaryOp::Shl => self.bits.checked_shl(amount).ok_or("shift overflow")?,
+            BinaryOp::Shr if self.width.signed() => (self.signed() >> amount) as u128,
+            BinaryOp::Shr => self.bits >> amount,
+            _ => unreachable!("shift operator already filtered"),
+        };
+        if op == BinaryOp::Shl && self.width.bits() < 128 && bits >= (1_u128 << self.width.bits()) {
+            return Err("integer Shl overflow".into());
+        }
+        Ok(Self::from_bits(bits, self.width))
+    }
+
+    /// Mirrors the IR `IntCast` instruction: narrow by truncation and widen
+    /// by sign- or zero-extension from the source width.
+    const fn cast(self, target: IntWidth) -> Self {
+        if target.bits() <= self.width.bits() {
+            return Self::from_bits(self.bits, target);
+        }
+        let bits = if self.width.signed()
+            && self.width.bits() < 128
+            && self.bits & (1_u128 << (self.width.bits() - 1)) != 0
+        {
+            self.bits | (!0_u128 << self.width.bits())
+        } else {
+            self.bits
+        };
+        Self::from_bits(bits, target)
+    }
+}
+
+/// Heap-owned values that can carry browser-local identity.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeapEntry {
+    String(String),
+    Char(String),
+    Regex(String),
+    Range(zirk_runtime_core::range::Range),
+    Closure {
+        target: String,
+        captures: Vec<Value>,
+    },
+    Object {
+        layout: u32,
+        fields: Vec<Value>,
+    },
+    Record {
+        layout: u32,
+        fields: Vec<Value>,
+    },
+    Enum {
+        layout: u32,
+        variant: u32,
+        fields: Vec<Value>,
+    },
+    Array(Vec<Value>),
+    List(Vec<Value>),
+    Map(Vec<(Value, Value)>),
+    Set(Vec<Value>),
+    RuntimeError {
+        category: String,
+        message: String,
+    },
+}
+
+/// Bounded arena used for the lifetime of a single execution.
+#[derive(Debug, Default)]
+pub struct Heap {
+    entries: Vec<HeapEntry>,
+    used_bytes: usize,
+}
+
+impl Heap {
+    pub fn allocate(
+        &mut self,
+        entry: HeapEntry,
+        bytes: usize,
+        limits: InterpreterLimits,
+    ) -> Result<HeapId, LimitFailure> {
+        let Some(next) = self.used_bytes.checked_add(bytes) else {
+            return Err(LimitFailure::Heap);
+        };
+        if next > limits.heap_bytes {
+            return Err(LimitFailure::Heap);
+        }
+        let id = HeapId(self.entries.len() as u32);
+        self.entries.push(entry);
+        self.used_bytes = next;
+        Ok(id)
+    }
+
+    pub fn get(&self, id: HeapId) -> Option<&HeapEntry> {
+        self.entries.get(id.0 as usize)
+    }
+
+    pub fn get_mut(&mut self, id: HeapId) -> Option<&mut HeapEntry> {
+        self.entries.get_mut(id.0 as usize)
+    }
+
+    pub const fn used_bytes(&self) -> usize {
+        self.used_bytes
+    }
+}
+
+/// One explicit interpreter call frame. Values never cross basic blocks; slots
+/// carry data across control-flow edges, matching the IR contract.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub function: usize,
+    pub block: BlockId,
+    pub instruction: usize,
+    pub slots: Vec<Option<Value>>,
+    pub values: HashMap<ValueId, Value>,
+    pub closure_environment: Option<HeapId>,
+    pub return_to: Option<ReturnDestination>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReturnDestination {
+    pub caller_value: Option<ValueId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackFrame {
+    pub function: String,
+    pub span: Option<Span>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitFailure {
+    Instructions,
+    CallDepth,
+    Heap,
+    Output,
+    Cancelled,
+}
+
+/// One ordered text emission accepted by an interpreter host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEvent {
+    pub text: String,
+    /// True only for the control event emitted when bounded program output was
+    /// cut short. Its empty text is not program output and does not consume an
+    /// output-event or output-byte allowance.
+    pub truncated: bool,
+}
+
+/// The entire authority surface granted to interpreted Zirk code.
+///
+/// Hosts may reject an event when their own bounded sink is full. They expose
+/// neither native stdout nor clock, storage, network, process, or ambient
+/// browser APIs.
+pub trait InterpreterHost {
+    fn emit(&mut self, event: OutputEvent) -> Result<(), HostOutputError>;
+    fn is_cancelled(&self) -> bool;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOutputError {
+    Rejected,
+}
+
+/// In-memory host used by deterministic interpreter and browser-boundary tests.
+#[derive(Debug, Default)]
+pub struct CapturedHost {
+    events: Vec<OutputEvent>,
+    cancelled: bool,
+}
+
+impl CapturedHost {
+    pub fn events(&self) -> &[OutputEvent] {
+        &self.events
+    }
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+}
+
+impl InterpreterHost for CapturedHost {
+    fn emit(&mut self, event: OutputEvent) -> Result<(), HostOutputError> {
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFailure {
+    pub category: String,
+    pub message: String,
+    pub span: Option<Span>,
+    pub frames: Vec<StackFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityFailure {
+    pub code: String,
+    pub message: String,
+    pub span: Option<Span>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalFailure {
+    pub message: String,
+    pub span: Option<Span>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExecutionResult {
+    Completed { value: Option<Value> },
+    RuntimeFailure(RuntimeFailure),
+    LimitFailure(LimitFailure),
+    CapabilityFailure(CapabilityFailure),
+    InternalFailure(InternalFailure),
+}
+
+/// Reviews all executable declarations before an interpreter instance can be
+/// run in a browser. It is intentionally non-mutating: callers can render all
+/// diagnostics, then decide whether to construct an execution.
+pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
+    let mut failures = Vec::new();
+    // Lowering currently registers a conservative catalog of native helper
+    // declarations, including helpers a given module never calls. Browser
+    // compatibility is about an actual requested effect, not unused metadata.
+    let called_externs: std::collections::HashSet<&str> = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match &instruction.kind {
+            InstKind::Call { callee, .. } => Some(callee.as_str()),
+            _ => None,
+        })
+        .collect();
+    for external in &module.externs {
+        if !called_externs.contains(external.name.as_str()) || is_browser_intrinsic(&external.name)
+        {
+            continue;
+        }
+        failures.push(CapabilityFailure {
+            code: "ZB001".into(),
+            message: format!("extern `{}` is unavailable in the browser", external.name),
+            span: None,
+        });
+        for ty in external
+            .params
+            .iter()
+            .copied()
+            .chain([external.return_type])
+        {
+            preflight_type(ty, None, &mut failures);
+        }
+    }
+    for function in &module.functions {
+        preflight_type(function.return_type, Some(function.span), &mut failures);
+        for slot in &function.slots {
+            preflight_type(slot.ty, Some(slot.span), &mut failures);
+        }
+        for block in &function.blocks {
+            if let Some(terminator) = &block.terminator
+                && matches!(terminator_support(terminator), BrowserSupport::Excluded)
+            {
+                failures.push(CapabilityFailure {
+                    code: "ZB003".into(),
+                    message: format!("terminator {terminator:?} is unavailable in the browser"),
+                    span: Some(function.span),
+                });
+            }
+            for instruction in &block.instructions {
+                preflight_type(instruction.ty, Some(instruction.span), &mut failures);
+                if matches!(
+                    instruction_support(&instruction.kind),
+                    BrowserSupport::Excluded
+                ) {
+                    failures.push(CapabilityFailure {
+                        code: "ZB002".into(),
+                        message: format!(
+                            "instruction {:?} is unavailable in the browser",
+                            instruction.kind
+                        ),
+                        span: Some(instruction.span),
+                    });
+                }
+            }
+        }
+    }
+    failures.sort_by_key(|failure| {
+        (
+            failure.span.map(|span| span.file.0).unwrap_or(u32::MAX),
+            failure.span.map(|span| span.start).unwrap_or(u32::MAX),
+            failure.span.map(|span| span.end).unwrap_or(u32::MAX),
+            failure.code.clone(),
+            failure.message.clone(),
+        )
+    });
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures)
+    }
+}
+
+fn is_browser_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "zirk_regex_from_pattern"
+            | "zirk_regex_is_match"
+            | "zirk_regex_to_string"
+            | "zirk_regex_replace"
+            | "zirk_char_is_uppercase"
+            | "zirk_char_is_lowercase"
+            | "zirk_char_is_digit"
+            | "zirk_char_is_letter"
+            | "zirk_char_is_whitespace"
+            | "zirk_char_is_ascii"
+            | "zirk_char_is_alphabetic"
+            | "zirk_char_is_numeric"
+            | "zirk_char_is_alphanumeric"
+            | "zirk_char_ascii_code"
+            | "zirk_char_to_uppercase"
+            | "zirk_char_to_lowercase"
+            | "zirk_str_length"
+            | "zirk_str_byte_length"
+            | "zirk_str_is_empty"
+            | "zirk_str_find"
+            | "zirk_str_replace"
+            | "zirk_str_trim"
+            | "zirk_str_trim_start"
+            | "zirk_str_trim_end"
+            | "zirk_str_to_lowercase"
+            | "zirk_str_to_uppercase"
+            | "zirk_str_normalize"
+            | "zirk_str_clone"
+            | "zirk_str_contains"
+            | "zirk_str_starts_with"
+            | "zirk_str_ends_with"
+            | "zirk_str_substring"
+            | "zirk_duration_abs"
+            | "zirk_duration_sign"
+            | "zirk_duration_days"
+            | "zirk_duration_hours"
+            | "zirk_duration_minutes"
+            | "zirk_duration_seconds"
+            | "zirk_duration_milliseconds"
+            | "zirk_duration_microseconds"
+            | "zirk_duration_nanoseconds"
+            | "zirk_duration_total_weeks"
+            | "zirk_duration_total_days"
+            | "zirk_duration_total_hours"
+            | "zirk_duration_total_minutes"
+            | "zirk_duration_total_seconds"
+            | "zirk_duration_total_milliseconds"
+            | "zirk_duration_total_microseconds"
+            | "zirk_duration_total_nanoseconds"
+            | "zirk_duration_whole_weeks"
+            | "zirk_duration_whole_days"
+            | "zirk_duration_whole_hours"
+            | "zirk_duration_whole_minutes"
+            | "zirk_duration_whole_seconds"
+            | "zirk_duration_whole_milliseconds"
+            | "zirk_duration_whole_microseconds"
+            | "zirk_duration_whole_nanoseconds"
+            | "zirk_duration_round"
+            | "zirk_duration_floor"
+            | "zirk_duration_ceil"
+            | "zirk_duration_truncate"
+            | "zirk_rt_duration_to_string"
+            | "zirk_range_new"
+            | "zirk_range_start"
+            | "zirk_range_end"
+            | "zirk_range_step"
+            | "zirk_range_inclusive"
+            | "zirk_range_length"
+            | "zirk_range_element_at"
+            | "zirk_range_slice"
+            | "zirk_range_to_string"
+    )
+}
+
+fn preflight_type(ty: IrType, span: Option<Span>, failures: &mut Vec<CapabilityFailure>) {
+    if matches!(type_support(ty), BrowserSupport::Excluded) {
+        failures.push(CapabilityFailure {
+            code: "ZB004".into(),
+            message: format!("type {} is unavailable in the browser", ty.as_str()),
+            span,
+        });
+    }
+}
+
+/// Internal control flow for instruction execution. It is deliberately kept
+/// private so callers only observe the stable `ExecutionResult` contract.
+#[derive(Debug)]
+enum ExecutionFault {
+    Runtime { category: String, message: String },
+    Internal(String),
+    Limit(LimitFailure),
+}
+
+#[derive(Debug, Clone)]
+struct ThrowableInfo {
+    value: Value,
+    span: Span,
+    frames: Vec<StackFrame>,
+    suppressed: Vec<Value>,
+}
+
+impl From<String> for ExecutionFault {
+    fn from(message: String) -> Self {
+        Self::Internal(message)
+    }
+}
+
+/// Execution instance for one verified module. Dropping it drops the complete
+/// arena and all frames, so no state can leak into another browser run.
+pub struct Interpreter<'module> {
+    module: &'module Module,
+    limits: InterpreterLimits,
+    heap: Heap,
+    frames: Vec<Frame>,
+    executed_steps: u64,
+    output_bytes: usize,
+    output_events: u32,
+    output_truncated: bool,
+    pending_exception: Option<HeapId>,
+    throwables: HashMap<HeapId, ThrowableInfo>,
+}
+
+impl<'module> Interpreter<'module> {
+    pub fn new(
+        module: &'module Module,
+        limits: InterpreterLimits,
+    ) -> Result<Self, InternalFailure> {
+        limits.validate().map_err(|error| InternalFailure {
+            message: format!("invalid interpreter limits: {error:?}"),
+            span: None,
+        })?;
+        verify(module).map_err(|errors| InternalFailure {
+            message: format!("IR verification failed: {}", errors[0]),
+            span: None,
+        })?;
+        Ok(Self {
+            module,
+            limits,
+            heap: Heap::default(),
+            frames: Vec::new(),
+            executed_steps: 0,
+            output_bytes: 0,
+            output_events: 0,
+            output_truncated: false,
+            pending_exception: None,
+            throwables: HashMap::new(),
+        })
+    }
+
+    pub fn heap_bytes(&self) -> usize {
+        self.heap.used_bytes()
+    }
+
+    pub fn capture_stack(&self) -> Vec<StackFrame> {
+        self.frames
+            .iter()
+            .rev()
+            .take(self.limits.stack_frames as usize)
+            .filter_map(|frame| {
+                self.module
+                    .functions
+                    .get(frame.function)
+                    .map(|function| StackFrame {
+                        function: function.name.clone(),
+                        span: Some(function.span),
+                    })
+            })
+            .collect()
+    }
+
+    /// Executes the `main` entrypoint for the browser-compatible scalar
+    /// literal subset. Subsequent execution tasks extend this loop without
+    /// changing the frame or result boundary.
+    pub fn run_main(&mut self) -> ExecutionResult {
+        let mut host = CapturedHost::default();
+        self.run_main_with_host(&mut host)
+    }
+
+    /// Executes `main` using the sole authority granted to interpreted code.
+    /// The caller owns the output sink and cooperative cancellation state.
+    pub fn run_main_with_host(&mut self, host: &mut dyn InterpreterHost) -> ExecutionResult {
+        if let Err(mut failures) = preflight(self.module) {
+            return ExecutionResult::CapabilityFailure(failures.remove(0));
+        }
+        let Some(function) = self
+            .module
+            .functions
+            .iter()
+            .position(|function| function.name == "main")
+        else {
+            return ExecutionResult::InternalFailure(InternalFailure {
+                message: "verified module has no main entrypoint".into(),
+                span: None,
+            });
+        };
+        if let Err(failure) = self.push_frame(function, Vec::new(), None) {
+            return ExecutionResult::LimitFailure(failure);
+        }
+
+        loop {
+            if host.is_cancelled() {
+                return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
+            }
+            if self.executed_steps >= self.limits.instructions {
+                return ExecutionResult::LimitFailure(LimitFailure::Instructions);
+            }
+            self.executed_steps += 1;
+            let frame_index = self.frames.len() - 1;
+            let (instruction, terminator) = {
+                let frame = &self.frames[frame_index];
+                let function = &self.module.functions[frame.function];
+                let Some(block) = function.block(frame.block) else {
+                    return self.internal("frame references a missing basic block", None);
+                };
+                if let Some(instruction) = block.instructions.get(frame.instruction) {
+                    (Some(instruction.clone()), None)
+                } else {
+                    (None, block.terminator.clone())
+                }
+            };
+
+            if let Some(instruction) = instruction {
+                self.frames[frame_index].instruction += 1;
+                let value = match self.execute_instruction(frame_index, &instruction, host) {
+                    Ok(value) => value,
+                    Err(ExecutionFault::Runtime { category, message }) => {
+                        return ExecutionResult::RuntimeFailure(RuntimeFailure {
+                            category,
+                            message,
+                            span: Some(instruction.span),
+                            frames: self.capture_stack(),
+                        });
+                    }
+                    Err(ExecutionFault::Internal(message)) => {
+                        return self.internal(message, Some(instruction.span));
+                    }
+                    Err(ExecutionFault::Limit(failure)) => {
+                        return ExecutionResult::LimitFailure(failure);
+                    }
+                };
+                if let (Some(result), Some(value)) = (instruction.result, value) {
+                    self.frames[frame_index].values.insert(result, value);
+                    continue;
+                }
+                if instruction.result.is_some() {
+                    return self.internal(
+                        "instruction result was not materialized",
+                        Some(instruction.span),
+                    );
+                }
+                continue;
+            }
+
+            match terminator {
+                Some(Terminator::Return(value)) => {
+                    if self.frames.len() == 1
+                        && let Some(exception) = self.pending_exception
+                    {
+                        return self.uncaught_exception(exception);
+                    }
+                    let value = value.and_then(|operand| {
+                        self.frames[frame_index].values.get(&operand.0).cloned()
+                    });
+                    let returned = self.frames.pop().expect("active frame exists");
+                    match returned.return_to {
+                        None => return ExecutionResult::Completed { value },
+                        Some(destination) => {
+                            let Some(caller) = self.frames.last_mut() else {
+                                return self
+                                    .internal("callee returned without a caller frame", None);
+                            };
+                            if let Some(result) = destination.caller_value {
+                                let value = value.ok_or_else(|| {
+                                    ExecutionFault::Internal(
+                                        "non-void call returned no value".into(),
+                                    )
+                                });
+                                match value {
+                                    Ok(value) => {
+                                        caller.values.insert(result, value);
+                                    }
+                                    Err(ExecutionFault::Internal(message)) => {
+                                        return self.internal(message, None);
+                                    }
+                                    Err(ExecutionFault::Runtime { category, message }) => {
+                                        return ExecutionResult::RuntimeFailure(RuntimeFailure {
+                                            category,
+                                            message,
+                                            span: None,
+                                            frames: self.capture_stack(),
+                                        });
+                                    }
+                                    Err(ExecutionFault::Limit(failure)) => {
+                                        return ExecutionResult::LimitFailure(failure);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Terminator::Jump(target)) => {
+                    self.enter_block(frame_index, target);
+                }
+                Some(Terminator::Branch {
+                    condition,
+                    then_block,
+                    else_block,
+                }) => {
+                    let condition = self.frames[frame_index].values.get(&condition.0).cloned();
+                    match condition {
+                        Some(Value::Boolean(true)) => self.enter_block(frame_index, then_block),
+                        Some(Value::Boolean(false)) => self.enter_block(frame_index, else_block),
+                        Some(_) => return self.internal("branch condition is not Boolean", None),
+                        None => return self.internal("branch condition is unavailable", None),
+                    }
+                }
+                Some(Terminator::Unreachable) => {
+                    let span = self.module.functions[self.frames[frame_index].function].span;
+                    return self.internal("execution reached Unreachable terminator", Some(span));
+                }
+                None => return self.internal("verified block has no terminator", None),
+            }
+        }
+    }
+
+    fn enter_block(&mut self, frame_index: usize, block: BlockId) {
+        let frame = &mut self.frames[frame_index];
+        frame.block = block;
+        frame.instruction = 0;
+        frame.values.clear();
+    }
+
+    fn push_frame(
+        &mut self,
+        function: usize,
+        arguments: Vec<Value>,
+        return_to: Option<ReturnDestination>,
+    ) -> Result<(), LimitFailure> {
+        if self.frames.len() >= self.limits.call_depth as usize {
+            return Err(LimitFailure::CallDepth);
+        }
+        let entry = &self.module.functions[function];
+        if entry.params.len() != arguments.len() {
+            // The verifier proves direct-call arity, so a mismatch is a
+            // compiler fault rather than user-triggerable runtime behavior.
+            return Err(LimitFailure::CallDepth);
+        }
+        let mut slots = vec![None; entry.slots.len()];
+        for (slot, value) in entry.params.iter().zip(arguments) {
+            slots[slot.0 as usize] = Some(value);
+        }
+        self.frames.push(Frame {
+            function,
+            block: entry.entry,
+            instruction: 0,
+            slots,
+            values: HashMap::new(),
+            closure_environment: None,
+            return_to,
+        });
+        Ok(())
+    }
+
+    fn push_dispatch_frame(
+        &mut self,
+        callee: &str,
+        receiver: Value,
+        args: &[zirk_ir::Operand],
+        frame_index: usize,
+        result: Option<ValueId>,
+    ) -> Result<(), ExecutionFault> {
+        let function = self
+            .module
+            .functions
+            .iter()
+            .position(|function| function.name == callee)
+            .ok_or_else(|| {
+                ExecutionFault::Internal(format!(
+                    "dispatch table references unavailable interpreted function {callee:?}"
+                ))
+            })?;
+        let mut arguments = Vec::with_capacity(args.len() + 1);
+        arguments.push(receiver);
+        arguments.extend(
+            args.iter()
+                .map(|operand| self.value(frame_index, *operand))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ExecutionFault::Internal)?,
+        );
+        self.push_frame(
+            function,
+            arguments,
+            Some(ReturnDestination {
+                caller_value: result,
+            }),
+        )
+        .map_err(ExecutionFault::Limit)
+    }
+
+    fn exception_id(&self, value: &Value) -> Result<HeapId, ExecutionFault> {
+        match value {
+            Value::Heap(id) if matches!(self.heap.get(*id), Some(HeapEntry::Object { .. })) => {
+                Ok(*id)
+            }
+            _ => Err(ExecutionFault::Internal(
+                "throwable value is not an object".into(),
+            )),
+        }
+    }
+
+    fn record_throwable(&mut self, value: Value, span: Span) -> Result<HeapId, ExecutionFault> {
+        let id = self.exception_id(&value)?;
+        let frames = self.capture_stack();
+        self.throwables.entry(id).or_insert_with(|| ThrowableInfo {
+            value,
+            span,
+            frames,
+            suppressed: Vec::new(),
+        });
+        Ok(id)
+    }
+
+    fn uncaught_exception(&self, id: HeapId) -> ExecutionResult {
+        let Some(info) = self.throwables.get(&id) else {
+            return self.internal("pending exception metadata is unavailable", None);
+        };
+        let category = match self.heap.get(id) {
+            Some(HeapEntry::Object { layout, .. }) => self
+                .module
+                .objects
+                .get(*layout as usize)
+                .map(|layout| layout.name.clone())
+                .unwrap_or_else(|| "Throwable".into()),
+            _ => "Throwable".into(),
+        };
+        ExecutionResult::RuntimeFailure(RuntimeFailure {
+            category,
+            message: format!("uncaught throwable {:?}", info.value),
+            span: Some(info.span),
+            frames: info.frames.clone(),
+        })
+    }
+
+    fn materialize_constant(&self, instruction: &zirk_ir::Instruction) -> Result<Value, String> {
+        match &instruction.kind {
+            InstKind::ConstInt(value) => match instruction.ty {
+                IrType::Int(width) => IntegerValue::from_literal(*value, width).map(Value::Int),
+                ty => Err(format!("ConstInt has non-integer type {ty:?}")),
+            },
+            InstKind::ConstBool(value) => Ok(Value::Boolean(*value)),
+            InstKind::Undefined => Ok(Value::Undefined),
+            InstKind::ConstFloat(width, text) => Ok(Value::Float {
+                width: *width,
+                text: if *width == FloatWidth::F128 {
+                    zirk_runtime_core::binary_float::Float128::from_decimal(text)
+                        .map_err(|error| format!("invalid Float128 literal {text:?}: {error:?}"))?
+                        .wire_text()
+                } else {
+                    let value = Self::parse_binary_float(text)
+                        .map_err(|_| format!("invalid {width:?} literal {text:?}"))?;
+                    Self::format_binary_float(Self::round_binary_float(value, *width), *width)
+                },
+            }),
+            InstKind::ConstDecimal(text) => Ok(Value::Decimal(text.clone())),
+            unsupported => Err(format!(
+                "instruction {unsupported:?} is not implemented yet"
+            )),
+        }
+    }
+
+    fn execute_instruction(
+        &mut self,
+        frame_index: usize,
+        instruction: &zirk_ir::Instruction,
+        host: &mut dyn InterpreterHost,
+    ) -> Result<Option<Value>, ExecutionFault> {
+        match &instruction.kind {
+            InstKind::FatalError(message) => Err(ExecutionFault::Runtime {
+                category: "FatalError".into(),
+                message: self.render_value(frame_index, *message)?,
+            }),
+            InstKind::Throw(exception) => {
+                let value = self.value(frame_index, *exception)?;
+                let id = self.record_throwable(value, instruction.span)?;
+                self.pending_exception = Some(id);
+                Ok(None)
+            }
+            InstKind::SetSuppressed {
+                exception,
+                suppressed,
+            } => {
+                let exception = self.value(frame_index, *exception)?;
+                let suppressed = self.value(frame_index, *suppressed)?;
+                let id = self.record_throwable(exception, instruction.span)?;
+                self.record_throwable(suppressed.clone(), instruction.span)?;
+                self.throwables
+                    .get_mut(&id)
+                    .expect("recorded throwable exists")
+                    .suppressed
+                    .push(suppressed);
+                Ok(None)
+            }
+            InstKind::HasPendingException => {
+                Ok(Some(Value::Boolean(self.pending_exception.is_some())))
+            }
+            InstKind::TakePendingException => {
+                let id = self.pending_exception.take().ok_or_else(|| {
+                    ExecutionFault::Internal("TakePendingException has no pending throwable".into())
+                })?;
+                self.throwables
+                    .get(&id)
+                    .map(|info| Some(info.value.clone()))
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal("pending exception metadata is unavailable".into())
+                    })
+            }
+            InstKind::Suppressed(exception) => {
+                let value = self.value(frame_index, *exception)?;
+                let id = self.exception_id(&value)?;
+                let suppressed = self
+                    .throwables
+                    .get(&id)
+                    .and_then(|info| info.suppressed.first())
+                    .cloned();
+                Ok(Some(Value::Nullable(suppressed.map(Box::new))))
+            }
+            InstKind::StackTrace(exception) => {
+                let value = self.value(frame_index, *exception)?;
+                let id = self.exception_id(&value)?;
+                let frames = self.throwables.get(&id).ok_or_else(|| {
+                    ExecutionFault::Internal("throwable stack trace metadata is unavailable".into())
+                })?;
+                let text = frames
+                    .frames
+                    .iter()
+                    .map(|frame| frame.function.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::ConstString(id) => {
+                let text = self
+                    .module
+                    .strings
+                    .get(id.0 as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "ConstString references missing string {id:?}"
+                        ))
+                    })?;
+                self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::ConstChar(id) => {
+                let text = self
+                    .module
+                    .strings
+                    .get(id.0 as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "ConstChar references missing string {id:?}"
+                        ))
+                    })?;
+                if zirk_runtime_core::text::grapheme_count(&text) != 1 {
+                    return Err(ExecutionFault::Internal(
+                        "ConstChar does not contain exactly one grapheme".into(),
+                    ));
+                }
+                self.allocate_char(text).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::StringGraphemeOffset { string, index } => {
+                let text = self.string_operand(frame_index, *string)?;
+                let index = self.integer_operand(frame_index, *index)?;
+                let IrType::Int(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "StringGraphemeOffset has a non-integer result".into(),
+                    ));
+                };
+                let offset = zirk_runtime_core::text::grapheme_offset(&text, index)
+                    .map(|offset| offset as i128)
+                    .unwrap_or(-1);
+                IntegerValue::from_literal(offset, width)
+                    .map(Value::Int)
+                    .map(Some)
+                    .map_err(ExecutionFault::Internal)
+            }
+            InstKind::GraphemeLenAt { string, offset } => {
+                let text = self.string_operand(frame_index, *string)?;
+                let offset = self.integer_operand(frame_index, *offset)?;
+                let IrType::Int(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "GraphemeLenAt has a non-integer result".into(),
+                    ));
+                };
+                let length = usize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| zirk_runtime_core::text::grapheme_len_at(&text, offset))
+                    .map(|length| length as i128)
+                    .unwrap_or(-1);
+                IntegerValue::from_literal(length, width)
+                    .map(Value::Int)
+                    .map(Some)
+                    .map_err(ExecutionFault::Internal)
+            }
+            InstKind::GraphemeSlice {
+                string,
+                offset,
+                len,
+            } => {
+                let text = self.string_operand(frame_index, *string)?;
+                let offset = self.integer_operand(frame_index, *offset)?;
+                let len = self.integer_operand(frame_index, *len)?;
+                let Some(end) = offset.checked_add(len) else {
+                    return Err(ExecutionFault::Runtime {
+                        category: "BoundsError".into(),
+                        message: "grapheme range overflows".into(),
+                    });
+                };
+                let value = text
+                    .get(
+                        usize::try_from(offset).unwrap_or(usize::MAX)
+                            ..usize::try_from(end).unwrap_or(usize::MAX),
+                    )
+                    .filter(|value| zirk_runtime_core::text::grapheme_count(value) == 1)
+                    .ok_or_else(|| ExecutionFault::Runtime {
+                        category: "BoundsError".into(),
+                        message: "grapheme range is invalid".into(),
+                    })?
+                    .to_owned();
+                self.allocate_char(value).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::Concat { left, right } => {
+                let left = self.string_operand(frame_index, *left)?;
+                let right = self.string_operand(frame_index, *right)?;
+                let length = left
+                    .len()
+                    .checked_add(right.len())
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.ensure_string_allocation_fits(length)?;
+                self.allocate_string(zirk_runtime_core::text::concat(&left, &right))
+                    .map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::Repeat { string, count } => {
+                let string = self.string_operand(frame_index, *string)?;
+                let count = self.value(frame_index, *count)?;
+                let Value::Int(count) = count else {
+                    return Err(ExecutionFault::Internal(
+                        "Repeat count is not an integer".into(),
+                    ));
+                };
+                let count = usize::try_from(count.signed()).map_err(|_| {
+                    ExecutionFault::Internal("Repeat count is negative or too large".into())
+                })?;
+                let length = string
+                    .len()
+                    .checked_mul(count)
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.ensure_string_allocation_fits(length)?;
+                let repeated = zirk_runtime_core::text::repeat(&string, count)
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.allocate_string(repeated)
+                    .map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::ToString(operand) => {
+                let text = self.render_value(frame_index, *operand)?;
+                self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::Load(slot) => self.frames[frame_index]
+                .slots
+                .get(slot.0 as usize)
+                .cloned()
+                .flatten()
+                .map(Some)
+                .ok_or_else(|| {
+                    ExecutionFault::Internal(format!("load from uninitialized slot {slot:?}"))
+                }),
+            InstKind::Store(slot, operand) => {
+                let value = self.frames[frame_index]
+                    .values
+                    .get(&operand.0)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "store reads unavailable operand {operand:?}"
+                        ))
+                    })?;
+                let destination = self.frames[frame_index]
+                    .slots
+                    .get_mut(slot.0 as usize)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!("store references missing slot {slot:?}"))
+                    })?;
+                *destination = Some(value);
+                Ok(None)
+            }
+            InstKind::Unary { op, operand } => {
+                let value = self.value(frame_index, *operand)?;
+                self.execute_unary(*op, value).map(Some).map_err(|message| {
+                    ExecutionFault::Runtime {
+                        category: "ArithmeticError".into(),
+                        message,
+                    }
+                })
+            }
+            InstKind::Binary { op, left, right } => {
+                let left = self.value(frame_index, *left)?;
+                let right = self.value(frame_index, *right)?;
+                self.execute_binary(*op, left, right)
+                    .map(Some)
+                    .map_err(|message| ExecutionFault::Runtime {
+                        category: "ArithmeticError".into(),
+                        message,
+                    })
+            }
+            InstKind::CheckedArithmetic {
+                op,
+                left,
+                right,
+                signed,
+            } => {
+                let Value::Int(left) = self.value(frame_index, *left)? else {
+                    return Err(ExecutionFault::Internal(
+                        "CheckedArithmetic reads a non-integer left operand".into(),
+                    ));
+                };
+                let Value::Int(right) = self.value(frame_index, *right)? else {
+                    return Err(ExecutionFault::Internal(
+                        "CheckedArithmetic reads a non-integer right operand".into(),
+                    ));
+                };
+                if left.width != right.width || left.width.signed() != *signed {
+                    return Err(ExecutionFault::Internal(
+                        "CheckedArithmetic operands disagree with declared signedness".into(),
+                    ));
+                }
+                let overflow = if *signed {
+                    let value = match op {
+                        BinaryOp::Add => left.signed().checked_add(right.signed()),
+                        BinaryOp::Sub => left.signed().checked_sub(right.signed()),
+                        BinaryOp::Mul => left.signed().checked_mul(right.signed()),
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "unsupported CheckedArithmetic operation".into(),
+                            ));
+                        }
+                    };
+                    let maximum = if left.width.bits() == 128 {
+                        i128::MAX
+                    } else {
+                        (1_i128 << (left.width.bits() - 1)) - 1
+                    };
+                    let minimum = if left.width.bits() == 128 {
+                        i128::MIN
+                    } else {
+                        -(1_i128 << (left.width.bits() - 1))
+                    };
+                    value.is_none_or(|value| value < minimum || value > maximum)
+                } else {
+                    let value = match op {
+                        BinaryOp::Add => left.unsigned().checked_add(right.unsigned()),
+                        BinaryOp::Sub => left.unsigned().checked_sub(right.unsigned()),
+                        BinaryOp::Mul => left.unsigned().checked_mul(right.unsigned()),
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "unsupported CheckedArithmetic operation".into(),
+                            ));
+                        }
+                    };
+                    let maximum = if left.width.bits() == 128 {
+                        u128::MAX
+                    } else {
+                        (1_u128 << left.width.bits()) - 1
+                    };
+                    value.is_none_or(|value| value > maximum)
+                };
+                Ok(Some(Value::Boolean(overflow)))
+            }
+            InstKind::IntCast(operand) => {
+                let value = self.value(frame_index, *operand)?;
+                let IrType::Int(target) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(format!(
+                        "IntCast has non-integer target {:?}",
+                        instruction.ty
+                    )));
+                };
+                match value {
+                    Value::Int(value) => Ok(Some(Value::Int(value.cast(target)))),
+                    value => Err(ExecutionFault::Internal(format!(
+                        "IntCast reads non-integer value {value:?}"
+                    ))),
+                }
+            }
+            InstKind::FloatCast(operand) => {
+                let Value::Float {
+                    width: source_width,
+                    text,
+                } = self.value(frame_index, *operand)?
+                else {
+                    return Err(ExecutionFault::Internal(
+                        "FloatCast reads a non-float value".into(),
+                    ));
+                };
+                let IrType::Float(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "FloatCast has a non-float target".into(),
+                    ));
+                };
+                let text = if width == FloatWidth::F128 {
+                    let value = if source_width == FloatWidth::F128 {
+                        zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                            .map_err(|error| {
+                                ExecutionFault::Internal(format!("float cast failed: {error:?}"))
+                            })?
+                    } else {
+                        zirk_runtime_core::binary_float::Float128::from_bits(
+                            zirk_runtime_core::scalar::f64_to_float128_bits(
+                                Self::parse_binary_float(&text)?,
+                            ),
+                        )
+                    };
+                    value.wire_text()
+                } else if source_width == FloatWidth::F128 {
+                    let value =
+                        zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                            .map_err(|error| {
+                                ExecutionFault::Internal(format!("float cast failed: {error:?}"))
+                            })?
+                            .display_f64();
+                    Self::format_binary_float(Self::round_binary_float(value, width), width)
+                } else {
+                    let value = Self::parse_binary_float(&text)?;
+                    Self::format_binary_float(Self::round_binary_float(value, width), width)
+                };
+                Ok(Some(Value::Float { width, text }))
+            }
+            InstKind::IntToFloat(operand) => {
+                let Value::Int(value) = self.value(frame_index, *operand)? else {
+                    return Err(ExecutionFault::Internal(
+                        "IntToFloat reads a non-integer value".into(),
+                    ));
+                };
+                let IrType::Float(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "IntToFloat has a non-float target".into(),
+                    ));
+                };
+                if width == FloatWidth::F128 {
+                    let text = if value.width.signed() {
+                        zirk_runtime_core::binary_float::Float128::from_i128(value.signed())
+                            .wire_text()
+                    } else {
+                        zirk_runtime_core::binary_float::Float128::from_decimal(
+                            &value.unsigned().to_string(),
+                        )
+                        .map_err(|error| {
+                            ExecutionFault::Internal(format!(
+                                "integer-to-Float128 conversion failed: {error:?}"
+                            ))
+                        })?
+                        .wire_text()
+                    };
+                    return Ok(Some(Value::Float { width, text }));
+                }
+                let number = if value.width.signed() {
+                    value.signed() as f64
+                } else {
+                    value.unsigned() as f64
+                };
+                Ok(Some(Value::Float {
+                    width,
+                    text: Self::format_binary_float(Self::round_binary_float(number, width), width),
+                }))
+            }
+            InstKind::FloatToInt(operand) => {
+                let Value::Float {
+                    width: source_width,
+                    text,
+                } = self.value(frame_index, *operand)?
+                else {
+                    return Err(ExecutionFault::Internal(
+                        "FloatToInt reads a non-float value".into(),
+                    ));
+                };
+                let IrType::Int(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "FloatToInt has a non-integer target".into(),
+                    ));
+                };
+                if source_width == FloatWidth::F128 {
+                    let literal = zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(
+                        &text,
+                    )
+                    .and_then(|value| value.trunc_to_integer(width.bits(), width.signed()))
+                    .map_err(|error| {
+                        ExecutionFault::Internal(format!(
+                            "float-to-integer conversion is outside the target range: {error:?}"
+                        ))
+                    })?;
+                    return Ok(Some(Value::Int(
+                        IntegerValue::from_literal(literal, width)
+                            .map_err(ExecutionFault::Internal)?,
+                    )));
+                }
+                let value = Self::parse_binary_float(&text)?;
+                let integer = value.trunc();
+                let (minimum, maximum) = if width.signed() {
+                    let minimum = if width.bits() == 128 {
+                        i128::MIN as f64
+                    } else {
+                        -(1_i128 << (width.bits() - 1)) as f64
+                    };
+                    let maximum = if width.bits() == 128 {
+                        i128::MAX as f64
+                    } else {
+                        ((1_i128 << (width.bits() - 1)) - 1) as f64
+                    };
+                    (minimum, maximum)
+                } else {
+                    (
+                        0.0,
+                        if width.bits() == 128 {
+                            u128::MAX as f64
+                        } else {
+                            ((1_u128 << width.bits()) - 1) as f64
+                        },
+                    )
+                };
+                if !integer.is_finite() || integer < minimum || integer > maximum {
+                    return Err(ExecutionFault::Internal(
+                        "float-to-integer conversion is outside the target range".into(),
+                    ));
+                }
+                let literal = if width.signed() {
+                    integer as i128
+                } else {
+                    integer as u128 as i128
+                };
+                Ok(Some(Value::Int(
+                    IntegerValue::from_literal(literal, width).map_err(ExecutionFault::Internal)?,
+                )))
+            }
+            InstKind::IntToDecimal(operand) => {
+                let Value::Int(value) = self.value(frame_index, *operand)? else {
+                    return Err(ExecutionFault::Internal(
+                        "IntToDecimal reads a non-integer value".into(),
+                    ));
+                };
+                let integer = if value.width.signed() {
+                    value.signed()
+                } else {
+                    i128::try_from(value.unsigned()).map_err(|_| {
+                        ExecutionFault::Internal(
+                            "unsigned integer cannot fit the decimal representation".into(),
+                        )
+                    })?
+                };
+                Ok(Some(Value::Decimal(zirk_runtime_core::decimal::format(
+                    zirk_runtime_core::decimal::Decimal::new(integer, 0),
+                ))))
+            }
+            InstKind::DecimalToInt(operand) => {
+                let Value::Decimal(text) = self.value(frame_index, *operand)? else {
+                    return Err(ExecutionFault::Internal(
+                        "DecimalToInt reads a non-decimal value".into(),
+                    ));
+                };
+                let IrType::Int(target) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "DecimalToInt has a non-integer target".into(),
+                    ));
+                };
+                let decimal = self.parse_decimal(&text)?;
+                let integer = zirk_runtime_core::decimal::to_i128_checked(
+                    decimal,
+                    target.bits(),
+                    target.signed(),
+                )
+                .map_err(|error| {
+                    ExecutionFault::Internal(format!(
+                        "decimal-to-integer conversion failed: {error:?}"
+                    ))
+                })?;
+                Ok(Some(Value::Int(
+                    IntegerValue::from_literal(integer, target)
+                        .map_err(ExecutionFault::Internal)?,
+                )))
+            }
+            InstKind::DecimalToFloat(operand) => {
+                let Value::Decimal(text) = self.value(frame_index, *operand)? else {
+                    return Err(ExecutionFault::Internal(
+                        "DecimalToFloat reads a non-decimal value".into(),
+                    ));
+                };
+                let IrType::Float(width) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "DecimalToFloat has a non-float target".into(),
+                    ));
+                };
+                let text = if width == FloatWidth::F128 {
+                    zirk_runtime_core::binary_float::Float128::from_decimal(&text)
+                        .map_err(|error| {
+                            ExecutionFault::Internal(format!(
+                                "decimal-to-Float128 conversion failed: {error:?}"
+                            ))
+                        })?
+                        .wire_text()
+                } else {
+                    let value = Self::parse_binary_float(&text)?;
+                    Self::format_binary_float(Self::round_binary_float(value, width), width)
+                };
+                Ok(Some(Value::Float { width, text }))
+            }
+            InstKind::FloatToDecimal(operand) => {
+                let Value::Float { width, text } = self.value(frame_index, *operand)? else {
+                    return Err(ExecutionFault::Internal(
+                        "FloatToDecimal reads a non-float value".into(),
+                    ));
+                };
+                let text = if width == FloatWidth::F128 {
+                    zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                        .map_err(|error| {
+                            ExecutionFault::Internal(format!(
+                                "Float128-to-decimal conversion failed: {error:?}"
+                            ))
+                        })?
+                        .display_f64()
+                        .to_string()
+                } else {
+                    text
+                };
+                self.parse_decimal(&text)?;
+                Ok(Some(Value::Decimal(text)))
+            }
+            InstKind::Call { callee, args } => {
+                let arguments = args
+                    .iter()
+                    .map(|operand| self.value(frame_index, *operand))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ExecutionFault::Internal)?;
+                if is_browser_intrinsic(callee) {
+                    return self
+                        .execute_browser_intrinsic(callee, &arguments, instruction.ty)
+                        .map(Some);
+                }
+                let function = self
+                    .module
+                    .functions
+                    .iter()
+                    .position(|function| function.name == *callee)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "Call references unavailable interpreted function {callee:?}"
+                        ))
+                    })?;
+                self.push_frame(
+                    function,
+                    arguments,
+                    Some(ReturnDestination {
+                        caller_value: instruction.result,
+                    }),
+                )
+                .map_err(ExecutionFault::Limit)?;
+                // The caller is suspended until its child returns. A result
+                // placeholder avoids treating this deferred value as an IR
+                // fault; it is replaced atomically at return propagation.
+                Ok(instruction.result.map(|_| Value::Undefined))
+            }
+            InstKind::CallVirtual {
+                object,
+                index,
+                args,
+            } => {
+                let receiver = self.value(frame_index, *object)?;
+                let layout = self.object_layout(frame_index, *object)?;
+                let callee = self
+                    .module
+                    .objects
+                    .get(layout as usize)
+                    .and_then(|layout| layout.methods.get(*index as usize))
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "CallVirtual references missing method {index} on object layout {layout}"
+                        ))
+                    })?;
+                self.push_dispatch_frame(&callee, receiver, args, frame_index, instruction.result)?;
+                Ok(instruction.result.map(|_| Value::Undefined))
+            }
+            InstKind::CallContract {
+                object,
+                contract,
+                index,
+                args,
+            } => {
+                let receiver = self.value(frame_index, *object)?;
+                let layout = self.object_layout(frame_index, *object)?;
+                let callee = self
+                    .module
+                    .objects
+                    .get(layout as usize)
+                    .and_then(|layout| layout.contracts.iter().find(|table| table.contract == *contract))
+                    .and_then(|table| table.methods.get(*index as usize))
+                    .cloned()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "CallContract references missing contract {contract} method {index} on object layout {layout}"
+                        ))
+                    })?;
+                self.push_dispatch_frame(&callee, receiver, args, frame_index, instruction.result)?;
+                Ok(instruction.result.map(|_| Value::Undefined))
+            }
+            InstKind::MakeClosure {
+                target, captures, ..
+            }
+            | InstKind::MakeCallable { target, captures } => {
+                let captures = captures
+                    .iter()
+                    .map(|operand| self.value(frame_index, *operand))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ExecutionFault::Internal)?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(captures.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Closure {
+                            target: target.clone(),
+                            captures,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::CallClosure { callee, args, .. }
+            | InstKind::CallCallable {
+                callable: callee,
+                args,
+            } => {
+                let Value::Heap(id) = self.value(frame_index, *callee)? else {
+                    return Err(ExecutionFault::Internal(
+                        "indirect call reads a non-callable value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Closure { target, captures }) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "indirect call reads a heap value that is not callable".into(),
+                    ));
+                };
+                let function = self
+                    .module
+                    .functions
+                    .iter()
+                    .position(|function| function.name == *target)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "callable references unavailable interpreted function {target:?}"
+                        ))
+                    })?;
+                let mut arguments = captures.clone();
+                arguments.extend(
+                    args.iter()
+                        .map(|operand| self.value(frame_index, *operand))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(ExecutionFault::Internal)?,
+                );
+                self.push_frame(
+                    function,
+                    arguments,
+                    Some(ReturnDestination {
+                        caller_value: instruction.result,
+                    }),
+                )
+                .map_err(ExecutionFault::Limit)?;
+                Ok(instruction.result.map(|_| Value::Undefined))
+            }
+            InstKind::ArrayNew { capacity, .. } => {
+                let capacity = self.integer_operand(frame_index, *capacity)?;
+                let capacity = usize::try_from(capacity).map_err(|_| ExecutionFault::Runtime {
+                    category: "BoundsError".into(),
+                    message: "array capacity cannot be negative".into(),
+                })?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(capacity.saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Array(vec![Value::Undefined; capacity]),
+                        bytes,
+                        self.limits,
+                    )
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::ListNew { .. } => self
+                .heap
+                .allocate(
+                    HeapEntry::List(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(|id| Some(Value::Heap(id)))
+                .map_err(ExecutionFault::Limit),
+            InstKind::ArrayLength(receiver) | InstKind::ListLength(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let length = match self.heap.get(id) {
+                    Some(HeapEntry::Array(values)) | Some(HeapEntry::List(values)) => values.len(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "length receiver is not an array or list".into(),
+                        ));
+                    }
+                };
+                self.collection_length_value(length, instruction.ty)
+                    .map(Some)
+            }
+            InstKind::ArrayListLoad { receiver, index } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let index = self.integer_operand(frame_index, *index)?;
+                let values = match self.heap.get(id) {
+                    Some(HeapEntry::Array(values)) | Some(HeapEntry::List(values)) => values,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "load receiver is not an array or list".into(),
+                        ));
+                    }
+                };
+                let index = zirk_runtime_core::collections::element_index(values.len(), index)
+                    .ok_or_else(Self::collection_bounds_error)?;
+                Ok(Some(values[index].clone()))
+            }
+            InstKind::ArrayListStore {
+                receiver,
+                index,
+                value,
+            } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let index = self.integer_operand(frame_index, *index)?;
+                let value = self.value(frame_index, *value)?;
+                let values = match self.heap.get_mut(id) {
+                    Some(HeapEntry::Array(values)) | Some(HeapEntry::List(values)) => values,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "store receiver is not an array or list".into(),
+                        ));
+                    }
+                };
+                let index = zirk_runtime_core::collections::element_index(values.len(), index)
+                    .ok_or_else(Self::collection_bounds_error)?;
+                values[index] = value;
+                Ok(None)
+            }
+            InstKind::ListAdd { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ListAdd receiver is not a list".into(),
+                    ));
+                };
+                values.push(value);
+                Ok(None)
+            }
+            InstKind::ListInsert {
+                receiver,
+                index,
+                value,
+            } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let index = self.integer_operand(frame_index, *index)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ListInsert receiver is not a list".into(),
+                    ));
+                };
+                let index = zirk_runtime_core::collections::insertion_index(values.len(), index)
+                    .ok_or_else(Self::collection_bounds_error)?;
+                values.insert(index, value);
+                Ok(None)
+            }
+            InstKind::ListRemove { receiver, index } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let index = self.integer_operand(frame_index, *index)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ListRemove receiver is not a list".into(),
+                    ));
+                };
+                let index = zirk_runtime_core::collections::element_index(values.len(), index)
+                    .ok_or_else(Self::collection_bounds_error)?;
+                values.remove(index);
+                Ok(None)
+            }
+            InstKind::ListRemoveValue { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ListRemoveValue receiver is not a list".into(),
+                    ));
+                };
+                let removed = values
+                    .iter()
+                    .position(|candidate| candidate == &value)
+                    .map(|index| {
+                        values.remove(index);
+                        true
+                    })
+                    .unwrap_or(false);
+                Ok(Some(Value::Boolean(removed)))
+            }
+            InstKind::ArrayClone { receiver } | InstKind::ListClone { receiver } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let (entry, bytes) = match self.heap.get(id) {
+                    Some(HeapEntry::Array(values)) => (
+                        HeapEntry::Array(values.clone()),
+                        values.len() * std::mem::size_of::<Value>(),
+                    ),
+                    Some(HeapEntry::List(values)) => (
+                        HeapEntry::List(values.clone()),
+                        values.len() * std::mem::size_of::<Value>(),
+                    ),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "clone receiver is not an array or list".into(),
+                        ));
+                    }
+                };
+                self.heap
+                    .allocate(entry, std::mem::size_of::<HeapEntry>() + bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::MapNew { .. } => self
+                .heap
+                .allocate(
+                    HeapEntry::Map(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(|id| Some(Value::Heap(id)))
+                .map_err(ExecutionFault::Limit),
+            InstKind::SetNew { .. } => self
+                .heap
+                .allocate(
+                    HeapEntry::Set(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(|id| Some(Value::Heap(id)))
+                .map_err(ExecutionFault::Limit),
+            InstKind::MapLength(receiver) | InstKind::SetLength(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let length = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => entries.len(),
+                    Some(HeapEntry::Set(values)) => values.len(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "length receiver is not a map or set".into(),
+                        ));
+                    }
+                };
+                self.collection_length_value(length, instruction.ty)
+                    .map(Some)
+            }
+            InstKind::MapIsEmpty(receiver) | InstKind::SetIsEmpty(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let empty = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => entries.is_empty(),
+                    Some(HeapEntry::Set(values)) => values.is_empty(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "is_empty receiver is not a map or set".into(),
+                        ));
+                    }
+                };
+                Ok(Some(Value::Boolean(empty)))
+            }
+            InstKind::MapSet {
+                receiver,
+                key,
+                value,
+            } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let key = self.value(frame_index, *key)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "MapSet receiver is not a map".into(),
+                    ));
+                };
+                if let Some((_, current)) =
+                    entries.iter_mut().find(|(candidate, _)| candidate == &key)
+                {
+                    *current = value;
+                } else {
+                    entries.push((key, value));
+                }
+                Ok(None)
+            }
+            InstKind::MapContainsKey { receiver, key } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let key = self.value(frame_index, *key)?;
+                let Some(HeapEntry::Map(entries)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "MapContainsKey receiver is not a map".into(),
+                    ));
+                };
+                Ok(Some(Value::Boolean(
+                    entries.iter().any(|(candidate, _)| candidate == &key),
+                )))
+            }
+            InstKind::MapGet { receiver, key } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let key = self.value(frame_index, *key)?;
+                let Some(HeapEntry::Map(entries)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "MapGet receiver is not a map".into(),
+                    ));
+                };
+                Ok(Some(Value::Nullable(
+                    entries
+                        .iter()
+                        .find(|(candidate, _)| candidate == &key)
+                        .map(|(_, value)| Box::new(value.clone())),
+                )))
+            }
+            InstKind::MapRemove { receiver, key } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let key = self.value(frame_index, *key)?;
+                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "MapRemove receiver is not a map".into(),
+                    ));
+                };
+                let removed = entries
+                    .iter()
+                    .position(|(candidate, _)| candidate == &key)
+                    .map(|index| {
+                        entries.remove(index);
+                        true
+                    })
+                    .unwrap_or(false);
+                Ok(Some(Value::Boolean(removed)))
+            }
+            InstKind::SetAdd { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "SetAdd receiver is not a set".into(),
+                    ));
+                };
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+                Ok(None)
+            }
+            InstKind::SetContains { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::Set(values)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "SetContains receiver is not a set".into(),
+                    ));
+                };
+                Ok(Some(Value::Boolean(values.contains(&value))))
+            }
+            InstKind::SetRemove { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "SetRemove receiver is not a set".into(),
+                    ));
+                };
+                let removed = values
+                    .iter()
+                    .position(|candidate| candidate == &value)
+                    .map(|index| {
+                        values.remove(index);
+                        true
+                    })
+                    .unwrap_or(false);
+                Ok(Some(Value::Boolean(removed)))
+            }
+            InstKind::ArraySlice {
+                receiver,
+                start,
+                end,
+                step,
+            } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let start = self.integer_operand(frame_index, *start)?;
+                let end = self.integer_operand(frame_index, *end)?;
+                let step = self.integer_operand(frame_index, *step)?;
+                let values = match self.heap.get(id) {
+                    Some(HeapEntry::Array(values)) => values,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ArraySlice receiver is not an array".into(),
+                        ));
+                    }
+                };
+                let indexes =
+                    zirk_runtime_core::collections::slice_indices(values.len(), start, end, step)
+                        .map_err(|message| ExecutionFault::Runtime {
+                        category: "BoundsError".into(),
+                        message: message.into(),
+                    })?;
+                let sliced = indexes
+                    .into_iter()
+                    .map(|index| values[index].clone())
+                    .collect::<Vec<_>>();
+                let bytes =
+                    std::mem::size_of::<HeapEntry>() + sliced.len() * std::mem::size_of::<Value>();
+                self.heap
+                    .allocate(HeapEntry::Array(sliced), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::Alloc(layout) => {
+                let fields = self
+                    .module
+                    .objects
+                    .get(*layout as usize)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "Alloc references missing object layout {layout}"
+                        ))
+                    })?
+                    .fields
+                    .len();
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(fields.saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Object {
+                            layout: *layout,
+                            fields: vec![Value::Undefined; fields],
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::BuildValue { class, fields } => {
+                let fields = fields
+                    .iter()
+                    .map(|operand| self.value(frame_index, *operand))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ExecutionFault::Internal)?;
+                let layout = self.module.values.get(*class as usize).ok_or_else(|| {
+                    ExecutionFault::Internal(format!(
+                        "BuildValue references missing layout {class}"
+                    ))
+                })?;
+                if fields.len() != layout.fields.len() {
+                    return Err(ExecutionFault::Internal(
+                        "BuildValue field count does not match layout".into(),
+                    ));
+                }
+                let bytes =
+                    std::mem::size_of::<HeapEntry>() + fields.len() * std::mem::size_of::<Value>();
+                self.heap
+                    .allocate(
+                        HeapEntry::Record {
+                            layout: *class,
+                            fields,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::BuildEnum {
+                enum_id,
+                variant,
+                fields,
+            } => {
+                let fields = fields
+                    .iter()
+                    .map(|operand| self.value(frame_index, *operand))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ExecutionFault::Internal)?;
+                let layout = self.module.enums.get(*enum_id as usize).ok_or_else(|| {
+                    ExecutionFault::Internal(format!(
+                        "BuildEnum references missing layout {enum_id}"
+                    ))
+                })?;
+                let expected = layout.variants.get(*variant as usize).ok_or_else(|| {
+                    ExecutionFault::Internal(format!(
+                        "BuildEnum references missing variant {variant}"
+                    ))
+                })?;
+                if fields.len() != expected.len() {
+                    return Err(ExecutionFault::Internal(
+                        "BuildEnum field count does not match variant".into(),
+                    ));
+                }
+                let bytes =
+                    std::mem::size_of::<HeapEntry>() + fields.len() * std::mem::size_of::<Value>();
+                self.heap
+                    .allocate(
+                        HeapEntry::Enum {
+                            layout: *enum_id,
+                            variant: *variant,
+                            fields,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::Discriminant(value) => {
+                let Value::Heap(id) = self.value(frame_index, *value)? else {
+                    return Err(ExecutionFault::Internal(
+                        "Discriminant reads a non-enum value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Enum { variant, .. }) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "Discriminant reads a heap value that is not an enum".into(),
+                    ));
+                };
+                Ok(Some(Value::Int(
+                    IntegerValue::from_literal(*variant as i128, IntWidth::I32)
+                        .map_err(ExecutionFault::Internal)?,
+                )))
+            }
+            InstKind::LoadField { object, index } => {
+                let Value::Heap(id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "LoadField reads a non-aggregate value".into(),
+                    ));
+                };
+                let Some(entry) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "LoadField reads a missing heap value".into(),
+                    ));
+                };
+                let fields = match entry {
+                    HeapEntry::Object { fields, .. }
+                    | HeapEntry::Record { fields, .. }
+                    | HeapEntry::Enum { fields, .. } => fields,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "LoadField reads a heap value that is not an aggregate".into(),
+                        ));
+                    }
+                };
+                fields
+                    .get(*index as usize)
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "LoadField references missing field {index}"
+                        ))
+                    })
+            }
+            InstKind::StoreField {
+                object,
+                index,
+                value,
+            } => {
+                let Value::Heap(id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "StoreField writes a non-object value".into(),
+                    ));
+                };
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::Object { fields, .. }) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "StoreField writes a heap value that is not an object".into(),
+                    ));
+                };
+                let field = fields.get_mut(*index as usize).ok_or_else(|| {
+                    ExecutionFault::Internal(format!("StoreField references missing field {index}"))
+                })?;
+                *field = value;
+                Ok(None)
+            }
+            InstKind::IsInstance {
+                object,
+                target_class,
+            } => {
+                let actual = self.object_layout(frame_index, *object)?;
+                let matched = self
+                    .module
+                    .objects
+                    .get(actual as usize)
+                    .is_some_and(|layout| {
+                        actual == *target_class || layout.ancestors.contains(target_class)
+                    });
+                Ok(Some(Value::Boolean(matched)))
+            }
+            InstKind::CheckedCast {
+                object,
+                target_class,
+            } => {
+                let actual = self.object_layout(frame_index, *object)?;
+                let matched = self
+                    .module
+                    .objects
+                    .get(actual as usize)
+                    .is_some_and(|layout| {
+                        actual == *target_class || layout.ancestors.contains(target_class)
+                    });
+                if !matched {
+                    return Err(ExecutionFault::Runtime {
+                        category: "CastError".into(),
+                        message: format!(
+                            "object layout {actual} is not an instance of {target_class}"
+                        ),
+                    });
+                }
+                Ok(Some(self.value(frame_index, *object)?))
+            }
+            InstKind::NullValue(_) => Ok(Some(Value::Nullable(None))),
+            InstKind::Wrap { value, .. } => Ok(Some(Value::Nullable(Some(Box::new(
+                self.value(frame_index, *value)?,
+            ))))),
+            InstKind::IsNull(operand) => match self.value(frame_index, *operand)? {
+                Value::Nullable(value) => Ok(Some(Value::Boolean(value.is_none()))),
+                value => Err(ExecutionFault::Internal(format!(
+                    "IsNull reads non-nullable value {value:?}"
+                ))),
+            },
+            InstKind::Unwrap(operand) => match self.value(frame_index, *operand)? {
+                Value::Nullable(Some(value)) => Ok(Some(*value)),
+                Value::Nullable(None) => Err(ExecutionFault::Internal(
+                    "Unwrap reached an absent nullable value".into(),
+                )),
+                value => Err(ExecutionFault::Internal(format!(
+                    "Unwrap reads non-nullable value {value:?}"
+                ))),
+            },
+            InstKind::Print(operand) => self.emit_output(frame_index, *operand, false, host),
+            InstKind::Println(operand) => self.emit_output(frame_index, *operand, true, host),
+            InstKind::IsCancelled => Ok(Some(Value::Boolean(host.is_cancelled()))),
+            _ => self
+                .materialize_constant(instruction)
+                .map(Some)
+                .map_err(ExecutionFault::Internal),
+        }
+    }
+
+    fn emit_output(
+        &mut self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+        newline: bool,
+        host: &mut dyn InterpreterHost,
+    ) -> Result<Option<Value>, ExecutionFault> {
+        let Value::Heap(id) = self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        else {
+            return Err(ExecutionFault::Internal(
+                "print operand is not a heap string".into(),
+            ));
+        };
+        let HeapEntry::String(text) = self.heap.get(id).ok_or_else(|| {
+            ExecutionFault::Internal("print operand references a missing heap value".into())
+        })?
+        else {
+            return Err(ExecutionFault::Internal(
+                "print operand is not a string heap value".into(),
+            ));
+        };
+        let mut text = text.clone();
+        if newline {
+            text.push('\n');
+        }
+        let bytes = text.len();
+        let next_bytes = match self
+            .output_bytes
+            .checked_add(bytes)
+            .filter(|bytes| *bytes <= self.limits.output_bytes)
+        {
+            Some(bytes) => bytes,
+            None => return Err(self.truncate_output(host)),
+        };
+        let next_events = match self
+            .output_events
+            .checked_add(1)
+            .filter(|events| *events <= self.limits.output_events)
+        {
+            Some(events) => events,
+            None => return Err(self.truncate_output(host)),
+        };
+        if host
+            .emit(OutputEvent {
+                text,
+                truncated: false,
+            })
+            .is_err()
+        {
+            return Err(self.truncate_output(host));
+        }
+        self.output_bytes = next_bytes;
+        self.output_events = next_events;
+        Ok(None)
+    }
+
+    fn truncate_output(&mut self, host: &mut dyn InterpreterHost) -> ExecutionFault {
+        if !self.output_truncated {
+            self.output_truncated = true;
+            let _ = host.emit(OutputEvent {
+                text: String::new(),
+                truncated: true,
+            });
+        }
+        ExecutionFault::Limit(LimitFailure::Output)
+    }
+
+    fn string_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<String, ExecutionFault> {
+        let Value::Heap(id) = self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        else {
+            return Err(ExecutionFault::Internal(
+                "string operation operand is not a heap string".into(),
+            ));
+        };
+        match self.heap.get(id) {
+            Some(HeapEntry::String(text)) => Ok(text.clone()),
+            Some(_) => Err(ExecutionFault::Internal(
+                "string operation operand is not a string heap value".into(),
+            )),
+            None => Err(ExecutionFault::Internal(
+                "string operation operand references a missing heap value".into(),
+            )),
+        }
+    }
+
+    fn integer_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<i64, ExecutionFault> {
+        let Value::Int(value) = self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        else {
+            return Err(ExecutionFault::Internal(
+                "integer operation operand is not an integer".into(),
+            ));
+        };
+        if value.width.signed() {
+            i64::try_from(value.signed()).map_err(|_| ExecutionFault::Runtime {
+                category: "BoundsError".into(),
+                message: "integer operand is outside the supported index range".into(),
+            })
+        } else {
+            i64::try_from(value.unsigned()).map_err(|_| ExecutionFault::Runtime {
+                category: "BoundsError".into(),
+                message: "integer operand is outside the supported index range".into(),
+            })
+        }
+    }
+
+    fn integer_from_value(&self, value: Option<&Value>) -> Result<i64, ExecutionFault> {
+        let Some(Value::Int(value)) = value else {
+            return Err(ExecutionFault::Internal(
+                "integer intrinsic argument is missing or not an integer".into(),
+            ));
+        };
+        if value.width.signed() {
+            i64::try_from(value.signed()).map_err(|_| ExecutionFault::Runtime {
+                category: "BoundsError".into(),
+                message: "integer operand is outside the supported index range".into(),
+            })
+        } else {
+            i64::try_from(value.unsigned()).map_err(|_| ExecutionFault::Runtime {
+                category: "BoundsError".into(),
+                message: "integer operand is outside the supported index range".into(),
+            })
+        }
+    }
+
+    fn char_value(&self, value: &Value) -> Result<String, ExecutionFault> {
+        let Value::Heap(id) = value else {
+            return Err(ExecutionFault::Internal(
+                "Char intrinsic received a non-Char value".into(),
+            ));
+        };
+        match self.heap.get(*id) {
+            Some(HeapEntry::Char(value)) => Ok(value.clone()),
+            _ => Err(ExecutionFault::Internal(
+                "Char intrinsic received a non-Char heap value".into(),
+            )),
+        }
+    }
+
+    fn execute_browser_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        if name.starts_with("zirk_regex_") {
+            return self.execute_regex_intrinsic(name, arguments);
+        }
+        if name.starts_with("zirk_str_") {
+            return self.execute_string_intrinsic(name, arguments, ty);
+        }
+        if name.starts_with("zirk_duration_") || name == "zirk_rt_duration_to_string" {
+            return self.execute_duration_intrinsic(name, arguments, ty);
+        }
+        if name.starts_with("zirk_range_") {
+            return self.execute_range_intrinsic(name, arguments, ty);
+        }
+        let [receiver] = arguments else {
+            return Err(ExecutionFault::Internal(format!(
+                "{name} has invalid arity"
+            )));
+        };
+        let value = self.char_value(receiver)?;
+        let boolean = |value| Ok(Value::Boolean(value));
+        match name {
+            "zirk_char_is_uppercase" => boolean(zirk_runtime_core::char::is_uppercase(&value)),
+            "zirk_char_is_lowercase" => boolean(zirk_runtime_core::char::is_lowercase(&value)),
+            "zirk_char_is_digit" => boolean(zirk_runtime_core::char::is_digit(&value)),
+            "zirk_char_is_letter" => boolean(zirk_runtime_core::char::is_letter(&value)),
+            "zirk_char_is_whitespace" => boolean(zirk_runtime_core::char::is_whitespace(&value)),
+            "zirk_char_is_ascii" => boolean(value.is_ascii()),
+            "zirk_char_is_alphabetic" => boolean(value.chars().all(char::is_alphabetic)),
+            "zirk_char_is_numeric" => boolean(value.chars().all(char::is_numeric)),
+            "zirk_char_is_alphanumeric" => boolean(value.chars().all(char::is_alphanumeric)),
+            "zirk_char_ascii_code" => {
+                let IrType::Int(width) = ty else {
+                    return Err(ExecutionFault::Internal(
+                        "Char ascii_code has non-integer result".into(),
+                    ));
+                };
+                IntegerValue::from_literal(
+                    i128::from(zirk_runtime_core::char::ascii_code(&value)),
+                    width,
+                )
+                .map(Value::Int)
+                .map_err(ExecutionFault::Internal)
+            }
+            "zirk_char_to_uppercase" => self
+                .allocate_string(zirk_runtime_core::char::uppercase(&value))
+                .map(Value::Heap),
+            "zirk_char_to_lowercase" => self
+                .allocate_string(zirk_runtime_core::char::lowercase(&value))
+                .map(Value::Heap),
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    fn execute_duration_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        const WEEK: i64 = 604_800_000_000_000;
+        const DAY: i64 = 86_400_000_000_000;
+        const HOUR: i64 = 3_600_000_000_000;
+        const MINUTE: i64 = 60_000_000_000;
+        const SECOND: i64 = 1_000_000_000;
+        const MILLI: i64 = 1_000_000;
+        const MICRO: i64 = 1_000;
+        let nanos = self.integer_from_value(arguments.first())?;
+        let int = |value: i64| match ty {
+            IrType::Int(width) => IntegerValue::from_literal(i128::from(value), width)
+                .map(Value::Int)
+                .map_err(ExecutionFault::Internal),
+            _ => Err(ExecutionFault::Internal(format!(
+                "{name} has non-integer result"
+            ))),
+        };
+        let float = |value: f64| match ty {
+            IrType::Float(width) => Ok(Value::Float {
+                width,
+                text: Self::format_binary_float(Self::round_binary_float(value, width), width),
+            }),
+            _ => Err(ExecutionFault::Internal(format!(
+                "{name} has non-float result"
+            ))),
+        };
+        let magnitude = (nanos as i128).abs();
+        let component = |unit: i128, modulus: Option<i128>| {
+            let value = modulus.map_or(magnitude, |modulus| magnitude % modulus);
+            (value / unit) as i64
+        };
+        match name {
+            "zirk_rt_duration_to_string" => self
+                .allocate_string(zirk_runtime_core::duration::format(nanos))
+                .map(Value::Heap),
+            "zirk_duration_abs" => nanos.checked_abs().map_or_else(
+                || {
+                    Err(ExecutionFault::Runtime {
+                        category: "ArithmeticError".into(),
+                        message: "Duration.abs overflows".into(),
+                    })
+                },
+                int,
+            ),
+            "zirk_duration_sign" => int(nanos.signum()),
+            "zirk_duration_days" => int(component(i128::from(DAY), None)),
+            "zirk_duration_hours" => int(component(i128::from(HOUR), Some(i128::from(DAY)))),
+            "zirk_duration_minutes" => int(component(i128::from(MINUTE), Some(i128::from(HOUR)))),
+            "zirk_duration_seconds" => int(component(i128::from(SECOND), Some(i128::from(MINUTE)))),
+            "zirk_duration_milliseconds" => {
+                int(component(i128::from(MILLI), Some(i128::from(SECOND))))
+            }
+            "zirk_duration_microseconds" => {
+                int(component(i128::from(MICRO), Some(i128::from(SECOND))) % 1_000)
+            }
+            "zirk_duration_nanoseconds" => int((magnitude % i128::from(SECOND) % 1_000) as i64),
+            "zirk_duration_total_weeks" => float(nanos as f64 / WEEK as f64),
+            "zirk_duration_total_days" => float(nanos as f64 / DAY as f64),
+            "zirk_duration_total_hours" => float(nanos as f64 / HOUR as f64),
+            "zirk_duration_total_minutes" => float(nanos as f64 / MINUTE as f64),
+            "zirk_duration_total_seconds" => float(nanos as f64 / SECOND as f64),
+            "zirk_duration_total_milliseconds" => float(nanos as f64 / MILLI as f64),
+            "zirk_duration_total_microseconds" => float(nanos as f64 / MICRO as f64),
+            "zirk_duration_total_nanoseconds" => float(nanos as f64),
+            "zirk_duration_whole_weeks" => int(nanos / WEEK),
+            "zirk_duration_whole_days" => int(nanos / DAY),
+            "zirk_duration_whole_hours" => int(nanos / HOUR),
+            "zirk_duration_whole_minutes" => int(nanos / MINUTE),
+            "zirk_duration_whole_seconds" => int(nanos / SECOND),
+            "zirk_duration_whole_milliseconds" => int(nanos / MILLI),
+            "zirk_duration_whole_microseconds" => int(nanos / MICRO),
+            "zirk_duration_whole_nanoseconds" => int(nanos),
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    fn execute_range_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        let int = |value: i64| match ty {
+            IrType::Int(width) => IntegerValue::from_literal(i128::from(value), width)
+                .map(Value::Int)
+                .map_err(ExecutionFault::Internal),
+            _ => Err(ExecutionFault::Internal(format!(
+                "{name} has non-integer result"
+            ))),
+        };
+        let range = |value: &Value, heap: &Heap| match value {
+            Value::Heap(id) => match heap.get(*id) {
+                Some(HeapEntry::Range(value)) => Ok(*value),
+                _ => Err(ExecutionFault::Internal(
+                    "Range intrinsic received a non-Range value".into(),
+                )),
+            },
+            _ => Err(ExecutionFault::Internal(
+                "Range intrinsic received a non-heap value".into(),
+            )),
+        };
+        match name {
+            "zirk_range_new" => {
+                let [start, end, step, inclusive] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_range_new has invalid arity".into(),
+                    ));
+                };
+                let value = zirk_runtime_core::range::Range::new(
+                    self.integer_from_value(Some(start))?,
+                    self.integer_from_value(Some(end))?,
+                    self.integer_from_value(Some(step))?,
+                    self.integer_from_value(Some(inclusive))? != 0,
+                );
+                self.heap
+                    .allocate(
+                        HeapEntry::Range(value),
+                        std::mem::size_of::<HeapEntry>(),
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            "zirk_range_start" => int(range(
+                arguments.first().ok_or_else(|| {
+                    ExecutionFault::Internal("zirk_range_start has invalid arity".into())
+                })?,
+                &self.heap,
+            )?
+            .start),
+            "zirk_range_end" => int(range(
+                arguments.first().ok_or_else(|| {
+                    ExecutionFault::Internal("zirk_range_end has invalid arity".into())
+                })?,
+                &self.heap,
+            )?
+            .end),
+            "zirk_range_step" => int(range(
+                arguments.first().ok_or_else(|| {
+                    ExecutionFault::Internal("zirk_range_step has invalid arity".into())
+                })?,
+                &self.heap,
+            )?
+            .step),
+            "zirk_range_inclusive" => int(i64::from(
+                range(
+                    arguments.first().ok_or_else(|| {
+                        ExecutionFault::Internal("zirk_range_inclusive has invalid arity".into())
+                    })?,
+                    &self.heap,
+                )?
+                .inclusive,
+            )),
+            "zirk_range_length" => int(range(
+                arguments.first().ok_or_else(|| {
+                    ExecutionFault::Internal("zirk_range_length has invalid arity".into())
+                })?,
+                &self.heap,
+            )?
+            .len()
+            .unwrap_or(-1)),
+            "zirk_range_element_at" => {
+                let [receiver, index] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_range_element_at has invalid arity".into(),
+                    ));
+                };
+                int(range(receiver, &self.heap)?.element_at(self.integer_from_value(Some(index))?))
+            }
+            "zirk_range_slice" => {
+                let [receiver, start, end, step] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_range_slice has invalid arity".into(),
+                    ));
+                };
+                let value = range(receiver, &self.heap)?.slice(
+                    self.integer_from_value(Some(start))?,
+                    self.integer_from_value(Some(end))?,
+                    self.integer_from_value(Some(step))?,
+                );
+                self.heap
+                    .allocate(
+                        HeapEntry::Range(value),
+                        std::mem::size_of::<HeapEntry>(),
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            "zirk_range_to_string" => {
+                let [receiver, duration_parts] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_range_to_string has invalid arity".into(),
+                    ));
+                };
+                let text = range(receiver, &self.heap)?
+                    .format(self.integer_from_value(Some(duration_parts))? != 0);
+                self.allocate_string(text).map(Value::Heap)
+            }
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    /// Browser-owned regex calls are deliberately bounded before invoking the
+    /// regex engine.  The native ABI remains the authority for native runs;
+    /// this path only replaces the four pure operations in the browser
+    /// compatibility baseline.
+    fn execute_regex_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+    ) -> Result<Value, ExecutionFault> {
+        const MAX_REGEX_INPUT_BYTES: usize = 65_536;
+        let string = |value: &Value, heap: &Heap| match value {
+            Value::Heap(id) => match heap.get(*id) {
+                Some(HeapEntry::String(text)) => Ok(text.clone()),
+                _ => Err(ExecutionFault::Internal(
+                    "Regex intrinsic received a non-String value".into(),
+                )),
+            },
+            _ => Err(ExecutionFault::Internal(
+                "Regex intrinsic received a non-heap value".into(),
+            )),
+        };
+        let pattern = |value: &Value, heap: &Heap| match value {
+            Value::Heap(id) => match heap.get(*id) {
+                Some(HeapEntry::Regex(pattern)) => Ok(pattern.clone()),
+                _ => Err(ExecutionFault::Internal(
+                    "Regex intrinsic received a non-Regex value".into(),
+                )),
+            },
+            _ => Err(ExecutionFault::Internal(
+                "Regex intrinsic received a non-heap value".into(),
+            )),
+        };
+        let bounded = |text: &str| {
+            (text.len() <= MAX_REGEX_INPUT_BYTES)
+                .then_some(())
+                .ok_or_else(|| ExecutionFault::Runtime {
+                    category: "LimitError".into(),
+                    message: "regex input exceeds the browser limit".into(),
+                })
+        };
+        match name {
+            "zirk_regex_from_pattern" => {
+                let [source] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_from_pattern has invalid arity".into(),
+                    ));
+                };
+                let source = string(source, &self.heap)?;
+                bounded(&source)?;
+                zirk_runtime_core::regex::compile(&source).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Regex(source),
+                        std::mem::size_of::<HeapEntry>(),
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            "zirk_regex_is_match" => {
+                let [receiver, text] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_is_match has invalid arity".into(),
+                    ));
+                };
+                let pattern = pattern(receiver, &self.heap)?;
+                let text = string(text, &self.heap)?;
+                bounded(&text)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                Ok(Value::Boolean(zirk_runtime_core::regex::is_match(
+                    &regex, &text,
+                )))
+            }
+            "zirk_regex_to_string" => {
+                let [receiver] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_to_string has invalid arity".into(),
+                    ));
+                };
+                self.allocate_string(pattern(receiver, &self.heap)?)
+                    .map(Value::Heap)
+            }
+            "zirk_regex_replace" => {
+                let [receiver, text, replacement] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_replace has invalid arity".into(),
+                    ));
+                };
+                let pattern = pattern(receiver, &self.heap)?;
+                let text = string(text, &self.heap)?;
+                let replacement = string(replacement, &self.heap)?;
+                bounded(&text)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.allocate_string(zirk_runtime_core::regex::replace(
+                    &regex,
+                    &text,
+                    &replacement,
+                ))
+                .map(Value::Heap)
+            }
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    fn execute_string_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        let receiver = arguments
+            .first()
+            .ok_or_else(|| ExecutionFault::Internal(format!("{name} has invalid arity")))?;
+        let text = match receiver {
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::String(text)) => text.clone(),
+                _ => {
+                    return Err(ExecutionFault::Internal(
+                        "String intrinsic received a non-String value".into(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(ExecutionFault::Internal(
+                    "String intrinsic received a non-heap value".into(),
+                ));
+            }
+        };
+        let argument_string = |index: usize| -> Result<String, ExecutionFault> {
+            match arguments.get(index) {
+                Some(Value::Heap(id)) => match self.heap.get(*id) {
+                    Some(HeapEntry::String(value)) => Ok(value.clone()),
+                    _ => Err(ExecutionFault::Internal(
+                        "String intrinsic argument is not a String".into(),
+                    )),
+                },
+                _ => Err(ExecutionFault::Internal(
+                    "String intrinsic argument is missing".into(),
+                )),
+            }
+        };
+        let integer = |value: i128| -> Result<Value, ExecutionFault> {
+            let IrType::Int(width) = ty else {
+                return Err(ExecutionFault::Internal(
+                    "String intrinsic has non-integer result".into(),
+                ));
+            };
+            IntegerValue::from_literal(value, width)
+                .map(Value::Int)
+                .map_err(ExecutionFault::Internal)
+        };
+        match name {
+            "zirk_str_length" => integer(zirk_runtime_core::text::grapheme_count(&text) as i128),
+            "zirk_str_byte_length" => integer(text.len() as i128),
+            "zirk_str_is_empty" => Ok(Value::Boolean(text.is_empty())),
+            "zirk_str_find" => integer(
+                zirk_runtime_core::text::grapheme_find(&text, &argument_string(1)?)
+                    .map(|index| index as i128)
+                    .unwrap_or(-1),
+            ),
+            "zirk_str_contains" => Ok(Value::Boolean(zirk_runtime_core::text::contains(
+                &text,
+                &argument_string(1)?,
+            ))),
+            "zirk_str_starts_with" => Ok(Value::Boolean(zirk_runtime_core::text::starts_with(
+                &text,
+                &argument_string(1)?,
+            ))),
+            "zirk_str_ends_with" => Ok(Value::Boolean(zirk_runtime_core::text::ends_with(
+                &text,
+                &argument_string(1)?,
+            ))),
+            "zirk_str_replace" => self
+                .allocate_string(zirk_runtime_core::text::replace(
+                    &text,
+                    &argument_string(1)?,
+                    &argument_string(2)?,
+                ))
+                .map(Value::Heap),
+            "zirk_str_trim" => self.allocate_string(text.trim().into()).map(Value::Heap),
+            "zirk_str_trim_start" => self
+                .allocate_string(text.trim_start().into())
+                .map(Value::Heap),
+            "zirk_str_trim_end" => self
+                .allocate_string(text.trim_end().into())
+                .map(Value::Heap),
+            "zirk_str_to_lowercase" => self.allocate_string(text.to_lowercase()).map(Value::Heap),
+            "zirk_str_to_uppercase" => self.allocate_string(text.to_uppercase()).map(Value::Heap),
+            "zirk_str_normalize" => self
+                .allocate_string(zirk_runtime_core::text::normalize(
+                    &text,
+                    &argument_string(1)?,
+                ))
+                .map(Value::Heap),
+            "zirk_str_clone" => self.allocate_string(text).map(Value::Heap),
+            "zirk_str_substring" => {
+                let start = self.integer_from_value(arguments.get(1))?;
+                let end = self.integer_from_value(arguments.get(2))?;
+                self.allocate_string(zirk_runtime_core::text::substring(&text, start, end).into())
+                    .map(Value::Heap)
+            }
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    fn heap_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<HeapId, ExecutionFault> {
+        match self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        {
+            Value::Heap(id) => Ok(id),
+            _ => Err(ExecutionFault::Internal(
+                "collection receiver is not a heap value".into(),
+            )),
+        }
+    }
+
+    fn collection_length_value(&self, length: usize, ty: IrType) -> Result<Value, ExecutionFault> {
+        let IrType::Int(width) = ty else {
+            return Err(ExecutionFault::Internal(
+                "collection length has a non-integer result".into(),
+            ));
+        };
+        let length = i128::try_from(length).map_err(|_| ExecutionFault::Runtime {
+            category: "LimitError".into(),
+            message: "collection length exceeds the interpreter range".into(),
+        })?;
+        IntegerValue::from_literal(length, width)
+            .map(Value::Int)
+            .map_err(ExecutionFault::Internal)
+    }
+
+    fn collection_bounds_error() -> ExecutionFault {
+        ExecutionFault::Runtime {
+            category: "BoundsError".into(),
+            message: "collection index is out of bounds".into(),
+        }
+    }
+
+    fn render_value(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<String, ExecutionFault> {
+        self.render_owned_value(
+            self.value(frame_index, operand)
+                .map_err(ExecutionFault::Internal)?,
+        )
+    }
+
+    fn render_owned_value(&self, value: Value) -> Result<String, ExecutionFault> {
+        match value {
+            Value::Int(value) if value.width.signed() => Ok(value.signed().to_string()),
+            Value::Int(value) => Ok(value.unsigned().to_string()),
+            Value::Float {
+                width: FloatWidth::F128,
+                text,
+            } => zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                .map(|value| value.display_f64().to_string())
+                .map_err(|error| {
+                    ExecutionFault::Internal(format!("cannot render Float128: {error:?}"))
+                }),
+            Value::Float { text, .. } | Value::Decimal(text) => Ok(text),
+            Value::Boolean(value) => Ok(value.to_string()),
+            Value::Nullable(None) => Ok("null".into()),
+            Value::Nullable(Some(value)) => self.render_owned_value(*value),
+            Value::Heap(id) => match self.heap.get(id) {
+                Some(HeapEntry::String(text)) | Some(HeapEntry::Char(text)) => Ok(text.clone()),
+                _ => Err(ExecutionFault::Internal(
+                    "ToString has no rendering for this value".into(),
+                )),
+            },
+            value => Err(ExecutionFault::Internal(format!(
+                "ToString is not defined for {value:?}"
+            ))),
+        }
+    }
+
+    fn ensure_string_allocation_fits(&self, text_bytes: usize) -> Result<(), ExecutionFault> {
+        let bytes = text_bytes
+            .checked_add(std::mem::size_of::<String>())
+            .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+        self.heap
+            .used_bytes()
+            .checked_add(bytes)
+            .filter(|total| *total <= self.limits.heap_bytes)
+            .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+        Ok(())
+    }
+
+    fn allocate_string(&mut self, text: String) -> Result<HeapId, ExecutionFault> {
+        self.ensure_string_allocation_fits(text.len())?;
+        let bytes = text.len() + std::mem::size_of::<String>();
+        self.heap
+            .allocate(HeapEntry::String(text), bytes, self.limits)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    fn allocate_char(&mut self, text: String) -> Result<HeapId, ExecutionFault> {
+        self.ensure_string_allocation_fits(text.len())?;
+        let bytes = text.len() + std::mem::size_of::<String>();
+        self.heap
+            .allocate(HeapEntry::Char(text), bytes, self.limits)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    fn value(&self, frame_index: usize, operand: zirk_ir::Operand) -> Result<Value, String> {
+        self.frames[frame_index]
+            .values
+            .get(&operand.0)
+            .cloned()
+            .ok_or_else(|| format!("operand {operand:?} is unavailable"))
+    }
+
+    fn object_layout(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<u32, ExecutionFault> {
+        let Value::Heap(id) = self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        else {
+            return Err(ExecutionFault::Internal(
+                "type test reads a non-object value".into(),
+            ));
+        };
+        match self.heap.get(id) {
+            Some(HeapEntry::Object { layout, .. }) => Ok(*layout),
+            _ => Err(ExecutionFault::Internal(
+                "type test reads a heap value that is not an object".into(),
+            )),
+        }
+    }
+
+    fn execute_unary(&self, op: UnaryOp, value: Value) -> Result<Value, String> {
+        match (op, value) {
+            (UnaryOp::Neg, Value::Int(value)) if value.width.signed() => {
+                let result = value.signed().checked_neg().ok_or("integer Neg overflow")?;
+                let maximum = if value.width.bits() == 128 {
+                    i128::MAX
+                } else {
+                    (1_i128 << (value.width.bits() - 1)) - 1
+                };
+                if result > maximum {
+                    return Err("integer Neg overflow".into());
+                }
+                Ok(Value::Int(IntegerValue::from_bits(
+                    result as u128,
+                    value.width,
+                )))
+            }
+            (UnaryOp::Neg, Value::Int(_)) => Err("integer Neg requires a signed width".into()),
+            (UnaryOp::Neg, Value::Float { width, text }) => {
+                if width == FloatWidth::F128 {
+                    return zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                        .map(|value| Value::Float {
+                            width,
+                            text: value.neg().wire_text(),
+                        })
+                        .map_err(|error| format!("invalid Float128 value: {error:?}"));
+                }
+                // Float16/128 do not have stable Rust primitives. Negation is
+                // nevertheless exact at the IR literal boundary: preserve the
+                // original decimal spelling and change only its sign.
+                if text.parse::<f64>().is_err() {
+                    return Err(format!("invalid {width:?} float literal {text:?}"));
+                }
+                let text = match text.strip_prefix('-') {
+                    Some(magnitude) => magnitude.to_owned(),
+                    None => format!("-{text}"),
+                };
+                Ok(Value::Float { width, text })
+            }
+            (UnaryOp::Neg, Value::Decimal(text)) => {
+                let value = self.parse_decimal(&text).map_err(|error| match error {
+                    ExecutionFault::Runtime { message, .. } => message,
+                    ExecutionFault::Internal(message) => message,
+                    ExecutionFault::Limit(limit) => format!("decimal limit failure: {limit:?}"),
+                })?;
+                let value = zirk_runtime_core::decimal::negate(value)
+                    .map_err(|error| format!("decimal negation failed: {error:?}"))?;
+                Ok(Value::Decimal(zirk_runtime_core::decimal::format(value)))
+            }
+            (UnaryOp::Not, Value::Boolean(value)) => Ok(Value::Boolean(!value)),
+            (UnaryOp::BitNot, Value::Int(value)) => Ok(Value::Int(IntegerValue::from_bits(
+                !value.bits,
+                value.width,
+            ))),
+            (_, value) => Err(format!("unary {op:?} is not defined for {value:?}")),
+        }
+    }
+
+    fn execute_binary(&self, op: BinaryOp, left: Value, right: Value) -> Result<Value, String> {
+        match (left, right) {
+            (Value::Heap(left), Value::Heap(right)) => match op {
+                BinaryOp::Eq => Ok(Value::Boolean(self.value_equals(left, right))),
+                BinaryOp::NotEq => Ok(Value::Boolean(!self.value_equals(left, right))),
+                BinaryOp::Identical => Ok(Value::Boolean(left == right)),
+                _ => Err(format!("operator {op:?} is not defined for heap values")),
+            },
+            (Value::Int(left), Value::Int(right)) => left.checked_binary(op, right),
+            (
+                Value::Float {
+                    width: left_width,
+                    text: left,
+                },
+                Value::Float {
+                    width: right_width,
+                    text: right,
+                },
+            ) if left_width == right_width => {
+                self.execute_float_binary(op, left_width, &left, &right)
+            }
+            (Value::Decimal(left), Value::Decimal(right)) => {
+                self.execute_decimal_binary(op, &left, &right)
+            }
+            (Value::Boolean(left), Value::Boolean(right)) => match op {
+                BinaryOp::Eq => Ok(Value::Boolean(left == right)),
+                BinaryOp::NotEq => Ok(Value::Boolean(left != right)),
+                BinaryOp::And => Ok(Value::Boolean(left && right)),
+                BinaryOp::Or => Ok(Value::Boolean(left || right)),
+                BinaryOp::Identical => Ok(Value::Boolean(left == right)),
+                _ => Err(format!("operator {op:?} is not defined for Boolean")),
+            },
+            (left, right) => Err(format!(
+                "binary {op:?} has incompatible operands {left:?} and {right:?}"
+            )),
+        }
+    }
+
+    /// Value records and algebraic enums are compared by their visible
+    /// fields. Objects retain reference identity: giving records a heap slot
+    /// is only an arena implementation detail, never a language observable.
+    fn value_equals(&self, left: HeapId, right: HeapId) -> bool {
+        if left == right {
+            return true;
+        }
+        match (self.heap.get(left), self.heap.get(right)) {
+            (Some(HeapEntry::String(left)), Some(HeapEntry::String(right))) => {
+                zirk_runtime_core::text::equal(left, right)
+            }
+            (Some(HeapEntry::Char(left)), Some(HeapEntry::Char(right)))
+            | (Some(HeapEntry::Regex(left)), Some(HeapEntry::Regex(right))) => left == right,
+            (
+                Some(HeapEntry::Record {
+                    layout: left_layout,
+                    fields: left_fields,
+                }),
+                Some(HeapEntry::Record {
+                    layout: right_layout,
+                    fields: right_fields,
+                }),
+            ) => {
+                left_layout == right_layout
+                    && left_fields.len() == right_fields.len()
+                    && left_fields
+                        .iter()
+                        .zip(right_fields)
+                        .all(|(left, right)| self.runtime_value_equals(left, right))
+            }
+            (
+                Some(HeapEntry::Enum {
+                    layout: left_layout,
+                    variant: left_variant,
+                    fields: left_fields,
+                }),
+                Some(HeapEntry::Enum {
+                    layout: right_layout,
+                    variant: right_variant,
+                    fields: right_fields,
+                }),
+            ) => {
+                left_layout == right_layout
+                    && left_variant == right_variant
+                    && left_fields.len() == right_fields.len()
+                    && left_fields
+                        .iter()
+                        .zip(right_fields)
+                        .all(|(left, right)| self.runtime_value_equals(left, right))
+            }
+            _ => false,
+        }
+    }
+
+    fn runtime_value_equals(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Heap(left), Value::Heap(right)) => self.value_equals(*left, *right),
+            _ => left == right,
+        }
+    }
+
+    fn parse_binary_float(text: &str) -> Result<f64, ExecutionFault> {
+        let value = text.parse::<f64>().map_err(|_| {
+            ExecutionFault::Internal(format!("invalid binary float literal {text:?}"))
+        })?;
+        if !value.is_finite() {
+            return Err(ExecutionFault::Internal(
+                "non-finite binary floats are not supported by the browser baseline".into(),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn round_binary_float(value: f64, width: FloatWidth) -> f64 {
+        match width {
+            FloatWidth::F16 => zirk_runtime_core::scalar::round_to_float16(value),
+            FloatWidth::F32 => value as f32 as f64,
+            FloatWidth::F64 | FloatWidth::F128 => value,
+        }
+    }
+
+    fn format_binary_float(value: f64, width: FloatWidth) -> String {
+        match width {
+            FloatWidth::F16 | FloatWidth::F32 => (value as f32).to_string(),
+            FloatWidth::F64 | FloatWidth::F128 => value.to_string(),
+        }
+    }
+
+    fn execute_float_binary(
+        &self,
+        op: BinaryOp,
+        width: FloatWidth,
+        left: &str,
+        right: &str,
+    ) -> Result<Value, String> {
+        if width == FloatWidth::F128 {
+            use zirk_runtime_core::binary_float::Float128;
+            let left = Float128::from_wire_or_decimal(left)
+                .map_err(|error| format!("invalid Float128 value: {error:?}"))?;
+            let right = Float128::from_wire_or_decimal(right)
+                .map_err(|error| format!("invalid Float128 value: {error:?}"))?;
+            use BinaryOp::*;
+            let comparison = left
+                .compare(right)
+                .map_err(|error| format!("Float128 comparison failed: {error:?}"));
+            match op {
+                Eq => {
+                    return comparison
+                        .map(|value| Value::Boolean(value == std::cmp::Ordering::Equal));
+                }
+                NotEq => {
+                    return comparison
+                        .map(|value| Value::Boolean(value != std::cmp::Ordering::Equal));
+                }
+                Lt => {
+                    return comparison
+                        .map(|value| Value::Boolean(value == std::cmp::Ordering::Less));
+                }
+                LtEq => {
+                    return comparison
+                        .map(|value| Value::Boolean(value != std::cmp::Ordering::Greater));
+                }
+                Gt => {
+                    return comparison
+                        .map(|value| Value::Boolean(value == std::cmp::Ordering::Greater));
+                }
+                GtEq => {
+                    return comparison
+                        .map(|value| Value::Boolean(value != std::cmp::Ordering::Less));
+                }
+                _ => {}
+            }
+            return match op {
+                Add => left.add(right),
+                Sub => left.sub(right),
+                Mul => left.mul(right),
+                Div => left.div(right),
+                Rem => left.rem(right),
+                _ => return Err(format!("operator {op:?} is not defined for binary floats")),
+            }
+            .map(|value| Value::Float {
+                width,
+                text: value.wire_text(),
+            })
+            .map_err(|error| format!("Float128 operation failed: {error:?}"));
+        }
+        let left = Self::parse_binary_float(left).map_err(|error| match error {
+            ExecutionFault::Runtime { message, .. } => message,
+            ExecutionFault::Internal(message) => message,
+            ExecutionFault::Limit(limit) => format!("binary float limit failure: {limit:?}"),
+        })?;
+        let right = Self::parse_binary_float(right).map_err(|error| match error {
+            ExecutionFault::Runtime { message, .. } => message,
+            ExecutionFault::Internal(message) => message,
+            ExecutionFault::Limit(limit) => format!("binary float limit failure: {limit:?}"),
+        })?;
+        use BinaryOp::*;
+        let comparison = |value| Ok(Value::Boolean(value));
+        match op {
+            Eq => comparison(left == right),
+            NotEq => comparison(left != right),
+            Lt => comparison(left < right),
+            LtEq => comparison(left <= right),
+            Gt => comparison(left > right),
+            GtEq => comparison(left >= right),
+            Add | Sub | Mul | Div | Rem => {
+                if matches!(op, Div | Rem) && right == 0.0 {
+                    return Err("binary float division by zero".into());
+                }
+                let value = match op {
+                    Add => left + right,
+                    Sub => left - right,
+                    Mul => left * right,
+                    Div => left / right,
+                    Rem => left % right,
+                    _ => unreachable!(),
+                };
+                let value = Self::round_binary_float(value, width);
+                if !value.is_finite() {
+                    return Err("binary float operation produced a non-finite value".into());
+                }
+                Ok(Value::Float {
+                    width,
+                    text: Self::format_binary_float(value, width),
+                })
+            }
+            _ => Err(format!("operator {op:?} is not defined for binary floats")),
+        }
+    }
+
+    fn parse_decimal(
+        &self,
+        text: &str,
+    ) -> Result<zirk_runtime_core::decimal::Decimal, ExecutionFault> {
+        zirk_runtime_core::decimal::parse(text).ok_or_else(|| {
+            ExecutionFault::Internal(format!("invalid exact decimal literal {text:?}"))
+        })
+    }
+
+    fn execute_decimal_binary(
+        &self,
+        op: BinaryOp,
+        left: &str,
+        right: &str,
+    ) -> Result<Value, String> {
+        use zirk_runtime_core::decimal;
+        let left = self.parse_decimal(left).map_err(|error| match error {
+            ExecutionFault::Runtime { message, .. } => message,
+            ExecutionFault::Internal(message) => message,
+            ExecutionFault::Limit(limit) => format!("decimal limit failure: {limit:?}"),
+        })?;
+        let right = self.parse_decimal(right).map_err(|error| match error {
+            ExecutionFault::Runtime { message, .. } => message,
+            ExecutionFault::Internal(message) => message,
+            ExecutionFault::Limit(limit) => format!("decimal limit failure: {limit:?}"),
+        })?;
+        let comparison = || {
+            decimal::compare(left, right)
+                .map_err(|error| format!("decimal comparison failed: {error:?}"))
+        };
+        let value = match op {
+            BinaryOp::Eq => return comparison().map(|value| Value::Boolean(value == 0)),
+            BinaryOp::NotEq => return comparison().map(|value| Value::Boolean(value != 0)),
+            BinaryOp::Lt => return comparison().map(|value| Value::Boolean(value < 0)),
+            BinaryOp::LtEq => return comparison().map(|value| Value::Boolean(value <= 0)),
+            BinaryOp::Gt => return comparison().map(|value| Value::Boolean(value > 0)),
+            BinaryOp::GtEq => return comparison().map(|value| Value::Boolean(value >= 0)),
+            BinaryOp::Add => decimal::add(left, right),
+            BinaryOp::Sub => decimal::sub(left, right),
+            BinaryOp::Mul => decimal::mul(left, right),
+            BinaryOp::Div => decimal::div(left, right),
+            BinaryOp::Rem => decimal::rem(left, right),
+            _ => return Err(format!("operator {op:?} is not defined for Decimal")),
+        }
+        .map_err(|error| format!("decimal arithmetic failed: {error:?}"))?;
+        Ok(Value::Decimal(decimal::format(value)))
+    }
+
+    fn internal(&self, message: impl Into<String>, span: Option<Span>) -> ExecutionResult {
+        ExecutionResult::InternalFailure(InternalFailure {
+            message: message.into(),
+            span,
+        })
+    }
+}
+
+pub const fn type_support(ty: IrType) -> BrowserSupport {
+    match ty {
+        IrType::Void
+        | IrType::Never
+        | IrType::Int(_)
+        | IrType::Float(_)
+        | IrType::Decimal
+        | IrType::Boolean
+        | IrType::Nullable(_)
+        | IrType::Closure(_)
+        | IrType::Callable(_)
+        | IrType::Object(_)
+        | IrType::Contract(_)
+        | IrType::Value(_)
+        | IrType::Enum(_) => BrowserSupport::Direct,
+        IrType::String
+        | IrType::Regex
+        | IrType::Char
+        | IrType::Array(_)
+        | IrType::List(_)
+        | IrType::Range
+        | IrType::Map(_)
+        | IrType::Set(_) => BrowserSupport::RuntimeCore,
+        IrType::Job
+        | IrType::Channel(_)
+        | IrType::Pointer(_)
+        | IrType::Weak(_)
+        | IrType::JournalHandle
+        | IrType::NativeSlice(_)
+        | IrType::NativeSliceMut(_)
+        | IrType::Dependent(_)
+        | IrType::Pin(_) => BrowserSupport::Excluded,
+    }
+}
+
+pub const fn terminator_support(terminator: &Terminator) -> BrowserSupport {
+    match terminator {
+        Terminator::Return(_)
+        | Terminator::Unreachable
+        | Terminator::Jump(_)
+        | Terminator::Branch { .. } => BrowserSupport::Direct,
+    }
+}
+
+pub const fn instruction_support(instruction: &InstKind) -> BrowserSupport {
+    match instruction {
+        InstKind::ConstInt(_)
+        | InstKind::ConstBool(_)
+        | InstKind::Load(_)
+        | InstKind::Store(_, _)
+        | InstKind::BuildValue { .. }
+        | InstKind::BuildEnum { .. }
+        | InstKind::Discriminant(_)
+        | InstKind::Undefined
+        | InstKind::Retype(_)
+        | InstKind::IntCast(_)
+        | InstKind::WordCast(_)
+        | InstKind::ConstFloat(_, _)
+        | InstKind::FloatCast(_)
+        | InstKind::IntToFloat(_)
+        | InstKind::FloatToInt(_)
+        | InstKind::ConstDecimal(_)
+        | InstKind::IntToDecimal(_)
+        | InstKind::DecimalToInt(_)
+        | InstKind::DecimalToFloat(_)
+        | InstKind::FloatToDecimal(_)
+        | InstKind::Unary { .. }
+        | InstKind::Binary { .. }
+        | InstKind::CheckedArithmetic { .. }
+        | InstKind::Call { .. }
+        | InstKind::NullValue(_)
+        | InstKind::Wrap { .. }
+        | InstKind::IsNull(_)
+        | InstKind::Unwrap(_) => BrowserSupport::Direct,
+        InstKind::ConstString(_)
+        | InstKind::ConstChar(_)
+        | InstKind::StringGraphemeOffset { .. }
+        | InstKind::GraphemeLenAt { .. }
+        | InstKind::GraphemeSlice { .. }
+        | InstKind::Alloc(_)
+        | InstKind::CheckedCast { .. }
+        | InstKind::IsInstance { .. }
+        | InstKind::Concat { .. }
+        | InstKind::Repeat { .. }
+        | InstKind::CallContract { .. }
+        | InstKind::CallVirtual { .. }
+        | InstKind::LoadField { .. }
+        | InstKind::StoreField { .. }
+        | InstKind::ToString(_)
+        | InstKind::MakeClosure { .. }
+        | InstKind::CallClosure { .. }
+        | InstKind::MakeCallable { .. }
+        | InstKind::CallCallable { .. }
+        | InstKind::ArrayLength(_)
+        | InstKind::ListLength(_)
+        | InstKind::ArrayNew { .. }
+        | InstKind::ListNew { .. }
+        | InstKind::MapNew { .. }
+        | InstKind::SetNew { .. }
+        | InstKind::ArrayListLoad { .. }
+        | InstKind::ArrayListStore { .. }
+        | InstKind::ListAdd { .. }
+        | InstKind::ListInsert { .. }
+        | InstKind::ListRemove { .. }
+        | InstKind::ListRemoveValue { .. }
+        | InstKind::ArrayClone { .. }
+        | InstKind::ListClone { .. }
+        | InstKind::MapLength(_)
+        | InstKind::MapIsEmpty(_)
+        | InstKind::MapSet { .. }
+        | InstKind::MapContainsKey { .. }
+        | InstKind::MapGet { .. }
+        | InstKind::MapRemove { .. }
+        | InstKind::SetLength(_)
+        | InstKind::SetIsEmpty(_)
+        | InstKind::SetAdd { .. }
+        | InstKind::SetContains { .. }
+        | InstKind::SetRemove { .. }
+        | InstKind::ArraySlice { .. } => BrowserSupport::RuntimeCore,
+        InstKind::Print(_) | InstKind::Println(_) | InstKind::IsCancelled => {
+            BrowserSupport::BoundedHost
+        }
+        InstKind::FatalError(_)
+        | InstKind::Throw(_)
+        | InstKind::SetSuppressed { .. }
+        | InstKind::StackTrace(_)
+        | InstKind::Suppressed(_)
+        | InstKind::HasPendingException
+        | InstKind::TakePendingException => BrowserSupport::StructuredFailure,
+        InstKind::ScopeEnter
+        | InstKind::ScopeExit { .. }
+        | InstKind::BranchStart { .. }
+        | InstKind::ParallelForStart { .. }
+        | InstKind::JobWait { .. }
+        | InstKind::JobDone { .. }
+        | InstKind::JobCancel { .. }
+        | InstKind::TimerSleep { .. }
+        | InstKind::ChannelNew { .. }
+        | InstKind::ChannelSend { .. }
+        | InstKind::ChannelRecv { .. }
+        | InstKind::ChannelTrySend { .. }
+        | InstKind::ChannelTryRecv { .. }
+        | InstKind::ChannelClose { .. }
+        | InstKind::ChannelLength(_)
+        | InstKind::ChannelIsClosed(_)
+        | InstKind::ChannelCapacity(_)
+        | InstKind::ChannelDrain { .. }
+        | InstKind::PointerFromSlot(_)
+        | InstKind::PointerFromField { .. }
+        | InstKind::PointerRead(_)
+        | InstKind::PointerWrite { .. }
+        | InstKind::PointerOffset { .. }
+        | InstKind::PointerOffsetBytes { .. }
+        | InstKind::PointerCast(_)
+        | InstKind::PointerIsNull(_)
+        | InstKind::WeakFrom(_)
+        | InstKind::WeakUpgrade(_)
+        | InstKind::WeakIsAlive(_)
+        | InstKind::Clone(_)
+        | InstKind::JournalBegin
+        | InstKind::JournalRecordSlot { .. }
+        | InstKind::JournalRecordField { .. }
+        | InstKind::JournalCommit(_)
+        | InstKind::JournalRollback(_)
+        | InstKind::NativeSliceValidate { .. }
+        | InstKind::NativeSliceValue { .. }
+        | InstKind::NativeSliceLength(_)
+        | InstKind::NativeSliceLoad { .. }
+        | InstKind::NativeSliceStore { .. }
+        | InstKind::ResourceTransfer { .. }
+        | InstKind::DependentFrom { .. }
+        | InstKind::PinObject { .. }
+        | InstKind::UnpinObject { .. } => BrowserSupport::Excluded,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zirk_ir::{Block, BlockId, Function, Instruction, IntWidth, Operand, Slot, SlotId};
+
+    fn int(width: IntWidth, value: i128) -> Value {
+        Value::Int(IntegerValue::from_literal(value, width).unwrap())
+    }
+
+    #[test]
+    fn scalar_and_scheduler_types_have_explicit_policy() {
+        assert_eq!(
+            type_support(IrType::Int(IntWidth::I32)),
+            BrowserSupport::Direct
+        );
+        assert_eq!(type_support(IrType::Job), BrowserSupport::Excluded);
+    }
+
+    #[test]
+    fn preflight_reports_all_excluded_capabilities_in_source_order() {
+        let module = Module {
+            externs: vec![zirk_ir::ExternFn {
+                name: "native_only".into(),
+                params: vec![IrType::Pointer(0)],
+                return_type: IrType::Void,
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: vec![Slot {
+                    name: "native".into(),
+                    ty: IrType::Pointer(0),
+                    span: Span::empty(8),
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "native_only".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(15),
+                        },
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::PointerFromSlot(SlotId(0)),
+                            ty: IrType::Pointer(0),
+                            span: Span::empty(16),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+
+        let failures = preflight(&module).unwrap_err();
+        // The extern declaration is itself unavailable and its pointer
+        // parameter is independently unavailable, alongside the slot and
+        // instruction in the function body.
+        assert_eq!(failures.len(), 5);
+        assert_eq!(failures[0].code, "ZB004");
+        assert_eq!(failures[0].span, Some(Span::empty(8)));
+        assert_eq!(failures[1].code, "ZB002");
+        assert_eq!(failures[1].span, Some(Span::empty(16)));
+        assert_eq!(failures[2].code, "ZB004");
+        assert_eq!(failures[2].span, Some(Span::empty(16)));
+        assert_eq!(failures[3].code, "ZB001");
+        assert_eq!(failures[3].span, None);
+        assert_eq!(failures[4].code, "ZB004");
+        assert_eq!(failures[4].span, None);
+    }
+
+    #[test]
+    fn preflight_accepts_a_baseline_scalar_module() {
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstBool(true),
+                        ty: IrType::Boolean,
+                        span: Span::empty(0),
+                    }],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        assert_eq!(preflight(&module), Ok(()));
+    }
+
+    #[test]
+    fn preflight_rejects_every_native_authority_and_pointer_family() {
+        // Native effects are represented in current IR as extern declarations:
+        // the browser does not infer safety from a friendly symbol name.  This
+        // covers the process/shell/filesystem/environment/secrets/network
+        // families as well as an arbitrary C ABI call.
+        let native_effects = [
+            "c_abi",
+            "process",
+            "shell",
+            "filesystem",
+            "environment",
+            "secrets",
+            "network",
+        ];
+        let externs = native_effects
+            .into_iter()
+            .map(|name| zirk_ir::ExternFn {
+                name: name.into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+            })
+            .collect();
+        let module = Module {
+            externs,
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: vec![
+                    Slot {
+                        name: "pointer".into(),
+                        ty: IrType::Pointer(0),
+                        span: Span::empty(10),
+                    },
+                    Slot {
+                        name: "slice".into(),
+                        ty: IrType::NativeSlice(0),
+                        span: Span::empty(11),
+                    },
+                    Slot {
+                        name: "dependent".into(),
+                        ty: IrType::Dependent(0),
+                        span: Span::empty(12),
+                    },
+                    Slot {
+                        name: "pin".into(),
+                        ty: IrType::Pin(0),
+                        span: Span::empty(13),
+                    },
+                    Slot {
+                        name: "journal".into(),
+                        ty: IrType::JournalHandle,
+                        span: Span::empty(14),
+                    },
+                ],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        // Every declared external is called so this checks
+                        // rejected *effects*, not harmless unused metadata.
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "c_abi".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(1),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "process".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(2),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "shell".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(3),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "filesystem".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(4),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "environment".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(5),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "secrets".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(6),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "network".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(7),
+                        },
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::PointerFromSlot(SlotId(0)),
+                            ty: IrType::Pointer(0),
+                            span: Span::empty(20),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::JournalBegin,
+                            ty: IrType::JournalHandle,
+                            span: Span::empty(21),
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::NativeSliceLength(Operand(ValueId(0))),
+                            ty: IrType::Int(IntWidth::I64),
+                            span: Span::empty(22),
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::DependentFrom {
+                                base: Operand(ValueId(0)),
+                                field_ptr: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Dependent(0),
+                            span: Span::empty(23),
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::PinObject {
+                                object: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Pin(0),
+                            span: Span::empty(24),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+
+        let failures = preflight(&module).unwrap_err();
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|failure| failure.code == "ZB001")
+                .count(),
+            native_effects.len()
+        );
+        // Each concrete pointer/unsafe instruction and its result type are
+        // rejected before execution; no excluded family can slip through as
+        // an opaque browser value.
+        for start in 20..=24 {
+            assert!(failures.iter().any(|failure| {
+                failure.code == "ZB002" && failure.span == Some(Span::empty(start))
+            }));
+        }
+        for start in 10..=14 {
+            assert!(failures.iter().any(|failure| {
+                failure.code == "ZB004" && failure.span == Some(Span::empty(start))
+            }));
+        }
+    }
+
+    #[test]
+    fn excluded_capability_prevents_entrypoint_execution() {
+        let module = Module {
+            externs: vec![zirk_ir::ExternFn {
+                name: "native_only".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: "native_only".into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(1),
+                        },
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstBool(true),
+                            ty: IrType::Boolean,
+                            span: Span::empty(2),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstBool(false),
+                            ty: IrType::Boolean,
+                            span: Span::empty(3),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let limits = InterpreterLimits {
+            instructions: 1,
+            ..InterpreterLimits::default()
+        };
+        let mut interpreter = Interpreter::new(&module, limits).unwrap();
+        assert!(matches!(
+            interpreter.run_main(),
+            ExecutionResult::CapabilityFailure(CapabilityFailure { ref code, .. }) if code == "ZB001"
+        ));
+    }
+
+    #[test]
+    fn unary_operations_cover_integer_and_binary_float_widths() {
+        let module = Module::default();
+        let interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        for width in [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::I64,
+            IntWidth::I128,
+        ] {
+            assert_eq!(
+                interpreter.execute_unary(UnaryOp::Neg, int(width, 1)),
+                Ok(int(width, -1)),
+            );
+        }
+        for width in [
+            FloatWidth::F16,
+            FloatWidth::F32,
+            FloatWidth::F64,
+            FloatWidth::F128,
+        ] {
+            assert_eq!(
+                interpreter.execute_unary(
+                    UnaryOp::Neg,
+                    Value::Float {
+                        width,
+                        text: "1.25".into()
+                    }
+                ),
+                Ok(Value::Float {
+                    width,
+                    text: if width == FloatWidth::F128 {
+                        zirk_runtime_core::binary_float::Float128::from_decimal("-1.25")
+                            .unwrap()
+                            .wire_text()
+                    } else {
+                        "-1.25".into()
+                    }
+                }),
+            );
+        }
+        assert_eq!(
+            interpreter.execute_unary(UnaryOp::BitNot, int(IntWidth::U8, 0)),
+            Ok(int(IntWidth::U8, 255)),
+        );
+        assert_eq!(
+            interpreter.execute_unary(UnaryOp::Not, Value::Boolean(true)),
+            Ok(Value::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn direct_calls_bind_parameters_and_propagate_return_values() {
+        let span = Span::empty(0);
+        let module = Module {
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    return_type: IrType::Int(IntWidth::I32),
+                    slots: Vec::new(),
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(0)),
+                                kind: InstKind::ConstInt(41),
+                                ty: IrType::Int(IntWidth::I32),
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::Call {
+                                    callee: "increment".into(),
+                                    args: vec![Operand(ValueId(0))],
+                                },
+                                ty: IrType::Int(IntWidth::I32),
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(1))))),
+                    }],
+                    entry: BlockId(0),
+                    span,
+                    gc_roots: Vec::new(),
+                },
+                Function {
+                    name: "increment".into(),
+                    params: vec![SlotId(0)],
+                    return_type: IrType::Int(IntWidth::I32),
+                    slots: vec![Slot {
+                        name: "value".into(),
+                        ty: IrType::Int(IntWidth::I32),
+                        span,
+                    }],
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(0)),
+                                kind: InstKind::Load(SlotId(0)),
+                                ty: IrType::Int(IntWidth::I32),
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::ConstInt(1),
+                                ty: IrType::Int(IntWidth::I32),
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(2)),
+                                kind: InstKind::Binary {
+                                    op: BinaryOp::Add,
+                                    left: Operand(ValueId(0)),
+                                    right: Operand(ValueId(1)),
+                                },
+                                ty: IrType::Int(IntWidth::I32),
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(2))))),
+                    }],
+                    entry: BlockId(0),
+                    span,
+                    gc_roots: Vec::new(),
+                },
+            ],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+    }
+
+    #[test]
+    fn virtual_and_contract_calls_use_the_runtime_layout_tables() {
+        use zirk_ir::{ContractTable, ObjectLayout};
+        let span = Span::empty(0);
+        let object_type = IrType::Object(0);
+        let int_type = IrType::Int(IntWidth::I32);
+        let method = |name: &str, result: i128| Function {
+            name: name.into(),
+            params: vec![SlotId(0)],
+            return_type: int_type,
+            slots: vec![Slot {
+                name: "self".into(),
+                ty: object_type,
+                span,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::ConstInt(result),
+                    ty: int_type,
+                    span,
+                }],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(0))))),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+        };
+        let module = Module {
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    return_type: int_type,
+                    slots: Vec::new(),
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(0)),
+                                kind: InstKind::Alloc(0),
+                                ty: object_type,
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::CallVirtual {
+                                    object: Operand(ValueId(0)),
+                                    index: 0,
+                                    args: Vec::new(),
+                                },
+                                ty: int_type,
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(2)),
+                                kind: InstKind::CallContract {
+                                    object: Operand(ValueId(0)),
+                                    contract: 0,
+                                    index: 0,
+                                    args: Vec::new(),
+                                },
+                                ty: int_type,
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(2))))),
+                    }],
+                    entry: BlockId(0),
+                    span,
+                    gc_roots: Vec::new(),
+                },
+                method("override", 7),
+                method("contract_override", 9),
+            ],
+            objects: vec![ObjectLayout {
+                name: "Child".into(),
+                fields: Vec::new(),
+                methods: vec!["override".into()],
+                contracts: vec![ContractTable {
+                    contract: 0,
+                    methods: vec!["contract_override".into()],
+                }],
+                ancestors: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 9))
+            }
+        );
+    }
+
+    #[test]
+    fn typed_throw_reaches_the_root_as_a_structured_runtime_failure() {
+        use zirk_ir::ObjectLayout;
+        let span = Span::empty(17);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Throw(Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            objects: vec![ObjectLayout {
+                name: "ExampleError".into(),
+                fields: Vec::new(),
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert!(matches!(
+            interpreter.run_main(),
+            ExecutionResult::RuntimeFailure(RuntimeFailure { ref category, span: Some(actual), .. })
+                if category == "ExampleError" && actual == span
+        ));
+    }
+
+    #[test]
+    fn pending_throwable_is_taken_by_lowered_catch_control_flow() {
+        use zirk_ir::ObjectLayout;
+        let span = Span::empty(0);
+        let module = Module {
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    params: Vec::new(),
+                    return_type: IrType::Void,
+                    slots: Vec::new(),
+                    blocks: vec![
+                        Block {
+                            id: BlockId(0),
+                            instructions: vec![
+                                Instruction {
+                                    result: None,
+                                    kind: InstKind::Call {
+                                        callee: "raise".into(),
+                                        args: Vec::new(),
+                                    },
+                                    ty: IrType::Void,
+                                    span,
+                                },
+                                Instruction {
+                                    result: Some(ValueId(0)),
+                                    kind: InstKind::HasPendingException,
+                                    ty: IrType::Boolean,
+                                    span,
+                                },
+                            ],
+                            terminator: Some(Terminator::Branch {
+                                condition: Operand(ValueId(0)),
+                                then_block: BlockId(1),
+                                else_block: BlockId(2),
+                            }),
+                        },
+                        Block {
+                            id: BlockId(1),
+                            instructions: vec![Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::TakePendingException,
+                                ty: IrType::Object(0),
+                                span,
+                            }],
+                            terminator: Some(Terminator::Return(None)),
+                        },
+                        Block {
+                            id: BlockId(2),
+                            instructions: Vec::new(),
+                            terminator: Some(Terminator::Unreachable),
+                        },
+                    ],
+                    entry: BlockId(0),
+                    span,
+                    gc_roots: Vec::new(),
+                },
+                Function {
+                    name: "raise".into(),
+                    params: Vec::new(),
+                    return_type: IrType::Void,
+                    slots: Vec::new(),
+                    blocks: vec![Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(0)),
+                                kind: InstKind::Alloc(0),
+                                ty: IrType::Object(0),
+                                span,
+                            },
+                            Instruction {
+                                result: None,
+                                kind: InstKind::Throw(Operand(ValueId(0))),
+                                ty: IrType::Void,
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Return(None)),
+                    }],
+                    entry: BlockId(0),
+                    span,
+                    gc_roots: Vec::new(),
+                },
+            ],
+            objects: vec![ObjectLayout {
+                name: "ExampleError".into(),
+                fields: Vec::new(),
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed { value: None }
+        );
+    }
+
+    #[test]
+    fn suppressed_throwables_preserve_the_primary_and_first_suppressed_value() {
+        use zirk_ir::ObjectLayout;
+        let span = Span::empty(0);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Boolean,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SetSuppressed {
+                                exception: Operand(ValueId(0)),
+                                suppressed: Operand(ValueId(1)),
+                            },
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::Suppressed(Operand(ValueId(0))),
+                            ty: IrType::Nullable(zirk_ir::Nullable::Object(0)),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::IsNull(Operand(ValueId(2))),
+                            ty: IrType::Boolean,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(3))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            objects: vec![ObjectLayout {
+                name: "ExampleError".into(),
+                fields: Vec::new(),
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(Value::Boolean(false))
+            }
+        );
+    }
+
+    #[test]
+    fn arithmetic_domain_errors_are_runtime_failures_not_interpreter_panics() {
+        let span = Span::empty(0);
+        let int_type = IrType::Int(IntWidth::I32);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: int_type,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstInt(1),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstInt(0),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::Binary {
+                                op: BinaryOp::Div,
+                                left: Operand(ValueId(0)),
+                                right: Operand(ValueId(1)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(2))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert!(matches!(
+            interpreter.run_main(),
+            ExecutionResult::RuntimeFailure(RuntimeFailure { ref category, .. })
+                if category == "ArithmeticError"
+        ));
+    }
+
+    #[test]
+    fn arrays_and_lists_enforce_indexes_and_preserve_mutation_order() {
+        let span = Span::empty(0);
+        let int_type = IrType::Int(IntWidth::I32);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: int_type,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstInt(1),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ArrayNew {
+                                element_id: 0,
+                                capacity: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Array(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::ConstInt(0),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstInt(42),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::ArrayListStore {
+                                receiver: Operand(ValueId(1)),
+                                index: Operand(ValueId(2)),
+                                value: Operand(ValueId(3)),
+                            },
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::ArrayListLoad {
+                                receiver: Operand(ValueId(1)),
+                                index: Operand(ValueId(2)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(4))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            array_types: vec![int_type],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+    }
+
+    #[test]
+    fn char_intrinsics_are_browser_safe_runtime_core_operations() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let char = Value::Heap(interpreter.allocate_char("Á".into()).unwrap());
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_char_is_uppercase",
+                    std::slice::from_ref(&char),
+                    IrType::Boolean,
+                )
+                .unwrap(),
+            Value::Boolean(true)
+        );
+        let lowercase = interpreter
+            .execute_browser_intrinsic("zirk_char_to_lowercase", &[char], IrType::String)
+            .unwrap();
+        assert_eq!(interpreter.render_owned_value(lowercase).unwrap(), "á");
+    }
+
+    #[test]
+    fn regex_intrinsics_match_replace_reject_invalid_patterns_and_bound_input() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let pattern = Value::Heap(interpreter.allocate_string("a+".into()).unwrap());
+        let regex = interpreter
+            .execute_browser_intrinsic("zirk_regex_from_pattern", &[pattern], IrType::Regex)
+            .unwrap();
+        let text = Value::Heap(interpreter.allocate_string("baacaa".into()).unwrap());
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_regex_is_match",
+                    &[regex.clone(), text.clone()],
+                    IrType::Boolean,
+                )
+                .unwrap(),
+            Value::Boolean(true)
+        );
+        let replacement = Value::Heap(interpreter.allocate_string("x".into()).unwrap());
+        let replaced = interpreter
+            .execute_browser_intrinsic(
+                "zirk_regex_replace",
+                &[regex.clone(), text, replacement],
+                IrType::String,
+            )
+            .unwrap();
+        assert_eq!(interpreter.render_owned_value(replaced).unwrap(), "bxcx");
+
+        let invalid = Value::Heap(interpreter.allocate_string("[".into()).unwrap());
+        assert!(matches!(
+            interpreter.execute_browser_intrinsic("zirk_regex_from_pattern", &[invalid], IrType::Regex),
+            Err(ExecutionFault::Runtime { category, .. }) if category == "RegexError"
+        ));
+        let oversized = Value::Heap(interpreter.allocate_string("a".repeat(65_537)).unwrap());
+        assert!(matches!(
+            interpreter.execute_browser_intrinsic("zirk_regex_is_match", &[regex, oversized], IrType::Boolean),
+            Err(ExecutionFault::Runtime { category, .. }) if category == "LimitError"
+        ));
+    }
+
+    #[test]
+    fn duration_and_range_intrinsics_use_runtime_core_values() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let nanos = int(IntWidth::I64, 1_500_000_000);
+        let rendered = interpreter
+            .execute_browser_intrinsic(
+                "zirk_rt_duration_to_string",
+                std::slice::from_ref(&nanos),
+                IrType::String,
+            )
+            .unwrap();
+        assert_eq!(interpreter.render_owned_value(rendered).unwrap(), "1.5s");
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_duration_whole_seconds",
+                    &[nanos],
+                    IrType::Int(IntWidth::I64)
+                )
+                .unwrap(),
+            int(IntWidth::I64, 1)
+        );
+        let range = interpreter
+            .execute_browser_intrinsic(
+                "zirk_range_new",
+                &[
+                    int(IntWidth::I64, 6),
+                    int(IntWidth::I64, 0),
+                    int(IntWidth::I64, -2),
+                    int(IntWidth::I64, 1),
+                ],
+                IrType::Range,
+            )
+            .unwrap();
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_range_length",
+                    std::slice::from_ref(&range),
+                    IrType::Int(IntWidth::I64)
+                )
+                .unwrap(),
+            int(IntWidth::I64, 4)
+        );
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_range_element_at",
+                    &[range.clone(), int(IntWidth::I64, 2)],
+                    IrType::Int(IntWidth::I64),
+                )
+                .unwrap(),
+            int(IntWidth::I64, 2)
+        );
+        let text = interpreter
+            .execute_browser_intrinsic(
+                "zirk_range_to_string",
+                &[range, int(IntWidth::I64, 0)],
+                IrType::String,
+            )
+            .unwrap();
+        assert_eq!(interpreter.render_owned_value(text).unwrap(), "6..=0:-2");
+    }
+
+    #[test]
+    fn string_intrinsics_preserve_unicode_search_replacement_and_normalized_equality() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let text = Value::Heap(interpreter.allocate_string("Café café".into()).unwrap());
+        let needle = Value::Heap(interpreter.allocate_string("café".into()).unwrap());
+        assert_eq!(
+            interpreter
+                .execute_browser_intrinsic(
+                    "zirk_str_find",
+                    &[text.clone(), needle.clone()],
+                    IrType::Int(IntWidth::I64),
+                )
+                .unwrap(),
+            int(IntWidth::I64, 5)
+        );
+        let replacement = Value::Heap(interpreter.allocate_string("té".into()).unwrap());
+        let replaced = interpreter
+            .execute_browser_intrinsic(
+                "zirk_str_replace",
+                &[text, needle, replacement],
+                IrType::String,
+            )
+            .unwrap();
+        assert_eq!(interpreter.render_owned_value(replaced).unwrap(), "Café té");
+        let composed = interpreter.allocate_string("é".into()).unwrap();
+        let decomposed = interpreter.allocate_string("e\u{301}".into()).unwrap();
+        assert!(interpreter.value_equals(composed, decomposed));
+    }
+
+    #[test]
+    fn nested_void_calls_clean_up_frames_before_root_completion() {
+        let span = Span::empty(0);
+        let void_call = |callee: &str| Instruction {
+            result: None,
+            kind: InstKind::Call {
+                callee: callee.into(),
+                args: Vec::new(),
+            },
+            ty: IrType::Void,
+            span,
+        };
+        let function = |name: &str, instructions: Vec<Instruction>| Function {
+            name: name.into(),
+            params: Vec::new(),
+            return_type: IrType::Void,
+            slots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions,
+                terminator: Some(Terminator::Return(None)),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+        };
+        let module = Module {
+            functions: vec![
+                function("main", vec![void_call("outer")]),
+                function("outer", vec![void_call("inner")]),
+                function("inner", Vec::new()),
+            ],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert!(matches!(
+            interpreter.run_main(),
+            ExecutionResult::Completed { value: None }
+        ));
+        assert!(interpreter.capture_stack().is_empty());
+    }
+
+    #[test]
+    fn direct_recursion_stops_at_the_exact_call_depth_limit() {
+        let span = Span::empty(0);
+        let recursive_call = |callee: &str| Instruction {
+            result: None,
+            kind: InstKind::Call {
+                callee: callee.into(),
+                args: Vec::new(),
+            },
+            ty: IrType::Void,
+            span,
+        };
+        let function = |name: &str, instructions: Vec<Instruction>| Function {
+            name: name.into(),
+            params: Vec::new(),
+            return_type: IrType::Void,
+            slots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions,
+                terminator: Some(Terminator::Return(None)),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+        };
+        let module = Module {
+            functions: vec![
+                function("main", vec![recursive_call("loop")]),
+                function("loop", vec![recursive_call("loop")]),
+            ],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(
+            &module,
+            InterpreterLimits {
+                call_depth: 2,
+                ..InterpreterLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::LimitFailure(LimitFailure::CallDepth)
+        );
+    }
+
+    #[test]
+    fn closures_and_callables_copy_captures_then_dispatch_indirectly() {
+        use zirk_ir::{ClosureLayout, Operand, Slot};
+        let span = Span::empty(0);
+        let ty = IrType::Int(IntWidth::I32);
+        let lifted = Function {
+            name: "lifted".into(),
+            params: vec![SlotId(0), SlotId(1)],
+            return_type: ty,
+            slots: vec![
+                Slot {
+                    name: "capture".into(),
+                    ty,
+                    span,
+                },
+                Slot {
+                    name: "argument".into(),
+                    ty,
+                    span,
+                },
+            ],
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::Load(SlotId(0)),
+                        ty,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::Load(SlotId(1)),
+                        ty,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::Binary {
+                            op: BinaryOp::Add,
+                            left: Operand(ValueId(0)),
+                            right: Operand(ValueId(1)),
+                        },
+                        ty,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(2))))),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+        };
+        let make = |kind| Instruction {
+            result: Some(ValueId(1)),
+            kind,
+            ty: IrType::Closure(0),
+            span,
+        };
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: ty,
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstInt(40),
+                        ty,
+                        span,
+                    },
+                    make(InstKind::MakeClosure {
+                        id: 0,
+                        captures: vec![Operand(ValueId(0))],
+                        target: "lifted".into(),
+                    }),
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::ConstInt(2),
+                        ty,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstKind::CallClosure {
+                            id: 0,
+                            callee: Operand(ValueId(1)),
+                            args: vec![Operand(ValueId(2))],
+                        },
+                        ty,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(3))))),
+            }],
+        };
+        let module = Module {
+            functions: vec![main, lifted],
+            closures: vec![ClosureLayout {
+                captures: vec![ty],
+                params: vec![ty],
+                returns: ty,
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+        let mut callable_module = module.clone();
+        let instructions = &mut callable_module.functions[0].blocks[0].instructions;
+        instructions[1].kind = InstKind::MakeCallable {
+            target: "lifted".into(),
+            captures: vec![Operand(ValueId(0))],
+        };
+        instructions[1].ty = IrType::Callable(0);
+        instructions[3].kind = InstKind::CallCallable {
+            callable: Operand(ValueId(1)),
+            args: vec![Operand(ValueId(2))],
+        };
+        let mut interpreter =
+            Interpreter::new(&callable_module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+    }
+
+    #[test]
+    fn objects_use_layout_fields_and_checked_runtime_type_tests() {
+        use zirk_ir::{ObjectField, ObjectLayout, Operand};
+        let span = Span::empty(0);
+        let ty = IrType::Int(IntWidth::I32);
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: ty,
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::Alloc(1),
+                        ty: IrType::Object(1),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::ConstInt(42),
+                        ty,
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::StoreField {
+                            object: Operand(ValueId(0)),
+                            index: 0,
+                            value: Operand(ValueId(1)),
+                        },
+                        ty: IrType::Void,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::IsInstance {
+                            object: Operand(ValueId(0)),
+                            target_class: 0,
+                        },
+                        ty: IrType::Boolean,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstKind::CheckedCast {
+                            object: Operand(ValueId(0)),
+                            target_class: 0,
+                        },
+                        ty: IrType::Object(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(4)),
+                        kind: InstKind::LoadField {
+                            object: Operand(ValueId(3)),
+                            index: 0,
+                        },
+                        ty,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(4))))),
+            }],
+        };
+        let layout = |name: &str, ancestors: Vec<u32>| ObjectLayout {
+            name: name.into(),
+            fields: vec![ObjectField {
+                name: "value".into(),
+                ty,
+            }],
+            contracts: Vec::new(),
+            methods: Vec::new(),
+            ancestors,
+        };
+        let module = Module {
+            functions: vec![main],
+            objects: vec![layout("Base", vec![]), layout("Child", vec![0])],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+    }
+
+    #[test]
+    fn records_and_enums_preserve_fields_and_discriminants() {
+        use zirk_ir::{EnumLayout, ObjectField, Operand, ValueLayout};
+        let span = Span::empty(0);
+        let ty = IrType::Int(IntWidth::I32);
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: ty,
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstInt(7),
+                        ty,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::BuildValue {
+                            class: 0,
+                            fields: vec![Operand(ValueId(0))],
+                        },
+                        ty: IrType::Value(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::BuildEnum {
+                            enum_id: 0,
+                            variant: 1,
+                            fields: vec![Operand(ValueId(0))],
+                        },
+                        ty: IrType::Enum(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstKind::Discriminant(Operand(ValueId(2))),
+                        ty,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(3))))),
+            }],
+        };
+        let field = ObjectField {
+            name: "payload".into(),
+            ty,
+        };
+        let module = Module {
+            functions: vec![main],
+            values: vec![ValueLayout {
+                name: "Point".into(),
+                fields: vec![field.clone()],
+            }],
+            enums: vec![EnumLayout {
+                name: "Choice".into(),
+                fields: vec![field],
+                variants: vec![vec![], vec![0]],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 1))
+            }
+        );
+    }
+
+    #[test]
+    fn records_are_structural_values_but_keep_object_identity_separate() {
+        use zirk_ir::{ObjectField, Operand, ValueLayout};
+        let span = Span::empty(0);
+        let int_type = IrType::Int(IntWidth::I32);
+        let function = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: IrType::Boolean,
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstInt(7),
+                        ty: int_type,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::BuildValue {
+                            class: 0,
+                            fields: vec![Operand(ValueId(0))],
+                        },
+                        ty: IrType::Value(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::BuildValue {
+                            class: 0,
+                            fields: vec![Operand(ValueId(0))],
+                        },
+                        ty: IrType::Value(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstKind::LoadField {
+                            object: Operand(ValueId(1)),
+                            index: 0,
+                        },
+                        ty: int_type,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(4)),
+                        kind: InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: Operand(ValueId(1)),
+                            right: Operand(ValueId(2)),
+                        },
+                        ty: IrType::Boolean,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(4))))),
+            }],
+        };
+        let module = Module {
+            functions: vec![function],
+            values: vec![ValueLayout {
+                name: "Point".into(),
+                fields: vec![ObjectField {
+                    name: "x".into(),
+                    ty: int_type,
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(Value::Boolean(true))
+            }
+        );
+    }
+
+    #[test]
+    fn exact_decimal_arithmetic_comparison_formatting_and_conversion_use_runtime_core() {
+        let module = Module::default();
+        let interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Add,
+                    Value::Decimal("0.1".into()),
+                    Value::Decimal("0.2".into()),
+                )
+                .unwrap(),
+            Value::Decimal("0.3".into())
+        );
+        assert_eq!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Lt,
+                    Value::Decimal("1.25".into()),
+                    Value::Decimal("2".into()),
+                )
+                .unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            interpreter
+                .execute_unary(UnaryOp::Neg, Value::Decimal("2.5".into()))
+                .unwrap(),
+            Value::Decimal("-2.5".into())
+        );
+        let decimal = zirk_runtime_core::decimal::parse("42.9").unwrap();
+        assert_eq!(
+            zirk_runtime_core::decimal::to_i128_checked(decimal, 8, true),
+            Ok(42)
+        );
+        assert!(zirk_runtime_core::decimal::to_i128_checked(decimal, 5, false).is_err());
+        assert!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Div,
+                    Value::Decimal("1".into()),
+                    Value::Decimal("0".into()),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn binary_float_operations_round_to_the_declared_width_and_reject_invalid_domains() {
+        let module = Module::default();
+        let interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Add,
+                    Value::Float {
+                        width: FloatWidth::F32,
+                        text: "0.1".into()
+                    },
+                    Value::Float {
+                        width: FloatWidth::F32,
+                        text: "0.2".into()
+                    },
+                )
+                .unwrap(),
+            Value::Float {
+                width: FloatWidth::F32,
+                text: "0.3".into()
+            }
+        );
+        let one = zirk_runtime_core::binary_float::Float128::from_decimal("1")
+            .unwrap()
+            .wire_text();
+        let ulp = zirk_runtime_core::binary_float::Float128::from_decimal(
+            "1.92592994438723585305597794258492732e-34",
+        )
+        .unwrap()
+        .wire_text();
+        let widened = interpreter
+            .execute_binary(
+                BinaryOp::Add,
+                Value::Float {
+                    width: FloatWidth::F128,
+                    text: one.clone(),
+                },
+                Value::Float {
+                    width: FloatWidth::F128,
+                    text: ulp,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            interpreter.execute_binary(
+                BinaryOp::NotEq,
+                widened,
+                Value::Float {
+                    width: FloatWidth::F128,
+                    text: one
+                },
+            ),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Add,
+                    Value::Float {
+                        width: FloatWidth::F16,
+                        text: "0.1".into()
+                    },
+                    Value::Float {
+                        width: FloatWidth::F16,
+                        text: "0.2".into()
+                    },
+                )
+                .unwrap(),
+            Value::Float {
+                width: FloatWidth::F16,
+                text: "0.30004883".into()
+            }
+        );
+        assert_eq!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Lt,
+                    Value::Float {
+                        width: FloatWidth::F64,
+                        text: "1".into()
+                    },
+                    Value::Float {
+                        width: FloatWidth::F64,
+                        text: "2".into()
+                    },
+                )
+                .unwrap(),
+            Value::Boolean(true)
+        );
+        assert!(
+            interpreter
+                .execute_binary(
+                    BinaryOp::Div,
+                    Value::Float {
+                        width: FloatWidth::F64,
+                        text: "1".into()
+                    },
+                    Value::Float {
+                        width: FloatWidth::F64,
+                        text: "0".into()
+                    },
+                )
+                .is_err()
+        );
+        assert!(Interpreter::parse_binary_float("NaN").is_err());
+    }
+
+    #[test]
+    fn boolean_logic_and_nullable_presence_are_value_operations() {
+        let module = Module::default();
+        let interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.execute_binary(BinaryOp::And, Value::Boolean(true), Value::Boolean(false)),
+            Ok(Value::Boolean(false))
+        );
+        assert_eq!(
+            interpreter.execute_unary(UnaryOp::Not, Value::Boolean(false)),
+            Ok(Value::Boolean(true))
+        );
+        assert_eq!(
+            interpreter.execute_binary(
+                BinaryOp::Identical,
+                Value::Boolean(true),
+                Value::Boolean(true),
+            ),
+            Ok(Value::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn nullable_operations_preserve_presence_and_absence() {
+        use zirk_ir::{Nullable, Operand};
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: IrType::Int(IntWidth::I32),
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span: Span::empty(0),
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstInt(7),
+                        ty: IrType::Int(IntWidth::I32),
+                        span: Span::empty(0),
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::Wrap {
+                            base: Nullable::Int(IntWidth::I32),
+                            value: Operand(ValueId(0)),
+                        },
+                        ty: IrType::Nullable(Nullable::Int(IntWidth::I32)),
+                        span: Span::empty(1),
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::IsNull(Operand(ValueId(1))),
+                        ty: IrType::Boolean,
+                        span: Span::empty(2),
+                    },
+                    Instruction {
+                        result: Some(ValueId(3)),
+                        kind: InstKind::Unwrap(Operand(ValueId(1))),
+                        ty: IrType::Int(IntWidth::I32),
+                        span: Span::empty(3),
+                    },
+                ],
+                terminator: Some(Terminator::Return(Some(Operand(ValueId(3))))),
+            }],
+        };
+        let module = Module {
+            functions: vec![main],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 7))
+            }
+        );
+    }
+
+    #[test]
+    fn host_exposes_only_ordered_output_and_cancellation() {
+        let mut host = CapturedHost::default();
+        assert!(!host.is_cancelled());
+        host.emit(OutputEvent {
+            text: "ñ\n".into(),
+            truncated: false,
+        })
+        .unwrap();
+        host.cancel();
+        assert!(host.is_cancelled());
+        assert_eq!(
+            host.events(),
+            &[OutputEvent {
+                text: "ñ\n".into(),
+                truncated: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn default_limits_are_valid_and_hard_maxima_are_enforced() {
+        assert_eq!(
+            InterpreterLimits::default().validate(),
+            Ok(InterpreterLimits::default())
+        );
+        assert_eq!(
+            InterpreterLimits {
+                instructions: InterpreterLimits::MAX_INSTRUCTIONS + 1,
+                ..InterpreterLimits::default()
+            }
+            .validate(),
+            Err(LimitConfigurationError::Instructions)
+        );
+        assert_eq!(
+            InterpreterLimits {
+                instructions: 0,
+                ..InterpreterLimits::default()
+            }
+            .validate(),
+            Err(LimitConfigurationError::Instructions)
+        );
+    }
+
+    #[test]
+    fn heap_refuses_an_allocation_beyond_the_execution_budget() {
+        let mut heap = Heap::default();
+        let limits = InterpreterLimits {
+            heap_bytes: 3,
+            ..InterpreterLimits::default()
+        };
+        assert_eq!(
+            heap.allocate(HeapEntry::String("ok".into()), 3, limits),
+            Ok(HeapId(0))
+        );
+        assert_eq!(
+            heap.allocate(HeapEntry::String("no".into()), 1, limits),
+            Err(LimitFailure::Heap)
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_unverified_ir_before_allocating_execution_state() {
+        let module = Module {
+            functions: vec![Function {
+                name: "broken".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: Vec::new(),
+                entry: BlockId(99),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        assert!(Interpreter::new(&module, InterpreterLimits::default()).is_err());
+    }
+
+    #[test]
+    fn each_execution_owns_a_fresh_empty_arena() {
+        let module = Module::default();
+        let first = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(first.heap_bytes(), 0);
+        drop(first);
+        assert_eq!(
+            Interpreter::new(&module, InterpreterLimits::default())
+                .unwrap()
+                .heap_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn executes_scalar_constants_and_returns_the_result() {
+        let block = Block {
+            id: BlockId(0),
+            instructions: vec![Instruction {
+                result: Some(ValueId(0)),
+                kind: InstKind::ConstInt(42),
+                ty: IrType::Int(IntWidth::I32),
+                span: Span::empty(0),
+            }],
+            terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(0))))),
+        };
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Int(IntWidth::I32),
+                slots: Vec::new(),
+                blocks: vec![block],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 42))
+            }
+        );
+    }
+
+    #[test]
+    fn materializes_string_constants_in_the_execution_heap() {
+        let module = Module {
+            strings: vec!["ñandú".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::String,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstString(zirk_ir::StringId(0)),
+                        ty: IrType::String,
+                        span: Span::empty(0),
+                    }],
+                    terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(0))))),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let result = interpreter.run_main();
+        let ExecutionResult::Completed {
+            value: Some(Value::Heap(id)),
+        } = result
+        else {
+            panic!("expected heap string")
+        };
+        assert_eq!(
+            interpreter.heap.get(id),
+            Some(&HeapEntry::String("ñandú".into()))
+        );
+    }
+
+    #[test]
+    fn concatenates_and_repeats_strings_through_runtime_core() {
+        let module = Module {
+            strings: vec!["ñ".into(), "andú".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::String,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(0)),
+                            ty: IrType::String,
+                            span: Span::empty(0),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(1)),
+                            ty: IrType::String,
+                            span: Span::empty(1),
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::Concat {
+                                left: zirk_ir::Operand(ValueId(0)),
+                                right: zirk_ir::Operand(ValueId(1)),
+                            },
+                            ty: IrType::String,
+                            span: Span::empty(2),
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstInt(2),
+                            ty: IrType::Int(IntWidth::I32),
+                            span: Span::empty(3),
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::Repeat {
+                                string: zirk_ir::Operand(ValueId(2)),
+                                count: zirk_ir::Operand(ValueId(3)),
+                            },
+                            ty: IrType::String,
+                            span: Span::empty(4),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(4))))),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Heap(id)),
+        } = interpreter.run_main()
+        else {
+            panic!("expected a heap string result")
+        };
+        assert_eq!(
+            interpreter.heap.get(id),
+            Some(&HeapEntry::String("ñandúñandú".into()))
+        );
+    }
+
+    #[test]
+    fn materializes_a_single_unicode_grapheme_as_char() {
+        let module = Module {
+            strings: vec!["👩‍💻".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Char,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstChar(zirk_ir::StringId(0)),
+                        ty: IrType::Char,
+                        span: Span::empty(0),
+                    }],
+                    terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(0))))),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Heap(id)),
+        } = interpreter.run_main()
+        else {
+            panic!("expected a heap char result")
+        };
+        assert_eq!(
+            interpreter.heap.get(id),
+            Some(&HeapEntry::Char("👩‍💻".into()))
+        );
+    }
+
+    #[test]
+    fn print_and_println_emit_ordered_unicode_events_without_native_stdout() {
+        let module = Module {
+            strings: vec!["".into(), "ñ".into(), "fin".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(0)),
+                            ty: IrType::String,
+                            span: Span::empty(0),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(1)),
+                            ty: IrType::String,
+                            span: Span::empty(1),
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(2)),
+                            ty: IrType::String,
+                            span: Span::empty(2),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Print(zirk_ir::Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span: Span::empty(3),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Println(zirk_ir::Operand(ValueId(1))),
+                            ty: IrType::Void,
+                            span: Span::empty(4),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Println(zirk_ir::Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span: Span::empty(5),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Print(zirk_ir::Operand(ValueId(2))),
+                            ty: IrType::Void,
+                            span: Span::empty(6),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let mut host = CapturedHost::default();
+
+        assert_eq!(
+            interpreter.run_main_with_host(&mut host),
+            ExecutionResult::Completed { value: None }
+        );
+        assert_eq!(
+            host.events(),
+            &[
+                OutputEvent {
+                    text: "".into(),
+                    truncated: false
+                },
+                OutputEvent {
+                    text: "ñ\n".into(),
+                    truncated: false,
+                },
+                OutputEvent {
+                    text: "\n".into(),
+                    truncated: false
+                },
+                OutputEvent {
+                    text: "fin".into(),
+                    truncated: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn output_limits_reject_an_event_before_it_reaches_the_host() {
+        let module = Module {
+            strings: vec!["ñ".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(0)),
+                            ty: IrType::String,
+                            span: Span::empty(0),
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Println(zirk_ir::Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span: Span::empty(1),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+            }],
+            ..Module::default()
+        };
+        let limits = InterpreterLimits {
+            output_bytes: 2,
+            ..InterpreterLimits::default()
+        };
+        let mut interpreter = Interpreter::new(&module, limits).unwrap();
+        let mut host = CapturedHost::default();
+
+        assert_eq!(
+            interpreter.run_main_with_host(&mut host),
+            ExecutionResult::LimitFailure(LimitFailure::Output)
+        );
+        assert_eq!(
+            host.events(),
+            &[OutputEvent {
+                text: String::new(),
+                truncated: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn executes_store_then_load_through_a_local_slot() {
+        let block = Block {
+            id: BlockId(0),
+            instructions: vec![
+                Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::ConstBool(true),
+                    ty: IrType::Boolean,
+                    span: Span::empty(0),
+                },
+                Instruction {
+                    result: None,
+                    kind: InstKind::Store(SlotId(0), zirk_ir::Operand(ValueId(0))),
+                    ty: IrType::Void,
+                    span: Span::empty(1),
+                },
+                Instruction {
+                    result: Some(ValueId(1)),
+                    kind: InstKind::Load(SlotId(0)),
+                    ty: IrType::Boolean,
+                    span: Span::empty(2),
+                },
+            ],
+            terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(1))))),
+        };
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Boolean,
+                slots: vec![Slot {
+                    name: "answer".into(),
+                    ty: IrType::Boolean,
+                    span: Span::empty(0),
+                }],
+                blocks: vec![block],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(Value::Boolean(true))
+            }
+        );
+    }
+
+    #[test]
+    fn executes_the_selected_branch_only() {
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: IrType::Int(IntWidth::I32),
+            slots: Vec::new(),
+            blocks: vec![
+                Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::ConstBool(true),
+                        ty: IrType::Boolean,
+                        span: Span::empty(0),
+                    }],
+                    terminator: Some(Terminator::Branch {
+                        condition: zirk_ir::Operand(ValueId(0)),
+                        then_block: BlockId(1),
+                        else_block: BlockId(2),
+                    }),
+                },
+                Block {
+                    id: BlockId(1),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::ConstInt(7),
+                        ty: IrType::Int(IntWidth::I32),
+                        span: Span::empty(1),
+                    }],
+                    terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(1))))),
+                },
+                Block {
+                    id: BlockId(2),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::ConstInt(9),
+                        ty: IrType::Int(IntWidth::I32),
+                        span: Span::empty(2),
+                    }],
+                    terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(2))))),
+                },
+            ],
+            entry: BlockId(0),
+            span: Span::empty(0),
+            gc_roots: Vec::new(),
+        };
+        let module = Module {
+            functions: vec![main],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 7))
+            }
+        );
+    }
+
+    #[test]
+    fn stops_an_instructionless_cycle_at_the_exact_budget() {
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: Vec::new(),
+                    terminator: Some(Terminator::Jump(BlockId(0))),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let limits = InterpreterLimits {
+            instructions: 3,
+            ..InterpreterLimits::default()
+        };
+        let mut interpreter = Interpreter::new(&module, limits).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::LimitFailure(LimitFailure::Instructions)
+        );
+        assert_eq!(interpreter.executed_steps, 3);
+    }
+
+    #[test]
+    fn executes_a_finite_loop_through_slots_and_back_edges() {
+        let i32 = IrType::Int(IntWidth::I32);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: i32,
+                slots: vec![Slot {
+                    name: "counter".into(),
+                    ty: i32,
+                    span: Span::empty(0),
+                }],
+                blocks: vec![
+                    Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(0)),
+                                kind: InstKind::ConstInt(0),
+                                ty: i32,
+                                span: Span::empty(0),
+                            },
+                            Instruction {
+                                result: None,
+                                kind: InstKind::Store(SlotId(0), zirk_ir::Operand(ValueId(0))),
+                                ty: IrType::Void,
+                                span: Span::empty(0),
+                            },
+                        ],
+                        terminator: Some(Terminator::Jump(BlockId(1))),
+                    },
+                    Block {
+                        id: BlockId(1),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::Load(SlotId(0)),
+                                ty: i32,
+                                span: Span::empty(1),
+                            },
+                            Instruction {
+                                result: Some(ValueId(2)),
+                                kind: InstKind::ConstInt(3),
+                                ty: i32,
+                                span: Span::empty(1),
+                            },
+                            Instruction {
+                                result: Some(ValueId(3)),
+                                kind: InstKind::Binary {
+                                    op: BinaryOp::Lt,
+                                    left: zirk_ir::Operand(ValueId(1)),
+                                    right: zirk_ir::Operand(ValueId(2)),
+                                },
+                                ty: IrType::Boolean,
+                                span: Span::empty(1),
+                            },
+                        ],
+                        terminator: Some(Terminator::Branch {
+                            condition: zirk_ir::Operand(ValueId(3)),
+                            then_block: BlockId(2),
+                            else_block: BlockId(3),
+                        }),
+                    },
+                    Block {
+                        id: BlockId(2),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(4)),
+                                kind: InstKind::Load(SlotId(0)),
+                                ty: i32,
+                                span: Span::empty(2),
+                            },
+                            Instruction {
+                                result: Some(ValueId(5)),
+                                kind: InstKind::ConstInt(1),
+                                ty: i32,
+                                span: Span::empty(2),
+                            },
+                            Instruction {
+                                result: Some(ValueId(6)),
+                                kind: InstKind::Binary {
+                                    op: BinaryOp::Add,
+                                    left: zirk_ir::Operand(ValueId(4)),
+                                    right: zirk_ir::Operand(ValueId(5)),
+                                },
+                                ty: i32,
+                                span: Span::empty(2),
+                            },
+                            Instruction {
+                                result: None,
+                                kind: InstKind::Store(SlotId(0), zirk_ir::Operand(ValueId(6))),
+                                ty: IrType::Void,
+                                span: Span::empty(2),
+                            },
+                        ],
+                        terminator: Some(Terminator::Jump(BlockId(1))),
+                    },
+                    Block {
+                        id: BlockId(3),
+                        instructions: vec![Instruction {
+                            result: Some(ValueId(7)),
+                            kind: InstKind::Load(SlotId(0)),
+                            ty: i32,
+                            span: Span::empty(3),
+                        }],
+                        terminator: Some(Terminator::Return(Some(zirk_ir::Operand(ValueId(7))))),
+                    },
+                ],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 3))
+            }
+        );
+    }
+
+    #[test]
+    fn integer_operations_reject_overflow_instead_of_wrapping() {
+        let maximum = IntegerValue::from_literal(127, IntWidth::I8).unwrap();
+        let one = IntegerValue::from_literal(1, IntWidth::I8).unwrap();
+        assert_eq!(
+            maximum.checked_binary(BinaryOp::Add, one),
+            Err("integer Add overflow".into())
+        );
+
+        let maximum = IntegerValue::from_bits(u128::MAX, IntWidth::U128);
+        assert_eq!(
+            maximum.checked_binary(BinaryOp::Add, IntegerValue::from_bits(1, IntWidth::U128)),
+            Err("integer Add overflow or invalid domain".into())
+        );
+    }
+
+    #[test]
+    fn integer_binary_operations_preserve_every_declared_width() {
+        let widths = [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::I64,
+            IntWidth::I128,
+            IntWidth::U8,
+            IntWidth::U16,
+            IntWidth::U32,
+            IntWidth::U64,
+            IntWidth::U128,
+        ];
+
+        for width in widths {
+            let one = IntegerValue::from_literal(1, width).unwrap();
+            let two = IntegerValue::from_literal(2, width).unwrap();
+            let three = IntegerValue::from_literal(3, width).unwrap();
+            let four = IntegerValue::from_literal(4, width).unwrap();
+
+            assert_eq!(
+                one.checked_binary(BinaryOp::Add, one),
+                Ok(Value::Int(two)),
+                "{width:?} addition"
+            );
+            assert_eq!(
+                three.checked_binary(BinaryOp::Sub, one),
+                Ok(Value::Int(two)),
+                "{width:?} subtraction"
+            );
+            assert_eq!(
+                two.checked_binary(BinaryOp::Mul, two),
+                Ok(Value::Int(four)),
+                "{width:?} multiplication"
+            );
+            assert_eq!(
+                three.checked_binary(BinaryOp::Div, two),
+                Ok(Value::Int(one)),
+                "{width:?} division"
+            );
+            assert_eq!(
+                three.checked_binary(BinaryOp::Rem, two),
+                Ok(Value::Int(one)),
+                "{width:?} remainder"
+            );
+            assert_eq!(
+                one.checked_binary(BinaryOp::Shl, one),
+                Ok(Value::Int(two)),
+                "{width:?} left shift"
+            );
+            assert_eq!(
+                two.checked_binary(BinaryOp::Shr, one),
+                Ok(Value::Int(one)),
+                "{width:?} right shift"
+            );
+            assert_eq!(
+                one.checked_binary(BinaryOp::Lt, two),
+                Ok(Value::Boolean(true)),
+                "{width:?} comparison"
+            );
+            assert_eq!(
+                three.checked_binary(BinaryOp::BitAnd, one),
+                Ok(Value::Int(one)),
+                "{width:?} bitwise operation"
+            );
+            assert!(
+                two.checked_binary(BinaryOp::Div, IntegerValue::from_bits(0, width))
+                    .is_err()
+            );
+
+            if width.signed() {
+                let maximum = IntegerValue::from_bits(
+                    if width.bits() == 128 {
+                        i128::MAX as u128
+                    } else {
+                        (1_u128 << (width.bits() - 1)) - 1
+                    },
+                    width,
+                );
+                let minimum = IntegerValue::from_bits(1_u128 << (width.bits() - 1), width);
+                assert!(
+                    maximum.checked_binary(BinaryOp::Add, one).is_err(),
+                    "{width:?} maximum"
+                );
+                assert!(
+                    minimum.checked_binary(BinaryOp::Sub, one).is_err(),
+                    "{width:?} minimum"
+                );
+                let minus_one = IntegerValue::from_literal(-1, width).unwrap();
+                assert_eq!(
+                    minus_one.checked_binary(BinaryOp::Lt, one),
+                    Ok(Value::Boolean(true)),
+                    "{width:?} signed comparison"
+                );
+            } else {
+                let maximum = IntegerValue::from_bits(
+                    if width.bits() == 128 {
+                        u128::MAX
+                    } else {
+                        (1_u128 << width.bits()) - 1
+                    },
+                    width,
+                );
+                assert!(
+                    maximum.checked_binary(BinaryOp::Add, one).is_err(),
+                    "{width:?} maximum"
+                );
+                assert!(
+                    IntegerValue::from_bits(0, width)
+                        .checked_binary(BinaryOp::Sub, one)
+                        .is_err(),
+                    "{width:?} minimum"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integer_casts_use_explicit_truncation_and_source_extension() {
+        let signed_minus_one = IntegerValue::from_literal(-1, IntWidth::I8).unwrap();
+        assert_eq!(
+            signed_minus_one.cast(IntWidth::U16),
+            IntegerValue::from_literal(65_535, IntWidth::U16).unwrap()
+        );
+
+        let unsigned_max = IntegerValue::from_literal(255, IntWidth::U8).unwrap();
+        assert_eq!(
+            unsigned_max.cast(IntWidth::I16),
+            IntegerValue::from_literal(255, IntWidth::I16).unwrap()
+        );
+
+        let wide = IntegerValue::from_literal(511, IntWidth::U16).unwrap();
+        assert_eq!(
+            wide.cast(IntWidth::I8),
+            IntegerValue::from_literal(-1, IntWidth::I8).unwrap()
+        );
+    }
+
+    #[test]
+    fn reports_unreachable_with_the_enclosing_function_span() {
+        let function_span = Span::empty(17);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Never,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: Vec::new(),
+                    terminator: Some(Terminator::Unreachable),
+                }],
+                entry: BlockId(0),
+                span: function_span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::InternalFailure(InternalFailure {
+                message: "execution reached Unreachable terminator".into(),
+                span: Some(function_span),
+            })
+        );
+    }
+}

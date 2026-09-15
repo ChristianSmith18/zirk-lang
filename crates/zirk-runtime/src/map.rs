@@ -6,8 +6,8 @@
 //! object pointers stored as opaque `i64` values, but it does not
 //! integrate with the garbage collector's tracing pass yet.
 
-use std::collections::HashMap;
 use std::ffi::c_void;
+use zirk_runtime_core::collections::{self, WordMap};
 
 /// Sorts stored words for `to_string()`'s deterministic ordering
 /// (`universal-to-string-and-multiline-strings`): numerically for scalar
@@ -37,7 +37,7 @@ pub(crate) unsafe fn sort_words(words: &mut [i64], string_content: bool) {
 /// `Map<K, V>()` — allocates an empty map.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_map_new() -> *mut c_void {
-    let map = Box::new(HashMap::<i64, i64>::new());
+    let map = Box::new(WordMap::new());
     Box::into_raw(map) as *mut c_void
 }
 
@@ -47,7 +47,7 @@ pub extern "C" fn zirk_rt_map_is_empty(map: *mut c_void) -> i32 {
     if map.is_null() {
         return 1;
     }
-    let map = unsafe { &*(map as *const HashMap<i64, i64>) };
+    let map = unsafe { &*(map as *const WordMap) };
     map.is_empty() as i32
 }
 
@@ -57,7 +57,7 @@ pub extern "C" fn zirk_rt_map_length(map: *mut c_void) -> usize {
     if map.is_null() {
         return 0;
     }
-    let map = unsafe { &*(map as *const HashMap<i64, i64>) };
+    let map = unsafe { &*(map as *const WordMap) };
     map.len()
 }
 
@@ -67,8 +67,8 @@ pub extern "C" fn zirk_rt_map_set(map: *mut c_void, key: i64, value: i64) {
     if map.is_null() {
         return;
     }
-    let map = unsafe { &mut *(map as *mut HashMap<i64, i64>) };
-    map.insert(key, value);
+    let map = unsafe { &mut *(map as *mut WordMap) };
+    collections::map_set(map, key, value);
 }
 
 /// `map.contains_key(key)` — returns `1` if the key is present.
@@ -77,7 +77,7 @@ pub extern "C" fn zirk_rt_map_contains_key(map: *mut c_void, key: i64) -> i32 {
     if map.is_null() {
         return 0;
     }
-    let map = unsafe { &*(map as *const HashMap<i64, i64>) };
+    let map = unsafe { &*(map as *const WordMap) };
     map.contains_key(&key) as i32
 }
 
@@ -87,8 +87,8 @@ pub extern "C" fn zirk_rt_map_get(map: *mut c_void, key: i64) -> i64 {
     if map.is_null() {
         return 0;
     }
-    let map = unsafe { &*(map as *const HashMap<i64, i64>) };
-    map.get(&key).copied().unwrap_or(0)
+    let map = unsafe { &*(map as *const WordMap) };
+    collections::map_get(map, key).unwrap_or(0)
 }
 
 /// `map.remove(key)` — removes the key and returns `1` if it existed.
@@ -97,8 +97,8 @@ pub extern "C" fn zirk_rt_map_remove(map: *mut c_void, key: i64) -> i32 {
     if map.is_null() {
         return 0;
     }
-    let map = unsafe { &mut *(map as *mut HashMap<i64, i64>) };
-    map.remove(&key).is_some() as i32
+    let map = unsafe { &mut *(map as *mut WordMap) };
+    collections::map_remove(map, key) as i32
 }
 
 /// `map.to_string()`'s key snapshot
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn zirk_rt_map_sorted_keys(
     let mut keys: Vec<i64> = if map.is_null() {
         Vec::new()
     } else {
-        let map = unsafe { &*(map as *const HashMap<i64, i64>) };
+        let map = unsafe { &*(map as *const WordMap) };
         map.keys().copied().collect()
     };
     unsafe { sort_words(&mut keys, string_keys != 0) };
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn zirk_rt_map_sorted_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::{zirk_rt_map_new, zirk_rt_map_set, zirk_rt_map_sorted_keys};
+    use super::*;
 
     #[test]
     fn sorted_key_snapshot_uses_numeric_order() {
@@ -159,5 +159,18 @@ mod tests {
         };
 
         assert_eq!(words, [1, 2, 10]);
+    }
+
+    #[test]
+    fn native_map_adapter_matches_runtime_core_value_operations() {
+        let map = zirk_rt_map_new();
+        zirk_rt_map_set(map, 4, 10);
+        zirk_rt_map_set(map, 4, 20);
+        assert_eq!(zirk_rt_map_length(map), 1);
+        assert_eq!(zirk_rt_map_get(map, 4), 20);
+        assert_eq!(zirk_rt_map_contains_key(map, 4), 1);
+        assert_eq!(zirk_rt_map_remove(map, 4), 1);
+        assert_eq!(zirk_rt_map_remove(map, 4), 0);
+        assert_eq!(zirk_rt_map_is_empty(map), 1);
     }
 }

@@ -291,16 +291,15 @@ pub unsafe extern "C" fn zirk_rt_list_element(
     index: i64,
     elem_size: usize,
 ) -> *mut c_void {
-    let length = unsafe { zirk_rt_list_length(list) } as i64;
-    let index = if index < 0 { length + index } else { index };
-    if index < 0 || index >= length {
+    let length = unsafe { zirk_rt_list_length(list) };
+    let Some(index) = zirk_runtime_core::collections::element_index(length, index) else {
         crate::failure::zirk_rt_index_out_of_bounds();
-    }
+    };
     let data = unsafe { data_pointer(list) };
     if data.is_null() {
         crate::failure::zirk_rt_index_out_of_bounds();
     }
-    unsafe { element_pointer(data, index as usize, elem_size) }
+    unsafe { element_pointer(data, index, elem_size) }
 }
 
 /// `list.add(value)` — appends a value.
@@ -338,13 +337,10 @@ pub unsafe extern "C" fn zirk_rt_list_insert(
     elem_align: usize,
     is_ref: bool,
 ) {
-    let length = unsafe { zirk_rt_list_length(list) } as i64;
-    let index = if index < 0 { length + index } else { index };
-    if index < 0 || index > length {
+    let length_u = unsafe { zirk_rt_list_length(list) };
+    let Some(index_u) = zirk_runtime_core::collections::insertion_index(length_u, index) else {
         crate::failure::zirk_rt_index_out_of_bounds();
-    }
-    let index_u = index as usize;
-    let length_u = length as usize;
+    };
     unsafe { grow_buffer(list, length_u + 1, elem_size, elem_align, is_ref) };
     let data = unsafe { data_pointer(list) };
     if index_u < length_u {
@@ -433,15 +429,12 @@ pub unsafe extern "C" fn zirk_rt_list_remove(
     elem_align: usize,
     is_ref: bool,
 ) {
-    let length = unsafe { zirk_rt_list_length(list) } as i64;
-    let index = if index < 0 { length + index } else { index };
-    if index < 0 || index >= length {
+    let length_u = unsafe { zirk_rt_list_length(list) };
+    let Some(index_u) = zirk_runtime_core::collections::element_index(length_u, index) else {
         crate::failure::zirk_rt_index_out_of_bounds();
-    }
+    };
     let data = unsafe { data_pointer(list) };
-    let index_u = index as usize;
-    let length_u = length as usize;
-    if index + 1 < length {
+    if index_u + 1 < length_u {
         let src = unsafe { element_pointer(data, index_u + 1, elem_size) };
         let dst = unsafe { element_pointer(data, index_u, elem_size) };
         let bytes = (length_u - index_u - 1).saturating_mul(elem_size);

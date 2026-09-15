@@ -9,11 +9,12 @@
 use std::ffi::c_void;
 
 use crate::string::{alloc_owned, borrow};
+use zirk_runtime_core::duration as core_duration;
 
 /// Multiplies a `Duration` by an `f64` scalar.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_duration_mul_f64(nanos: i64, scalar: f64) -> i64 {
-    (nanos as f64 * scalar) as i64
+    core_duration::multiply(nanos, scalar)
 }
 
 /// Divides a `Duration` by an `f64` scalar.
@@ -23,7 +24,7 @@ pub extern "C" fn zirk_rt_duration_mul_f64(nanos: i64, scalar: f64) -> i64 {
 /// `Duration / Duration`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_duration_div_f64(nanos: i64, scalar: f64) -> i64 {
-    (nanos as f64 / scalar) as i64
+    core_duration::divide(nanos, scalar)
 }
 
 /// Divides one `Duration` by another, yielding a `Float64` ratio.
@@ -32,7 +33,7 @@ pub extern "C" fn zirk_rt_duration_div_f64(nanos: i64, scalar: f64) -> i64 {
 /// [`zirk_rt_duration_div_f64`] documents.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_duration_div_duration(left: i64, right: i64) -> f64 {
-    left as f64 / right as f64
+    core_duration::ratio(left, right)
 }
 
 /// Formats a `Duration` as a `String` — `to_string()`, `println` and string
@@ -297,6 +298,11 @@ pub extern "C" fn zirk_duration_truncate(nanos: i64, unit: i64) -> i64 {
 /// `pub(crate)` so `zirk_range_to_string` renders `Range<Duration>` bounds
 /// through the same spelling (`universal-to-string-and-multiline-strings`).
 pub(crate) fn format_duration(nanos: i64) -> String {
+    core_duration::format(nanos)
+}
+
+#[allow(dead_code)]
+fn native_format_duration_reference(nanos: i64) -> String {
     // Largest first: the first unit the magnitude reaches is the one the
     // text is written in. `m` is minutes — a month is a `Period`, not an
     // exact span.

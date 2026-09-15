@@ -1,0 +1,8 @@
+{
+  "name": "closure",
+  "source": "fn main(): Void { inmut increment = (value: Int32): Int32 => value + 1; stdout.println(increment(41)); }",
+  "virtualName": "fixtures/closure.zrk",
+  "expectedOutput": ["42\n"],
+  "completion": "completed",
+  "exclusions": []
+}

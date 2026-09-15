@@ -192,7 +192,14 @@ Current high-impact delivery limits include:
   decorator, and public documentation surfaces are specified ahead of full
   compiler/runtime delivery.
 
-Zirk 1.x explicitly excludes browser/WebAssembly, public runtime directives or
+Zirk 1.x explicitly excludes a Zirk WebAssembly target and browser/DOM
+integration from the source language. The optional browser-hosted verified-IR
+interpreter is developer tooling with a bounded package contract; it does not
+add browser APIs, platform directives, or a new deployment target. Its current
+execution subset and rejected effects are recorded in the browser interpreter
+support matrix, and are intentionally narrower than the native compiler.
+
+Zirk 1.x explicitly excludes public runtime directives or
 event loop, standalone `worker`, `async fn`, textual inline assembly, general
 `comptime`/`defer`, multiple class inheritance, traditional overloads, Result
 `?`, and public ownership/reference-counting semantics.

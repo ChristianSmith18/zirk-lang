@@ -16,6 +16,7 @@
 use std::ffi::c_void;
 
 use crate::collector::HEADER_BYTES;
+use zirk_runtime_core::range::Range;
 
 /// The `Range` payload: four `i64` words right after the object header.
 #[repr(C)]
@@ -140,44 +141,19 @@ pub unsafe extern "C" fn zirk_range_to_string(
     let Some(range) = (unsafe { borrow(handle) }) else {
         return std::ptr::null_mut();
     };
-    let part = |word: i64| -> String {
-        if is_duration != 0 {
-            crate::duration::format_duration(word)
-        } else {
-            word.to_string()
-        }
-    };
-    let mut text = format!(
-        "{}{}{}",
-        part(range.start),
-        if range.inclusive != 0 { "..=" } else { ".." },
-        part(range.end),
-    );
-    let inferred = if range.start < range.end { 1 } else { -1 };
-    if range.step != inferred {
-        text.push_str(&format!(":{}", part(range.step)));
-    }
-    crate::string::alloc_owned(&text)
+    crate::string::alloc_owned(
+        &Range::new(range.start, range.end, range.step, range.inclusive != 0)
+            .format(is_duration != 0),
+    )
 }
 
 /// How many elements the sequence produces, in `i128` so a huge range
 /// (`0..i64::MAX` stepping `1`) never overflows mid-computation.
 fn element_count(range: &ZirkRange) -> i128 {
-    let (start, end, step) = (range.start as i128, range.end as i128, range.step as i128);
-    if step == 0 {
-        return 0;
-    }
-    // The distance still to cover — for a forward range `end - start`, for
-    // a backward one `start - end` — plus one more when the bound itself
-    // is included.
-    let distance = if step > 0 { end - start } else { start - end };
-    let distance = distance + i128::from(range.inclusive != 0);
-    if distance <= 0 {
-        return 0;
-    }
-    // ceil(distance / |step|)
-    let magnitude = step.abs();
-    distance.div_euclid(magnitude) + i128::from(distance.rem_euclid(magnitude) != 0)
+    Range::new(range.start, range.end, range.step, range.inclusive != 0)
+        .len()
+        .map(i128::from)
+        .unwrap_or(i128::from(i64::MAX) + 1)
 }
 
 /// The `index`-th element of the sequence (`index` is a position, not a
@@ -185,8 +161,8 @@ fn element_count(range: &ZirkRange) -> i128 {
 /// a sliced bound can legitimately sit just past `i64`'s range when the
 /// original range's own end did.
 fn element_at(range: &ZirkRange, index: i128) -> i64 {
-    (range.start as i128 + index * range.step as i128).clamp(i64::MIN as i128, i64::MAX as i128)
-        as i64
+    Range::new(range.start, range.end, range.step, range.inclusive != 0)
+        .element_at(index.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 /// The number of elements in `handle`, or `-1` when it cannot fit in an
@@ -236,63 +212,19 @@ pub unsafe extern "C" fn zirk_range_slice(
     end: i64,
     step: i64,
 ) -> *mut c_void {
-    const MISSING: i64 = i64::MIN;
-
     let Some(range) = (unsafe { borrow(handle) }) else {
         return std::ptr::null_mut();
     };
-    let step = if step == MISSING { 1 } else { step };
-    if step == 0 {
-        return unsafe { zirk_range_new(0, 0, 1, 0) };
+    let slice = Range::new(range.start, range.end, range.step, range.inclusive != 0)
+        .slice(start, end, step);
+    unsafe {
+        zirk_range_new(
+            slice.start,
+            slice.end,
+            slice.step,
+            i64::from(slice.inclusive),
+        )
     }
-    let count = element_count(range);
-    if count == 0 {
-        return unsafe { zirk_range_new(0, 0, 1, 0) };
-    }
-    let n = count.clamp(0, i64::MAX as i128) as i64;
-
-    // Resolve `lo`/`hi` in index space — the same convention
-    // `zirk_str_slice` uses: forward `[lo, hi)`, backward `(hi, lo]`.
-    let forward = |bound: i64| -> i64 {
-        if bound < 0 {
-            (n + bound).max(0)
-        } else {
-            bound.min(n)
-        }
-    };
-    let (first, last) = if step > 0 {
-        let lo = if start == MISSING { 0 } else { forward(start) };
-        let hi = if end == MISSING { n } else { forward(end) };
-        if lo >= hi {
-            return unsafe { zirk_range_new(0, 0, 1, 0) };
-        }
-        (lo, lo + (hi - 1 - lo) / step * step)
-    } else {
-        let lo = if start == MISSING {
-            n - 1
-        } else {
-            (if start < 0 { n + start } else { start }).clamp(-1, n - 1)
-        };
-        let hi = if end == MISSING {
-            -1
-        } else {
-            (if end < 0 { n + end } else { end }).clamp(-1, n - 1)
-        };
-        if lo <= hi {
-            return unsafe { zirk_range_new(0, 0, 1, 0) };
-        }
-        (lo, lo + (hi + 1 - lo) / step * step)
-    };
-
-    // The result's step is the composition of both strides: `st` positions
-    // of `st_range` elements each.
-    let new_step =
-        (range.step as i128 * step as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64;
-    // Exclusive end, one result-step past the last included element — the
-    // walk's own convention (`<`/`>` by step sign) then stops exactly after
-    // `last` without an extra compare at build time.
-    let new_end = element_at(range, last as i128).saturating_add(new_step);
-    unsafe { zirk_range_new(element_at(range, first as i128), new_end, new_step, 0) }
 }
 
 #[cfg(test)]

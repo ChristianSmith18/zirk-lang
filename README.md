@@ -27,8 +27,10 @@ fn main(): Void {
 Phase 4d — callable and binding completion — is **complete for its scoped delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` archived). Phase 4e — managed memory and unsafe boundaries — delivered the non-moving mark-sweep collector, `Weak<T>`, deep `clone()`, `Pointer<T>`/`extern "C"`, transactional `unsafe {}`/`commit {}`, and `NativeSlice<T>`/`NativeSliceMut<T>`. The active change is **`array-list-tuple-duration-regex`**, which adds `Tuple`, `Array<T>`, `List<T>`, `Duration`, `Regex`, the `String`/`Char` method surface, `Range<T>`, `type` alias lowering, and removes `value class`.
 
 ```
-   .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ binary
-               ✅          ✅          ✅         ✅         ✅          ✅
+   .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ native binary
+               ✅          ✅          ✅         ✅         ✅
+                                                    └──▶ [interpreter] ──▶ browser WASM package
+                                                         optional; no Zirk-to-WASM code generation
 ```
 
 The complete, feature-by-feature status is in [docs/init/ZIRK_FEATURE_STATUS.md](docs/init/ZIRK_FEATURE_STATUS.md). Use it before assuming a construct is available; this README no longer repeats that enumeration.
@@ -54,11 +56,17 @@ A Cargo workspace with one crate per pipeline stage of `ZIRK_COMPILER_SPEC.md` s
 | `zirk-sema` | name resolution, types, flow analysis |
 | `zirk-ir` | typed, portable intermediate representation |
 | `zirk-codegen-llvm` | IR → LLVM → object file |
+| `zirk-runtime-core` | pure, platform-neutral runtime value semantics |
+| `zirk-interpreter` | verified IR execution with explicit bounded host effects |
+| `zirk-browser` | in-memory frontend and optional WASM browser contract |
 | `zirk-diagnostics` | error and warning formatting |
 | `zirk-cli` | the `zirk` executable |
 | `zirk-runtime` | runtime linked into produced binaries |
 
 Dependencies flow in a single direction along the pipeline. `zirk-diagnostics` is the only cross-cutting one.
+The browser branch uses the interpreter and `zirk-runtime-core`; it does not
+depend on LLVM, the native ABI runtime, or browser ambient authority. It is an
+optional execution engine for compatible source, not a native-target replacement.
 
 ## Getting started
 
@@ -85,6 +93,7 @@ cargo test --workspace
 - [ZIRK_ROADMAP.md](docs/init/ZIRK_ROADMAP.md) — the 13 phases, from here to self-hosting
 - [docs/decisions/](docs/decisions/) — ADRs: decisions that cascade to the rest of the project
 - [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md) — toolchain installation
+- [browser-package-handoff.md](docs/browser-package-handoff.md) — verified browser package handoff
 
 ## Language
 

@@ -16,6 +16,7 @@
 use std::ffi::c_void;
 
 use crate::collector::{HEADER_BYTES, string_descriptor};
+use zirk_runtime_core::text as core_text;
 
 /// A Zirk string.
 ///
@@ -311,22 +312,14 @@ pub unsafe extern "C" fn zirk_str_concat(left: *const c_void, right: *const c_vo
     let left_text = left.unwrap_or("");
     let right_text = right.unwrap_or("");
 
-    let len = left_text.len() + right_text.len();
+    let content = core_text::concat(left_text, right_text);
+    let len = content.len();
     let object = unsafe { alloc_string(len) };
     let payload = unsafe { payload_ptr(object) };
     unsafe {
         if len > 0 {
             let data = data_ptr(object);
-            if !left_text.is_empty() {
-                std::ptr::copy_nonoverlapping(left_text.as_ptr(), data, left_text.len());
-            }
-            if !right_text.is_empty() {
-                std::ptr::copy_nonoverlapping(
-                    right_text.as_ptr(),
-                    data.add(left_text.len()),
-                    right_text.len(),
-                );
-            }
+            std::ptr::copy_nonoverlapping(content.as_ptr(), data, len);
             (*payload).is_ascii = std::slice::from_raw_parts((*payload).bytes, len).is_ascii();
         } else {
             (*payload).is_ascii = true;
@@ -361,9 +354,10 @@ pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *
 
     // The size is checked before asking for it: a count that overflows what
     // can be addressed is a controlled error, not an allocator surprise.
-    let Some(size) = text.len().checked_mul(count as usize) else {
+    let Some(content) = core_text::repeat(text, count as usize) else {
         crate::failure::zirk_rt_invalid_repeat()
     };
+    let size = content.len();
     if size > isize::MAX as usize {
         crate::failure::zirk_rt_invalid_repeat()
     }
@@ -372,9 +366,7 @@ pub unsafe extern "C" fn zirk_str_repeat(handle: *const c_void, count: i32) -> *
     let payload = unsafe { payload_ptr(object) };
     unsafe {
         let data = data_ptr(object);
-        for i in 0..(count as usize) {
-            std::ptr::copy_nonoverlapping(text.as_ptr(), data.add(i * text.len()), text.len());
-        }
+        std::ptr::copy_nonoverlapping(content.as_ptr(), data, size);
         (*payload).is_ascii = string.is_ascii();
     }
     object
@@ -418,7 +410,7 @@ pub unsafe extern "C" fn zirk_str_eq(left: *const c_void, right: *const c_void) 
     let right = unsafe { borrow(right) };
 
     match (left, right) {
-        (Some(a), Some(b)) => unsafe { a.as_str() == b.as_str() },
+        (Some(a), Some(b)) => unsafe { core_text::equal(a.as_str(), b.as_str()) },
         // Two absent strings are equal to each other and to nothing else.
         (None, None) => true,
         _ => false,
@@ -448,25 +440,13 @@ pub unsafe extern "C" fn zirk_str_is_ascii(handle: *const c_void) -> bool {
 /// `handle` must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_grapheme_offset(handle: *const c_void, index: i64) -> i64 {
-    use unicode_segmentation::UnicodeSegmentation;
-
     let Some(string) = (unsafe { borrow(handle) }) else {
         return -1;
     };
     let text = unsafe { string.as_str() };
-    let count = text.graphemes(true).count() as i64;
-    let index = if index < 0 { count + index } else { index };
-    if index < 0 || index >= count {
-        return -1;
-    }
-    let mut byte_offset: i64 = 0;
-    for (i, grapheme) in text.graphemes(true).enumerate() {
-        if i == index as usize {
-            return byte_offset;
-        }
-        byte_offset += grapheme.len() as i64;
-    }
-    -1
+    core_text::grapheme_offset(text, index)
+        .and_then(|offset| i64::try_from(offset).ok())
+        .unwrap_or(-1)
 }
 
 /// The byte length of the Unicode extended grapheme starting at `offset`, or
@@ -485,20 +465,15 @@ pub unsafe extern "C" fn zirk_str_grapheme_offset(handle: *const c_void, index: 
 /// value, which could split a multi-byte code point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_grapheme_len_at(handle: *const c_void, offset: i64) -> i64 {
-    use unicode_segmentation::UnicodeSegmentation;
-
     let Some(string) = (unsafe { borrow(handle) }) else {
         return -1;
     };
     let text = unsafe { string.as_str() };
-    let start = offset as usize;
-    if start >= text.len() {
-        return -1;
-    }
-    match text[start..].graphemes(true).next() {
-        Some(grapheme) => grapheme.len() as i64,
-        None => -1,
-    }
+    usize::try_from(offset)
+        .ok()
+        .and_then(|start| core_text::grapheme_len_at(text, start))
+        .and_then(|length| i64::try_from(length).ok())
+        .unwrap_or(-1)
 }
 
 /// Builds a `Char` from the grapheme at byte range `[offset, offset + len)`
@@ -573,7 +548,7 @@ pub unsafe extern "C" fn zirk_str_contains(handle: *const c_void, pat: *const c_
     let pattern = unsafe { borrow(pat) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    text.contains(pattern)
+    core_text::contains(text, pattern)
 }
 
 /// Whether `handle` starts with `pat`.
@@ -589,7 +564,7 @@ pub unsafe extern "C" fn zirk_str_starts_with(handle: *const c_void, pat: *const
     let pattern = unsafe { borrow(pat) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    text.starts_with(pattern)
+    core_text::starts_with(text, pattern)
 }
 
 /// Whether `handle` ends with `pat`.
@@ -605,7 +580,7 @@ pub unsafe extern "C" fn zirk_str_ends_with(handle: *const c_void, pat: *const c
     let pattern = unsafe { borrow(pat) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    text.ends_with(pattern)
+    core_text::ends_with(text, pattern)
 }
 
 /// The slice of `handle` between byte offsets `start` and `end`.
@@ -626,16 +601,7 @@ pub unsafe extern "C" fn zirk_str_substring(
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    let len = text.len() as i64;
-    let start = start.clamp(0, len) as usize;
-    let end = end.clamp(0, len) as usize;
-    if start > end {
-        return alloc_owned("");
-    }
-    match text.get(start..end) {
-        Some(slice) => alloc_owned(slice),
-        None => alloc_owned(""),
-    }
+    alloc_owned(core_text::substring(text, start, end))
 }
 
 /// Builds the `String` that results from replacing the grapheme at byte
@@ -671,20 +637,9 @@ pub unsafe extern "C" fn zirk_str_set(
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
 
-    let start = offset.max(0) as usize;
-    let end = start.saturating_add(len.max(0) as usize);
-    if start > text.len()
-        || end > text.len()
-        || !text.is_char_boundary(start)
-        || !text.is_char_boundary(end)
-    {
+    let Some(out) = core_text::replace_range(text, offset, len, replacement) else {
         return;
-    }
-
-    let mut out = String::with_capacity(text.len() - (end - start) + replacement.len());
-    out.push_str(&text[..start]);
-    out.push_str(replacement);
-    out.push_str(&text[end..]);
+    };
     let replacement = alloc_owned(&out);
     let payload = unsafe { payload_ptr(handle.cast_mut()) };
     unsafe { (*payload).backing = replacement };
@@ -710,64 +665,10 @@ pub unsafe extern "C" fn zirk_str_slice(
     end: i64,
     step: i64,
 ) -> *mut c_void {
-    use unicode_segmentation::UnicodeSegmentation;
-
-    const MISSING: i64 = i64::MIN;
-
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-
-    let graphemes: Vec<&str> = text.graphemes(true).collect();
-    let n = graphemes.len() as i64;
-
-    let step = if step == MISSING { 1 } else { step };
-    if step == 0 || n == 0 {
-        return alloc_owned("");
-    }
-
-    // Resolves a bound that counts from the end when negative, clamped
-    // into `0..=n` for a forward slice.
-    let forward = |bound: i64| -> i64 {
-        if bound < 0 {
-            (n + bound).max(0)
-        } else {
-            bound.min(n)
-        }
-    };
-
-    let mut out = String::with_capacity(text.len());
-    if step > 0 {
-        let lo = if start == MISSING { 0 } else { forward(start) };
-        let hi = if end == MISSING { n } else { forward(end) };
-        if lo >= hi {
-            return alloc_owned("");
-        }
-        let mut i = lo;
-        while i < hi {
-            out.push_str(graphemes[i as usize]);
-            i += step;
-        }
-    } else {
-        // A backward slice's `end` is exclusive and may be `-1` ("to the
-        // beginning"), which is exactly what an omitted end means.
-        let lo = if start == MISSING {
-            n - 1
-        } else {
-            (if start < 0 { n + start } else { start }).clamp(-1, n - 1)
-        };
-        let hi = if end == MISSING {
-            -1
-        } else {
-            (if end < 0 { n + end } else { end }).clamp(-1, n - 1)
-        };
-        let mut i = lo;
-        while i > hi {
-            out.push_str(graphemes[i as usize]);
-            i += step;
-        }
-    }
-    alloc_owned(&out)
+    alloc_owned(&core_text::grapheme_slice(text, start, end, step))
 }
 
 /// The byte index of the first occurrence of `pat` in `handle`, or `-1`.
@@ -839,11 +740,10 @@ pub unsafe extern "C" fn zirk_str_split(handle: *const c_void, sep: *const c_voi
 /// `handle` must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_length(handle: *const c_void) -> i32 {
-    use unicode_segmentation::UnicodeSegmentation;
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    text.graphemes(true).count() as i32
+    core_text::grapheme_count(text) as i32
 }
 
 /// `s.byte_length` — the UTF-8 byte count.
@@ -879,17 +779,16 @@ pub unsafe extern "C" fn zirk_str_is_empty(handle: *const c_void) -> bool {
 /// `handle` and `needle` must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_find(handle: *const c_void, needle: *const c_void) -> i64 {
-    use unicode_segmentation::UnicodeSegmentation;
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
     let needle_str = unsafe { borrow(needle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    let Some(byte_index) = text.find(needle_str) else {
+    let Some(index) = core_text::grapheme_find(text, needle_str) else {
         return -1;
     };
-    text[..byte_index].graphemes(true).count() as i64
+    index as i64
 }
 
 /// `s.replace(needle, replacement)` — a new string with every occurrence
@@ -913,7 +812,7 @@ pub unsafe extern "C" fn zirk_str_replace(
     let repl = unsafe { borrow(replacement) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    alloc_owned(&text.replace(needle_str, repl))
+    alloc_owned(&core_text::replace(text, needle_str, repl))
 }
 
 /// `s.trim_start()` — leading whitespace removed.
@@ -971,14 +870,7 @@ pub unsafe extern "C" fn zirk_str_to_uppercase(handle: *const c_void) -> *mut c_
 /// Applies the named normalization form, `NFC`/`NFD`/`NFKC`/`NFKD`; an
 /// unknown form returns the text unchanged.
 fn normalize_text(text: &str, form: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    match form {
-        "NFC" => text.nfc().collect(),
-        "NFD" => text.nfd().collect(),
-        "NFKC" => text.nfkc().collect(),
-        "NFKD" => text.nfkd().collect(),
-        _ => text.to_string(),
-    }
+    core_text::normalize(text, form)
 }
 
 /// `s.normalize(form)` — `form` spelled as text (`"NFC"`, `"NFD"`,
@@ -1198,6 +1090,16 @@ mod tests {
     }
 
     #[test]
+    fn extracted_text_operations_preserve_native_handle_results() {
+        let empty_left = unsafe { zirk_str_concat(build(""), build("ñandú")) };
+        let empty_right = unsafe { zirk_str_concat(build("ñandú"), build("")) };
+        assert_eq!(read(empty_left), "ñandú");
+        assert_eq!(read(empty_right), "ñandú");
+        assert_eq!(unsafe { zirk_str_find(build("a👩‍💻b"), build("b")) }, 2);
+        assert_eq!(unsafe { zirk_str_length(build("a👩‍💻b")) }, 3);
+    }
+
+    #[test]
     fn a_converted_string_survives_the_call_that_built_it() {
         // The bytes are owned by the runtime, not by the caller's stack.
         let handle = zirk_str_from_i32(12345);
@@ -1270,9 +1172,7 @@ mod tests {
             "the two spellings must really differ in bytes"
         );
 
-        // What the lexer hands over is the canonical form of both.
-        let normalized = "h\u{f3}";
-        assert!(unsafe { zirk_str_eq(build(normalized), build(normalized)) });
+        assert!(unsafe { zirk_str_eq(build(composed), build(decomposed)) });
     }
 
     #[test]

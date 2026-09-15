@@ -14,6 +14,7 @@ crate-type = ["staticlib", "rlib"]
 unicode-segmentation.workspace = true
 regex = { workspace = true }
 unicode-normalization.workspace = true
+zirk-runtime-core.workspace = true
 
 # Stackful-coroutine stack switching for `task`/`await` (ADR-017). Only pulled
 # in on the targets it covers and that run the executor (ADR-004 addendum);

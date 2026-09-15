@@ -8,17 +8,7 @@
 use std::ffi::c_void;
 
 use crate::string::{alloc_owned, borrow};
-
-/// The first code point of the grapheme, which carries the classification
-/// for the whole `Char`.
-///
-/// # Safety
-///
-/// The handle must come from this runtime.
-unsafe fn first_char(handle: *const c_void) -> Option<char> {
-    let string = unsafe { borrow(handle) }?;
-    unsafe { string.as_str() }.chars().next()
-}
+use zirk_runtime_core::char as core_char;
 
 /// Whether the character is an uppercase letter.
 ///
@@ -27,7 +17,8 @@ unsafe fn first_char(handle: *const c_void) -> Option<char> {
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_uppercase(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_uppercase)
+    unsafe { borrow(handle) }
+        .is_some_and(|string| core_char::is_uppercase(unsafe { string.as_str() }))
 }
 
 /// Whether the character is a lowercase letter.
@@ -37,7 +28,8 @@ pub unsafe extern "C" fn zirk_char_is_uppercase(handle: *const c_void) -> bool {
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_lowercase(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_lowercase)
+    unsafe { borrow(handle) }
+        .is_some_and(|string| core_char::is_lowercase(unsafe { string.as_str() }))
 }
 
 /// Whether the character is a decimal digit.
@@ -47,7 +39,7 @@ pub unsafe extern "C" fn zirk_char_is_lowercase(handle: *const c_void) -> bool {
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_digit(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_numeric)
+    unsafe { borrow(handle) }.is_some_and(|string| core_char::is_digit(unsafe { string.as_str() }))
 }
 
 /// Whether the character is whitespace.
@@ -57,7 +49,8 @@ pub unsafe extern "C" fn zirk_char_is_digit(handle: *const c_void) -> bool {
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_whitespace(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_whitespace)
+    unsafe { borrow(handle) }
+        .is_some_and(|string| core_char::is_whitespace(unsafe { string.as_str() }))
 }
 
 /// Whether the character is an alphabetic letter.
@@ -67,7 +60,7 @@ pub unsafe extern "C" fn zirk_char_is_whitespace(handle: *const c_void) -> bool 
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_letter(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_alphabetic)
+    unsafe { borrow(handle) }.is_some_and(|string| core_char::is_letter(unsafe { string.as_str() }))
 }
 
 /// The uppercase form of the character as a `Char` (one grapheme string).
@@ -80,8 +73,7 @@ pub unsafe extern "C" fn zirk_char_to_uppercase(handle: *const c_void) -> *mut c
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    let upper: String = text.chars().flat_map(char::to_uppercase).collect();
-    alloc_owned(&upper)
+    alloc_owned(&core_char::uppercase(text))
 }
 
 /// The lowercase form of the character as a `Char` (one grapheme string).
@@ -94,8 +86,7 @@ pub unsafe extern "C" fn zirk_char_to_lowercase(handle: *const c_void) -> *mut c
     let text = unsafe { borrow(handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    let lower: String = text.chars().flat_map(char::to_lowercase).collect();
-    alloc_owned(&lower)
+    alloc_owned(&core_char::lowercase(text))
 }
 
 /// `c.byte_length` — the grapheme's UTF-8 byte count.
@@ -132,10 +123,9 @@ pub unsafe extern "C" fn zirk_char_codepoint_count(handle: *const c_void) -> i32
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_ascii_code(handle: *const c_void) -> i32 {
-    match unsafe { first_char(handle) } {
-        Some(c) if c.is_ascii() => c as i32,
-        _ => -1,
-    }
+    unsafe { borrow(handle) }
+        .map(|string| core_char::ascii_code(unsafe { string.as_str() }))
+        .unwrap_or(-1)
 }
 
 /// Whether the grapheme is a single ASCII code point.
@@ -177,7 +167,8 @@ pub unsafe extern "C" fn zirk_char_is_numeric(handle: *const c_void) -> bool {
 /// The handle must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_is_alphanumeric(handle: *const c_void) -> bool {
-    unsafe { first_char(handle) }.is_some_and(char::is_alphanumeric)
+    unsafe { borrow(handle) }
+        .is_some_and(|string| core_char::is_alphanumeric(unsafe { string.as_str() }))
 }
 
 /// `c.normalize(form)` — the grapheme normalized to the named form
@@ -213,4 +204,24 @@ pub unsafe extern "C" fn zirk_char_bytes(handle: *const c_void) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_char_codepoints(handle: *const c_void) -> *mut c_void {
     unsafe { crate::string::zirk_str_codepoints(handle) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(handle: *mut c_void) -> String {
+        unsafe { (*crate::string::payload_ptr(handle)).as_str().to_owned() }
+    }
+
+    #[test]
+    fn extracted_char_semantics_match_the_native_handles() {
+        let uppercase = crate::string::alloc_owned("Ñ");
+        let sharp_s = crate::string::alloc_owned("ß");
+        let non_ascii = crate::string::alloc_owned("ñ");
+        assert!(unsafe { zirk_char_is_uppercase(uppercase) });
+        assert!(unsafe { zirk_char_is_letter(non_ascii) });
+        assert_eq!(unsafe { zirk_char_ascii_code(non_ascii) }, -1);
+        assert_eq!(text(unsafe { zirk_char_to_uppercase(sharp_s) }), "SS");
+    }
 }
