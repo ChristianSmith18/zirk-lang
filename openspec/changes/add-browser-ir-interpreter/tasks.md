@@ -149,8 +149,8 @@
 - [x] 11.4 Add boundary tests for malformed requests, unknown fields according to contract policy, and unsupported API versions.
 - [x] 11.5 Add a pinned repository command that installs or locates the approved WASM build tools without floating versions.
 - [x] 11.6 Add a reproducible package build command that emits the `.wasm`, ES-module glue, declarations, and required license notices.
-- [ ] 11.7 Generate a manifest containing API/compiler versions, clean source revision, tool versions, operations, limits, exclusions, sizes, and SHA-256 checksums.
-- [ ] 11.8 Add manifest verification that fails for stale revisions, missing files, size drift outside policy, or checksum mismatch.
+- [x] 11.7 Generate a manifest containing API/compiler versions, clean source revision, tool versions, operations, limits, exclusions, sizes, and SHA-256 checksums.
+- [x] 11.8 Add manifest verification that fails for stale revisions, missing files, size drift outside policy, or checksum mismatch.
 - [x] 11.9 Add a dependency audit proving browser artifacts exclude LLVM, native linker code, native runtime ABI, collector, pointer, and stdout machinery.
 - [x] 11.10 Add a module-worker smoke test that initializes the package and runs a Hello World fixture.
 - [x] 11.11 Measure raw, gzip, and Brotli artifact sizes and enforce reviewed browser-package warning and error budgets.
@@ -165,13 +165,13 @@
 - [x] 12.5 Add a differential test harness that reports fixture-level output and failure differences.
 - [x] 12.6 Add a browser-package contract runner for the generated ES module and WASM artifact.
 - [x] 12.7 Add deterministic repeated-run tests proving no state, output, heap identity, or diagnostics leak between executions.
-- [ ] 12.8 Add stress tests for maximum accepted source, diagnostics, instruction count, call depth, heap use, output, regex input, and collection size.
+- [x] 12.8 Add stress tests for maximum accepted source, diagnostics, instruction count, call depth, heap use, output, regex input, and collection size.
 - [x] 12.9 Run `cargo test -p zirk-runtime-core` and resolve all failures.
 - [x] 12.10 Run `cargo test -p zirk-runtime` and resolve all regressions.
 - [x] 12.11 Run `cargo test -p zirk-interpreter` and resolve all failures.
 - [x] 12.12 Run `cargo test -p zirk-browser` on the host and through its WASM contract runner.
 - [x] 12.13 Run `cargo test --workspace` and resolve all regressions.
-- [ ] 12.14 Run formatting, clippy, browser dependency audit, package integrity verification, and bundle-budget checks.
+- [x] 12.14 Run formatting, clippy, browser dependency audit, package integrity verification, and bundle-budget checks.
 
 ## 13. Documentation, status, and companion-site handoff
 
@@ -182,8 +182,8 @@
 - [x] 13.5 Update Current Limitations to distinguish browser tooling from the deferred Zirk WebAssembly target.
 - [x] 13.6 Update the compiler and handbook roadmaps with the reviewed phase placement for browser-hosted interpretation.
 - [x] 13.7 Update relevant normative compiler/runtime documentation only where the new execution-engine contract requires it, without changing source-language semantics.
-- [ ] 13.8 Commit the completed `zirk-lang` change on the worktree branch and record its clean revision for artifact provenance.
-- [ ] 13.9 Build and verify the browser package from that exact clean compiler revision.
+- [x] 13.8 Commit the completed `zirk-lang` change on the worktree branch and record its clean revision for artifact provenance.
+- [x] 13.9 Build and verify the browser package from that exact clean compiler revision.
 - [ ] 13.10 Apply and complete `add-browser-playground-execution` in `../zirk-lang-site` on its normal `develop` branch using the verified package.
 - [ ] 13.11 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` from the committed compiler revision after human review of site-owned status claims.
 - [ ] 13.12 Reconcile generated website content with the site playground integration without overwriting site-owned changes.
