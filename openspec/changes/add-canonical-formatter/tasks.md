@@ -35,8 +35,8 @@
 
 - [x] 6.1 Add the versioned `format` request/response types reusing the existing source-byte and diagnostic limits; verify `apiVersion` stays 1 and unknown-version requests still fail explicitly.
 - [x] 6.2 Implement `format` in `zirk-browser` through the shared frontend and `zirk-format`; verify contract tests for success, diagnostics, limit failures, and pre-initialization errors.
-- [ ] 6.3 Update the manifest generator (`operations` list), TypeScript declarations, and package verification; verify `verify-browser-package.mjs` and the dependency audit still pass.
-- [ ] 6.4 Extend the module-worker smoke test with a `format` invocation; verify the built package formats a fixture inside a worker.
+- [x] 6.3 Update the manifest generator (`operations` list), TypeScript declarations, and package verification; verify `verify-browser-package.mjs` and the dependency audit still pass.
+- [x] 6.4 Extend the module-worker smoke test with a `format` invocation; verify the built package formats a fixture inside a worker.
 - [x] 6.5 Document the package handoff for the companion `zirk-lang-site` playground change (new package revision, manifest, Format UI wiring) in the site's delivery docs.
 
 ## 7. Documentation, status, and website sync
@@ -44,13 +44,13 @@
 - [x] 7.1 Update `docs/TOOLCHAIN.md` and the handbook toolchain chapter with the full `zirk format` surface (targets, `--check`, `--diff`, directives).
 - [x] 7.2 Document the canonical style rules (indent, width, breaking, comment anchoring, directives) in the handbook so the formatter's output is normative, not surprising.
 - [x] 7.3 Update Feature Status, Current Limitations, and roadmaps: the formatter moves from the `'''` slice to full canonical formatting, delivered in the browser package too.
-- [ ] 7.4 Reformat the repository's `.zrk` corpus and handbook examples in a single dedicated commit after the engine lands.
-- [ ] 7.5 Add `zirk format --check` to `scripts/check-local.sh` and CI after the corpus reformat; verify the gate passes.
+- [x] 7.4 Reformat the repository's `.zrk` corpus and handbook examples in a single dedicated commit after the engine lands.
+- [x] 7.5 Add `zirk format --check` to `scripts/check-local.sh` and CI after the corpus reformat; verify the gate passes.
 - [ ] 7.6 Commit the `zirk-lang` work on `develop`, run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` against a clean `../zirk-lang-site`, review the diff, and commit the site synchronization separately recording both revisions.
 
 ## 8. Verification
 
 - [x] 8.1 Run `cargo test -p zirk-format -p zirk-lexer -p zirk-cli -p zirk-lsp -p zirk-browser` and resolve all failures.
-- [ ] 8.2 Run `./scripts/check-local.sh` and resolve all regressions.
-- [ ] 8.3 Rebuild and verify the browser package from the clean committed revision; run the WASM contract runner and worker smoke test including `format`.
+- [x] 8.2 Run `./scripts/check-local.sh` and resolve all regressions.
+- [x] 8.3 Rebuild and verify the browser package from the clean committed revision; run the WASM contract runner and worker smoke test including `format`.
 - [ ] 8.4 After the companion site change lands, run the site's `yarn test` and `yarn build`; resolve content-integrity or budget regressions.
