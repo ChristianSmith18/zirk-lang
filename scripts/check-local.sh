@@ -64,6 +64,11 @@ cargo build --workspace
 green "  ok"
 echo
 
+blue "== canonical formatting =="
+./scripts/check-format.sh
+green "  ok"
+echo
+
 blue "== tests =="
 cargo test --workspace -- --test-threads=1
 echo
