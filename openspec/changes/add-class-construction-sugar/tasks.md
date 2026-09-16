@@ -44,11 +44,14 @@
 - [x] 6.2 Update the handbook constructors and instantiation chapters (`02-handbook/08-classes-and-objects/`) with short/long form examples, the legibility warnings, and the implicit constructor rules.
 - [x] 6.3 Update Feature Status and the roadmaps (compiler + handbook + `docs/init/ZIRK_ROADMAP.md`) with the delivered sugar and its phase placement.
 - [x] 6.4 Update `editors/vscode` grammar/snippets only if the parameter-modifier syntax needs highlighting changes; validate the JSON and copy to the installed extension per `AGENTS.md`.
-- [ ] 6.5 Commit the `zirk-lang` work on `develop`, then run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` against a clean `../zirk-lang-site` and review the generated diff.
-- [ ] 6.6 Commit the reviewed site synchronization separately and record both repository revisions.
+- [x] 6.5 Commit the `zirk-lang` work on `develop`, then run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` against a clean `../zirk-lang-site` and review the generated diff.
+  Evidence: sugar landed as `b193b7c feat(lang): class construction sugar`; `./scripts/sync-website-content.sh --audit-date 2026-09-16` pinned the site to `4b4d917` (372 handbook documents); the site diff was provenance/checksums plus the verified browser package acquisition.
+- [x] 6.6 Commit the reviewed site synchronization separately and record both repository revisions.
+  Evidence: site commits `12a80ef` (WASM package + `format` contract), `9ef8c4c` (content sync), `0d4f394` (delivery doc); the delivery pair is recorded in `zirk-lang-site/docs/playground-editor-delivery.md` (`zirk-lang` `4b4d917…` / `zirk-lang-site` `9ef8c4c…`).
 
 ## 7. Verification
 
 - [x] 7.1 Run `cargo test -p zirk-parser -p zirk-sema -p zirk-ir -p zirk-cli -p zirk-lsp` and resolve all failures.
 - [x] 7.2 Run `./scripts/check-local.sh` (fmt, clippy, builds, workspace tests) and resolve all regressions.
-- [ ] 7.3 Run the site's `yarn test` after the content sync when the site change lands; resolve any content-integrity regressions.
+- [x] 7.3 Run the site's `yarn test` after the content sync when the site change lands; resolve any content-integrity regressions.
+  Evidence: `yarn test` passed post-sync (47 files / 187 tests) and `yarn build` prerendered 378 routes with sitemap and shell verification green; only pre-existing bundle-budget warnings remain.

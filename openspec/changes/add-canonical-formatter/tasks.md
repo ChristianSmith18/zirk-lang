@@ -46,11 +46,13 @@
 - [x] 7.3 Update Feature Status, Current Limitations, and roadmaps: the formatter moves from the `'''` slice to full canonical formatting, delivered in the browser package too.
 - [x] 7.4 Reformat the repository's `.zrk` corpus and handbook examples in a single dedicated commit after the engine lands.
 - [x] 7.5 Add `zirk format --check` to `scripts/check-local.sh` and CI after the corpus reformat; verify the gate passes.
-- [ ] 7.6 Commit the `zirk-lang` work on `develop`, run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` against a clean `../zirk-lang-site`, review the diff, and commit the site synchronization separately recording both revisions.
+- [x] 7.6 Commit the `zirk-lang` work on `develop`, run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` against a clean `../zirk-lang-site`, review the diff, and commit the site synchronization separately recording both revisions.
+  Evidence: formatter landed as `3bf8f91`, `3d103a8`, `0ec96c2`, `c978b7a`, `8ae441d`, `901ce5b`; sync pinned the site to `4b4d917`; site commits `12a80ef`/`9ef8c4c`/`0d4f394` record the package acquisition, content sync, and delivery pair.
 
 ## 8. Verification
 
 - [x] 8.1 Run `cargo test -p zirk-format -p zirk-lexer -p zirk-cli -p zirk-lsp -p zirk-browser` and resolve all failures.
 - [x] 8.2 Run `./scripts/check-local.sh` and resolve all regressions.
 - [x] 8.3 Rebuild and verify the browser package from the clean committed revision; run the WASM contract runner and worker smoke test including `format`.
-- [ ] 8.4 After the companion site change lands, run the site's `yarn test` and `yarn build`; resolve content-integrity or budget regressions.
+- [x] 8.4 After the companion site change lands, run the site's `yarn test` and `yarn build`; resolve content-integrity or budget regressions.
+  Evidence: companion change vendored the verified `format` package (`BROWSER_COMPILER_OPERATIONS` extended); `yarn test` passed (187 tests) and `yarn build` prerendered 378 routes with `compiler:verify` and `shell:verify` green; budget warnings are pre-existing.
