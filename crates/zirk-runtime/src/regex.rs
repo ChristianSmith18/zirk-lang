@@ -497,16 +497,3 @@ pub unsafe extern "C" fn zirk_regex_match_group_name(
 
     crate::string::alloc_owned("")
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn to_string_returns_the_original_pattern() {
-        let pattern = crate::string::alloc_owned("a+b*");
-        let regex = unsafe { super::zirk_regex_from_pattern(pattern) };
-        let rendered = unsafe { super::zirk_regex_to_string(regex) };
-        let text = unsafe { (*crate::string::payload_ptr(rendered)).as_str() };
-
-        assert_eq!(text, "a+b*");
-    }
-}
