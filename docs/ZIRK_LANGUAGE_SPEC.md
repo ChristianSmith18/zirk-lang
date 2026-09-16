@@ -353,6 +353,21 @@ constructor execution. A constructor may finalize an `inmut` attribute before
 the instance becomes available. There is no property declaration or implicit
 accessor dispatch; APIs use ordinary `get_` and `set_` methods.
 
+A `class` constructor parameter carrying one or more member modifiers declares
+and initializes a field with the same name. For example,
+`construct(public name: String, private inmut id: UInt64)` is equivalent to
+explicit field declarations followed by assignments from the parameters. The
+parameter remains available in the constructor body. Promotion is restricted
+to a single `class construct`; it cannot be variadic or duplicate a declared
+field. A promoted field used from another method produces a legibility warning
+suggesting an explicit declaration.
+
+A class with no written `construct` has an implicit zero-argument constructor.
+It is not materialized in source or tooling. For a subclass it invokes an
+accessible zero-argument base constructor; construction is rejected at the
+call site when the base needs arguments. Declaring any `construct` removes the
+implicit constructor.
+
 A class may declare multiple `construct` members when their effective
 positional parameter signatures differ. Parameter labels do not distinguish
 constructors that accept the same positional arity and types: declaring both

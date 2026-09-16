@@ -1,0 +1,30 @@
+class ShortCreation {
+    construct(public name: String, public age: Int32) {
+        stdout.println(this.name);
+        stdout.println(this.age);
+    }
+}
+
+class LongCreation {
+    name: String;
+    age: Int32;
+
+    construct(name: String, age: Int32) {
+        this.name = name;
+        this.age = age;
+        stdout.println(this.name);
+        stdout.println(this.age);
+    }
+}
+
+class OmitConstruct {
+    value: Int32 = 7;
+    show(): Void { stdout.println(this.value); }
+}
+
+fn main(): Void {
+    mut short = ShortCreation("Ana", 32);
+    mut long = LongCreation("Ana", 32);
+    mut omitted = OmitConstruct();
+    omitted.show();
+}

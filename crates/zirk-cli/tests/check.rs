@@ -98,6 +98,26 @@ fn an_invalid_program_is_rejected_with_diagnostics() {
 }
 
 #[test]
+fn promoted_constructor_diagnostics_have_stable_json_codes() {
+    let dir = workspace("promoted_constructor_json");
+    let source = dir.join("promoted.zrk");
+    std::fs::write(
+        &source,
+        "class User { name: String; construct(public name: String) { } } fn main(): Void { }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "--json", "promoted.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run zirk check --json");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E0477"), "{stderr}");
+    assert!(stderr.trim_start().starts_with('['), "{stderr}");
+}
+
+#[test]
 fn a_missing_file_reports_a_diagnostic() {
     let dir = workspace("missing_file");
     let output = Command::new(compiler())

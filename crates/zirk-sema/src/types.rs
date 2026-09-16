@@ -1055,6 +1055,8 @@ pub struct FieldInfo {
     pub default: Option<zirk_ast::Expr>,
     /// `static` fields live outside object instances.
     pub is_static: bool,
+    /// Declared by a promoted constructor parameter rather than a field node.
+    pub promoted: bool,
 }
 
 /// A generic type parameter, as the checker sees it.

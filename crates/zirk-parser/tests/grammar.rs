@@ -1219,15 +1219,11 @@ fn named_argument_shorthand_desugars_to_the_identifier_path() {
             Some("value")
         );
         assert!(matches!(&call.args[0].value, Expr::Path(path) if path.name == "value"));
-        assert_eq!(
-            call.args[0].span,
-            call.args[0]
-                .name
-                .as_ref()
-                .unwrap()
-                .span
-                .to(call.args[0].value.span())
-        );
+        // The written argument is `value:` — the span covers the colon so
+        // source-slicing tools (the formatter) keep the shorthand marker.
+        let name_span = call.args[0].name.as_ref().unwrap().span;
+        assert_eq!(call.args[0].span.start, name_span.start);
+        assert_eq!(call.args[0].span.end, name_span.end + 1);
     }
 }
 
@@ -2405,4 +2401,31 @@ fn valid_cores_as_an_ordinary_identifier_outside_a_parallel_header() {
         panic!("expected a binding");
     };
     assert!(matches!(binding.init, Some(Expr::Int(_))));
+}
+
+#[test]
+fn valid_promoted_constructor_parameters_preserve_their_contract() {
+    let p = program(
+        "class User { construct(public name?: String, private inmut id: UInt64 = 1) { } } fn main(): Void { }",
+    );
+    let params = &p.classes[0].constructors[0].params;
+    assert!(params[0].promoted.is_some());
+    assert!(params[0].optional);
+    assert!(params[1].promoted.is_some());
+    assert!(params[1].default.is_some());
+}
+
+#[test]
+fn invalid_member_modifier_on_a_function_parameter_is_targeted() {
+    let output = errors("fn f(public name: String): Void { } fn main(): Void { }");
+    assert!(
+        output.contains("only to `construct` parameters"),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_unmodified_constructor_parameter_is_not_promoted() {
+    let p = program("class User { construct(name: String) { } } fn main(): Void { }");
+    assert!(p.classes[0].constructors[0].params[0].promoted.is_none());
 }

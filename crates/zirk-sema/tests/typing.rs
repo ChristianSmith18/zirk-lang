@@ -6438,3 +6438,109 @@ fn valid_io_outside_a_parallel_region_still_type_checks() {
          stdout.println(1);",
     );
 }
+
+#[test]
+fn valid_promoted_constructor_parameter_is_a_field() {
+    accepted(
+        "class User { construct(public name: String) { } greet(): String { return this.name; } } fn main(): Void { mut user = User(name: \"Ana\"); stdout.println(user.greet()); }",
+    );
+}
+
+#[test]
+fn invalid_promoted_constructor_parameter_duplicates_a_field() {
+    let output = rejected(
+        "class User { name: String; construct(public name: String) { } } fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_PROMOTED_FIELD.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_class_without_a_construct_has_an_implicit_zero_argument_constructor() {
+    accepted("class Marker { } fn main(): Void { mut marker = Marker(); }");
+}
+
+#[test]
+fn invalid_arguments_to_an_implicit_constructor_are_rejected() {
+    let output = rejected("class Marker { } fn main(): Void { mut marker = Marker(1); }");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn promoted_field_use_outside_its_constructor_is_a_warning() {
+    let output = accepted_with_warnings(
+        "class User { construct(public name: String) { } greet(): String { return this.name; } } fn main(): Void { mut user = User(\"Ana\"); stdout.println(user.greet()); }",
+    );
+    assert!(
+        output.contains(codes::PROMOTED_FIELD_LEGIBILITY.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn promoted_field_write_outside_its_constructor_is_a_warning() {
+    let output = accepted_with_warnings(
+        "class Counter { construct(public mut value: Int32) { this.value = value; } bump(): Void { this.value = 1; } } fn main(): Void { mut counter = Counter(0); counter.bump(); }",
+    );
+    assert!(
+        output.contains(codes::PROMOTED_FIELD_LEGIBILITY.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn promoted_variadic_and_record_constructor_parameters_are_rejected() {
+    let variadic =
+        rejected("class C { construct(public ...items: List<Int32>) { } } fn main(): Void { }");
+    assert!(
+        variadic.contains(codes::PROMOTED_VARIADIC.as_str()),
+        "{variadic}"
+    );
+    let record = rejected("record C { construct(public item: Int32) { } } fn main(): Void { }");
+    assert!(
+        record.contains(codes::PROMOTION_OUTSIDE_CLASS_CONSTRUCT.as_str()),
+        "{record}"
+    );
+}
+
+#[test]
+fn promoted_parameters_support_named_optional_default_and_generic_construction() {
+    accepted(
+        "class User { construct(public name: String, public age?: Int32, public role: String = \"member\") { } } class Box<T> { construct(public value: T) { } } fn main(): Void { mut user = User(role: \"admin\", name: \"Ana\"); mut box: Box<Int32> = Box(value: 1); }",
+    );
+}
+
+#[test]
+fn promoted_inmut_field_is_initialized_but_cannot_be_mutated_later() {
+    let output = rejected(
+        "class User { construct(public inmut id: Int32) { } change(): Void { this.id = 2; } } fn main(): Void { mut user = User(1); user.change(); }",
+    );
+    assert!(
+        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn implicit_subclass_constructor_calls_an_accessible_zero_argument_base() {
+    let output = accepted_with_warnings(
+        "class Base { construct() { } } class Child extends Base { } fn main(): Void { mut child = Child(); }",
+    );
+    assert!(output.contains(codes::IMPLICIT_SUPER.as_str()), "{output}");
+}
+
+#[test]
+fn implicit_subclass_constructor_reports_an_unsatisfied_base_at_instantiation() {
+    let output = rejected(
+        "class Base { construct(value: Int32) { } } class Child extends Base { } fn main(): Void { mut child = Child(); }",
+    );
+    assert!(
+        output.contains(codes::UNSATISFIABLE_IMPLICIT_CONSTRUCTION.as_str()),
+        "{output}"
+    );
+}

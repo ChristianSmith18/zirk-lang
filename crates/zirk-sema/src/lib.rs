@@ -78,6 +78,20 @@ pub mod codes {
     pub const UNKNOWN_VARIANT: Code = Code::new("E0420");
     /// A declaration whose name collides with another.
     pub const DUPLICATE_DECLARATION: Code = Code::new("E0421");
+    /// A promoted constructor parameter collides with a field.
+    pub const DUPLICATE_PROMOTED_FIELD: Code = Code::new("E0477");
+    /// Promotion is ambiguous when a class declares several constructors.
+    pub const PROMOTION_MULTIPLE_CONSTRUCTORS: Code = Code::new("E0478");
+    /// Member promotion belongs only to class constructors.
+    pub const PROMOTION_OUTSIDE_CLASS_CONSTRUCT: Code = Code::new("E0479");
+    /// A variadic parameter cannot become one field.
+    pub const PROMOTED_VARIADIC: Code = Code::new("E0480");
+    /// A promoted field is used outside the constructor that declares it.
+    pub const PROMOTED_FIELD_LEGIBILITY: Code = Code::new("W0465");
+    /// An implicit subclass constructor calls its zero-argument base constructor.
+    pub const IMPLICIT_SUPER: Code = Code::new("W0466");
+    /// A synthesized constructor cannot satisfy its base constructor.
+    pub const UNSATISFIABLE_IMPLICIT_CONSTRUCTION: Code = Code::new("E0481");
     /// An `if` used as a value without an `else`.
     pub const IF_WITHOUT_ELSE: Code = Code::new("E0422");
     /// A construct this phase checks but does not compile yet.

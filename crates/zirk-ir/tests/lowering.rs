@@ -1234,6 +1234,19 @@ fn a_constructor_writes_its_fields_by_position() {
 }
 
 #[test]
+fn an_implicit_constructor_initializes_declared_field_defaults() {
+    let module =
+        compile("class Marker { value: Int32 = 7; } fn main(): Void { mut marker = Marker(); }");
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::StoreField { index: 0, .. })),
+        "implicit construction must store the field initializer"
+    );
+}
+
+#[test]
 fn several_constructors_are_emitted_under_distinct_names() {
     let module = with_class(
         "class Point {

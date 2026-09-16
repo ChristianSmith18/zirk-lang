@@ -1088,6 +1088,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: class_id,
+                    promoted: false,
                 },
                 FieldInfo {
                     name: "haystack".to_string(),
@@ -1098,6 +1099,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: class_id,
+                    promoted: false,
                 },
                 FieldInfo {
                     name: "start".to_string(),
@@ -1108,6 +1110,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: class_id,
+                    promoted: false,
                 },
                 FieldInfo {
                     name: "end".to_string(),
@@ -1118,6 +1121,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: class_id,
+                    promoted: false,
                 },
                 FieldInfo {
                     name: "regex".to_string(),
@@ -1128,6 +1132,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: class_id,
+                    promoted: false,
                 },
             ],
             constructors: Vec::new(),
@@ -1441,6 +1446,24 @@ impl<'a> Checker<'a> {
                     text,
                     inferred: false,
                 });
+            }
+            for constructor in &decl.constructors {
+                for param in constructor
+                    .params
+                    .iter()
+                    .filter(|param| param.promoted.is_some())
+                {
+                    let Some(info) = self.classes[id as usize].field(&param.name.name) else {
+                        continue;
+                    };
+                    entries.push(TypeMapEntry {
+                        name: Some(param.name.name.clone()),
+                        kind: TypeMapKind::Field,
+                        span: param.name.span,
+                        text: self.name(info.ty),
+                        inferred: false,
+                    });
+                }
             }
         }
         for decl in &program.contracts {
@@ -2386,6 +2409,7 @@ impl<'a> Checker<'a> {
                     default: None,
                     is_static: false,
                     owner: id,
+                    promoted: false,
                 }],
                 // `construct(reason: String)`: one parameter, no user-visible
                 // body — `zirk-ir::lower_construction`'s own special case for
@@ -4378,6 +4402,7 @@ impl<'a> Checker<'a> {
                 default: None,
                 is_static: false,
                 owner: id,
+                promoted: false,
             });
         }
 
@@ -4465,6 +4490,7 @@ impl<'a> Checker<'a> {
                 owner: id,
                 default: field.default.clone(),
                 is_static: field.is_static,
+                promoted: false,
             });
         }
 
@@ -4488,6 +4514,68 @@ impl<'a> Checker<'a> {
                     Some("remove `construct`".into()),
                 );
             }
+        }
+
+        let promoted: Vec<&zirk_ast::Param> = decl
+            .constructors
+            .iter()
+            .flat_map(|constructor| constructor.params.iter())
+            .filter(|param| param.promoted.is_some())
+            .collect();
+        if !promoted.is_empty() && decl.kind != ClassKind::Class {
+            for param in &promoted {
+                self.error(
+                    codes::PROMOTION_OUTSIDE_CLASS_CONSTRUCT,
+                    param.span,
+                    "promoted parameters are only valid on a class `construct`",
+                    format!("this declaration is a {}", decl.kind.as_str()),
+                    Some("declare an explicit field instead".into()),
+                );
+            }
+        }
+        if !promoted.is_empty() && decl.constructors.len() != 1 {
+            self.error(
+                codes::PROMOTION_MULTIPLE_CONSTRUCTORS,
+                promoted[0].span,
+                "a promoted parameter requires exactly one constructor",
+                "more than one `construct` makes the promoted field's owner ambiguous",
+                Some("keep one constructor or declare the attributes explicitly".into()),
+            );
+        }
+        for param in promoted {
+            if param.variadic {
+                self.error(
+                    codes::PROMOTED_VARIADIC,
+                    param.span,
+                    "a promoted parameter cannot be variadic",
+                    "a field stores one value, while a variadic parameter collects many arguments",
+                    Some("declare the field explicitly and assign a collected value in the constructor".into()),
+                );
+                continue;
+            }
+            let modifiers = param.promoted.expect("filtered above");
+            if let Some(previous) = fields.iter().find(|field| field.name == param.name.name) {
+                let where_ = self.declared_at(previous.span, param.name.span);
+                self.error(
+                    codes::DUPLICATE_PROMOTED_FIELD,
+                    param.name.span,
+                    format!("field `{}` is already defined", param.name.name),
+                    format!("the existing field was declared {where_}"),
+                    Some("remove the explicit field or the promotion modifier".into()),
+                );
+                continue;
+            }
+            fields.push(FieldInfo {
+                name: param.name.name.clone(),
+                ty: self.resolve_type(&param.ty),
+                visibility: modifiers.visibility,
+                mutability: modifiers.mutability,
+                span: param.name.span,
+                owner: id,
+                default: None,
+                is_static: false,
+                promoted: true,
+            });
         }
 
         let constructors: Vec<Vec<ParamInfo>> = decl
@@ -5279,7 +5367,14 @@ impl<'a> Checker<'a> {
     /// allocation happened to contain, and `LANGUAGE_SPEC` section 2 forbids
     /// reading a variable before it holds a value. A field is no different.
     fn require_fields_initialized(&mut self, decl: &ClassDecl, constructor: &ConstructDecl) {
-        let assigned = assigned_fields(&constructor.body);
+        let mut assigned = assigned_fields(&constructor.body);
+        assigned.extend(
+            constructor
+                .params
+                .iter()
+                .filter(|param| param.promoted.is_some())
+                .map(|param| param.name.name.clone()),
+        );
         let Some(id) = self.class_decl_id(decl) else {
             return;
         };
@@ -9772,6 +9867,23 @@ impl<'a> Checker<'a> {
 
         if !in_own_constructor
             && let Base::Class(id) = object.base
+            && let Some(info) = self.classes[id as usize].field(&field.name.name).cloned()
+            && info.promoted
+        {
+            self.warning(
+                codes::PROMOTED_FIELD_LEGIBILITY,
+                info.span,
+                format!(
+                    "promoted field `{}` is used outside its constructor",
+                    field.name.name
+                ),
+                "the field is declared by a constructor parameter",
+                Some("declare the field explicitly when it is part of the class API".into()),
+            );
+        }
+
+        if !in_own_constructor
+            && let Base::Class(id) = object.base
             && let Some(info) = self.classes[id as usize].field(&field.name.name)
             && info.mutability == Mutability::Immutable
         {
@@ -13757,7 +13869,8 @@ impl<'a> Checker<'a> {
         };
 
         let class = &self.classes[id as usize];
-        let Some(field) = class.field(&member.name) else {
+        let class_name = class.name.clone();
+        let Some(field) = class.field(&member.name).cloned() else {
             let class_name = class.name.clone();
             let known: Vec<&str> = class.fields.iter().map(|f| f.name.as_str()).collect();
             let help = if known.is_empty() {
@@ -13780,8 +13893,20 @@ impl<'a> Checker<'a> {
         let declared = field.span;
         let owner = field.owner;
 
+        if field.promoted && !self.in_constructor {
+            self.warning(
+                codes::PROMOTED_FIELD_LEGIBILITY,
+                declared,
+                format!(
+                    "promoted field `{}` is used outside its constructor",
+                    member.name
+                ),
+                "the field is declared by a constructor parameter",
+                Some("declare the field explicitly when it is part of the class API".into()),
+            );
+        }
+
         if field.is_static {
-            let class_name = class.name.clone();
             self.error(
                 codes::TYPE_MISMATCH,
                 member.span,
@@ -15614,6 +15739,7 @@ impl<'a> Checker<'a> {
         let kind = class.kind;
         let constructors = class.constructors.clone();
         let type_params = class.type_params.clone();
+        let base = class.base;
 
         self.require_visible(span, shared, callee, kind.as_str());
 
@@ -15622,12 +15748,46 @@ impl<'a> Checker<'a> {
         }
 
         if constructors.is_empty() {
+            if expr.args.is_empty() {
+                // A class with no written `construct` has the language's
+                // implicit zero-argument constructor.  It remains absent
+                // from the AST and tooling tables.
+                if let Some(base) = base {
+                    let base_info = &self.classes[base as usize];
+                    if !base_info.constructors.is_empty()
+                        && !base_info
+                            .constructors
+                            .iter()
+                            .any(|params| admits_arity(params, 0))
+                    {
+                        self.error(
+                            codes::UNSATISFIABLE_IMPLICIT_CONSTRUCTION,
+                            expr.span,
+                            format!("implicit construction of `{class_name}` cannot initialize its base"),
+                            format!("`{}` has no constructor that takes zero arguments", base_info.name),
+                            Some("declare an explicit constructor and call `super(...)` with the required arguments".into()),
+                        );
+                    } else {
+                        self.warning(
+                            codes::IMPLICIT_SUPER,
+                            expr.span,
+                            format!("implicit constructor of `{class_name}` calls `super()`"),
+                            "the subclass declares no constructor",
+                            Some("write an explicit constructor and `super()` for clarity".into()),
+                        );
+                    }
+                }
+                return Type::of(Base::Class(id));
+            }
             self.error(
-                codes::UNKNOWN_MEMBER,
+                codes::WRONG_ARGUMENT_COUNT,
                 expr.span,
-                format!("`{class_name}` has no constructor"),
-                "a class is built through a `construct` declaration",
-                Some(format!("add `construct(...) {{ ... }}` to `{class_name}`")),
+                format!(
+                    "no constructor of `{class_name}` takes {} arguments",
+                    expr.args.len()
+                ),
+                "the implicit constructor takes zero arguments",
+                Some("declare a `construct(...)` for arguments".into()),
             );
             for arg in &expr.args {
                 self.check_expr(&arg.value);

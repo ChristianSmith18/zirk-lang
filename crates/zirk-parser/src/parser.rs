@@ -976,7 +976,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         // A contract method's annotation is optional only when a body follows:
         // a `trait` default may infer its return; a signature-only member of
@@ -1365,7 +1365,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Construct);
 
         self.expect(&TokenKind::LParen, "after `construct`");
-        let params = self.parse_params();
+        let params = self.parse_params(true);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -1390,7 +1390,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         // An `abstract` method has no body to infer a return type from; a
         // concrete one may omit it (`return-type-inference`).
@@ -1581,7 +1581,7 @@ impl<'a> Parser<'a> {
         let type_params = self.parse_type_params();
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
         let return_type = self.parse_optional_return_type();
@@ -1645,7 +1645,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("after `fn`")?;
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
         let return_type = self.require_return_type(&name)?;
@@ -1723,7 +1723,7 @@ impl<'a> Parser<'a> {
 
     /// Parameters, with the optional, default and variadic forms of
     /// `ZIRK_LANGUAGE_SPEC.md` section 6.
-    fn parse_params(&mut self) -> Vec<Param> {
+    fn parse_params(&mut self, allow_promotion: bool) -> Vec<Param> {
         let mut params = Vec::new();
         let mut variadic_at: Option<Span> = None;
 
@@ -1741,6 +1741,44 @@ impl<'a> Parser<'a> {
                     Some("move `...` to the end of the list".into()),
                 );
                 break;
+            }
+
+            let visibility = self.parse_visibility();
+            let mutability = if self.eat_keyword(Keyword::Mut) {
+                Some(Mutability::Mutable)
+            } else if self.eat_keyword(Keyword::Inmut) {
+                if self.eat(&TokenKind::ColonColon) {
+                    if matches!(self.peek(), TokenKind::Identifier(name) if name == "strict") {
+                        self.pos += 1;
+                        Some(Mutability::Strict)
+                    } else {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            self.peek_span(),
+                            "expected `strict` after `inmut::`",
+                            "`inmut::strict` is the only qualified form of `inmut`",
+                            None,
+                        );
+                        return params;
+                    }
+                } else {
+                    Some(Mutability::Immutable)
+                }
+            } else {
+                None
+            };
+            let promoted = visibility.is_some() || mutability.is_some();
+            if promoted && !allow_promotion {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "member modifiers apply only to `construct` parameters",
+                    "this parameter is not in a class constructor",
+                    Some(
+                        "move the modifier to a class field, or use it on a `construct` parameter"
+                            .into(),
+                    ),
+                );
             }
 
             let variadic = self.eat(&TokenKind::DotDotDot);
@@ -1772,6 +1810,10 @@ impl<'a> Parser<'a> {
             params.push(Param {
                 name,
                 ty,
+                promoted: promoted.then_some(PromotedParam {
+                    visibility: visibility.unwrap_or(Visibility::Public),
+                    mutability: mutability.unwrap_or(Mutability::Mutable),
+                }),
                 optional,
                 default,
                 variadic,
@@ -3108,7 +3150,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
 
         self.expect(&TokenKind::LParen, "to open the lambda parameters");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the lambda parameters");
 
         self.expect(&TokenKind::Colon, "before the lambda return type");
@@ -4574,8 +4616,8 @@ impl<'a> Parser<'a> {
             // `name: value` matches by name. A bare identifier followed by `:`
             // is unambiguous here: a type annotation cannot appear in a call.
             // Spread arguments cannot be named.
-            let name = if is_spread {
-                None
+            let (name, name_colon) = if is_spread {
+                (None, None)
             } else {
                 match self.peek().clone() {
                     TokenKind::Identifier(name)
@@ -4583,26 +4625,34 @@ impl<'a> Parser<'a> {
                             == Some(&TokenKind::Colon) =>
                     {
                         let span = self.peek_span();
+                        let colon = self.tokens[self.pos + 1].span;
                         self.pos += 2;
-                        Some(Ident::new(name, span))
+                        (Some(Ident::new(name, span)), Some(colon))
                     }
-                    _ => None,
+                    _ => (None, None),
                 }
             };
 
             // `name:` is shorthand for `name: name`. It is recognized only
             // after the unambiguous `identifier :` prefix above, so a member
             // expression such as `config.url:` still fails as ordinary call
-            // syntax and cannot be mistaken for shorthand.
-            let value = if let Some(name) = &name
-                && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen)
-            {
-                Expr::Path(name.clone())
+            // syntax and cannot be mistaken for shorthand. The synthesized
+            // path carries the name's span, so the argument's own span must
+            // reach the `:` — tools slicing the written argument need it.
+            let shorthand = name.is_some()
+                && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen);
+            let value = if shorthand {
+                Expr::Path(name.clone().expect("shorthand implies a name"))
             } else {
                 self.parse_expr()?
             };
+            let end = if shorthand {
+                name_colon.expect("shorthand implies a colon")
+            } else {
+                value.span()
+            };
             args.push(Arg {
-                span: start.to(value.span()),
+                span: start.to(end),
                 name,
                 value,
                 is_spread,

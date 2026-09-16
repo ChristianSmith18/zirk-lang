@@ -4371,6 +4371,42 @@ impl<'a> FunctionLowering<'a> {
                 .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span)),
         );
 
+        // Parameter properties are ordinary field stores, emitted after the
+        // allocation defaults and before the user-written body.
+        for param in constructor
+            .params
+            .iter()
+            .filter(|param| param.promoted.is_some())
+        {
+            let object = self.emit(InstKind::Load(this), IrType::Object(id), param.name.span);
+            let field_ty = self.checked.classes[id as usize]
+                .fields
+                .iter()
+                .find(|field| field.name == param.name.name && field.owner == id)
+                .expect("checker registers every promoted parameter")
+                .ty;
+            let value = self.emit(
+                InstKind::Load(self.lookup_slot(&param.name.name)),
+                self.ir_type(field_ty),
+                param.name.span,
+            );
+            let field_index = self.checked.classes[id as usize]
+                .fields
+                .iter()
+                .filter(|field| !field.is_static)
+                .position(|field| field.name == param.name.name && field.owner == id)
+                .expect("checker registers every promoted parameter")
+                as u32;
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: field_index,
+                    value,
+                },
+                param.name.span,
+            );
+        }
+
         self.lower_block(&constructor.body);
         self.terminate(Terminator::Return(None));
         self.scopes.pop();
@@ -18511,6 +18547,60 @@ impl<'a> FunctionLowering<'a> {
                 },
                 span,
             );
+            return object;
+        }
+
+        // The default constructor is semantic sugar only: no AST member or
+        // constructor symbol exists for it, so allocation is its whole body.
+        if self.checked.classes[id as usize].constructors.is_empty() {
+            let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+            // A synthesized subclass constructor delegates to a written
+            // zero-argument base constructor.  An implicit base has no
+            // symbol; its defaults are handled by the allocation path below.
+            if let Some(base) = self.checked.classes[id as usize].base
+                && let Some(index) = self.checked.classes[base as usize]
+                    .constructors
+                    .iter()
+                    .position(|params| params.is_empty())
+            {
+                let name = self.module.objects[base as usize].name.clone();
+                self.emit_effect(
+                    InstKind::Call {
+                        callee: constructor_symbol(&name, index),
+                        args: vec![object],
+                    },
+                    span,
+                );
+            }
+            let fields: Vec<(IrType, Option<ast::Expr>)> = self.module.objects[id as usize]
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .zip(
+                    self.checked.classes[id as usize]
+                        .fields
+                        .iter()
+                        .filter(|field| !field.is_static)
+                        .map(|field| field.default.clone()),
+                )
+                .collect();
+            for (index, (ty, default)) in fields.into_iter().enumerate() {
+                let value = match default {
+                    Some(expr) => self.lower_expr(&expr),
+                    None => match self.default_value(ty, span) {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                };
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object,
+                        index: index as u32,
+                        value,
+                    },
+                    span,
+                );
+            }
             return object;
         }
 

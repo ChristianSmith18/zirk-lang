@@ -380,6 +380,9 @@ pub struct ExternFnDecl {
 pub struct Param {
     pub name: Ident,
     pub ty: TypeRef,
+    /// Member modifiers written on a class `construct` parameter.  Their
+    /// presence makes this parameter a promoted field declaration.
+    pub promoted: Option<PromotedParam>,
     /// `name?: T`, which makes the parameter nullable and defaultable to null.
     pub optional: bool,
     /// `name: T = expr`.
@@ -387,6 +390,13 @@ pub struct Param {
     /// `...name: T`, which collects the remaining arguments.
     pub variadic: bool,
     pub span: Span,
+}
+
+/// The member shape carried by a promoted constructor parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromotedParam {
+    pub visibility: Visibility,
+    pub mutability: Mutability,
 }
 
 /// An identifier together with its location.

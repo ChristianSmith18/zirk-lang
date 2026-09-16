@@ -13,6 +13,28 @@ Every required field must be available before construction completes. Validation
 
 Zirk has no `new` keyword and does not use destructors as its general resource-cleanup model.
 
+## Promoted constructor parameters
+
+Member modifiers on a class constructor parameter declare the field and assign
+the argument before the constructor body runs. This short form is equivalent
+to the explicit long form:
+
+```zirk
+class User {
+    construct(public name: String, private inmut id: UInt64) { }
+}
+```
+
+Use promotion for data carried only by construction. Accessing a promoted field
+from another method emits a legibility warning; declare the field explicitly
+when it is a broader part of the class API. Promotion requires one constructor
+and cannot be used for a variadic parameter.
+
+A class with no `construct` receives an implicit `construct() {}`. It is an
+implementation convenience, not a source member: outlines and formatting keep
+the class as written. An implicit subclass constructor calls an accessible
+zero-argument base constructor and warns to make that `super()` explicit.
+
 A class may declare multiple `construct` members when their parameter lists are
 not identical. Resolution considers arity, parameter types, and named
 arguments:
