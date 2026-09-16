@@ -410,7 +410,12 @@ Every variadic parameter SHALL remain an ordered read-only `Iterable<T>`. A rest
 - **THEN** `tail` has an ordered collection type whose element type is `Int32`
 
 ### Requirement: Class defaults and constructor resolution
-An unmodified class field SHALL be `public mut`. A class MAY declare multiple constructors with distinct effective signatures. Selection SHALL consider arity, types, optional parameters, and names and SHALL reject ambiguous or duplicate effective signatures.
+An unmodified class field SHALL be `public mut`. A class MAY declare multiple
+constructors with distinct effective positional signatures. Constructor
+declarations whose parameter types and accepted arities admit the same
+positional call SHALL be rejected regardless of parameter labels. Selection
+among the remaining declarations SHALL consider arity, types, optional
+parameters, and names and SHALL reject genuinely ambiguous calls.
 
 #### Scenario: Default field modifiers
 - **WHEN** a class declares `name: String;`
@@ -780,11 +785,20 @@ acquired while a mutable alias remains accessible.
 
 ### Requirement: Constructor resolution
 
-The checker SHALL select among multiple `construct` declarations by arity, types, optionals and names, SHALL allow reordering named arguments, and SHALL reject duplicate effective signatures or ambiguous calls.
+The checker SHALL reject constructor declarations whose parameter types and
+accepted arities admit the same positional call, regardless of parameter
+labels. It SHALL select among the remaining `construct` declarations by arity,
+types, optionals and names, SHALL allow reordering named arguments, and SHALL
+reject genuinely ambiguous calls.
 
 #### Scenario: Reordered named construction
 - **WHEN** `User(name: "Cristian", id: 1)` matches `construct(id: UInt64, name: String)`
 - **THEN** that signature is selected and each value binds by name
+
+#### Scenario: Duplicate positional constructor signature
+- **WHEN** a class declares `construct(x: Int32)` and `construct(y: Int32)`
+- **THEN** the class declaration is rejected because `Point(1)` has no label
+  with which to distinguish the constructors
 
 ### Requirement: Checked casts
 

@@ -1,0 +1,2 @@
+fn join(prefix: String, suffix: String): String { return prefix + suffix; }
+fn main(): Void { stdout.println(join(prefix: "PRE", "SUF")); }

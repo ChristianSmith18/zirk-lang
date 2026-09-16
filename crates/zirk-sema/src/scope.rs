@@ -218,6 +218,10 @@ pub struct ParamInfo {
     pub ty: Type,
     pub optional: bool,
     pub has_default: bool,
+    /// The default expression is retained so lowering can materialize it for
+    /// every callable form, not only free functions with an AST declaration
+    /// lookup.
+    pub default: Option<zirk_ast::Expr>,
     pub variadic: bool,
 }
 

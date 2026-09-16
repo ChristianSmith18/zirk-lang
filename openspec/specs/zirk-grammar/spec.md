@@ -617,7 +617,8 @@ The call grammar SHALL accept `name: expression` as an explicit named argument
 and `name:` as shorthand for `name: name`. The shorthand SHALL accept only a
 simple identifier, SHALL remain reorderable with other named arguments, and
 SHALL NOT reinterpret a reordered bare positional identifier by matching its
-spelling to a parameter.
+spelling to a parameter. After the first explicit or shorthand named argument,
+the call SHALL NOT accept a positional argument.
 
 #### Scenario: Reordered shorthand arguments
 

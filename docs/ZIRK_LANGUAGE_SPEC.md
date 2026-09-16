@@ -354,9 +354,12 @@ the instance becomes available. There is no property declaration or implicit
 accessor dispatch; APIs use ordinary `get_` and `set_` methods.
 
 A class may declare multiple `construct` members when their effective
-parameter signatures differ. Resolution uses arity, type and argument labels,
-including reordered named arguments, and rejects duplicate or ambiguous sets.
-This exception does not enable ordinary function or method overloading.
+positional parameter signatures differ. Parameter labels do not distinguish
+constructors that accept the same positional arity and types: declaring both
+`construct(x: Int32)` and `construct(y: Int32)` is an error. Resolution uses
+arity, type and argument labels, including reordered named arguments, and
+rejects genuinely ambiguous calls. This exception does not enable ordinary
+function or method overloading.
 
 Named calls use `name: value`. When a simple visible identifier has exactly the
 parameter name, `name:` abbreviates `name: name`, so

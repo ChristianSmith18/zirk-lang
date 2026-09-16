@@ -183,6 +183,9 @@ pub struct CheckedProgram {
     /// span — needed because nested and local classes are registered under
     /// qualified/mangled names the written callee does not carry.
     pub resolved_constructions: std::collections::HashMap<Span, u32>,
+    /// The constructor overload selected for each construction or base
+    /// constructor call. Lowering consumes this decision directly.
+    pub resolved_constructor_indices: std::collections::HashMap<Span, usize>,
     /// Which `Iteration<T>` instantiation a `for ... in` loop over a type's
     /// own `Iterable<T>` resolves to, keyed by the iterable expression's
     /// span — an id into `enum_instances` (roadmap task 13.5).
@@ -806,6 +809,7 @@ struct Checker<'a> {
     /// Every resolved construction call, keyed by the call's span — nested
     /// and local classes carry registered names the source text does not.
     resolved_constructions: HashMap<Span, u32>,
+    resolved_constructor_indices: HashMap<Span, usize>,
     /// `#override` markers on methods of a class with `implements`, whose
     /// "overrides nothing" verdict waits for conformance: the target may be
     /// a contract or abstract-class requirement declared nowhere in the
@@ -1042,6 +1046,7 @@ impl<'a> Checker<'a> {
             contract_method_mutates: HashMap::new(),
             inner_constructions: HashMap::new(),
             resolved_constructions: HashMap::new(),
+            resolved_constructor_indices: HashMap::new(),
             override_pending: Vec::new(),
             inferred_returns: None,
             pending_fn_decls: HashMap::new(),
@@ -1338,6 +1343,7 @@ impl<'a> Checker<'a> {
             generic_constructions: self.generic_constructions,
             inner_constructions: self.inner_constructions,
             resolved_constructions: self.resolved_constructions,
+            resolved_constructor_indices: self.resolved_constructor_indices,
             for_in_iteration: self.for_in_iteration,
             variant_constructions: self.variant_constructions,
             native_result: self.native_result,
@@ -1973,6 +1979,7 @@ impl<'a> Checker<'a> {
                     ty: Type::STRING,
                     optional: false,
                     has_default: false,
+                    default: None,
                     variadic: false,
                 }],
                 returns: Type::of(Base::Never),
@@ -2392,6 +2399,7 @@ impl<'a> Checker<'a> {
                     ty: Type::STRING,
                     optional: false,
                     has_default: false,
+                    default: None,
                     variadic: false,
                 }]],
                 methods: native_methods(id),
@@ -4482,11 +4490,41 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let constructors = decl
+        let constructors: Vec<Vec<ParamInfo>> = decl
             .constructors
             .iter()
             .map(|c| c.params.iter().map(|p| self.resolve_param(p)).collect())
             .collect();
+
+        // A positional call has no labels with which to distinguish
+        // constructors. Reject an overlap here rather than leaving a class
+        // declaration that can only fail later at particular call sites.
+        // Labels may make named calls distinct, but they cannot make two
+        // positional signatures distinct.
+        for (index, params) in constructors.iter().enumerate() {
+            for (previous_index, previous) in constructors[..index].iter().enumerate() {
+                if !constructors_overlap_positionally(previous, params) {
+                    continue;
+                }
+                let previous_span = decl.constructors[previous_index].span;
+                let where_ = self.declared_at(previous_span, decl.constructors[index].span);
+                let signature = self.constructor_positional_signature(previous);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    decl.constructors[index].span,
+                    format!(
+                        "constructor duplicates a positional signature `construct({signature})`"
+                    ),
+                    format!(
+                        "a previous constructor accepts the same positional argument types, {where_}"
+                    ),
+                    Some(
+                        "make the constructor parameter types or accepted positional arities distinct"
+                            .into(),
+                    ),
+                );
+            }
+        }
 
         let mut methods: Vec<MethodInfo> = base
             .map(|b| self.classes[b as usize].methods.clone())
@@ -5692,8 +5730,27 @@ impl<'a> Checker<'a> {
             ty,
             optional: p.optional,
             has_default: p.default.is_some(),
+            default: p.default.clone(),
             variadic: p.variadic,
         }
+    }
+
+    /// The label-free form used in constructor-overlap diagnostics.  Labels
+    /// are intentionally omitted because the rejected ambiguity is about the
+    /// positional syntax that has no labels to inspect.
+    fn constructor_positional_signature(&self, params: &[ParamInfo]) -> String {
+        params
+            .iter()
+            .map(|param| {
+                let ty = self.name(param.ty);
+                if param.variadic {
+                    format!("...{ty}")
+                } else {
+                    ty
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// `ZIRK_RUNTIME_SPEC.md` section 2 requires a `main` entrypoint.
@@ -14104,6 +14161,7 @@ impl<'a> Checker<'a> {
                 ty: f.ty,
                 optional: false,
                 has_default: false,
+                default: None,
                 variadic: false,
             })
             .collect();
@@ -14952,11 +15010,12 @@ impl<'a> Checker<'a> {
         let constructors = class.constructors.clone();
 
         let arity = expr.args.len();
-        let Some(params) = constructors
+        let arity_candidates: Vec<usize> = constructors
             .iter()
-            .find(|params| admits_arity(params, arity))
-            .cloned()
-        else {
+            .enumerate()
+            .filter_map(|(index, params)| admits_arity(params, arity).then_some(index))
+            .collect();
+        if arity_candidates.is_empty() {
             self.error(
                 codes::WRONG_ARGUMENT_COUNT,
                 expr.span,
@@ -14968,7 +15027,52 @@ impl<'a> Checker<'a> {
                 self.check_expr(&arg.value);
             }
             return Type::VOID;
+        }
+
+        let (index, params) = if arity_candidates.len() == 1 {
+            let index = arity_candidates[0];
+            (index, constructors[index].clone())
+        } else {
+            let saved_expected = self.expected_type;
+            self.expected_type = None;
+            let argument_types: Vec<Type> = expr
+                .args
+                .iter()
+                .map(|arg| self.check_expr(&arg.value))
+                .collect();
+            self.expected_type = saved_expected;
+            let matches: Vec<usize> = arity_candidates
+                .into_iter()
+                .filter(|&index| {
+                    self.constructor_accepts_arguments(expr, &constructors[index], &argument_types)
+                })
+                .collect();
+            match matches.as_slice() {
+                [index] => (*index, constructors[*index].clone()),
+                [] => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("no constructor of `{name}` matches these argument labels and types"),
+                        "constructor selection considers arity, labels, optional parameters, and argument types",
+                        None,
+                    );
+                    return Type::VOID;
+                }
+                _ => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("constructor call to `{name}` is ambiguous"),
+                        "more than one constructor accepts these argument labels and types",
+                        None,
+                    );
+                    return Type::VOID;
+                }
+            }
         };
+
+        self.resolved_constructor_indices.insert(expr.span, index);
 
         let signature = Signature {
             name,
@@ -15532,12 +15636,13 @@ impl<'a> Checker<'a> {
         }
 
         let arity = expr.args.len();
-        let chosen = constructors
+        let arity_candidates: Vec<usize> = constructors
             .iter()
-            .find(|params| admits_arity(params, arity))
-            .cloned();
+            .enumerate()
+            .filter_map(|(index, params)| admits_arity(params, arity).then_some(index))
+            .collect();
 
-        let Some(params) = chosen else {
+        if arity_candidates.is_empty() {
             let arities: Vec<String> = constructors
                 .iter()
                 .map(|p| p.len().to_string())
@@ -15555,7 +15660,56 @@ impl<'a> Checker<'a> {
                 self.check_expr(&arg.value);
             }
             return Type::of(Base::Class(id));
+        }
+
+        // Resolve competing constructor overloads before the ordinary call
+        // checker supplies contextual literal types. The candidate probe is
+        // deliberately diagnostic-free: only the selected signature gets to
+        // explain a malformed call to the user.
+        let (index, params) = if arity_candidates.len() == 1 {
+            let index = arity_candidates[0];
+            (index, constructors[index].clone())
+        } else {
+            let saved_expected = self.expected_type;
+            self.expected_type = None;
+            let argument_types: Vec<Type> = expr
+                .args
+                .iter()
+                .map(|arg| self.check_expr(&arg.value))
+                .collect();
+            self.expected_type = saved_expected;
+            let matches: Vec<usize> = arity_candidates
+                .into_iter()
+                .filter(|&index| {
+                    self.constructor_accepts_arguments(expr, &constructors[index], &argument_types)
+                })
+                .collect();
+            match matches.as_slice() {
+                [index] => (*index, constructors[*index].clone()),
+                [] => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("no constructor of `{class_name}` matches these argument labels and types"),
+                        "constructor selection considers arity, labels, optional parameters, and argument types",
+                        None,
+                    );
+                    return Type::of(Base::Class(id));
+                }
+                _ => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("constructor call to `{class_name}` is ambiguous"),
+                        "more than one constructor accepts these argument labels and types",
+                        None,
+                    );
+                    return Type::of(Base::Class(id));
+                }
+            }
         };
+
+        self.resolved_constructor_indices.insert(expr.span, index);
 
         let signature = Signature {
             name: class_name,
@@ -15584,6 +15738,64 @@ impl<'a> Checker<'a> {
         let instance = self.intern_instance(GenericInstance { class: id, args });
         self.generic_constructions.insert(expr.span, instance);
         Type::of(Base::Instance(instance))
+    }
+
+    /// Whether one constructor can receive already-typed call arguments.
+    /// This probe deliberately emits no diagnostics: the selected signature is
+    /// checked normally afterwards, while an empty or plural result produces
+    /// the single constructor-resolution diagnostic above.
+    fn constructor_accepts_arguments(
+        &self,
+        expr: &CallExpr,
+        params: &[ParamInfo],
+        argument_types: &[Type],
+    ) -> bool {
+        let mut given = vec![false; params.len()];
+        let mut next = 0usize;
+        let mut seen_named = false;
+
+        for (arg, &actual) in expr.args.iter().zip(argument_types) {
+            if arg.is_spread {
+                return false;
+            }
+            let index = if let Some(name) = &arg.name {
+                seen_named = true;
+                let Some(index) = params.iter().position(|param| param.name == name.name) else {
+                    return false;
+                };
+                index
+            } else {
+                if seen_named {
+                    return false;
+                }
+                while next < params.len() && given[next] {
+                    next += 1;
+                }
+                if next == params.len() {
+                    return false;
+                }
+                let index = next;
+                next += 1;
+                index
+            };
+            if given[index] {
+                return false;
+            }
+            let expected = params[index].ty;
+            if !actual.is_unknown()
+                && !expected.accepts(actual)
+                && !self.is_subclass_of(actual, expected)
+                && !self.accepts_into_union(expected, actual)
+                && !self.bare_enum_matches_instance(actual, expected)
+            {
+                return false;
+            }
+            given[index] = true;
+        }
+
+        params.iter().enumerate().all(|(index, param)| {
+            given[index] || param.optional || param.has_default || param.variadic
+        })
     }
 
     /// `Array<T>(capacity)` — the element type is taken from the expected
@@ -16028,6 +16240,7 @@ impl<'a> Checker<'a> {
                 ty: f.ty,
                 optional: f.ty.has_default(),
                 has_default: false,
+                default: None,
                 variadic: false,
             })
             .collect();
@@ -16115,6 +16328,7 @@ impl<'a> Checker<'a> {
                     ty,
                     optional: false,
                     has_default: false,
+                    default: None,
                     variadic: false,
                 })
                 .collect(),
@@ -16330,6 +16544,7 @@ impl<'a> Checker<'a> {
                     ty: Type::INT32,
                     optional: false,
                     has_default: false,
+                    default: None,
                     variadic: false,
                 }],
                 returns,
@@ -16362,6 +16577,7 @@ impl<'a> Checker<'a> {
                     ty,
                     optional: false,
                     has_default: false,
+                    default: None,
                     variadic: false,
                 })
                 .collect(),
@@ -18983,6 +19199,7 @@ impl<'a> Checker<'a> {
                             ty,
                             optional: false,
                             has_default: false,
+                            default: None,
                             variadic: false,
                         })
                         .collect(),
@@ -19641,6 +19858,7 @@ impl<'a> Checker<'a> {
             .collect();
 
         let mut next_position = 0usize;
+        let mut seen_named = false;
         let saved_expected = self.expected_type;
 
         for arg in &expr.args {
@@ -19681,6 +19899,19 @@ impl<'a> Checker<'a> {
             let ty = self.check_expr(&arg.value);
 
             if arg.is_spread {
+                if seen_named {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        arg.span,
+                        format!(
+                            "`{}` received a positional argument after a named argument",
+                            signature.name
+                        ),
+                        "after a named argument, every remaining argument must be named",
+                        None,
+                    );
+                    continue;
+                }
                 let Some(element) = self.element_type_of(ty) else {
                     let found = self.name(ty);
                     self.error(
@@ -19744,6 +19975,7 @@ impl<'a> Checker<'a> {
             }
 
             if let Some(name) = &arg.name {
+                seen_named = true;
                 let Some(index) = signature.params.iter().position(|p| p.name == name.name) else {
                     let known: Vec<&str> =
                         signature.params.iter().map(|p| p.name.as_str()).collect();
@@ -19772,6 +20004,20 @@ impl<'a> Checker<'a> {
                 }
 
                 slots[index] = ArgSlot::Given { ty, span: arg.span };
+                continue;
+            }
+
+            if seen_named {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    arg.span,
+                    format!(
+                        "`{}` received a positional argument after a named argument",
+                        signature.name
+                    ),
+                    "after a named argument, every remaining argument must be named",
+                    None,
+                );
                 continue;
             }
 
@@ -20321,6 +20567,38 @@ fn admits_arity(params: &[ParamInfo], arity: usize) -> bool {
     let variadic = params.iter().any(|p| p.variadic);
 
     arity >= required && (variadic || arity <= params.len())
+}
+
+/// Whether two constructor declarations admit at least one identical
+/// positional call. Parameter labels deliberately do not participate: they
+/// are absent from positional syntax and therefore cannot disambiguate it.
+fn constructors_overlap_positionally(left: &[ParamInfo], right: &[ParamInfo]) -> bool {
+    let required = |params: &[ParamInfo]| {
+        params
+            .iter()
+            .filter(|param| !param.optional && !param.variadic && !param.has_default)
+            .count()
+    };
+    let maximum = |params: &[ParamInfo]| {
+        if params.last().is_some_and(|param| param.variadic) {
+            usize::MAX
+        } else {
+            params.len()
+        }
+    };
+    let type_at = |params: &[ParamInfo], index: usize| {
+        params
+            .get(index)
+            .or_else(|| params.last().filter(|param| param.variadic))
+            .map(|param| param.ty)
+    };
+
+    let arity = required(left).max(required(right));
+    if arity > maximum(left).min(maximum(right)) {
+        return false;
+    }
+
+    (0..arity).all(|index| type_at(left, index) == type_at(right, index))
 }
 
 /// The result of a native arithmetic operator, if the operands are native and

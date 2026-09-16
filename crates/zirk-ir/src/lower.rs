@@ -9258,13 +9258,9 @@ impl<'a> FunctionLowering<'a> {
             let name =
                 contract_method_symbol(&self.checked.contracts[contract_id].name, &method.name);
             let returns = self.ir_type(method.returns);
-            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
-
             let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
-            for (arg, ty) in call.args.iter().zip(params) {
-                args.push(self.lower_expr_as(&arg.value, ty));
-            }
+            args.extend(self.lower_args_for_params(call, &method.params));
             return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
         }
 
@@ -9278,13 +9274,9 @@ impl<'a> FunctionLowering<'a> {
             let method = class.method(&field.name.name)?;
             let name = body_symbol(self.checked, method);
             let returns = self.ir_type(method.returns);
-            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
-
             let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
-            for (arg, ty) in call.args.iter().zip(params) {
-                args.push(self.lower_expr_as(&arg.value, ty));
-            }
+            args.extend(self.lower_args_for_params(call, &method.params));
             return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
         }
 
@@ -9293,17 +9285,16 @@ impl<'a> FunctionLowering<'a> {
         }
 
         // `super(...)`: the base's constructor, on this same instance.
-        let index = self.constructor_index(base, call.args.len());
-        let params: Vec<IrType> = self.checked.classes[base as usize].constructors[index]
-            .iter()
-            .map(|p| self.ir_type(p.ty))
-            .collect();
+        let index = *self
+            .checked
+            .resolved_constructor_indices
+            .get(&call.span)
+            .expect("the checker selected the base constructor");
+        let params = self.checked.classes[base as usize].constructors[index].clone();
 
         let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
         let mut args = vec![receiver];
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        args.extend(self.lower_args_for_params(call, &params));
 
         let name = self.checked.classes[base as usize].name.clone();
         self.emit_effect(
@@ -11563,7 +11554,6 @@ impl<'a> FunctionLowering<'a> {
         // adopted trait default belongs to the trait.
         let name = body_symbol(self.checked, method);
         let returns = self.ir_type(method.returns);
-        let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let virtual_index = method.overridden.then_some(method.index as u32);
 
@@ -11573,10 +11563,7 @@ impl<'a> FunctionLowering<'a> {
         // survive to the `Call` that lives on the far side of it.
         let will_branch = call.args.iter().any(|arg| self.opens_blocks(&arg.value));
         let receiver = self.lower_and_hold(&field.object, will_branch);
-        let mut args = Vec::new();
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        let args = self.lower_args_for_params(call, &method.params);
         let receiver = self.reload(receiver, field.object.span());
 
         // A method some subclass redefines has no statically known target, so
@@ -18527,23 +18514,24 @@ impl<'a> FunctionLowering<'a> {
             return object;
         }
 
-        let index = self.constructor_index(id, call.args.len());
-        let params: Vec<IrType> = self
+        let index = *self
+            .checked
+            .resolved_constructor_indices
+            .get(&call.span)
+            .expect("the checker selected the constructor");
+        let params = self
             .checked
             .classes
             .get(id as usize)
             .and_then(|c| c.constructors.get(index))
-            .map(|p| p.iter().map(|param| self.ir_type(param.ty)).collect())
+            .cloned()
             .expect("the checker resolved the constructor");
 
         // Arguments are lowered first, so any branch introduced by them (e.g.
         // integer arithmetic overflow checks) is finished before the object is
         // allocated. The object and the `Call` to the constructor are then
         // emitted in the same block, and the object never crosses a branch.
-        let mut args: Vec<Operand> = Vec::new();
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        let args = self.lower_args_for_params(call, &params);
 
         let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
         let mut call_args = vec![object];
@@ -18984,22 +18972,6 @@ impl<'a> FunctionLowering<'a> {
         self.current = cont;
         let value_loaded = self.emit(InstKind::Load(value_slot), actual_ty, span);
         self.emit(InstKind::Retype(value_loaded), target_ty, span)
-    }
-
-    /// Which `construct` a call of this arity resolves to.
-    fn constructor_index(&self, id: u32, arity: usize) -> usize {
-        self.checked.classes[id as usize]
-            .constructors
-            .iter()
-            .position(|params| {
-                let required = params
-                    .iter()
-                    .filter(|p| !p.optional && !p.variadic && !p.has_default)
-                    .count();
-                let variadic = params.iter().any(|p| p.variadic);
-                arity >= required && (variadic || arity <= params.len())
-            })
-            .expect("the checker resolved the constructor")
     }
 
     /// Lowers `a.b`, which is a variant access or a field read.
@@ -23331,6 +23303,134 @@ impl<'a> FunctionLowering<'a> {
         args
     }
 
+    /// Lowers a checked argument list against an already-resolved parameter
+    /// list. Member and `super` calls do not have a free-function declaration
+    /// to look up, but named arguments still need the same source-order
+    /// evaluation and declaration-order materialization as a direct call.
+    fn lower_args_for_params(
+        &mut self,
+        call: &ast::CallExpr,
+        params: &[ParamInfo],
+    ) -> Vec<Operand> {
+        let variadic_index = params.iter().position(|p| p.variadic);
+        let fixed_count = variadic_index.unwrap_or(params.len());
+        let variadic_info = variadic_index.map(|i| {
+            let element_ty = self.ir_type(params[i].ty);
+            let list_id =
+                self.checked
+                    .list_types
+                    .iter()
+                    .position(|&t| self.ir_type(t) == element_ty)
+                    .expect("the checker interned the variadic list type") as u32;
+            let list_ty = IrType::List(list_id);
+            let list = self.emit(
+                InstKind::ListNew {
+                    element_id: list_id,
+                },
+                list_ty,
+                call.span,
+            );
+            let list_slot = self.spill(list, list_ty, call.span);
+            (list_id, element_ty, list_ty, list_slot)
+        });
+
+        let mut fixed_slots: Vec<Option<Held>> = (0..fixed_count).map(|_| None).collect();
+        let mut next = 0usize;
+
+        for (position, arg) in call.args.iter().enumerate() {
+            let branches_later = call.args[position + 1..]
+                .iter()
+                .any(|a| self.opens_blocks(&a.value));
+
+            if arg.is_spread {
+                let (_list_id, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker allows spread only into variadic parameters");
+                let source = self.lower_expr(&arg.value);
+                let source_ty = self.type_of_operand(source);
+                let source_slot = self.declare_slot("<spread source>", source_ty, arg.value.span());
+                self.emit_effect(InstKind::Store(source_slot, source), arg.value.span());
+                self.lower_iterable_elements(
+                    source_slot,
+                    source_ty,
+                    element_ty,
+                    arg.span,
+                    |this, element| {
+                        let receiver = this.emit(InstKind::Load(list_slot), list_ty, arg.span);
+                        this.emit_effect(
+                            InstKind::ListAdd {
+                                receiver,
+                                value: element,
+                            },
+                            arg.span,
+                        );
+                    },
+                );
+                continue;
+            }
+
+            if let Some(named) = &arg.name {
+                let index = params
+                    .iter()
+                    .position(|p| p.name == named.name)
+                    .expect("the checker resolved every named argument");
+                if index < fixed_count {
+                    let ty = self.ir_type(params[index].ty);
+                    fixed_slots[index] =
+                        Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                } else {
+                    let (_, element_ty, list_ty, list_slot) =
+                        variadic_info.expect("the checker resolved a named variadic argument");
+                    let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                    let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                    let element = self.reload(value, call.span);
+                    self.emit_effect(
+                        InstKind::ListAdd {
+                            receiver,
+                            value: element,
+                        },
+                        call.span,
+                    );
+                }
+                continue;
+            }
+
+            while next < fixed_count && fixed_slots[next].is_some() {
+                next += 1;
+            }
+            if next < fixed_count {
+                let ty = self.ir_type(params[next].ty);
+                fixed_slots[next] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                next += 1;
+            } else {
+                let (_, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker rejects too many positional arguments");
+                let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                let element = self.reload(value, call.span);
+                self.emit_effect(
+                    InstKind::ListAdd {
+                        receiver,
+                        value: element,
+                    },
+                    call.span,
+                );
+            }
+        }
+
+        let mut args = Vec::with_capacity(fixed_count + variadic_info.is_some() as usize);
+        for (index, slot) in fixed_slots.into_iter().enumerate() {
+            let ty = self.ir_type(params[index].ty);
+            args.push(match slot {
+                Some(held) => self.reload(held, call.span),
+                None => self.lower_param_default(&params[index], ty, call.span),
+            });
+        }
+        if let Some((list_id, _, _, list_slot)) = variadic_info {
+            args.push(self.emit(InstKind::Load(list_slot), IrType::List(list_id), call.span));
+        }
+        args
+    }
+
     /// The value a parameter takes when the call omits it.
     fn lower_default(
         &mut self,
@@ -23353,6 +23453,22 @@ impl<'a> FunctionLowering<'a> {
                 };
                 self.emit(InstKind::NullValue(base), ty, span)
             }
+        }
+    }
+
+    /// Materializes an omitted parameter using the resolved signature.  Unlike
+    /// the old free-function-only declaration lookup, `ParamInfo` is shared by
+    /// functions, methods, constructors, and both forms of `super`.
+    fn lower_param_default(&mut self, param: &ParamInfo, ty: IrType, span: Span) -> Operand {
+        match &param.default {
+            Some(expr) => self.lower_expr_as(expr, ty),
+            None if param.optional => {
+                let IrType::Nullable(base) = ty else {
+                    unreachable!("an omitted parameter without a default is nullable")
+                };
+                self.emit(InstKind::NullValue(base), ty, span)
+            }
+            None => panic!("the checker rejects a call missing a required parameter"),
         }
     }
 

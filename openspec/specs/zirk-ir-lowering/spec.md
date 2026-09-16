@@ -542,3 +542,21 @@ parallel combinators, and region loop back-edges SHALL poll the safepoint.
 #### Scenario: parallel pipeline lowers to combinators
 - **WHEN** `parallel { rows.map(f).sum() }` is lowered
 - **THEN** the IR contains ordered parallel map and sum combinators under its `ParallelRegion`
+
+### Requirement: Lowering preserves checked named-call bindings
+
+Lowering SHALL use the checker-resolved parameter and constructor binding for
+every call form. It SHALL evaluate explicit arguments in source order, then
+pass their values in the selected declaration's parameter order; default,
+optional, variadic, and branch-spilling behavior SHALL remain equivalent to an
+otherwise identical positional call.
+
+#### Scenario: Reordered constructor arguments reach their parameters
+- **WHEN** `Employee(age: 2, name: name, id: 45)` targets
+  `(id: Int32, name: String, age: Int32)`
+- **THEN** the emitted call passes `45`, `name`, and `2` in declaration order
+
+#### Scenario: Reordered super method arguments reach their parameters
+- **WHEN** `super.rename(suffix: "SUF", prefix: "PRE")` targets
+  `(prefix: String, suffix: String)`
+- **THEN** the emitted call passes `"PRE"` as `prefix` and `"SUF"` as `suffix`

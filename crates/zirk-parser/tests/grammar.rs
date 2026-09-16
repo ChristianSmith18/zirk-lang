@@ -1209,6 +1209,29 @@ fn valid_named_arguments() {
 }
 
 #[test]
+fn named_argument_shorthand_desugars_to_the_identifier_path() {
+    for source in ["f(value:)", "object.method(value:)", "Type(value:)"] {
+        let Expr::Call(call) = expression(source) else {
+            panic!("expected a call for {source}");
+        };
+        assert_eq!(
+            call.args[0].name.as_ref().map(|name| name.name.as_str()),
+            Some("value")
+        );
+        assert!(matches!(&call.args[0].value, Expr::Path(path) if path.name == "value"));
+        assert_eq!(
+            call.args[0].span,
+            call.args[0]
+                .name
+                .as_ref()
+                .unwrap()
+                .span
+                .to(call.args[0].value.span())
+        );
+    }
+}
+
+#[test]
 fn valid_lambda_with_expression_body() {
     let e = expression("(a: Int32, b: Int32): Int32 => a + b");
     let Expr::Lambda(l) = &e else {

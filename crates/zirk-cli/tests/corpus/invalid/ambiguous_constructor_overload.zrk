@@ -1,0 +1,12 @@
+class Animal { construct() { } }
+
+class Dog extends Animal {
+    construct() { super(); }
+}
+
+class Point {
+    text: String;
+    construct(animal: Animal) { this.text = "animal"; }
+    construct(dog: Dog) { this.text = "dog"; }
+}
+fn main(): Void { inmut point = Point(Dog()); }

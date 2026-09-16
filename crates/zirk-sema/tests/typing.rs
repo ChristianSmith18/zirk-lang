@@ -2074,6 +2074,102 @@ fn valid_several_constructors_resolve_by_arity() {
 }
 
 #[test]
+fn valid_constructor_overloads_resolve_by_label_and_type() {
+    accepted(
+        "class Point {
+             text: String;
+             construct(x: Int32) { this.text = \"int\"; }
+             construct(s: String) { this.text = s; }
+         }
+         fn main(): Void {
+             inmut integer = Point(x: 1);
+             inmut string = Point(s: \"text\");
+         }",
+    );
+}
+
+#[test]
+fn invalid_duplicate_constructor_positional_signature_is_rejected_at_declaration() {
+    let output = rejected(
+        "class Point {
+             text: String;
+             construct(x: Int32) { this.text = \"x\"; }
+             construct(y: Int32) { this.text = \"y\"; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+    assert!(
+        output.contains("duplicates a positional signature `construct(Int32)`"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_constructor_overload_is_ambiguous_only_when_distinct_types_both_fit() {
+    let output = rejected(
+        "class Animal { construct() { } }
+         class Dog extends Animal { construct() { super(); } }
+         class Point {
+             text: String;
+             construct(animal: Animal) { this.text = \"animal\"; }
+             construct(dog: Dog) { this.text = \"dog\"; }
+         }
+         fn main(): Void { inmut point = Point(Dog()); }",
+    );
+    assert!(output.contains("ambiguous"), "{output}");
+}
+
+#[test]
+fn invalid_constructor_overload_with_no_matching_label_is_deterministic() {
+    let output = rejected(
+        "class Point {
+             text: String;
+             construct(x: Int32) { this.text = \"x\"; }
+             construct(y: Int32) { this.text = \"y\"; }
+         }
+         fn main(): Void { inmut point = Point(z: 1); }",
+    );
+    assert!(
+        output.contains("no constructor of `Point` matches"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_positional_argument_after_named_argument_is_targeted() {
+    let output = rejected(
+        "fn join(prefix: String, suffix: String): String { return prefix + suffix; }
+         fn main(): Void { inmut text = join(prefix: \"PRE\", \"SUF\"); }",
+    );
+    assert!(
+        output.contains("positional argument after a named argument"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_named_argument_shorthand_reports_missing_bindings_and_repeated_labels() {
+    let missing = rejected(
+        "fn join(prefix: String, suffix: String): String { return prefix + suffix; }
+         fn main(): Void { inmut text = join(prefix:, suffix: \"SUF\"); }",
+    );
+    assert!(
+        missing.contains(codes::UNDECLARED_NAME.as_str()),
+        "{missing}"
+    );
+
+    let repeated = rejected(
+        "fn join(prefix: String, suffix: String): String { return prefix + suffix; }
+         fn main(): Void { inmut text = join(prefix: \"A\", prefix: \"B\"); }",
+    );
+    assert!(repeated.contains("already given a value"), "{repeated}");
+}
+
+#[test]
 fn invalid_duplicate_class() {
     let output = rejected(
         "class User { name: String; construct(name: String) { this.name = name; } }

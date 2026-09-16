@@ -4590,7 +4590,17 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            let value = self.parse_expr()?;
+            // `name:` is shorthand for `name: name`. It is recognized only
+            // after the unambiguous `identifier :` prefix above, so a member
+            // expression such as `config.url:` still fails as ordinary call
+            // syntax and cannot be mistaken for shorthand.
+            let value = if let Some(name) = &name
+                && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen)
+            {
+                Expr::Path(name.clone())
+            } else {
+                self.parse_expr()?
+            };
             args.push(Arg {
                 span: start.to(value.span()),
                 name,
