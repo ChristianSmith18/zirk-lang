@@ -63,7 +63,6 @@ pub fn format_text(text: &str, tokens: &[zirk_lexer::Token]) -> String {
     zirk_format::format_text(text, tokens)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::format_text;

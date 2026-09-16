@@ -371,9 +371,7 @@ fn normalize_token_spacing(source: &str, tokens: &[zirk_lexer::Token]) -> String
             output.push_str(replacement);
         }
         match previous.kind {
-            TokenKind::Question if is_operand_start(&next.kind) => {
-                pending_ternary = true
-            }
+            TokenKind::Question if is_operand_start(&next.kind) => pending_ternary = true,
             TokenKind::Colon
             | TokenKind::Comma
             | TokenKind::Semicolon
@@ -863,10 +861,7 @@ fn format_field_replacement(source: &str, field: &FieldDecl) -> Replacement {
                 .map(|offset| colon + offset)
                 .unwrap_or(colon)
         }
-        None => colon
-            + source[colon..end]
-                .find(';')
-                .unwrap_or(end - colon),
+        None => colon + source[colon..end].find(';').unwrap_or(end - colon),
     };
     let ty = collapse_inline_whitespace(&source[colon..type_end]);
     let mut text = format!("{prefix}{}: {ty}", field.name.name);
@@ -1127,7 +1122,11 @@ fn canonical_literal(text: &str, start: usize, end: usize) -> String {
             if line.trim().is_empty() {
                 String::new()
             } else {
-                format!("{}{}", edge, line.chars().skip(old_edge).collect::<String>())
+                format!(
+                    "{}{}",
+                    edge,
+                    line.chars().skip(old_edge).collect::<String>()
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -1329,9 +1328,7 @@ mod tests {
         };
         let twice = match format(name, &once) {
             Ok(twice) => twice,
-            Err(error) => {
-                return DocumentCheck::Violation(format!("reformat failed: {error}"))
-            }
+            Err(error) => return DocumentCheck::Violation(format!("reformat failed: {error}")),
         };
         if twice != once {
             return DocumentCheck::Violation("not idempotent".to_owned());

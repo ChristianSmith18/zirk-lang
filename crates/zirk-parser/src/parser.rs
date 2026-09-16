@@ -4639,8 +4639,8 @@ impl<'a> Parser<'a> {
             // syntax and cannot be mistaken for shorthand. The synthesized
             // path carries the name's span, so the argument's own span must
             // reach the `:` — tools slicing the written argument need it.
-            let shorthand = name.is_some()
-                && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen);
+            let shorthand =
+                name.is_some() && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen);
             let value = if shorthand {
                 Expr::Path(name.clone().expect("shorthand implies a name"))
             } else {
