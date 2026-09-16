@@ -156,10 +156,18 @@ pub fn format_with_warnings(name: &str, text: &str) -> Result<FormatResult, Stri
 /// Canonical block indentation is determined from braces in source text, not
 /// from expression spans. This deliberately leaves expression tokens alone
 /// while giving every statement, control-flow body, and nested block a stable
-/// four-space base indentation.
+/// four-space base indentation. Lines inside an unclosed `(` or `[` are
+/// continuations and sit one level deeper than their statement; `}` depth
+/// alone does not create continuations, so enum variants and match arms
+/// separated by commas keep their own indentation.
 fn normalize_indentation(source: &str) -> String {
     let had_newline = source.ends_with('\n');
     let mut depth = 0usize;
+    // Stack of unclosed delimiters. A `(`/`[` on top makes the next line a
+    // continuation (one level deeper); a `{` on top does not, so enum
+    // variants, record fields, and match arms keep their own level even
+    // though their neighbours end in commas.
+    let mut stack: Vec<u8> = Vec::new();
     let mut triple_quoted = false;
     let mut output = Vec::new();
     for line in source.lines() {
@@ -182,30 +190,21 @@ fn normalize_indentation(source: &str) -> String {
             && output
                 .last()
                 .is_some_and(|previous| previous.trim_end().ends_with('='));
-        let continuation = output.last().is_some_and(|previous| {
-            let previous = previous.trim_end();
-            previous.ends_with('(') || previous.ends_with('[') || previous.ends_with(',')
-        }) || (output
-            .last()
-            .is_some_and(|previous| line_comment_start(previous.trim_start()).is_some())
-            && output
-                .get(output.len().saturating_sub(2))
-                .is_some_and(|previous| {
-                    let previous = previous.trim_end();
-                    previous.ends_with('(') || previous.ends_with(',')
-                }));
+        let continuation = matches!(stack.last(), Some(b'(' | b'['));
         let indentation = if (continuation || triple_continuation) && !closing_delimiter {
             " ".repeat((depth + 1) * INDENT_WIDTH)
         } else {
             " ".repeat(depth.saturating_sub(usize::from(closing_brace)) * INDENT_WIDTH)
         };
         output.push(format!("{indentation}{trimmed}"));
-        let (opens, closes, toggles_triple) = brace_delta(trimmed, triple_quoted);
-        if toggles_triple {
+        let deltas = delimiter_deltas(trimmed, triple_quoted, &mut stack);
+        if deltas.toggles_triple {
             triple_quoted = !triple_quoted;
         }
         if !triple_quoted {
-            depth = depth.saturating_add(opens).saturating_sub(closes);
+            depth = depth
+                .saturating_add(deltas.brace_opens)
+                .saturating_sub(deltas.brace_closes);
         }
     }
     let mut result = output.join("\n");
@@ -215,19 +214,30 @@ fn normalize_indentation(source: &str) -> String {
     result
 }
 
-fn brace_delta(line: &str, initially_triple_quoted: bool) -> (usize, usize, bool) {
+struct Deltas {
+    brace_opens: usize,
+    brace_closes: usize,
+    toggles_triple: bool,
+}
+
+fn delimiter_deltas(line: &str, initially_triple_quoted: bool, stack: &mut Vec<u8>) -> Deltas {
+    let mut deltas = Deltas {
+        brace_opens: 0,
+        brace_closes: 0,
+        toggles_triple: false,
+    };
     if initially_triple_quoted {
-        return (0, 0, line.contains("'''"));
+        deltas.toggles_triple = line.contains("'''");
+        return deltas;
     }
     let bytes = line.as_bytes();
-    let mut opens = 0;
-    let mut closes = 0;
     let mut quoted = None;
     let mut escaped = false;
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index..].starts_with(b"'''") {
-            return (opens, closes, true);
+            deltas.toggles_triple = true;
+            return deltas;
         }
         let byte = bytes[index];
         if let Some(quote) = quoted {
@@ -242,14 +252,32 @@ fn brace_delta(line: &str, initially_triple_quoted: bool) -> (usize, usize, bool
             quoted = Some(byte);
         } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
             break;
-        } else if byte == b'{' {
-            opens += 1;
-        } else if byte == b'}' {
-            closes += 1;
+        } else {
+            match byte {
+                b'{' => {
+                    deltas.brace_opens += 1;
+                    stack.push(b'{');
+                }
+                b'}' => {
+                    deltas.brace_closes += 1;
+                    if stack.last() == Some(&b'{') {
+                        stack.pop();
+                    }
+                }
+                b'(' | b'[' => stack.push(byte),
+                b')' if stack.last() == Some(&b'(') => {
+                    stack.pop();
+                }
+                b']' if stack.last() == Some(&b'[') => {
+                    stack.pop();
+                }
+                b')' | b']' => {}
+                _ => {}
+            }
         }
         index += 1;
     }
-    (opens, closes, false)
+    deltas
 }
 
 /// Re-anchor comments by line position without touching their content. A
@@ -308,6 +336,11 @@ fn normalize_token_spacing(source: &str, tokens: &[zirk_lexer::Token]) -> String
         .collect::<Vec<_>>();
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
+    // Tracks a `?` whose matching `:` is still ahead — that colon is the
+    // ternary separator and takes spaces on both sides, unlike a `:` type
+    // annotation or the optional marker `?:`. Boundaries and a consumed
+    // colon reset it.
+    let mut pending_ternary = false;
     for (index, pair) in tokens.windows(2).enumerate() {
         let previous = pair[0];
         let next = pair[1];
@@ -318,10 +351,42 @@ fn normalize_token_spacing(source: &str, tokens: &[zirk_lexer::Token]) -> String
         let gap = &source[previous_end..next_start];
         if gap.contains('\n') {
             output.push_str(gap);
-        } else if gap.contains("//") {
+        } else if gap.contains("//") || gap.contains("/*") {
             output.push_str(gap);
         } else {
-            output.push_str(token_gap(&previous.kind, &next.kind, before_previous, gap));
+            // A `?` is ternary when an operand follows it; otherwise it is a
+            // suffix (`name?:`, `T?`) that binds to the preceding token.
+            let after_next = tokens.get(index + 2).map(|token| &token.kind);
+            let replacement = match (&previous.kind, &next.kind) {
+                (_, TokenKind::Question) if after_next.is_some_and(is_operand_start) => " ",
+                (_, TokenKind::Question) => "",
+                (TokenKind::Question, TokenKind::Colon) => "",
+                (_, TokenKind::Colon) if pending_ternary => " ",
+                (
+                    TokenKind::Identifier(_) | TokenKind::RParen | TokenKind::RBracket,
+                    TokenKind::LBracket,
+                ) => "",
+                _ => token_gap(&previous.kind, &next.kind, before_previous, gap),
+            };
+            output.push_str(replacement);
+        }
+        match previous.kind {
+            TokenKind::Question if is_operand_start(&next.kind) => {
+                pending_ternary = true
+            }
+            TokenKind::Colon
+            | TokenKind::Comma
+            | TokenKind::Semicolon
+            | TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBrace
+            | TokenKind::RBrace
+            | TokenKind::LBracket
+            | TokenKind::RBracket
+            | TokenKind::Assign
+            | TokenKind::Arrow
+            | TokenKind::FatArrow => pending_ternary = false,
+            _ => {}
         }
         cursor = next_start;
     }
@@ -354,7 +419,21 @@ fn token_gap(
         return "";
     }
     if matches!(next, LParen) {
-        return "";
+        return match previous {
+            Keyword(k)
+                if matches!(
+                    k,
+                    zirk_lexer::Keyword::This
+                        | zirk_lexer::Keyword::Super
+                        | zirk_lexer::Keyword::Construct
+                        | zirk_lexer::Keyword::Fn
+                ) =>
+            {
+                ""
+            }
+            Keyword(_) => " ",
+            _ => "",
+        };
     }
     // Generic type argument delimiters are already adjacent in canonical
     // source. Preserve that distinction from comparison operators, which are
@@ -400,7 +479,7 @@ fn token_gap(
         }
         return " ";
     }
-    if matches!(previous, Question) || matches!(next, Question) {
+    if matches!(previous, Question) {
         return " ";
     }
     if matches!(previous, FatArrow | Arrow) || matches!(next, FatArrow | Arrow) {
@@ -408,6 +487,30 @@ fn token_gap(
     }
     // Adjacent words/literals would otherwise merge into a different token.
     " "
+}
+
+/// Whether a token can begin an operand — used to tell the ternary `?`
+/// (`cond ? a : b`) from the suffix `?` (`name?:`, `T?`).
+fn is_operand_start(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier(_)
+            | TokenKind::Keyword(_)
+            | TokenKind::Integer(_)
+            | TokenKind::Float(_)
+            | TokenKind::Duration(..)
+            | TokenKind::Str(_)
+            | TokenKind::InterpolatedStr(_)
+            | TokenKind::Char(_)
+            | TokenKind::Regex(_)
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::Minus
+            | TokenKind::Plus
+            | TokenKind::Not
+            | TokenKind::Tilde
+            | TokenKind::DotDotDot
+    )
 }
 
 fn is_binary_operator(token: &TokenKind) -> bool {
