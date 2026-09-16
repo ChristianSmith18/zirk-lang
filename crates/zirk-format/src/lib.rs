@@ -349,9 +349,7 @@ fn normalize_token_spacing(source: &str, tokens: &[zirk_lexer::Token]) -> String
         let next_start = next.span.start as usize;
         output.push_str(&source[cursor..previous_end]);
         let gap = &source[previous_end..next_start];
-        if gap.contains('\n') {
-            output.push_str(gap);
-        } else if gap.contains("//") || gap.contains("/*") {
+        if gap.contains('\n') || gap.contains("//") || gap.contains("/*") {
             output.push_str(gap);
         } else {
             // A `?` is ternary when an operand follows it; otherwise it is a
@@ -418,17 +416,12 @@ fn token_gap(
     }
     if matches!(next, LParen) {
         return match previous {
-            Keyword(k)
-                if matches!(
-                    k,
-                    zirk_lexer::Keyword::This
-                        | zirk_lexer::Keyword::Super
-                        | zirk_lexer::Keyword::Construct
-                        | zirk_lexer::Keyword::Fn
-                ) =>
-            {
-                ""
-            }
+            Keyword(
+                zirk_lexer::Keyword::This
+                | zirk_lexer::Keyword::Super
+                | zirk_lexer::Keyword::Construct
+                | zirk_lexer::Keyword::Fn,
+            ) => "",
             Keyword(_) => " ",
             _ => "",
         };
@@ -1409,7 +1402,7 @@ mod tests {
                 collect_markdown_fences(&path, documents);
                 continue;
             }
-            if !path.extension().is_some_and(|extension| extension == "md") {
+            if path.extension().is_none_or(|extension| extension != "md") {
                 continue;
             }
             let Ok(markdown) = std::fs::read_to_string(&path) else {
