@@ -24,4 +24,5 @@ zirk-lexer.workspace = true
 zirk-ast.workspace = true
 zirk-parser.workspace = true
 zirk-sema.workspace = true
+zirk-format.workspace = true
 zirk-ir = { workspace = true, optional = true }

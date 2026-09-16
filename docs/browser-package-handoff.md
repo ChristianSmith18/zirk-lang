@@ -23,5 +23,9 @@ silently lose provenance.
 
 The site repository consumes only this verified directory. Its worker must
 await WASM instantiation, create `BrowserApi`, call `initialize()`, then send
-JSON requests to `check` or `run`. Before initialization, the facade returns
+JSON requests to `check`, `run`, or `format`. The package manifest advertises
+all three operations; the additive `format` response carries `formattedSource`
+on success or ordered diagnostics on invalid input. Wire the playground's
+Format control to that operation only after recording the new committed source
+revision and verifying this package. Before initialization, the facade returns
 the deterministic `ZB103` request failure.

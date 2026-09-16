@@ -30,10 +30,12 @@ export interface Response {
   output: Array<{ text: string; truncated: boolean }>;
   completion: "completed" | null;
   failure: { kind: FailureKind; code: string; message: string; limit: string | null } | null;
+  formattedSource?: string;
 }
 
 export interface BrowserApi {
   initialize(): void;
   check(request: string): string;
   run(request: string): string;
+  format(request: string): string;
 }

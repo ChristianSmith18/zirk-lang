@@ -1125,6 +1125,7 @@ dependencies = [
  "zirk-ast",
  "zirk-cli",
  "zirk-diagnostics",
+ "zirk-format",
  "zirk-interpreter",
  "zirk-ir",
  "zirk-lexer",
@@ -1139,6 +1140,7 @@ dependencies = [
  "zirk-ast",
  "zirk-codegen-llvm",
  "zirk-diagnostics",
+ "zirk-format",
  "zirk-ir",
  "zirk-lexer",
  "zirk-parser",
@@ -1161,6 +1163,16 @@ dependencies = [
 [[package]]
 name = "zirk-diagnostics"
 version = "0.0.0"
+
+[[package]]
+name = "zirk-format"
+version = "0.0.0"
+dependencies = [
+ "zirk-ast",
+ "zirk-diagnostics",
+ "zirk-lexer",
+ "zirk-parser",
+]
 
 [[package]]
 name = "zirk-interpreter"
@@ -1199,6 +1211,7 @@ dependencies = [
  "zirk-ast",
  "zirk-cli",
  "zirk-diagnostics",
+ "zirk-format",
  "zirk-sema",
 ]
 

@@ -167,6 +167,9 @@ unchanged, non-generic call site. Generic contracts remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
+- Constructor sugar: member-modified constructor parameters promote fields;
+  classes without a written constructor admit zero-argument construction and
+  implicit subclass construction delegates to an accessible zero-argument base.
 - Generics with `from` (constraints).
 - Records, algebraic enums, unions.
 - Casts (`as`, `<T>`, `unsafe` casts).
@@ -508,7 +511,9 @@ the real collections.
 
 ## Phase 9 — Developer experience
 
-- A canonical, idempotent formatter.
+- A canonical, idempotent formatter is delivered for whole `.zrk` documents;
+  future formatter work is configuration and range-formatting, not a basic
+  document formatter.
 - A linter sharing parser/types with the compiler.
 - An LSP with incremental snapshots.
 - A debugger with symbols and mapping back to `.zrk`.

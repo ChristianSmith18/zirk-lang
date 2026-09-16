@@ -88,6 +88,13 @@ impl BrowserApi {
         self.dispatch(request_json, true)
     }
 
+    /// Runs the additive versioned `format` operation without granting host
+    /// I/O to the formatter.
+    #[wasm_bindgen(js_name = format)]
+    pub fn format_json(&self, request_json: &str) -> String {
+        self.dispatch_format(request_json)
+    }
+
     fn dispatch(&self, request_json: &str, execute: bool) -> String {
         let response = if !self.initialized {
             request_failure("ZB103", "browser API is not initialized")
@@ -102,6 +109,20 @@ impl BrowserApi {
         // an internal serializer detail if this invariant is ever broken.
         serde_json::to_string(&response).unwrap_or_else(|_| {
             r#"{\"apiVersion\":1,\"operation\":\"contract\",\"compilerVersion\":\"unknown\",\"compilerRevision\":\"unknown\",\"limits\":{\"sourceBytes\":0,\"diagnostics\":0,\"instructions\":0,\"callDepth\":0,\"heapBytes\":0,\"outputBytes\":0,\"outputEvents\":0,\"stackFrames\":0},\"diagnostics\":[],\"diagnosticsTruncated\":false,\"output\":[],\"completion\":null,\"failure\":{\"kind\":\"internal\",\"code\":\"ZB199\",\"message\":\"browser response serialization failed\",\"limit\":null}}"#.into()
+        })
+    }
+
+    fn dispatch_format(&self, request_json: &str) -> String {
+        let response = if !self.initialized {
+            request_failure("ZB103", "browser API is not initialized")
+        } else {
+            match serde_json::from_str::<contract::Request>(request_json) {
+                Ok(request) => format(request),
+                Err(_) => request_failure("ZB104", "malformed browser request"),
+            }
+        };
+        serde_json::to_string(&response).unwrap_or_else(|_| {
+            request_failure("ZB199", "browser response serialization failed").operation
         })
     }
 }
@@ -123,6 +144,7 @@ fn request_failure(code: &str, message: &str) -> contract::Response {
             message: message.into(),
             limit: None,
         }),
+        formatted_source: None,
     }
 }
 
@@ -188,6 +210,7 @@ pub fn check(request: contract::Request) -> contract::Response {
         output: Vec::new(),
         completion: None,
         failure: None,
+        formatted_source: None,
     };
     if request.api_version != API_VERSION {
         response.failure = Some(Failure {
@@ -259,6 +282,32 @@ pub fn check(request: contract::Request) -> contract::Response {
     response
 }
 
+/// Executes the browser `format` operation through the portable shared
+/// formatter. Limits and invalid-request behavior match `check`.
+pub fn format(request: contract::Request) -> contract::Response {
+    let source = request.source.clone();
+    let name = request.virtual_name.clone();
+    let mut response = check(request);
+    response.operation = "format".into();
+    if response.failure.is_some() || response.completion.is_none() {
+        response.completion = None;
+        return response;
+    }
+    match zirk_format::format(&name, &source) {
+        Ok(formatted) => response.formatted_source = Some(formatted),
+        Err(_) => {
+            response.failure = Some(contract::Failure {
+                kind: contract::FailureKind::Internal,
+                code: "ZB199".into(),
+                message: "formatter rejected checked source".into(),
+                limit: None,
+            });
+            response.completion = None;
+        }
+    }
+    response
+}
+
 fn invalid_limit(limits: contract::Limits) -> Option<&'static str> {
     (limits.source_bytes == 0)
         .then_some("source")
@@ -282,7 +331,7 @@ pub fn run(request: contract::Request) -> contract::Response {
     let virtual_name = request.virtual_name.clone();
     let mut response = check(request);
     response.operation = "run".into();
-    if response.failure.is_some() || !response.diagnostics.is_empty() {
+    if response.failure.is_some() || response.completion.is_none() {
         response.completion = None;
         return response;
     }
@@ -416,12 +465,50 @@ fn diagnostic_start(source: &str, location: &zirk_diagnostics::Location) -> u32 
 
 #[cfg(test)]
 mod tests {
-    use super::{API_VERSION, BrowserApi, check, check_source, run};
+    use super::{API_VERSION, BrowserApi, check, check_source, format, run};
     use crate::contract::{FailureKind, Limits, Request};
 
     #[test]
     fn exposes_the_initial_contract_revision() {
         assert_eq!(API_VERSION, 1);
+    }
+
+    #[test]
+    fn format_is_additive_v1_and_returns_source_or_diagnostics() {
+        let valid = format(Request {
+            api_version: API_VERSION,
+            source: "fn main(): Void { }\n".into(),
+            virtual_name: "editor.zrk".into(),
+            limits: None,
+        });
+        assert_eq!(valid.operation, "format");
+        assert_eq!(
+            valid.formatted_source.as_deref(),
+            Some("fn main(): Void { }\n")
+        );
+        assert!(valid.failure.is_none());
+
+        let invalid = format(Request {
+            api_version: API_VERSION,
+            source: "fn main(: Void {".into(),
+            virtual_name: "editor.zrk".into(),
+            limits: None,
+        });
+        assert!(invalid.formatted_source.is_none());
+        assert!(!invalid.diagnostics.is_empty());
+
+        let api = BrowserApi::new();
+        let before: crate::contract::Response = serde_json::from_str(&api.format_json(
+            r#"{"apiVersion":1,"source":"fn main(): Void {}","virtualName":"editor.zrk"}"#,
+        ))
+        .unwrap();
+        assert!(matches!(
+            before.failure,
+            Some(crate::contract::Failure {
+                kind: FailureKind::Request,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -783,6 +870,7 @@ mod tests {
             include_str!("../fixtures/temporal-range.json"),
             include_str!("../fixtures/closure.json"),
             include_str!("../fixtures/regex.json"),
+            include_str!("../fixtures/class-construction-sugar.json"),
         ] {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let response = run(Request {
@@ -832,10 +920,11 @@ mod tests {
             include_str!("../fixtures/temporal-range.json"),
             include_str!("../fixtures/closure.json"),
             include_str!("../fixtures/regex.json"),
+            include_str!("../fixtures/class-construction-sugar.json"),
         ] {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let (frontend, diagnostics) = check_source(&fixture.source, &fixture.virtual_name);
-            assert!(diagnostics.is_empty(), "{}", fixture.name);
+            assert!(!diagnostics.has_errors(), "{}", fixture.name);
             let frontend = frontend.unwrap();
             let module = zirk_ir::lower(&frontend.program, &frontend.checked);
             let mut interpreter = zirk_interpreter::Interpreter::new(

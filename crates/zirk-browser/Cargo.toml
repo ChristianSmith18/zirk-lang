@@ -19,6 +19,7 @@ zirk-ir.workspace = true
 zirk-lexer.workspace = true
 zirk-parser.workspace = true
 zirk-sema.workspace = true
+zirk-format.workspace = true
 
 [dev-dependencies]
 zirk-cli.workspace = true

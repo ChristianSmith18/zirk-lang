@@ -11,6 +11,14 @@ const bindings = await import(modulePath);
 bindings.initSync({ module: await readFile(wasmPath) });
 const api = new bindings.BrowserApi();
 api.initialize();
+const formatted = JSON.parse(api.format(JSON.stringify({
+  apiVersion: 1,
+  source: 'fn main(): Void {  stdout.println(  1 ); }',
+  virtualName: 'format.zrk',
+})));
+if (formatted.failure || formatted.formattedSource !== 'fn main(): Void { stdout.println(1); }') {
+  throw new Error(`unexpected format response: ${JSON.stringify(formatted)}`);
+}
 const fixtures = [
   ['hello', 'fn main(): Void { stdout.println("Hello World"); }', 'completed', 'Hello World\n'],
   ['call', 'fn add(left: Int32, right: Int32): Int32 { return left + right; } fn main(): Void { stdout.println(add(40, 2)); }', 'completed', '42\n'],

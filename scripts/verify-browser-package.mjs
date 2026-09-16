@@ -15,6 +15,11 @@ if (manifest.schemaVersion !== 1 || manifest.apiVersion !== 1) {
 if (manifest.sourceRevision !== expectedRevision) {
   throw new Error(`stale package revision: ${manifest.sourceRevision} != ${expectedRevision}`);
 }
+if (!Array.isArray(manifest.operations)
+    || manifest.operations.length !== 3
+    || !["check", "run", "format"].every((operation) => manifest.operations.includes(operation))) {
+  throw new Error("manifest must advertise the check, run, and format operations");
+}
 if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
   throw new Error("manifest has no artifact records");
 }

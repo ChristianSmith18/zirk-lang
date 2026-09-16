@@ -102,6 +102,7 @@ merely because its frontend or native backend is delivered.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `class`, `construct` | yes | yes | yes | yes | yes | yes | — |
+| Promoted constructor parameters and implicit constructors | yes | yes | yes | yes | yes | yes | `add-class-construction-sugar`: member-modified class constructor parameters become fields; constructor-less classes accept zero arguments; an implicit subclass constructor delegates to an accessible zero-argument base constructor. |
 | Visibility (`public`/`private`/`protected`) | yes | yes | yes | yes | yes | yes | — |
 | Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`#override`; `final` seals classes and methods. |
 | `interface`/`trait` | yes | yes | yes | yes | yes | yes | `Keyword::Interface`/`Trait` in subset. |
@@ -245,7 +246,7 @@ merely because its frontend or native backend is delivered.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `.zpkg` / package manager | no | no | no | no | no | no | Phase 8. |
-| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-lsp` MVP serves diagnostics, hover, document symbols, and formatting over stdio; incremental snapshots, completion, navigation, and rename remain Phase 9. |
+| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-format` provides canonical whole-document formatting to the CLI, `zirk-lsp`, and browser package; the LSP MVP also serves diagnostics, hover, and document symbols over stdio. Incremental snapshots, completion, navigation, rename, range formatting, and a debugger remain Phase 9. |
 | Decorators (`fn dec`) | yes | no | no | no | no | no | `Keyword::Dec` gated to Phase 10. |
 
 ---

@@ -109,6 +109,25 @@ The real check is the workspace test suite, which includes the LLVM sanity check
 cargo test --workspace
 ```
 
+## Canonical formatting
+
+`zirk format <target>...` formats files or recursively discovered `.zrk` files
+under directory targets. Use `--check` in automation to report drift without
+writing, or `--diff` to print a preview. `fmt off` / `fmt on` directive comments
+protect exceptional regions verbatim:
+
+```sh
+zirk format src/ examples/main
+zirk format --check src/
+zirk format --diff examples/main.zrk
+```
+
+```zirk
+// zirk-compiler: fmt off
+// formatter leaves this region byte-for-byte unchanged
+// zirk-compiler: fmt on
+```
+
 If the LLVM pin is wrong, the build fails before compiling, with a diagnostic naming the version found and the version expected. There is no need to interpret linker errors.
 
 ## Platform notes

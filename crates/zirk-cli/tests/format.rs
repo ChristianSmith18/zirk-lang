@@ -71,12 +71,58 @@ fn syntax_errors_are_reported_without_writing() {
 }
 
 #[test]
-fn format_leaves_other_style_untouched() {
+fn format_canonicalizes_general_source_layout() {
     let dir = workspace("format_other_style");
     let file = dir.join("plain.zrk");
     let input = "fn main(): Void {  stdout.println(  1 ); }\n";
     std::fs::write(&file, input).expect("fixture");
 
     assert!(run(&dir, &["format", "plain.zrk"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "fn main(): Void { stdout.println(1); }\n"
+    );
+}
+
+#[test]
+fn format_preserves_class_construction_sugar() {
+    let dir = workspace("format_class_construction_sugar");
+    let file = dir.join("sugar.zrk");
+    let input = "class User { construct(public name: String) { } }\nclass Marker { }\nfn main(): Void { mut user = User(\"Ana\"); mut marker = Marker(); }\n";
+    std::fs::write(&file, input).expect("fixture");
+
+    assert!(run(&dir, &["format", "sugar.zrk"]).status.success());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), input);
+}
+
+#[test]
+fn directory_targets_are_recursive_and_an_invalid_sibling_does_not_block_them() {
+    let dir = workspace("format_directory");
+    let nested = dir.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let valid = nested.join("sample.zrk");
+    let invalid = dir.join("broken.zrk");
+    std::fs::write(&valid, UNFORMATTED).unwrap();
+    std::fs::write(&invalid, "fn main(: Void {\n").unwrap();
+
+    let output = run(&dir, &["format", "."]);
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(valid).unwrap(), CANONICAL);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error["));
+}
+
+#[test]
+fn diff_and_check_never_write_the_target() {
+    let dir = workspace("format_diff");
+    let file = dir.join("sample.zrk");
+    std::fs::write(&file, UNFORMATTED).unwrap();
+
+    let diff = run(&dir, &["format", "--diff", "sample.zrk"]);
+    assert!(diff.status.success());
+    assert!(String::from_utf8_lossy(&diff.stdout).contains("---"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), UNFORMATTED);
+
+    let check = run(&dir, &["format", "--check", "sample.zrk"]);
+    assert!(!check.status.success());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), UNFORMATTED);
 }

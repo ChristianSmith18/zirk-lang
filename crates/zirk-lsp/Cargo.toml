@@ -18,5 +18,6 @@ zirk-cli = { path = "../zirk-cli", default-features = false }
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
 zirk-sema.workspace = true
+zirk-format.workspace = true
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util"] }

@@ -16,7 +16,7 @@ use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
 
-use zirk_cli::{format, frontend};
+use zirk_cli::frontend;
 use zirk_diagnostics::{
     Diagnostic as ZirkDiagnostic, DiagnosticSink, FileId, Severity, SourceMap, Span,
 };
@@ -45,6 +45,22 @@ pub fn analyze(path: &Path, text: &str) -> Analysis {
         diagnostics: sink.diagnostics().to_vec(),
         frontend: result,
     }
+}
+
+/// Builds the one full-document edit exposed by `textDocument/formatting`.
+/// Invalid text deliberately produces no edit, matching the formatter's
+/// no-partial-output contract.
+fn formatting_edit(name: &str, text: &str) -> Option<TextEdit> {
+    let formatted = zirk_format::format(name, text).ok()?;
+    if formatted == text {
+        return None;
+    }
+    let file = zirk_diagnostics::SourceFile::new(name.to_owned(), text.to_owned());
+    let (end_line, end_col) = file.line_column_utf16(u32::MAX);
+    Some(TextEdit {
+        range: Range::new(Position::new(0, 0), Position::new(end_line, end_col)),
+        new_text: formatted,
+    })
 }
 
 /// The span-picking rule for hover: the smallest entry whose span contains
@@ -193,6 +209,23 @@ pub fn document_symbols(program: &zirk_ast::Program, sources: &SourceMap) -> Vec
                 field.name.span,
                 Vec::new(),
             ));
+        }
+        for constructor in &class.constructors {
+            for param in constructor
+                .params
+                .iter()
+                .filter(|param| param.promoted.is_some())
+            {
+                children.push(symbol(
+                    sources,
+                    &param.name.name,
+                    None,
+                    SymbolKind::FIELD,
+                    param.span,
+                    param.name.span,
+                    Vec::new(),
+                ));
+            }
         }
         for construct in &class.constructors {
             children.push(symbol(
@@ -612,20 +645,7 @@ impl LanguageServer for Backend {
             (name, document.text.clone())
         };
 
-        let Ok(formatted) = format::format_source(&name, &text) else {
-            return Ok(None);
-        };
-        if formatted == text {
-            return Ok(None);
-        }
-
-        let file = zirk_diagnostics::SourceFile::new(name, text);
-        let (end_line, end_col) = file.line_column_utf16(u32::MAX);
-        let edit = TextEdit {
-            range: Range::new(Position::new(0, 0), Position::new(end_line, end_col)),
-            new_text: formatted,
-        };
-        Ok(Some(vec![edit]))
+        Ok(formatting_edit(&name, &text).map(|edit| vec![edit]))
     }
 }
 
@@ -660,6 +680,16 @@ mod tests {
         let analysis = analyze(&path, "fn broken(x: Int32) {\n    return x + ;\n}\n");
         assert!(analysis.frontend.is_none());
         assert!(!analysis.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn document_formatting_returns_one_full_edit_or_no_edit_for_invalid_text() {
+        let text = "fn main(): Void {  stdout.println(  1 ); }\n";
+        let edit = formatting_edit("memory.zrk", text).expect("formatting edit");
+        assert_eq!(edit.range.start, Position::new(0, 0));
+        assert_eq!(edit.range.end, Position::new(1, 0));
+        assert_eq!(edit.new_text, "fn main(): Void { stdout.println(1); }\n");
+        assert!(formatting_edit("broken.zrk", "fn main(: Void {\n").is_none());
     }
 
     #[test]
@@ -719,6 +749,48 @@ mod tests {
             .collect();
         assert!(child_names.contains(&"value"));
         assert!(child_names.contains(&"bump"));
+    }
+
+    #[test]
+    fn promoted_constructor_parameters_are_field_symbols() {
+        let dir = scratch("promoted-symbols");
+        let path = dir.join("promoted.zrk");
+        let result = analyze(
+            &path,
+            "class User { construct(public name: String) { } } fn main(): Void { }",
+        );
+        let frontend = result.frontend.as_ref().unwrap();
+        let symbols = document_symbols(&frontend.program, &frontend.sources);
+        let user = symbols.iter().find(|symbol| symbol.name == "User").unwrap();
+        assert!(
+            user.children
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|symbol| symbol.name == "name" && symbol.kind == SymbolKind::FIELD)
+        );
+        assert!(frontend.checked.type_map.iter().any(|entry| {
+            entry.name.as_deref() == Some("name")
+                && entry.kind == TypeMapKind::Field
+                && hover_text(entry) == "name: String"
+        }));
+    }
+
+    #[test]
+    fn implicit_constructor_is_not_a_document_symbol() {
+        let dir = scratch("implicit-constructor-symbols");
+        let path = dir.join("implicit.zrk");
+        let result = analyze(
+            &path,
+            "class Marker { } fn main(): Void { mut marker = Marker(); }",
+        );
+        let frontend = result.frontend.as_ref().unwrap();
+        let symbols = document_symbols(&frontend.program, &frontend.sources);
+        let marker = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Marker")
+            .unwrap();
+        assert!(marker.children.is_none());
     }
 
     #[test]

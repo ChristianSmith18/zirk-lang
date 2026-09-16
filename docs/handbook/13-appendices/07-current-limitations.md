@@ -11,10 +11,9 @@ stage implements them.
 
 Current high-impact delivery limits include:
 
-- `zirk format` is intentionally not a general formatter yet. It only
-  canonicalizes triple-quoted string layout; all other whitespace, semicolon,
-  brace and ordering rules described by the compiler specification remain
-  future work.
+- `zirk format` is canonical for the delivered source grammar, but it does not
+  format `.zkinit` manifests, accept style configuration, or support
+  range-formatting. Use `fmt off` / `fmt on` for deliberate exceptions.
 
 - `Fn(P...) => R` is parseable, type-checked, and lowered in every position
   (Phase 4d). A named function, capture-less lambda, or captured closure works

@@ -26,6 +26,15 @@ pub use token::{
 
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
 
+/// A comment retained by [`tokenize_with_trivia`]. Whitespace deliberately
+/// remains implicit, so the normal lexer hot path and token contract stay
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub text: String,
+    pub span: Span,
+}
+
 /// Diagnostic codes of the lexer.
 pub mod codes {
     use zirk_diagnostics::Code;
@@ -61,6 +70,66 @@ pub mod codes {
 /// Turns a source file into tokens, accumulating any errors found.
 pub fn tokenize(source: &SourceFile, sink: &mut DiagnosticSink) -> Vec<Token> {
     Lexer::new(source, sink).run()
+}
+
+/// Tokenizes normally and additionally returns comments in source order.
+/// This additive API is intended for tools such as the formatter; callers
+/// that do not need trivia should keep using [`tokenize`].
+pub fn tokenize_with_trivia(
+    source: &SourceFile,
+    sink: &mut DiagnosticSink,
+) -> (Vec<Token>, Vec<Comment>) {
+    let tokens = tokenize(source, sink);
+    let text = source.text();
+    let mut comments = Vec::new();
+    let mut offset = 0usize;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        let relative = match (rest.find("//"), rest.find("/*")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => break,
+        };
+        let start = offset + relative;
+        if tokens
+            .iter()
+            .any(|token| token.span.start as usize <= start && start < token.span.end as usize)
+        {
+            offset = start + 2;
+            continue;
+        }
+        let line = text[start..].starts_with("//");
+        let end = if line {
+            text[start..].find('\n').map_or(text.len(), |n| start + n)
+        } else if let Some(close) = text[start + 2..].find("*/") {
+            start + 2 + close + 2
+        } else {
+            text.len()
+        };
+        comments.push(Comment {
+            text: text[start..end].into(),
+            span: source.span(start as u32, end as u32),
+        });
+        offset = end.max(start + 2);
+    }
+    (tokens, comments)
+}
+
+#[cfg(test)]
+mod trivia_tests {
+    use super::*;
+
+    #[test]
+    fn trivia_mode_returns_comments_in_source_order() {
+        let source = SourceFile::new("comments.zrk", "// first\nfn main(): Void { /* second */ }");
+        let mut sink = DiagnosticSink::new();
+        let (_, comments) = tokenize_with_trivia(&source, &mut sink);
+        assert!(!sink.has_errors());
+        assert_eq!(
+            comments.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["// first", "/* second */"]
+        );
+    }
 }
 
 struct Lexer<'a> {

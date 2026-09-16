@@ -41,7 +41,7 @@ const manifest = {
   apiVersion: 1,
   compilerVersion: process.env.npm_package_version ?? "0.0.0",
   sourceRevision,
-  operations: ["check", "run"],
+  operations: ["check", "run", "format"],
   limits: {
     sourceBytes: 262144,
     diagnostics: 128,

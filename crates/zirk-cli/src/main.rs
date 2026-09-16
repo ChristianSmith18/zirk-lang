@@ -92,34 +92,65 @@ fn dispatch(args: &[String]) -> i32 {
 }
 
 fn format(args: &[String]) -> i32 {
-    let json = args.iter().any(|arg| arg == "--json");
+    let _json = args.iter().any(|arg| arg == "--json");
     let check = args.iter().any(|arg| arg == "--check");
+    let diff = args.iter().any(|arg| arg == "--diff");
     let files: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    if files.len() != 1 {
+    if files.is_empty() {
         return fail(
             codes::INVALID_USAGE,
-            "`zirk format` needs exactly one source file",
-            "the first formatter slice works on a single file",
-            Some("write `zirk format [--check] program.zrk`"),
+            "`zirk format` needs at least one source file or directory",
+            "formatting works independently for every target",
+            Some("write `zirk format [--check] [--diff] program.zrk src/`"),
         );
     }
-
-    let path = frontend::resolve_source_path(files[0]);
-    match zirk_cli::format::format_path(
-        &path,
-        check,
-        json,
-        frontend::resolve_color(color_choice(args).as_deref()),
-    ) {
-        zirk_cli::format::Outcome::Unchanged => 0,
-        zirk_cli::format::Outcome::Changed if check => {
-            eprintln!("{} needs formatting", path.display());
-            1
+    let mut paths = Vec::new();
+    for file in files {
+        let raw = std::path::Path::new(file);
+        let path = if raw.exists() {
+            raw.to_path_buf()
+        } else {
+            frontend::resolve_source_path(file)
+        };
+        collect_format_targets(&path, &mut paths);
+    }
+    let mut failed = false;
+    let mut drift = false;
+    for path in paths {
+        match zirk_cli::format::format_path_with_diff(&path, check, diff) {
+            Ok(zirk_cli::format::Outcome::Unchanged) => {}
+            Ok(zirk_cli::format::Outcome::Changed) if check => {
+                eprintln!("{} needs formatting", path.display());
+                drift = true;
+            }
+            Ok(zirk_cli::format::Outcome::Changed) => {}
+            Ok(zirk_cli::format::Outcome::Invalid(diagnostic)) | Err(diagnostic) => {
+                eprint!("{diagnostic}");
+                failed = true;
+            }
         }
-        zirk_cli::format::Outcome::Changed => 0,
-        zirk_cli::format::Outcome::Invalid(diagnostic) => {
-            eprint!("{diagnostic}");
-            1
+    }
+    i32::from(failed || drift)
+}
+
+fn collect_format_targets(path: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
+    if path.is_file() {
+        output.push(path.to_path_buf());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        output.push(path.to_path_buf());
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            collect_format_targets(&child, output);
+        } else if child
+            .extension()
+            .is_some_and(|extension| extension == "zrk")
+        {
+            output.push(child);
         }
     }
 }
@@ -260,7 +291,7 @@ fn help() {
     println!();
     println!("Subcommands:");
     println!("  check <file>       validate the frontend only");
-    println!("  format [--check] <file>  canonicalize triple-quoted string layout");
+    println!("  format [--check] [--diff] <target>...  canonicalize Zirk source files");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");

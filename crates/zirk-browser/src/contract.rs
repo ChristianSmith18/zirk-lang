@@ -134,6 +134,9 @@ pub struct Response {
     pub output: Vec<OutputEvent>,
     pub completion: Option<Completion>,
     pub failure: Option<Failure>,
+    /// Canonical source returned by the additive `format` operation only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatted_source: Option<String>,
 }
 
 #[cfg(test)]
