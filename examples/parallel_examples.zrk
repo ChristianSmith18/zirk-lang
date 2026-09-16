@@ -34,7 +34,7 @@ fn main(): Void {
             compress(name);
         }
     }
-    parallel; cores: 1..=4 {
+    parallel; cores: 1 ..= 4 {
         for name in files {
             compress(name);
         }
@@ -52,7 +52,7 @@ fn main(): Void {
     stdout.println(even.sum());
 
     // 5. `Parallel.each` is ordered even though callbacks finish independently.
-    inmut shifted: List<Int32> = Parallel.each(files, (n: Int32): Int32 => n + 1);
+    inmut shifted: List<Int32> = Parallel.each(files,(n: Int32): Int32 => n + 1);
     stdout.println(shifted[0]);
     stdout.println(shifted[7]);
 }

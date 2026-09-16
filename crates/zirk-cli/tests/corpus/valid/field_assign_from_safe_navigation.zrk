@@ -20,5 +20,5 @@ fn main(): Void {
     mut maybeB: Node? = b;
     a.next = maybeB?.next;
 
-    stdout.println(a.next?.value ?? -1);
+    stdout.println(a.next?.value ?? - 1);
 }

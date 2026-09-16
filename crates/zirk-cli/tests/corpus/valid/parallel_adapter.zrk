@@ -5,14 +5,14 @@ fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3];
     mut mapped: List<Int32> = values.parallel.map((v: Int32): Int32 => v * 2);
     mut filtered: List<Int32> = values.parallel.filter((v: Int32): Boolean => v > 1);
-    mut each: List<Int32> = Parallel.each(values, (v: Int32): Int32 => v + 1);
+    mut each: List<Int32> = Parallel.each(values,(v: Int32): Int32 => v + 1);
     stdout.println(mapped[0]);
     stdout.println(mapped[2]);
     stdout.println(filtered[0]);
     stdout.println(filtered[1]);
     stdout.println(each[0]);
     stdout.println(each[2]);
-    stdout.println(values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a + b));
+    stdout.println(values.parallel.reduce(0,(a: Int32, b: Int32): Int32 => a + b));
     stdout.println(values.parallel.sum());
     stdout.println(parallel { values.sum() });
 }

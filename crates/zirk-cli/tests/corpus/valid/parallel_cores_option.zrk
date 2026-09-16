@@ -15,7 +15,7 @@ fn main(): Void {
             touch(v);
         }
     }
-    parallel; cores: 1..=4 {
+    parallel; cores: 1 ..= 4 {
         for v in values {
             touch(v);
         }

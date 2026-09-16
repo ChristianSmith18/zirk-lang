@@ -13,13 +13,13 @@ class Point {
         this.y = y;
     }
 
-     to_string(): String {
+    to_string(): String {
         return "({this.x}, {this.y})";
     }
 }
 
 fn main(): Void {
-    mut i8: Int8 = (-5) as Int8;
+    mut i8: Int8 =(-5) as Int8;
     mut i16: Int16 = 1000 as Int16;
     mut i64: Int64 = 2000000000 as Int64;
     mut i128: Int128 = 2000000000 as Int128;

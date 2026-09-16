@@ -2,8 +2,8 @@
 // variable, annotated, reversed, sliced — and still iterated by
 // `for ... in`.
 fn main(): Void {
-    mut r: Range<Int32> = 0..10;
-    for i in r[0:3] {
+    mut r: Range<Int32> = 0 .. 10;
+    for i in r[0: 3] {
         stdout.println(i);
     }
 }

@@ -1,5 +1,5 @@
 interface Container<T> {
-     get(): T;
+    get(): T;
 }
 
 class Box<T> implements Container<T> {
@@ -7,4 +7,4 @@ class Box<T> implements Container<T> {
     construct(v: T) { this.value = v; }
 }
 
-fn main(): Void {}
+fn main(): Void { }

@@ -5,7 +5,7 @@
 fn main(): Void {
     mut x: Int32 = 41;
     mut view: NativeSlice<Int32> = unsafe {
-        mut p: Pointer<Int32> = Pointer.from(x);
+        mut p: Pointer<Int32> = Pointer.from (x);
         p.as_slice(1).unwrap()
     };
 

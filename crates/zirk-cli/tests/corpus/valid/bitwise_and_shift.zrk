@@ -6,7 +6,7 @@ fn main(): Void {
     stdout.println(a & b);
     stdout.println(a | b);
     stdout.println(a ^ b);
-    stdout.println(~a);
+    stdout.println(~ a);
     stdout.println(a << 2);
     stdout.println(a >> 1);
 

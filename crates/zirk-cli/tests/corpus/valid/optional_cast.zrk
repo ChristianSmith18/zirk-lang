@@ -1,26 +1,24 @@
 // Cast nullable `as?` devuelve el subtipo cuando coincide y null cuando no.
-class Animal { construct() { }  speak(): String { return "..."; } }
+class Animal { construct() { } speak(): String { return "..."; } }
 class Dog extends Animal {
     construct() { super(); }
-    #override
-      speak(): String { return "woof"; }
+    #override speak(): String { return "woof"; }
 }
 class Cat extends Animal {
     construct() { super(); }
-    #override
-      speak(): String { return "meow"; }
+    #override speak(): String { return "meow"; }
 }
 
 fn main(): Void {
     mut a: Animal = Dog();
-    mut maybeDog: Dog? = a as? Dog;
+    mut maybeDog: Dog? = a as ? Dog;
     match maybeDog {
         null => stdout.println("no dog"),
         d => stdout.println(d.speak()),
     }
 
     mut c: Animal = Cat();
-    mut maybeDog2: Dog? = c as? Dog;
+    mut maybeDog2: Dog? = c as ? Dog;
     match maybeDog2 {
         null => stdout.println("not dog"),
         _ => stdout.println("unexpected"),

@@ -6,39 +6,30 @@
 class OpenError implements Error {
     inmut reason: String;
     construct(reason: String) { this.reason = reason; }
-    #override
-      message(): String { return this.reason; }
-    #override
-      code(): String { return "OPEN"; }
-    #override
-      cause(): Error? { return null; }
+    #override message(): String { return this.reason; }
+    #override code(): String { return "OPEN"; }
+    #override cause(): Error? { return null; }
 }
 
 class BoomError implements RuntimeError {
     construct() { }
-    #override
-      message(): String { return "boom"; }
-    #override
-      code(): String { return "BOOM"; }
-    #override
-      cause(): Error? { return null; }
-    #override
-      stack_trace(): StackTrace { return StackTrace(); }
+    #override message(): String { return "boom"; }
+    #override code(): String { return "BOOM"; }
+    #override cause(): Error? { return null; }
+    #override stack_trace(): StackTrace { return StackTrace(); }
 }
 
 class FakeFile implements Resource<OpenError> {
     inmut name: String;
     mut closed: Boolean;
     construct(name: String) { this.name = name; this.closed = false; }
-     nothing(): Void { return; }
-    #override
-      close(): Result<Void, OpenError> {
+    nothing(): Void { return; }
+    #override close(): Result<Void, OpenError> {
         this.closed = true;
         stdout.println("closed " + this.name);
         return Ok(this.nothing());
     }
-    #override
-      is_closed(): Boolean { return this.closed; }
+    #override is_closed(): Boolean { return this.closed; }
 }
 
 fn open_file(name: String): Result<FakeFile, OpenError> {

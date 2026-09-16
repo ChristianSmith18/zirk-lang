@@ -6,5 +6,5 @@ class Dog extends Animal {
 
 fn main(): Void {
     mut a: Animal = Dog();
-    mut i: Int32? = a as? Int32;
+    mut i: Int32? = a as ? Int32;
 }

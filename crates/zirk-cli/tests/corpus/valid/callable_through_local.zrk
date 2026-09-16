@@ -9,6 +9,6 @@ fn apply(f: Fn(Int32) => Int32, n: Int32): Int32 {
 fn main(): Void {
     mut named = double;
     stdout.println(apply(named, 21));
-    mut lam: Fn(Int32) => Int32 = (n: Int32): Int32 => n + 1;
+    mut lam: Fn(Int32) => Int32 =(n: Int32): Int32 => n + 1;
     stdout.println(apply(lam, 20));
 }

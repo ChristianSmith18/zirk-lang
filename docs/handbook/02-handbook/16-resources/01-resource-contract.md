@@ -5,7 +5,7 @@ resource:
 
 ```zirk
 interface Resource<E from Error> {
-    close(): Result<Void,E>;
+    close(): Result<Void, E>;
     is_closed(): Boolean;
 }
 ```

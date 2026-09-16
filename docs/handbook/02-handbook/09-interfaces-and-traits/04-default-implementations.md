@@ -27,8 +27,7 @@ class VerboseUser implements Describable {
         return "VerboseUser";
     }
 
-    #override
-    describe(): String {
+    #override describe(): String {
         return "a user with verbose diagnostics";
     }
 }

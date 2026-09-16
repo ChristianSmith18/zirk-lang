@@ -17,7 +17,7 @@ fn main(): Void {
     mut count = 0;
     for m in empty.find_all("abc") {
         stdout.println(m.text);
-        count++;
+        count ++;
     }
     stdout.println(count);
 }

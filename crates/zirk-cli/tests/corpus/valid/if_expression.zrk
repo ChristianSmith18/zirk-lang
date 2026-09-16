@@ -3,7 +3,7 @@ fn classify(n: Int32): String {
 }
 
 fn main(): Void {
-    for i in 1..=4 {
+    for i in 1 ..= 4 {
         stdout.println(classify(i));
     }
 

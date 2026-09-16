@@ -8,7 +8,7 @@ fn main(): Void {
     // Checked arithmetic on a narrow signed width.
     mut a: Int32 = 100;
     mut a8 = a as Int8;
-    mut b8 = (20 as Int32) as Int8;
+    mut b8 =(20 as Int32) as Int8;
     stdout.println((a8 + b8) as Int32);
 
     // Checked arithmetic on an unsigned width, and unsigned comparison.
@@ -30,7 +30,7 @@ fn main(): Void {
     mut n: UInt32 = 10 as UInt32;
     stdout.println((n << 2) as Int32);
     stdout.println((n >> 1) as Int32);
-    stdout.println((~a) );
+    stdout.println((~ a));
 
     // Division and remainder, checked.
     mut p: Int64 = 100 as Int64;

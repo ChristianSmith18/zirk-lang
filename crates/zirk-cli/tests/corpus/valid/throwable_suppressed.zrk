@@ -7,23 +7,19 @@ class AppError implements Throwable {
         this.reason = reason;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "APP";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 
-    #override
-      stack_trace(): StackTrace {
+    #override stack_trace(): StackTrace {
         return StackTrace();
     }
 }
@@ -36,7 +32,7 @@ fn main(): Void {
             try {
                 throw AppError("inner");
             } catch AppError(inner) {
-                stdout.println("suppressed: " + (inner.suppressed()?.message() ?? "none"));
+                stdout.println("suppressed: " +(inner.suppressed()?.message() ?? "none"));
             }
         }
     } catch Throwable(_) {

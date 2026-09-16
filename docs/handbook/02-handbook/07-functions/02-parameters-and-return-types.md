@@ -18,11 +18,11 @@ A function or method **with a body** may omit the `: Type` annotation. The check
 
 ```zirk
 fn double(n: Int32) {
-    return n * 2;          // inferred: Int32
+    return n * 2; // inferred: Int32
 }
 
 fn main() {
-    stdout.println(double(21));   // no `return` at all: inferred Void
+    stdout.println(double(21)); // no `return` at all: inferred Void
 }
 ```
 

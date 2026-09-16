@@ -16,6 +16,6 @@ fn main(): Void {
     mut keptPresent: Node? = present ?? null;
     mut keptAbsent: Node? = absent ?? null;
 
-    stdout.println(keptPresent?.value ?? -1);
-    stdout.println(keptAbsent?.value ?? -1);
+    stdout.println(keptPresent?.value ?? - 1);
+    stdout.println(keptAbsent?.value ?? - 1);
 }

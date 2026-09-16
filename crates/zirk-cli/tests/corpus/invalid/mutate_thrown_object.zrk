@@ -16,23 +16,19 @@ class Payload implements Throwable {
         this.container = container;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "PAYLOAD";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 
-    #override
-      stack_trace(): StackTrace {
+    #override stack_trace(): StackTrace {
         return StackTrace();
     }
 }

@@ -8,5 +8,5 @@ fn main(): Void {
     l.insert(-1, 99);
     stdout.println(l[-2].to_string());
 
-    stdout.println("hola"[-1]);
+    stdout.println("hola" [-1]);
 }

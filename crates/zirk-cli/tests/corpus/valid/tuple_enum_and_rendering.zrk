@@ -31,7 +31,7 @@ class Person {
 }
 
 fn main(): Void {
-    inmut t = (1, "a", true);
+    inmut t =(1, "a", true);
     stdout.println(t.length.to_string());
     stdout.println(t.to_string());
     stdout.println(Color.Red.name);

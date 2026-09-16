@@ -4,7 +4,7 @@
 
 fn main(): Void {
     concurrent {
-        Timer.every(1ms, (): Void => { });
+        Timer.every(1ms,(): Void => { });
         Timer.sleep(4ms);
     }
     stdout.println(99);

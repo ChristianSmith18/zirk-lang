@@ -11,7 +11,7 @@ fn pick(cond: Boolean): Int32 {
 }
 
 fn pick_reversed(cond: Boolean): Int32 {
-    return cond ? fatalError("unreachable in this test") : 7;
+    return cond ? fatalError("unreachable in this test"): 7;
 }
 
 fn pick_if(cond: Boolean): Int32 {

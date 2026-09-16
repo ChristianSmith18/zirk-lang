@@ -49,7 +49,7 @@ fn main(): Void {
 
     // 2. A dynamic spawn loop: the block waits for every branch.
     concurrent {
-        for n in 1..=3 {
+        for n in 1 ..= 3 {
             spawn render(n);
         }
     }
@@ -63,7 +63,7 @@ fn main(): Void {
     // 4. Ambient timers: `Timer.every` is cancelled on scope close, so the
     //    block does not hang.
     concurrent {
-        Timer.every(1ms, (): Void => { });
+        Timer.every(1ms,(): Void => { });
         Timer.sleep(3ms);
     }
     stdout.println(42);

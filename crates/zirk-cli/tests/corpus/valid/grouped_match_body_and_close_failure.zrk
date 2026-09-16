@@ -8,18 +8,15 @@ class OpenError implements Error {
         this.reason = reason;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "OPEN";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 }
@@ -33,24 +30,22 @@ class FakeFile implements Resource<OpenError> {
         this.fail_close = fail_close;
     }
 
-     read_all(): String {
+    read_all(): String {
         return "contents of " + this.name;
     }
 
-     nothing(): Void {
+    nothing(): Void {
         return;
     }
 
-    #override
-      close(): Result<Void, OpenError> {
+    #override close(): Result<Void, OpenError> {
         if this.fail_close {
             return Error(OpenError("close error: " + this.name));
         }
         return Ok(this.nothing());
     }
 
-    #override
-      is_closed(): Boolean {
+    #override is_closed(): Boolean {
         return false;
     }
 }

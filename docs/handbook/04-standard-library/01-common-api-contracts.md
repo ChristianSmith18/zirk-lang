@@ -98,7 +98,7 @@ Handles with deterministic cleanup implement `Resource<E>`:
 
 ```zirk
 interface Resource<E from Error> {
-    close(): Result<Void,E>;
+    close(): Result<Void, E>;
     is_closed(): Boolean;
 }
 ```

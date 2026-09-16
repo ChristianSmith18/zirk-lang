@@ -85,7 +85,7 @@ fn main(): Void {
     stdout.println(empty);
     inmut ds: List<Duration> = [1500ms, 2s];
     stdout.println(ds);
-    inmut t = ("Ada", 37, true);
+    inmut t =("Ada", 37, true);
     stdout.println(t);
 
     // Map/Set — sorted snapshots, numeric or lexicographic by key/element.
@@ -108,12 +108,12 @@ fn main(): Void {
     stdout.println(ss);
 
     // Ranges — every literal spelling is reproduced.
-    stdout.println(1..10);
-    stdout.println(1..=10);
-    stdout.println(1..10:2);
-    stdout.println(1..=10:2);
-    stdout.println(10..0:-2);
-    stdout.println(0s..10s:2s);
+    stdout.println(1 .. 10);
+    stdout.println(1 ..= 10);
+    stdout.println(1 .. 10: 2);
+    stdout.println(1 ..= 10: 2);
+    stdout.println(10 .. 0: -2);
+    stdout.println(0s .. 10s: 2s);
 
     // Records, classes, and the surface name of a block-local class.
     stdout.println(Point(x: 1, y: 2));
@@ -146,7 +146,7 @@ fn main(): Void {
 
     // Callables — a named function keeps its name, a lambda does not.
     stdout.println(double);
-    inmut lam = (a: Int32): Int32 => a + 1;
+    inmut lam =(a: Int32): Int32 => a + 1;
     stdout.println(lam);
 
     // Regex renders the literal spelling of its pattern.
@@ -172,12 +172,12 @@ fn main(): Void {
     inmut j = spawn work();
     stdout.println(j);
     mut marker: Marker = Marker(1);
-    mut w: Weak<Marker> = Weak.from(marker);
+    mut w: Weak<Marker> = Weak.from (marker);
     stdout.println(w);
     inmut x2: Int32 = 42;
-    mut ptr: Pointer<Int32> = unsafe { Pointer.from(x2) };
+    mut ptr: Pointer<Int32> = unsafe { Pointer.from (x2) };
     stdout.println(ptr);
-    inmut pinned: Pin<Marker> = Pin(marker);
+    inmut pinned: Pin<Marker> = Pin (marker);
     stdout.println(pinned);
 
     // `print` shares the conversion too.

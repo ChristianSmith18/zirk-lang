@@ -1,6 +1,6 @@
 fn main(): Void {
     mut counter = 0;
-    inmut BUMP = (): Void => {
+    inmut BUMP =(): Void => {
         counter = counter + 1;
     };
     BUMP();

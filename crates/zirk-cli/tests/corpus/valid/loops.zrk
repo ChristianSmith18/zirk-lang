@@ -1,7 +1,7 @@
 fn main(): Void {
     mut total = 0;
 
-    for (mut i = 0; i < 10; i++) {
+    for (mut i = 0; i < 10; i ++) {
         if i == 3 { continue; }
         if i == 7 { break; }
         total += i;
@@ -16,7 +16,7 @@ fn main(): Void {
 
     mut guard = 0;
     loop {
-        guard++;
+        guard ++;
         if guard == 2 { break; }
     }
     stdout.println(guard);

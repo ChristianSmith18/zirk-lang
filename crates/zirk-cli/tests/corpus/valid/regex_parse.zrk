@@ -7,7 +7,7 @@ fn main(): Void {
     }
 
     mut bad = Regex.parse("[");
-    if !bad.is_ok() {
+    if ! bad.is_ok() {
         stdout.println("err");
     } else {
         stdout.println("unexpected");

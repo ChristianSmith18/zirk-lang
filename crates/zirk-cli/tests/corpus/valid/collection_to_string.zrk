@@ -5,7 +5,7 @@ fn main(): Void {
     mut l: List<String> = List("a", "b");
     stdout.println(l.to_string());
 
-    mut outer: Array<Array<Int32>> = Array(2);
+    mut outer: Array<Array<Int32 >> = Array(2);
     mut inner1: Array<Int32> = Array(1, 2);
     mut inner2: Array<Int32> = Array(3, 4);
     outer[0] = inner1;

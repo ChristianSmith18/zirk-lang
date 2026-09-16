@@ -2,4 +2,4 @@ fn escape_return(d: Dependent<Int32>): Dependent<Int32> {
     return d;
 }
 
-fn main(): Void {}
+fn main(): Void { }

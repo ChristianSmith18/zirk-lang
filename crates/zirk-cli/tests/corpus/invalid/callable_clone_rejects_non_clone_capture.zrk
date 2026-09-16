@@ -12,7 +12,7 @@ fn main(): Void {
     unsafe {
         mut x: Int32 = 1;
         mut h = Holder(Pointer.from(x));
-        inmut f = (n: Int32): Int32 => n + h.value;
+        inmut f =(n: Int32): Int32 => n + h.value;
         mut g = f.clone();
     }
 }

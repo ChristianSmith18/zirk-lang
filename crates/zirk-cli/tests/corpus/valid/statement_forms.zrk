@@ -4,12 +4,12 @@
 
 fn main(): Void {
     // La forma canónica del `for` tradicional no lleva paréntesis.
-    for mut i = 0; i < 3; i++ {
+    for mut i = 0; i < 3; i ++ {
         stdout.println(i);
     }
 
     // Escribirlos sigue siendo válido.
-    for (mut j = 0; j < 2; j++) {
+    for (mut j = 0; j < 2; j ++) {
         stdout.println(j);
     }
 
@@ -25,8 +25,8 @@ fn main(): Void {
 
     // Postfijo devuelve el valor previo; prefijo, el ya incrementado.
     mut i = 0;
-    stdout.println(i++);
-    stdout.println(++i);
+    stdout.println(i ++);
+    stdout.println(++ i);
 
     mut closed = true;
     if closed stdout.println("cerrado");

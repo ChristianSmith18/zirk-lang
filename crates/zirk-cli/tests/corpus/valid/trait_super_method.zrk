@@ -1,15 +1,14 @@
 // Selección explícita del default de un trait con TraitName.super.
 trait Greeter {
-     greet(): String;
-     buildGreeting(prefix: String, suffix: String): String { return prefix + "hello" + suffix; }
+    greet(): String;
+    buildGreeting(prefix: String, suffix: String): String { return prefix + "hello" + suffix; }
 }
 
 class Person implements Greeter {
     name: String;
     construct(name: String) { this.name = name; }
-     greet(): String { return "hi, " + this.name; }
-    #override
-     buildGreeting(prefix: String, suffix: String): String {
+    greet(): String { return "hi, " + this.name; }
+    #override buildGreeting(prefix: String, suffix: String): String {
         return Greeter.super.buildGreeting(suffix:, prefix:) + " " + this.name;
     }
 }

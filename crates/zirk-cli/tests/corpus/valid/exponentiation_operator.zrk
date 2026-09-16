@@ -14,7 +14,7 @@ fn main(): Void {
     stdout.println((-2 ** 2).to_string());
 
     // A negative literal exponent widens to exact `Float`.
-    stdout.println((2 ** -3).to_string());
+    stdout.println((2 ** - 3).to_string());
 
     // Exact `Float` base, integer exponent: exact.
     inmut base: Float = 1.5;

@@ -4,20 +4,19 @@
 class Box<T> {
     value: T;
     construct(value: T) { this.value = value; }
-     get(): T { return this.value; }
-     set(value: T): Void { this.value = value; }
+    get(): T { return this.value; }
+    set(value: T): Void { this.value = value; }
 }
 
-class Animal { construct() { }  speak(): String { return "..."; } }
+class Animal { construct() { } speak(): String { return "..."; } }
 class Dog extends Animal {
     construct() { super(); }
-    #override
-      speak(): String { return "woof"; }
+    #override speak(): String { return "woof"; }
 }
 class Cage<T from Animal> {
     value: T;
     construct(value: T) { this.value = value; }
-     peek(): T { return this.value; }
+    peek(): T { return this.value; }
 }
 
 fn makeBox(v: Int32): Box<Int32> {

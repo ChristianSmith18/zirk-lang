@@ -12,7 +12,7 @@ enum Box<T> {
 }
 
 enum OnlyBox<T> {
-    Wrap(value: Box<Box<T>>),
+    Wrap(value: Box<Box<T >>),
 }
 
 fn unwrapInner(b: Box<Int32>): String {
@@ -22,7 +22,7 @@ fn unwrapInner(b: Box<Int32>): String {
     };
 }
 
-fn unwrapOuter(b: Box<Box<Int32>>): String {
+fn unwrapOuter(b: Box<Box<Int32 >>): String {
     return match b {
         Box.Full(inner) => unwrapInner(inner);
         Box.Empty => "empty";

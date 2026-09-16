@@ -71,7 +71,7 @@ fn main(): Void {
     // 3. Timer.every es ambient: el scope lo cancela al salir después del
     //    sleep, sin dejar una rama viva ni bloquear el programa.
     concurrent {
-        Timer.every(1ms, (): Void => { });
+        Timer.every(1ms,(): Void => { });
         Timer.sleep(3ms);
     }
     stdout.println("timer scope: done");
@@ -88,8 +88,10 @@ fn main(): Void {
     // 5. Adaptadores paralelos: los resultados materializados mantienen el
     //    orden original aunque los callbacks terminen en distinto momento.
     inmut squares: List<Int32> = values.parallel.map((value: Int32): Int32 => value * value);
-    inmut even_squares: List<Int32> = squares.parallel.filter((value: Int32): Boolean => value % 2 == 0);
-    inmut shifted: List<Int32> = Parallel.each(values, (value: Int32): Int32 => value + 100);
+    inmut even_squares: List<Int32> = squares.parallel.filter(
+        (value: Int32): Boolean => value % 2 == 0,
+    );
+    inmut shifted: List<Int32> = Parallel.each(values,(value: Int32): Int32 => value + 100);
     stdout.println("parallel sum");
     stdout.println(squares.parallel.sum());
     stdout.println("parallel even count");

@@ -6,6 +6,6 @@
 
 fn main(): Void {
     inmut base = 10;
-    inmut f: Fn(Int32) => Int32 = (n: Int32): Int32 => n + base;
+    inmut f: Fn(Int32) => Int32 =(n: Int32): Int32 => n + base;
     stdout.println(f(5));
 }
