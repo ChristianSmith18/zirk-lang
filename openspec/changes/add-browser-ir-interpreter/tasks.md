@@ -184,8 +184,13 @@
 - [x] 13.7 Update relevant normative compiler/runtime documentation only where the new execution-engine contract requires it, without changing source-language semantics.
 - [x] 13.8 Commit the completed `zirk-lang` change on the worktree branch and record its clean revision for artifact provenance.
 - [x] 13.9 Build and verify the browser package from that exact clean compiler revision.
-- [ ] 13.10 Apply and complete `add-browser-playground-execution` in `../zirk-lang-site` on its normal `develop` branch using the verified package.
-- [ ] 13.11 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` from the committed compiler revision after human review of site-owned status claims.
-- [ ] 13.12 Reconcile generated website content with the site playground integration without overwriting site-owned changes.
-- [ ] 13.13 Run the complete compiler and website verification suites and review both diffs for contradictory availability or target claims.
-- [ ] 13.14 Commit the companion website changes separately and record both repository revisions for an auditable release pair.
+- [x] 13.10 Apply and complete `add-browser-playground-execution` in `../zirk-lang-site` on its normal `develop` branch using the verified package.
+  Evidence: the site change landed on `develop` and was archived as `2026-09-16-add-browser-playground-execution` with all 152 tasks complete; the verified package is vendored under `public/browser-compiler/` with provenance pinning `32f33ef`.
+- [x] 13.11 Run `./scripts/sync-website-content.sh --audit-date YYYY-MM-DD` from the committed compiler revision after human review of site-owned status claims.
+  Evidence: `./scripts/sync-website-content.sh --audit-date 2026-09-16` produced no drift — 372 handbook documents, digest `1e7b3a2a…`, base revision `32f33ef`; `project-status-source.json` records `auditDate` `2026-09-16`.
+- [x] 13.12 Reconcile generated website content with the site playground integration without overwriting site-owned changes.
+  Evidence: reconciliation happened inside the site change (its task 14.3); the re-run synchronization produced an empty diff, so generated content and the playground integration are consistent.
+- [x] 13.13 Run the complete compiler and website verification suites and review both diffs for contradictory availability or target claims.
+  Evidence: `./scripts/check-local.sh` passed on Darwin arm64 (fmt, clippy, frontend-only build, workspace build, workspace tests) after removing a duplicated `mod tests` block in `zirk-runtime/src/regex.rs` and applying pending rustfmt drift; the site `yarn test` passed (80 tool + 187 Angular tests; one axe timeout flake recovered on isolated re-run). Diff review found consistent claims: both repos describe the interpreter as tooling and the Zirk WebAssembly target as excluded.
+- [x] 13.14 Commit the companion website changes separately and record both repository revisions for an auditable release pair.
+  Evidence: the website changes were committed separately on `develop`; the delivery pair is recorded in `zirk-lang-site/docs/playground-editor-delivery.md` (`zirk-lang` `8e40ed0…` / `zirk-lang-site` `969fc32…`), and current site HEAD `ffa3625` pins handbook, status, and package provenance to `32f33ef`.
