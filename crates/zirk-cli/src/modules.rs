@@ -190,11 +190,8 @@ mod tests {
 
     /// A scratch directory unique to this test process.
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zirk-modules-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zirk-modules-test-{}-{}", std::process::id(), tag));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

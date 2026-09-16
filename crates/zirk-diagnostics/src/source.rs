@@ -174,10 +174,7 @@ impl SourceFile {
         let line = self.line_index(offset);
         let start = self.line_starts[line] as usize;
         let up_to = (offset as usize).min(self.text.len());
-        let column: usize = self.text[start..up_to]
-            .chars()
-            .map(char::len_utf16)
-            .sum();
+        let column: usize = self.text[start..up_to].chars().map(char::len_utf16).sum();
         (line as u32, column as u32)
     }
 

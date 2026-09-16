@@ -17,7 +17,9 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
 
 use zirk_cli::{format, frontend};
-use zirk_diagnostics::{Diagnostic as ZirkDiagnostic, DiagnosticSink, FileId, Severity, SourceMap, Span};
+use zirk_diagnostics::{
+    Diagnostic as ZirkDiagnostic, DiagnosticSink, FileId, Severity, SourceMap, Span,
+};
 use zirk_sema::{TypeMapEntry, TypeMapKind};
 
 /// The result of one analysis pass over a document's text.
@@ -83,10 +85,9 @@ pub fn hover_text(entry: &TypeMapEntry) -> String {
         (TypeMapKind::Method, Some(name)) => {
             format!("{name}{}", &entry.text["fn".len()..])
         }
-        (
-            TypeMapKind::Variable | TypeMapKind::Parameter | TypeMapKind::Field,
-            Some(name),
-        ) => format!("{name}: {}", entry.text),
+        (TypeMapKind::Variable | TypeMapKind::Parameter | TypeMapKind::Field, Some(name)) => {
+            format!("{name}: {}", entry.text)
+        }
         _ => entry.text.clone(),
     }
 }
@@ -146,10 +147,7 @@ fn to_lsp_diagnostic(diag: &ZirkDiagnostic) -> (Option<String>, Diagnostic) {
 /// One symbol of `textDocument/documentSymbol`, built from the merged AST.
 /// Only declarations that live in the entry file become symbols: an imported
 /// declaration belongs to its own document's outline.
-pub fn document_symbols(
-    program: &zirk_ast::Program,
-    sources: &SourceMap,
-) -> Vec<DocumentSymbol> {
+pub fn document_symbols(program: &zirk_ast::Program, sources: &SourceMap) -> Vec<DocumentSymbol> {
     fn range(sources: &SourceMap, span: Span) -> Range {
         let file = sources.file(span.file);
         let (sl, sc) = file.line_column_utf16(span.start);
@@ -175,7 +173,11 @@ pub fn document_symbols(
             deprecated: None,
             range: range(sources, span),
             selection_range: range(sources, selection),
-            children: if children.is_empty() { None } else { Some(children) },
+            children: if children.is_empty() {
+                None
+            } else {
+                Some(children)
+            },
         }
     }
 
@@ -449,7 +451,9 @@ impl Backend {
         }
         for target in previously {
             if !published.contains(&target) {
-                self.client.publish_diagnostics(target, Vec::new(), None).await;
+                self.client
+                    .publish_diagnostics(target, Vec::new(), None)
+                    .await;
             }
         }
 
@@ -641,11 +645,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "zirk-lsp-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zirk-lsp-test-{}-{}", std::process::id(), tag));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
