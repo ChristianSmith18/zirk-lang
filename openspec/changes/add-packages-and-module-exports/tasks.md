@@ -63,4 +63,4 @@
 - [x] 8.5 Add `docs/decisions/ADR-021-package-and-module-boundaries.md` documenting package versus module terminology, import-source resolution, default member opening, collision handling, and compiler-owned stdlib mappings
 - [x] 8.6 Update `docs/init/ZIRK_ROADMAP.md`, `docs/init/ZIRK_FEATURE_STATUS.md`, `README.md`, and current limitations to distinguish delivered multi-file imports from pending package publication/registry work
 - [x] 8.7 Validate all changed examples with `zirk check`/`zirk run` and validate the OpenSpec change with `openspec validate add-packages-and-module-exports --strict`
-- [ ] 8.8 After the zirk-lang commit is clean, run `./scripts/sync-website-content.sh` (with a human-reviewed `--audit-date YYYY-MM-DD` if status evidence changed), review the companion site diff, and commit website synchronization separately
+- [x] 8.8 After the zirk-lang commit is clean, run `./scripts/sync-website-content.sh` (with a human-reviewed `--audit-date YYYY-MM-DD` if status evidence changed), review the companion site diff, and commit website synchronization separately
