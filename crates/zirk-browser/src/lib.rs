@@ -871,6 +871,18 @@ mod tests {
             include_str!("../fixtures/closure.json"),
             include_str!("../fixtures/regex.json"),
             include_str!("../fixtures/class-construction-sugar.json"),
+            include_str!("../fixtures/void-call.json"),
+            include_str!("../fixtures/void-method-call.json"),
+            include_str!("../fixtures/list-add.json"),
+            include_str!("../fixtures/map-set.json"),
+            include_str!("../fixtures/set-add.json"),
+            include_str!("../fixtures/typed-catch.json"),
+            include_str!("../fixtures/downcast.json"),
+            include_str!("../fixtures/decimal-ops.json"),
+            include_str!("../fixtures/decimal-compare.json"),
+            include_str!("../fixtures/int-division.json"),
+            include_str!("../fixtures/length-loop.json"),
+            include_str!("../fixtures/uncaught-throwable-message.json"),
         ] {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let response = run(Request {
@@ -921,6 +933,18 @@ mod tests {
             include_str!("../fixtures/closure.json"),
             include_str!("../fixtures/regex.json"),
             include_str!("../fixtures/class-construction-sugar.json"),
+            include_str!("../fixtures/void-call.json"),
+            include_str!("../fixtures/void-method-call.json"),
+            include_str!("../fixtures/list-add.json"),
+            include_str!("../fixtures/map-set.json"),
+            include_str!("../fixtures/set-add.json"),
+            include_str!("../fixtures/typed-catch.json"),
+            include_str!("../fixtures/downcast.json"),
+            include_str!("../fixtures/decimal-ops.json"),
+            include_str!("../fixtures/decimal-compare.json"),
+            include_str!("../fixtures/int-division.json"),
+            include_str!("../fixtures/length-loop.json"),
+            include_str!("../fixtures/uncaught-throwable-message.json"),
         ] {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let (frontend, diagnostics) = check_source(&fixture.source, &fixture.virtual_name);

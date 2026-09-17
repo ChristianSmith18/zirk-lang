@@ -676,9 +676,27 @@ fn invalid_no_common_numeric_type() {
 }
 
 #[test]
-fn invalid_comparison_between_integer_and_float() {
-    let output = rejected_body("mut a: Int32 = 1;\nmut b: Float64 = 1.0;\nmut c = a < b;");
+fn invalid_comparison_between_decimal_and_float() {
+    // Ordered comparisons widen to the smallest common numeric type, so
+    // `Int32 < Float64` is accepted. A `Decimal`/`Float` pair has no common
+    // type — the exact type never joins a binary float — and stays rejected.
+    let output = rejected_body("mut a: Decimal = 1.5;\nmut b: Float64 = 1.0;\nmut c = a < b;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
+}
+
+#[test]
+fn valid_comparison_between_integer_and_float() {
+    accepted_body("mut a: Int32 = 1;\nmut b: Float64 = 1.0;\nmut c = a < b;");
+}
+
+#[test]
+fn valid_comparison_between_signed_and_unsigned_integer() {
+    accepted_body("mut a: Int32 = 1;\nmut b: UInt64 = 2;\nmut c = a < b;");
+}
+
+#[test]
+fn valid_comparison_between_decimal_and_integer() {
+    accepted_body("mut a: Decimal = 1.5;\nmut b: Int64 = 2;\nmut c = a < b;");
 }
 
 #[test]

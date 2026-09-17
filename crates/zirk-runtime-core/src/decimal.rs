@@ -469,11 +469,15 @@ pub fn to_f64(value: Decimal) -> f64 {
 
 /// Converts a finite binary float into its exact decimal spelling. Consumers
 /// use this only at an explicit binary-float to decimal conversion boundary.
+/// Matches the native `zirk_rt_decimal_from_f64`: shortest round-trip text,
+/// then rounded into the significant-digit budget.
 pub fn from_f64_checked(value: f64) -> Result<Decimal, DecimalError> {
     if !value.is_finite() {
         return Err(DecimalError::Domain);
     }
-    parse(&format!("{value:.16}")).ok_or(DecimalError::Overflow)
+    let parsed = parse(&format!("{value}"))
+        .map(|d| reduce_to_digits(d, MAX_SIGNIFICANT_DIGITS, RoundingMode::HalfEven));
+    parsed.unwrap_or(Ok(Decimal::ZERO))
 }
 
 pub fn sqrt(value: Decimal) -> Result<Decimal, DecimalError> {

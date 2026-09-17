@@ -99,6 +99,291 @@ fn f16_bits_to_f64(bits: u16) -> f64 {
     f64::from_bits(bits64)
 }
 
+/// Masks `value` to `bits` and sign-extends when `signed` is set, so
+/// arithmetic on narrow widths observes the same wrap points the type
+/// system promises.
+pub fn normalize(value: i128, bits: i32, signed: i32) -> i128 {
+    let bits = bits.clamp(1, 128) as u32;
+    if bits == 128 {
+        return value;
+    }
+    let mask: u128 = (1u128 << bits) - 1;
+    let narrowed = (value as u128) & mask;
+    if signed != 0 && (narrowed >> (bits - 1)) & 1 == 1 {
+        (narrowed | !mask) as i128
+    } else {
+        narrowed as i128
+    }
+}
+
+/// The minimum value of the `(bits, signed)` width.
+pub fn width_min(bits: i32, signed: i32) -> i128 {
+    if signed != 0 {
+        -(1i128 << (bits - 1))
+    } else {
+        0
+    }
+}
+
+/// The maximum value of the `(bits, signed)` width.
+pub fn width_max(bits: i32, signed: i32) -> i128 {
+    if signed != 0 {
+        (1i128 << (bits - 1)) - 1
+    } else if bits >= 128 {
+        -1 // u128::MAX reinterpreted
+    } else {
+        (1i128 << bits) - 1
+    }
+}
+
+/// `v.abs()` — the magnitude. The `MIN` case never reaches here: lowering
+/// throws `ArithmeticOverflowError` first.
+pub fn int_abs(value: i128, bits: i32, signed: i32) -> i128 {
+    normalize(value, bits, signed).wrapping_abs()
+}
+
+/// `v.sign()` — `-1`, `0`, or `1`.
+pub fn int_sign(value: i128, bits: i32, signed: i32) -> i32 {
+    normalize(value, bits, signed).signum() as i32
+}
+
+/// `v.min(other)`.
+pub fn int_min(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    normalize(value, bits, signed).min(normalize(other, bits, signed))
+}
+
+/// `v.max(other)`.
+pub fn int_max(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    normalize(value, bits, signed).max(normalize(other, bits, signed))
+}
+
+/// `v.clamp(lo, hi)`.
+pub fn int_clamp(value: i128, lo: i128, hi: i128, bits: i32, signed: i32) -> i128 {
+    normalize(value, bits, signed).clamp(normalize(lo, bits, signed), normalize(hi, bits, signed))
+}
+
+/// `v.bit_count()` — one bits within the width.
+pub fn int_bit_count(value: i128, bits: i32) -> i32 {
+    let bits = bits.clamp(1, 128) as u32;
+    let mask: u128 = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+    ((value as u128) & mask).count_ones() as i32
+}
+
+/// `v.leading_zeros()` — width-scoped, so `(0: UInt8)` answers `8`.
+pub fn int_leading_zeros(value: i128, bits: i32) -> i32 {
+    let bits = bits.clamp(1, 128) as u32;
+    let mask: u128 = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+    let narrowed = (value as u128) & mask;
+    (narrowed.leading_zeros() - (128 - bits)) as i32
+}
+
+/// `v.trailing_zeros()`.
+pub fn int_trailing_zeros(value: i128, bits: i32) -> i32 {
+    let bits = bits.clamp(1, 128) as u32;
+    let mask: u128 = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+    let narrowed = (value as u128) & mask;
+    narrowed.trailing_zeros().min(bits) as i32
+}
+
+/// `v.rotate_left(n)` — wraps bits within the width.
+pub fn int_rotate_left(value: i128, n: i64, bits: i32) -> i128 {
+    let bits = bits.clamp(1, 128) as u32;
+    let mask: u128 = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+    let narrowed = (value as u128) & mask;
+    let n = (n.rem_euclid(bits as i64)) as u32;
+    if n == 0 {
+        return narrowed as i128;
+    }
+    let rotated = (narrowed << n) | (narrowed >> (bits - n));
+    (rotated & mask) as i128
+}
+
+/// `v.rotate_right(n)`.
+pub fn int_rotate_right(value: i128, n: i64, bits: i32) -> i128 {
+    let width = bits.clamp(1, 128) as i64;
+    int_rotate_left(value, width - n.rem_euclid(width), bits)
+}
+
+/// `v.wrapping_add(other)` — and `sub`/`mul` below: arithmetic that wraps
+/// at the width, the deliberate form of what `+` traps on.
+pub fn int_wrapping_add(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    normalize(
+        normalize(value, bits, signed).wrapping_add(normalize(other, bits, signed)),
+        bits,
+        signed,
+    )
+}
+
+/// `v.wrapping_sub(other)`.
+pub fn int_wrapping_sub(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    normalize(
+        normalize(value, bits, signed).wrapping_sub(normalize(other, bits, signed)),
+        bits,
+        signed,
+    )
+}
+
+/// `v.wrapping_mul(other)`.
+pub fn int_wrapping_mul(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    normalize(
+        normalize(value, bits, signed).wrapping_mul(normalize(other, bits, signed)),
+        bits,
+        signed,
+    )
+}
+
+/// `v.saturating_add(other)` — clamps at the width's bounds.
+pub fn int_saturating_add(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    let result = normalize(value, bits, signed).saturating_add(normalize(other, bits, signed));
+    result.clamp(width_min(bits, signed), width_max(bits, signed))
+}
+
+/// `v.saturating_sub(other)`.
+pub fn int_saturating_sub(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    let result = normalize(value, bits, signed).saturating_sub(normalize(other, bits, signed));
+    result.clamp(width_min(bits, signed), width_max(bits, signed))
+}
+
+/// `v.saturating_mul(other)`.
+pub fn int_saturating_mul(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    let result = normalize(value, bits, signed).saturating_mul(normalize(other, bits, signed));
+    result.clamp(width_min(bits, signed), width_max(bits, signed))
+}
+
+/// Whether the operation fits the width — the `ok` half of `checked_*`.
+pub fn int_checked_ok(result: Option<i128>, bits: i32, signed: i32) -> bool {
+    match result {
+        Some(value) => value >= width_min(bits, signed) && value <= width_max(bits, signed),
+        None => false,
+    }
+}
+
+/// `v.checked_add(other)` — `ok` flag.
+pub fn int_checked_add_ok(value: i128, other: i128, bits: i32, signed: i32) -> bool {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    int_checked_ok(a.checked_add(b), bits, signed)
+}
+
+/// `v.checked_sub(other)` — `ok` flag.
+pub fn int_checked_sub_ok(value: i128, other: i128, bits: i32, signed: i32) -> bool {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    int_checked_ok(a.checked_sub(b), bits, signed)
+}
+
+/// `v.checked_mul(other)` — `ok` flag.
+pub fn int_checked_mul_ok(value: i128, other: i128, bits: i32, signed: i32) -> bool {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    int_checked_ok(a.checked_mul(b), bits, signed)
+}
+
+/// `v.checked_div(other)` — `ok` flag; `other == 0` and the `MIN / -1`
+/// wrap both fail.
+pub fn int_checked_div_ok(value: i128, other: i128, bits: i32, signed: i32) -> bool {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    if b == 0 {
+        return false;
+    }
+    int_checked_ok(a.checked_div(b), bits, signed)
+}
+
+/// `v / other` — only read when `checked_div_ok` is true.
+pub fn int_checked_div_value(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    if b == 0 {
+        return 0;
+    }
+    normalize(a.wrapping_div(b), bits, signed)
+}
+
+/// `v.checked_rem(other)` — `ok` flag.
+pub fn int_checked_rem_ok(value: i128, other: i128, bits: i32, signed: i32) -> bool {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    if b == 0 {
+        return false;
+    }
+    int_checked_ok(a.checked_rem(b), bits, signed)
+}
+
+/// `v % other` — only read when `checked_rem_ok` is true.
+pub fn int_checked_rem_value(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
+    let a = normalize(value, bits, signed);
+    let b = normalize(other, bits, signed);
+    if b == 0 {
+        return 0;
+    }
+    normalize(a.wrapping_rem(b), bits, signed)
+}
+
+/// `v.checked_pow(exp)` — `ok` flag.
+pub fn int_checked_pow_ok(value: i128, exp: i128, bits: i32, signed: i32) -> bool {
+    if exp < 0 || exp > i32::MAX as i128 {
+        return false;
+    }
+    let a = normalize(value, bits, signed);
+    let e = exp as u32;
+    int_checked_ok(a.checked_pow(e), bits, signed)
+}
+
+/// `v.checked_pow(exp)` value — only read when `ok` is true.
+pub fn int_checked_pow_value(value: i128, exp: i128, bits: i32, signed: i32) -> i128 {
+    if exp < 0 {
+        return 0;
+    }
+    let a = normalize(value, bits, signed);
+    let e = exp as u32;
+    normalize(a.wrapping_pow(e), bits, signed)
+}
+
+/// `IntN.parse(text)` — `ok` flag: the text is a valid decimal literal in
+/// the width's range.
+pub fn int_parse_ok(text: &str, bits: i32, signed: i32) -> bool {
+    let parsed = parse_integer(text.trim(), 10, signed != 0);
+    int_checked_ok(parsed, bits, signed)
+}
+
+/// `IntN.parse(text)` — the wrapped value; only read when `int_parse_ok`
+/// is true.
+pub fn int_parse_value(text: &str, bits: i32, signed: i32) -> i128 {
+    let parsed = parse_integer(text.trim(), 10, signed != 0).unwrap_or(0);
+    normalize(parsed, bits, signed)
+}
+
+/// `IntN.parse(text, radix: n)` — `ok` flag.
+pub fn int_parse_radix_ok(text: &str, radix: i32, bits: i32, signed: i32) -> bool {
+    let radix = radix.clamp(2, 36) as u32;
+    let parsed = parse_integer(text.trim(), radix, signed != 0);
+    int_checked_ok(parsed, bits, signed)
+}
+
+/// `IntN.parse(text, radix: n)` — the wrapped value.
+pub fn int_parse_radix_value(text: &str, radix: i32, bits: i32, signed: i32) -> i128 {
+    let radix = radix.clamp(2, 36) as u32;
+    let parsed = parse_integer(text.trim(), radix, signed != 0).unwrap_or(0);
+    normalize(parsed, bits, signed)
+}
+
 /// Renders an integer in a radix from 2 through 36.
 pub fn format_integer_radix(value: i128, radix: i32) -> String {
     let radix = radix.clamp(2, 36) as u32;

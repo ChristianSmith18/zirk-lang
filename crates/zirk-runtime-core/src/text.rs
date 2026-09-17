@@ -132,6 +132,21 @@ pub fn grapheme_slice(text: &str, start: i64, end: i64, step: i64) -> String {
     out
 }
 
+/// The grapheme clusters of `text`, in order.
+pub fn graphemes(text: &str) -> Vec<&str> {
+    text.graphemes(true).collect()
+}
+
+/// `text.split(separator)` — an empty separator splits into grapheme
+/// clusters, matching `zirk_str_split`.
+pub fn split<'a>(text: &'a str, separator: &str) -> Vec<&'a str> {
+    if separator.is_empty() {
+        text.graphemes(true).collect()
+    } else {
+        text.split(separator).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -210,87 +210,28 @@ pub extern "C" fn zirk_duration_whole_nanoseconds(nanos: i64) -> i64 {
     nanos
 }
 
-/// `d.round(unit)`, `d.floor(unit)`, `d.ceil(unit)` and `d.truncate(unit)`.
-/// All take the current nanosecond count and the `unit` as nanoseconds.
-fn divide_rounded(nanos: i64, unit: i64) -> i64 {
-    if unit == 0 {
-        return nanos;
-    }
-    let n = nanos as i128;
-    let u = unit as i128;
-    let q = n / u;
-    let r = n % u;
-    let q = if 2 * r.abs() >= u.abs() {
-        q + r.signum()
-    } else {
-        q
-    };
-    q as i64
-}
-
-fn divide_floored(nanos: i64, unit: i64) -> i64 {
-    if unit == 0 {
-        return nanos;
-    }
-    let n = nanos as i128;
-    let u = unit as i128;
-    let mut q = n / u;
-    let r = n % u;
-    if r != 0 && (n < 0) != (u < 0) {
-        q -= 1;
-    }
-    (q * u) as i64
-}
-
-fn divide_ceiled(nanos: i64, unit: i64) -> i64 {
-    if unit == 0 {
-        return nanos;
-    }
-    let n = nanos as i128;
-    let u = unit as i128;
-    let mut q = n / u;
-    let r = n % u;
-    if r != 0 && (n < 0) == (u < 0) {
-        q += 1;
-    }
-    (q * u) as i64
-}
-
-fn divide_truncated(nanos: i64, unit: i64) -> i64 {
-    if unit == 0 {
-        return nanos;
-    }
-    let n = nanos as i128;
-    let u = unit as i128;
-    let q = n / u;
-    (q * u) as i64
-}
-
 /// `d.round(unit)` — nearest multiple of `unit`, halves away from zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_round(nanos: i64, unit: i64) -> i64 {
-    if unit == 0 {
-        return nanos;
-    }
-    (divide_rounded(nanos, unit) as i128 * unit as i128) as i64
+    zirk_runtime_core::duration::round(nanos, unit)
 }
 
 /// `d.floor(unit)` — largest multiple of `unit` not greater than the value.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_floor(nanos: i64, unit: i64) -> i64 {
-    divide_floored(nanos, unit)
+    zirk_runtime_core::duration::floor(nanos, unit)
 }
 
 /// `d.ceil(unit)` — smallest multiple of `unit` not less than the value.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_ceil(nanos: i64, unit: i64) -> i64 {
-    divide_ceiled(nanos, unit)
+    zirk_runtime_core::duration::ceil(nanos, unit)
 }
 
 /// `d.truncate(unit)` — multiple of `unit` toward zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_duration_truncate(nanos: i64, unit: i64) -> i64 {
-    divide_truncated(nanos, unit)
+    zirk_runtime_core::duration::truncate(nanos, unit)
 }
 
 /// Renders a nanosecond count as a normalized duration literal.
@@ -375,34 +316,7 @@ fn native_format_duration_reference(nanos: i64) -> String {
 
 /// Renders a nanosecond count as an ISO 8601 duration, e.g. `PT1H30M5.123S`.
 fn format_duration_iso(nanos: i64) -> String {
-    if nanos == 0 {
-        return "PT0S".to_string();
-    }
-    let sign = if nanos < 0 { "-" } else { "" };
-    let m = (nanos as i128).wrapping_abs();
-    let days = m / NANOS_PER_DAY;
-    let m = m % NANOS_PER_DAY;
-    let hours = m / NANOS_PER_HOUR;
-    let m = m % NANOS_PER_HOUR;
-    let minutes = m / NANOS_PER_MINUTE;
-    let m = m % NANOS_PER_MINUTE;
-    let seconds = m / NANOS_PER_SECOND;
-    let subsecond = (m % NANOS_PER_SECOND) as i64;
-    let mut text = if days > 0 {
-        format!("{sign}P{days}DT{hours}H{minutes}M{seconds}")
-    } else {
-        format!("{sign}PT{hours}H{minutes}M{seconds}")
-    };
-    if subsecond == 0 {
-        text.push('S');
-    } else {
-        let frac = format!("{subsecond:09}");
-        let frac = frac.trim_end_matches('0');
-        text.push('.');
-        text.push_str(frac);
-        text.push('S');
-    }
-    text
+    core_duration::format_iso(nanos)
 }
 
 /// `d.to_iso_string()` — ISO 8601 duration representation.
@@ -419,81 +333,7 @@ pub extern "C" fn zirk_duration_to_iso_string(nanos: i64) -> *mut c_void {
 pub extern "C" fn zirk_duration_format(nanos: i64, template: *const c_void) -> *mut c_void {
     let template = unsafe { borrow(template) }.expect("a valid string handle");
     let template = unsafe { template.as_str() };
-    let sign = if nanos < 0 { "-" } else { "" };
-    let m = (nanos as i128).wrapping_abs();
-    let days_total = m / NANOS_PER_DAY;
-    let m = m % NANOS_PER_DAY;
-    let hours = m / NANOS_PER_HOUR;
-    let m = m % NANOS_PER_HOUR;
-    let minutes = m / NANOS_PER_MINUTE;
-    let m = m % NANOS_PER_MINUTE;
-    let seconds = m / NANOS_PER_SECOND;
-    let m = m % NANOS_PER_SECOND;
-    let ms = m / NANOS_PER_MILLI;
-    let m = m % NANOS_PER_MILLI;
-    let us = m / NANOS_PER_MICRO;
-    let ns = m % NANOS_PER_MICRO;
-
-    let mut out = String::new();
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
-            continue;
-        }
-        match chars.peek() {
-            Some('%') => {
-                out.push('%');
-                chars.next();
-            }
-            Some('w') => {
-                out.push_str(&(days_total / 7).to_string());
-                chars.next();
-            }
-            Some('d') => {
-                out.push_str(&days_total.to_string());
-                chars.next();
-            }
-            Some('h') => {
-                out.push_str(&hours.to_string());
-                chars.next();
-            }
-            Some('m') => {
-                chars.next();
-                if matches!(chars.peek(), Some('s')) {
-                    out.push_str(&ms.to_string());
-                    chars.next();
-                } else {
-                    out.push_str(&minutes.to_string());
-                }
-            }
-            Some('s') => {
-                out.push_str(&seconds.to_string());
-                chars.next();
-            }
-            Some('u') => {
-                chars.next();
-                if matches!(chars.peek(), Some('s')) {
-                    out.push_str(&us.to_string());
-                    chars.next();
-                } else {
-                    out.push('?');
-                }
-            }
-            Some('n') => {
-                chars.next();
-                if matches!(chars.peek(), Some('s')) {
-                    out.push_str(&ns.to_string());
-                    chars.next();
-                } else {
-                    out.push('?');
-                }
-            }
-            _ => out.push('?'),
-        }
-    }
-    let text = format!("{sign}{out}");
-    alloc_owned(&text)
+    alloc_owned(&core_duration::format_template(nanos, template))
 }
 
 /// `d.humanize(locale, max_units)` — readable, multi-unit description.
@@ -504,42 +344,10 @@ pub extern "C" fn zirk_duration_humanize(
     _locale: *const c_void,
     max_units: i32,
 ) -> *mut c_void {
-    if nanos == 0 {
-        return alloc_owned("0s");
-    }
-    let sign = if nanos < 0 { "-" } else { "" };
-    let mut m = (nanos as i128).wrapping_abs();
-    const UNITS: &[(&str, i128)] = &[
-        ("w", 604_800_000_000_000),
-        ("d", 86_400_000_000_000),
-        ("h", 3_600_000_000_000),
-        ("m", 60_000_000_000),
-        ("s", 1_000_000_000),
-        ("ms", 1_000_000),
-        ("us", 1_000),
-        ("ns", 1),
-    ];
-    let mut parts = Vec::new();
-    for &(name, unit) in UNITS {
-        if m == 0 {
-            break;
-        }
-        let whole = m / unit;
-        if whole == 0 {
-            continue;
-        }
-        m %= unit;
-        parts.push(format!("{}{name}", whole));
-        if max_units > 0 && parts.len() == max_units as usize {
-            break;
-        }
-    }
-    let text = if parts.is_empty() {
-        "0s".to_string()
-    } else {
-        format!("{sign}{}", parts.join(" "))
-    };
-    alloc_owned(&text)
+    let locale = unsafe { borrow(_locale) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    alloc_owned(&core_duration::humanize(nanos, locale, max_units))
 }
 
 #[cfg(test)]

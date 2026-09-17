@@ -1,0 +1,8 @@
+{
+  "name": "uncaught-throwable-message",
+  "source": "fn main(): Void {\n    mut fixed: Int32[3];\n    stdout.println(fixed[9]);\n}\n",
+  "virtualName": "fixtures/uncaught-throwable-message.zrk",
+  "expectedOutput": [],
+  "completion": "runtime",
+  "exclusions": []
+}

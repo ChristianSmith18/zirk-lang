@@ -2110,6 +2110,36 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         module.functions.extend(lifted);
     }
 
+    // Types interned mid-lowering (an inferred sequence result's `List<T>`,
+    // say, when no `List<T>` type ever appeared in checked source) missed the
+    // `zirk_rt_array_from_list` registration above — declare the conversions
+    // now so every emitted call resolves.
+    for (array_id, &element) in module.array_types.clone().iter().enumerate() {
+        let Some(list_id) = module
+            .list_types
+            .iter()
+            .position(|&candidate| candidate == element)
+        else {
+            continue;
+        };
+        let declared = module.externs.iter().any(|e| {
+            e.name == "zirk_rt_array_from_list"
+                && e.params.first() == Some(&IrType::List(list_id as u32))
+        });
+        if !declared {
+            module.externs.push(ExternFn {
+                name: "zirk_rt_array_from_list".to_string(),
+                params: vec![
+                    IrType::List(list_id as u32),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Boolean,
+                ],
+                return_type: IrType::Array(array_id as u32),
+            });
+        }
+    }
+
     module
 }
 
@@ -3400,6 +3430,19 @@ impl<'a> FunctionLowering<'a> {
     /// is what must survive, not merely the slot it happened to come from,
     /// since that slot can be overwritten before the next collection point.
     fn emit(&mut self, kind: InstKind, ty: IrType, span: Span) -> Operand {
+        // A `Void` instruction materializes no value, so it must not declare a
+        // result id: consumers read `result.is_some()` as "produces a value"
+        // (the interpreter builds its call return destination from exactly
+        // that, and the verifier rejects a `Void` instruction that carries
+        // one). Emitting it as an effect and returning the `Undefined`
+        // placeholder keeps every caller's `Operand` valid — `Undefined` is
+        // the one `Void`-typed instruction allowed to declare a result,
+        // precisely because it exists to stand in value position for a `Void`
+        // expression.
+        if ty == IrType::Void && !matches!(kind, InstKind::Undefined) {
+            self.emit_effect(kind, span);
+            return self.emit(InstKind::Undefined, IrType::Void, span);
+        }
         let result = self.new_value();
         self.value_types.insert(result, ty);
         let current = self.current;
@@ -7152,12 +7195,27 @@ impl<'a> FunctionLowering<'a> {
                             self.convert_numeric(right, right_actual, common, e.right.span());
                         (left, right, common)
                     } else {
+                        // Ordered comparisons share arithmetic's rule: both
+                        // operands are evaluated in their smallest common
+                        // type, so `i32 < u64` widens instead of narrowing the
+                        // unsigned side into the signed one. Other operators
+                        // (bitwise, shifts) keep the left operand's domain —
+                        // a shift's result is the shifted value's own type.
+                        let common = if matches!(
+                            op,
+                            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+                        ) {
+                            self.common_numeric_ir_type(left_ty, right_ty)
+                                .unwrap_or(left_ty)
+                        } else {
+                            left_ty
+                        };
                         let left_actual = self.type_of_operand(left);
                         let right_actual = self.type_of_operand(right);
-                        let left = self.convert_numeric(left, left_actual, left_ty, e.left.span());
+                        let left = self.convert_numeric(left, left_actual, common, e.left.span());
                         let right =
-                            self.convert_numeric(right, right_actual, left_ty, e.right.span());
-                        (left, right, left_ty)
+                            self.convert_numeric(right, right_actual, common, e.right.span());
+                        (left, right, common)
                     }
                 } else {
                     match (left_ty, right_ty) {
@@ -14733,12 +14791,7 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("parallel sequence callback is callable")
         };
         let result_element = self.module.closures[callback_id as usize].returns;
-        let result_array_id =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == result_element)
-                .expect("parallel result array type was interned by sema") as u32;
+        let result_array_id = self.array_id_for(result_element);
         let result_array_ty = IrType::Array(result_array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let result = self.emit(
@@ -14882,12 +14935,7 @@ impl<'a> FunctionLowering<'a> {
     ) -> Operand {
         let source_slot = self.spill(receiver, receiver_ty, span);
         let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
-        let bool_array =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == IrType::Boolean)
-                .expect("parallel filter Boolean Array was interned by sema") as u32;
+        let bool_array = self.array_id_for(IrType::Boolean);
         let flags = self.lower_parallel_sequence_map(
             source,
             receiver_ty,
@@ -15148,13 +15196,7 @@ impl<'a> FunctionLowering<'a> {
         let IrType::Callable(_) = callback_ty else {
             unreachable!("parallel reduce callback is callable")
         };
-        let array_id = self
-            .module
-            .array_types
-            .iter()
-            .position(|&ty| ty == result_ty)
-            .expect("parallel reduce result array type was interned by sema")
-            as u32;
+        let array_id = self.array_id_for(result_ty);
         let array_ty = IrType::Array(array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let partials = self.emit(
@@ -15306,12 +15348,7 @@ impl<'a> FunctionLowering<'a> {
         element_ty: IrType,
         span: Span,
     ) -> Operand {
-        let array_id =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == element_ty)
-                .expect("parallel sum result array type was interned by sema") as u32;
+        let array_id = self.array_id_for(element_ty);
         let array_ty = IrType::Array(array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let partials = self.emit(
@@ -15502,23 +15539,16 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.lower_parallel_sequence_reduce(call, values, values_ty, element_ty, span))
             }
             "reduce" | "reduce_ordered" if call.args.len() == 2 => {
-                Some(self.lower_sequence_reduce(
-                    call,
-                    values,
-                    IrType::List(self.list_id_for(element_ty)),
-                    element_ty,
-                    span,
-                ))
+                let list_ty = IrType::List(self.list_id_for(element_ty));
+                Some(self.lower_sequence_reduce(call, values, list_ty, element_ty, span))
             }
             "sum" if call.args.is_empty() && parallel => {
                 Some(self.lower_parallel_sequence_sum(values, values_ty, element_ty, span))
             }
-            "sum" if call.args.is_empty() => Some(self.lower_sequence_sum(
-                values,
-                IrType::List(self.list_id_for(element_ty)),
-                element_ty,
-                span,
-            )),
+            "sum" if call.args.is_empty() => {
+                let list_ty = IrType::List(self.list_id_for(element_ty));
+                Some(self.lower_sequence_sum(values, list_ty, element_ty, span))
+            }
             "count" if call.args.is_empty() => {
                 let length = self.emit(
                     InstKind::ListLength(values),
@@ -15532,12 +15562,26 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    fn list_id_for(&self, element: IrType) -> u32 {
-        self.module
-            .list_types
-            .iter()
-            .position(|&ty| ty == element)
-            .expect("range collection list type") as u32
+    fn list_id_for(&mut self, element: IrType) -> u32 {
+        if let Some(id) = self.module.list_types.iter().position(|&ty| ty == element) {
+            return id as u32;
+        }
+        // The checker interns every list type a declared type or literal
+        // spelled out, but an inferred sequence result (`xs.filter` on an
+        // `Array` with no `List<T>` in sight) can need one sema never saw —
+        // intern it here instead of panicking on valid code.
+        let id = self.module.list_types.len() as u32;
+        self.module.list_types.push(element);
+        id
+    }
+
+    fn array_id_for(&mut self, element: IrType) -> u32 {
+        if let Some(id) = self.module.array_types.iter().position(|&ty| ty == element) {
+            return id as u32;
+        }
+        let id = self.module.array_types.len() as u32;
+        self.module.array_types.push(element);
+        id
     }
 
     fn lower_range_collect_values(
@@ -15704,12 +15748,7 @@ impl<'a> FunctionLowering<'a> {
         } else {
             callback_returns
         };
-        let result_id =
-            self.module
-                .list_types
-                .iter()
-                .position(|&ty| ty == result_element)
-                .expect("sequence result list type was interned by the checker") as u32;
+        let result_id = self.list_id_for(result_element);
         let result_slot = if discarding {
             None
         } else {
@@ -16300,12 +16339,7 @@ impl<'a> FunctionLowering<'a> {
         if let IrType::List(_) = receiver_ty {
             return self.emit(InstKind::ListClone { receiver }, receiver_ty, span);
         }
-        let list_id = self
-            .module
-            .list_types
-            .iter()
-            .position(|&ty| ty == element_ty)
-            .expect("collect list type") as u32;
+        let list_id = self.list_id_for(element_ty);
         let list = self.emit(
             InstKind::ListNew {
                 element_id: list_id,

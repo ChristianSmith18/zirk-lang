@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use zirk_diagnostics::Span;
 use zirk_ir::{
-    BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Terminator, UnaryOp,
-    ValueId, verify,
+    BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Nullable, Terminator,
+    UnaryOp, ValueId, verify,
 };
 
 /// Browser compatibility classification used by preflight and maintained as
@@ -395,6 +395,17 @@ pub struct ReturnDestination {
     pub caller_value: Option<ValueId>,
 }
 
+/// A `Void`-typed instruction never produces a value, even if the lowering
+/// attached a result id to it. Only non-void results become return
+/// destinations, so a `Void` callee returning `None` is never awaited.
+fn result_value_id(instruction: &zirk_ir::Instruction) -> Option<ValueId> {
+    if instruction.ty == IrType::Void {
+        None
+    } else {
+        instruction.result
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackFrame {
     pub function: String,
@@ -546,6 +557,29 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
             }
             for instruction in &block.instructions {
                 preflight_type(instruction.ty, Some(instruction.span), &mut failures);
+                if let InstKind::ConstFloat(FloatWidth::F128, text) = &instruction.kind {
+                    // Float128 wire text only encodes finite values; flag
+                    // literal spellings of infinities/NaN directly. The
+                    // narrower widths carry any `f64` spelling as text.
+                    let non_finite = matches!(
+                        text.trim_start_matches(['+', '-'])
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "inf" | "infinity" | "nan"
+                    ) || text
+                        .parse::<f64>()
+                        .map(|value| !value.is_finite())
+                        .unwrap_or(false);
+                    if non_finite {
+                        failures.push(CapabilityFailure {
+                            code: "ZB002".into(),
+                            message: format!(
+                                "non-finite Float128 literal {text:?} is unavailable in the browser"
+                            ),
+                            span: Some(instruction.span),
+                        });
+                    }
+                }
                 if matches!(
                     instruction_support(&instruction.kind),
                     BrowserSupport::Excluded
@@ -578,80 +612,42 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
     }
 }
 
-fn is_browser_intrinsic(name: &str) -> bool {
+/// Externs that need a host clock the browser boundary deliberately does not
+/// grant: `Date.today`, `Time.now_*` and `DateTime.now_*` are platform
+/// authority, not portable value semantics.
+fn is_host_clock_extern(name: &str) -> bool {
     matches!(
         name,
-        "zirk_regex_from_pattern"
-            | "zirk_regex_is_match"
-            | "zirk_regex_to_string"
-            | "zirk_regex_replace"
-            | "zirk_char_is_uppercase"
-            | "zirk_char_is_lowercase"
-            | "zirk_char_is_digit"
-            | "zirk_char_is_letter"
-            | "zirk_char_is_whitespace"
-            | "zirk_char_is_ascii"
-            | "zirk_char_is_alphabetic"
-            | "zirk_char_is_numeric"
-            | "zirk_char_is_alphanumeric"
-            | "zirk_char_ascii_code"
-            | "zirk_char_to_uppercase"
-            | "zirk_char_to_lowercase"
-            | "zirk_str_length"
-            | "zirk_str_byte_length"
-            | "zirk_str_is_empty"
-            | "zirk_str_find"
-            | "zirk_str_replace"
-            | "zirk_str_trim"
-            | "zirk_str_trim_start"
-            | "zirk_str_trim_end"
-            | "zirk_str_to_lowercase"
-            | "zirk_str_to_uppercase"
-            | "zirk_str_normalize"
-            | "zirk_str_clone"
-            | "zirk_str_contains"
-            | "zirk_str_starts_with"
-            | "zirk_str_ends_with"
-            | "zirk_str_substring"
-            | "zirk_duration_abs"
-            | "zirk_duration_sign"
-            | "zirk_duration_days"
-            | "zirk_duration_hours"
-            | "zirk_duration_minutes"
-            | "zirk_duration_seconds"
-            | "zirk_duration_milliseconds"
-            | "zirk_duration_microseconds"
-            | "zirk_duration_nanoseconds"
-            | "zirk_duration_total_weeks"
-            | "zirk_duration_total_days"
-            | "zirk_duration_total_hours"
-            | "zirk_duration_total_minutes"
-            | "zirk_duration_total_seconds"
-            | "zirk_duration_total_milliseconds"
-            | "zirk_duration_total_microseconds"
-            | "zirk_duration_total_nanoseconds"
-            | "zirk_duration_whole_weeks"
-            | "zirk_duration_whole_days"
-            | "zirk_duration_whole_hours"
-            | "zirk_duration_whole_minutes"
-            | "zirk_duration_whole_seconds"
-            | "zirk_duration_whole_milliseconds"
-            | "zirk_duration_whole_microseconds"
-            | "zirk_duration_whole_nanoseconds"
-            | "zirk_duration_round"
-            | "zirk_duration_floor"
-            | "zirk_duration_ceil"
-            | "zirk_duration_truncate"
-            | "zirk_rt_duration_to_string"
-            | "zirk_range_new"
-            | "zirk_range_start"
-            | "zirk_range_end"
-            | "zirk_range_step"
-            | "zirk_range_inclusive"
-            | "zirk_range_length"
-            | "zirk_range_element_at"
-            | "zirk_range_slice"
-            | "zirk_range_to_string"
+        "zirk_rt_date_today"
+            | "zirk_rt_time_now_utc"
+            | "zirk_rt_time_now_local"
+            | "zirk_rt_datetime_now_utc"
+            | "zirk_rt_datetime_now_local"
+    )
+}
+
+fn is_browser_intrinsic(name: &str) -> bool {
+    if is_host_clock_extern(name) {
+        return false;
+    }
+    if name.starts_with("zirk_regex_")
+        || name.starts_with("zirk_char_")
+        || name.starts_with("zirk_str_")
+        || name.starts_with("zirk_duration_")
+        || name.starts_with("zirk_rt_duration_")
+        || name.starts_with("zirk_range_")
+        || name.starts_with("zirk_rt_decimal_")
+        || name.starts_with("zirk_int_")
+        || name.starts_with("zirk_float_")
+        || name.starts_with("zirk_rt_date_")
+        || name.starts_with("zirk_rt_time_")
+        || name.starts_with("zirk_rt_datetime_")
+    {
+        return true;
+    }
+    matches!(
+        name,
+        "zirk_rt_array_from_list" | "zirk_rt_map_sorted_keys" | "zirk_rt_set_sorted_elements"
     )
 }
 
@@ -667,7 +663,7 @@ fn preflight_type(ty: IrType, span: Option<Span>, failures: &mut Vec<CapabilityF
 
 /// Internal control flow for instruction execution. It is deliberately kept
 /// private so callers only observe the stable `ExecutionResult` contract.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum ExecutionFault {
     Runtime { category: String, message: String },
     Internal(String),
@@ -1007,18 +1003,43 @@ impl<'module> Interpreter<'module> {
         let Some(info) = self.throwables.get(&id) else {
             return self.internal("pending exception metadata is unavailable", None);
         };
-        let category = match self.heap.get(id) {
-            Some(HeapEntry::Object { layout, .. }) => self
-                .module
-                .objects
-                .get(*layout as usize)
-                .map(|layout| layout.name.clone())
-                .unwrap_or_else(|| "Throwable".into()),
-            _ => "Throwable".into(),
+        let (category, message) = match self.heap.get(id) {
+            Some(HeapEntry::Object { layout, fields }) => {
+                let name = self
+                    .module
+                    .objects
+                    .get(*layout as usize)
+                    .map(|layout| layout.name.clone())
+                    .unwrap_or_else(|| "Throwable".into());
+                // Every throwable carries its human-readable text in the
+                // `reason` field the constructor stores first — the same
+                // field `message()` reads. Falling back to the class name
+                // keeps a hand-built or unusual throwable still printable
+                // without leaking `HeapId` internals.
+                let reason = self
+                    .module
+                    .objects
+                    .get(*layout as usize)
+                    .and_then(|layout| layout.field_index("reason"))
+                    .and_then(|index| fields.get(index))
+                    .and_then(|value| match value {
+                        Value::Heap(id) => match self.heap.get(*id) {
+                            Some(HeapEntry::String(text)) => Some(text.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| name.clone());
+                (name, reason)
+            }
+            Some(HeapEntry::RuntimeError { category, message }) => {
+                (category.clone(), message.clone())
+            }
+            _ => ("Throwable".into(), "uncaught throwable".into()),
         };
         ExecutionResult::RuntimeFailure(RuntimeFailure {
             category,
-            message: format!("uncaught throwable {:?}", info.value),
+            message,
             span: Some(info.span),
             frames: info.frames.clone(),
         })
@@ -1289,12 +1310,7 @@ impl<'module> Interpreter<'module> {
             InstKind::Binary { op, left, right } => {
                 let left = self.value(frame_index, *left)?;
                 let right = self.value(frame_index, *right)?;
-                self.execute_binary(*op, left, right)
-                    .map(Some)
-                    .map_err(|message| ExecutionFault::Runtime {
-                        category: "ArithmeticError".into(),
-                        message,
-                    })
+                self.execute_binary(*op, left, right).map(Some)
             }
             InstKind::CheckedArithmetic {
                 op,
@@ -1359,6 +1375,22 @@ impl<'module> Interpreter<'module> {
                 };
                 Ok(Some(Value::Boolean(overflow)))
             }
+            // `Retype` is a compile-time-directed coercion: the runtime type
+            // check that justifies a narrowing was already emitted as its own
+            // instruction (`IsInstance`/`CheckedCast`), and an upcast needs no
+            // work at all — the heap value already carries its concrete
+            // layout. The instruction therefore evaluates to its operand.
+            InstKind::Retype(operand) => {
+                let value = self.value(frame_index, *operand)?;
+                Ok(Some(value))
+            }
+            // `WordCast` exists because native `Map`/`Set` store keys as
+            // `i64` words; interpreted collections hold `Value`s directly,
+            // so the "word" read back is already the typed value.
+            InstKind::WordCast(operand) => {
+                let value = self.value(frame_index, *operand)?;
+                Ok(Some(value))
+            }
             InstKind::IntCast(operand) => {
                 let value = self.value(frame_index, *operand)?;
                 let IrType::Int(target) = instruction.ty else {
@@ -1389,7 +1421,7 @@ impl<'module> Interpreter<'module> {
                         "FloatCast has a non-float target".into(),
                     ));
                 };
-                let text = if width == FloatWidth::F128 {
+                if width == FloatWidth::F128 {
                     let value = if source_width == FloatWidth::F128 {
                         zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
                             .map_err(|error| {
@@ -1402,20 +1434,21 @@ impl<'module> Interpreter<'module> {
                             ),
                         )
                     };
-                    value.wire_text()
-                } else if source_width == FloatWidth::F128 {
-                    let value =
-                        zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
-                            .map_err(|error| {
-                                ExecutionFault::Internal(format!("float cast failed: {error:?}"))
-                            })?
-                            .display_f64();
-                    Self::format_binary_float(Self::round_binary_float(value, width), width)
+                    return Ok(Some(Value::Float {
+                        width,
+                        text: value.wire_text(),
+                    }));
+                }
+                let value = if source_width == FloatWidth::F128 {
+                    zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                        .map_err(|error| {
+                            ExecutionFault::Internal(format!("float cast failed: {error:?}"))
+                        })?
+                        .display_f64()
                 } else {
-                    let value = Self::parse_binary_float(&text)?;
-                    Self::format_binary_float(Self::round_binary_float(value, width), width)
+                    Self::parse_binary_float(&text)?
                 };
-                Ok(Some(Value::Float { width, text }))
+                Self::binary_float_value(value, width).map(Some)
             }
             InstKind::IntToFloat(operand) => {
                 let Value::Int(value) = self.value(frame_index, *operand)? else {
@@ -1450,10 +1483,7 @@ impl<'module> Interpreter<'module> {
                 } else {
                     value.unsigned() as f64
                 };
-                Ok(Some(Value::Float {
-                    width,
-                    text: Self::format_binary_float(Self::round_binary_float(number, width), width),
-                }))
+                Self::binary_float_value(number, width).map(Some)
             }
             InstKind::FloatToInt(operand) => {
                 let Value::Float {
@@ -1510,9 +1540,10 @@ impl<'module> Interpreter<'module> {
                     )
                 };
                 if !integer.is_finite() || integer < minimum || integer > maximum {
-                    return Err(ExecutionFault::Internal(
-                        "float-to-integer conversion is outside the target range".into(),
-                    ));
+                    return Err(ExecutionFault::Runtime {
+                        category: "CastError".into(),
+                        message: "float-to-integer conversion is outside the target range".into(),
+                    });
                 }
                 let literal = if width.signed() {
                     integer as i128
@@ -1580,19 +1611,18 @@ impl<'module> Interpreter<'module> {
                         "DecimalToFloat has a non-float target".into(),
                     ));
                 };
-                let text = if width == FloatWidth::F128 {
-                    zirk_runtime_core::binary_float::Float128::from_decimal(&text)
+                if width == FloatWidth::F128 {
+                    let text = zirk_runtime_core::binary_float::Float128::from_decimal(&text)
                         .map_err(|error| {
                             ExecutionFault::Internal(format!(
                                 "decimal-to-Float128 conversion failed: {error:?}"
                             ))
                         })?
-                        .wire_text()
-                } else {
-                    let value = Self::parse_binary_float(&text)?;
-                    Self::format_binary_float(Self::round_binary_float(value, width), width)
-                };
-                Ok(Some(Value::Float { width, text }))
+                        .wire_text();
+                    return Ok(Some(Value::Float { width, text }));
+                }
+                let value = Self::parse_binary_float(&text)?;
+                Self::binary_float_value(value, width).map(Some)
             }
             InstKind::FloatToDecimal(operand) => {
                 let Value::Float { width, text } = self.value(frame_index, *operand)? else {
@@ -1640,7 +1670,7 @@ impl<'module> Interpreter<'module> {
                     function,
                     arguments,
                     Some(ReturnDestination {
-                        caller_value: instruction.result,
+                        caller_value: result_value_id(instruction),
                     }),
                 )
                 .map_err(ExecutionFault::Limit)?;
@@ -1667,7 +1697,13 @@ impl<'module> Interpreter<'module> {
                             "CallVirtual references missing method {index} on object layout {layout}"
                         ))
                     })?;
-                self.push_dispatch_frame(&callee, receiver, args, frame_index, instruction.result)?;
+                self.push_dispatch_frame(
+                    &callee,
+                    receiver,
+                    args,
+                    frame_index,
+                    result_value_id(instruction),
+                )?;
                 Ok(instruction.result.map(|_| Value::Undefined))
             }
             InstKind::CallContract {
@@ -1690,7 +1726,13 @@ impl<'module> Interpreter<'module> {
                             "CallContract references missing contract {contract} method {index} on object layout {layout}"
                         ))
                     })?;
-                self.push_dispatch_frame(&callee, receiver, args, frame_index, instruction.result)?;
+                self.push_dispatch_frame(
+                    &callee,
+                    receiver,
+                    args,
+                    frame_index,
+                    result_value_id(instruction),
+                )?;
                 Ok(instruction.result.map(|_| Value::Undefined))
             }
             InstKind::MakeClosure {
@@ -1753,24 +1795,38 @@ impl<'module> Interpreter<'module> {
                     function,
                     arguments,
                     Some(ReturnDestination {
-                        caller_value: instruction.result,
+                        caller_value: result_value_id(instruction),
                     }),
                 )
                 .map_err(ExecutionFault::Limit)?;
                 Ok(instruction.result.map(|_| Value::Undefined))
             }
-            InstKind::ArrayNew { capacity, .. } => {
+            InstKind::ArrayNew {
+                element_id,
+                capacity,
+            } => {
                 let capacity = self.integer_operand(frame_index, *capacity)?;
                 let capacity = usize::try_from(capacity).map_err(|_| ExecutionFault::Runtime {
                     category: "BoundsError".into(),
                     message: "array capacity cannot be negative".into(),
                 })?;
+                let element = self
+                    .module
+                    .array_types
+                    .get(*element_id as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "ArrayNew references missing element type {element_id}"
+                        ))
+                    })?;
+                let default = self.default_value(element)?;
                 let bytes = std::mem::size_of::<HeapEntry>()
                     .checked_add(capacity.saturating_mul(std::mem::size_of::<Value>()))
                     .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
                 self.heap
                     .allocate(
-                        HeapEntry::Array(vec![Value::Undefined; capacity]),
+                        HeapEntry::Array(vec![default; capacity]),
                         bytes,
                         self.limits,
                     )
@@ -1880,20 +1936,23 @@ impl<'module> Interpreter<'module> {
             InstKind::ListRemoveValue { receiver, value } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
-                    return Err(ExecutionFault::Internal(
-                        "ListRemoveValue receiver is not a list".into(),
-                    ));
+                let position = match self.heap.get(id) {
+                    Some(HeapEntry::List(values)) => values
+                        .iter()
+                        .position(|candidate| self.runtime_value_equals(candidate, &value)),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ListRemoveValue receiver is not a list".into(),
+                        ));
+                    }
                 };
-                let removed = values
-                    .iter()
-                    .position(|candidate| candidate == &value)
-                    .map(|index| {
-                        values.remove(index);
-                        true
-                    })
-                    .unwrap_or(false);
-                Ok(Some(Value::Boolean(removed)))
+                if let Some(index) = position {
+                    let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                        unreachable!("checked above");
+                    };
+                    values.remove(index);
+                }
+                Ok(Some(Value::Boolean(position.is_some())))
             }
             InstKind::ArrayClone { receiver } | InstKind::ListClone { receiver } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
@@ -1970,15 +2029,21 @@ impl<'module> Interpreter<'module> {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
-                    return Err(ExecutionFault::Internal(
-                        "MapSet receiver is not a map".into(),
-                    ));
+                let position = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => entries
+                        .iter()
+                        .position(|(candidate, _)| self.runtime_value_equals(candidate, &key)),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "MapSet receiver is not a map".into(),
+                        ));
+                    }
                 };
-                if let Some((_, current)) =
-                    entries.iter_mut().find(|(candidate, _)| candidate == &key)
-                {
-                    *current = value;
+                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                    unreachable!("checked above");
+                };
+                if let Some(index) = position {
+                    entries[index].1 = value;
                 } else {
                     entries.push((key, value));
                 }
@@ -1992,9 +2057,9 @@ impl<'module> Interpreter<'module> {
                         "MapContainsKey receiver is not a map".into(),
                     ));
                 };
-                Ok(Some(Value::Boolean(
-                    entries.iter().any(|(candidate, _)| candidate == &key),
-                )))
+                Ok(Some(Value::Boolean(entries.iter().any(
+                    |(candidate, _)| self.runtime_value_equals(candidate, &key),
+                ))))
             }
             InstKind::MapGet { receiver, key } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
@@ -2007,37 +2072,48 @@ impl<'module> Interpreter<'module> {
                 Ok(Some(Value::Nullable(
                     entries
                         .iter()
-                        .find(|(candidate, _)| candidate == &key)
+                        .find(|(candidate, _)| self.runtime_value_equals(candidate, &key))
                         .map(|(_, value)| Box::new(value.clone())),
                 )))
             }
             InstKind::MapRemove { receiver, key } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
-                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
-                    return Err(ExecutionFault::Internal(
-                        "MapRemove receiver is not a map".into(),
-                    ));
+                let position = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => entries
+                        .iter()
+                        .position(|(candidate, _)| self.runtime_value_equals(candidate, &key)),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "MapRemove receiver is not a map".into(),
+                        ));
+                    }
                 };
-                let removed = entries
-                    .iter()
-                    .position(|(candidate, _)| candidate == &key)
-                    .map(|index| {
-                        entries.remove(index);
-                        true
-                    })
-                    .unwrap_or(false);
-                Ok(Some(Value::Boolean(removed)))
+                if let Some(index) = position {
+                    let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                        unreachable!("checked above");
+                    };
+                    entries.remove(index);
+                }
+                Ok(Some(Value::Boolean(position.is_some())))
             }
             InstKind::SetAdd { receiver, value } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
-                    return Err(ExecutionFault::Internal(
-                        "SetAdd receiver is not a set".into(),
-                    ));
+                let present = match self.heap.get(id) {
+                    Some(HeapEntry::Set(values)) => values
+                        .iter()
+                        .any(|candidate| self.runtime_value_equals(candidate, &value)),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "SetAdd receiver is not a set".into(),
+                        ));
+                    }
                 };
-                if !values.contains(&value) {
+                if !present {
+                    let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
+                        unreachable!("checked above");
+                    };
                     values.push(value);
                 }
                 Ok(None)
@@ -2050,25 +2126,30 @@ impl<'module> Interpreter<'module> {
                         "SetContains receiver is not a set".into(),
                     ));
                 };
-                Ok(Some(Value::Boolean(values.contains(&value))))
+                Ok(Some(Value::Boolean(values.iter().any(|candidate| {
+                    self.runtime_value_equals(candidate, &value)
+                }))))
             }
             InstKind::SetRemove { receiver, value } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
-                    return Err(ExecutionFault::Internal(
-                        "SetRemove receiver is not a set".into(),
-                    ));
+                let position = match self.heap.get(id) {
+                    Some(HeapEntry::Set(values)) => values
+                        .iter()
+                        .position(|candidate| self.runtime_value_equals(candidate, &value)),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "SetRemove receiver is not a set".into(),
+                        ));
+                    }
                 };
-                let removed = values
-                    .iter()
-                    .position(|candidate| candidate == &value)
-                    .map(|index| {
-                        values.remove(index);
-                        true
-                    })
-                    .unwrap_or(false);
-                Ok(Some(Value::Boolean(removed)))
+                if let Some(index) = position {
+                    let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
+                        unreachable!("checked above");
+                    };
+                    values.remove(index);
+                }
+                Ok(Some(Value::Boolean(position.is_some())))
             }
             InstKind::ArraySlice {
                 receiver,
@@ -2229,25 +2310,47 @@ impl<'module> Interpreter<'module> {
                         "LoadField reads a missing heap value".into(),
                     ));
                 };
-                let fields = match entry {
-                    HeapEntry::Object { fields, .. }
-                    | HeapEntry::Record { fields, .. }
-                    | HeapEntry::Enum { fields, .. } => fields,
+                let position = match entry {
+                    HeapEntry::Object { .. } | HeapEntry::Record { .. } => *index as usize,
+                    HeapEntry::Enum {
+                        layout, variant, ..
+                    } => {
+                        // `index` is the flat field index in the enum layout;
+                        // the heap entry stores only the active variant's
+                        // payload, so translate through the variant's field list.
+                        let Some(field_list) = self
+                            .module
+                            .enums
+                            .get(*layout as usize)
+                            .and_then(|enum_layout| enum_layout.variants.get(*variant as usize))
+                        else {
+                            return Err(ExecutionFault::Internal(format!(
+                                "LoadField references missing enum variant {variant}"
+                            )));
+                        };
+                        let Some(position) = field_list.iter().position(|field| *field == *index)
+                        else {
+                            return Err(ExecutionFault::Internal(format!(
+                                "LoadField references missing field {index}"
+                            )));
+                        };
+                        position
+                    }
                     _ => {
                         return Err(ExecutionFault::Internal(
                             "LoadField reads a heap value that is not an aggregate".into(),
                         ));
                     }
                 };
-                fields
-                    .get(*index as usize)
-                    .cloned()
-                    .map(Some)
-                    .ok_or_else(|| {
-                        ExecutionFault::Internal(format!(
-                            "LoadField references missing field {index}"
-                        ))
-                    })
+                let fields = match entry {
+                    HeapEntry::Object { fields, .. }
+                    | HeapEntry::Record { fields, .. }
+                    | HeapEntry::Enum { fields, .. } => fields,
+                    _ => unreachable!(),
+                };
+                fields.get(position).cloned().map(Some).ok_or_else(|| {
+                    ExecutionFault::Internal(format!("LoadField references missing field {index}"))
+                })
             }
             InstKind::StoreField {
                 object,
@@ -2494,23 +2597,42 @@ impl<'module> Interpreter<'module> {
         arguments: &[Value],
         ty: IrType,
     ) -> Result<Value, ExecutionFault> {
+        if name.starts_with("zirk_rt_decimal_") || name == "zirk_str_from_decimal" {
+            return self.execute_decimal_intrinsic(name, arguments, ty);
+        }
+        if name.starts_with("zirk_int_") {
+            return self.execute_int_intrinsic(name, arguments, ty);
+        }
+        if name.starts_with("zirk_float_") {
+            return self.execute_float_intrinsic(name, arguments, ty);
+        }
+        if name.starts_with("zirk_rt_date_")
+            || name.starts_with("zirk_rt_time_")
+            || name.starts_with("zirk_rt_datetime_")
+        {
+            return self.execute_temporal_intrinsic(name, arguments, ty);
+        }
+        if matches!(
+            name,
+            "zirk_rt_array_from_list" | "zirk_rt_map_sorted_keys" | "zirk_rt_set_sorted_elements"
+        ) {
+            return self.execute_collection_intrinsic(name, arguments, ty);
+        }
         if name.starts_with("zirk_regex_") {
-            return self.execute_regex_intrinsic(name, arguments);
+            return self.execute_regex_intrinsic(name, arguments, ty);
         }
         if name.starts_with("zirk_str_") {
             return self.execute_string_intrinsic(name, arguments, ty);
         }
-        if name.starts_with("zirk_duration_") || name == "zirk_rt_duration_to_string" {
+        if name.starts_with("zirk_duration_") || name.starts_with("zirk_rt_duration_") {
             return self.execute_duration_intrinsic(name, arguments, ty);
         }
         if name.starts_with("zirk_range_") {
             return self.execute_range_intrinsic(name, arguments, ty);
         }
-        let [receiver] = arguments else {
-            return Err(ExecutionFault::Internal(format!(
-                "{name} has invalid arity"
-            )));
-        };
+        let receiver = arguments
+            .first()
+            .ok_or_else(|| ExecutionFault::Internal(format!("{name} has invalid arity")))?;
         let value = self.char_value(receiver)?;
         let boolean = |value| Ok(Value::Boolean(value));
         match name {
@@ -2523,6 +2645,26 @@ impl<'module> Interpreter<'module> {
             "zirk_char_is_alphabetic" => boolean(value.chars().all(char::is_alphabetic)),
             "zirk_char_is_numeric" => boolean(value.chars().all(char::is_numeric)),
             "zirk_char_is_alphanumeric" => boolean(value.chars().all(char::is_alphanumeric)),
+            "zirk_char_byte_length" => {
+                let IrType::Int(width) = ty else {
+                    return Err(ExecutionFault::Internal(
+                        "Char byte_length has non-integer result".into(),
+                    ));
+                };
+                IntegerValue::from_literal(value.len() as i128, width)
+                    .map(Value::Int)
+                    .map_err(ExecutionFault::Internal)
+            }
+            "zirk_char_codepoint_count" => {
+                let IrType::Int(width) = ty else {
+                    return Err(ExecutionFault::Internal(
+                        "Char codepoint_count has non-integer result".into(),
+                    ));
+                };
+                IntegerValue::from_literal(value.chars().count() as i128, width)
+                    .map(Value::Int)
+                    .map_err(ExecutionFault::Internal)
+            }
             "zirk_char_ascii_code" => {
                 let IrType::Int(width) = ty else {
                     return Err(ExecutionFault::Internal(
@@ -2542,6 +2684,31 @@ impl<'module> Interpreter<'module> {
             "zirk_char_to_lowercase" => self
                 .allocate_string(zirk_runtime_core::char::lowercase(&value))
                 .map(Value::Heap),
+            "zirk_char_normalize" => self
+                .allocate_string(zirk_runtime_core::text::normalize(
+                    &value,
+                    &self.text_argument(arguments.get(1))?,
+                ))
+                .map(Value::Heap),
+            "zirk_char_bytes" => {
+                let values = value
+                    .bytes()
+                    .map(|byte| Value::Int(IntegerValue::from_bits(u128::from(byte), IntWidth::U8)))
+                    .collect();
+                self.allocate_value_list(values)
+            }
+            "zirk_char_codepoints" => {
+                let values = value
+                    .chars()
+                    .map(|point| {
+                        Value::Int(IntegerValue::from_bits(
+                            u128::from(point as u32),
+                            IntWidth::U32,
+                        ))
+                    })
+                    .collect();
+                self.allocate_value_list(values)
+            }
             _ => Err(ExecutionFault::Internal(format!(
                 "unsupported browser intrinsic {name}"
             ))),
@@ -2571,10 +2738,7 @@ impl<'module> Interpreter<'module> {
             ))),
         };
         let float = |value: f64| match ty {
-            IrType::Float(width) => Ok(Value::Float {
-                width,
-                text: Self::format_binary_float(Self::round_binary_float(value, width), width),
-            }),
+            IrType::Float(width) => Self::binary_float_value(value, width),
             _ => Err(ExecutionFault::Internal(format!(
                 "{name} has non-float result"
             ))),
@@ -2625,6 +2789,52 @@ impl<'module> Interpreter<'module> {
             "zirk_duration_whole_milliseconds" => int(nanos / MILLI),
             "zirk_duration_whole_microseconds" => int(nanos / MICRO),
             "zirk_duration_whole_nanoseconds" => int(nanos),
+            "zirk_duration_to_iso_string" => self
+                .allocate_string(zirk_runtime_core::duration::format_iso(nanos))
+                .map(Value::Heap),
+            "zirk_duration_format" => {
+                let template = self.text_argument(arguments.get(1))?;
+                self.allocate_string(zirk_runtime_core::duration::format_template(
+                    nanos, &template,
+                ))
+                .map(Value::Heap)
+            }
+            "zirk_duration_humanize" => {
+                let locale = self.text_argument(arguments.get(1))?;
+                let max_units = self.i32_argument(arguments.get(2))?;
+                self.allocate_string(zirk_runtime_core::duration::humanize(
+                    nanos, &locale, max_units,
+                ))
+                .map(Value::Heap)
+            }
+            "zirk_duration_round" => int(zirk_runtime_core::duration::round(
+                nanos,
+                self.integer_from_value(arguments.get(1))?,
+            )),
+            "zirk_duration_floor" => int(zirk_runtime_core::duration::floor(
+                nanos,
+                self.integer_from_value(arguments.get(1))?,
+            )),
+            "zirk_duration_ceil" => int(zirk_runtime_core::duration::ceil(
+                nanos,
+                self.integer_from_value(arguments.get(1))?,
+            )),
+            "zirk_duration_truncate" => int(zirk_runtime_core::duration::truncate(
+                nanos,
+                self.integer_from_value(arguments.get(1))?,
+            )),
+            "zirk_rt_duration_mul_f64" => int(zirk_runtime_core::duration::multiply(
+                nanos,
+                self.float64_argument(arguments.get(1))?,
+            )),
+            "zirk_rt_duration_div_f64" => int(zirk_runtime_core::duration::divide(
+                nanos,
+                self.float64_argument(arguments.get(1))?,
+            )),
+            "zirk_rt_duration_div_duration" => float(zirk_runtime_core::duration::ratio(
+                nanos,
+                self.integer_from_value(arguments.get(1))?,
+            )),
             _ => Err(ExecutionFault::Internal(format!(
                 "unsupported browser intrinsic {name}"
             ))),
@@ -2760,6 +2970,683 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    /// The raw `i128` payload of an `Int` argument. The `zirk_int_*` and
+    /// `DateTime` externs receive their value already widened to `Int128`.
+    fn int128_argument(&self, value: Option<&Value>) -> Result<i128, ExecutionFault> {
+        match value {
+            Some(Value::Int(value)) => Ok(value.signed()),
+            _ => Err(ExecutionFault::Internal(
+                "integer intrinsic argument is missing or not an integer".into(),
+            )),
+        }
+    }
+
+    /// `i32` metadata arguments (`bits`, `signed`, radix, rounding modes).
+    fn i32_argument(&self, value: Option<&Value>) -> Result<i32, ExecutionFault> {
+        Ok(self.integer_from_value(value)? as i32)
+    }
+
+    /// `f64` arguments of the `zirk_float_*` and scalar `zirk_rt_*` externs.
+    fn float64_argument(&self, value: Option<&Value>) -> Result<f64, ExecutionFault> {
+        match value {
+            Some(Value::Float {
+                width: FloatWidth::F128,
+                text,
+            }) => zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(text)
+                .map(|value| value.display_f64())
+                .map_err(|error| {
+                    ExecutionFault::Internal(format!("invalid Float128 value: {error:?}"))
+                }),
+            Some(Value::Float { text, .. }) => Self::parse_binary_float(text),
+            _ => Err(ExecutionFault::Internal(
+                "float intrinsic argument is missing or not a float".into(),
+            )),
+        }
+    }
+
+    fn decimal_argument(
+        &self,
+        value: Option<&Value>,
+    ) -> Result<zirk_runtime_core::decimal::Decimal, ExecutionFault> {
+        match value {
+            Some(Value::Decimal(text)) => self.parse_decimal(text),
+            _ => Err(ExecutionFault::Internal(
+                "decimal intrinsic argument is missing or not a Decimal".into(),
+            )),
+        }
+    }
+
+    /// A `String`/`Char` heap argument — they share representation (ADR-014).
+    fn text_argument(&self, value: Option<&Value>) -> Result<String, ExecutionFault> {
+        match value {
+            Some(Value::Heap(id)) => match self.heap.get(*id) {
+                Some(HeapEntry::String(text)) | Some(HeapEntry::Char(text)) => Ok(text.clone()),
+                _ => Err(ExecutionFault::Internal(
+                    "intrinsic argument is not a String or Char".into(),
+                )),
+            },
+            _ => Err(ExecutionFault::Internal(
+                "intrinsic argument is missing or not a heap value".into(),
+            )),
+        }
+    }
+
+    fn int_result(&self, value: i128, ty: IrType, name: &str) -> Result<Value, ExecutionFault> {
+        let IrType::Int(width) = ty else {
+            return Err(ExecutionFault::Internal(format!(
+                "{name} has a non-integer result"
+            )));
+        };
+        IntegerValue::from_literal(value, width)
+            .map(Value::Int)
+            .map_err(ExecutionFault::Internal)
+    }
+
+    fn float_result(&self, value: f64, ty: IrType, name: &str) -> Result<Value, ExecutionFault> {
+        let IrType::Float(width) = ty else {
+            return Err(ExecutionFault::Internal(format!(
+                "{name} has a non-float result"
+            )));
+        };
+        Self::binary_float_value(value, width)
+    }
+
+    /// Maps a decimal operation's controlled failure to the failure category
+    /// the native runtime reports for the same condition.
+    fn decimal_fault(error: zirk_runtime_core::decimal::DecimalError) -> ExecutionFault {
+        use zirk_runtime_core::decimal::DecimalError;
+        let (category, message) = match error {
+            DecimalError::Overflow => ("ArithmeticOverflowError", "decimal arithmetic overflow"),
+            DecimalError::DivisionByZero => ("DivisionByZeroError", "division by zero"),
+            DecimalError::Domain => ("DomainError", "decimal operation is outside its domain"),
+            DecimalError::InvalidCast => (
+                "InvalidCastError",
+                "decimal value does not fit the target type",
+            ),
+        };
+        ExecutionFault::Runtime {
+            category: category.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Allocates `values` as a `List` heap entry.
+    fn allocate_value_list(&mut self, values: Vec<Value>) -> Result<Value, ExecutionFault> {
+        let bytes = std::mem::size_of::<HeapEntry>()
+            .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+            .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+        self.heap
+            .allocate(HeapEntry::List(values), bytes, self.limits)
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// Allocates each part as a `String` and wraps them into a `List`.
+    fn string_list_result(&mut self, parts: Vec<String>) -> Result<Value, ExecutionFault> {
+        let mut values = Vec::with_capacity(parts.len());
+        for part in parts {
+            values.push(Value::Heap(self.allocate_string(part)?));
+        }
+        self.allocate_value_list(values)
+    }
+
+    /// The `i64` word a `Map`/`Set` sorted snapshot compares, mirroring the
+    /// native runtime's word order: integers contribute their bit pattern
+    /// sign- or zero-extended per declared width, heap values their identity
+    /// (the analogue of a native pointer).
+    fn value_sort_word(&self, value: &Value) -> i64 {
+        match value {
+            Value::Int(value) if value.width.signed() => value.signed() as i64,
+            Value::Int(value) => value.unsigned() as i64,
+            Value::Boolean(value) => i64::from(*value),
+            Value::Heap(id) => i64::from(id.0),
+            _ => 0,
+        }
+    }
+
+    /// The contents a string-content `Map`/`Set` sort compares; non-text
+    /// values sort as empty, matching the native null-word rule.
+    fn value_sort_text(&self, value: &Value) -> String {
+        match value {
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::String(text)) | Some(HeapEntry::Char(text)) => text.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    /// The `Regex.Match` class layout behind a `Nullable<Object>` result
+    /// (`find`) or the element type of a `List` result (`find_all`).
+    fn regex_match_layout(&self, ty: IrType) -> Result<u32, ExecutionFault> {
+        let layout = match ty {
+            IrType::Nullable(Nullable::Object(layout)) => Some(layout),
+            IrType::List(list) => match self.module.list_types.get(list as usize) {
+                Some(&IrType::Object(layout)) => Some(layout),
+                _ => None,
+            },
+            _ => None,
+        };
+        layout.ok_or_else(|| {
+            ExecutionFault::Internal("regex match intrinsic has a non-match result".into())
+        })
+    }
+
+    /// Allocates a `Regex.Match` object. The field order is `text`,
+    /// `haystack`, `start`, `end`, `regex`, matching the class the checker
+    /// declares; `start`/`end` are byte offsets into `haystack`.
+    fn allocate_regex_match(
+        &mut self,
+        layout: u32,
+        matched: &str,
+        haystack: &str,
+        start: usize,
+        end: usize,
+        regex: Value,
+    ) -> Result<Value, ExecutionFault> {
+        let text = Value::Heap(self.allocate_string(matched.to_owned())?);
+        let haystack = Value::Heap(self.allocate_string(haystack.to_owned())?);
+        let offset =
+            |value: usize| Value::Int(IntegerValue::from_bits(value as u128, IntWidth::I64));
+        let fields = vec![text, haystack, offset(start), offset(end), regex];
+        let bytes = std::mem::size_of::<HeapEntry>()
+            .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
+            .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+        self.heap
+            .allocate(HeapEntry::Object { layout, fields }, bytes, self.limits)
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// The exact decimal surface: every `zirk_rt_decimal_*` extern plus
+    /// `zirk_str_from_decimal`, dispatched to the same `runtime-core`
+    /// arithmetic the native adapters call.
+    fn execute_decimal_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::decimal as dec;
+        let value = |result: Result<dec::Decimal, dec::DecimalError>| {
+            result
+                .map(|value| Value::Decimal(dec::format(value)))
+                .map_err(Self::decimal_fault)
+        };
+        let dec_arg = |index: usize| self.decimal_argument(arguments.get(index));
+        let int_arg = |index: usize| self.i32_argument(arguments.get(index));
+        let ordered = |left: dec::Decimal,
+                       right: dec::Decimal,
+                       pick_less: bool|
+         -> Result<bool, ExecutionFault> {
+            let order = dec::compare(left, right).map_err(Self::decimal_fault)?;
+            Ok(if pick_less { order <= 0 } else { order >= 0 })
+        };
+        match name {
+            "zirk_rt_decimal_add" => value(dec::add(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_sub" => value(dec::sub(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_mul" => value(dec::mul(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_div" => value(dec::div(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_rem" => value(dec::rem(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_pow" => value(dec::pow(dec_arg(0)?, dec_arg(1)?)),
+            "zirk_rt_decimal_pow_i" => value(dec::pow_int(
+                dec_arg(0)?,
+                self.integer_from_value(arguments.get(1))?,
+            )),
+            "zirk_rt_decimal_div_ex" => value(dec::div_to_scale(
+                dec_arg(0)?,
+                dec_arg(1)?,
+                int_arg(3)?.max(0) as u32,
+                dec::RoundingMode::from_abi(int_arg(2)?),
+            )),
+            "zirk_rt_decimal_round" => value(dec::round_to_places(
+                dec_arg(0)?,
+                int_arg(1)?,
+                dec::RoundingMode::from_abi(int_arg(2)?),
+            )),
+            "zirk_rt_decimal_min" => {
+                let (a, b) = (dec_arg(0)?, dec_arg(1)?);
+                value(Ok(if ordered(a, b, true)? { a } else { b }))
+            }
+            "zirk_rt_decimal_max" => {
+                let (a, b) = (dec_arg(0)?, dec_arg(1)?);
+                value(Ok(if ordered(a, b, false)? { a } else { b }))
+            }
+            "zirk_rt_decimal_clamp" => {
+                let (v, lo, hi) = (dec_arg(0)?, dec_arg(1)?, dec_arg(2)?);
+                let picked = if dec::compare(v, lo).map_err(Self::decimal_fault)? < 0 {
+                    lo
+                } else if dec::compare(v, hi).map_err(Self::decimal_fault)? > 0 {
+                    hi
+                } else {
+                    v
+                };
+                value(Ok(picked))
+            }
+            "zirk_rt_decimal_neg" => value(dec::negate(dec_arg(0)?)),
+            "zirk_rt_decimal_abs" => value(dec::abs(dec_arg(0)?)),
+            "zirk_rt_decimal_sqrt" => value(dec::sqrt(dec_arg(0)?)),
+            "zirk_rt_decimal_floor" => value(dec::round_to_places(
+                dec_arg(0)?,
+                0,
+                dec::RoundingMode::Floor,
+            )),
+            "zirk_rt_decimal_ceil" => value(dec::round_to_places(
+                dec_arg(0)?,
+                0,
+                dec::RoundingMode::Ceil,
+            )),
+            "zirk_rt_decimal_truncate" => value(dec::round_to_places(
+                dec_arg(0)?,
+                0,
+                dec::RoundingMode::Down,
+            )),
+            "zirk_rt_decimal_fraction" => {
+                let v = dec_arg(0)?;
+                let whole = dec::round_to_places(v, 0, dec::RoundingMode::Down)
+                    .map_err(Self::decimal_fault)?;
+                value(dec::sub(v, whole))
+            }
+            "zirk_rt_decimal_cmp" => self.int_result(
+                i128::from(dec::compare(dec_arg(0)?, dec_arg(1)?).map_err(Self::decimal_fault)?),
+                ty,
+                name,
+            ),
+            "zirk_rt_decimal_sign" => self.int_result(i128::from(dec_arg(0)?.sign()), ty, name),
+            "zirk_rt_decimal_scale" => self.int_result(i128::from(dec_arg(0)?.scale), ty, name),
+            "zirk_rt_decimal_is_zero" => Ok(Value::Boolean(dec_arg(0)?.is_zero())),
+            "zirk_rt_decimal_is_negative" => Ok(Value::Boolean(dec_arg(0)?.is_negative())),
+            "zirk_rt_decimal_is_integer" => Ok(Value::Boolean(dec_arg(0)?.is_integer())),
+            "zirk_str_from_decimal" => self
+                .allocate_string(dec::format(dec_arg(0)?))
+                .map(Value::Heap),
+            "zirk_rt_decimal_to_f64" => self.float_result(dec::to_f64(dec_arg(0)?), ty, name),
+            "zirk_rt_decimal_from_i128" => Ok(Value::Decimal(dec::format(dec::Decimal::new(
+                self.int128_argument(arguments.first())?,
+                0,
+            )))),
+            "zirk_rt_decimal_to_i128_checked" => {
+                let signed = matches!(arguments.get(2), Some(Value::Boolean(true)));
+                let value = dec::to_i128_checked(dec_arg(0)?, int_arg(1)? as u32, signed)
+                    .map_err(Self::decimal_fault)?;
+                self.int_result(value, ty, name)
+            }
+            "zirk_rt_decimal_from_f64" => value(
+                dec::from_f64_checked(self.float64_argument(arguments.first())?).map_err(|error| {
+                    // A non-finite source is an invalid cast, matching the
+                    // native boundary's `zirk_rt_invalid_cast`.
+                    if error == dec::DecimalError::Domain {
+                        dec::DecimalError::InvalidCast
+                    } else {
+                        error
+                    }
+                }),
+            ),
+            "zirk_rt_decimal_from_literal" => {
+                let text = self.text_argument(arguments.first())?;
+                // A literal the lexer accepted always parses; a miss is a
+                // compiler bug — the native boundary traps `zirk_rt_overflow`.
+                dec::parse(&text)
+                    .map(|parsed| Value::Decimal(dec::format(parsed)))
+                    .ok_or_else(|| Self::decimal_fault(dec::DecimalError::Overflow))
+            }
+            "zirk_rt_decimal_parse_ok" => Ok(Value::Boolean(
+                dec::parse(&self.text_argument(arguments.first())?).is_some(),
+            )),
+            "zirk_rt_decimal_parse_value" => Ok(Value::Decimal(dec::format(
+                dec::parse(&self.text_argument(arguments.first())?).unwrap_or(dec::Decimal::ZERO),
+            ))),
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    /// The `IntN` member surface: `zirk_int_*` externs dispatched to the
+    /// shared `runtime-core::scalar` implementations. The receiver arrives
+    /// widened to `Int128`; `bits`/`signed` describe the original width.
+    fn execute_int_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::scalar as sc;
+        let wide = |index: usize| self.int128_argument(arguments.get(index));
+        let meta = |index: usize| self.i32_argument(arguments.get(index));
+        let int = |value: i128| self.int_result(value, ty, name);
+        let binary =
+            |f: fn(i128, i128, i32, i32) -> i128| int(f(wide(0)?, wide(1)?, meta(2)?, meta(3)?));
+        let checked_ok = |f: fn(i128, i128, i32, i32) -> bool| {
+            Ok(Value::Boolean(f(wide(0)?, wide(1)?, meta(2)?, meta(3)?)))
+        };
+        let checked_value =
+            |f: fn(i128, i128, i32, i32) -> i128| int(f(wide(0)?, wide(1)?, meta(2)?, meta(3)?));
+        match name {
+            "zirk_int_abs" => int(sc::int_abs(wide(0)?, meta(1)?, meta(2)?)),
+            "zirk_int_sign" => int(i128::from(sc::int_sign(wide(0)?, meta(1)?, meta(2)?))),
+            "zirk_int_min" => int(sc::int_min(wide(0)?, wide(1)?, meta(2)?, meta(3)?)),
+            "zirk_int_max" => int(sc::int_max(wide(0)?, wide(1)?, meta(2)?, meta(3)?)),
+            "zirk_int_clamp" => int(sc::int_clamp(
+                wide(0)?,
+                wide(1)?,
+                wide(2)?,
+                meta(3)?,
+                meta(4)?,
+            )),
+            "zirk_int_is_zero" => Ok(Value::Boolean(wide(0)? == 0)),
+            "zirk_int_is_even" => Ok(Value::Boolean(wide(0)? % 2 == 0)),
+            "zirk_int_is_odd" => Ok(Value::Boolean(wide(0)? % 2 != 0)),
+            "zirk_int_bit_count" => int(i128::from(sc::int_bit_count(wide(0)?, meta(1)?))),
+            "zirk_int_leading_zeros" => int(i128::from(sc::int_leading_zeros(wide(0)?, meta(1)?))),
+            "zirk_int_trailing_zeros" => {
+                int(i128::from(sc::int_trailing_zeros(wide(0)?, meta(1)?)))
+            }
+            "zirk_int_rotate_left" => int(sc::int_rotate_left(
+                wide(0)?,
+                self.integer_from_value(arguments.get(1))?,
+                meta(2)?,
+            )),
+            "zirk_int_rotate_right" => int(sc::int_rotate_right(
+                wide(0)?,
+                self.integer_from_value(arguments.get(1))?,
+                meta(2)?,
+            )),
+            "zirk_int_wrapping_add" => binary(sc::int_wrapping_add),
+            "zirk_int_wrapping_sub" => binary(sc::int_wrapping_sub),
+            "zirk_int_wrapping_mul" => binary(sc::int_wrapping_mul),
+            "zirk_int_saturating_add" => binary(sc::int_saturating_add),
+            "zirk_int_saturating_sub" => binary(sc::int_saturating_sub),
+            "zirk_int_saturating_mul" => binary(sc::int_saturating_mul),
+            "zirk_int_to_string_radix" => self
+                .allocate_string(sc::format_integer_radix(wide(0)?, meta(1)?))
+                .map(Value::Heap),
+            "zirk_int_checked_add_ok" => checked_ok(sc::int_checked_add_ok),
+            // The `value` half of checked add/sub/mul is the wrapped result —
+            // only meaningful when the `ok` probe already passed.
+            "zirk_int_checked_add_value" => checked_value(sc::int_wrapping_add),
+            "zirk_int_checked_sub_ok" => checked_ok(sc::int_checked_sub_ok),
+            "zirk_int_checked_sub_value" => checked_value(sc::int_wrapping_sub),
+            "zirk_int_checked_mul_ok" => checked_ok(sc::int_checked_mul_ok),
+            "zirk_int_checked_mul_value" => checked_value(sc::int_wrapping_mul),
+            "zirk_int_checked_div_ok" => checked_ok(sc::int_checked_div_ok),
+            "zirk_int_checked_div_value" => checked_value(sc::int_checked_div_value),
+            "zirk_int_checked_rem_ok" => checked_ok(sc::int_checked_rem_ok),
+            "zirk_int_checked_rem_value" => checked_value(sc::int_checked_rem_value),
+            "zirk_int_checked_pow_ok" => checked_ok(sc::int_checked_pow_ok),
+            "zirk_int_checked_pow_value" => checked_value(sc::int_checked_pow_value),
+            "zirk_int_parse_ok" => Ok(Value::Boolean(sc::int_parse_ok(
+                &self.text_argument(arguments.first())?,
+                meta(1)?,
+                meta(2)?,
+            ))),
+            "zirk_int_parse_value" => int(sc::int_parse_value(
+                &self.text_argument(arguments.first())?,
+                meta(1)?,
+                meta(2)?,
+            )),
+            "zirk_int_parse_radix_ok" => Ok(Value::Boolean(sc::int_parse_radix_ok(
+                &self.text_argument(arguments.first())?,
+                meta(1)?,
+                meta(2)?,
+                meta(3)?,
+            ))),
+            "zirk_int_parse_radix_value" => int(sc::int_parse_radix_value(
+                &self.text_argument(arguments.first())?,
+                meta(1)?,
+                meta(2)?,
+                meta(3)?,
+            )),
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    /// The binary-float member surface: `zirk_float_*` externs over the
+    /// `f64` view the ABI declares for them.
+    fn execute_float_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::scalar as sc;
+        let float = |value: f64| self.float_result(value, ty, name);
+        match name {
+            "zirk_float_parse_ok" => Ok(Value::Boolean(
+                sc::parse_float(&self.text_argument(arguments.first())?).is_some(),
+            )),
+            "zirk_float_parse_value" => {
+                float(sc::parse_float(&self.text_argument(arguments.first())?).unwrap_or(0.0))
+            }
+            _ => {
+                let value = self.float64_argument(arguments.first())?;
+                match name {
+                    "zirk_float_abs" => float(value.abs()),
+                    "zirk_float_sign" => self.int_result(
+                        i128::from(if value > 0.0 {
+                            1_i32
+                        } else if value < 0.0 {
+                            -1
+                        } else {
+                            0
+                        }),
+                        ty,
+                        name,
+                    ),
+                    "zirk_float_min" => float(value.min(self.float64_argument(arguments.get(1))?)),
+                    "zirk_float_max" => float(value.max(self.float64_argument(arguments.get(1))?)),
+                    "zirk_float_clamp" => {
+                        let lo = self.float64_argument(arguments.get(1))?;
+                        let hi = self.float64_argument(arguments.get(2))?;
+                        // `f64::clamp` panics when `lo > hi`; the manual form
+                        // keeps the interpreter deterministic where the
+                        // native ABI would trap.
+                        float(if value < lo {
+                            lo
+                        } else if value > hi {
+                            hi
+                        } else {
+                            value
+                        })
+                    }
+                    "zirk_float_is_zero" => Ok(Value::Boolean(value == 0.0)),
+                    "zirk_float_floor" => float(value.floor()),
+                    "zirk_float_ceil" => float(value.ceil()),
+                    "zirk_float_round" => float(value.round()),
+                    "zirk_float_truncate" => float(value.trunc()),
+                    "zirk_float_fraction" => float(value.fract()),
+                    "zirk_float_is_finite" => Ok(Value::Boolean(value.is_finite())),
+                    "zirk_float_is_infinite" => Ok(Value::Boolean(value.is_infinite())),
+                    "zirk_float_is_negative" => Ok(Value::Boolean(value.is_sign_negative())),
+                    "zirk_float_pow" => {
+                        float(value.powi(self.integer_from_value(arguments.get(1))? as i32))
+                    }
+                    "zirk_float_powf" => {
+                        float(value.powf(self.float64_argument(arguments.get(1))?))
+                    }
+                    "zirk_float_sqrt" => float(value.sqrt()),
+                    "zirk_float_format" => self
+                        .allocate_string(sc::format_float(
+                            value,
+                            &self.text_argument(arguments.get(1))?,
+                        ))
+                        .map(Value::Heap),
+                    _ => Err(ExecutionFault::Internal(format!(
+                        "unsupported browser intrinsic {name}"
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// The civil `Date`/`Time`/`DateTime` surface — pure value operations
+    /// shared with the native runtime through `runtime-core::temporal`. The
+    /// host-clock externs (`today`, `now_*`) are excluded upstream by
+    /// `is_host_clock_extern` and never reach this dispatcher.
+    fn execute_temporal_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::temporal as tmp;
+        let int64 = |index: usize| self.integer_from_value(arguments.get(index));
+        let int32 = |index: usize| self.i32_argument(arguments.get(index));
+        let wide = |index: usize| self.int128_argument(arguments.get(index));
+        let text = |index: usize| self.text_argument(arguments.get(index));
+        let int = |value: i64| self.int_result(i128::from(value), ty, name);
+        let wide_result = |value: i128| self.int_result(value, ty, name);
+        match name {
+            "zirk_rt_date_is_valid" => Ok(Value::Boolean(tmp::date_is_valid(
+                int32(0)?,
+                int32(1)?,
+                int32(2)?,
+            ))),
+            "zirk_rt_date_days" => int(tmp::days_from_civil(int32(0)?, int32(1)?, int32(2)?)),
+            "zirk_rt_date_year" => int(i64::from(tmp::civil_from_days(int64(0)?).0)),
+            "zirk_rt_date_month" => int(i64::from(tmp::civil_from_days(int64(0)?).1)),
+            "zirk_rt_date_day" => int(i64::from(tmp::civil_from_days(int64(0)?).2)),
+            "zirk_rt_date_to_string" => self
+                .allocate_string(tmp::date_to_string(int64(0)?))
+                .map(Value::Heap),
+            "zirk_rt_date_day_of_week" => int(i64::from(tmp::date_day_of_week(int64(0)?))),
+            "zirk_rt_date_day_of_year" => int(i64::from(tmp::date_day_of_year(int64(0)?))),
+            "zirk_rt_date_week_of_year" => int(i64::from(tmp::date_week_of_year(int64(0)?))),
+            "zirk_rt_date_quarter" => int(i64::from(tmp::date_quarter(int64(0)?))),
+            "zirk_rt_date_days_in_month" => int(i64::from(tmp::date_days_in_month(int64(0)?))),
+            "zirk_rt_date_days_in_year" => int(i64::from(tmp::date_days_in_year(int64(0)?))),
+            "zirk_rt_date_is_leap" => Ok(Value::Boolean(tmp::date_is_leap(int64(0)?))),
+            "zirk_rt_date_start_of_ok" | "zirk_rt_date_end_of_ok" => {
+                Ok(Value::Boolean(tmp::date_unit_ok(&text(0)?)))
+            }
+            "zirk_rt_date_start_of_value" => int(tmp::date_start_of(int64(0)?, &text(1)?)),
+            "zirk_rt_date_end_of_value" => int(tmp::date_end_of(int64(0)?, &text(1)?)),
+            "zirk_rt_date_parse_ok" => {
+                Ok(Value::Boolean(tmp::parse_date_text(&text(0)?).is_some()))
+            }
+            "zirk_rt_date_parse_value" => int(tmp::parse_date_text(&text(0)?).unwrap_or(0)),
+            "zirk_rt_date_format" => self
+                .allocate_string(tmp::date_format(int64(0)?, &text(1)?))
+                .map(Value::Heap),
+            "zirk_rt_time_is_valid" => Ok(Value::Boolean(tmp::time_is_valid(
+                int32(0)?,
+                int32(1)?,
+                int32(2)?,
+                int64(3)?,
+            ))),
+            "zirk_rt_time_nanos" => {
+                int(tmp::time_nanos(int32(0)?, int32(1)?, int32(2)?, int64(3)?))
+            }
+            "zirk_rt_time_hour" => int(i64::from(tmp::time_hour(int64(0)?))),
+            "zirk_rt_time_minute" => int(i64::from(tmp::time_minute(int64(0)?))),
+            "zirk_rt_time_second" => int(i64::from(tmp::time_second(int64(0)?))),
+            "zirk_rt_time_nanosecond" => int(tmp::time_nanosecond(int64(0)?)),
+            "zirk_rt_time_add_nanos" => int(tmp::time_add_nanos(int64(0)?, int64(1)?)),
+            "zirk_rt_time_diff" => int(tmp::time_diff(int64(0)?, int64(1)?)),
+            "zirk_rt_time_to_string" => self
+                .allocate_string(tmp::format_time(int64(0)?))
+                .map(Value::Heap),
+            "zirk_rt_time_start_of_ok" | "zirk_rt_time_end_of_ok" => {
+                Ok(Value::Boolean(tmp::time_unit_ok(&text(0)?)))
+            }
+            "zirk_rt_time_start_of_value" => int(tmp::time_start_of(int64(0)?, &text(1)?)),
+            "zirk_rt_time_end_of_value" => int(tmp::time_end_of(int64(0)?, &text(1)?)),
+            "zirk_rt_time_parse_ok" => {
+                Ok(Value::Boolean(tmp::parse_time_text(&text(0)?).is_some()))
+            }
+            "zirk_rt_time_parse_value" => int(tmp::parse_time_text(&text(0)?).unwrap_or(0)),
+            "zirk_rt_time_format" => self
+                .allocate_string(tmp::time_format(int64(0)?, &text(1)?))
+                .map(Value::Heap),
+            "zirk_rt_datetime_new" => wide_result(tmp::datetime_pack(int64(0)?, int64(1)?)),
+            "zirk_rt_datetime_days" => int(tmp::datetime_days(wide(0)?)),
+            "zirk_rt_datetime_nanos" => int(tmp::datetime_nanos(wide(0)?)),
+            "zirk_rt_datetime_to_string" => self
+                .allocate_string(tmp::datetime_to_string(wide(0)?))
+                .map(Value::Heap),
+            "zirk_rt_datetime_start_of_ok" | "zirk_rt_datetime_end_of_ok" => {
+                Ok(Value::Boolean(tmp::datetime_unit_ok(&text(0)?)))
+            }
+            "zirk_rt_datetime_start_of_value" => {
+                wide_result(tmp::datetime_start_of(wide(0)?, &text(1)?))
+            }
+            "zirk_rt_datetime_end_of_value" => {
+                wide_result(tmp::datetime_end_of(wide(0)?, &text(1)?))
+            }
+            "zirk_rt_datetime_parse_ok" => Ok(Value::Boolean(
+                tmp::parse_datetime_text(&text(0)?).is_some(),
+            )),
+            "zirk_rt_datetime_parse_value" => {
+                wide_result(tmp::parse_datetime_text(&text(0)?).unwrap_or(0))
+            }
+            "zirk_rt_datetime_format" => self
+                .allocate_string(tmp::datetime_format(wide(0)?, &text(1)?))
+                .map(Value::Heap),
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
+    /// The three collection-shape externs: `List` to `Array` conversion and
+    /// the sorted key/element snapshots `Map.to_string`/`Set.to_string` use.
+    fn execute_collection_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: &[Value],
+        _ty: IrType,
+    ) -> Result<Value, ExecutionFault> {
+        let elements = |value: Option<&Value>, heap: &Heap, name: &str| match value {
+            Some(Value::Heap(id)) => match heap.get(*id) {
+                Some(HeapEntry::List(values)) | Some(HeapEntry::Array(values)) => {
+                    Ok(values.clone())
+                }
+                Some(HeapEntry::Set(values)) => Ok(values.clone()),
+                Some(HeapEntry::Map(entries)) => {
+                    Ok(entries.iter().map(|(key, _)| key.clone()).collect())
+                }
+                _ => Err(ExecutionFault::Internal(format!(
+                    "{name} received a non-collection value"
+                ))),
+            },
+            _ => Err(ExecutionFault::Internal(format!(
+                "{name} received a non-heap value"
+            ))),
+        };
+        match name {
+            "zirk_rt_array_from_list" => {
+                let values = elements(arguments.first(), &self.heap, name)?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            "zirk_rt_map_sorted_keys" | "zirk_rt_set_sorted_elements" => {
+                let mut values = elements(arguments.first(), &self.heap, name)?;
+                if self.integer_from_value(arguments.get(1))? != 0 {
+                    values.sort_by_key(|value| self.value_sort_text(value));
+                } else {
+                    values.sort_by_key(|value| self.value_sort_word(value));
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            _ => Err(ExecutionFault::Internal(format!(
+                "unsupported browser intrinsic {name}"
+            ))),
+        }
+    }
+
     /// Browser-owned regex calls are deliberately bounded before invoking the
     /// regex engine.  The native ABI remains the authority for native runs;
     /// this path only replaces the four pure operations in the browser
@@ -2768,6 +3655,7 @@ impl<'module> Interpreter<'module> {
         &mut self,
         name: &str,
         arguments: &[Value],
+        ty: IrType,
     ) -> Result<Value, ExecutionFault> {
         const MAX_REGEX_INPUT_BYTES: usize = 65_536;
         let string = |value: &Value, heap: &Heap| match value {
@@ -2875,10 +3763,166 @@ impl<'module> Interpreter<'module> {
                 ))
                 .map(Value::Heap)
             }
+            "zirk_regex_is_valid_pattern" => {
+                let [source] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_is_valid_pattern has invalid arity".into(),
+                    ));
+                };
+                Ok(Value::Boolean(zirk_runtime_core::regex::is_valid(&string(
+                    source, &self.heap,
+                )?)))
+            }
+            "zirk_regex_split" => {
+                let [receiver, text] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_split has invalid arity".into(),
+                    ));
+                };
+                let pattern = pattern(receiver, &self.heap)?;
+                let text = string(text, &self.heap)?;
+                bounded(&text)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.string_list_result(zirk_runtime_core::regex::split(&regex, &text))
+            }
+            "zirk_regex_find" => {
+                let [receiver, text] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_find has invalid arity".into(),
+                    ));
+                };
+                let pattern = pattern(receiver, &self.heap)?;
+                let text = string(text, &self.heap)?;
+                bounded(&text)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                match zirk_runtime_core::regex::find(&regex, &text) {
+                    Some((start, end)) => self
+                        .allocate_regex_match(
+                            self.regex_match_layout(ty)?,
+                            &text[start..end],
+                            &text,
+                            start,
+                            end,
+                            receiver.clone(),
+                        )
+                        .map(|value| Value::Nullable(Some(Box::new(value)))),
+                    None => Ok(Value::Nullable(None)),
+                }
+            }
+            "zirk_regex_find_all" => {
+                let [receiver, text] = arguments else {
+                    return Err(ExecutionFault::Internal(
+                        "zirk_regex_find_all has invalid arity".into(),
+                    ));
+                };
+                let layout = self.regex_match_layout(ty)?;
+                let pattern = pattern(receiver, &self.heap)?;
+                let text = string(text, &self.heap)?;
+                bounded(&text)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let mut values = Vec::new();
+                for (start, end) in zirk_runtime_core::regex::find_all(&regex, &text) {
+                    values.push(self.allocate_regex_match(
+                        layout,
+                        &text[start..end],
+                        &text,
+                        start,
+                        end,
+                        receiver.clone(),
+                    )?);
+                }
+                self.allocate_value_list(values)
+            }
+            "zirk_regex_match_group_pos" | "zirk_regex_match_group_name" => {
+                let [receiver, ..] = arguments else {
+                    return Err(ExecutionFault::Internal(format!(
+                        "{name} has invalid arity"
+                    )));
+                };
+                let (haystack, start, pattern) = self.regex_match_parts(receiver, name)?;
+                bounded(&haystack)?;
+                let regex = zirk_runtime_core::regex::compile(&pattern).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "RegexError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let group = if name == "zirk_regex_match_group_pos" {
+                    let index = self.integer_from_value(arguments.get(1))?;
+                    let index = usize::try_from(index).map_err(|_| ExecutionFault::Runtime {
+                        category: "BoundsError".into(),
+                        message: "regex group index is out of range".into(),
+                    })?;
+                    zirk_runtime_core::regex::match_group_pos(&regex, &haystack, start, index)
+                } else {
+                    let group = string(
+                        arguments.get(1).ok_or_else(|| {
+                            ExecutionFault::Internal(format!("{name} has invalid arity"))
+                        })?,
+                        &self.heap,
+                    )?;
+                    zirk_runtime_core::regex::match_group_name(&regex, &haystack, start, &group)
+                };
+                self.allocate_string(group).map(Value::Heap)
+            }
             _ => Err(ExecutionFault::Internal(format!(
                 "unsupported browser intrinsic {name}"
             ))),
         }
+    }
+
+    /// `(haystack, match_start, pattern)` of a `Regex.Match` object produced
+    /// by `find`/`find_all` — the pieces `group(index)`/`group(name)` need to
+    /// resolve captures by re-running the regex, matching the native layout.
+    fn regex_match_parts(
+        &self,
+        receiver: &Value,
+        name: &str,
+    ) -> Result<(String, usize, String), ExecutionFault> {
+        let invalid = || ExecutionFault::Internal(format!("{name} received a non-match value"));
+        let Value::Heap(id) = receiver else {
+            return Err(invalid());
+        };
+        let Some(HeapEntry::Object { fields, .. }) = self.heap.get(*id) else {
+            return Err(invalid());
+        };
+        let [_, haystack, start, _, regex] = fields.as_slice() else {
+            return Err(invalid());
+        };
+        let haystack = match haystack {
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::String(text)) => text.clone(),
+                _ => return Err(invalid()),
+            },
+            _ => return Err(invalid()),
+        };
+        let start = match start {
+            Value::Int(value) => usize::try_from(value.signed()).map_err(|_| invalid())?,
+            _ => return Err(invalid()),
+        };
+        let pattern = match regex {
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::Regex(pattern)) => pattern.clone(),
+                _ => return Err(invalid()),
+            },
+            _ => return Err(invalid()),
+        };
+        Ok((haystack, start, pattern))
     }
 
     fn execute_string_intrinsic(
@@ -2978,6 +4022,97 @@ impl<'module> Interpreter<'module> {
                 self.allocate_string(zirk_runtime_core::text::substring(&text, start, end).into())
                     .map(Value::Heap)
             }
+            "zirk_str_search" => integer(
+                text.find(&argument_string(1)?)
+                    .map(|index| index as i128)
+                    .unwrap_or(-1),
+            ),
+            "zirk_str_set" => {
+                let offset = self.integer_from_value(arguments.get(1))?;
+                let length = self.integer_from_value(arguments.get(2))?;
+                let replacement = match arguments.get(3) {
+                    Some(Value::Heap(id)) => match self.heap.get(*id) {
+                        Some(HeapEntry::String(value)) | Some(HeapEntry::Char(value)) => {
+                            value.clone()
+                        }
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "zirk_str_set replacement is not a String or Char".into(),
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "zirk_str_set replacement is missing".into(),
+                        ));
+                    }
+                };
+                // An out-of-range write is a no-op, matching the native
+                // `zirk_str_set` boundary.
+                if let Some(out) =
+                    zirk_runtime_core::text::replace_range(&text, offset, length, &replacement)
+                {
+                    let Value::Heap(id) = receiver else {
+                        return Err(ExecutionFault::Internal(
+                            "zirk_str_set receiver is not a heap value".into(),
+                        ));
+                    };
+                    match self.heap.get_mut(*id) {
+                        Some(HeapEntry::String(slot)) => *slot = out,
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "zirk_str_set receiver is not a String".into(),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::Void)
+            }
+            "zirk_str_slice" => {
+                let start = self.integer_from_value(arguments.get(1))?;
+                let end = self.integer_from_value(arguments.get(2))?;
+                let step = self.integer_from_value(arguments.get(3))?;
+                self.allocate_string(zirk_runtime_core::text::grapheme_slice(
+                    &text, start, end, step,
+                ))
+                .map(Value::Heap)
+            }
+            "zirk_str_split" => self.string_list_result(
+                zirk_runtime_core::text::split(&text, &argument_string(1)?)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            "zirk_str_split_whitespace" => {
+                self.string_list_result(text.split_whitespace().map(str::to_owned).collect())
+            }
+            "zirk_str_lines" => self.string_list_result(text.lines().map(str::to_owned).collect()),
+            "zirk_str_chars" => {
+                let mut values = Vec::new();
+                for grapheme in zirk_runtime_core::text::graphemes(&text) {
+                    values.push(Value::Heap(self.allocate_char(grapheme.to_owned())?));
+                }
+                self.allocate_value_list(values)
+            }
+            "zirk_str_bytes" => {
+                let values = text
+                    .bytes()
+                    .map(|byte| Value::Int(IntegerValue::from_bits(u128::from(byte), IntWidth::U8)))
+                    .collect();
+                self.allocate_value_list(values)
+            }
+            "zirk_str_codepoints" => {
+                let values = text
+                    .chars()
+                    .map(|point| {
+                        Value::Int(IntegerValue::from_bits(
+                            u128::from(point as u32),
+                            IntWidth::U32,
+                        ))
+                    })
+                    .collect();
+                self.allocate_value_list(values)
+            }
             _ => Err(ExecutionFault::Internal(format!(
                 "unsupported browser intrinsic {name}"
             ))),
@@ -3019,6 +4154,76 @@ impl<'module> Interpreter<'module> {
         ExecutionFault::Runtime {
             category: "BoundsError".into(),
             message: "collection index is out of bounds".into(),
+        }
+    }
+
+    /// The zero-initialized element an `Array<T>(n)` allocation starts with,
+    /// matching the native collector's defaults (`T[n]` lowers to it).
+    fn default_value(&mut self, ty: IrType) -> Result<Value, ExecutionFault> {
+        match ty {
+            IrType::Int(width) => IntegerValue::from_literal(0, width)
+                .map(Value::Int)
+                .map_err(ExecutionFault::Internal),
+            IrType::Float(FloatWidth::F128) => Ok(Value::Float {
+                width: FloatWidth::F128,
+                text: zirk_runtime_core::binary_float::Float128::from_decimal("0")
+                    .map_err(|error| {
+                        ExecutionFault::Internal(format!("Float128 zero failed: {error:?}"))
+                    })?
+                    .wire_text(),
+            }),
+            IrType::Float(width) => Ok(Value::Float {
+                width,
+                text: "0".to_string(),
+            }),
+            IrType::Decimal => Ok(Value::Decimal("0".to_string())),
+            IrType::Boolean => Ok(Value::Boolean(false)),
+            IrType::String => self.allocate_string(String::new()).map(Value::Heap),
+            IrType::Nullable(_) => Ok(Value::Nullable(None)),
+            // Collections default to empty ("empty where meaningful").
+            IrType::Array(_) => self
+                .heap
+                .allocate(
+                    HeapEntry::Array(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(Value::Heap)
+                .map_err(ExecutionFault::Limit),
+            IrType::List(_) => self
+                .heap
+                .allocate(
+                    HeapEntry::List(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(Value::Heap)
+                .map_err(ExecutionFault::Limit),
+            IrType::Map(_) => self
+                .heap
+                .allocate(
+                    HeapEntry::Map(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(Value::Heap)
+                .map_err(ExecutionFault::Limit),
+            IrType::Set(_) => self
+                .heap
+                .allocate(
+                    HeapEntry::Set(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(Value::Heap)
+                .map_err(ExecutionFault::Limit),
+            // `Duration` and the civil temporals are plain integers at this
+            // level (`Int64` nanos/days), covered by `Int` above. `Char`,
+            // aggregates and managed references have no implicit default —
+            // the checker requires an explicit initializer for those.
+            _ => Err(ExecutionFault::Internal(format!(
+                "ArrayNew element type {ty:?} has no default value"
+            ))),
         }
     }
 
@@ -3176,15 +4381,61 @@ impl<'module> Interpreter<'module> {
         }
     }
 
-    fn execute_binary(&self, op: BinaryOp, left: Value, right: Value) -> Result<Value, String> {
+    /// Plain `Binary` failures carry `ArithmeticError` — the category every
+    /// checked operator reports through. Typed error categories
+    /// (`FloatNanError`, `DivisionByZeroError`) are produced by the typed
+    /// paths themselves.
+    fn arithmetic_error(message: impl Into<String>) -> ExecutionFault {
+        ExecutionFault::Runtime {
+            category: "ArithmeticError".into(),
+            message: message.into(),
+        }
+    }
+
+    fn execute_binary(
+        &self,
+        op: BinaryOp,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, ExecutionFault> {
         match (left, right) {
             (Value::Heap(left), Value::Heap(right)) => match op {
                 BinaryOp::Eq => Ok(Value::Boolean(self.value_equals(left, right))),
                 BinaryOp::NotEq => Ok(Value::Boolean(!self.value_equals(left, right))),
-                BinaryOp::Identical => Ok(Value::Boolean(left == right)),
-                _ => Err(format!("operator {op:?} is not defined for heap values")),
+                BinaryOp::Identical => Ok(Value::Boolean(self.identity_equals(left, right))),
+                _ => Err(Self::arithmetic_error(format!(
+                    "operator {op:?} is not defined for heap values"
+                ))),
             },
-            (Value::Int(left), Value::Int(right)) => left.checked_binary(op, right),
+            // `is` is the one comparison allowed on nullable references: two
+            // absent values are identical, absent vs present never is, two
+            // present ones compare by identity like the non-nullable case.
+            (Value::Nullable(left), Value::Nullable(right)) if op == BinaryOp::Identical => {
+                let identical = match (left.as_deref(), right.as_deref()) {
+                    (None, None) => true,
+                    (Some(Value::Heap(left)), Some(Value::Heap(right))) => {
+                        self.identity_equals(*left, *right)
+                    }
+                    (Some(left), Some(right)) => left == right,
+                    _ => false,
+                };
+                Ok(Value::Boolean(identical))
+            }
+            (Value::Nullable(inner), Value::Heap(right)) if op == BinaryOp::Identical => {
+                Ok(Value::Boolean(matches!(
+                    inner.as_deref(),
+                    Some(Value::Heap(left)) if self.identity_equals(*left, right)
+                )))
+            }
+            (Value::Heap(left), Value::Nullable(inner)) if op == BinaryOp::Identical => {
+                Ok(Value::Boolean(matches!(
+                    inner.as_deref(),
+                    Some(Value::Heap(right)) if self.identity_equals(left, *right)
+                )))
+            }
+            (Value::Int(left), Value::Int(right)) => left
+                .checked_binary(op, right)
+                .map_err(Self::arithmetic_error),
             (
                 Value::Float {
                     width: left_width,
@@ -3206,11 +4457,13 @@ impl<'module> Interpreter<'module> {
                 BinaryOp::And => Ok(Value::Boolean(left && right)),
                 BinaryOp::Or => Ok(Value::Boolean(left || right)),
                 BinaryOp::Identical => Ok(Value::Boolean(left == right)),
-                _ => Err(format!("operator {op:?} is not defined for Boolean")),
+                _ => Err(Self::arithmetic_error(format!(
+                    "operator {op:?} is not defined for Boolean"
+                ))),
             },
-            (left, right) => Err(format!(
+            (left, right) => Err(Self::arithmetic_error(format!(
                 "binary {op:?} has incompatible operands {left:?} and {right:?}"
-            )),
+            ))),
         }
     }
 
@@ -3268,6 +4521,31 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    /// `is` — reference identity. Two bindings to the same allocation compare
+    /// equal; a capture-less callable compares by its function target because
+    /// every same-signature non-capturing callable denotes one canonical
+    /// function value (`module.closures` D12), not one instance per mention.
+    fn identity_equals(&self, left: HeapId, right: HeapId) -> bool {
+        if left == right {
+            return true;
+        }
+        match (self.heap.get(left), self.heap.get(right)) {
+            (
+                Some(HeapEntry::Closure {
+                    target: left_target,
+                    captures: left_captures,
+                }),
+                Some(HeapEntry::Closure {
+                    target: right_target,
+                    captures: right_captures,
+                }),
+            ) => {
+                left_captures.is_empty() && right_captures.is_empty() && left_target == right_target
+            }
+            _ => false,
+        }
+    }
+
     fn runtime_value_equals(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Heap(left), Value::Heap(right)) => self.value_equals(*left, *right),
@@ -3275,16 +4553,14 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    /// Parses the decimal spelling a `Value::Float` carries. Infinities and
+    /// NaN are valid here — they are produced and consumed like any other
+    /// `f64`, and the lowering's own `guard_nan` turns a `NaN` result into a
+    /// catchable `FloatNanError`. Only `Float128` is finite-only, and it
+    /// never reaches this parser.
     fn parse_binary_float(text: &str) -> Result<f64, ExecutionFault> {
-        let value = text.parse::<f64>().map_err(|_| {
-            ExecutionFault::Internal(format!("invalid binary float literal {text:?}"))
-        })?;
-        if !value.is_finite() {
-            return Err(ExecutionFault::Internal(
-                "non-finite binary floats are not supported by the browser baseline".into(),
-            ));
-        }
-        Ok(value)
+        text.parse::<f64>()
+            .map_err(|_| ExecutionFault::Internal(format!("invalid binary float literal {text:?}")))
     }
 
     fn round_binary_float(value: f64, width: FloatWidth) -> f64 {
@@ -3302,23 +4578,33 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    /// Builds a runtime `Value::Float` from an `f64` result. Infinities and
+    /// NaN carry through as text exactly like native — the lowering's
+    /// `guard_nan` raises `FloatNanError` for NaN, and `inf` is a valid value.
+    fn binary_float_value(value: f64, width: FloatWidth) -> Result<Value, ExecutionFault> {
+        Ok(Value::Float {
+            width,
+            text: Self::format_binary_float(Self::round_binary_float(value, width), width),
+        })
+    }
+
     fn execute_float_binary(
         &self,
         op: BinaryOp,
         width: FloatWidth,
         left: &str,
         right: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ExecutionFault> {
         if width == FloatWidth::F128 {
             use zirk_runtime_core::binary_float::Float128;
-            let left = Float128::from_wire_or_decimal(left)
-                .map_err(|error| format!("invalid Float128 value: {error:?}"))?;
-            let right = Float128::from_wire_or_decimal(right)
-                .map_err(|error| format!("invalid Float128 value: {error:?}"))?;
+            let invalid =
+                |error| Self::arithmetic_error(format!("invalid Float128 value: {error:?}"));
+            let left = Float128::from_wire_or_decimal(left).map_err(invalid)?;
+            let right = Float128::from_wire_or_decimal(right).map_err(invalid)?;
             use BinaryOp::*;
-            let comparison = left
-                .compare(right)
-                .map_err(|error| format!("Float128 comparison failed: {error:?}"));
+            let comparison = left.compare(right).map_err(|error| {
+                Self::arithmetic_error(format!("Float128 comparison failed: {error:?}"))
+            });
             match op {
                 Eq => {
                     return comparison
@@ -3352,24 +4638,22 @@ impl<'module> Interpreter<'module> {
                 Mul => left.mul(right),
                 Div => left.div(right),
                 Rem => left.rem(right),
-                _ => return Err(format!("operator {op:?} is not defined for binary floats")),
+                _ => {
+                    return Err(Self::arithmetic_error(format!(
+                        "operator {op:?} is not defined for binary floats"
+                    )));
+                }
             }
             .map(|value| Value::Float {
                 width,
                 text: value.wire_text(),
             })
-            .map_err(|error| format!("Float128 operation failed: {error:?}"));
+            .map_err(|error| {
+                Self::arithmetic_error(format!("Float128 operation failed: {error:?}"))
+            });
         }
-        let left = Self::parse_binary_float(left).map_err(|error| match error {
-            ExecutionFault::Runtime { message, .. } => message,
-            ExecutionFault::Internal(message) => message,
-            ExecutionFault::Limit(limit) => format!("binary float limit failure: {limit:?}"),
-        })?;
-        let right = Self::parse_binary_float(right).map_err(|error| match error {
-            ExecutionFault::Runtime { message, .. } => message,
-            ExecutionFault::Internal(message) => message,
-            ExecutionFault::Limit(limit) => format!("binary float limit failure: {limit:?}"),
-        })?;
+        let left = Self::parse_binary_float(left)?;
+        let right = Self::parse_binary_float(right)?;
         use BinaryOp::*;
         let comparison = |value| Ok(Value::Boolean(value));
         match op {
@@ -3380,9 +4664,6 @@ impl<'module> Interpreter<'module> {
             Gt => comparison(left > right),
             GtEq => comparison(left >= right),
             Add | Sub | Mul | Div | Rem => {
-                if matches!(op, Div | Rem) && right == 0.0 {
-                    return Err("binary float division by zero".into());
-                }
                 let value = match op {
                     Add => left + right,
                     Sub => left - right,
@@ -3391,16 +4672,18 @@ impl<'module> Interpreter<'module> {
                     Rem => left % right,
                     _ => unreachable!(),
                 };
+                // Produce the IEEE 754 result verbatim — `inf` is a valid
+                // value and a `NaN` is detected by the lowering's `guard_nan`
+                // (`x == x`), which throws a catchable `FloatNanError`.
                 let value = Self::round_binary_float(value, width);
-                if !value.is_finite() {
-                    return Err("binary float operation produced a non-finite value".into());
-                }
                 Ok(Value::Float {
                     width,
                     text: Self::format_binary_float(value, width),
                 })
             }
-            _ => Err(format!("operator {op:?} is not defined for binary floats")),
+            _ => Err(Self::arithmetic_error(format!(
+                "operator {op:?} is not defined for binary floats"
+            ))),
         }
     }
 
@@ -3418,22 +4701,11 @@ impl<'module> Interpreter<'module> {
         op: BinaryOp,
         left: &str,
         right: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, ExecutionFault> {
         use zirk_runtime_core::decimal;
-        let left = self.parse_decimal(left).map_err(|error| match error {
-            ExecutionFault::Runtime { message, .. } => message,
-            ExecutionFault::Internal(message) => message,
-            ExecutionFault::Limit(limit) => format!("decimal limit failure: {limit:?}"),
-        })?;
-        let right = self.parse_decimal(right).map_err(|error| match error {
-            ExecutionFault::Runtime { message, .. } => message,
-            ExecutionFault::Internal(message) => message,
-            ExecutionFault::Limit(limit) => format!("decimal limit failure: {limit:?}"),
-        })?;
-        let comparison = || {
-            decimal::compare(left, right)
-                .map_err(|error| format!("decimal comparison failed: {error:?}"))
-        };
+        let left = self.parse_decimal(left)?;
+        let right = self.parse_decimal(right)?;
+        let comparison = || decimal::compare(left, right).map_err(Self::decimal_fault);
         let value = match op {
             BinaryOp::Eq => return comparison().map(|value| Value::Boolean(value == 0)),
             BinaryOp::NotEq => return comparison().map(|value| Value::Boolean(value != 0)),
@@ -3446,9 +4718,13 @@ impl<'module> Interpreter<'module> {
             BinaryOp::Mul => decimal::mul(left, right),
             BinaryOp::Div => decimal::div(left, right),
             BinaryOp::Rem => decimal::rem(left, right),
-            _ => return Err(format!("operator {op:?} is not defined for Decimal")),
+            _ => {
+                return Err(Self::arithmetic_error(format!(
+                    "operator {op:?} is not defined for Decimal"
+                )));
+            }
         }
-        .map_err(|error| format!("decimal arithmetic failed: {error:?}"))?;
+        .map_err(Self::decimal_fault)?;
         Ok(Value::Decimal(decimal::format(value)))
     }
 
@@ -5354,7 +6630,9 @@ mod tests {
                 .unwrap(),
             Value::Boolean(true)
         );
-        assert!(
+        // IEEE 754 results carry through verbatim: `1 / 0` is `inf` and `NaN`
+        // is a value the lowering's `guard_nan` turns into `FloatNanError`.
+        assert_eq!(
             interpreter
                 .execute_binary(
                     BinaryOp::Div,
@@ -5367,9 +6645,13 @@ mod tests {
                         text: "0".into()
                     },
                 )
-                .is_err()
+                .unwrap(),
+            Value::Float {
+                width: FloatWidth::F64,
+                text: "inf".into()
+            }
         );
-        assert!(Interpreter::parse_binary_float("NaN").is_err());
+        assert!(Interpreter::parse_binary_float("NaN").unwrap().is_nan());
     }
 
     #[test]
@@ -6321,6 +7603,135 @@ mod tests {
                 message: "execution reached Unreachable terminator".into(),
                 span: Some(function_span),
             })
+        );
+    }
+
+    #[test]
+    fn array_new_initializes_elements_with_the_type_default() {
+        // `mut fixed: Int32[6]` lowers to `ArrayNew` with the element type in
+        // the module's `array_types` table: every slot starts at the type's
+        // default (`0` for integers), not `Undefined`. The program stores 50
+        // at index 5 and returns `fixed[0] + fixed[5] + fixed.length` = 56.
+        let span = Span::empty(0);
+        let int_type = IrType::Int(IntWidth::I32);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: int_type,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstInt(6),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ArrayNew {
+                                element_id: 0,
+                                capacity: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Array(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::ConstInt(5),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstInt(50),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::ArrayListStore {
+                                receiver: Operand(ValueId(1)),
+                                index: Operand(ValueId(2)),
+                                value: Operand(ValueId(3)),
+                            },
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::ConstInt(0),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(5)),
+                            kind: InstKind::ArrayListLoad {
+                                receiver: Operand(ValueId(1)),
+                                index: Operand(ValueId(4)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(6)),
+                            kind: InstKind::ArrayListLoad {
+                                receiver: Operand(ValueId(1)),
+                                index: Operand(ValueId(2)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(7)),
+                            kind: InstKind::ArrayLength(Operand(ValueId(1))),
+                            ty: IrType::Int(IntWidth::U64),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(8)),
+                            kind: InstKind::IntCast(Operand(ValueId(7))),
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(9)),
+                            kind: InstKind::Binary {
+                                op: BinaryOp::Add,
+                                left: Operand(ValueId(5)),
+                                right: Operand(ValueId(6)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(10)),
+                            kind: InstKind::Binary {
+                                op: BinaryOp::Add,
+                                left: Operand(ValueId(9)),
+                                right: Operand(ValueId(8)),
+                            },
+                            ty: int_type,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(10))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            array_types: vec![IrType::Int(IntWidth::I32)],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 56))
+            }
         );
     }
 }

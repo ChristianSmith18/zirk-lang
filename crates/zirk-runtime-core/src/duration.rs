@@ -67,6 +67,213 @@ pub fn ratio(left: i64, right: i64) -> f64 {
     left as f64 / right as f64
 }
 
+/// `d.round(unit)` — nearest multiple of `unit`, halves away from zero.
+/// A zero unit returns `nanos` unchanged.
+pub fn round(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let q = n / u;
+    let r = n % u;
+    let q = if 2 * r.abs() >= u.abs() {
+        q + r.signum()
+    } else {
+        q
+    };
+    (q * u) as i64
+}
+
+/// `d.floor(unit)` — largest multiple of `unit` not greater than the value.
+pub fn floor(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let mut q = n / u;
+    let r = n % u;
+    if r != 0 && (n < 0) != (u < 0) {
+        q -= 1;
+    }
+    (q * u) as i64
+}
+
+/// `d.ceil(unit)` — smallest multiple of `unit` not less than the value.
+pub fn ceil(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    let mut q = n / u;
+    let r = n % u;
+    if r != 0 && (n < 0) == (u < 0) {
+        q += 1;
+    }
+    (q * u) as i64
+}
+
+/// `d.truncate(unit)` — multiple of `unit` toward zero.
+pub fn truncate(nanos: i64, unit: i64) -> i64 {
+    if unit == 0 {
+        return nanos;
+    }
+    let n = nanos as i128;
+    let u = unit as i128;
+    ((n / u) * u) as i64
+}
+
+const NANOS_PER_HOUR: i128 = 3_600_000_000_000;
+const NANOS_PER_MINUTE: i128 = 60_000_000_000;
+const NANOS_PER_SECOND: i128 = 1_000_000_000;
+const NANOS_PER_MILLI: i128 = 1_000_000;
+const NANOS_PER_MICRO: i128 = 1_000;
+
+/// Renders a nanosecond count as an ISO 8601 duration, e.g. `PT1H30M5.123S`.
+pub fn format_iso(nanos: i64) -> String {
+    if nanos == 0 {
+        return "PT0S".to_string();
+    }
+    let sign = if nanos < 0 { "-" } else { "" };
+    let m = (nanos as i128).wrapping_abs();
+    let days = m / NANOS_PER_DAY;
+    let m = m % NANOS_PER_DAY;
+    let hours = m / NANOS_PER_HOUR;
+    let m = m % NANOS_PER_HOUR;
+    let minutes = m / NANOS_PER_MINUTE;
+    let m = m % NANOS_PER_MINUTE;
+    let seconds = m / NANOS_PER_SECOND;
+    let subsecond = (m % NANOS_PER_SECOND) as i64;
+    let mut text = if days > 0 {
+        format!("{sign}P{days}DT{hours}H{minutes}M{seconds}")
+    } else {
+        format!("{sign}PT{hours}H{minutes}M{seconds}")
+    };
+    if subsecond == 0 {
+        text.push('S');
+    } else {
+        let frac = format!("{subsecond:09}");
+        let frac = frac.trim_end_matches('0');
+        text.push('.');
+        text.push_str(frac);
+        text.push('S');
+    }
+    text
+}
+
+/// `d.format(template)` — typed `%` placeholders for the duration's
+/// components. Supported: `%w` weeks, `%d` days, `%h` hours, `%m` minutes,
+/// `%s` seconds, `%ms` milliseconds, `%us` microseconds, `%ns` nanoseconds,
+/// `%%` a literal `%`. All component values are from the magnitude.
+pub fn format_template(nanos: i64, template: &str) -> String {
+    let sign = if nanos < 0 { "-" } else { "" };
+    let m = (nanos as i128).wrapping_abs();
+    let days_total = m / NANOS_PER_DAY;
+    let m = m % NANOS_PER_DAY;
+    let hours = m / NANOS_PER_HOUR;
+    let m = m % NANOS_PER_HOUR;
+    let minutes = m / NANOS_PER_MINUTE;
+    let m = m % NANOS_PER_MINUTE;
+    let seconds = m / NANOS_PER_SECOND;
+    let m = m % NANOS_PER_SECOND;
+    let ms = m / NANOS_PER_MILLI;
+    let m = m % NANOS_PER_MILLI;
+    let us = m / NANOS_PER_MICRO;
+    let ns = m % NANOS_PER_MICRO;
+
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('%') => {
+                out.push('%');
+                chars.next();
+            }
+            Some('w') => {
+                out.push_str(&(days_total / 7).to_string());
+                chars.next();
+            }
+            Some('d') => {
+                out.push_str(&days_total.to_string());
+                chars.next();
+            }
+            Some('h') => {
+                out.push_str(&hours.to_string());
+                chars.next();
+            }
+            Some('m') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&ms.to_string());
+                    chars.next();
+                } else {
+                    out.push_str(&minutes.to_string());
+                }
+            }
+            Some('s') => {
+                out.push_str(&seconds.to_string());
+                chars.next();
+            }
+            Some('u') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&us.to_string());
+                    chars.next();
+                } else {
+                    out.push('?');
+                }
+            }
+            Some('n') => {
+                chars.next();
+                if matches!(chars.peek(), Some('s')) {
+                    out.push_str(&ns.to_string());
+                    chars.next();
+                } else {
+                    out.push('?');
+                }
+            }
+            _ => out.push('?'),
+        }
+    }
+    format!("{sign}{out}")
+}
+
+/// `d.humanize(locale, max_units)` — readable, multi-unit description.
+/// The `locale` is currently ignored and English-style labels are used.
+pub fn humanize(nanos: i64, _locale: &str, max_units: i32) -> String {
+    if nanos == 0 {
+        return "0s".to_string();
+    }
+    let sign = if nanos < 0 { "-" } else { "" };
+    let mut m = (nanos as i128).wrapping_abs();
+    let mut parts = Vec::new();
+    for &(name, unit) in UNITS {
+        if m == 0 {
+            break;
+        }
+        let whole = m / unit;
+        if whole == 0 {
+            continue;
+        }
+        m %= unit;
+        parts.push(format!("{whole}{name}"));
+        if max_units > 0 && parts.len() == max_units as usize {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        format!("{sign}{}", parts.join(" "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

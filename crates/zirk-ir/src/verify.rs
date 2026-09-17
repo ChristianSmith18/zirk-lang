@@ -139,6 +139,20 @@ fn verify_instruction(
 ) {
     let type_of = |operand: &Operand| values.get(&operand.0).map(|(_, ty)| *ty);
 
+    // A `Void` instruction produces no value, so declaring a result id is
+    // contradictory: consumers read `result.is_some()` as "this instruction
+    // materializes a value" (the interpreter derives its return destination
+    // from exactly that). The one exception is `Undefined`, the lowering's
+    // placeholder for a `Void` expression forced into value position — it
+    // does materialize `Value::Undefined`. `Never` stays allowed too:
+    // `FatalError` declares a result purely as a diverging-branch marker.
+    if inst.ty == IrType::Void && inst.result.is_some() && !matches!(inst.kind, InstKind::Undefined)
+    {
+        report(format!(
+            "{position}: a Void instruction cannot declare a result value"
+        ));
+    }
+
     match &inst.kind {
         InstKind::ConstInt(_) => {
             if !matches!(inst.ty, IrType::Int(_) | IrType::Enum(_)) {

@@ -23,7 +23,7 @@ Unique values under `T`'s equality/hash contract; insertion-order iteration.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Element count | specified |
+| `length` | `UInt64` | Element count | specified |
 | `is_empty` | `Boolean` | `length == 0` | specified |
 
 ### Methods

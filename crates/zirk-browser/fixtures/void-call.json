@@ -1,0 +1,10 @@
+{
+  "name": "void-call",
+  "source": "fn helper(): Void {\n    stdout.println(\"ran\");\n}\nfn main(): Void {\n    helper();\n}\n",
+  "virtualName": "fixtures/void-call.zrk",
+  "expectedOutput": [
+    "ran\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

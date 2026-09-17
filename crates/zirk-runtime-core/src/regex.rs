@@ -31,6 +31,38 @@ pub fn find_all(regex: &Regex, text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
+/// The text of positional capture group `n` of the match whose whole-match
+/// span starts at `match_start` within `haystack`, or an empty string when
+/// the group is missing. Re-running captures is how `Regex.Match.group(n)`
+/// resolves groups without storing them.
+pub fn match_group_pos(regex: &Regex, haystack: &str, match_start: usize, n: usize) -> String {
+    for caps in regex.captures_iter(haystack) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() == match_start {
+            return caps
+                .get(n)
+                .map(|group| group.as_str().to_owned())
+                .unwrap_or_default();
+        }
+    }
+    String::new()
+}
+
+/// The text of the named capture group of the match whose whole-match span
+/// starts at `match_start`, or an empty string when missing.
+pub fn match_group_name(regex: &Regex, haystack: &str, match_start: usize, name: &str) -> String {
+    for caps in regex.captures_iter(haystack) {
+        let Some(whole) = caps.get(0) else { continue };
+        if whole.start() == match_start {
+            return caps
+                .name(name)
+                .map(|group| group.as_str().to_owned())
+                .unwrap_or_default();
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

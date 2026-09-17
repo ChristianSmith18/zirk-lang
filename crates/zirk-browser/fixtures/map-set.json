@@ -1,0 +1,11 @@
+{
+  "name": "map-set",
+  "source": "fn main(): Void {\n    mut m: Map<Int32, Int32> = Map();\n    m.set(1, 10);\n    m.set(2, 20);\n    stdout.println(m.length);\n    stdout.println(m.get_or_null(2) ?? 0);\n}\n",
+  "virtualName": "fixtures/map-set.zrk",
+  "expectedOutput": [
+    "2\n",
+    "20\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

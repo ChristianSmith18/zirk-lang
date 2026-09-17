@@ -24,7 +24,7 @@ Unique key/value associations; insertion-order iteration; `K` requires coherent
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Entry count | specified |
+| `length` | `UInt64` | Entry count | specified |
 | `is_empty` | `Boolean` | `length == 0` | specified |
 
 ### Methods

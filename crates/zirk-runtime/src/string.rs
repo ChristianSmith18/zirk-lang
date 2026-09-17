@@ -720,15 +720,8 @@ pub unsafe extern "C" fn zirk_str_split(handle: *const c_void, sep: *const c_voi
         };
     };
 
-    if sep_str.is_empty() {
-        use unicode_segmentation::UnicodeSegmentation;
-        for part in text.graphemes(true) {
-            push(part);
-        }
-    } else {
-        for part in text.split(sep_str) {
-            push(part);
-        }
+    for part in core_text::split(text, sep_str) {
+        push(part);
     }
     list
 }

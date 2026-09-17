@@ -1,0 +1,12 @@
+{
+  "name": "length-loop",
+  "source": "fn main(): Void {\n    inmut xs = [\"a\", \"b\", \"c\"];\n    for mut i = 0; i < xs.length; i++ {\n        stdout.println(xs[i]);\n    }\n}\n",
+  "virtualName": "fixtures/length-loop.zrk",
+  "expectedOutput": [
+    "a\n",
+    "b\n",
+    "c\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

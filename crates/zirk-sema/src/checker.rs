@@ -11619,15 +11619,17 @@ impl<'a> Checker<'a> {
 
                 self.expect_comparable(left, expr.left.span(), expr.op);
                 self.expect_comparable(right, expr.right.span(), expr.op);
-                // Each side is some width on its own; comparing two different
-                // ones — including an integer against a `Float` — needs an
-                // explicit conversion first, the same rule arithmetic has for
-                // integers (roadmap Phase 3b, task 4.3). Arithmetic's mixed
-                // int/Float rule does not extend here: which side's width the
-                // comparison would run at is not the unambiguous "produces
-                // Float" the spec states for arithmetic, so it is left
-                // explicit rather than guessed.
-                if !left.is_unknown() && !right.is_unknown() && left.base != right.base {
+                // Two numeric operands compare in their smallest common type
+                // — the same widening arithmetic applies — so `i < xs.length`
+                // (an `Int32` against a `UInt64`) just works, and `Decimal`
+                // orders against integers through the exact type. A mix with
+                // no common numeric type (`Decimal`/`Float`, or a temporal
+                // operand against a number) is still rejected.
+                if !left.is_unknown()
+                    && !right.is_unknown()
+                    && left.base != right.base
+                    && left.common_numeric(right).is_none()
+                {
                     let l = self.name(left);
                     let r = self.name(right);
                     self.error(
@@ -20338,6 +20340,7 @@ impl<'a> Checker<'a> {
                 actual.base,
                 Base::Int(_)
                     | Base::Float(_)
+                    | Base::Decimal
                     | Base::Duration
                     | Base::Date
                     | Base::Time
