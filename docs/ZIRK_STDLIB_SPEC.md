@@ -81,7 +81,7 @@ mut line = stdin.read_line();
   are the only rejected arguments. Nullable absence renders `<Null>`.
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
 - an unqualified convenience call resolves through the imported module when
-  unique; a collision requires `stdout::println(...)`.
+  unique; a collision requires `stdout.println(...)`.
 - `style` controls terminal presentation while `format` constructs text;
   cursor movement, progress and live regions belong to `Terminal`.
 - `write` is the exact text/byte stream primitive and does not insert

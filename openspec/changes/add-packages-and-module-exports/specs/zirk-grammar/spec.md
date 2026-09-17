@@ -36,7 +36,7 @@ member positions where a qualified name is legal. It SHALL preserve the full
 qualification for resolution rather than interpreting `::` as punctuation.
 
 #### Scenario: Qualified call
-- **WHEN** source contains `stdout::println("hello");`
+- **WHEN** source contains `stdout.println("hello");`
 - **THEN** the parser records a two-segment qualified member access
 
 #### Scenario: Qualified import

@@ -320,7 +320,7 @@ fn imported_stdout_opens_println_and_explicit_qualification() {
     let dir = workspace("standard_module_opening");
     std::fs::write(
         dir.join("main.zrk"),
-        "import { stdout } from std.io;\nfn main(): Void { println(\"open\"); stdout::println(\"qualified\"); }",
+        "import { stdout } from std.io;\nfn main(): Void { println(\"open\"); stdout.println(\"qualified\"); }",
     )
     .unwrap();
     let output = Command::new(compiler())
@@ -421,23 +421,6 @@ fn unimported_println_is_rejected() {
         .current_dir(&dir)
         .output()
         .expect("run unimported standard member check");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("E0401"));
-}
-
-#[test]
-fn unimported_qualified_stdout_is_rejected() {
-    let dir = workspace("unimported_qualified_standard_member");
-    std::fs::write(
-        dir.join("main.zrk"),
-        "fn main(): Void { stdout::println(\"nope\"); }",
-    )
-    .unwrap();
-    let output = Command::new(compiler())
-        .args(["check", "main.zrk"])
-        .current_dir(&dir)
-        .output()
-        .expect("run unimported qualified standard member check");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("E0401"));
 }

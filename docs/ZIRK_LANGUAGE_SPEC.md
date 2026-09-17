@@ -603,7 +603,7 @@ acme.cli;`) and explicit member imports select one member
 (`import { println } from std.io::stdout;`).
 
 After `import { stdout } from std.io`, `println("hello")` resolves to
-`stdout::println("hello")`. The same opening rule applies to every published
+`stdout.println("hello")`. The same opening rule applies to every published
 module, not just `std`; an unimported module is never made available merely by
 writing its name.
 

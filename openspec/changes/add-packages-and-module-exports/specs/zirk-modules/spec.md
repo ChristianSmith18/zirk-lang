@@ -40,16 +40,16 @@ modules. A collision SHALL require qualification.
 
 #### Scenario: Direct standard output call
 - **WHEN** a file imports `{ stdout } from std.io` and has no competing `println`
-- **THEN** `println("hello")` resolves to `stdout::println("hello")`
+- **THEN** `println("hello")` resolves to `stdout.println("hello")`
 
 #### Scenario: Explicit module member
 - **WHEN** a file imports `{ stdout } from std.io`
-- **THEN** `stdout::println("hello")` resolves to the same published member without relying on unqualified opening
+- **THEN** `stdout.println("hello")` resolves to the same published member without relying on unqualified opening
 
 #### Scenario: Ambiguous convenience name
 - **WHEN** the file also declares or imports another `println`
 - **THEN** an unqualified call is diagnosed as ambiguous
-- **AND** `stdout::println(...)` remains valid
+- **AND** `stdout.println(...)` remains valid
 
 #### Scenario: External module members open by default
 - **WHEN** a file imports `{ terminal } from acme.cli` and `terminal` publishes `clear()`

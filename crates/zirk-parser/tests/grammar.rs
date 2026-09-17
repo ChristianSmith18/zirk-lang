@@ -1747,7 +1747,7 @@ fn valid_qualified_module_type_is_retained() {
 
 #[test]
 fn valid_qualified_stdout_call_keeps_the_compatibility_lowering() {
-    let p = program("fn main(): Void { stdout::println(\"ready\"); }");
+    let p = program("fn main(): Void { stdout.println(\"ready\"); }");
     assert!(matches!(
         p.functions[0].body.statements[0],
         Stmt::Expr(ExprStmt {

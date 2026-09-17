@@ -4498,8 +4498,8 @@ impl<'a> Parser<'a> {
                 newline: method.name == "println",
                 // Dot notation remains the pre-package compatibility
                 // spelling. The new module qualification is subject to the
-                // resolver, so `stdout::println` requires the `stdout`
-                // module to have been imported from `std.io`.
+                // resolver, so a `module::member` spelling requires the
+                // module to have been imported from its package.
                 requires_import: qualified,
                 span: ident.span.to(end),
             }));

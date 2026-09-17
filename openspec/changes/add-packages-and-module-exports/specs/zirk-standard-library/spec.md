@@ -39,4 +39,4 @@ qualification form for every convenience member.
 #### Scenario: Unqualified standard call
 - **WHEN** `{ stdout } from std.io` is imported and no `println` conflicts
 - **THEN** `println("ready")` is accepted
-- **AND** it is equivalent to `stdout::println("ready")`
+- **AND** it is equivalent to `stdout.println("ready")`
