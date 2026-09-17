@@ -1328,7 +1328,6 @@ pub struct FieldExpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldAccess {
     Dot,
-    Module,
 }
 
 /// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —

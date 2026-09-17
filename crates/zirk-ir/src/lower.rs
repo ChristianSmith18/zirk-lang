@@ -3566,7 +3566,7 @@ impl<'a> FunctionLowering<'a> {
     /// that aliases exist.
     fn callee_name(&self, call: &ast::CallExpr) -> String {
         if let ast::Expr::Field(field) = &*call.callee
-            && field.access == ast::FieldAccess::Module
+            && self.checked.aliases.contains_key(&field.name.span)
         {
             return self.declaration_of(&field.name.name, field.name.span);
         }
@@ -7381,7 +7381,7 @@ impl<'a> FunctionLowering<'a> {
                 // namespace path as though it were a value.
                 if matches!(
                     &*e.callee,
-                    ast::Expr::Field(field) if field.access == ast::FieldAccess::Module
+                    ast::Expr::Field(field) if self.checked.aliases.contains_key(&field.name.span)
                 ) {
                     let name = self.callee_name(e);
                     let args = self.lower_args(e);
@@ -23851,7 +23851,7 @@ impl<'a> FunctionLowering<'a> {
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
         if matches!(
             &*call.callee,
-            ast::Expr::Field(field) if field.access == ast::FieldAccess::Module
+            ast::Expr::Field(field) if self.checked.aliases.contains_key(&field.name.span)
         ) {
             return false;
         }

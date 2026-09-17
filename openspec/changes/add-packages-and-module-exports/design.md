@@ -18,7 +18,7 @@ lockfile; `.zpkg` and package-manager commands are roadmap work. See
 - Preserve quoted relative imports and existing `share` visibility while
   adding unquoted logical package paths.
 - Open published members of imported modules by default and provide stable
-  `module::member` qualification for explicit calls and collision resolution.
+  `module.member` qualification for explicit calls and collision resolution.
 - Let official standard-library declarations look like ordinary Zirk source;
   keep any Rust implementation association in compiler-owned metadata rather
   than source annotations.
@@ -89,7 +89,7 @@ local/package distinction already documented by Zirk.
 Importing a module creates its qualified binding and a set of unqualified
 candidate names for its published members. Resolution accepts an unqualified
 candidate only when it is unique after local declarations and other imports are
-considered. Explicit qualification uses `module::member` and never depends on
+considered. Explicit qualification uses `module.member` and never depends on
 opening state. `use` remains solely the existing `.zkinit` application-global
 mechanism; it is not part of module opening.
 
@@ -138,7 +138,7 @@ public and that official stdlib provenance is compiler-owned.
 ## Risks / Trade-offs
 
 - **[Implicit opening can create collisions]** → Require source-order-independent
-  ambiguity diagnostics and always support `module::member`.
+  ambiguity diagnostics and always support `module.member`.
 - **[Package identity can drift from physical layout]** → Store the logical
   identity in `.zkinit`, validate package-root declarations, and preserve both
   canonical and written paths in diagnostics.

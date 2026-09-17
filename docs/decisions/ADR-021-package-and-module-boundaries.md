@@ -24,7 +24,7 @@ library convenience behavior special rather than a general language rule.
 - `share` is the sole publication marker. Private declarations remain private
   inside a published module.
 - Importing a module opens its shared members only while a bare name is unique.
-  There is no source-order tiebreak: collisions require `module::member`.
+  There is no source-order tiebreak: collisions require `module.member`.
   `use` remains limited to application globals.
 - The standard library is authored as ordinary package/module surface. The
   compiler owns any host binding behind a fully qualified package, module,

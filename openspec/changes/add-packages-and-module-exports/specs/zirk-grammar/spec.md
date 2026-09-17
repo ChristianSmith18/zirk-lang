@@ -29,11 +29,11 @@ mixed spellings with a targeted diagnostic.
 - **WHEN** source contains `import { stdout } from std.io;`
 - **THEN** the source is recorded as an unquoted logical path
 
-### Requirement: Explicit module member qualification is parsed
+### Requirement: Package import and module member paths are parsed
 
-The grammar SHALL recognize `module::member` in value, call, type, and import
-member positions where a qualified name is legal. It SHALL preserve the full
-qualification for resolution rather than interpreting `::` as punctuation.
+The grammar SHALL recognize `::` only in an unquoted package import path, such
+as `std.io::stdout`. Member access in values, calls, and type positions SHALL
+use `module.member`.
 
 #### Scenario: Qualified call
 - **WHEN** source contains `stdout.println("hello");`

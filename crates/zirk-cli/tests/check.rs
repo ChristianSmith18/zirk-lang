@@ -442,7 +442,7 @@ fn package_module_members_open_and_qualify_from_a_root_reexport() {
     .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
-        "import { terminal } from acme.cli;\nfn main(): Void { clear(); terminal::clear(); }",
+        "import { terminal } from acme.cli;\nfn main(): Void { clear(); terminal.clear(); }",
     )
     .unwrap();
     std::fs::write(
@@ -490,7 +490,7 @@ fn opened_module_member_collisions_require_qualification_without_source_order() 
     .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
-        "import { terminal, screen } from acme.cli;\nfn main(): Void { terminal::clear(); screen::clear(); clear(); }",
+        "import { terminal, screen } from acme.cli;\nfn main(): Void { terminal.clear(); screen.clear(); clear(); }",
     )
     .unwrap();
     std::fs::write(
@@ -525,8 +525,8 @@ fn opened_module_member_collisions_require_qualification_without_source_order() 
 }
 
 #[test]
-fn qualified_module_values_types_and_direct_member_imports_resolve() {
-    let dir = workspace("qualified_module_values_types");
+fn module_values_types_and_direct_member_imports_resolve() {
+    let dir = workspace("module_values_types");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
@@ -541,7 +541,7 @@ fn qualified_module_values_types_and_direct_member_imports_resolve() {
     .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
-        "import { api } from acme.web;\nimport { Api } from acme.web::api;\nfn receive(value: Fn() => Void): Void { value(); }\nfn main(): Void { mut item: api::Api = Api(); receive(api::clear); }",
+        "import { api } from acme.web;\nimport { Api } from acme.web::api;\nfn receive(value: Fn() => Void): Void { value(); }\nfn main(): Void { mut item: api.Api = Api(); receive(api.clear); }",
     )
     .unwrap();
     std::fs::write(

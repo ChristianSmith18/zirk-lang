@@ -20,7 +20,7 @@ behavior only when the declaration belongs to the official standard-library
 sources. External packages SHALL NOT acquire that association by name alone.
 
 #### Scenario: Official I/O implementation
-- **WHEN** `std.io::stdout::write` is compiled for a native target
+- **WHEN** `stdout.write` imported from `std.io::stdout` is compiled for a native target
 - **THEN** the compiler may lower that known standard declaration to the runtime's native output implementation
 - **AND** the source signature remains an ordinary Zirk function
 
@@ -33,7 +33,7 @@ sources. External packages SHALL NOT acquire that association by name alone.
 
 Published convenience members of an imported standard module SHALL be available
 unqualified by default when unambiguous and SHALL remain selectable through
-`module::member`. The standard library SHALL document collisions and the
+`module.member`. The standard library SHALL document collisions and the
 qualification form for every convenience member.
 
 #### Scenario: Unqualified standard call

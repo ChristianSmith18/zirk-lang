@@ -2016,15 +2016,6 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // `module::Type` selects a type published by an imported module. The
-        // resolver owns its meaning; retaining the full written path here
-        // keeps it distinct from nested `Outer.Inner` classes.
-        while self.eat(&TokenKind::ColonColon) {
-            let segment = self.expect_identifier("after `::` in a type path")?;
-            name.push_str("::");
-            name.push_str(&segment.name);
-        }
-
         let arguments = if matches!(self.peek(), TokenKind::Lt) {
             self.parse_type_args()?
         } else {
@@ -4498,7 +4489,7 @@ impl<'a> Parser<'a> {
                 newline: method.name == "println",
                 // Dot notation remains the pre-package compatibility
                 // spelling. The new module qualification is subject to the
-                // resolver, so a `module::member` spelling requires the
+                // resolver, so a module member spelling requires the
                 // module to have been imported from its package.
                 requires_import: qualified,
                 span: ident.span.to(end),
@@ -4583,13 +4574,9 @@ impl<'a> Parser<'a> {
     fn parse_member_chain(&mut self, mut object: Expr) -> Option<Expr> {
         loop {
             match self.peek() {
-                TokenKind::Dot | TokenKind::QuestionDot | TokenKind::ColonColon => {
+                TokenKind::Dot | TokenKind::QuestionDot => {
                     let safe = matches!(self.peek(), TokenKind::QuestionDot);
-                    let access = if matches!(self.peek(), TokenKind::ColonColon) {
-                        FieldAccess::Module
-                    } else {
-                        FieldAccess::Dot
-                    };
+                    let access = FieldAccess::Dot;
                     self.pos += 1;
 
                     // `TraitName.super.method()` — the `super` itself is a

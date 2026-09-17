@@ -32,12 +32,12 @@ collision has no source-order tiebreak; qualify it instead:
 ```zirk
 import { terminal } from acme.cli;
 
-terminal::clear();
+terminal.clear();
 ```
 
 `import { println } from std.io::stdout;` imports only that member. Module
 aliases change the qualifier (`import { terminal -> console } from acme.cli;`
-then `console::clear()`); `use` does not open modules.
+then `console.clear()`); `use` does not open modules.
 
 ---
 

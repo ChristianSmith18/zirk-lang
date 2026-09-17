@@ -578,7 +578,7 @@ struct Checker<'a> {
     /// and never grant that implementation to an equally named user export.
     standard_output_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
     /// Bare names opened by more than one imported module. They deliberately
-    /// have no source-order winner; callers must use `module::member`.
+    /// have no source-order winner; callers must use `module.member`.
     ambiguous_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
     /// Source files which implement a published module. Their shared
     /// functions may share a short name with another module.
@@ -1677,6 +1677,10 @@ impl<'a> Checker<'a> {
                                 .entry(import.span.file)
                                 .or_default()
                                 .insert(canonical, member.clone());
+                            self.imported
+                                .entry(import.span.file)
+                                .or_default()
+                                .insert(format!("{module}.{member}"), member.clone());
                         }
                         if standard_output_module && matches!(member.as_str(), "print" | "println")
                         {
@@ -1781,7 +1785,7 @@ impl<'a> Checker<'a> {
                 at,
                 format!("`{name}` is ambiguous between imported modules"),
                 "opened module members never use source order as a tiebreak",
-                Some("qualify the call as `module::member`".into()),
+                Some("qualify the call as `module.member`".into()),
             );
             return name.to_string();
         }
@@ -13644,24 +13648,31 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `a.b`, which is an enum variant or a field of an object.
+    /// Returns a path for `module.member` when `module` was imported as a
+    /// published module in this file. A dot spelling otherwise remains an
+    /// ordinary object/type member access.
+    fn imported_module_member(&self, expr: &FieldExpr) -> Option<Ident> {
+        let Expr::Path(module) = &*expr.object else {
+            return None;
+        };
+        let qualified = format!("{}.{}", module.name, expr.name.name);
+        self.imported
+            .get(&expr.span.file)
+            .is_some_and(|names| names.contains_key(&qualified))
+            .then(|| Ident::new(qualified, expr.name.span))
+    }
+
+    /// `a.b`, which is an enum variant, a module member, or a field of an
+    /// object.
     ///
     /// The parser cannot tell them apart — `Direction.North` and `user.name`
     /// have the same shape — so the decision lands here, where it is known
     /// whether the base names a type or a value.
     fn check_field(&mut self, expr: &FieldExpr) -> Type {
-        // `module::member` is a namespace lookup, never an object-member
-        // lookup. Preserve its written qualification long enough for the
-        // per-file import table to select the published declaration, then use
-        // the ordinary path machinery so function values carry their real
-        // `Fn` type just like an unqualified reference.
-        if expr.access == FieldAccess::Module
-            && let Expr::Path(module) = &*expr.object
-        {
-            let qualified = Ident::new(
-                format!("{}::{}", module.name, expr.name.name),
-                expr.name.span,
-            );
+        // A module is a compile-time namespace, not a runtime receiver.
+        // `module.member` resolves through the import table before normal
+        // object-field lookup, preserving the declaration's actual type.
+        if let Some(qualified) = self.imported_module_member(expr) {
             return self.check_path(&qualified);
         }
 
@@ -18079,20 +18090,12 @@ impl<'a> Checker<'a> {
             return self.check_super_construction(expr);
         }
 
-        // `module::member(args)` resolves through the published member set
-        // recorded by imports. The AST retains the qualification for tooling;
-        // ordinary call checking owns its signature and visibility rules.
+        // `module.member(args)` resolves through the published member set
+        // recorded by imports. Ordinary call checking then owns signature and
+        // visibility rules.
         if let Expr::Field(field) = &*expr.callee
-            && field.access == FieldAccess::Module
+            && let Some(name) = self.imported_module_member(field)
         {
-            let name = if let Expr::Path(module) = &*field.object {
-                Ident::new(
-                    format!("{}::{}", module.name, field.name.name),
-                    field.name.span,
-                )
-            } else {
-                field.name.clone()
-            };
             let redirected = CallExpr {
                 callee: Box::new(Expr::Path(name)),
                 args: expr.args.clone(),

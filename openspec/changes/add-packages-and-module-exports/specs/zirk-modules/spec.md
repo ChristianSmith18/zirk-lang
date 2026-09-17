@@ -33,7 +33,7 @@ paths.
 
 Importing a module SHALL make its published members callable without
 qualification when each unqualified name is otherwise unambiguous. A caller
-MAY always select the member explicitly with `module::member`. The same default
+MAY always select the member explicitly with `module.member`. The same default
 opening applies to imported external package modules; local modules imported by
 relative path SHALL follow the same lexical rule once they are represented as
 modules. A collision SHALL require qualification.
@@ -53,7 +53,7 @@ modules. A collision SHALL require qualification.
 
 #### Scenario: External module members open by default
 - **WHEN** a file imports `{ terminal } from acme.cli` and `terminal` publishes `clear()`
-- **THEN** `clear()` and `terminal::clear()` both resolve when no collision exists
+- **THEN** `clear()` and `terminal.clear()` both resolve when no collision exists
 
 #### Scenario: Explicit member import
 - **WHEN** `import { println } from std.io::stdout;` is written
@@ -63,7 +63,7 @@ modules. A collision SHALL require qualification.
 #### Scenario: Package object import
 - **WHEN** an object is imported from an external package module
 - **THEN** its published methods are opened by default when unambiguous
-- **AND** `module::member` remains available for explicit selection
+- **AND** `module.member` remains available for explicit selection
 
 ## ADDED Requirements
 

@@ -596,7 +596,7 @@ package intended for reuse.
 `share` publishes a declaration or module; `import` brings selected published
 names into a file; `use` only enables application globals. It does not open a
 module. Published module members open by default only while their unqualified
-name is unique. Thus both `clear()` and `terminal::clear()` are valid after
+name is unique. Thus both `clear()` and `terminal.clear()` are valid after
 `import { terminal } from acme.cli;`; a collision requires the qualified form.
 Aliases bind the written import name (`import { terminal -> console } from
 acme.cli;`) and explicit member imports select one member

@@ -20,7 +20,7 @@ implementation details.
 - Extend `share` to publish modules and their selected declarations as the
   package's public API; retain private declarations as non-importable.
 - Make published members of an imported module available unqualified by
-  default when unambiguous, while supporting explicit `module::member` access.
+  default when unambiguous, while supporting explicit `module.member` access.
 - Define deterministic collision diagnostics, import aliases, package-root
   re-exports, cycle handling, and source/package identity rules.
 - Define the standard library as compiler-provided packages resolved through the
@@ -50,10 +50,10 @@ implementation details.
 ### Modified Capabilities
 
 - `zirk-modules`: Add `package`, `mod`, module re-exports, package-qualified
-  imports, default member opening, explicit `module::member` access, and
+  imports, default member opening, explicit `module.member` access, and
   package-level public API rules.
 - `zirk-grammar`: Recognize the package/module declarations, package paths, and
-  `module::member` qualified access while preserving quoted relative paths.
+  `module.member` access while preserving quoted relative paths.
 - `zirk-standard-library`: Make `std` packages follow the public package/module
   model and define the compiler-owned implementation boundary for standard
   library functions.

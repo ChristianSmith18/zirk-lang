@@ -1709,9 +1709,8 @@ fn valid_import_from_a_standard_module() {
 
 #[test]
 fn valid_import_from_an_external_package_and_its_module() {
-    let p = program(
-        "import { clear } from acme.cli::terminal;\nfn main(): Void { terminal::clear(); }",
-    );
+    let p =
+        program("import { clear } from acme.cli::terminal;\nfn main(): Void { terminal.clear(); }");
     assert!(
         matches!(&p.imports[0].source, ImportSource::Package { path, .. } if path == "acme.cli::terminal")
     );
@@ -1725,7 +1724,7 @@ fn valid_import_from_an_external_package_and_its_module() {
     let Expr::Field(field) = &*call.callee else {
         panic!("expected module access");
     };
-    assert_eq!(field.access, FieldAccess::Module);
+    assert_eq!(field.access, FieldAccess::Dot);
 }
 
 #[test]
@@ -1740,9 +1739,9 @@ fn valid_package_inline_module_and_root_reexport() {
 }
 
 #[test]
-fn valid_qualified_module_type_is_retained() {
-    let p = program("fn main(value: model::User): Void { }");
-    assert_eq!(p.functions[0].params[0].ty.name, "model::User");
+fn valid_module_type_is_retained() {
+    let p = program("fn main(value: model.User): Void { }");
+    assert_eq!(p.functions[0].params[0].ty.name, "model.User");
 }
 
 #[test]

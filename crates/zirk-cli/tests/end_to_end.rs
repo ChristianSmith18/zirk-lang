@@ -650,7 +650,7 @@ fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
     .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
-        "import { math } from acme.math;\nfn main(): Void { stdout.println(math::answer()); }",
+        "import { math } from acme.math;\nfn main(): Void { stdout.println(math.answer()); }",
     )
     .unwrap();
     std::fs::write(

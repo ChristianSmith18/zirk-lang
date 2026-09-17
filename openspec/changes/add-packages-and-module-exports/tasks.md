@@ -10,7 +10,7 @@
 - [x] 2.1 Add AST nodes for package declarations and inline `mod` declarations, retaining spans and source ownership; verify parser snapshots for nested module declarations
 - [x] 2.2 Add AST support for `share mod name from "./relative-path"` and package-root re-exports; verify the target path omits `.zrk` and retains its written span
 - [x] 2.3 Extend import-source parsing to distinguish quoted relative paths from unquoted logical package/module paths; verify `"./models/user"`, `acme.web`, and `std.io` parse into distinct source kinds
-- [x] 2.4 Parse `module::member` qualification in expressions, calls, type positions, and direct member imports; verify chained package/module qualification is retained
+- [x] 2.4 Parse `module.member` qualification in expressions, calls, and type positions; retain `::` for direct member imports
 - [x] 2.5 Update lexer/parser diagnostics and syntax-highlighting fixtures for `package`, `mod`, `share mod`, unquoted package paths, and `::`; verify existing quoted imports remain unchanged
 
 ## 3. Source loading and visibility
@@ -25,7 +25,7 @@
 ## 4. Default member opening and qualification
 
 - [x] 4.1 Replace standard-library-only convenience resolution with default opening of published members from every imported module; verify an unqualified call resolves when unique
-- [x] 4.2 Implement `module::member` lookup for values, calls, types, and imports; verify qualification succeeds even when an unqualified name is ambiguous
+- [x] 4.2 Implement `module.member` lookup for values, calls, and types; verify qualification succeeds even when an unqualified name is ambiguous
 - [x] 4.3 Remove module-opening semantics from `use` while preserving `.zkinit` application-global behavior; verify `use` no longer imports or opens module members
 - [x] 4.4 Add resolver tests for local declarations, explicit imports, opened members, aliases, and collisions; verify resolution is source-order independent
 
@@ -47,7 +47,7 @@
 
 ## 7. Tests, examples, and compatibility
 
-- [x] 7.1 Add parser and semantic fixtures for package roots, module re-exports, package paths, relative paths, direct submodule imports, aliases, and `module::member`
+- [x] 7.1 Add parser and semantic fixtures for package roots, module re-exports, package paths, relative paths, direct submodule imports, aliases, and `module.member`
 - [x] 7.2 Add end-to-end multi-file application fixtures covering local modules, external packages, standard packages, private helpers, re-export diamonds, and collision diagnostics; verify expected output and errors
 - [x] 7.3 Add native codegen/link tests and interpreter/browser conformance fixtures for an ordinary Zirk stdlib declaration backed by the compiler-owned standard registry
 - [x] 7.4 Add negative fixtures proving external packages cannot invoke hidden Rust bindings, acquire undeclared permissions, or escape package-root visibility
@@ -56,7 +56,7 @@
 
 ## 8. Documentation and decision records
 
-- [x] 8.1 Update `docs/ZIRK_LANGUAGE_SPEC.md` section 10 with package/module identity, `share mod` re-exports, quoted-relative versus unquoted-package imports, default member opening, and `module::member` qualification
+- [x] 8.1 Update `docs/ZIRK_LANGUAGE_SPEC.md` section 10 with package/module identity, `share mod` re-exports, quoted-relative versus unquoted-package imports, default member opening, and `module.member` qualification
 - [x] 8.2 Update `docs/handbook/02-handbook/19-modules/` pages to remove module-opening `use` wording, explain package roots and re-exports, document collision rules, and add complete application/package examples
 - [x] 8.3 Update `.zkinit`, project layout, dependencies, lockfile, and package handbook pages to describe package projects without introducing `zirk.toml`
 - [x] 8.4 Update `docs/ZIRK_STDLIB_SPEC.md`, `docs/handbook/04-standard-library/`, and standard-library indexes so `std` packages use the same public module model and hide Rust implementation details
