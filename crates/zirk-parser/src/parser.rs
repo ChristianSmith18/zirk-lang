@@ -478,7 +478,10 @@ impl<'a> Parser<'a> {
 
     fn parse_program(mut self) -> Program {
         let start = self.peek_span();
+        let mut package = None;
         let mut imports = Vec::new();
+        let mut modules = Vec::new();
+        let mut module_reexports = Vec::new();
         let mut uses = Vec::new();
         let mut enums = Vec::new();
         let mut classes = Vec::new();
@@ -488,6 +491,10 @@ impl<'a> Parser<'a> {
         let mut externs = Vec::new();
 
         while !self.at_eof() {
+            if self.check_keyword(Keyword::Package) {
+                package = self.parse_package();
+                continue;
+            }
             if self.check_keyword(Keyword::Import) {
                 if let Some(i) = self.parse_import() {
                     imports.push(i);
@@ -508,6 +515,19 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 span
             });
+
+            if self.check_keyword(Keyword::Mod) {
+                if let Some(shared_at) = shared_at
+                    && matches!(self.peek_at(2), TokenKind::Keyword(Keyword::From))
+                {
+                    if let Some(reexport) = self.parse_module_reexport(shared_at) {
+                        module_reexports.push(reexport);
+                    }
+                } else if let Some(module) = self.parse_module(shared_at.is_some()) {
+                    modules.push(module);
+                }
+                continue;
+            }
 
             if self.check_keyword(Keyword::Extern) {
                 if let Some(e) = self.parse_extern_fn() {
@@ -662,7 +682,10 @@ impl<'a> Parser<'a> {
 
         let end = self.peek_span();
         Program {
+            package,
             imports,
+            modules,
+            module_reexports,
             uses,
             enums,
             classes,
@@ -674,7 +697,74 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `import { A, B -> C } from "./path";` or `... from std.io;`
+    fn parse_package(&mut self) -> Option<PackageDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Package);
+        let path = self.parse_dotted_path("in the package declaration")?;
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+        Some(PackageDecl {
+            path,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_module(&mut self, shared: bool) -> Option<ModuleDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Mod);
+        let name = self.expect_identifier("after `mod`")?;
+        self.expect(&TokenKind::LBrace, "after the module name");
+        let mut body_tokens = Vec::new();
+        let mut depth = 1usize;
+        while depth > 0 && !self.at_eof() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            match token.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                body_tokens.push(token);
+            }
+        }
+        let end = self.peek_span();
+        let eof_span = Span::empty_in(start.file, end.start);
+        body_tokens.push(Token::new(TokenKind::Eof, eof_span));
+        let body = Parser::new(self.source, &body_tokens, self.sink).parse_program();
+        Some(ModuleDecl {
+            name,
+            shared,
+            body: Box::new(body),
+            span: start.to(end),
+        })
+    }
+
+    fn parse_module_reexport(&mut self, start: Span) -> Option<ModuleReexport> {
+        self.eat_keyword(Keyword::Mod);
+        let name = self.expect_identifier("after `share mod`")?;
+        self.expect(&TokenKind::Keyword(Keyword::From), "after the module name");
+        let span = self.peek_span();
+        let TokenKind::Str(source_path) = self.peek().clone() else {
+            self.error(
+                codes::INVALID_IMPORT_SOURCE,
+                span,
+                "expected a quoted local path",
+                "package-root reexports use a relative quoted path",
+                Some("write `share mod name from \"./name\";`".into()),
+            );
+            return None;
+        };
+        self.pos += 1;
+        self.eat(&TokenKind::Semicolon);
+        Some(ModuleReexport {
+            name,
+            source_path,
+            span: start.to(span),
+        })
+    }
+
+    /// `import { A, B -> C } from "./path";` or `... from acme.web;`
     fn parse_import(&mut self) -> Option<ImportDecl> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Import);
@@ -727,26 +817,19 @@ impl<'a> Parser<'a> {
             return Some(ImportSource::Local { path, span });
         }
 
-        // A standard module is a dotted name: `std.io`.
+        // Packages are unquoted dotted names: `std.io` or `acme.web`.
         if matches!(self.peek(), TokenKind::Identifier(_)) {
-            let mut path = String::new();
-            let mut end;
-
-            loop {
-                let segment = self.expect_identifier("in the module name")?;
-                if !path.is_empty() {
-                    path.push('.');
-                }
-                path.push_str(&segment.name);
-                end = segment.span;
-
-                if !self.eat(&TokenKind::Dot) {
-                    break;
-                }
+            let path = self.parse_dotted_path("in the package name")?;
+            let mut full_path = path;
+            let mut end = self.peek_span();
+            if self.eat(&TokenKind::ColonColon) {
+                let member = self.expect_identifier("after `::` in an import source")?;
+                full_path.push_str("::");
+                full_path.push_str(&member.name);
+                end = member.span;
             }
-
-            return Some(ImportSource::Std {
-                path,
+            return Some(ImportSource::Package {
+                path: full_path,
                 span: span.to(end),
             });
         }
@@ -758,12 +841,44 @@ impl<'a> Parser<'a> {
             "expected the source of the import",
             format!("found {found}"),
             Some(
-                "a local path goes in quotes (`\"./user\"`); a standard module does not (`std.io`)"
-                    .into(),
+                "a local path goes in quotes (`\"./user\"`); a package does not (`std.io`)".into(),
             ),
         );
         self.synchronize();
         None
+    }
+
+    fn parse_dotted_path(&mut self, context: &str) -> Option<String> {
+        let mut path = String::new();
+        loop {
+            // A package segment may coincide with a reserved word (`demo.package`),
+            // because package paths are logical names rather than declarations.
+            let segment = match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    let span = self.peek_span();
+                    self.pos += 1;
+                    Ident::new(name, span)
+                }
+                TokenKind::Keyword(Keyword::Package | Keyword::Mod) => {
+                    let span = self.peek_span();
+                    let name = match self.peek() {
+                        TokenKind::Keyword(keyword) => keyword.as_str(),
+                        _ => unreachable!(),
+                    };
+                    self.pos += 1;
+                    Ident::new(name, span)
+                }
+                _ => self.expect_identifier(context)?,
+            };
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(&segment.name);
+            if !self.eat(&TokenKind::Dot) {
+                break;
+            }
+        }
+        Some(path)
     }
 
     /// `use stdout;`
@@ -1899,6 +2014,15 @@ impl<'a> Parser<'a> {
                 name.push('.');
                 name.push_str(&segment);
             }
+        }
+
+        // `module::Type` selects a type published by an imported module. The
+        // resolver owns its meaning; retaining the full written path here
+        // keeps it distinct from nested `Outer.Inner` classes.
+        while self.eat(&TokenKind::ColonColon) {
+            let segment = self.expect_identifier("after `::` in a type path")?;
+            name.push_str("::");
+            name.push_str(&segment.name);
         }
 
         let arguments = if matches!(self.peek(), TokenKind::Lt) {
@@ -4331,16 +4455,25 @@ impl<'a> Parser<'a> {
     fn parse_after_ident(&mut self, ident: Ident) -> Option<Expr> {
         // `stdout.println(expr)` is a special syntactic form while neither
         // modules nor a standard library exist. See decision D4 of the design.
-        if ident.name == "stdout" && matches!(self.peek(), TokenKind::Dot) {
+        if ident.name == "stdout" && matches!(self.peek(), TokenKind::Dot | TokenKind::ColonColon) {
+            let qualified = matches!(self.peek(), TokenKind::ColonColon);
             self.pos += 1;
             let method_span = self.peek_span();
-            let method = self.expect_identifier("after `stdout.`")?;
+            let method = self.expect_identifier(if qualified {
+                "after `stdout::`"
+            } else {
+                "after `stdout.`"
+            })?;
 
             if !matches!(method.name.as_str(), "print" | "println") {
                 self.error(
                     codes::NOT_IMPLEMENTED,
                     method_span,
-                    format!("`stdout.{}` is not available yet", method.name),
+                    format!(
+                        "`stdout{}{}` is not available yet",
+                        if qualified { "::" } else { "." },
+                        method.name
+                    ),
                     "only `stdout.print` and `stdout.println` exist in this phase",
                     Some("the full standard library arrives in Phase 7".into()),
                 );
@@ -4363,6 +4496,37 @@ impl<'a> Parser<'a> {
             return Some(Expr::Println(PrintlnExpr {
                 args,
                 newline: method.name == "println",
+                // Dot notation remains the pre-package compatibility
+                // spelling. The new module qualification is subject to the
+                // resolver, so `stdout::println` requires the `stdout`
+                // module to have been imported from `std.io`.
+                requires_import: qualified,
+                span: ident.span.to(end),
+            }));
+        }
+
+        // Once a module publishes `println`/`print`, its members are opened
+        // by import. Keep the same IR node as the compatibility spelling, but
+        // retain the fact that this form needs resolver authorization.
+        if matches!(ident.name.as_str(), "print" | "println")
+            && matches!(self.peek(), TokenKind::LParen)
+        {
+            self.pos += 1;
+            let mut args = Vec::new();
+            if !matches!(self.peek(), TokenKind::RParen) {
+                loop {
+                    args.push(self.parse_expr()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            let end = self.peek_span();
+            self.expect(&TokenKind::RParen, "to close the print argument list");
+            return Some(Expr::Println(PrintlnExpr {
+                args,
+                newline: ident.name == "println",
+                requires_import: true,
                 span: ident.span.to(end),
             }));
         }
@@ -4419,8 +4583,13 @@ impl<'a> Parser<'a> {
     fn parse_member_chain(&mut self, mut object: Expr) -> Option<Expr> {
         loop {
             match self.peek() {
-                TokenKind::Dot | TokenKind::QuestionDot => {
+                TokenKind::Dot | TokenKind::QuestionDot | TokenKind::ColonColon => {
                     let safe = matches!(self.peek(), TokenKind::QuestionDot);
+                    let access = if matches!(self.peek(), TokenKind::ColonColon) {
+                        FieldAccess::Module
+                    } else {
+                        FieldAccess::Dot
+                    };
                     self.pos += 1;
 
                     // `TraitName.super.method()` — the `super` itself is a
@@ -4466,6 +4635,7 @@ impl<'a> Parser<'a> {
                         object: Box::new(object),
                         name,
                         safe,
+                        access,
                     });
                 }
                 TokenKind::LParen => {
@@ -4728,6 +4898,7 @@ fn pow_call(base: Expr, exponent: Expr, op_span: Span) -> Expr {
                 span: op_span,
             },
             safe: false,
+            access: FieldAccess::Dot,
             span,
         })),
         args: vec![Arg {

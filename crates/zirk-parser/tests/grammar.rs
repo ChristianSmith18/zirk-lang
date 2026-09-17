@@ -1704,7 +1704,57 @@ fn valid_import_with_alias() {
 #[test]
 fn valid_import_from_a_standard_module() {
     let p = program("import { stdout } from std.io;\nfn main(): Void { }");
-    assert!(matches!(&p.imports[0].source, ImportSource::Std { path, .. } if path == "std.io"));
+    assert!(matches!(&p.imports[0].source, ImportSource::Package { path, .. } if path == "std.io"));
+}
+
+#[test]
+fn valid_import_from_an_external_package_and_its_module() {
+    let p = program(
+        "import { clear } from acme.cli::terminal;\nfn main(): Void { terminal::clear(); }",
+    );
+    assert!(
+        matches!(&p.imports[0].source, ImportSource::Package { path, .. } if path == "acme.cli::terminal")
+    );
+    let Stmt::Expr(ExprStmt {
+        expr: Expr::Call(call),
+        ..
+    }) = &p.functions[0].body.statements[0]
+    else {
+        panic!("expected qualified call");
+    };
+    let Expr::Field(field) = &*call.callee else {
+        panic!("expected module access");
+    };
+    assert_eq!(field.access, FieldAccess::Module);
+}
+
+#[test]
+fn valid_package_inline_module_and_root_reexport() {
+    let p = program(
+        "package std.io;\nshare mod stdout { fn println(): Void { } }\nshare mod stdin from \"./stdin\";",
+    );
+    assert_eq!(p.package.as_ref().unwrap().path, "std.io");
+    assert!(p.modules[0].shared);
+    assert_eq!(p.modules[0].name.name, "stdout");
+    assert_eq!(p.module_reexports[0].source_path, "./stdin");
+}
+
+#[test]
+fn valid_qualified_module_type_is_retained() {
+    let p = program("fn main(value: model::User): Void { }");
+    assert_eq!(p.functions[0].params[0].ty.name, "model::User");
+}
+
+#[test]
+fn valid_qualified_stdout_call_keeps_the_compatibility_lowering() {
+    let p = program("fn main(): Void { stdout::println(\"ready\"); }");
+    assert!(matches!(
+        p.functions[0].body.statements[0],
+        Stmt::Expr(ExprStmt {
+            expr: Expr::Println(_),
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -2428,4 +2478,15 @@ fn invalid_member_modifier_on_a_function_parameter_is_targeted() {
 fn valid_unmodified_constructor_parameter_is_not_promoted() {
     let p = program("class User { construct(name: String) { } } fn main(): Void { }");
     assert!(p.classes[0].constructors[0].params[0].promoted.is_none());
+}
+
+#[test]
+fn standard_io_sources_are_ordinary_package_and_module_declarations() {
+    let root = program(include_str!("../../../stdlib/std/io/package.zrk"));
+    assert_eq!(root.package.as_ref().unwrap().path, "std.io");
+    assert_eq!(root.module_reexports.len(), 3);
+
+    let stdout = program(include_str!("../../../stdlib/std/io/stdout.zrk"));
+    assert!(stdout.functions.iter().all(|function| function.shared));
+    assert_eq!(stdout.functions[1].name.name, "println");
 }

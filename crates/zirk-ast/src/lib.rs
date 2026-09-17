@@ -27,6 +27,54 @@
 
 use zirk_diagnostics::Span;
 
+/// Stable identity of a source module, independent from how it was reached on
+/// disk. Package loading assigns it before semantic resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleIdentity {
+    pub package: String,
+    pub canonical_path: String,
+    pub written_path: String,
+    pub package_root: String,
+}
+
+impl ModuleIdentity {
+    pub fn new(
+        package: impl Into<String>,
+        canonical_path: impl Into<String>,
+        written_path: impl Into<String>,
+        package_root: impl Into<String>,
+    ) -> Self {
+        Self {
+            package: package.into(),
+            canonical_path: canonical_path.into(),
+            written_path: written_path.into(),
+            package_root: package_root.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod module_identity_tests {
+    use super::ModuleIdentity;
+
+    #[test]
+    fn identity_round_trips_every_path_form() {
+        let identity = ModuleIdentity::new(
+            "acme.web",
+            "acme.web.http.client",
+            "src/http/client.zrk",
+            "src/package.zrk",
+        );
+        let restored = ModuleIdentity::new(
+            identity.package.clone(),
+            identity.canonical_path.clone(),
+            identity.written_path.clone(),
+            identity.package_root.clone(),
+        );
+        assert_eq!(restored, identity);
+    }
+}
+
 /// A parsed source file.
 ///
 /// A program is one file of a crate. Which files make up the crate, and how
@@ -34,7 +82,13 @@ use zirk_diagnostics::Span;
 /// here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
+    /// Declares the package that owns this source file.
+    pub package: Option<PackageDecl>,
     pub imports: Vec<ImportDecl>,
+    /// Inline module namespaces declared by this file.
+    pub modules: Vec<ModuleDecl>,
+    /// Modules re-exported by a package root.
+    pub module_reexports: Vec<ModuleReexport>,
     pub uses: Vec<UseDecl>,
     pub enums: Vec<EnumDecl>,
     pub classes: Vec<ClassDecl>,
@@ -43,6 +97,30 @@ pub struct Program {
     pub type_aliases: Vec<TypeAliasDecl>,
     /// `extern "C" fn name(...): T;` (roadmap Phase 4e, `ADR-015`).
     pub externs: Vec<ExternFnDecl>,
+    pub span: Span,
+}
+
+/// `package acme.web;` — the package identity of a source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageDecl {
+    pub path: String,
+    pub span: Span,
+}
+
+/// `mod stdout { ... }` or `share mod stdout { ... }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleDecl {
+    pub name: Ident,
+    pub shared: bool,
+    pub body: Box<Program>,
+    pub span: Span,
+}
+
+/// `share mod stdout from "./stdout";`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleReexport {
+    pub name: Ident,
+    pub source_path: String,
     pub span: Span,
 }
 
@@ -92,20 +170,20 @@ impl ImportName {
 pub enum ImportSource {
     /// `"./domain/user"`, without the `.zrk` extension.
     Local { path: String, span: Span },
-    /// `std.io`
-    Std { path: String, span: Span },
+    /// An unquoted package/module path, such as `std.io` or `acme.web`.
+    Package { path: String, span: Span },
 }
 
 impl ImportSource {
     pub fn span(&self) -> Span {
         match self {
-            ImportSource::Local { span, .. } | ImportSource::Std { span, .. } => *span,
+            ImportSource::Local { span, .. } | ImportSource::Package { span, .. } => *span,
         }
     }
 
     pub fn path(&self) -> &str {
         match self {
-            ImportSource::Local { path, .. } | ImportSource::Std { path, .. } => path,
+            ImportSource::Local { path, .. } | ImportSource::Package { path, .. } => path,
         }
     }
 }
@@ -1241,7 +1319,16 @@ pub struct FieldExpr {
     /// Written `?.`: the whole access produces `null` when the object is
     /// absent, instead of reading through it.
     pub safe: bool,
+    /// The written separator. `::` selects a member published by an imported
+    /// module; semantic resolution is intentionally deferred to package work.
+    pub access: FieldAccess,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldAccess {
+    Dot,
+    Module,
 }
 
 /// `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`, design D5) —
@@ -1749,6 +1836,9 @@ pub struct PrintlnExpr {
     pub args: Vec<Expr>,
     /// `true` for `println`, `false` for `print`.
     pub newline: bool,
+    /// `true` only for the opened `println(...)`/`print(...)` spelling; the
+    /// checker then requires an imported module to have published it.
+    pub requires_import: bool,
     pub span: Span,
 }
 

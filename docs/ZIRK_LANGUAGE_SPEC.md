@@ -580,23 +580,40 @@ behaviour.
 ## 10. Modules, project and packages
 
 ```text
-share class User {}
-import { User, Role -> DomainRole } from "./domain/user";
+package acme.cli;
+share mod terminal from "./terminal";
+import { terminal } from acme.cli;
 import { stdin, stdout, stderr } from std.io;
 ```
 
-Local paths use quotes and omit `.zrk`. Standard modules use unquoted names.
-`share` publishes code; `import` brings code in; `use` only enables globals.
+`package` gives a package root its logical identity. `mod` is a namespace
+inside that package; `share mod name from "./path"` is the root's barrel
+export and its path is relative and omits `.zrk`. Local paths use quotes;
+logical package paths, including standard packages, are unquoted. A package is
+the only importable/distributable unit—"library" is ordinary prose for a
+package intended for reuse.
 
-Importing a compiler-known standard-library object also exposes its declared
-convenience members directly when unambiguous. After
-`import { stdout } from std.io`, `println("hello")` resolves to
-`stdout.println("hello")`. A collision requires qualification. Local and
-package objects do not inject methods into file scope.
+`share` publishes a declaration or module; `import` brings selected published
+names into a file; `use` only enables application globals. It does not open a
+module. Published module members open by default only while their unqualified
+name is unique. Thus both `clear()` and `terminal::clear()` are valid after
+`import { terminal } from acme.cli;`; a collision requires the qualified form.
+Aliases bind the written import name (`import { terminal -> console } from
+acme.cli;`) and explicit member imports select one member
+(`import { println } from std.io::stdout;`).
 
-`.zkinit` is a declarative DSL, not executable code. It contains `project`,
-`build_targets`, `globals`, `permissions`, `requires` and dependencies according
-to project type. Libraries request authority with `requires`; applications grant
+After `import { stdout } from std.io`, `println("hello")` resolves to
+`stdout::println("hello")`. The same opening rule applies to every published
+module, not just `std`; an unimported module is never made available merely by
+writing its name.
+
+`.zkinit` is a declarative DSL, not executable code. Its project identity,
+kind (`application` or `package`), entry, source roots and dependencies are
+resolved before source bodies. `zirk.lock`, when dependencies are declared,
+pins their source, version, hash and package-root entry. Registry, Git, local
+and vendored acquisition are transport details; source code always imports the
+logical package name. It also contains `build_targets`, `globals`,
+`permissions`, `requires` and dependencies according to project type. Libraries request authority with `requires`; applications grant
 it with `permissions`. Each operation uses `during: build`, `runtime` or `both`;
 there is no separate `compile_permissions` block. It contains no global imports and no
 arbitrary compiler/runtime configuration.

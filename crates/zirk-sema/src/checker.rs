@@ -572,6 +572,17 @@ struct Checker<'a> {
     parallel_adapter_accesses: std::collections::HashSet<Span>,
     /// Per file, the names it imported: bound name to original name.
     imported: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    /// Opened `print` and `println` names whose full provenance is the
+    /// compiler-owned `std.io` package. The parser represents these calls
+    /// with a compact output node, so resolution must retain this distinction
+    /// and never grant that implementation to an equally named user export.
+    standard_output_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
+    /// Bare names opened by more than one imported module. They deliberately
+    /// have no source-order winner; callers must use `module::member`.
+    ambiguous_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
+    /// Source files which implement a published module. Their shared
+    /// functions may share a short name with another module.
+    module_files: HashSet<zirk_diagnostics::FileId>,
     /// Use sites whose written name differs from the declaration's.
     aliases: HashMap<Span, String>,
     /// Return type of the function or lambda being checked.
@@ -987,6 +998,9 @@ impl<'a> Checker<'a> {
             temporal_constructions: std::collections::HashSet::new(),
             parallel_adapter_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
+            standard_output_imports: HashMap::new(),
+            ambiguous_imports: HashMap::new(),
+            module_files: HashSet::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
             expected_type: None,
@@ -1302,7 +1316,11 @@ impl<'a> Checker<'a> {
         self.infer_return_types(program);
         self.verify_pending_signatures();
 
-        self.check_entrypoint(program);
+        // A `package` root is compiled as a reusable API surface. It has no
+        // executable entrypoint; applications remain subject to `main`.
+        if program.package.is_none() {
+            self.check_entrypoint(program);
+        }
 
         self.scopes.push();
         for c in Self::class_decls_flat(program) {
@@ -1538,15 +1556,137 @@ impl<'a> Checker<'a> {
     /// something private must fail, and so must naming something shared that
     /// was never imported.
     fn record_imports(&mut self, program: &Program) {
+        self.module_files
+            .extend(program.modules.iter().map(|module| module.body.span.file));
+        let module_members: HashMap<String, Vec<String>> = program
+            .modules
+            .iter()
+            .map(|module| {
+                let mut members = Vec::new();
+                members.extend(
+                    module
+                        .body
+                        .functions
+                        .iter()
+                        .filter(|decl| decl.shared)
+                        .map(|decl| decl.name.name.clone()),
+                );
+                members.extend(
+                    module
+                        .body
+                        .classes
+                        .iter()
+                        .filter(|decl| decl.shared)
+                        .map(|decl| decl.name.name.clone()),
+                );
+                members.extend(
+                    module
+                        .body
+                        .enums
+                        .iter()
+                        .filter(|decl| decl.shared)
+                        .map(|decl| decl.name.name.clone()),
+                );
+                members.extend(
+                    module
+                        .body
+                        .contracts
+                        .iter()
+                        .filter(|decl| decl.shared)
+                        .map(|decl| decl.name.name.clone()),
+                );
+                members.extend(
+                    module
+                        .body
+                        .type_aliases
+                        .iter()
+                        .filter(|decl| decl.shared)
+                        .map(|decl| decl.name.name.clone()),
+                );
+                (module.name.name.clone(), members)
+            })
+            .collect();
         for import in &program.imports {
+            let standard_output_module = matches!(
+                &import.source,
+                ImportSource::Package { path, .. }
+                    if matches!(path.as_str(), "std.io" | "std.io::stdout" | "std.io::stderr")
+            );
             for name in &import.names {
                 // Standard modules are recorded too. They name no declaration
                 // of the crate, so they never reach the visibility check, but
                 // `use` does ask whether the file imported the name.
-                self.imported
-                    .entry(import.span.file)
-                    .or_default()
-                    .insert(name.bound_name().name.clone(), name.name.name.clone());
+                let direct_package_member = matches!(
+                    &import.source,
+                    ImportSource::Package { path, .. } if path.contains("::")
+                );
+                if !direct_package_member {
+                    self.imported
+                        .entry(import.span.file)
+                        .or_default()
+                        .insert(name.bound_name().name.clone(), name.name.name.clone());
+                }
+                let imported_module = match &import.source {
+                    ImportSource::Package { path, .. } => path
+                        .rsplit_once("::")
+                        .map(|(_, module)| module)
+                        .unwrap_or(&name.name.name),
+                    ImportSource::Local { .. } => &name.name.name,
+                };
+                if let Some(members) = module_members.get(imported_module) {
+                    // A direct member import names the published declaration,
+                    // not the module itself: `import { clear } from
+                    // acme.cli::terminal`. Keep the module binding absent
+                    // while recording the selected member's provenance.
+                    let direct_member = matches!(
+                        &import.source,
+                        ImportSource::Package { path, .. } if path.contains("::")
+                    );
+                    for member in members {
+                        if direct_member && member != &name.name.name {
+                            continue;
+                        }
+                        let module = name.bound_name().name.clone();
+                        let canonical = if direct_member {
+                            format!("{imported_module}::{member}")
+                        } else {
+                            format!("{module}::{member}")
+                        };
+                        let existing = self
+                            .imported
+                            .get(&import.span.file)
+                            .and_then(|names| names.get(member))
+                            .cloned();
+                        match existing {
+                            Some(existing) if existing != canonical => {
+                                self.ambiguous_imports
+                                    .entry(import.span.file)
+                                    .or_default()
+                                    .insert(member.clone());
+                            }
+                            None => {
+                                self.imported
+                                    .entry(import.span.file)
+                                    .or_default()
+                                    .insert(member.clone(), canonical.clone());
+                            }
+                            _ => {}
+                        }
+                        if !direct_member {
+                            self.imported
+                                .entry(import.span.file)
+                                .or_default()
+                                .insert(canonical, member.clone());
+                        }
+                        if standard_output_module && matches!(member.as_str(), "print" | "println")
+                        {
+                            self.standard_output_imports
+                                .entry(import.span.file)
+                                .or_default()
+                                .insert(member.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -1631,6 +1771,20 @@ impl<'a> Checker<'a> {
     /// file, but the declaration is still called `Role`: every lookup goes
     /// through here so the alias is applied in exactly one place.
     fn resolved_name(&mut self, name: &str, at: Span) -> String {
+        if self
+            .ambiguous_imports
+            .get(&at.file)
+            .is_some_and(|names| names.contains(name))
+        {
+            self.error(
+                codes::UNDECLARED_NAME,
+                at,
+                format!("`{name}` is ambiguous between imported modules"),
+                "opened module members never use source order as a tiebreak",
+                Some("qualify the call as `module::member`".into()),
+            );
+            return name.to_string();
+        }
         let Some(original) = self
             .imported
             .get(&at.file)
@@ -1640,10 +1794,14 @@ impl<'a> Checker<'a> {
             return name.to_string();
         };
 
-        if original != name {
-            self.aliases.insert(at, original.clone());
+        let declared = original
+            .rsplit_once("::")
+            .map(|(_, member)| member.to_string())
+            .unwrap_or_else(|| original.clone());
+        if declared != name {
+            self.aliases.insert(at, declared.clone());
         }
-        original
+        declared
     }
 
     /// Whether a value of this type can be turned into text through
@@ -5743,6 +5901,11 @@ impl<'a> Checker<'a> {
         self.leave_type_params();
 
         if let Some(previous) = self.functions.get(&signature.name).cloned() {
+            if self.module_files.contains(&previous.span.file)
+                && self.module_files.contains(&f.name.span.file)
+            {
+                return;
+            }
             let where_ = self.declared_at(previous.span, f.name.span);
             self.error(
                 codes::DUPLICATE_FUNCTION,
@@ -10560,6 +10723,16 @@ impl<'a> Checker<'a> {
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
+                if e.requires_import
+                    && !self
+                        .standard_output_imports
+                        .get(&e.span.file)
+                        .is_some_and(|names| {
+                            names.contains(if e.newline { "println" } else { "print" })
+                        })
+                {
+                    self.error(codes::UNDECLARED_NAME, e.span, format!("`{}` is not available in this file", if e.newline { "println" } else { "print" }), "opened module members must be imported before use", Some("import `{ stdout }` from `std.io`, or qualify the call with `stdout::`".into()));
+                }
                 self.reject_in_parallel_region(e.span, "`println`");
                 for arg in &e.args {
                     let ty = self.check_expr(arg);
@@ -13477,6 +13650,21 @@ impl<'a> Checker<'a> {
     /// have the same shape — so the decision lands here, where it is known
     /// whether the base names a type or a value.
     fn check_field(&mut self, expr: &FieldExpr) -> Type {
+        // `module::member` is a namespace lookup, never an object-member
+        // lookup. Preserve its written qualification long enough for the
+        // per-file import table to select the published declaration, then use
+        // the ordinary path machinery so function values carry their real
+        // `Fn` type just like an unqualified reference.
+        if expr.access == FieldAccess::Module
+            && let Expr::Path(module) = &*expr.object
+        {
+            let qualified = Ident::new(
+                format!("{}::{}", module.name, expr.name.name),
+                expr.name.span,
+            );
+            return self.check_path(&qualified);
+        }
+
         // A base that names a declared enum is a variant access. `?.` makes
         // no sense on it — a type name is never absent — so `safe` is not
         // consulted here.
@@ -17891,6 +18079,28 @@ impl<'a> Checker<'a> {
             return self.check_super_construction(expr);
         }
 
+        // `module::member(args)` resolves through the published member set
+        // recorded by imports. The AST retains the qualification for tooling;
+        // ordinary call checking owns its signature and visibility rules.
+        if let Expr::Field(field) = &*expr.callee
+            && field.access == FieldAccess::Module
+        {
+            let name = if let Expr::Path(module) = &*field.object {
+                Ident::new(
+                    format!("{}::{}", module.name, field.name.name),
+                    field.name.span,
+                )
+            } else {
+                field.name.clone()
+            };
+            let redirected = CallExpr {
+                callee: Box::new(Expr::Path(name)),
+                args: expr.args.clone(),
+                span: expr.span,
+            };
+            return self.check_call(&redirected, expected);
+        }
+
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Super(super_expr) = &*field.object
         {
@@ -17954,6 +18164,7 @@ impl<'a> Checker<'a> {
                 object: Box::new(Expr::Path(result_ident)),
                 name: callee.clone(),
                 safe: false,
+                access: FieldAccess::Dot,
                 span: callee.span,
             };
             self.variant_accesses.insert(callee.span);

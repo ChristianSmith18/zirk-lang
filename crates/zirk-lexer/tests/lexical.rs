@@ -262,6 +262,8 @@ fn valid_later_phase_keywords_are_recognized() {
         ("match", Keyword::Match),
         ("parallel", Keyword::Parallel),
         ("import", Keyword::Import),
+        ("package", Keyword::Package),
+        ("mod", Keyword::Mod),
     ] {
         assert_eq!(
             tokens(text)[0],

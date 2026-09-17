@@ -94,6 +94,17 @@ pub struct SourceFile {
     text: String,
     /// Byte offset where each line starts. Always begins with 0.
     line_starts: Vec<u32>,
+    identity: Option<SourceIdentity>,
+}
+
+/// Loader-assigned ownership metadata for a source file. The diagnostics crate
+/// intentionally stores strings only, so the AST and source map stay acyclic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceIdentity {
+    pub package: String,
+    pub canonical_module_path: String,
+    pub written_path: String,
+    pub package_root: String,
 }
 
 impl SourceFile {
@@ -112,6 +123,7 @@ impl SourceFile {
             name: name.into(),
             text,
             line_starts,
+            identity: None,
         }
     }
 
@@ -130,6 +142,14 @@ impl SourceFile {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn set_identity(&mut self, identity: SourceIdentity) {
+        self.identity = Some(identity);
+    }
+
+    pub fn identity(&self) -> Option<&SourceIdentity> {
+        self.identity.as_ref()
     }
 
     /// The text covered by a span.

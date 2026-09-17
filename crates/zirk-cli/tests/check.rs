@@ -35,6 +35,17 @@ fn workspace(name: &str) -> PathBuf {
     dir
 }
 
+fn lock_local_dependency(root: &Path, package: &str, dependency_dir: &str) {
+    let dependency_root = root.join(dependency_dir);
+    let manifest = zirk_cli::project::read_manifest(&dependency_root.join(".zkinit")).unwrap();
+    let hash = zirk_cli::project::package_integrity_hash(&dependency_root, &manifest).unwrap();
+    std::fs::write(
+        root.join("zirk.lock"),
+        format!("{package} 1.0 local sha256:{hash} src/package.zrk\n"),
+    )
+    .unwrap();
+}
+
 /// Runs `zirk check` over a source file, from its own working directory.
 fn zirk_check(source: &Path, name: &str) -> (bool, String, String) {
     zirk_check_with_arg(
@@ -132,6 +143,449 @@ fn a_missing_file_reports_a_diagnostic() {
     assert!(
         stderr.contains("could not read"),
         "expected a readable diagnostic, got: {stderr}"
+    );
+}
+
+#[test]
+fn a_package_project_is_discovered_from_its_directory() {
+    let dir = workspace("package_project_check");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"demo.package\"\nkind package\nentry \"src/package.zrk\"\nsource \"src\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/package.zrk"),
+        "package demo.package;\nshare fn hello(): Void { }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run package project check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_malformed_project_manifest_is_rejected_before_source_checking() {
+    let dir = workspace("invalid_package_manifest");
+    std::fs::write(dir.join(".zkinit"), "project \"broken\"\nkind unknown\n").unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run malformed project check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0510"));
+}
+
+#[test]
+fn a_lockfile_without_an_integrity_hash_is_rejected_before_source_checking() {
+    let dir = workspace("invalid_package_lock");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join(".zkinit"), "project \"app\"\nkind application\n").unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.web 1.0 local - src/package.zrk\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run malformed lock check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0510"));
+}
+
+#[test]
+fn a_tampered_local_package_is_rejected_before_its_body_is_checked() {
+    let dir = workspace("tampered_package_lock");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { Api } from acme.web;\nfn main(): Void { mut api = Api(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.web\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.web;\nthis is deliberately not valid Zirk",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.web 1.0 local sha256:0000000000000000000000000000000000000000000000000000000000000000 src/package.zrk\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run tampered package check");
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostics.contains("does not match the integrity hash"),
+        "{diagnostics}"
+    );
+    assert!(
+        !diagnostics.contains("expected a declaration"),
+        "{diagnostics}"
+    );
+}
+
+#[test]
+fn an_undeclared_package_is_rejected_before_type_checking() {
+    let dir = workspace("undeclared_package_import");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join(".zkinit"), "project \"app\"\nkind application\n").unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { Api } from acme.web;\nfn main(): Void { Api(); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run undeclared package check");
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("E0511"), "{diagnostics}");
+    assert!(diagnostics.contains("not declared"), "{diagnostics}");
+}
+
+#[test]
+fn a_declared_local_package_root_is_loaded_by_logical_name() {
+    let dir = workspace("local_package_resolution");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.web 1.0 local sha256:fixture src/package.zrk\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { Api } from acme.web;\nfn main(): Void { mut api = Api(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.web\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.web;\nshare class Api { }",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.web", "dep");
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run local package check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn imported_stdout_opens_println_and_explicit_qualification() {
+    let dir = workspace("standard_module_opening");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { stdout } from std.io;\nfn main(): Void { println(\"open\"); stdout::println(\"qualified\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run standard opening check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn direct_standard_module_member_import_binds_only_the_member() {
+    let dir = workspace("direct_standard_module_member");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { println } from std.io::stdout;\nfn main(): Void { println(\"direct\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run direct standard member import check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn external_println_export_never_receives_the_standard_output_implementation() {
+    let dir = workspace("external_println_is_not_standard_output");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.io ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from acme.io;\nfn main(): Void { println(\"not standard\"); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.io\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.io;\nshare mod stdout { share fn println(...args: String): Void { } }",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.io", "dep");
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run external output check");
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostics.contains("E0401"), "{diagnostics}");
+}
+
+#[test]
+fn an_unknown_standard_package_module_is_rejected_by_the_resolver() {
+    let dir = workspace("unknown_standard_package_module");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { missing } from std.unknown;\nfn main(): Void { }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run unknown standard module check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not provided"));
+}
+
+#[test]
+fn unimported_println_is_rejected() {
+    let dir = workspace("unimported_standard_member");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn main(): Void { println(\"nope\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run unimported standard member check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0401"));
+}
+
+#[test]
+fn unimported_qualified_stdout_is_rejected() {
+    let dir = workspace("unimported_qualified_standard_member");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn main(): Void { stdout::println(\"nope\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run unimported qualified standard member check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0401"));
+}
+
+#[test]
+fn package_module_members_open_and_qualify_from_a_root_reexport() {
+    let dir = workspace("package_module_members");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.cli ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.cli 1.0 local sha256:fixture src/package.zrk\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { terminal } from acme.cli;\nfn main(): Void { clear(); terminal::clear(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.cli\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.cli;\nshare mod terminal from \"./terminal\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/terminal.zrk"),
+        "share fn clear(): Void { }",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.cli", "dep");
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run module member check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn opened_module_member_collisions_require_qualification_without_source_order() {
+    let dir = workspace("package_module_member_collision");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.cli ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.cli 1.0 local sha256:fixture src/package.zrk\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { terminal, screen } from acme.cli;\nfn main(): Void { terminal::clear(); screen::clear(); clear(); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.cli\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.cli;\nshare mod terminal from \"./terminal\";\nshare mod screen from \"./screen\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/terminal.zrk"),
+        "share fn clear(): Void { }",
+    )
+    .unwrap();
+    std::fs::write(dir.join("dep/src/screen.zrk"), "share fn clear(): Void { }").unwrap();
+    lock_local_dependency(&dir, "acme.cli", "dep");
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run opened module collision check");
+    assert!(!output.status.success());
+    let diagnostics = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostics.contains("ambiguous between imported modules"),
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("already defined"), "{diagnostics}");
+}
+
+#[test]
+fn qualified_module_values_types_and_direct_member_imports_resolve() {
+    let dir = workspace("qualified_module_values_types");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        "acme.web 1.0 local sha256:fixture src/package.zrk\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { api } from acme.web;\nimport { Api } from acme.web::api;\nfn receive(value: Fn() => Void): Void { value(); }\nfn main(): Void { mut item: api::Api = Api(); receive(api::clear); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.web\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.web;\nshare mod api from \"./api\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/api.zrk"),
+        "share class Api { }\nshare fn clear(): Void { }",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.web", "dep");
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run qualified module value/type check");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

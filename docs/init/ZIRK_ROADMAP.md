@@ -424,6 +424,11 @@ and data-race guarantees, working end to end.
 
 ## Phase 6 — Project system and CLI
 
+- Delivered slice: `.zkinit` discovery for `application` and `package`,
+  logical package identity, quoted local imports, unquoted package imports,
+  `share mod` package roots, local/vendored traversal and pre-frontend lock
+  metadata validation. Registry/Git acquisition and publication remain work
+  for the package phase.
 - `.zkinit` as a declarative DSL (its own parser, not reusing the Zirk parser).
 - `project`, `build_targets`, `globals`, library `requires`, and application
   `permissions` with per-operation `during: build | runtime | both`.
@@ -503,6 +508,8 @@ the real collections.
 
 ## Phase 8 — Packaging and distribution
 
+- Package API inspection scaffolding exists, but `.zpkg` publication remains
+  blocked on reproducible archives and cryptographic integrity verification.
 - `.zpkg`, `zirk.lock`, `zirk add/remove/install/update`, `zirk package`,
   `zirk publish`.
 - Reproducible builds (`COMPILER_SPEC.md` section 7).

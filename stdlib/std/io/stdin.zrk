@@ -1,0 +1,1 @@
+share fn read_line(): String? { return null; }

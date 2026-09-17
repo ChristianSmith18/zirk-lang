@@ -1,0 +1,5 @@
+package std.io;
+
+share mod stdin from "./stdin";
+share mod stdout from "./stdout";
+share mod stderr from "./stderr";

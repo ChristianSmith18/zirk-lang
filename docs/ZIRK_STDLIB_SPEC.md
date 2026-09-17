@@ -3,9 +3,10 @@
 ## 1. Principles
 
 The stdlib must be small, coherent, typed, cross-platform and explicit about
-I/O, permissions and errors. Print and read operations belong to imported
-standard objects; compiler-known convenience members may be called directly
-after that object is imported when the name is unambiguous.
+I/O, permissions and errors. It is consumed as ordinary Zirk packages and
+published modules. Print and read operations belong to imported standard
+objects; published members may be called directly after that module is
+imported when the name is unambiguous.
 Standard modules are imported without quotes:
 
 ```text
@@ -43,6 +44,9 @@ std.system
 ```
 
 Implementations may subdivide them without changing their public imports.
+The compiler may map a fully identified standard declaration to its host
+implementation internally. This is not source syntax and cannot be requested
+by an external package with a matching short name.
 
 `std.terminal` owns `Terminal`, `Style`, `Color`, cursor control, progress and
 live regions; `std.io` re-exports the common console-facing types for ordinary
@@ -76,8 +80,8 @@ mut line = stdin.read_line();
 - every value-producing type uses `to_string(): String`; `Void` and `Never`
   are the only rejected arguments. Nullable absence renders `<Null>`.
 - interpolation is favoured: `stdout.println("User: {user.name}");`.
-- an unqualified convenience call resolves through the imported standard object
-  when unique; a collision requires `stdout.println(...)`.
+- an unqualified convenience call resolves through the imported module when
+  unique; a collision requires `stdout::println(...)`.
 - `style` controls terminal presentation while `format` constructs text;
   cursor movement, progress and live regions belong to `Terminal`.
 - `write` is the exact text/byte stream primitive and does not insert

@@ -3565,6 +3565,11 @@ impl<'a> FunctionLowering<'a> {
     /// The checker recorded the resolution, so lowering does not need to know
     /// that aliases exist.
     fn callee_name(&self, call: &ast::CallExpr) -> String {
+        if let ast::Expr::Field(field) = &*call.callee
+            && field.access == ast::FieldAccess::Module
+        {
+            return self.declaration_of(&field.name.name, field.name.span);
+        }
         let ident = callee_ident(call);
         self.declaration_of(&ident.name, ident.span)
     }
@@ -7370,6 +7375,20 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
                 }
+                // A module namespace is not a runtime receiver. Resolution
+                // already selected its shared declaration, so lower the call
+                // directly before receiver-oriented method probes inspect the
+                // namespace path as though it were a value.
+                if matches!(
+                    &*e.callee,
+                    ast::Expr::Field(field) if field.access == ast::FieldAccess::Module
+                ) {
+                    let name = self.callee_name(e);
+                    let args = self.lower_args(e);
+                    let returns = self.signature_return(&name);
+                    let result = self.emit(InstKind::Call { callee: name, args }, returns, span);
+                    return self.lower_throws_check(result, returns, span);
+                }
                 // `Outer.Nested(...)` / `o.Inner(...)`: a construction whose
                 // callee is a field access. The method-call lowerers below
                 // would try `Outer`/`o` as a value first — `Outer` names a
@@ -10453,6 +10472,7 @@ impl<'a> FunctionLowering<'a> {
             object: Box::new(object),
             name: ast::Ident::new("close".to_string(), span),
             safe: false,
+            access: ast::FieldAccess::Dot,
             span,
         });
         ast::Expr::Call(ast::CallExpr {
@@ -23203,10 +23223,18 @@ impl<'a> FunctionLowering<'a> {
         // existing runtime newline intrinsic a valid handle; `print()` writes
         // that same empty string and therefore nothing.
         let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
-        if expr.newline {
-            self.emit_effect(InstKind::Println(rendered), span);
-        } else {
-            self.emit_effect(InstKind::Print(rendered), span);
+        let name = if expr.newline { "println" } else { "print" };
+        let binding = zirk_sema::stdlib::compiler_binding(
+            "std.io",
+            "stdout",
+            name,
+            &format!("fn {name}(...args: String): Void"),
+        )
+        .expect("the compiler-owned std.io output declaration has a binding");
+        match binding {
+            "std.io.stdout.println" => self.emit_effect(InstKind::Println(rendered), span),
+            "std.io.stdout.print" => self.emit_effect(InstKind::Print(rendered), span),
+            _ => unreachable!("the output lowering only requests stdout print bindings"),
         }
         self.emit(InstKind::Undefined, IrType::Void, span)
     }
@@ -23821,6 +23849,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        if matches!(
+            &*call.callee,
+            ast::Expr::Field(field) if field.access == ast::FieldAccess::Module
+        ) {
+            return false;
+        }
         // `Timer.*` and `job.wait()`/`.cancel()` (`concurrent-blocks-and-timers`):
         // `Timer` is not a value and a `Job` handle has no method table, so the
         // `type_of` probes below would fault on the callee.

@@ -11,6 +11,12 @@ stage implements them.
 
 Current high-impact delivery limits include:
 
+- Package roots, local/vendored dependency traversal, `share mod`, logical
+  package imports and lock metadata validation are delivered. Registry/Git
+  acquisition, cryptographic archive verification, package publishing and
+  complete collision resolution across opened module members are still
+  pending.
+
 - `zirk format` is canonical for the delivered source grammar, but it does not
   format `.zkinit` manifests, accept style configuration, or support
   range-formatting. Use `fmt off` / `fmt on` for deliberate exceptions.

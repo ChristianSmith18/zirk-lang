@@ -625,6 +625,72 @@ fn a_crate_of_several_files_compiles_and_runs() {
 }
 
 #[test]
+fn a_standard_package_module_compiles_and_runs_through_the_native_backend() {
+    let output = crate_of(
+        "standard_package_native",
+        &[(
+            "main.zrk",
+            "import { stdout } from std.io;\nfn main(): Void { println(\"package native\"); }",
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "package native\n");
+}
+
+#[test]
+fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
+    let dir = workspace("external_package_native");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.math ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { math } from acme.math;\nfn main(): Void { stdout.println(math::answer()); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.math\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.math;\nshare mod math from \"./math\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/math.zrk"),
+        "share fn answer(): Int32 { return 42; }",
+    )
+    .unwrap();
+    let manifest = zirk_cli::project::read_manifest(&dir.join("dep/.zkinit")).unwrap();
+    let hash = zirk_cli::project::package_integrity_hash(&dir.join("dep"), &manifest).unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        format!("acme.math 1.0 local sha256:{hash} src/package.zrk\n"),
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run external package");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(normalize(&String::from_utf8_lossy(&output.stdout)), "42\n");
+}
+
+#[test]
 fn a_declaration_without_share_is_private_to_its_file() {
     let output = crate_of(
         "modules_private",

@@ -19,7 +19,7 @@ pub struct FrontendResult {
 /// On failure it returns `None` and `sink` contains the diagnostics that
 /// explain why. On success it returns the merged program and the checked tree.
 pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendResult> {
-    let loaded = crate::modules::load(path, sink)?;
+    let loaded = load_target(path, sink)?;
     if sink.has_errors() {
         // Loading recovered enough to continue, but the errors already make the
         // program invalid. Returning None keeps the contract simple: a Some
@@ -56,7 +56,11 @@ pub fn run_frontend_lenient_with_overlay(
     overlay: &std::collections::HashMap<PathBuf, String>,
     sink: &mut DiagnosticSink,
 ) -> Option<FrontendResult> {
-    let loaded = crate::modules::load_with_overlay(path, overlay, sink)?;
+    let loaded = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        crate::modules::load_project(path, sink)?
+    } else {
+        crate::modules::load_with_overlay(path, overlay, sink)?
+    };
     if sink.has_errors() {
         return None;
     }
@@ -68,6 +72,14 @@ pub fn run_frontend_lenient_with_overlay(
         checked,
         sources: loaded.sources,
     })
+}
+
+fn load_target(path: &Path, sink: &mut DiagnosticSink) -> Option<crate::modules::Crate> {
+    if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        crate::modules::load_project(path, sink)
+    } else {
+        crate::modules::load(path, sink)
+    }
 }
 
 /// Renders the checker's type map as structured JSON — sibling to the
@@ -121,7 +133,10 @@ fn json_escape(text: &str) -> String {
 /// Merges the files of a crate into the program the checker sees.
 fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
     let mut program = zirk_ast::Program {
+        package: None,
         imports: Vec::new(),
+        modules: Vec::new(),
+        module_reexports: Vec::new(),
         uses: Vec::new(),
         enums: Vec::new(),
         classes: Vec::new(),
@@ -133,7 +148,14 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
     };
 
     for unit in &loaded.units {
+        if unit.program.span.file == zirk_diagnostics::FileId::ENTRY {
+            program.package = unit.program.package.clone();
+        }
         program.imports.extend(unit.program.imports.iter().cloned());
+        program.modules.extend(unit.program.modules.iter().cloned());
+        program
+            .module_reexports
+            .extend(unit.program.module_reexports.iter().cloned());
         program.uses.extend(unit.program.uses.iter().cloned());
         program.enums.extend(unit.program.enums.iter().cloned());
         program.classes.extend(unit.program.classes.iter().cloned());

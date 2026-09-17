@@ -218,7 +218,7 @@ merely because its frontend or native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zkinit` / multi-file projects | no | no | no | no | no | partial | `zirk build`/`zirk run` operate on a single file today. |
+| `.zkinit` / multi-file projects | yes | yes | yes | partial | no | yes | `add-packages-and-module-exports`: project discovery, package/application identity, quoted local imports, logical package imports, `share mod` roots, local/vendored graph traversal and lock metadata validation reach `check`/`build`/`run`. Registry/Git acquisition, verified archive hashes and publication remain pending. |
 | `requires`/`during: build` manifest | no | no | no | no | no | no | Spec defined; not started. |
 
 ## Phase 7 — Standard library
@@ -245,7 +245,7 @@ merely because its frontend or native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zpkg` / package manager | no | no | no | no | no | no | Phase 8. |
+| `.zpkg` / package manager | partial | partial | partial | no | no | partial | Package API/artifact inspection scaffolding exists, but publication remains gated on reproducible archives and cryptographic integrity verification. |
 | LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-format` provides canonical whole-document formatting to the CLI, `zirk-lsp`, and browser package; the LSP MVP also serves diagnostics, hover, and document symbols over stdio. Incremental snapshots, completion, navigation, rename, range formatting, and a debugger remain Phase 9. |
 | Decorators (`fn dec`) | yes | no | no | no | no | no | `Keyword::Dec` gated to Phase 10. |
 

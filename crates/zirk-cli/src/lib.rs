@@ -9,6 +9,7 @@ pub mod codes;
 pub mod format;
 pub mod frontend;
 pub mod modules;
+pub mod project;
 
 #[cfg(feature = "backend")]
 pub mod driver;

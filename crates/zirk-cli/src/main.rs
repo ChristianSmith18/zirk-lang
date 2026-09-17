@@ -179,7 +179,12 @@ fn check(args: &[String]) -> i32 {
         );
     }
 
-    let path = frontend::resolve_source_path(files[0].as_str());
+    let raw = std::path::Path::new(files[0]);
+    let path = if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
+        raw.to_path_buf()
+    } else {
+        frontend::resolve_source_path(files[0].as_str())
+    };
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
     let result = if types {
         // `--types` keeps the checked program even on errors: the map
@@ -227,7 +232,12 @@ fn compile(args: &[String], action: Action) -> i32 {
         );
     }
 
-    let path = frontend::resolve_source_path(files[0].as_str());
+    let raw = std::path::Path::new(files[0]);
+    let path = if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
+        raw.to_path_buf()
+    } else {
+        frontend::resolve_source_path(files[0].as_str())
+    };
     let output_dir = PathBuf::from(OUTPUT_DIR);
     let compilation = driver::compile(&path, &output_dir);
 

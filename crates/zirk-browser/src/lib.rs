@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 use wasm_bindgen::prelude::wasm_bindgen;
+use zirk_ast::{Ident, ModuleDecl};
 use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceMap};
 
 pub mod contract;
@@ -172,7 +173,13 @@ pub fn check_source(
     let file = sources.add(SourceFile::new(virtual_name, source));
     let mut sink = DiagnosticSink::new();
     let tokens = zirk_lexer::tokenize(sources.file(file), &mut sink);
-    let program = zirk_parser::parse(sources.file(file), &tokens, &mut sink);
+    let mut program = zirk_parser::parse(sources.file(file), &tokens, &mut sink);
+    if sink.has_errors() {
+        return (None, sink);
+    }
+    program
+        .modules
+        .extend(bundled_standard_modules(&mut sources, &mut sink));
     if sink.has_errors() {
         return (None, sink);
     }
@@ -188,6 +195,30 @@ pub fn check_source(
         }),
         sink,
     )
+}
+
+/// Parses the compiler-bundled standard modules into the same `SourceMap` as
+/// the caller's buffer. This keeps browser resolution source-based while the
+/// browser remains unable to read host files or fetch packages.
+fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) -> Vec<ModuleDecl> {
+    [
+        ("stdin", include_str!("../../../stdlib/std/io/stdin.zrk")),
+        ("stdout", include_str!("../../../stdlib/std/io/stdout.zrk")),
+        ("stderr", include_str!("../../../stdlib/std/io/stderr.zrk")),
+    ]
+    .into_iter()
+    .map(|(name, source)| {
+        let file = sources.add(SourceFile::new(format!("std.io/{name}.zrk"), source));
+        let tokens = zirk_lexer::tokenize(sources.file(file), sink);
+        let body = zirk_parser::parse(sources.file(file), &tokens, sink);
+        ModuleDecl {
+            name: Ident::new(name, body.span),
+            shared: true,
+            span: body.span,
+            body: Box::new(body),
+        }
+    })
+    .collect()
 }
 
 /// Executes the browser `check` operation. It deliberately stops at the
@@ -619,6 +650,23 @@ mod tests {
         assert!(response.failure.is_none(), "{response:?}");
         assert!(response.completion.is_some());
         assert_eq!(response.output[0].text, "hello\n");
+    }
+
+    #[test]
+    fn bundled_standard_package_sources_run_without_browser_filesystem_access() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            source: "import { stdout } from std.io;\nfn main(): Void { println(\"package\"); }"
+                .into(),
+            virtual_name: "package-editor.zrk".into(),
+            limits: None,
+        });
+        assert!(response.failure.is_none(), "{response:?}");
+        assert_eq!(
+            response.output.first().map(|event| event.text.as_str()),
+            Some("package\n"),
+            "{response:?}"
+        );
     }
 
     #[test]

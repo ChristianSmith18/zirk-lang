@@ -1,0 +1,3 @@
+share fn print(...args: String): Void { }
+
+share fn println(...args: String): Void { }

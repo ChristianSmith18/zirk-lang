@@ -19,6 +19,7 @@
 
 mod checker;
 mod scope;
+pub mod stdlib;
 mod types;
 
 pub use checker::{
