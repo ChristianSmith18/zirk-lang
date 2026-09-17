@@ -1,6 +1,6 @@
 {
   "name": "void-method-call",
-  "source": "class Counter {\n    mut count: Int32;\n    construct() { this.count = 0; }\n    bump(): Void {\n        this.count = this.count + 1;\n        stdout.println(this.count);\n    }\n}\nfn main(): Void {\n    mut c = Counter();\n    c.bump();\n    c.bump();\n}\n",
+  "source": "import { stdout } from std.io;\nclass Counter {\n    mut count: Int32;\n    construct() { this.count = 0; }\n    bump(): Void {\n        this.count = this.count + 1;\n        stdout.println(this.count);\n    }\n}\nfn main(): Void {\n    mut c = Counter();\n    c.bump();\n    c.bump();\n}\n",
   "virtualName": "fixtures/void-method-call.zrk",
   "expectedOutput": [
     "1\n",

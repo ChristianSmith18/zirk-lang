@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `ArithmeticOverflowError` is catchable for `++` and `--`.
 fn main(): Void {
     try {

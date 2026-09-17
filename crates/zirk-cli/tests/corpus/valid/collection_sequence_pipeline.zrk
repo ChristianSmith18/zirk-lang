@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut values: List<Int32> = [3, 1, 2];
     stdout.println(values.map((x: Int32): Int32 => x * 2).sum());

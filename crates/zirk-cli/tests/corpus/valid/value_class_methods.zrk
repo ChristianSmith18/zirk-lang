@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A record's own method dispatches statically (design.md's open question on
 // virtual methods, confirmed at closeout: no descriptor exists to carry a
 // table, so nothing here is ever virtual) — a real, preexisting gap found

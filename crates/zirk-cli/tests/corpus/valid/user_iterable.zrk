@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `for ... in` over a type's own `Iterable<T>` lowers end to end (roadmap
 // task 13.5, D8): `iterator()` runs once, `next()` drives the loop, and
 // `Iteration<T>`'s two variants — one with a payload, one without — both

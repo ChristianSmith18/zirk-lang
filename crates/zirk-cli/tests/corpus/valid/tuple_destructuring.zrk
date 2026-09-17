@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut (n, s) =(42, "hello");
     stdout.println(n);

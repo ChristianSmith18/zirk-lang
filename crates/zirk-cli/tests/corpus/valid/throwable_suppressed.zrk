@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Throwable.suppressed()` links a new exception to the one that was being
 // handled when it was thrown.
 class AppError implements Throwable {

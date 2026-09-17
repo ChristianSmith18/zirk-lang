@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 class Point {
     x: Int32;
     y: Int32;

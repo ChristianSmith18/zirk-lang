@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `to_string()` (roadmap Phase 3b, task 8): `print`/`println` and string
 // interpolation now route through it for every native scalar this phase
 // added — the ten integer widths, `Float32`/`Float64`, `Char` — and for a

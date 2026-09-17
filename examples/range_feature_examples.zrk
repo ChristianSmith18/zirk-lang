@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Range feature examples
 //
 // This file is executable documentation for the delivered range and

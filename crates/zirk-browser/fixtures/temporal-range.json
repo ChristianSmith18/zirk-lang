@@ -1,6 +1,6 @@
 {
   "name": "temporal-range",
-  "source": "fn main(): Void { stdout.println((1500ms).to_string()); stdout.println((6..=0:-2).to_string()); }",
+  "source": "import { stdout } from std.io;\nfn main(): Void { stdout.println((1500ms).to_string()); stdout.println((6..=0:-2).to_string()); }",
   "virtualName": "fixtures/temporal-range.zrk",
   "expectedOutput": ["1.5s\n", "6..=0:-2\n"],
   "completion": "completed",

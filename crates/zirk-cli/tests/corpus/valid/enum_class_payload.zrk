@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // An algebraic variant's associated data may name a class (roadmap task
 // 13.6, probing a cross between enums and classes): `declare_enum` used to
 // run before any class was registered, so `User` here was never a resolvable

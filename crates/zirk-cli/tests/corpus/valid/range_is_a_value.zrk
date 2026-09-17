@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Roadmap Phase 7 (`Range<T>`): a range is a real value now — stored in a
 // variable, annotated, reversed, sliced — and still iterated by
 // `for ... in`.

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Two different concrete `record` adopters of the same interface, dispatched
 // correctly through the same interface-typed slot
 // (`fase-3-value-type-contract-dispatch`, design D1's own "Alternative

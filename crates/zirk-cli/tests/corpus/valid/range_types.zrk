@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut big: Range<Int64> = { 1 as Int64 } .. { 5 as Int64 };
     mut total: Int64 = 0;

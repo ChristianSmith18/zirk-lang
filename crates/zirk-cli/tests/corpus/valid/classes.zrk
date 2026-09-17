@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Una clase que se construye, lee sus campos y escribe los mutables.
 
 class User {

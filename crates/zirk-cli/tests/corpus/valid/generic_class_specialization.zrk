@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A generic class specializes per combination of type arguments used
 // (roadmap task 11.1, D5): each instantiation gets its own layout and
 // method bodies, reused when the same combination repeats (11.2).

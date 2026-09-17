@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A checked cast (`as`, and its prefix form `<Type>`) verifies the runtime
 // type against a descriptor's ancestor list and terminates on a mismatch
 // (roadmap task 11.6). Also exercises the widening this task's fix found:

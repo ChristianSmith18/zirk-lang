@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn factorial(n: Int32): Int32 {
     if n <= 1 {
         return 1;

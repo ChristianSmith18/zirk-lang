@@ -99,8 +99,8 @@ semantics.
 
 ## Migration Plan
 
-1. Land types and source declarations while preserving existing `stdout.print`
-   and `stdout.println` behavior.
+1. Land types and source declarations, migrating every output caller to an
+   explicit `std.io` import while retaining member opening after import.
 2. Add semantic provenance and IR/runtime/interpreter operations behind the
    source API.
 3. Add browser preflight and cross-target conformance fixtures.

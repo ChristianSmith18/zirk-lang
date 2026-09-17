@@ -16,5 +16,5 @@ with the same name or signature SHALL remain an ordinary Zirk declaration.
 - **THEN** it does not acquire a standard runtime binding
 
 #### Scenario: Program without imports
-- **WHEN** a legacy program calls `stdout.println` without an import statement
-- **THEN** it remains compatible with the standard output operation during the migration
+- **WHEN** a program calls `stdout.println` without importing `stdout` from `std.io`
+- **THEN** checking reports that `stdout` is unavailable in that file

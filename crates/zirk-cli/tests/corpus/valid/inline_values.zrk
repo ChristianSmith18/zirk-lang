@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Records lower inline, with no allocation and no indirection
 // (roadmap task 11.5, ADR-003): construction, field access,
 // passing to and returning from a function, nesting one inside another,

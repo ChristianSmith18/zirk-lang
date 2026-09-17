@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Four native safety checks — division by zero, an out-of-range shift, a
 // negative string-repeat count, a `Float` operation producing `NaN` — throw
 // concrete, catchable `RuntimeError` subclasses instead of aborting the

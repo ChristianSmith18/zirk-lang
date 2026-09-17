@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn classify(n: Int32): String {
     return if n % 2 == 0 { "par" } else { "impar" };
 }

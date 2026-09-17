@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `throw`/`try`/`catch`/`finally` (roadmap Phase 4b,
 // `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a compiler-known
 // exception hierarchy, a user's own `implements Throwable`/`RuntimeError`

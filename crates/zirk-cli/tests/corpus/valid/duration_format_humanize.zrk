@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut d = 1h + 30m + 5s + 150ms;
     stdout.println(d.format("%h:%m:%s"));

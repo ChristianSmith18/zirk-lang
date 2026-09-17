@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `fase-3-generic-substitution-recursion` (design's own flagged risk): the
 // recursive unification/substitution must work at any nesting depth, not
 // just one level — verified here with a declared parameter type that nests

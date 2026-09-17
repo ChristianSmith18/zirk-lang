@@ -1,6 +1,6 @@
 {
   "name": "set-add",
-  "source": "fn main(): Void {\n    mut s: Set<Int32> = Set();\n    s.add(1);\n    s.add(2);\n    s.add(1);\n    stdout.println(s.length);\n    stdout.println(s.contains(2));\n}\n",
+  "source": "import { stdout } from std.io;\nfn main(): Void {\n    mut s: Set<Int32> = Set();\n    s.add(1);\n    s.add(2);\n    s.add(1);\n    stdout.println(s.length);\n    stdout.println(s.contains(2));\n}\n",
   "virtualName": "fixtures/set-add.zrk",
   "expectedOutput": [
     "2\n",

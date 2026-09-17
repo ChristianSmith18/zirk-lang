@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Regex` literals and built-in methods.
 fn main(): Void {
     inmut r = re'\\d+';

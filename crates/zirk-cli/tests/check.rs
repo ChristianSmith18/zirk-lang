@@ -336,6 +336,23 @@ fn imported_stdout_opens_println_and_explicit_qualification() {
 }
 
 #[test]
+fn stdout_requires_an_explicit_standard_module_import() {
+    let dir = workspace("stdout_requires_import");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn main(): Void { stdout.println(\"not global\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run missing stdout import check");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("`stdout` is not available"));
+}
+
+#[test]
 fn direct_standard_module_member_import_binds_only_the_member() {
     let dir = workspace("direct_standard_module_member");
     std::fs::write(

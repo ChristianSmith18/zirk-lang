@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 enum E { A, B }
 
 fn from_bool(b: Boolean): Int32 { return match b { true => 1, false => 0 }; }

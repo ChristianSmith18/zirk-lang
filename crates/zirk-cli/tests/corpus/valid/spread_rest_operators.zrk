@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Spread and rest operator examples
 //
 // This file is normative for the proposed spread/rest feature. The current

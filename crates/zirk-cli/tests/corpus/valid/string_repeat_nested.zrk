@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn shout(s: String, n: Int32): Void {
     stdout.println(s + n.to_string());
 }

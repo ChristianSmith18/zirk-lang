@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Normative examples for typed channels: producer/consumer values, a small
 // worker-pool-shaped queue, and a fan-out result stream.
 // Run: `zirk run examples/channel_examples.zrk`

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 record Inner { a: Int32; }
 record Outer { inner: Inner; }
 

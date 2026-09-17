@@ -2,7 +2,7 @@
 
 - [x] 1.1 Define `IoError` and generic `ReadResult<T>` in the standard type surface, including value, end, decoding, limit, and exact-read EOF outcomes; verify parser, semantic, and API-metadata tests cover every public variant
 - [x] 1.2 Replace placeholder declarations in `stdlib/std/io/{stdin,stdout,stderr}.zrk` with the complete shared stream API and verify the parsed source signatures match the compiler-owned registry
-- [x] 1.3 Preserve compatibility for `stdout.print`, `stdout.println`, and default member opening while adding `stderr` and `stdin` members; verify existing output corpus programs remain valid
+- [x] 1.3 Require an explicit `std.io` import for `stdout.print` and `stdout.println` while preserving default member opening after import; migrate and verify output corpus programs
 
 ## 2. Semantic provenance and lowering
 

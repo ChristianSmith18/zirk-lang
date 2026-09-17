@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Fn(...) => R / Function(...) => R as a real, writable type (roadmap Phase
 // 4d): a named function assigned to a typed local, a closure that captures a
 // value and escapes its creating function, a recursive lambda with an

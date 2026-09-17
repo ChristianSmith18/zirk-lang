@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Herencia simple: `super(...)` para construir la base, `override fn` para
 // reemplazar, `super.method()` para alcanzar el cuerpo heredado, y el despacho
 // que hace que la redefinición se vea a través del tipo de la base.

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Las formas de sentencia que la norma define y el parser incorporó al
 // alinearse con ella: paréntesis opcionales, `do ... while`, el `if` sin
 // llaves, el ternario y el incremento como expresión.

@@ -1,6 +1,6 @@
 {
   "name": "int-division",
-  "source": "fn main(): Void {\n    stdout.println(10 / 3);\n    stdout.println(7 / 2);\n}\n",
+  "source": "import { stdout } from std.io;\nfn main(): Void {\n    stdout.println(10 / 3);\n    stdout.println(7 / 2);\n}\n",
   "virtualName": "fixtures/int-division.zrk",
   "expectedOutput": [
     "3.333333333333333333333333333\n",

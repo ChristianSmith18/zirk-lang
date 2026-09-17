@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `?.` (safe navigation) on a method call is lowered end to end (task 10.8):
 // a present receiver runs the call, an absent one short-circuits to null,
 // dispatch works both through a class and through a contract, and a method

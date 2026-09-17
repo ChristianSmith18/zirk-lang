@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut r = re'(?<word>\\w+) (?<num>\\d+)';
     inmut m = r.find("abc 123");

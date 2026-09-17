@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // D11 (`fase-4d-runtimeerror`): a native failure inside `g()`, called by
 // `f()`, propagates through both — neither declares `throws` (a native
 // failure never appears in one, by design) and neither has a `try` of its

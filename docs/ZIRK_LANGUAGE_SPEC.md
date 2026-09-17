@@ -302,6 +302,8 @@ used instead.
 Lambdas are equivalent to function values:
 
 ```text
+import { stdout } from std.io;
+
 inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
 inmut SUBTRACT = fn(a: Int32, b: Int32): Int32 => a - b;
 inmut ACTION = (): Void => {
@@ -604,8 +606,8 @@ acme.cli;`) and explicit member imports select one member
 
 After `import { stdout } from std.io`, `println("hello")` resolves to
 `stdout.println("hello")`. The same opening rule applies to every published
-module, not just `std`; an unimported module is never made available merely by
-writing its name.
+module, not just `std`; an unimported module, including `stdout`, is never
+made available merely by writing its name.
 
 `.zkinit` is a declarative DSL, not executable code. Its project identity,
 kind (`application` or `package`), entry, source roots and dependencies are

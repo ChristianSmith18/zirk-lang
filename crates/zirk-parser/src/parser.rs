@@ -4476,11 +4476,10 @@ impl<'a> Parser<'a> {
             return Some(Expr::Println(PrintlnExpr {
                 args,
                 newline: method.name == "println",
-                // Dot notation remains the pre-package compatibility
-                // spelling. The new module qualification is subject to the
-                // resolver, so a module member spelling requires the
-                // module to have been imported from its package.
-                requires_import: ident.name == "stderr",
+                // Every standard stream is an imported module. Dot notation
+                // selects a member at runtime, but it never introduces a
+                // global `stdout`/`stderr` name.
+                requires_import: true,
                 stream: Some(ident.name),
                 span: ident.span.to(end),
             }));

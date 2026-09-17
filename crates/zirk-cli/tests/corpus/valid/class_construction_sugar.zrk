@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 class ShortCreation {
     construct(public name: String, public age: Int32) {
         stdout.println(this.name);

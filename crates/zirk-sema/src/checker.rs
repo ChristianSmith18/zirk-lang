@@ -10775,14 +10775,11 @@ impl<'a> Checker<'a> {
                     .get(&e.span.file)
                     .and_then(|names| names.get(member));
                 let allowed = match e.stream.as_deref() {
-                    // `stdout.*` predates packages and remains a deliberately
-                    // supported compatibility spelling.
-                    Some("stdout") => true,
                     Some(stream) => opened_stream.is_some_and(|opened| opened == stream),
                     None => opened_stream.is_some(),
                 };
                 if e.requires_import && !allowed {
-                    self.error(codes::UNDECLARED_NAME, e.span, format!("`{}` is not available in this file", if e.newline { "println" } else { "print" }), "opened module members must be imported before use", Some("import `{ stdout }` from `std.io`, or qualify the call with `stdout::`".into()));
+                    self.error(codes::UNDECLARED_NAME, e.span, format!("`{}` is not available in this file", e.stream.as_deref().unwrap_or(if e.newline { "println" } else { "print" })), "stream modules must be imported before their members can be called", Some("import `{ stdout }` from `std.io`, then call `stdout.println(...)` or `println(...)`".into()));
                 }
                 self.reject_in_parallel_region(e.span, "`println`");
                 for arg in &e.args {

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Un parámetro de tipo con default se usa cuando se omite el argumento.
 class Box<T = Int32> {
     value: T;

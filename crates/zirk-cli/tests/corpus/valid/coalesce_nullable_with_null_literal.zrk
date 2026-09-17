@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `nullable ?? null` used to panic lowering: `type_of` has no answer for a
 // bare `Expr::Null` on purpose (it has no type of its own — everywhere else a
 // destination type supplies it first), but `lower_coalesce` and its `type_of`

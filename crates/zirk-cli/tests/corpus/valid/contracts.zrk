@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 interface Describable {
     describe(): String;
 }

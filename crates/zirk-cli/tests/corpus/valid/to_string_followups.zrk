@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Follow-up work closing debt `fase-3b-scalars-and-text` documented as
 // deliberately pending: explicit `value.to_string()` on a native scalar
 // (outside of `println`/interpolation, which already reached it implicitly),

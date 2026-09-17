@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut arr: Array<String> = Array(2);
     arr[0] = "hello";

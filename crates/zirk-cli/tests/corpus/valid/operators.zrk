@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Los cinco aritméticos, los seis comparadores y los tres lógicos.
 fn main(): Void {
     inmut A: Int32 = 17;

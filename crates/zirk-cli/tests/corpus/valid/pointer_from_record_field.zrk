@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 record Point { x: Int32; y: Int32; }
 
 fn main(): Void {

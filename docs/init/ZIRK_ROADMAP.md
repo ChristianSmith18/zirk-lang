@@ -54,6 +54,7 @@ ADR-006.
 closeout provide the implementation evidence.
 
 **Goal:** `zirk run` over a `.zrk` containing
+`import { stdout } from std.io;` and
 `fn main(): Void { stdout.println("..."); }` really compiles through LLVM and
 runs as a native binary.
 

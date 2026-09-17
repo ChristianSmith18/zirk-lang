@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut x: Int32 = 41;
     unsafe {

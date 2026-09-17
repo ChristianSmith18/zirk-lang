@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A boxed value type's identity is meaningless/unspecified
 // (`fase-3-value-type-contract-dispatch`, design D4/Risk, task 4.4): two
 // separate conversions of an equal `record` value each produce their own,

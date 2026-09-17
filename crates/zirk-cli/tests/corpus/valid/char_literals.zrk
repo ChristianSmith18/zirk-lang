@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Char` (roadmap Phase 3b, task 6): exactly one Unicode grapheme, even an
 // extended cluster of several code points (ADR-014: same opaque runtime
 // representation as `String`, but a distinct static type with no identity).

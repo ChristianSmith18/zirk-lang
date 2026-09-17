@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // structured_tasks_examples.zrk
 //
 // Executable documentation for the fase-5-structured-tasks slice: sibling

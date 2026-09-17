@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The infix `**` operator (`exponentiation-operator`): `a ** b` is `a.pow(b)`
 // across the numeric families. Integer power stays integer and checks
 // overflow; a negative literal exponent widens an integer base to exact

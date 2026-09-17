@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `String` built-in methods and `Char` classification/normalization.
 fn main(): Void {
     inmut s = "  hello  ";

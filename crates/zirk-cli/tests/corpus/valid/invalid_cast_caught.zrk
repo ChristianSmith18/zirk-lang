@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `InvalidCastError` is catchable for `as` and `<T>` class casts.
 class Animal { construct() { } }
 class Dog extends Animal { construct() { super(); } }

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `match ... with` (roadmap Phase 4c) closes its resource on a propagating
 // exception too, not only on `return`/normal completion — the frame it
 // pushes has no `catch` of its own, so `lower_pending_exception_dispatch`

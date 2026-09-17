@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // NativeSlice<T>/NativeSliceMut<T> (roadmap Phase 4e, `fase-4e-native-slice`):
 // construction requires `unsafe`, but indexing (`view[i]`/`view[i] = x`),
 // `.length` and `.is_empty` do not — this fixture confirms that end to end.

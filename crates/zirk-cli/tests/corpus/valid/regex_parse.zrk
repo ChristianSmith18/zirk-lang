@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut ok = Regex.parse("a.b");
     if ok.is_ok() {

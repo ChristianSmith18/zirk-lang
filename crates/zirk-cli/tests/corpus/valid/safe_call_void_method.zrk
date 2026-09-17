@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `?.` calling a `Void`-returning method (found via ADR-003's fase-4
 // investigation): the checker types the result as plain `Void`, not `Void?`
 // — there is no nullable form of "no value" to widen to — and the lowering

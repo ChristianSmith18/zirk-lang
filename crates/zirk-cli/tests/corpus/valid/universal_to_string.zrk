@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `universal-to-string-and-multiline-strings`: every value-producing type
 // renders through `to_string()`, and `println`/`print`/`"{…}"` all go
 // through the same conversion. This file is the reference table — one

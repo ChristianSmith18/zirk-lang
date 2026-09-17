@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Methods infer the same way functions do — the annotation stays a
 // contract when written, optional when the body says it.
 class Calc {

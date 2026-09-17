@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut t =(1, "hello");
     stdout.println(t[0]);

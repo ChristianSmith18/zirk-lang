@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Regex.find_all` returns a `List<Regex.Match>` usable in `for ... in`.
 fn main(): Void {
     inmut r = re'\\d+';

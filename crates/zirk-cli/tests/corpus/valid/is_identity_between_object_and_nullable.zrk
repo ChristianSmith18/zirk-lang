@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `is` between a bare `T` and a `T?` used to reach the IR with two different
 // operand types (`Checker::check_binary`'s `Is` arm unifies them, the same
 // widening any other assignment allows, but lowering never inserted the

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The full integer family (roadmap Phase 3b, task 4.1-4.4): every width
 // declarable, checked arithmetic per width and signedness, implicit safe
 // widening (same signedness, no narrower destination), explicit `as` for

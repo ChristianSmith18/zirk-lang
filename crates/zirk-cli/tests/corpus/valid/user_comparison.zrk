@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Los operadores de comparación se resuelven por los métodos reservados _less etc.
 class Money {
     amount: Int32;

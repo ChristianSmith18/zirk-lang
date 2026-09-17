@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `s[start:end:step]` (roadmap Phase 7) — grapheme slicing with
 // Python-style bounds: defaults, negatives and a backward step.
 fn main(): Void {

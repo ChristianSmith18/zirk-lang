@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Derived structural equality for `record` (roadmap task
 // 11.5's own gap, closed by `fase-3-structural-equality`): `==`/`!=`
 // compares every field, recursing into a nested `record`

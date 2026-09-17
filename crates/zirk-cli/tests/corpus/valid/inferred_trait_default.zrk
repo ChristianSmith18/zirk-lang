@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A trait's default body can omit the annotation too: the adopter copies
 // the resolved signature.
 trait Labelled {

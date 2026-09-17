@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Cubre println sobre cada tipo del subset. `STDLIB_SPEC` sección 3 dice que
 // todo valor imprimible pasa por to_string(), así que ninguno de estos puede
 // llegar al runtime como un valor crudo.

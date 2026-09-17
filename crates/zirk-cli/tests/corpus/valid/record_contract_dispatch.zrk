@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A `record` implementing an interface, held through an interface-typed
 // variable and passed as an interface-typed parameter
 // (`fase-3-value-type-contract-dispatch`, design D1, task 4.1/4.2): the

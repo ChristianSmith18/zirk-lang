@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Resource<E>`/`match ... with` (roadmap Phase 4c,
 // `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4): a user class
 // `implements Resource<OpenError>`, acquisition returns

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Tuple length/to_string, enum case members and default rendering for
 // records, classes, algebraic enums and callable values.
 fn double(x: Int32): Int32 { return x * 2; }

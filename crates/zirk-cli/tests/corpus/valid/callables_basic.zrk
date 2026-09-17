@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Basic callable fixture for Phase 4d: a lambda that captures a local and
 // is assigned to a `Fn(Int32) => Int32` typed variable, then called.
 //

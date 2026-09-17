@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A class with no `to_string()` method has no text form (roadmap Phase 3b,
 // task 8) — printing one is rejected at compile time.
 class User {

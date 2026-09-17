@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The `cores` option (spec `parallel-regions`, "The `cores` option"):
 // `cores: N` (exact) and `cores: A..=B` (a runtime-picked range) both resolve
 // safely regardless of how many cores the machine actually has — unlike

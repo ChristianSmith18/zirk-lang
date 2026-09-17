@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     stdout.println("áéíóú ñ");
     stdout.println("🚀 zirk");

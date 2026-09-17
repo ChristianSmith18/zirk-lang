@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut count: Int32 = 1_000;
     inmut NAME: String = "Zirk";

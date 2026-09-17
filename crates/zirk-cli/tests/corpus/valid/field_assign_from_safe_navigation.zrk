@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `object.field = <expr containing `?.`>` used to produce invalid IR:
 // `lower_assign`'s `Field` arm lowered the target object before the value,
 // but never held it across the value's own `?.` branch — so `StoreField`

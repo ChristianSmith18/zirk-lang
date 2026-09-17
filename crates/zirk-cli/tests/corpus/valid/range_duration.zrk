@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     for d in 0s .. 5s: 1s {
         stdout.println(d);

@@ -1,6 +1,6 @@
 {
   "name": "downcast",
-  "source": "class Animal {\n    construct() { }\n    speak(): String { return \"...\"; }\n}\nclass Dog extends Animal {\n    construct() { super(); }\n    #override speak(): String { return \"woof\"; }\n}\nfn main(): Void {\n    mut a: Animal = Dog();\n    mut d: Dog? = a as ? Dog;\n    match d {\n        null => stdout.println(\"no dog\"),\n        dog => stdout.println(dog.speak()),\n    }\n}\n",
+  "source": "import { stdout } from std.io;\nclass Animal {\n    construct() { }\n    speak(): String { return \"...\"; }\n}\nclass Dog extends Animal {\n    construct() { super(); }\n    #override speak(): String { return \"woof\"; }\n}\nfn main(): Void {\n    mut a: Animal = Dog();\n    mut d: Dog? = a as ? Dog;\n    match d {\n        null => stdout.println(\"no dog\"),\n        dog => stdout.println(dog.speak()),\n    }\n}\n",
   "virtualName": "fixtures/downcast.zrk",
   "expectedOutput": [
     "woof\n"

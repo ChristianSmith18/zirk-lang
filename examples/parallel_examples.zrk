@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Normative examples for `parallel-cpu-regions`: the `parallel { }` region,
 // its `cores` option, real work-splitting for a `for` loop over a `List`,
 // the `.parallel` adapter, and the region-boundary and no-I/O rules a

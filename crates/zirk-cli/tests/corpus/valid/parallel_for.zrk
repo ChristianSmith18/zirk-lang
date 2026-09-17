@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `parallel { for x in coll { ... } }` runs across the worker pool
 // (`parallel-cpu-regions` task 6.1) when the loop body has no `return` /
 // `break` / `continue` / `throw` and does not reassign a captured name.

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     // A closure capturing another one: the checker identifies a closure type
     // by its own numbering and the IR by the layout it built, so the capture's

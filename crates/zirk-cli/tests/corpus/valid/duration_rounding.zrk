@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut d = 150m;
     stdout.println(d.round(1h).to_string());

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `?.` chains through more than one level (roadmap task 13.6, probing `?.`
 // against itself): a field read through `?.` feeding another `?.` method
 // call, short-circuiting at whichever link is absent.

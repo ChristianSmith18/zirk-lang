@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Grouped `match ... with` where a body succeeds and a close fails.
 // The `error` branch receives `ResourceFailure.Close(e)`.
 

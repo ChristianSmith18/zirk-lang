@@ -679,7 +679,9 @@ mod tests {
     fn run_lowers_verifies_and_interprets_a_compatible_program() {
         let response = run(Request {
             api_version: API_VERSION,
-            source: "fn main(): Void { stdout.println(\"hello\"); }".into(),
+            source:
+                "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"hello\"); }"
+                    .into(),
             virtual_name: "editor.zrk".into(),
             limits: None,
         });
@@ -745,7 +747,8 @@ mod tests {
     fn run_contract_covers_completion_runtime_capability_and_execution_limits() {
         let normal = run(Request {
             api_version: API_VERSION,
-            source: "fn main(): Void { stdout.println(\"done\"); }".into(),
+            source: "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"done\"); }"
+                .into(),
             virtual_name: "normal.zrk".into(),
             limits: None,
         });
@@ -782,7 +785,9 @@ mod tests {
 
         let limited = run(Request {
             api_version: API_VERSION,
-            source: "fn main(): Void { stdout.println(\"limit\"); }".into(),
+            source:
+                "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"limit\"); }"
+                    .into(),
             virtual_name: "limit.zrk".into(),
             limits: Some(Limits {
                 instructions: 1,
@@ -1113,7 +1118,9 @@ mod tests {
     fn repeated_browser_runs_do_not_leak_output_or_execution_state() {
         let request = Request {
             api_version: API_VERSION,
-            source: "fn main(): Void { stdout.println(\"fresh\"); }".into(),
+            source:
+                "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"fresh\"); }"
+                    .into(),
             virtual_name: "isolation.zrk".into(),
             limits: None,
         };

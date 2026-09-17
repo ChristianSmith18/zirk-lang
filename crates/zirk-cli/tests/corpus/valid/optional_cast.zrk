@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Cast nullable `as?` devuelve el subtipo cuando coincide y null cuando no.
 class Animal { construct() { } speak(): String { return "..."; } }
 class Dog extends Animal {

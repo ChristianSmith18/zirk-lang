@@ -49,7 +49,7 @@ standard-library I/O packages can depend on it.
 - Affects `stdlib/std/io`, semantic standard-library registry resolution, IR
   lowering, native runtime I/O, the interpreter, and browser capability
   preflight.
-- Adds public Zirk API and typed outcomes; legacy `stdout.print` and
-  `stdout.println` remain compatible.
+- Adds public Zirk API and typed outcomes; stream modules are imported from
+  `std.io` and are not implicit globals.
 - Affects `docs/ZIRK_STDLIB_SPEC.md`, handbook standard-library pages,
   examples, status evidence, and the sibling `../zirk-lang-site` repository.

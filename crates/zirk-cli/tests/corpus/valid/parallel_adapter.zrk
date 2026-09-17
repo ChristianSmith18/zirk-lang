@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `.parallel.map` and `Parallel.each` execute callbacks through the CPU
 // worker pool and preserve input order in their materialized results.
 

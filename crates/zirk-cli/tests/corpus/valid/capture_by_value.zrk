@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     // Capture is by value (design D2): the closure copies what it captured
     // when it was created, so changing the original afterwards does not reach

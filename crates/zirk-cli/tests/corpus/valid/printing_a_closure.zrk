@@ -1,1 +1,3 @@
+import { stdout } from std.io;
+
 fn main(): Void { inmut F =(a: Int32): Int32 => a; stdout.println(F); }

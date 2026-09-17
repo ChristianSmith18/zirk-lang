@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Algebraic enums lower to a discriminant plus a flattened payload
 // (roadmap task 11.3), and destructuring reads straight out of it
 // (task 11.4): construction, matching with bindings, and a wildcard

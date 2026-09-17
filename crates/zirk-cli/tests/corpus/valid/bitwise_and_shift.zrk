@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Bitwise and shift operators (roadmap Phase 3b, task 3.1/4.4), over `Int32`
 // for now: `&`, `|`, `^`, `~`, `<<`, `>>`, and their compound forms.
 fn main(): Void {

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Showcase ejecutable de la concurrencia y el paralelismo disponibles.
 //
 // Ejecutar con:

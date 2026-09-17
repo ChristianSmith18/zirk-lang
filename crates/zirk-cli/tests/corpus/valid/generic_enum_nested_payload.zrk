@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `fase-3-generic-substitution-recursion`: a generic enum's own variant
 // payload naming another generic instantiation containing the enum's type
 // parameter (`Wrapper<T> { Inner(value: Box<T>) }`, the `Bar<Baz<T>>` shape

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Timer.sleep` is a cooperative suspension point: the branch yields and then
 // resumes past it.
 

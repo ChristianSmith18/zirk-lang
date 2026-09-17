@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Timer.every` is ambient: the enclosing scope cancels it on exit rather than
 // waiting for it, so the block does not hang (`concurrent-blocks-and-timers`,
 // design D5).

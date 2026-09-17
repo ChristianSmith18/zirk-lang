@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Conformidad transitiva: una clase que adopta B, y B implementa A,
 // debe satisfacer los métodos de A.
 interface A {

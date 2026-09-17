@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A compiler-level smoke test for a bounded typed channel: construction,
 // indirect send/receive and idempotent close all have dedicated lowering.
 fn main(): Void {

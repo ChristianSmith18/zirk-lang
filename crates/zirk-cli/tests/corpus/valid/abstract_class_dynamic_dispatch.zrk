@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `abstract class` dynamic dispatch (fase-3-abstract-dispatch): a value
 // statically typed through the abstract class, backed by a concrete
 // adopter, dispatches to that adopter's own override — the same mechanism

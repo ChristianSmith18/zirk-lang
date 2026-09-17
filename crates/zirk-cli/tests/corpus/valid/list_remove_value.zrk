@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut l: List<Int32> = List(1, 2, 3, 2);
     stdout.println(l.remove(2).to_string());

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A recursive function combining its own call with a field read of the same
 // discriminant in one `match` arm used to produce invalid IR, the same
 // "values do not cross blocks" defect as `field_assign_from_safe_navigation`

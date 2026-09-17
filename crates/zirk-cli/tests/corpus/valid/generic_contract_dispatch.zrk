@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 interface Container<T> {
     get(): T;
 }

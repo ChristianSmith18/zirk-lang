@@ -628,7 +628,8 @@ fn a_crate_of_several_files_compiles_and_runs() {
         &[
             (
                 "main.zrk",
-                "import { Role, describe } from \"./domain/user\";\n\
+                "import { stdout } from std.io;\n\
+                 import { Role, describe } from \"./domain/user\";\n\
                  fn main(): Void {\n\
                  stdout.println(describe(Role.Admin));\n\
                  stdout.println(describe(Role.Guest));\n\
@@ -704,7 +705,7 @@ fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
     .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
-        "import { math } from acme.math;\nfn main(): Void { stdout.println(math.answer()); }",
+        "import { stdout } from std.io;\nimport { math } from acme.math;\nfn main(): Void { stdout.println(math.answer()); }",
     )
     .unwrap();
     std::fs::write(
@@ -751,7 +752,8 @@ fn a_declaration_without_share_is_private_to_its_file() {
         &[
             (
                 "main.zrk",
-                "import { helper } from \"./other\";\n\
+                "import { stdout } from std.io;\n\
+                 import { helper } from \"./other\";\n\
                  fn main(): Void { stdout.println(helper()); }\n",
             ),
             ("other.zrk", "fn helper(): String { return \"x\"; }\n"),
@@ -775,7 +777,8 @@ fn two_files_may_import_from_each_other() {
         &[
             (
                 "a.zrk",
-                "import { b } from \"./b\";\n\
+                "import { stdout } from std.io;\n\
+                 import { b } from \"./b\";\n\
                  share fn a(): String { return b(); }\n\
                  fn main(): Void { stdout.println(a()); }\n",
             ),
@@ -844,7 +847,8 @@ fn an_import_alias_binds_only_the_alias() {
         &[
             (
                 "main.zrk",
-                "import { Role -> R, describe -> name } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { Role -> R, describe -> name } from \"./lib\";\n\
                  fn main(): Void { stdout.println(name(R.Guest)); }\n",
             ),
             (
@@ -868,7 +872,8 @@ fn the_original_name_is_not_available_under_an_alias() {
         &[
             (
                 "main.zrk",
-                "import { valor -> v } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { valor -> v } from \"./lib\";\n\
                  fn main(): Void { stdout.println(valor()); }\n",
             ),
             ("lib.zrk", "share fn valor(): Int32 { return 8; }\n"),
@@ -892,7 +897,8 @@ fn a_shared_declaration_still_has_to_be_imported() {
         &[
             (
                 "main.zrk",
-                "import { one } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { one } from \"./lib\";\n\
                  fn main(): Void { stdout.println(one() + two()); }\n",
             ),
             (
@@ -918,7 +924,8 @@ fn a_private_enum_is_not_reachable_from_another_file() {
         &[
             (
                 "main.zrk",
-                "import { E } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { E } from \"./lib\";\n\
                  fn main(): Void { stdout.println(match E.A { _ => \"x\" }); }\n",
             ),
             ("lib.zrk", "enum E { A }\n"),
@@ -984,7 +991,7 @@ fn zirk_with_env(source_text: &str, name: &str, env: &[(&str, &str)]) -> Output 
 /// off-by-one, a use-after-free.
 #[test]
 fn d4_hazard_the_first_constructor_argument_survives_a_collection_triggered_by_the_second() {
-    let source = "class Marker {
+    let source = "import { stdout } from std.io;\nclass Marker {
         id: Int32;
         construct(id: Int32) { this.id = id; }
     }
@@ -1015,7 +1022,7 @@ fn d4_hazard_the_first_constructor_argument_survives_a_collection_triggered_by_t
 /// still be caught by comparison.
 #[test]
 fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
-    let source = "class Marker {
+    let source = "import { stdout } from std.io;\nclass Marker {
         id: Int32;
         construct(id: Int32) { this.id = id; }
     }
@@ -1054,7 +1061,7 @@ fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
 /// live-byte accounting drops to exactly zero for this identical shape.
 #[test]
 fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_threshold() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut next: Node?;
         construct() { }
     }
@@ -1087,7 +1094,7 @@ fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_thresh
 /// GC objects.
 #[test]
 fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
-    let source = "fn churn(n: Int32): Void {\n\
+    let source = "import { stdout } from std.io;\nfn churn(n: Int32): Void {\n\
         mut i = 0;\n\
         while i < n {\n\
             mut s = \"x\" + i.to_string();\n\
@@ -1126,7 +1133,7 @@ fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
 /// fix (verified by re-reverting the fix locally and re-running this test).
 #[test]
 fn a_list_survives_repeated_buffer_growth_under_a_small_threshold() {
-    let source = "fn main(): Void {\n\
+    let source = "import { stdout } from std.io;\nfn main(): Void {\n\
         mut values: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n\
         mut total: Int32 = 0;\n\
         for v in values {\n\
@@ -1148,7 +1155,7 @@ fn a_list_survives_repeated_buffer_growth_under_a_small_threshold() {
 /// the innermost one.
 #[test]
 fn a_still_active_outer_frames_root_survives_unrelated_allocation_in_an_inner_call() {
-    let source = "class Holder {
+    let source = "import { stdout } from std.io;\nclass Holder {
         value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1195,7 +1202,7 @@ fn a_still_active_outer_frames_root_survives_unrelated_allocation_in_an_inner_ca
 /// the next collection) the moment its frame pops.
 #[test]
 fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_loop() {
-    let source = "class Scratch {
+    let source = "import { stdout } from std.io;\nclass Scratch {
         value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1239,7 +1246,7 @@ fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_l
 /// while the referent is alive").
 #[test]
 fn weak_upgrade_and_is_alive_see_a_still_reachable_referent() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn main(): Void {
         mut m: Marker = Marker(42);
@@ -1269,7 +1276,7 @@ fn weak_upgrade_and_is_alive_see_a_still_reachable_referent() {
 /// stale, dangling pointer instead of `null`.
 #[test]
 fn weak_upgrade_and_is_alive_see_a_collected_referent_as_gone() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn make(): Weak<Marker> {
         mut m: Marker = Marker(7);
@@ -1317,7 +1324,7 @@ fn weak_upgrade_and_is_alive_see_a_collected_referent_as_gone() {
 /// object forever, since `w` never goes out of scope in `main`.
 #[test]
 fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn make(): Weak<Marker> {
         mut m: Marker = Marker(9);
@@ -1362,7 +1369,7 @@ fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
 /// identity (`is` false against the source) and equal field values.
 #[test]
 fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
-    let source = "class Point {
+    let source = "import { stdout } from std.io;\nclass Point {
         mut x: Int32;
         mut y: Int32;
         construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
@@ -1391,7 +1398,7 @@ fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
 /// The single most important test in this change.
 #[test]
 fn clone_preserves_internal_sharing_of_a_shared_child() {
-    let source = "class Child {
+    let source = "import { stdout } from std.io;\nclass Child {
         mut value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1429,7 +1436,7 @@ fn clone_preserves_internal_sharing_of_a_shared_child() {
 /// contains a cycle").
 #[test]
 fn clone_of_a_self_referential_cycle_terminates_within_the_new_graph() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut next: Node?;
         construct() { }
     }
@@ -1465,7 +1472,7 @@ fn clone_of_a_self_referential_cycle_terminates_within_the_new_graph() {
 /// observed concretely rather than only through identity comparisons).
 #[test]
 fn mutating_a_clone_does_not_affect_the_source_or_vice_versa() {
-    let source = "class Counter {
+    let source = "import { stdout } from std.io;\nclass Counter {
         mut value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1497,7 +1504,7 @@ fn mutating_a_clone_does_not_affect_the_source_or_vice_versa() {
 /// traversal state is collector-safe for its whole duration" requirement.
 #[test]
 fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut value: Int32;
         mut next: Node?;
         construct(value: Int32) { this.value = value; this.next = null; }
@@ -1558,7 +1565,7 @@ fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
 /// member").
 #[test]
 fn clone_of_a_class_reaching_a_pointer_field_is_rejected_at_compile_time() {
-    let source = "class Holder {
+    let source = "import { stdout } from std.io;\nclass Holder {
         mut p: Pointer<Int32>;
         construct(p: Pointer<Int32>) { this.p = p; }
     }

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Inferred return types: a body-bearing `fn`, method, or trait default may
 // omit the `: Type` annotation. The checker reads the body's `return`s and
 // applies the same unification rule used for `if`-expression branches.

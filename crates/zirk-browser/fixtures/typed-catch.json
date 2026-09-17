@@ -1,6 +1,6 @@
 {
   "name": "typed-catch",
-  "source": "class NetworkError implements Throwable {\n    inmut reason: String;\n    construct(reason: String) { this.reason = reason; }\n    message(): String { return this.reason; }\n    code(): String { return \"NETWORK\"; }\n    cause(): Error? { return null; }\n    stack_trace(): StackTrace { return StackTrace(); }\n}\nfn risky(): Int32 throws NetworkError {\n    throw NetworkError(\"connection lost\");\n}\nfn main(): Void {\n    try {\n        mut v: Int32 = risky();\n        stdout.println(v);\n    } catch NetworkError(e) {\n        stdout.println(e.message());\n    }\n}\n",
+  "source": "import { stdout } from std.io;\nclass NetworkError implements Throwable {\n    inmut reason: String;\n    construct(reason: String) { this.reason = reason; }\n    message(): String { return this.reason; }\n    code(): String { return \"NETWORK\"; }\n    cause(): Error? { return null; }\n    stack_trace(): StackTrace { return StackTrace(); }\n}\nfn risky(): Int32 throws NetworkError {\n    throw NetworkError(\"connection lost\");\n}\nfn main(): Void {\n    try {\n        mut v: Int32 = risky();\n        stdout.println(v);\n    } catch NetworkError(e) {\n        stdout.println(e.message());\n    }\n}\n",
   "virtualName": "fixtures/typed-catch.zrk",
   "expectedOutput": [
     "connection lost\n"

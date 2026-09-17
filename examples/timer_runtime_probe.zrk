@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Runtime probe for the concurrent-blocks-and-timers change.
 // Expected runtime order:
 //   before close

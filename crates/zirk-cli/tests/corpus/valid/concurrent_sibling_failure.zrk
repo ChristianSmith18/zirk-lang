@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // One branch throws: the scope makes it the primary failure, cancels the
 // sibling (observed at its `Timer.sleep` safe point), and re-raises the
 // exception out of the block (`concurrent-blocks-and-timers`).
