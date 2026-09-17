@@ -177,9 +177,29 @@ pub fn check_source(
     if sink.has_errors() {
         return (None, sink);
     }
-    program
-        .modules
-        .extend(bundled_standard_modules(&mut sources, &mut sink));
+    let standard_package = bundled_standard_package(&mut sources, &mut sink);
+    let standard_modules = bundled_standard_modules(&mut sources, &mut sink);
+    // The browser has no filesystem-backed loader, so mirror the CLI's merge:
+    // modules carry their published-member metadata and their declarations are
+    // also part of the checked executable program.
+    program.enums.extend(standard_package.enums);
+    program.classes.extend(standard_package.classes);
+    program.contracts.extend(standard_package.contracts);
+    program.type_aliases.extend(standard_package.type_aliases);
+    for module in &standard_modules {
+        program.enums.extend(module.body.enums.iter().cloned());
+        program.classes.extend(module.body.classes.iter().cloned());
+        program
+            .contracts
+            .extend(module.body.contracts.iter().cloned());
+        program
+            .functions
+            .extend(module.body.functions.iter().cloned());
+        program
+            .type_aliases
+            .extend(module.body.type_aliases.iter().cloned());
+    }
+    program.modules.extend(standard_modules);
     if sink.has_errors() {
         return (None, sink);
     }
@@ -195,6 +215,18 @@ pub fn check_source(
         }),
         sink,
     )
+}
+
+fn bundled_standard_package(
+    sources: &mut SourceMap,
+    sink: &mut DiagnosticSink,
+) -> zirk_ast::Program {
+    let file = sources.add(SourceFile::new(
+        "std.io/package.zrk",
+        include_str!("../../../stdlib/std/io/package.zrk"),
+    ));
+    let tokens = zirk_lexer::tokenize(sources.file(file), sink);
+    zirk_parser::parse(sources.file(file), &tokens, sink)
 }
 
 /// Parses the compiler-bundled standard modules into the same `SourceMap` as
@@ -425,6 +457,10 @@ pub fn run(request: contract::Request) -> contract::Response {
         .iter()
         .map(|event| OutputEvent {
             text: event.text.clone(),
+            destination: match event.destination {
+                zirk_interpreter::OutputDestination::Stdout => "stdout".into(),
+                zirk_interpreter::OutputDestination::Stderr => "stderr".into(),
+            },
             truncated: event.truncated,
         })
         .collect();
@@ -667,6 +703,42 @@ mod tests {
             Some("package\n"),
             "{response:?}"
         );
+    }
+
+    #[test]
+    fn browser_captures_standard_error_with_its_destination() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            source:
+                "import { stderr } from std.io;\nfn main(): Void { stderr.println(\"warning\"); }"
+                    .into(),
+            virtual_name: "stderr-editor.zrk".into(),
+            limits: None,
+        });
+        assert!(response.failure.is_none(), "{response:?}");
+        assert_eq!(response.output[0].text, "warning\n");
+        assert_eq!(response.output[0].destination, "stderr");
+    }
+
+    #[test]
+    fn browser_rejects_reachable_standard_input_before_execution() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            source: "import { stdin } from std.io;\nfn main(): Void { stdin.read_line(); }".into(),
+            virtual_name: "stdin-editor.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            matches!(
+                response.failure,
+                Some(crate::contract::Failure {
+                    kind: FailureKind::Capability,
+                    ..
+                })
+            ),
+            "{response:?}"
+        );
+        assert!(response.output.is_empty());
     }
 
     #[test]

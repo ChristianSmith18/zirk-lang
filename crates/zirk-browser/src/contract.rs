@@ -92,6 +92,7 @@ pub struct Diagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct OutputEvent {
     pub text: String,
+    pub destination: String,
     pub truncated: bool,
 }
 

@@ -4442,34 +4442,23 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// What may follow an identifier: a call, `stdout.println`, or nothing.
+    /// What may follow an identifier: a call, a standard-stream print, or nothing.
     fn parse_after_ident(&mut self, ident: Ident) -> Option<Expr> {
-        // `stdout.println(expr)` is a special syntactic form while neither
-        // modules nor a standard library exist. See decision D4 of the design.
-        if ident.name == "stdout" && matches!(self.peek(), TokenKind::Dot | TokenKind::ColonColon) {
-            let qualified = matches!(self.peek(), TokenKind::ColonColon);
+        // Output has a dedicated expression so values can be rendered through
+        // `to_string()` before reaching the target. `::` is intentionally not
+        // accepted here: it selects a module only in an import path; calls use
+        // ordinary member access (`stdout.println(...)`).
+        // Only `print`/`println` get the dedicated rendering node; any other
+        // member (`flush`, and stdin's read family accessed the same way)
+        // falls through to the ordinary member-chain parsing below, which
+        // produces a plain field access/call the checker and lowering
+        // resolve like any other module member.
+        let stream_method_follows = matches!(ident.name.as_str(), "stdout" | "stderr")
+            && matches!(self.peek(), TokenKind::Dot)
+            && matches!(self.peek_at(1), TokenKind::Identifier(name) if matches!(name.as_str(), "print" | "println"));
+        if stream_method_follows {
             self.pos += 1;
-            let method_span = self.peek_span();
-            let method = self.expect_identifier(if qualified {
-                "after `stdout::`"
-            } else {
-                "after `stdout.`"
-            })?;
-
-            if !matches!(method.name.as_str(), "print" | "println") {
-                self.error(
-                    codes::NOT_IMPLEMENTED,
-                    method_span,
-                    format!(
-                        "`stdout{}{}` is not available yet",
-                        if qualified { "::" } else { "." },
-                        method.name
-                    ),
-                    "only `stdout.print` and `stdout.println` exist in this phase",
-                    Some("the full standard library arrives in Phase 7".into()),
-                );
-                return None;
-            }
+            let method = self.expect_identifier("after standard stream `.`")?;
 
             self.expect(&TokenKind::LParen, "after `println`");
             let mut args = Vec::new();
@@ -4491,7 +4480,8 @@ impl<'a> Parser<'a> {
                 // spelling. The new module qualification is subject to the
                 // resolver, so a module member spelling requires the
                 // module to have been imported from its package.
-                requires_import: qualified,
+                requires_import: ident.name == "stderr",
+                stream: Some(ident.name),
                 span: ident.span.to(end),
             }));
         }
@@ -4518,6 +4508,7 @@ impl<'a> Parser<'a> {
                 args,
                 newline: ident.name == "println",
                 requires_import: true,
+                stream: None,
                 span: ident.span.to(end),
             }));
         }

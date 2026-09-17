@@ -1161,6 +1161,61 @@ pub enum InstKind {
     /// `stdout.print`, using the same already-converted `String` contract as
     /// `Println` but without appending a platform line break.
     Print(Operand),
+    /// `stderr.println`, with the same rendering contract as `stdout`.
+    PrintlnStderr(Operand),
+    /// `stderr.print`, with the same rendering contract as `stdout`.
+    PrintStderr(Operand),
+    /// `stdout.flush()`: `0` on success, mapped by codegen/interpreter to
+    /// `Result<Void, IoError>` — `Ok` on `0`, `Error(IoError.Io)` otherwise
+    /// (`add-stdin-stdout-standard-library`, design D3). `enum_id` is the
+    /// concrete `Result<Void, IoError>` instantiation the call site resolved
+    /// (the same `IrType::Enum` id `BuildEnum` would use for a literal
+    /// `Error(IoError.Io)` at this call site).
+    FlushStdout {
+        enum_id: u32,
+    },
+    /// `stderr.flush()`, otherwise identical to [`InstKind::FlushStdout`].
+    FlushStderr {
+        enum_id: u32,
+    },
+
+    /// `stdin.read_line()`: the nullable convenience projection of a line
+    /// read. A received line is present; EOF and an input failure are absent.
+    StdinReadLine,
+
+    /// `stdin.read_line_result()`: performs one real line read (native
+    /// process stdin, or the interpreter's injected bounded fixture) and
+    /// returns the already-tagged `ReadResult<String>` value directly.
+    ///
+    /// This does not go through [`InstKind::BuildEnum`] at the IR level: the
+    /// discriminant and payload are only known once the host read actually
+    /// happens, so codegen and the interpreter build the tagged value
+    /// themselves from the host's outcome, reusing the same enum layout
+    /// `BuildEnum` reads (`add-stdin-stdout-standard-library`, design D2).
+    /// `enum_id` is `ReadResult<String>`'s concrete instantiation. The nested
+    /// `error: IoError` field's own enum id is not carried separately: it is
+    /// read off `enum_id`'s own `Error` variant field type, the same way any
+    /// other consumer of `EnumLayout` would.
+    StdinReadLineResult {
+        enum_id: u32,
+    },
+    /// `stdin.read_char()`, otherwise identical in shape to
+    /// [`InstKind::StdinReadLineResult`] but for `ReadResult<Char>`.
+    StdinReadChar {
+        enum_id: u32,
+    },
+    /// `stdin.read_bytes(max)`: bounded byte read, `ReadResult<Array<Byte>>`.
+    /// `max` is the requested cap (`UInt64`).
+    StdinReadBytes {
+        max: Operand,
+        enum_id: u32,
+    },
+    /// `stdin.read_exact(count)`: exact byte read, `Result<Array<Byte>,
+    /// IoError>`. `count` is the requested length (`UInt64`).
+    StdinReadExact {
+        count: Operand,
+        enum_id: u32,
+    },
 
     /// The absent value of a nullable type.
     NullValue(Nullable),

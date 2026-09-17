@@ -922,7 +922,7 @@ fn verify_instruction(
             }
         }
 
-        InstKind::Println(operand) => {
+        InstKind::Println(operand) | InstKind::PrintlnStderr(operand) => {
             expect(inst.ty, IrType::Void, position, "Println", report);
             // The runtime reads the operand as a string handle: any other type
             // would be interpreted as a pointer to an arbitrary address.
@@ -936,13 +936,73 @@ fn verify_instruction(
             }
         }
 
-        InstKind::Print(operand) => {
+        InstKind::Print(operand) | InstKind::PrintStderr(operand) => {
             expect(inst.ty, IrType::Void, position, "Print", report);
             if let Some(value) = type_of(operand)
                 && value != IrType::String
             {
                 report(format!(
                     "{position}: Print receives {}, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::FlushStdout { enum_id } | InstKind::FlushStderr { enum_id } => {
+            expect(inst.ty, IrType::Enum(*enum_id), position, "Flush", report);
+        }
+
+        InstKind::StdinReadLine => {
+            expect(
+                inst.ty,
+                IrType::Nullable(crate::ir::Nullable::String),
+                position,
+                "StdinReadLine",
+                report,
+            );
+        }
+
+        InstKind::StdinReadLineResult { enum_id, .. } | InstKind::StdinReadChar { enum_id, .. } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "StdinRead",
+                report,
+            );
+        }
+
+        InstKind::StdinReadBytes { max, enum_id, .. } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "StdinReadBytes",
+                report,
+            );
+            if let Some(value) = type_of(max)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: StdinReadBytes receives {} for `max`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::StdinReadExact { count, enum_id, .. } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "StdinReadExact",
+                report,
+            );
+            if let Some(value) = type_of(count)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: StdinReadExact receives {} for `count`, expected UInt64",
                     value.as_str()
                 ));
             }
@@ -2511,7 +2571,16 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
-        InstKind::Println(operand) | InstKind::Print(operand) => vec![*operand],
+        InstKind::Println(operand)
+        | InstKind::Print(operand)
+        | InstKind::PrintlnStderr(operand)
+        | InstKind::PrintStderr(operand) => vec![*operand],
+        InstKind::FlushStdout { .. } | InstKind::FlushStderr { .. } => Vec::new(),
+        InstKind::StdinReadLine
+        | InstKind::StdinReadLineResult { .. }
+        | InstKind::StdinReadChar { .. } => Vec::new(),
+        InstKind::StdinReadBytes { max, .. } => vec![*max],
+        InstKind::StdinReadExact { count, .. } => vec![*count],
         InstKind::NullValue(_) => Vec::new(),
         InstKind::Wrap { value, .. } => vec![*value],
         InstKind::IsNull(operand) | InstKind::Unwrap(operand) => vec![*operand],

@@ -183,6 +183,26 @@ pub unsafe extern "C" fn zirk_rt_array_slice(
     slice
 }
 
+/// Builds an owned `Array<Byte>` from `bytes`, copying its contents.
+///
+/// Used by `stdin.read_bytes`/`stdin.read_exact` (`add-stdin-stdout-standard-library`)
+/// to turn a host-read buffer into a Zirk value: `Byte` is a one-byte,
+/// non-reference element, so this is `zirk_rt_array_new(bytes.len(), 1, 1,
+/// false)` followed by a raw copy into its data region.
+pub(crate) fn alloc_byte_array(bytes: &[u8]) -> *mut c_void {
+    let object = unsafe { zirk_rt_array_new(bytes.len(), 1, 1, false) };
+    if !bytes.is_empty() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (object as *mut u8).add(DATA_OFFSET),
+                bytes.len(),
+            );
+        }
+    }
+    object
+}
+
 /// Returns a pointer to the element at `index`, or terminates on an out-of-bounds index.
 ///
 /// # Safety

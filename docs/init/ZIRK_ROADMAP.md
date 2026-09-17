@@ -444,7 +444,7 @@ and data-race guarantees, working end to end.
 
 Order suggested by real dependency, not by the order they appear in the spec:
 
-`std.io` (already partially covered) → `std.collections` → `std.fs`/`std.path` →
+`std.io` (synchronous standard streams delivered; async and terminal work remains) → `std.collections` → `std.fs`/`std.path` →
 `std.time` → `std.process` → `std.thread`/`std.sync` (wrapping
 Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →

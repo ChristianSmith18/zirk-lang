@@ -17,5 +17,6 @@ pub mod duration;
 pub mod range;
 pub mod regex;
 pub mod scalar;
+pub mod stdin;
 pub mod temporal;
 pub mod text;

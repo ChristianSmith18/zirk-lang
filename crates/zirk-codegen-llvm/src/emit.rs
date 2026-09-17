@@ -16,7 +16,8 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module as LlvmModule};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+    PointerValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
 use std::collections::HashMap;
@@ -3132,6 +3133,109 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
 
+            ir::InstKind::PrintlnStderr(operand) => {
+                self.builder
+                    .build_call(
+                        self.runtime.io_eprintln,
+                        &[self.operand(*operand).into()],
+                        "",
+                    )
+                    .expect("call to eprintln");
+                None
+            }
+
+            ir::InstKind::PrintStderr(operand) => {
+                self.builder
+                    .build_call(self.runtime.io_eprint, &[self.operand(*operand).into()], "")
+                    .expect("call to eprint");
+                None
+            }
+
+            ir::InstKind::FlushStdout { enum_id } => {
+                let call = self
+                    .builder
+                    .build_call(self.runtime.io_stdout_flush, &[], "flush")
+                    .expect("call to zirk_io_stdout_flush");
+                let status = call
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("flush returns a status")
+                    .into_int_value();
+                Some(self.build_flush_result(*enum_id, status))
+            }
+
+            ir::InstKind::FlushStderr { enum_id } => {
+                let call = self
+                    .builder
+                    .build_call(self.runtime.io_stderr_flush, &[], "flush")
+                    .expect("call to zirk_io_stderr_flush");
+                let status = call
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("flush returns a status")
+                    .into_int_value();
+                Some(self.build_flush_result(*enum_id, status))
+            }
+
+            ir::InstKind::StdinReadLine => {
+                let (kind, _error, payload) =
+                    self.call_stdin_read(self.runtime.io_stdin_read_line, &[]);
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        kind,
+                        self.context.i32_type().const_zero(),
+                        "stdin.has_line",
+                    )
+                    .expect("stdin line kind comparison");
+                let nullable = self
+                    .llvm_type(ir::IrType::Nullable(ir::Nullable::String))
+                    .expect("nullable String has an LLVM representation")
+                    .into_struct_type();
+                let value = self
+                    .builder
+                    .build_insert_value(nullable.const_zero(), present, 0, "stdin.line.present")
+                    .expect("nullable line present field")
+                    .into_struct_value();
+                Some(
+                    self.builder
+                        .build_insert_value(value, payload, 1, "stdin.line.payload")
+                        .expect("nullable line payload field")
+                        .into_struct_value()
+                        .into(),
+                )
+            }
+
+            ir::InstKind::StdinReadLineResult { enum_id } => {
+                let (kind, error, payload) =
+                    self.call_stdin_read(self.runtime.io_stdin_read_line, &[]);
+                // `ReadResult<T>`: Value = 0, End = 1, Error = 2
+                // (`stdlib/std/io/package.zrk`'s declaration order).
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::StdinReadChar { enum_id } => {
+                let (kind, error, payload) =
+                    self.call_stdin_read(self.runtime.io_stdin_read_char, &[]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::StdinReadBytes { max, enum_id } => {
+                let max_value = self.operand(*max);
+                let (kind, error, payload) =
+                    self.call_stdin_read(self.runtime.io_stdin_read_bytes, &[max_value]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::StdinReadExact { count, enum_id } => {
+                let count_value = self.operand(*count);
+                let (kind, error, payload) =
+                    self.call_stdin_read(self.runtime.io_stdin_read_exact, &[count_value]);
+                // `Result<T, IoError>`: Ok = 0, Error = 1 (`register_native_result_enum`).
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
             // A nullable value is `{ i1 present, T value }`. The absent form's
             // payload slot is zeroed, not left undefined: ordinary Zirk-level
             // code never reads it without checking the flag first (the
@@ -5188,6 +5292,195 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .set_alignment(16)
             .expect("16 is a valid alignment");
         slot
+    }
+
+    /// The out-parameter shape every `stdin.read_*` FFI operation writes,
+    /// matching `zirk_runtime::io::StdinReadOut`'s `#[repr(C)]` layout field
+    /// for field (`add-stdin-stdout-standard-library`).
+    fn stdin_out_struct(&self) -> inkwell::types::StructType<'ctx> {
+        self.context.struct_type(
+            &[
+                self.context.i32_type().into(),
+                self.context.i32_type().into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            false,
+        )
+    }
+
+    /// Calls a `stdin.read_*` native operation through its out-parameter
+    /// convention: allocates a `StdinReadOut` stack slot, calls `function`
+    /// with `extra_args` followed by a pointer to that slot, and loads the
+    /// `(kind, error, payload)` fields back out.
+    fn call_stdin_read(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        extra_args: &[BasicValueEnum<'ctx>],
+    ) -> (IntValue<'ctx>, IntValue<'ctx>, PointerValue<'ctx>) {
+        let out_ty = self.stdin_out_struct();
+        let slot = self.aligned_alloca(out_ty.into(), "stdin.out");
+        let mut args: Vec<BasicMetadataValueEnum> =
+            extra_args.iter().map(|value| (*value).into()).collect();
+        args.push(slot.into());
+        self.builder
+            .build_call(function, &args, "stdin_read")
+            .expect("call to a stdin read operation");
+        let loaded = self
+            .builder
+            .build_load(out_ty, slot, "stdin.out.load")
+            .expect("load the stdin read outcome")
+            .into_struct_value();
+        let kind = self
+            .builder
+            .build_extract_value(loaded, 0, "stdin.kind")
+            .expect("extract kind")
+            .into_int_value();
+        let error = self
+            .builder
+            .build_extract_value(loaded, 1, "stdin.error")
+            .expect("extract error")
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(loaded, 2, "stdin.payload")
+            .expect("extract payload")
+            .into_pointer_value();
+        (kind, error, payload)
+    }
+
+    /// Builds a value of a fieldless enum (`IoError`'s own representation:
+    /// every variant is a bare unit) whose discriminant is a runtime value
+    /// rather than a literal one `InstKind::BuildEnum` already covers.
+    fn build_fieldless_enum(
+        &mut self,
+        enum_id: u32,
+        discriminant: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = struct_type.get_undef();
+        let built = self
+            .builder
+            .build_insert_value(built, discriminant, 0, "discriminant")
+            .expect("insert the discriminant")
+            .into_struct_value();
+        built.into()
+    }
+
+    /// Builds a `Result<Void, IoError>` value from `stdout.flush`/
+    /// `stderr.flush`'s own status code (`0` = `Ok`, `1` = `Error`, matching
+    /// `register_native_result_enum`'s `Ok = 0, Error = 1` order) — the only
+    /// failure this operation can report is `IoError.Io`.
+    fn build_flush_result(&mut self, enum_id: u32, status: IntValue<'ctx>) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = struct_type.get_undef();
+        let built = self
+            .builder
+            .build_insert_value(built, status, 0, "flush.kind")
+            .expect("insert the discriminant")
+            .into_struct_value();
+        // The `Error` variant (index 1) carries one field, `error: IoError`,
+        // always `Io` — `flush()` reports no other failure. The `Ok` variant
+        // (index 0) carries `value: Void`, which — like every `Void` field
+        // (`InstKind::BuildEnum`'s own arm) — is left undefined: nothing
+        // ever reads it.
+        let error_field_index = layout.variants[1][0];
+        let ir::IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
+            unreachable!("Result<Void, IoError>'s Error field is an IoError enum")
+        };
+        let io_error_zero = self.context.i32_type().const_zero();
+        let io_error_value = self.build_fieldless_enum(io_error_id, io_error_zero);
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                io_error_value,
+                error_field_index + ENUM_HEADER_FIELDS,
+                "flush.error",
+            )
+            .expect("insert the error field")
+            .into_struct_value();
+        built.into()
+    }
+
+    /// Builds a `ReadResult<T>`/`Result<T, IoError>` value directly from a
+    /// `stdin.read_*` host outcome (`add-stdin-stdout-standard-library`,
+    /// design D2): `kind` is already the outer discriminant exactly as the
+    /// native/interpreter host produced it, `error` is the nested
+    /// `IoError` discriminant (meaningful only when `kind` denotes an
+    /// error), and `payload` is an already-built `String`/`Char`/
+    /// `Array<Byte>` handle (meaningful only when `kind` denotes a value),
+    /// or a null pointer otherwise.
+    ///
+    /// Both variant fields are populated unconditionally rather than
+    /// branching on `kind`: an inactive variant's slot is never read by
+    /// verified Zirk code, the same invariant `InstKind::BuildEnum`'s own
+    /// codegen already relies on for an omitted field.
+    fn build_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        payload: PointerValue<'ctx>,
+        value_variant: u32,
+        error_variant: u32,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = struct_type.get_undef();
+        let built = self
+            .builder
+            .build_insert_value(built, kind, 0, "stdin.kind")
+            .expect("insert the discriminant")
+            .into_struct_value();
+
+        let value_field_index = layout.variants[value_variant as usize][0];
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                payload,
+                value_field_index + ENUM_HEADER_FIELDS,
+                "stdin.value",
+            )
+            .expect("insert the value field")
+            .into_struct_value();
+
+        let error_field_index = layout.variants[error_variant as usize][0];
+        let ir::IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
+            unreachable!("the Error variant's field is an IoError enum")
+        };
+        let io_error_value = self.build_fieldless_enum(io_error_id, error);
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                io_error_value,
+                error_field_index + ENUM_HEADER_FIELDS,
+                "stdin.error",
+            )
+            .expect("insert the error field")
+            .into_struct_value();
+        built.into()
     }
 
     /// Converts an `fp128` value to `double` by decoding its IEEE 754

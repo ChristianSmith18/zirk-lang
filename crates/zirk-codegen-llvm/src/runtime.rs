@@ -123,6 +123,27 @@ pub mod symbols {
     pub const IO_PRINTLN: &str = "zirk_io_println";
     /// Writes a `String` to standard output without a line break.
     pub const IO_PRINT: &str = "zirk_io_print";
+    /// Writes a `String` to standard error with a line break.
+    pub const IO_EPRINTLN: &str = "zirk_io_eprintln";
+    /// Writes a `String` to standard error without a line break.
+    pub const IO_EPRINT: &str = "zirk_io_eprint";
+    /// Flushes standard output; `0` succeeded, `1` failed
+    /// (`add-stdin-stdout-standard-library`).
+    pub const IO_STDOUT_FLUSH: &str = "zirk_io_stdout_flush";
+    /// Flushes standard error; see [`IO_STDOUT_FLUSH`].
+    pub const IO_STDERR_FLUSH: &str = "zirk_io_stderr_flush";
+    /// Reads one line from standard input into a `zirk_io::StdinReadOut` out
+    /// parameter (`add-stdin-stdout-standard-library`).
+    pub const IO_STDIN_READ_LINE: &str = "zirk_io_stdin_read_line";
+    /// Reads one Unicode scalar value from standard input into a
+    /// `zirk_io::StdinReadOut` out parameter.
+    pub const IO_STDIN_READ_CHAR: &str = "zirk_io_stdin_read_char";
+    /// Reads up to `max` bytes from standard input into a
+    /// `zirk_io::StdinReadOut` out parameter.
+    pub const IO_STDIN_READ_BYTES: &str = "zirk_io_stdin_read_bytes";
+    /// Reads exactly `count` bytes from standard input into a
+    /// `zirk_io::StdinReadOut` out parameter.
+    pub const IO_STDIN_READ_EXACT: &str = "zirk_io_stdin_read_exact";
     /// Reports a division by zero and terminates.
     pub const DIVISION_BY_ZERO: &str = "zirk_rt_division_by_zero";
     /// Obtains storage for an object. The strategy behind it is the runtime's
@@ -397,6 +418,14 @@ pub struct Runtime<'ctx> {
     pub str_eq: FunctionValue<'ctx>,
     pub io_println: FunctionValue<'ctx>,
     pub io_print: FunctionValue<'ctx>,
+    pub io_eprintln: FunctionValue<'ctx>,
+    pub io_eprint: FunctionValue<'ctx>,
+    pub io_stdout_flush: FunctionValue<'ctx>,
+    pub io_stderr_flush: FunctionValue<'ctx>,
+    pub io_stdin_read_line: FunctionValue<'ctx>,
+    pub io_stdin_read_char: FunctionValue<'ctx>,
+    pub io_stdin_read_bytes: FunctionValue<'ctx>,
+    pub io_stdin_read_exact: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
@@ -789,6 +818,51 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let io_print = module.add_function(
         symbols::IO_PRINT,
         void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let io_eprintln = module.add_function(
+        symbols::IO_EPRINTLN,
+        context.void_type().fn_type(&[ptr.into()], false),
+        Some(Linkage::External),
+    );
+    let io_eprint = module.add_function(
+        symbols::IO_EPRINT,
+        context.void_type().fn_type(&[ptr.into()], false),
+        Some(Linkage::External),
+    );
+    let io_stdout_flush = module.add_function(
+        symbols::IO_STDOUT_FLUSH,
+        context.i32_type().fn_type(&[], false),
+        external,
+    );
+    let io_stderr_flush = module.add_function(
+        symbols::IO_STDERR_FLUSH,
+        context.i32_type().fn_type(&[], false),
+        external,
+    );
+    // Every `stdin.read_*` operation writes its outcome through a
+    // `zirk_io::StdinReadOut` out-parameter (`{ i32 kind, i32 error, ptr
+    // payload }`) rather than returning a value directly, so codegen can
+    // read `kind`/`error`/`payload` back with ordinary loads
+    // (`add-stdin-stdout-standard-library`).
+    let io_stdin_read_line = module.add_function(
+        symbols::IO_STDIN_READ_LINE,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let io_stdin_read_char = module.add_function(
+        symbols::IO_STDIN_READ_CHAR,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let io_stdin_read_bytes = module.add_function(
+        symbols::IO_STDIN_READ_BYTES,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let io_stdin_read_exact = module.add_function(
+        symbols::IO_STDIN_READ_EXACT,
+        void.fn_type(&[i64.into(), ptr.into()], false),
         external,
     );
 
@@ -1400,6 +1474,14 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_eq,
         io_println,
         io_print,
+        io_eprintln,
+        io_eprint,
+        io_stdout_flush,
+        io_stderr_flush,
+        io_stdin_read_line,
+        io_stdin_read_char,
+        io_stdin_read_bytes,
+        io_stdin_read_exact,
         alloc,
         contract_table,
         str_concat,

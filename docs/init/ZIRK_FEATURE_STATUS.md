@@ -80,7 +80,7 @@ merely because its frontend or native backend is delivered.
 | `mut`/`inmut` | yes | yes | yes | yes | yes | yes | — |
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
 | `if`/`else` | yes | yes | yes | yes | yes | yes | — |
-| `stdout.println` | yes | yes | yes | yes | yes | yes | Hardcoded intrinsic, not the full `std.io` contract. |
+| `std.io` standard streams | yes | yes | yes | yes | yes | yes | Source-defined `stdin`, `stdout`, and `stderr`; synchronous native/interpreter input, destination-labelled output, and browser stdin preflight. Async and terminal controls remain deferred. |
 
 ## Phase 2 — Core language surface
 

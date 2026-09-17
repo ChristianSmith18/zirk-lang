@@ -425,10 +425,19 @@ pub enum LimitFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputEvent {
     pub text: String,
+    /// Logical standard-stream destination. This is observable to portable
+    /// hosts and deliberately does not expose a native handle.
+    pub destination: OutputDestination,
     /// True only for the control event emitted when bounded program output was
     /// cut short. Its empty text is not program output and does not consume an
     /// output-event or output-byte allowance.
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputDestination {
+    Stdout,
+    Stderr,
 }
 
 /// The entire authority surface granted to interpreted Zirk code.
@@ -439,6 +448,21 @@ pub struct OutputEvent {
 pub trait InterpreterHost {
     fn emit(&mut self, event: OutputEvent) -> Result<(), HostOutputError>;
     fn is_cancelled(&self) -> bool;
+
+    /// Reads more bytes from the host's bounded standard-input fixture into
+    /// `buf`, returning the number of bytes read (`0` at end-of-stream), the
+    /// same contract as `std::io::Read::read`
+    /// (`add-stdin-stdout-standard-library`).
+    ///
+    /// Every browser host reaches `preflight` rejecting a reachable
+    /// `stdin.read_*` instruction before execution ever starts (design D5),
+    /// so this default — behaving as an immediately exhausted stream — is
+    /// never actually exercised there; it exists only so hosts that never
+    /// grant standard input (every `InterpreterHost` but a direct interpreter
+    /// unit test's fixture) do not have to implement it.
+    fn read_stdin(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,11 +470,30 @@ pub enum HostOutputError {
     Rejected,
 }
 
+/// Adapts an `InterpreterHost`'s bounded `read_stdin` into `std::io::Read`,
+/// so `zirk_runtime_core::stdin`'s platform-neutral line/char/byte/exact
+/// logic — the exact same code the native runtime calls against real
+/// process stdin — runs identically against the interpreter's injected
+/// fixture (`add-stdin-stdout-standard-library`, design D2/D3).
+struct HostReader<'a>(&'a mut dyn InterpreterHost);
+
+impl std::io::Read for HostReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read_stdin(buf)
+    }
+}
+
 /// In-memory host used by deterministic interpreter and browser-boundary tests.
 #[derive(Debug, Default)]
 pub struct CapturedHost {
     events: Vec<OutputEvent>,
     cancelled: bool,
+    /// A fixed byte sequence `read_stdin` serves from, for deterministic
+    /// `stdin.read_*` interpreter unit tests
+    /// (`add-stdin-stdout-standard-library`). Empty by default — browser
+    /// hosts never reach `read_stdin` at all, since `preflight` rejects a
+    /// reachable stdin read before execution starts.
+    stdin: std::io::Cursor<Vec<u8>>,
 }
 
 impl CapturedHost {
@@ -459,6 +502,15 @@ impl CapturedHost {
     }
     pub fn cancel(&mut self) {
         self.cancelled = true;
+    }
+
+    /// Injects a fixed byte sequence for subsequent `read_stdin` calls to
+    /// serve from, in order.
+    pub fn with_stdin(bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdin: std::io::Cursor::new(bytes.into()),
+            ..Self::default()
+        }
     }
 }
 
@@ -470,6 +522,10 @@ impl InterpreterHost for CapturedHost {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled
+    }
+
+    fn read_stdin(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.stdin, buf)
     }
 }
 
@@ -2429,9 +2485,55 @@ impl<'module> Interpreter<'module> {
                     "Unwrap reads non-nullable value {value:?}"
                 ))),
             },
-            InstKind::Print(operand) => self.emit_output(frame_index, *operand, false, host),
-            InstKind::Println(operand) => self.emit_output(frame_index, *operand, true, host),
+            InstKind::Print(operand) => self.emit_output(
+                frame_index,
+                *operand,
+                false,
+                OutputDestination::Stdout,
+                host,
+            ),
+            InstKind::Println(operand) => {
+                self.emit_output(frame_index, *operand, true, OutputDestination::Stdout, host)
+            }
+            InstKind::PrintStderr(operand) => self.emit_output(
+                frame_index,
+                *operand,
+                false,
+                OutputDestination::Stderr,
+                host,
+            ),
+            InstKind::PrintlnStderr(operand) => {
+                self.emit_output(frame_index, *operand, true, OutputDestination::Stderr, host)
+            }
             InstKind::IsCancelled => Ok(Some(Value::Boolean(host.is_cancelled()))),
+            InstKind::FlushStdout { enum_id } | InstKind::FlushStderr { enum_id } => {
+                // The bounded host's own sink is in-memory
+                // (`add-stdin-stdout-standard-library`, design D3): flushing
+                // it always succeeds.
+                self.build_flush_ok(*enum_id).map(Some)
+            }
+            InstKind::StdinReadLine => {
+                let outcome = zirk_runtime_core::stdin::read_line(&mut HostReader(host));
+                self.build_nullable_line(outcome).map(Some)
+            }
+            InstKind::StdinReadLineResult { enum_id } => {
+                let outcome = zirk_runtime_core::stdin::read_line(&mut HostReader(host));
+                self.build_text_outcome(*enum_id, outcome, false).map(Some)
+            }
+            InstKind::StdinReadChar { enum_id } => {
+                let outcome = zirk_runtime_core::stdin::read_char(&mut HostReader(host));
+                self.build_text_outcome(*enum_id, outcome, true).map(Some)
+            }
+            InstKind::StdinReadBytes { max, enum_id } => {
+                let max = self.uint_operand(frame_index, *max)?;
+                let outcome = zirk_runtime_core::stdin::read_bytes(&mut HostReader(host), max);
+                self.build_bytes_outcome(*enum_id, outcome).map(Some)
+            }
+            InstKind::StdinReadExact { count, enum_id } => {
+                let count = self.uint_operand(frame_index, *count)?;
+                let outcome = zirk_runtime_core::stdin::read_exact(&mut HostReader(host), count);
+                self.build_exact_outcome(*enum_id, outcome).map(Some)
+            }
             _ => self
                 .materialize_constant(instruction)
                 .map(Some)
@@ -2444,6 +2546,7 @@ impl<'module> Interpreter<'module> {
         frame_index: usize,
         operand: zirk_ir::Operand,
         newline: bool,
+        destination: OutputDestination,
         host: &mut dyn InterpreterHost,
     ) -> Result<Option<Value>, ExecutionFault> {
         let Value::Heap(id) = self
@@ -2486,6 +2589,7 @@ impl<'module> Interpreter<'module> {
         if host
             .emit(OutputEvent {
                 text,
+                destination,
                 truncated: false,
             })
             .is_err()
@@ -2502,6 +2606,7 @@ impl<'module> Interpreter<'module> {
             self.output_truncated = true;
             let _ = host.emit(OutputEvent {
                 text: String::new(),
+                destination: OutputDestination::Stdout,
                 truncated: true,
             });
         }
@@ -4294,6 +4399,218 @@ impl<'module> Interpreter<'module> {
             .map_err(ExecutionFault::Limit)
     }
 
+    /// Allocates `bytes` as an `Array<Byte>` heap entry
+    /// (`add-stdin-stdout-standard-library`'s `stdin.read_bytes`/
+    /// `read_exact`).
+    fn allocate_byte_array(&mut self, bytes: Vec<u8>) -> Result<Value, ExecutionFault> {
+        let values: Vec<Value> = bytes
+            .into_iter()
+            .map(|byte| Value::Int(IntegerValue::from_bits(u128::from(byte), IntWidth::U8)))
+            .collect();
+        let heap_bytes =
+            std::mem::size_of::<HeapEntry>() + values.len() * std::mem::size_of::<Value>();
+        self.heap
+            .allocate(HeapEntry::Array(values), heap_bytes, self.limits)
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// Reads a `UInt64` operand's value (`stdin.read_bytes(max)`/
+    /// `read_exact(count)`'s own argument).
+    fn uint_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<u64, ExecutionFault> {
+        match self
+            .value(frame_index, operand)
+            .map_err(ExecutionFault::Internal)?
+        {
+            Value::Int(value) => Ok(value.unsigned() as u64),
+            other => Err(ExecutionFault::Internal(format!(
+                "expected a UInt64 operand, found {other:?}"
+            ))),
+        }
+    }
+
+    /// Builds `Ok(Void)` for `stdout.flush`/`stderr.flush`
+    /// (`add-stdin-stdout-standard-library`, design D3): the interpreter's
+    /// own output sink is in-memory, so flushing it never fails.
+    fn build_flush_ok(&mut self, enum_id: u32) -> Result<Value, ExecutionFault> {
+        let bytes = std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>();
+        self.heap
+            .allocate(
+                HeapEntry::Enum {
+                    layout: enum_id,
+                    variant: 0,
+                    fields: vec![Value::Void],
+                },
+                bytes,
+                self.limits,
+            )
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// Builds a value of `IoError` (a fieldless enum) with `discriminant`
+    /// selecting its variant, matching `zirk_runtime_core::stdin`'s
+    /// `ERROR_*` constants and the declaration order in
+    /// `stdlib/std/io/package.zrk`.
+    fn build_io_error_value(
+        &mut self,
+        io_error_enum_id: u32,
+        discriminant: u32,
+    ) -> Result<Value, ExecutionFault> {
+        let bytes = std::mem::size_of::<HeapEntry>();
+        self.heap
+            .allocate(
+                HeapEntry::Enum {
+                    layout: io_error_enum_id,
+                    variant: discriminant,
+                    fields: Vec::new(),
+                },
+                bytes,
+                self.limits,
+            )
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// Builds a `ReadResult<T>`/`Result<T, IoError>` value directly from a
+    /// `stdin.read_*` host outcome (`add-stdin-stdout-standard-library`,
+    /// design D2), mirroring `crates/zirk-codegen-llvm/src/emit.rs`'s
+    /// `build_tagged_outcome`: `kind` is already the outer discriminant,
+    /// `error` is the nested `IoError` discriminant (read only when `kind ==
+    /// error_variant`), and `payload` is the already-allocated value (read
+    /// only when `kind == value_variant`).
+    fn build_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: u32,
+        error: i32,
+        payload: Option<Value>,
+        value_variant: u32,
+        error_variant: u32,
+    ) -> Result<Value, ExecutionFault> {
+        let layout = self
+            .module
+            .enums
+            .get(enum_id as usize)
+            .ok_or_else(|| {
+                ExecutionFault::Internal(format!(
+                    "a stdin read references missing enum layout {enum_id}"
+                ))
+            })?
+            .clone();
+        let fields = if kind == value_variant {
+            vec![payload.ok_or_else(|| {
+                ExecutionFault::Internal("a Value/Ok outcome carries no payload".into())
+            })?]
+        } else if kind == error_variant {
+            let error_field_index = *layout
+                .variants
+                .get(error_variant as usize)
+                .and_then(|fields| fields.first())
+                .ok_or_else(|| {
+                    ExecutionFault::Internal("the Error variant carries no field".into())
+                })?;
+            let IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
+                return Err(ExecutionFault::Internal(
+                    "the Error variant's field is not an IoError enum".into(),
+                ));
+            };
+            vec![self.build_io_error_value(io_error_id, error as u32)?]
+        } else {
+            Vec::new()
+        };
+        let bytes = std::mem::size_of::<HeapEntry>() + fields.len() * std::mem::size_of::<Value>();
+        self.heap
+            .allocate(
+                HeapEntry::Enum {
+                    layout: enum_id,
+                    variant: kind,
+                    fields,
+                },
+                bytes,
+                self.limits,
+            )
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
+    }
+
+    /// `read_line_result`/`read_char`'s shared outcome shape: `as_char`
+    /// selects `Char` vs `String` payload allocation, since both share the
+    /// same `zirk_runtime_core::stdin::TextOutcome`.
+    fn build_text_outcome(
+        &mut self,
+        enum_id: u32,
+        outcome: zirk_runtime_core::stdin::TextOutcome,
+        as_char: bool,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::stdin::TextOutcome;
+        match outcome {
+            TextOutcome::Value(text) => {
+                let id = if as_char {
+                    self.allocate_char(text)?
+                } else {
+                    self.allocate_string(text)?
+                };
+                self.build_tagged_outcome(enum_id, 0, 0, Some(Value::Heap(id)), 0, 2)
+            }
+            TextOutcome::End => self.build_tagged_outcome(enum_id, 1, 0, None, 0, 2),
+            TextOutcome::Error(code) => self.build_tagged_outcome(enum_id, 2, code, None, 0, 2),
+        }
+    }
+
+    /// Implements `stdin.read_line()`'s nullable projection: successful text
+    /// is present, while EOF and input/decoding failures are `null`.
+    fn build_nullable_line(
+        &mut self,
+        outcome: zirk_runtime_core::stdin::TextOutcome,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::stdin::TextOutcome;
+        match outcome {
+            TextOutcome::Value(text) => Ok(Value::Nullable(Some(Box::new(Value::Heap(
+                self.allocate_string(text)?,
+            ))))),
+            TextOutcome::End | TextOutcome::Error(_) => Ok(Value::Nullable(None)),
+        }
+    }
+
+    /// `read_bytes`'s outcome shape.
+    fn build_bytes_outcome(
+        &mut self,
+        enum_id: u32,
+        outcome: zirk_runtime_core::stdin::BytesOutcome,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::stdin::BytesOutcome;
+        match outcome {
+            BytesOutcome::Value(bytes) => {
+                let payload = self.allocate_byte_array(bytes)?;
+                self.build_tagged_outcome(enum_id, 0, 0, Some(payload), 0, 2)
+            }
+            BytesOutcome::End => self.build_tagged_outcome(enum_id, 1, 0, None, 0, 2),
+            BytesOutcome::Error(code) => self.build_tagged_outcome(enum_id, 2, code, None, 0, 2),
+        }
+    }
+
+    /// `read_exact`'s outcome shape (`Result<Array<Byte>, IoError>`: `Ok =
+    /// 0`, `Error = 1`, per `register_native_result_enum`).
+    fn build_exact_outcome(
+        &mut self,
+        enum_id: u32,
+        outcome: zirk_runtime_core::stdin::ExactOutcome,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::stdin::ExactOutcome;
+        match outcome {
+            ExactOutcome::Ok(bytes) => {
+                let payload = self.allocate_byte_array(bytes)?;
+                self.build_tagged_outcome(enum_id, 0, 0, Some(payload), 0, 1)
+            }
+            ExactOutcome::Err(code) => self.build_tagged_outcome(enum_id, 1, code, None, 0, 1),
+        }
+    }
+
     fn value(&self, frame_index: usize, operand: zirk_ir::Operand) -> Result<Value, String> {
         self.frames[frame_index]
             .values
@@ -4780,7 +5097,7 @@ pub const fn terminator_support(terminator: &Terminator) -> BrowserSupport {
     }
 }
 
-pub const fn instruction_support(instruction: &InstKind) -> BrowserSupport {
+pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
     match instruction {
         InstKind::ConstInt(_)
         | InstKind::ConstBool(_)
@@ -4805,11 +5122,22 @@ pub const fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::Unary { .. }
         | InstKind::Binary { .. }
         | InstKind::CheckedArithmetic { .. }
-        | InstKind::Call { .. }
         | InstKind::NullValue(_)
         | InstKind::Wrap { .. }
         | InstKind::IsNull(_)
         | InstKind::Unwrap(_) => BrowserSupport::Direct,
+        InstKind::Call { .. } => BrowserSupport::Direct,
+        // `stdin.read_*` carries ambient input authority the browser
+        // deliberately has no source for (`add-stdin-stdout-standard-
+        // library`, design D5): browser execution must fail its preflight
+        // on these instructions directly rather than ever attempting to run
+        // them, the same way `browser_rejects_reachable_standard_input_
+        // before_execution` (`crates/zirk-browser/src/lib.rs`) verifies.
+        InstKind::StdinReadLine
+        | InstKind::StdinReadLineResult { .. }
+        | InstKind::StdinReadChar { .. }
+        | InstKind::StdinReadBytes { .. }
+        | InstKind::StdinReadExact { .. } => BrowserSupport::Excluded,
         InstKind::ConstString(_)
         | InstKind::ConstChar(_)
         | InstKind::StringGraphemeOffset { .. }
@@ -4855,9 +5183,13 @@ pub const fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::SetContains { .. }
         | InstKind::SetRemove { .. }
         | InstKind::ArraySlice { .. } => BrowserSupport::RuntimeCore,
-        InstKind::Print(_) | InstKind::Println(_) | InstKind::IsCancelled => {
-            BrowserSupport::BoundedHost
-        }
+        InstKind::Print(_)
+        | InstKind::Println(_)
+        | InstKind::PrintStderr(_)
+        | InstKind::PrintlnStderr(_)
+        | InstKind::FlushStdout { .. }
+        | InstKind::FlushStderr { .. }
+        | InstKind::IsCancelled => BrowserSupport::BoundedHost,
         InstKind::FatalError(_)
         | InstKind::Throw(_)
         | InstKind::SetSuppressed { .. }
@@ -6740,6 +7072,7 @@ mod tests {
         assert!(!host.is_cancelled());
         host.emit(OutputEvent {
             text: "ñ\n".into(),
+            destination: OutputDestination::Stdout,
             truncated: false,
         })
         .unwrap();
@@ -6749,6 +7082,7 @@ mod tests {
             host.events(),
             &[OutputEvent {
                 text: "ñ\n".into(),
+                destination: OutputDestination::Stdout,
                 truncated: false,
             }]
         );
@@ -7083,18 +7417,22 @@ mod tests {
             &[
                 OutputEvent {
                     text: "".into(),
+                    destination: OutputDestination::Stdout,
                     truncated: false
                 },
                 OutputEvent {
                     text: "ñ\n".into(),
+                    destination: OutputDestination::Stdout,
                     truncated: false,
                 },
                 OutputEvent {
                     text: "\n".into(),
+                    destination: OutputDestination::Stdout,
                     truncated: false
                 },
                 OutputEvent {
                     text: "fin".into(),
+                    destination: OutputDestination::Stdout,
                     truncated: false
                 },
             ]
@@ -7149,6 +7487,7 @@ mod tests {
             host.events(),
             &[OutputEvent {
                 text: String::new(),
+                destination: OutputDestination::Stdout,
                 truncated: true,
             }]
         );

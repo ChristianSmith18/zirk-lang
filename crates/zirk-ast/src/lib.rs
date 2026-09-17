@@ -1835,6 +1835,10 @@ pub struct PrintlnExpr {
     pub args: Vec<Expr>,
     /// `true` for `println`, `false` for `print`.
     pub newline: bool,
+    /// Compiler-verified standard stream that owns this operation. `None`
+    /// denotes the opened-member spelling; semantic analysis resolves it to
+    /// `stdout` or `stderr` before lowering.
+    pub stream: Option<String>,
     /// `true` only for the opened `println(...)`/`print(...)` spelling; the
     /// checker then requires an imported module to have published it.
     pub requires_import: bool,

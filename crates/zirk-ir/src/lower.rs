@@ -7304,7 +7304,15 @@ impl<'a> FunctionLowering<'a> {
             }
 
             // Calling a callable value goes through the boxed callable, not a name.
-            ast::Expr::Call(e) if !Self::is_parallel_each_call(e) && self.is_callable_call(e) => {
+            ast::Expr::Call(e)
+                if !Self::is_parallel_each_call(e)
+                    && !matches!(
+                        &*e.callee,
+                        ast::Expr::Field(field)
+                            if self.checked.aliases.contains_key(&field.name.span)
+                    )
+                    && self.is_callable_call(e) =>
+            {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
                 };
@@ -7326,6 +7334,10 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let Some(result) = self.try_lower_stdio_host_call(e, span) {
+                    let returns = self.type_of_operand(result);
+                    return self.lower_throws_check(result, returns, span);
+                }
                 if let ast::Expr::Field(field) = &*e.callee
                     && let ast::Expr::Path(base) = &*field.object
                     && base.name == "Channel"
@@ -8676,7 +8688,17 @@ impl<'a> FunctionLowering<'a> {
             }
 
             let value = match &arm.body {
-                ast::ArmBody::Expr(e) => self.lower_expr(e),
+                // `lower_expr_as` rather than plain `lower_expr`: a `match`
+                // result's own type is not necessarily each arm's own raw
+                // expression type — most visibly a bare `null` arm (which
+                // `lower_expr` alone cannot lower at all: `null` carries no
+                // type of its own outside a destination that supplies one),
+                // but also an arm producing `T` where the match itself is
+                // `T?` because a sibling arm is `null` (found via
+                // `stdin.read_line()`'s own `match read_line_result() {
+                // ReadResult.Value(text) => text; ReadResult.End => null;
+                // ... }`, `add-stdin-stdout-standard-library`).
+                ast::ArmBody::Expr(e) => self.lower_expr_as(e, result_type),
                 ast::ArmBody::Block(b) if result_type == IrType::Void => {
                     self.lower_block(b);
                     self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
@@ -9266,6 +9288,20 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type the arms of a `match` produce.
     fn arm_value_type(&self, expr: &ast::MatchExpr) -> IrType {
+        // The checker already unified every arm's own type (`check_match`'s
+        // `result.unify(ty)` loop) and recorded the match expression's own
+        // final type at its span — consult that first: the first arm's own
+        // syntactic type is not always the match's own type, most visibly
+        // when a later arm is a bare `null` and an earlier one is `T`, which
+        // unifies to `T?` (found via `stdin.read_line()`'s own `match
+        // read_line_result() { ReadResult.Value(text) => text; ReadResult.End
+        // => null; ... }`, `add-stdin-stdout-standard-library`).
+        if let Some(&ty) = self.checked.expr_types.get(&expr.span)
+            && !ty.is_unknown()
+        {
+            return self.ir_type(ty);
+        }
+
         // The first arm decides: the checker already proved every arm agrees,
         // so looking further would only confirm what it verified.
         let Some(first) = expr.arms.first() else {
@@ -21879,6 +21915,33 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Println(e) => {
                 self.lower_print_expr(e, expr.span());
             }
+            ast::Expr::Call(e) if self.checked.standard_stream_calls.contains_key(&e.span) => {
+                let result = self
+                    .try_lower_stdio_host_call(e, expr.span())
+                    .expect("checked standard stream call has a binding");
+                let returns = self.type_of_operand(result);
+                self.lower_throws_check(result, returns, expr.span());
+            }
+            ast::Expr::Call(e)
+                if matches!(
+                    &*e.callee,
+                    ast::Expr::Field(field)
+                        if self.checked.aliases.contains_key(&field.name.span)
+                ) =>
+            {
+                if let Some(result) = self.try_lower_stdio_host_call(e, expr.span()) {
+                    let returns = self.type_of_operand(result);
+                    self.lower_throws_check(result, returns, expr.span());
+                    return;
+                }
+                // Published modules are namespaces rather than runtime
+                // objects; this must precede method probes below.
+                let name = self.callee_name(e);
+                let args = self.lower_args(e);
+                let returns = self.signature_return(&name);
+                let result = self.emit(InstKind::Call { callee: name, args }, returns, expr.span());
+                self.lower_throws_check(result, returns, expr.span());
+            }
             // `super(...)` and a method call know their own target, so they
             // need none of the name resolution the arm below does.
             ast::Expr::Call(e)
@@ -23224,9 +23287,10 @@ impl<'a> FunctionLowering<'a> {
         // that same empty string and therefore nothing.
         let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
         let name = if expr.newline { "println" } else { "print" };
+        let stream = expr.stream.as_deref().unwrap_or("stdout");
         let binding = zirk_sema::stdlib::compiler_binding(
             "std.io",
-            "stdout",
+            stream,
             name,
             &format!("fn {name}(...args: String): Void"),
         )
@@ -23234,9 +23298,75 @@ impl<'a> FunctionLowering<'a> {
         match binding {
             "std.io.stdout.println" => self.emit_effect(InstKind::Println(rendered), span),
             "std.io.stdout.print" => self.emit_effect(InstKind::Print(rendered), span),
-            _ => unreachable!("the output lowering only requests stdout print bindings"),
+            "std.io.stderr.println" => self.emit_effect(InstKind::PrintlnStderr(rendered), span),
+            "std.io.stderr.print" => self.emit_effect(InstKind::PrintStderr(rendered), span),
+            _ => unreachable!("the output lowering only requests stream print bindings"),
         }
         self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    /// Intercepts a semantically proven `std.io` call before it would
+    /// otherwise lower to a generic `InstKind::Call`, for the operations
+    /// that need real host I/O rather than the ordinary (stub) Zirk source
+    /// body reachable through `stdlib/std/io/{stdout,stderr,stdin}.zrk`
+    /// (`add-stdin-stdout-standard-library`, design D4): `stdout.flush()`,
+    /// `stderr.flush()`, and `stdin`'s `read_line_result`/`read_char`/
+    /// `read_bytes`/`read_exact`.
+    ///
+    /// Returns `None` for every other module-member call, which falls
+    /// through to ordinary `Call` lowering unchanged — including a
+    /// same-named function in a different (non-`std.io`) package, since
+    /// `zirk_sema::stdlib::compiler_binding` only ever matches the closed,
+    /// provenance-keyed registry (`external-same-name-never-acquires-a-
+    /// standard-binding`, `crates/zirk-sema/src/stdlib.rs`'s own test).
+    fn try_lower_stdio_host_call(&mut self, e: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let binding = self.checked.standard_stream_calls.get(&e.span)?.as_str();
+        let name = binding.rsplit_once('.').map(|(_, name)| name)?;
+        let returns = self.signature_return(name);
+        Some(match binding {
+            "std.io.stdin.read_line" => self.emit(InstKind::StdinReadLine, returns, span),
+            "std.io.stdout.flush" | "std.io.stderr.flush" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!("every intercepted std.io flush returns an enum")
+                };
+                match binding {
+                    "std.io.stdout.flush" => {
+                        self.emit(InstKind::FlushStdout { enum_id }, returns, span)
+                    }
+                    "std.io.stderr.flush" => {
+                        self.emit(InstKind::FlushStderr { enum_id }, returns, span)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            "std.io.stdin.read_line_result" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                self.emit(InstKind::StdinReadLineResult { enum_id }, returns, span)
+            }
+            "std.io.stdin.read_char" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                self.emit(InstKind::StdinReadChar { enum_id }, returns, span)
+            }
+            "std.io.stdin.read_bytes" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                let max = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                self.emit(InstKind::StdinReadBytes { max, enum_id }, returns, span)
+            }
+            "std.io.stdin.read_exact" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                let count = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                self.emit(InstKind::StdinReadExact { count, enum_id }, returns, span)
+            }
+            _ => unreachable!("the std.io host-call lowering only requests these bindings"),
+        })
     }
 
     /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each

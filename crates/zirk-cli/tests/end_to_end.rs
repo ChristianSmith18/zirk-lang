@@ -9,8 +9,9 @@
 //! with its expected output; the invalid ones have their diagnostics captured
 //! as snapshots so a change in wording is visible in review.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Path to the `zirk` executable produced by the workspace.
 fn compiler() -> PathBuf {
@@ -594,6 +595,32 @@ fn crate_of(name: &str, files: &[(&str, &str)]) -> Output {
     }
 }
 
+/// Runs a one-file crate while supplying deterministic process stdin.
+fn crate_of_with_input(name: &str, source: &str, input: &[u8]) -> Output {
+    let dir = workspace(name);
+    std::fs::write(dir.join("main.zrk"), source).expect("write the source");
+    let mut child = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the compiler");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write process stdin");
+    let output = child.wait_with_output().expect("wait for the compiler");
+    Output {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 #[test]
 fn a_crate_of_several_files_compiles_and_runs() {
     let output = crate_of(
@@ -636,6 +663,33 @@ fn a_standard_package_module_compiles_and_runs_through_the_native_backend() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "package native\n");
+}
+
+#[test]
+fn standard_input_line_is_read_by_the_native_backend() {
+    let output = crate_of_with_input(
+        "standard_input_native",
+        "import { stdin, stdout } from std.io;\nfn main(): Void { stdout.println(stdin.read_line()); }",
+        "hola\n".as_bytes(),
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "hola\n");
+}
+
+#[test]
+fn standard_error_is_written_to_the_process_error_stream() {
+    let output = crate_of(
+        "standard_error_native",
+        &[(
+            "main.zrk",
+            "import { stderr } from std.io;\nfn main(): Void { stderr.print(\"warning\"); }",
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(output.stdout, "");
+    assert_eq!(output.stderr, "warning");
 }
 
 #[test]

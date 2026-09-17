@@ -48,10 +48,8 @@ The compiler may map a fully identified standard declaration to its host
 implementation internally. This is not source syntax and cannot be requested
 by an external package with a matching short name.
 
-`std.terminal` owns `Terminal`, `Style`, `Color`, cursor control, progress and
-live regions; `std.io` re-exports the common console-facing types for ordinary
-printing. `std.encoding` owns the `Encoding` enum and codecs used explicitly by
-text I/O; strict UTF-8 is the default interchange encoding.
+`std.terminal` and `std.encoding` are future packages. This delivery owns only
+the synchronous `std.io` stream surface; strict UTF-8 is its text encoding.
 
 ## 3. `std.io`
 
@@ -60,48 +58,32 @@ Exposes three streams:
 ```text
 import { stdin, stdout, stderr } from std.io;
 
-stdout.print("Hello", 42);
-stdout.println("World", user);
-stdout.println();
-println("Direct convenience call");
-stderr.println("Diagnostic");
-mut line = stdin.read_line();
+stdout.print("Hello", "world");
+stdout.println("ready");
+stderr.println("diagnostic");
+match stdin.read_line_result() { ReadResult.End => {}, _ => {} }
 ```
 
-- `print(...args: T[])` converts each value through `to_string()`, joins the
-  rendered values with one space, and writes without a line break.
-- `println(...args: T[])` performs the same conversion and adds exactly the
-  platform line break. Neither operation has a configurable separator or an
-  `end` parameter.
+- `print(...args: String)` and `println(...args: String)` are the delivered
+  output APIs. They join rendered arguments with one space; `println` adds one
+  platform line break and `print` adds none.
 - `println()` writes just a line break.
 - `print()` writes nothing.
 - `stdout` and `stderr` share the same formatting operations but different
   destinations.
-- every value-producing type uses `to_string(): String`; `Void` and `Never`
-  are the only rejected arguments. Nullable absence renders `<Null>`.
-- interpolation is favoured: `stdout.println("User: {user.name}");`.
 - an unqualified convenience call resolves through the imported module when
   unique; a collision requires `stdout.println(...)`.
-- `style` controls terminal presentation while `format` constructs text;
-  cursor movement, progress and live regions belong to `Terminal`.
-- `write` is the exact text/byte stream primitive and does not insert
-  separators, line endings, styles or arbitrary object conversions.
-- convenience printing propagates catchable `IoError`; `try_print` and
-  `try_println` expose an explicit `Result` for expected output failure.
-- `mut print: Fn(String) => Void = stdout.println` creates an independent safe
-  callable capability. Compiler-known standard-library extraction performs the
-  necessary internal clone/attenuation without exposing mutable authority over
-  the original standard object or cloning its native handle.
+- `flush(): Result<Void, IoError>` is explicit and target-aware.
 
-`stdin` offers byte, Unicode code-point, grapheme and line reads. EOF is not an
-exception: `ReadResult<T>` distinguishes `Value(T)`, `End` and
-`Error(IoError)`. `read_line` removes the terminator and `Value("")` remains
-distinct from `End`. Exact-count reads use `Result` because premature EOF
-violates their requested contract.
-
-Blocking operations may offer `_async` variants that return `Task<T>` and
-suspend without blocking a thread. There is no `async fn`; inherently
-task-aware APIs do not need the suffix.
+`IoError` has `Io`, `Decoding`, `Limit`, and `EndOfStream`. `ReadResult<T>` has
+`Value(value: T)`, `End`, and `Error(error: IoError)`. `stdin` provides
+`read_line(): String?`, `read_line_result(): ReadResult<String>`,
+`read_char(): ReadResult<Char>`, `read_bytes(max: UInt64): ReadResult<Array<Byte>>`,
+and `read_exact(count: UInt64): Result<Array<Byte>, IoError>`. Empty lines are
+values, text decoding is strict UTF-8, and premature exact reads return
+`IoError.EndOfStream`. Browser execution retains output capture but rejects
+reachable stdin reads before execution. Async streams and terminal APIs are
+not delivered by this package.
 
 ## 4. `std.fs`
 

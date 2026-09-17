@@ -48,6 +48,10 @@ pub struct CheckedProgram {
     /// declaration called `Role`. Recording the resolution here means lowering
     /// does not have to repeat it — or know that aliases exist at all.
     pub aliases: HashMap<Span, String>,
+    /// Compiler-owned `std.io` bindings resolved at call sites. This is
+    /// provenance, not name matching: lowering must never infer a host effect
+    /// from a user package's similarly named declaration.
+    pub standard_stream_calls: HashMap<Span, String>,
     /// The resolved type of each `match` scrutinee, keyed by the match's span.
     ///
     /// Lowering compares against a discriminant for enums and against the value
@@ -576,7 +580,11 @@ struct Checker<'a> {
     /// compiler-owned `std.io` package. The parser represents these calls
     /// with a compact output node, so resolution must retain this distinction
     /// and never grant that implementation to an equally named user export.
-    standard_output_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
+    standard_output_imports: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    /// Standard stream bindings visible under their written import names.
+    standard_stream_imports: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    /// Provenance selected for each checked stream call.
+    standard_stream_calls: HashMap<Span, String>,
     /// Bare names opened by more than one imported module. They deliberately
     /// have no source-order winner; callers must use `module.member`.
     ambiguous_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
@@ -999,6 +1007,8 @@ impl<'a> Checker<'a> {
             parallel_adapter_accesses: std::collections::HashSet::new(),
             imported: HashMap::new(),
             standard_output_imports: HashMap::new(),
+            standard_stream_imports: HashMap::new(),
+            standard_stream_calls: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
             aliases: HashMap::new(),
@@ -1358,6 +1368,7 @@ impl<'a> Checker<'a> {
             temporal_constructions: self.temporal_constructions,
             parallel_adapter_accesses: self.parallel_adapter_accesses,
             aliases: self.aliases,
+            standard_stream_calls: self.standard_stream_calls,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
             contract_instances: self.contract_instances,
@@ -1607,10 +1618,10 @@ impl<'a> Checker<'a> {
             })
             .collect();
         for import in &program.imports {
-            let standard_output_module = matches!(
+            let standard_stream_module = matches!(
                 &import.source,
                 ImportSource::Package { path, .. }
-                    if matches!(path.as_str(), "std.io" | "std.io::stdout" | "std.io::stderr")
+                    if matches!(path.as_str(), "std.io" | "std.io::stdout" | "std.io::stderr" | "std.io::stdin")
             );
             for name in &import.names {
                 // Standard modules are recorded too. They name no declaration
@@ -1682,12 +1693,26 @@ impl<'a> Checker<'a> {
                                 .or_default()
                                 .insert(format!("{module}.{member}"), member.clone());
                         }
-                        if standard_output_module && matches!(member.as_str(), "print" | "println")
-                        {
-                            self.standard_output_imports
-                                .entry(import.span.file)
-                                .or_default()
-                                .insert(member.clone());
+                        if standard_stream_module {
+                            if matches!(member.as_str(), "print" | "println") {
+                                self.standard_output_imports
+                                    .entry(import.span.file)
+                                    .or_default()
+                                    .insert(member.clone(), imported_module.to_string());
+                            }
+                            if let Some(binding) =
+                                crate::stdlib::compiler_binding_for_member(imported_module, member)
+                            {
+                                let written = if direct_member {
+                                    name.bound_name().name.clone()
+                                } else {
+                                    format!("{}.{}", name.bound_name().name, member)
+                                };
+                                self.standard_stream_imports
+                                    .entry(import.span.file)
+                                    .or_default()
+                                    .insert(written, binding.to_string());
+                            }
                         }
                     }
                 }
@@ -1930,6 +1955,23 @@ impl<'a> Checker<'a> {
     /// `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and are Phase 3.
     fn require_visible(&mut self, owner: Span, shared: bool, used: &Ident, what: &str) {
         if owner.file == used.span.file {
+            return;
+        }
+
+        // `Result` is a language-native generic enum, not a declaration a
+        // file must import. The source-defined std.io package is allowed to
+        // share its own public outcome types between its implementation files;
+        // user packages retain the ordinary explicit-import rule below.
+        if (what == "enum" && used.name == "Result")
+            || (what == "function" && used.name == "fatalError")
+        {
+            return;
+        }
+        let owner_name = self.sources.file(owner.file).name();
+        let used_name = self.sources.file(used.span.file).name();
+        let is_standard_io_source =
+            |name: &str| name.contains("/stdlib/std/io/") || name.starts_with("std.io/");
+        if is_standard_io_source(owner_name) && is_standard_io_source(used_name) {
             return;
         }
 
@@ -10727,14 +10769,19 @@ impl<'a> Checker<'a> {
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
-                if e.requires_import
-                    && !self
-                        .standard_output_imports
-                        .get(&e.span.file)
-                        .is_some_and(|names| {
-                            names.contains(if e.newline { "println" } else { "print" })
-                        })
-                {
+                let member = if e.newline { "println" } else { "print" };
+                let opened_stream = self
+                    .standard_output_imports
+                    .get(&e.span.file)
+                    .and_then(|names| names.get(member));
+                let allowed = match e.stream.as_deref() {
+                    // `stdout.*` predates packages and remains a deliberately
+                    // supported compatibility spelling.
+                    Some("stdout") => true,
+                    Some(stream) => opened_stream.is_some_and(|opened| opened == stream),
+                    None => opened_stream.is_some(),
+                };
+                if e.requires_import && !allowed {
                     self.error(codes::UNDECLARED_NAME, e.span, format!("`{}` is not available in this file", if e.newline { "println" } else { "print" }), "opened module members must be imported before use", Some("import `{ stdout }` from `std.io`, or qualify the call with `stdout::`".into()));
                 }
                 self.reject_in_parallel_region(e.span, "`println`");
@@ -18086,6 +18133,27 @@ impl<'a> Checker<'a> {
 
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        // Preserve the package-qualified stream binding while the import
+        // source is still known. The IR must consume this record instead of
+        // treating names such as `stdin.read_line` as privileged by spelling.
+        let stream_name = match &*expr.callee {
+            Expr::Path(name) => Some(name.name.clone()),
+            Expr::Field(field) => match &*field.object {
+                Expr::Path(module) => Some(format!("{}.{}", module.name, field.name.name)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(name) = stream_name
+            && let Some(binding) = self
+                .standard_stream_imports
+                .get(&expr.span.file)
+                .and_then(|bindings| bindings.get(&name))
+                .cloned()
+        {
+            self.standard_stream_calls.insert(expr.span, binding);
+        }
+
         if matches!(&*expr.callee, Expr::Super(_)) {
             return self.check_super_construction(expr);
         }

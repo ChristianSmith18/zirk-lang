@@ -52,9 +52,27 @@ pub fn registry() -> Vec<StandardLibraryEntry> {
     [
         ("stdout", "print", "fn print(...args: String): Void"),
         ("stdout", "println", "fn println(...args: String): Void"),
+        ("stdout", "flush", "fn flush(): Result<Void, IoError>"),
         ("stderr", "print", "fn print(...args: String): Void"),
         ("stderr", "println", "fn println(...args: String): Void"),
+        ("stderr", "flush", "fn flush(): Result<Void, IoError>"),
         ("stdin", "read_line", "fn read_line(): String?"),
+        (
+            "stdin",
+            "read_line_result",
+            "fn read_line_result(): ReadResult<String>",
+        ),
+        ("stdin", "read_char", "fn read_char(): ReadResult<Char>"),
+        (
+            "stdin",
+            "read_bytes",
+            "fn read_bytes(max: UInt64): ReadResult<Array<Byte>>",
+        ),
+        (
+            "stdin",
+            "read_exact",
+            "fn read_exact(count: UInt64): Result<Array<Byte>, IoError>",
+        ),
     ]
     .into_iter()
     .map(|(module, name, signature)| StandardLibraryEntry {
@@ -67,9 +85,15 @@ pub fn registry() -> Vec<StandardLibraryEntry> {
         compiler_binding: match (module, name) {
             ("stdout", "print") => "std.io.stdout.print",
             ("stdout", "println") => "std.io.stdout.println",
+            ("stdout", "flush") => "std.io.stdout.flush",
             ("stderr", "print") => "std.io.stderr.print",
             ("stderr", "println") => "std.io.stderr.println",
+            ("stderr", "flush") => "std.io.stderr.flush",
             ("stdin", "read_line") => "std.io.stdin.read_line",
+            ("stdin", "read_line_result") => "std.io.stdin.read_line_result",
+            ("stdin", "read_char") => "std.io.stdin.read_char",
+            ("stdin", "read_bytes") => "std.io.stdin.read_bytes",
+            ("stdin", "read_exact") => "std.io.stdin.read_exact",
             _ => unreachable!("the registry table is closed"),
         },
     })
@@ -93,6 +117,17 @@ pub fn compiler_binding(
                 && entry.key.name == name
                 && entry.key.signature == signature
         })
+        .map(|entry| entry.compiler_binding)
+}
+
+/// Returns the closed compiler binding for a member already known to have
+/// originated in `std.io`. Import resolution uses this to preserve that
+/// provenance at a call site; signatures remain validated separately against
+/// the parsed standard source surface.
+pub fn compiler_binding_for_member(module: &str, name: &str) -> Option<&'static str> {
+    registry()
+        .into_iter()
+        .find(|entry| entry.key.module == module && entry.key.name == name)
         .map(|entry| entry.compiler_binding)
 }
 
