@@ -125,6 +125,15 @@ pub fn compiler_binding(
 /// provenance at a call site; signatures remain validated separately against
 /// the parsed standard source surface.
 pub fn compiler_binding_for_member(module: &str, name: &str) -> Option<&'static str> {
+    // These are private implementation leaves, callable only while checking
+    // the compiler-bundled source file. They are intentionally absent from
+    // `registry()`, which describes the public package surface.
+    if let ("stdout", "write_line") = (module, name) {
+        return Some("std.io.stdout.write_line");
+    }
+    if let ("stderr", "write_line") = (module, name) {
+        return Some("std.io.stderr.write_line");
+    }
     registry()
         .into_iter()
         .find(|entry| entry.key.module == module && entry.key.name == name)

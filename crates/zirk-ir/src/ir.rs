@@ -1179,10 +1179,6 @@ pub enum InstKind {
         enum_id: u32,
     },
 
-    /// `stdin.read_line()`: the nullable convenience projection of a line
-    /// read. A received line is present; EOF and an input failure are absent.
-    StdinReadLine,
-
     /// `stdin.read_line_result()`: performs one real line read (native
     /// process stdin, or the interpreter's injected bounded fixture) and
     /// returns the already-tagged `ReadResult<String>` value directly.

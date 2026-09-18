@@ -23,6 +23,11 @@ use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
     pub functions: HashMap<String, Signature>,
+    /// Compiler-bundled standard-stream implementation modules, keyed by
+    /// their source file. Lowering uses this only to give their generated
+    /// functions collision-free internal symbols and to select their private
+    /// host leaves; it is never a language-level capability.
+    pub standard_stream_source_modules: HashMap<zirk_diagnostics::FileId, String>,
     /// Declared enums, indexed by the id their [`Base::Enum`] carries.
     pub enums: Vec<EnumType>,
     /// Declared classes, indexed by the id their [`Base::Class`] carries.
@@ -580,9 +585,18 @@ struct Checker<'a> {
     /// compiler-owned `std.io` package. The parser represents these calls
     /// with a compact output node, so resolution must retain this distinction
     /// and never grant that implementation to an equally named user export.
-    standard_output_imports: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    ///
+    /// Keyed by member name to the set of streams that opened it: a file
+    /// commonly imports both `stdout` and `stderr`, and each independently
+    /// opens `print`/`println`, so a single winning stream per member would
+    /// silently drop whichever import was recorded first.
+    standard_output_imports: HashMap<zirk_diagnostics::FileId, HashMap<String, HashSet<String>>>,
     /// Standard stream bindings visible under their written import names.
     standard_stream_imports: HashMap<zirk_diagnostics::FileId, HashMap<String, String>>,
+    /// Compiler-bundled `std.io` implementation files, keyed by file. Calls
+    /// made *inside* those files may reach the private host leaf operations
+    /// without requiring those implementation details to become Zirk syntax.
+    standard_stream_source_modules: HashMap<zirk_diagnostics::FileId, String>,
     /// Provenance selected for each checked stream call.
     standard_stream_calls: HashMap<Span, String>,
     /// Bare names opened by more than one imported module. They deliberately
@@ -1008,6 +1022,7 @@ impl<'a> Checker<'a> {
             imported: HashMap::new(),
             standard_output_imports: HashMap::new(),
             standard_stream_imports: HashMap::new(),
+            standard_stream_source_modules: HashMap::new(),
             standard_stream_calls: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
@@ -1353,6 +1368,7 @@ impl<'a> Checker<'a> {
         let type_map = self.build_type_map(program);
         CheckedProgram {
             functions: self.functions,
+            standard_stream_source_modules: self.standard_stream_source_modules,
             enums: self.enums,
             classes: self.classes,
             contracts: self.contracts,
@@ -1569,6 +1585,16 @@ impl<'a> Checker<'a> {
     fn record_imports(&mut self, program: &Program) {
         self.module_files
             .extend(program.modules.iter().map(|module| module.body.span.file));
+        for module in &program.modules {
+            let file = module.body.span.file;
+            let source_name = self.sources.file(file).name();
+            if (source_name.contains("/stdlib/std/io/") || source_name.starts_with("std.io/"))
+                && matches!(module.name.name.as_str(), "stdin" | "stdout" | "stderr")
+            {
+                self.standard_stream_source_modules
+                    .insert(file, module.name.name.clone());
+            }
+        }
         let module_members: HashMap<String, Vec<String>> = program
             .modules
             .iter()
@@ -1698,7 +1724,9 @@ impl<'a> Checker<'a> {
                                 self.standard_output_imports
                                     .entry(import.span.file)
                                     .or_default()
-                                    .insert(member.clone(), imported_module.to_string());
+                                    .entry(member.clone())
+                                    .or_default()
+                                    .insert(imported_module.to_string());
                             }
                             if let Some(binding) =
                                 crate::stdlib::compiler_binding_for_member(imported_module, member)
@@ -10774,10 +10802,13 @@ impl<'a> Checker<'a> {
                     .standard_output_imports
                     .get(&e.span.file)
                     .and_then(|names| names.get(member));
-                let allowed = match e.stream.as_deref() {
-                    Some(stream) => opened_stream.is_some_and(|opened| opened == stream),
-                    None => opened_stream.is_some(),
-                };
+                let allowed = self
+                    .standard_stream_source_modules
+                    .contains_key(&e.span.file)
+                    || match e.stream.as_deref() {
+                        Some(stream) => opened_stream.is_some_and(|opened| opened.contains(stream)),
+                        None => opened_stream.is_some_and(|opened| !opened.is_empty()),
+                    };
                 if e.requires_import && !allowed {
                     self.error(codes::UNDECLARED_NAME, e.span, format!("`{}` is not available in this file", e.stream.as_deref().unwrap_or(if e.newline { "println" } else { "print" })), "stream modules must be imported before their members can be called", Some("import `{ stdout }` from `std.io`, then call `stdout.println(...)` or `println(...)`".into()));
                 }
@@ -13718,6 +13749,23 @@ impl<'a> Checker<'a> {
         // object-field lookup, preserving the declaration's actual type.
         if let Some(qualified) = self.imported_module_member(expr) {
             return self.check_path(&qualified);
+        }
+
+        if let Expr::Path(module) = &*expr.object
+            && matches!(module.name.as_str(), "stdout" | "stderr")
+            && matches!(expr.name.name.as_str(), "print" | "println" | "flush")
+        {
+            self.error(
+                codes::UNDECLARED_NAME,
+                module.span,
+                format!("`{}` is not available in this file", module.name),
+                "stream modules must be imported before their members can be called",
+                Some(format!(
+                    "import `{{ {} }}` from `std.io` first",
+                    module.name
+                )),
+            );
+            return Type::UNKNOWN;
         }
 
         // A base that names a declared enum is a variant access. `?.` makes
@@ -18149,6 +18197,74 @@ impl<'a> Checker<'a> {
                 .cloned()
         {
             self.standard_stream_calls.insert(expr.span, binding);
+        } else if let Expr::Path(name) = &*expr.callee
+            && let Some(module) = self.standard_stream_source_modules.get(&expr.span.file)
+            && let Some(binding) = crate::stdlib::compiler_binding_for_member(module, &name.name)
+        {
+            // Only standard-library implementation source can name a host
+            // leaf without importing it. A user file with the same short
+            // name never reaches this branch.
+            self.standard_stream_calls.insert(expr.span, binding.into());
+        }
+
+        // `stdout` and `stderr` accept every printable value, while their
+        // Zirk implementation receives the compiler-rendered `String` list.
+        // Keep that ergonomic public contract here instead of requiring a
+        // lossy implicit conversion in ordinary function-argument checking.
+        if matches!(
+            self.standard_stream_calls
+                .get(&expr.span)
+                .map(String::as_str),
+            Some(
+                "std.io.stdout.print"
+                    | "std.io.stdout.println"
+                    | "std.io.stderr.print"
+                    | "std.io.stderr.println"
+            )
+        ) {
+            if let Expr::Field(field) = &*expr.callee
+                && let Some(binding) = self.standard_stream_calls.get(&expr.span).cloned()
+            {
+                // Output calls return early to apply their printable-value
+                // rule, before ordinary module-member redirection would
+                // record an alias. Preserve the resolved target for IR
+                // lowering nonetheless.
+                self.aliases.insert(field.name.span, binding);
+            }
+            self.reject_in_parallel_region(expr.span, "standard stream output");
+            for arg in &expr.args {
+                if arg.is_spread {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        arg.span,
+                        "spreading arguments into standard stream output is not supported yet",
+                        "each output argument is rendered independently before calling the Zirk stream implementation",
+                        Some("pass the values explicitly".into()),
+                    );
+                } else {
+                    let ty = self.check_expr(&arg.value);
+                    self.require_printable(ty, arg.value.span());
+                }
+            }
+            return Type::VOID;
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(module) = &*field.object
+            && matches!(module.name.as_str(), "stdout" | "stderr")
+            && matches!(field.name.name.as_str(), "print" | "println" | "flush")
+        {
+            self.error(
+                codes::UNDECLARED_NAME,
+                module.span,
+                format!("`{}` is not available in this file", module.name),
+                "stream modules must be imported before their members can be called",
+                Some(format!(
+                    "import `{{ {} }}` from `std.io` first",
+                    module.name
+                )),
+            );
+            return Type::UNKNOWN;
         }
 
         if matches!(&*expr.callee, Expr::Super(_)) {

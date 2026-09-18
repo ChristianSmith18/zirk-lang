@@ -4,20 +4,89 @@
 //! expected shape, and that it passes the verifier. The second check is what
 //! catches structural bugs the first one would let through.
 
+use zirk_ast::{Ident, ModuleDecl};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::*;
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
 use zirk_sema::check;
 
+fn bundled_standard_package(
+    sources: &mut SourceMap,
+    sink: &mut DiagnosticSink,
+) -> zirk_ast::Program {
+    let file = sources.add(SourceFile::new(
+        "std.io/package.zrk",
+        include_str!("../../../stdlib/std/io/package.zrk"),
+    ));
+    let tokens = tokenize(sources.file(file), sink);
+    parse(sources.file(file), &tokens, sink)
+}
+
+fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) -> Vec<ModuleDecl> {
+    [
+        ("stdin", include_str!("../../../stdlib/std/io/stdin.zrk")),
+        ("stdout", include_str!("../../../stdlib/std/io/stdout.zrk")),
+        ("stderr", include_str!("../../../stdlib/std/io/stderr.zrk")),
+    ]
+    .into_iter()
+    .map(|(name, source)| {
+        let file = sources.add(SourceFile::new(format!("std.io/{name}.zrk"), source));
+        let tokens = tokenize(sources.file(file), sink);
+        let body = parse(sources.file(file), &tokens, sink);
+        ModuleDecl {
+            name: Ident::new(name, body.span),
+            shared: true,
+            span: body.span,
+            body: Box::new(body),
+        }
+    })
+    .collect()
+}
+
 /// Runs the full frontend and lowers, asserting the IR is well formed.
+///
+/// Standard stream calls (`stdout.println`, `stderr.print`, ...) require an
+/// explicit `std.io` import; source using one is automatically prefixed with
+/// the import and checked alongside the compiler-bundled `std.io` modules.
 fn compile(source_text: &str) -> Module {
+    let needs_streams = ["stdout.", "stderr.", "stdin."]
+        .iter()
+        .any(|prefix| source_text.contains(prefix));
+    let source_text = if needs_streams {
+        format!("import {{ stdout, stderr, stdin }} from std.io;\n{source_text}")
+    } else {
+        source_text.to_string()
+    };
+
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new("test.zrk", source_text));
     let source = sources.entry();
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
-    let program = parse(source, &tokens, &mut sink);
+    let mut program = parse(source, &tokens, &mut sink);
+    if needs_streams {
+        let standard_package = bundled_standard_package(&mut sources, &mut sink);
+        let standard_modules = bundled_standard_modules(&mut sources, &mut sink);
+        program.enums.extend(standard_package.enums);
+        program.classes.extend(standard_package.classes);
+        program.contracts.extend(standard_package.contracts);
+        program.type_aliases.extend(standard_package.type_aliases);
+        for module in &standard_modules {
+            program.enums.extend(module.body.enums.iter().cloned());
+            program.classes.extend(module.body.classes.iter().cloned());
+            program
+                .contracts
+                .extend(module.body.contracts.iter().cloned());
+            program
+                .functions
+                .extend(module.body.functions.iter().cloned());
+            program
+                .type_aliases
+                .extend(module.body.type_aliases.iter().cloned());
+        }
+        program.modules.extend(standard_modules);
+    }
     let checked = check(&sources, &program, &mut sink);
 
     assert!(
@@ -748,12 +817,12 @@ fn a_call_lowers_with_its_arguments() {
 }
 
 #[test]
-fn println_lowers_to_its_own_instruction() {
+fn println_calls_its_zirk_standard_library_body() {
     let f = main_body("stdout.println(\"hola\");");
-    let has_println = instructions(&f)
+    let has_call = instructions(&f)
         .iter()
-        .any(|i| matches!(i, InstKind::Println(_)));
-    assert!(has_println);
+        .any(|i| matches!(i, InstKind::Call { callee, .. } if callee == "std.io.stdout.println"));
+    assert!(has_call);
 }
 
 #[test]
@@ -764,8 +833,8 @@ fn a_discarded_println_produces_no_value() {
         .blocks
         .iter()
         .flat_map(|b| &b.instructions)
-        .find(|i| matches!(i.kind, InstKind::Println(_)))
-        .expect("there must be a println");
+        .find(|i| matches!(&i.kind, InstKind::Call { callee, .. } if callee == "std.io.stdout.println"))
+        .expect("there must be a call to the Zirk println body");
 
     assert!(
         println.result.is_none(),
@@ -832,16 +901,16 @@ fn println_always_receives_a_string() {
             .iter()
             .flat_map(|b| &b.instructions)
             .find_map(|i| match &i.kind {
-                InstKind::Println(operand) => Some(*operand),
+                InstKind::ListAdd { value, .. } => Some(*value),
                 _ => None,
             })
-            .unwrap_or_else(|| panic!("there must be a println in `{body}`"));
+            .unwrap_or_else(|| panic!("there must be a rendered argument in `{body}`"));
 
         let operand_type = types
             .iter()
             .find(|(result, _, _)| *result == Some(printed.0))
             .map(|(_, _, ty)| *ty)
-            .unwrap_or_else(|| panic!("the operand of println is undefined in `{body}`"));
+            .unwrap_or_else(|| panic!("the rendered argument is undefined in `{body}`"));
 
         assert_eq!(
             operand_type,
@@ -989,16 +1058,14 @@ fn the_ir_names_no_memory_strategy() {
 fn the_reference_program_of_the_roadmap_lowers() {
     let module = compile("fn main(): Void {\n    stdout.println(\"Hola desde Zirk\");\n}");
 
-    assert_eq!(
-        module.strings,
-        native_failure_codes_then(["Hola desde Zirk"])
-    );
+    assert!(module.strings.starts_with(&native_failure_codes_then([])));
+    assert!(module.strings.contains(&"Hola desde Zirk".into()));
     let main = module.function("main").expect("main exists");
     assert_eq!(main.return_type, IrType::Void);
     assert!(
-        instructions(main)
-            .iter()
-            .any(|i| matches!(i, InstKind::Println(_)))
+        instructions(main).iter().any(
+            |i| matches!(i, InstKind::Call { callee, .. } if callee == "std.io.stdout.println")
+        )
     );
 }
 

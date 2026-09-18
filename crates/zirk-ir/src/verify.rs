@@ -952,16 +952,6 @@ fn verify_instruction(
             expect(inst.ty, IrType::Enum(*enum_id), position, "Flush", report);
         }
 
-        InstKind::StdinReadLine => {
-            expect(
-                inst.ty,
-                IrType::Nullable(crate::ir::Nullable::String),
-                position,
-                "StdinReadLine",
-                report,
-            );
-        }
-
         InstKind::StdinReadLineResult { enum_id, .. } | InstKind::StdinReadChar { enum_id, .. } => {
             expect(
                 inst.ty,
@@ -2576,9 +2566,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::PrintlnStderr(operand)
         | InstKind::PrintStderr(operand) => vec![*operand],
         InstKind::FlushStdout { .. } | InstKind::FlushStderr { .. } => Vec::new(),
-        InstKind::StdinReadLine
-        | InstKind::StdinReadLineResult { .. }
-        | InstKind::StdinReadChar { .. } => Vec::new(),
+        InstKind::StdinReadLineResult { .. } | InstKind::StdinReadChar { .. } => Vec::new(),
         InstKind::StdinReadBytes { max, .. } => vec![*max],
         InstKind::StdinReadExact { count, .. } => vec![*count],
         InstKind::NullValue(_) => Vec::new(),

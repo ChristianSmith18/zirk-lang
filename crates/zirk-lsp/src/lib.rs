@@ -671,7 +671,7 @@ mod tests {
         dir
     }
 
-    const EXAMPLE: &str = "fn square(n: Int32) {\n    return n * n;\n}\n\nfn main() {\n    stdout.println(square(7));\n}\n";
+    const EXAMPLE: &str = "import { stdout } from std.io;\n\nfn square(n: Int32) {\n    return n * n;\n}\n\nfn main() {\n    stdout.println(square(7));\n}\n";
 
     #[test]
     fn analysis_reports_diagnostics_for_broken_text() {

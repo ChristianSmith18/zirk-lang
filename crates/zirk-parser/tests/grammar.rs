@@ -747,13 +747,6 @@ fn valid_print_and_println_accept_multiple_or_zero_arguments() {
     assert_eq!(shape(&expression("stdout.println()")), "println()");
 }
 
-#[test]
-fn invalid_other_stdout_method() {
-    let output = errors("fn main(): Void { stdout.write(\"x\"); }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()));
-    assert!(output.contains("Phase 7"));
-}
-
 // --- Constructs from later phases ------------------------------------
 
 #[test]

@@ -4444,50 +4444,11 @@ impl<'a> Parser<'a> {
 
     /// What may follow an identifier: a call, a standard-stream print, or nothing.
     fn parse_after_ident(&mut self, ident: Ident) -> Option<Expr> {
-        // Output has a dedicated expression so values can be rendered through
-        // `to_string()` before reaching the target. `::` is intentionally not
-        // accepted here: it selects a module only in an import path; calls use
-        // ordinary member access (`stdout.println(...)`).
-        // Only `print`/`println` get the dedicated rendering node; any other
-        // member (`flush`, and stdin's read family accessed the same way)
-        // falls through to the ordinary member-chain parsing below, which
-        // produces a plain field access/call the checker and lowering
-        // resolve like any other module member.
-        let stream_method_follows = matches!(ident.name.as_str(), "stdout" | "stderr")
-            && matches!(self.peek(), TokenKind::Dot)
-            && matches!(self.peek_at(1), TokenKind::Identifier(name) if matches!(name.as_str(), "print" | "println"));
-        if stream_method_follows {
-            self.pos += 1;
-            let method = self.expect_identifier("after standard stream `.`")?;
-
-            self.expect(&TokenKind::LParen, "after `println`");
-            let mut args = Vec::new();
-            if !matches!(self.peek(), TokenKind::RParen) {
-                loop {
-                    args.push(self.parse_expr()?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-            }
-            let end = self.peek_span();
-            self.expect(&TokenKind::RParen, "to close the call");
-
-            return Some(Expr::Println(PrintlnExpr {
-                args,
-                newline: method.name == "println",
-                // Every standard stream is an imported module. Dot notation
-                // selects a member at runtime, but it never introduces a
-                // global `stdout`/`stderr` name.
-                requires_import: true,
-                stream: Some(ident.name),
-                span: ident.span.to(end),
-            }));
-        }
-
-        // Once a module publishes `println`/`print`, its members are opened
-        // by import. Keep the same IR node as the compatibility spelling, but
-        // retain the fact that this form needs resolver authorization.
+        // Opened `print`/`println` retain a dedicated expression so values
+        // can be rendered through `to_string()` before reaching the host
+        // leaf. Qualified calls (`stdout.println(...)`) deliberately fall
+        // through to ordinary module-member resolution below: this lets the
+        // compiler execute the Zirk body published by that module.
         if matches!(ident.name.as_str(), "print" | "println")
             && matches!(self.peek(), TokenKind::LParen)
         {

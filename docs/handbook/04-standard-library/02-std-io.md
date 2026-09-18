@@ -7,7 +7,7 @@
 import { stdin, stdout, stderr } from std.io;
 
 fn main(): Void {
-    println("ready");          // opened from stdout
+    println("ready"); // opened from stdout
     stdout.println("explicit");
     stderr.println("warning");
 }
@@ -31,6 +31,12 @@ fn flush(): Result<Void, IoError>;
 ending. Arguments are rendered left-to-right, joined by one space, and preserve
 call order. `stdout` and `stderr` have separate destinations. `print()` emits
 nothing; `println()` emits only a line ending.
+
+`println` is implemented in the bundled Zirk source: it composes the rendered
+arguments into one line and delegates only the final stream write to the
+compiler runtime. `read_line()` likewise is Zirk code that maps
+`read_line_result()` into `String?`. Those runtime boundaries have no keyword
+or callable name available to application packages.
 
 ```zirk
 stdout.print("count", 2);  // count 2

@@ -3565,6 +3565,9 @@ impl<'a> FunctionLowering<'a> {
     /// The checker recorded the resolution, so lowering does not need to know
     /// that aliases exist.
     fn callee_name(&self, call: &ast::CallExpr) -> String {
+        if let Some(binding) = self.checked.standard_stream_calls.get(&call.span) {
+            return binding.clone();
+        }
         if let ast::Expr::Field(field) = &*call.callee
             && self.checked.aliases.contains_key(&field.name.span)
         {
@@ -3581,6 +3584,17 @@ impl<'a> FunctionLowering<'a> {
             .get(&at)
             .cloned()
             .unwrap_or_else(|| written.to_string())
+    }
+
+    /// Internal symbol for a compiler-bundled stream implementation. The
+    /// source-level name remains `stdout.println` or `stderr.println`; the
+    /// qualified IR name prevents their equally named bodies from colliding.
+    fn standard_stream_function_symbol(&self, function: &ast::FnDecl) -> String {
+        self.checked
+            .standard_stream_source_modules
+            .get(&function.name.span.file)
+            .map(|module| format!("std.io.{module}.{}", function.name.name))
+            .unwrap_or_else(|| function.name.name.clone())
     }
 
     fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
@@ -4338,7 +4352,7 @@ impl<'a> FunctionLowering<'a> {
         let lifted = std::mem::take(&mut self.lifted);
         let gc_roots = gc_roots_of(self.module, &self.slots);
         let lowered = Function {
-            name: function.name.name.clone(),
+            name: self.standard_stream_function_symbol(function),
             params,
             return_type: self.return_type,
             slots: self.slots,
@@ -7310,6 +7324,7 @@ impl<'a> FunctionLowering<'a> {
                         &*e.callee,
                         ast::Expr::Field(field)
                             if self.checked.aliases.contains_key(&field.name.span)
+                                || self.checked.standard_stream_calls.contains_key(&e.span)
                     )
                     && self.is_callable_call(e) =>
             {
@@ -7393,7 +7408,9 @@ impl<'a> FunctionLowering<'a> {
                 // namespace path as though it were a value.
                 if matches!(
                     &*e.callee,
-                    ast::Expr::Field(field) if self.checked.aliases.contains_key(&field.name.span)
+                    ast::Expr::Field(field)
+                        if self.checked.aliases.contains_key(&field.name.span)
+                            || self.checked.standard_stream_calls.contains_key(&e.span)
                 ) {
                     let name = self.callee_name(e);
                     let args = self.lower_args(e);
@@ -21916,17 +21933,22 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_print_expr(e, expr.span());
             }
             ast::Expr::Call(e) if self.checked.standard_stream_calls.contains_key(&e.span) => {
-                let result = self
-                    .try_lower_stdio_host_call(e, expr.span())
-                    .expect("checked standard stream call has a binding");
-                let returns = self.type_of_operand(result);
-                self.lower_throws_check(result, returns, expr.span());
+                if let Some(result) = self.try_lower_stdio_host_call(e, expr.span()) {
+                    let returns = self.type_of_operand(result);
+                    self.lower_throws_check(result, returns, expr.span());
+                } else {
+                    // Source-level wrappers such as `stdin.read_line` and
+                    // `stdout.println` are ordinary calls even though their
+                    // inner leaves carry std.io provenance.
+                    self.lower_expr(expr);
+                }
             }
             ast::Expr::Call(e)
                 if matches!(
                     &*e.callee,
                     ast::Expr::Field(field)
                         if self.checked.aliases.contains_key(&field.name.span)
+                            || self.checked.standard_stream_calls.contains_key(&e.span)
                 ) =>
             {
                 if let Some(result) = self.try_lower_stdio_host_call(e, expr.span()) {
@@ -23287,7 +23309,13 @@ impl<'a> FunctionLowering<'a> {
         // that same empty string and therefore nothing.
         let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
         let name = if expr.newline { "println" } else { "print" };
-        let stream = expr.stream.as_deref().unwrap_or("stdout");
+        let stream = self
+            .checked
+            .standard_stream_source_modules
+            .get(&expr.span.file)
+            .map(String::as_str)
+            .or(expr.stream.as_deref())
+            .unwrap_or("stdout");
         let binding = zirk_sema::stdlib::compiler_binding(
             "std.io",
             stream,
@@ -23306,11 +23334,9 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Intercepts a semantically proven `std.io` call before it would
-    /// otherwise lower to a generic `InstKind::Call`, for the operations
-    /// that need real host I/O rather than the ordinary (stub) Zirk source
-    /// body reachable through `stdlib/std/io/{stdout,stderr,stdin}.zrk`
-    /// (`add-stdin-stdout-standard-library`, design D4): `stdout.flush()`,
-    /// `stderr.flush()`, and `stdin`'s `read_line_result`/`read_char`/
+    /// otherwise lower to a generic `InstKind::Call`, for the minimal host
+    /// leaves that cannot be expressed in Zirk source: `print`, `flush`, and
+    /// `stdin`'s `read_line_result`/`read_char`/
     /// `read_bytes`/`read_exact`.
     ///
     /// Returns `None` for every other module-member call, which falls
@@ -23324,7 +23350,36 @@ impl<'a> FunctionLowering<'a> {
         let name = binding.rsplit_once('.').map(|(_, name)| name)?;
         let returns = self.signature_return(name);
         Some(match binding {
-            "std.io.stdin.read_line" => self.emit(InstKind::StdinReadLine, returns, span),
+            "std.io.stdout.print" | "std.io.stderr.print" => {
+                let rendered = ast::PrintlnExpr {
+                    args: e.args.iter().map(|arg| arg.value.clone()).collect(),
+                    newline: false,
+                    requires_import: false,
+                    stream: binding.strip_prefix("std.io.").and_then(|name| {
+                        name.split_once('.').map(|(stream, _)| stream.to_string())
+                    }),
+                    span,
+                };
+                self.lower_print_expr(&rendered, span)
+            }
+            "std.io.stdout.write_line" | "std.io.stderr.write_line" => {
+                let text = self.lower_expr_as(&e.args[0].value, IrType::String);
+                match binding {
+                    "std.io.stdout.write_line" => self.emit_effect(InstKind::Println(text), span),
+                    "std.io.stderr.write_line" => {
+                        self.emit_effect(InstKind::PrintlnStderr(text), span)
+                    }
+                    _ => unreachable!(),
+                }
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            // `println` is Zirk source. Its body renders the list supplied by
+            // `lower_print_call_args` through the private `print` leaf.
+            "std.io.stdout.println" | "std.io.stderr.println" => return None,
+            // `read_line` is ordinary Zirk source: its body projects the
+            // leaf `read_line_result()` outcome into `String?`. Only that
+            // leaf reaches the host runtime.
+            "std.io.stdin.read_line" => return None,
             "std.io.stdout.flush" | "std.io.stderr.flush" => {
                 let IrType::Enum(enum_id) = returns else {
                     unreachable!("every intercepted std.io flush returns an enum")
@@ -23440,6 +23495,16 @@ impl<'a> FunctionLowering<'a> {
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
         let name = self.callee_name(call);
 
+        if matches!(
+            self.checked
+                .standard_stream_calls
+                .get(&call.span)
+                .map(String::as_str),
+            Some("std.io.stdout.println" | "std.io.stderr.println")
+        ) {
+            return vec![self.lower_print_call_args(call)];
+        }
+
         // `extern "C" fn` (roadmap Phase 4e, `ADR-015`): a single-item
         // declaration with no optional/default/variadic/named parameters —
         // every argument is positional, so this needs none of the
@@ -23457,6 +23522,10 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .functions
             .get(&name)
+            .or_else(|| {
+                name.rsplit_once('.')
+                    .and_then(|(_, member)| self.checked.functions.get(member))
+            })
             .expect("a verified program only calls declared functions")
             .clone();
 
@@ -23583,6 +23652,48 @@ impl<'a> FunctionLowering<'a> {
             args.push(self.emit(InstKind::Load(list_slot), list_ty, call.span));
         }
         args
+    }
+
+    /// Materializes the rendered argument list consumed by the Zirk-level
+    /// `stdout.println`/`stderr.println` bodies. The public calls accept all
+    /// printable values; the library implementation deliberately works only
+    /// with `String`, keeping host rendering at this private compiler seam.
+    fn lower_print_call_args(&mut self, call: &ast::CallExpr) -> Operand {
+        let element = Type::of(Base::String);
+        let list_id =
+            self.checked
+                .list_types
+                .iter()
+                .position(|&candidate| candidate == element)
+                .expect("the checker interns the standard stream String list") as u32;
+        let list_ty = IrType::List(list_id);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            list_ty,
+            call.span,
+        );
+        let list_slot = self.spill(list, list_ty, call.span);
+
+        for arg in &call.args {
+            // Semantic checking rejects spreads for now, so lowering can keep
+            // the rendering boundary explicit rather than silently rendering
+            // the iterable container itself.
+            debug_assert!(!arg.is_spread);
+            let value = self.lower_render_operand(&arg.value, call.span);
+            let text = self.lower_to_string_expr(&arg.value, value, call.span);
+            let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+            self.emit_effect(
+                InstKind::ListAdd {
+                    receiver,
+                    value: text,
+                },
+                call.span,
+            );
+        }
+
+        self.emit(InstKind::Load(list_slot), list_ty, call.span)
     }
 
     /// Lowers a checked argument list against an already-resolved parameter
@@ -24130,6 +24241,11 @@ impl<'a> FunctionLowering<'a> {
 
     fn signature_return(&self, name: &str) -> IrType {
         if let Some(signature) = self.checked.functions.get(name) {
+            return self.ir_type(signature.returns);
+        }
+        if let Some((_, member)) = name.rsplit_once('.')
+            && let Some(signature) = self.checked.functions.get(member)
+        {
             return self.ir_type(signature.returns);
         }
         // `extern "C" fn` (roadmap Phase 4e, design D7) — a call to one

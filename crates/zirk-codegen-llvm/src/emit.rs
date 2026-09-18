@@ -3177,36 +3177,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(self.build_flush_result(*enum_id, status))
             }
 
-            ir::InstKind::StdinReadLine => {
-                let (kind, _error, payload) =
-                    self.call_stdin_read(self.runtime.io_stdin_read_line, &[]);
-                let present = self
-                    .builder
-                    .build_int_compare(
-                        IntPredicate::EQ,
-                        kind,
-                        self.context.i32_type().const_zero(),
-                        "stdin.has_line",
-                    )
-                    .expect("stdin line kind comparison");
-                let nullable = self
-                    .llvm_type(ir::IrType::Nullable(ir::Nullable::String))
-                    .expect("nullable String has an LLVM representation")
-                    .into_struct_type();
-                let value = self
-                    .builder
-                    .build_insert_value(nullable.const_zero(), present, 0, "stdin.line.present")
-                    .expect("nullable line present field")
-                    .into_struct_value();
-                Some(
-                    self.builder
-                        .build_insert_value(value, payload, 1, "stdin.line.payload")
-                        .expect("nullable line payload field")
-                        .into_struct_value()
-                        .into(),
-                )
-            }
-
             ir::InstKind::StdinReadLineResult { enum_id } => {
                 let (kind, error, payload) =
                     self.call_stdin_read(self.runtime.io_stdin_read_line, &[]);
@@ -5348,31 +5318,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         (kind, error, payload)
     }
 
-    /// Builds a value of a fieldless enum (`IoError`'s own representation:
-    /// every variant is a bare unit) whose discriminant is a runtime value
-    /// rather than a literal one `InstKind::BuildEnum` already covers.
-    fn build_fieldless_enum(
-        &mut self,
-        enum_id: u32,
-        discriminant: IntValue<'ctx>,
-    ) -> BasicValueEnum<'ctx> {
-        let layout = self.module.enums[enum_id as usize].clone();
-        let struct_type = enum_struct(
-            self.context,
-            &layout,
-            &self.module.closures,
-            &self.module.values,
-            &self.module.enums,
-        );
-        let built = struct_type.get_undef();
-        let built = self
-            .builder
-            .build_insert_value(built, discriminant, 0, "discriminant")
-            .expect("insert the discriminant")
-            .into_struct_value();
-        built.into()
-    }
-
     /// Builds a `Result<Void, IoError>` value from `stdout.flush`/
     /// `stderr.flush`'s own status code (`0` = `Ok`, `1` = `Error`, matching
     /// `register_native_result_enum`'s `Ok = 0, Error = 1` order) — the only
@@ -5398,16 +5343,17 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // (`InstKind::BuildEnum`'s own arm) — is left undefined: nothing
         // ever reads it.
         let error_field_index = layout.variants[1][0];
-        let ir::IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
-            unreachable!("Result<Void, IoError>'s Error field is an IoError enum")
-        };
+        debug_assert_eq!(
+            layout.fields[error_field_index as usize].ty,
+            ir::IrType::Int(ir::IntWidth::I32),
+            "IoError is a fieldless enum, represented by its i32 discriminant"
+        );
         let io_error_zero = self.context.i32_type().const_zero();
-        let io_error_value = self.build_fieldless_enum(io_error_id, io_error_zero);
         let built = self
             .builder
             .build_insert_value(
                 built,
-                io_error_value,
+                io_error_zero,
                 error_field_index + ENUM_HEADER_FIELDS,
                 "flush.error",
             )
@@ -5466,15 +5412,16 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .into_struct_value();
 
         let error_field_index = layout.variants[error_variant as usize][0];
-        let ir::IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
-            unreachable!("the Error variant's field is an IoError enum")
-        };
-        let io_error_value = self.build_fieldless_enum(io_error_id, error);
+        debug_assert_eq!(
+            layout.fields[error_field_index as usize].ty,
+            ir::IrType::Int(ir::IntWidth::I32),
+            "IoError is a fieldless enum, represented by its i32 discriminant"
+        );
         let built = self
             .builder
             .build_insert_value(
                 built,
-                io_error_value,
+                error,
                 error_field_index + ENUM_HEADER_FIELDS,
                 "stdin.error",
             )

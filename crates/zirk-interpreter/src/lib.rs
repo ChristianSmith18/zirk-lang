@@ -564,6 +564,33 @@ pub enum ExecutionResult {
 /// diagnostics, then decide whether to construct an execution.
 pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
     let mut failures = Vec::new();
+    // Standard-library implementation bodies are bundled into every module,
+    // including stdin's browser-excluded host leaves. Follow ordinary direct
+    // calls from `main` so an unused bundled leaf is not treated as ambient
+    // authority. Other declarations retain the conservative whole-module
+    // review below, preserving the existing diagnostics for user code.
+    let functions_by_name: std::collections::HashMap<&str, &zirk_ir::Function> = module
+        .functions
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect();
+    let mut reachable = std::collections::HashSet::from(["main"]);
+    let mut pending = vec!["main"];
+    while let Some(name) = pending.pop() {
+        let Some(function) = functions_by_name.get(name) else {
+            continue;
+        };
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                if let InstKind::Call { callee, .. } = &instruction.kind
+                    && functions_by_name.contains_key(callee.as_str())
+                    && reachable.insert(callee.as_str())
+                {
+                    pending.push(callee.as_str());
+                }
+            }
+        }
+    }
     // Lowering currently registers a conservative catalog of native helper
     // declarations, including helpers a given module never calls. Browser
     // compatibility is about an actual requested effect, not unused metadata.
@@ -597,6 +624,10 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
         }
     }
     for function in &module.functions {
+        if function.name.starts_with("std.io.stdin.") && !reachable.contains(function.name.as_str())
+        {
+            continue;
+        }
         preflight_type(function.return_type, Some(function.span), &mut failures);
         for slot in &function.slots {
             preflight_type(slot.ty, Some(slot.span), &mut failures);
@@ -2511,10 +2542,6 @@ impl<'module> Interpreter<'module> {
                 // (`add-stdin-stdout-standard-library`, design D3): flushing
                 // it always succeeds.
                 self.build_flush_ok(*enum_id).map(Some)
-            }
-            InstKind::StdinReadLine => {
-                let outcome = zirk_runtime_core::stdin::read_line(&mut HostReader(host));
-                self.build_nullable_line(outcome).map(Some)
             }
             InstKind::StdinReadLineResult { enum_id } => {
                 let outcome = zirk_runtime_core::stdin::read_line(&mut HostReader(host));
@@ -4562,21 +4589,6 @@ impl<'module> Interpreter<'module> {
         }
     }
 
-    /// Implements `stdin.read_line()`'s nullable projection: successful text
-    /// is present, while EOF and input/decoding failures are `null`.
-    fn build_nullable_line(
-        &mut self,
-        outcome: zirk_runtime_core::stdin::TextOutcome,
-    ) -> Result<Value, ExecutionFault> {
-        use zirk_runtime_core::stdin::TextOutcome;
-        match outcome {
-            TextOutcome::Value(text) => Ok(Value::Nullable(Some(Box::new(Value::Heap(
-                self.allocate_string(text)?,
-            ))))),
-            TextOutcome::End | TextOutcome::Error(_) => Ok(Value::Nullable(None)),
-        }
-    }
-
     /// `read_bytes`'s outcome shape.
     fn build_bytes_outcome(
         &mut self,
@@ -5133,8 +5145,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         // on these instructions directly rather than ever attempting to run
         // them, the same way `browser_rejects_reachable_standard_input_
         // before_execution` (`crates/zirk-browser/src/lib.rs`) verifies.
-        InstKind::StdinReadLine
-        | InstKind::StdinReadLineResult { .. }
+        InstKind::StdinReadLineResult { .. }
         | InstKind::StdinReadChar { .. }
         | InstKind::StdinReadBytes { .. }
         | InstKind::StdinReadExact { .. } => BrowserSupport::Excluded,

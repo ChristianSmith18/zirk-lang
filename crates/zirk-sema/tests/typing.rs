@@ -3,20 +3,96 @@
 //! `ZIRK_SPEC_FINAL.md` section 8 requires one valid and one invalid case per
 //! rule. Tests are grouped by rule so that correspondence stays verifiable.
 
+use zirk_ast::{Ident, ModuleDecl};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
 use zirk_sema::{check, codes};
 
-/// Checks a full program expecting no errors.
-fn accepted(source_text: &str) {
+/// Standard stream calls (`stdout.println`, `stderr.print`, ...) require an
+/// explicit `std.io` import (see `add-stdin-stdout-standard-library`). Source
+/// using one is automatically prefixed with the import and checked alongside
+/// the compiler-bundled `std.io` modules, mirroring how
+/// `zirk-browser::check_source` merges them for a program with no
+/// filesystem-backed package loader.
+fn parse_and_check(source_text: &str) -> (SourceMap, DiagnosticSink) {
+    let needs_streams = ["stdout.", "stderr.", "stdin."]
+        .iter()
+        .any(|prefix| source_text.contains(prefix));
+    let source_text = if needs_streams {
+        format!("import {{ stdout, stderr, stdin }} from std.io;\n{source_text}")
+    } else {
+        source_text.to_string()
+    };
+
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new("test.zrk", source_text));
     let source = sources.entry();
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
-    let program = parse(source, &tokens, &mut sink);
+    let mut program = parse(source, &tokens, &mut sink);
+    if needs_streams {
+        let standard_package = bundled_standard_package(&mut sources, &mut sink);
+        let standard_modules = bundled_standard_modules(&mut sources, &mut sink);
+        program.enums.extend(standard_package.enums);
+        program.classes.extend(standard_package.classes);
+        program.contracts.extend(standard_package.contracts);
+        program.type_aliases.extend(standard_package.type_aliases);
+        for module in &standard_modules {
+            program.enums.extend(module.body.enums.iter().cloned());
+            program.classes.extend(module.body.classes.iter().cloned());
+            program
+                .contracts
+                .extend(module.body.contracts.iter().cloned());
+            program
+                .functions
+                .extend(module.body.functions.iter().cloned());
+            program
+                .type_aliases
+                .extend(module.body.type_aliases.iter().cloned());
+        }
+        program.modules.extend(standard_modules);
+    }
     check(&sources, &program, &mut sink);
+    (sources, sink)
+}
+
+fn bundled_standard_package(
+    sources: &mut SourceMap,
+    sink: &mut DiagnosticSink,
+) -> zirk_ast::Program {
+    let file = sources.add(SourceFile::new(
+        "std.io/package.zrk",
+        include_str!("../../../stdlib/std/io/package.zrk"),
+    ));
+    let tokens = tokenize(sources.file(file), sink);
+    parse(sources.file(file), &tokens, sink)
+}
+
+fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) -> Vec<ModuleDecl> {
+    [
+        ("stdin", include_str!("../../../stdlib/std/io/stdin.zrk")),
+        ("stdout", include_str!("../../../stdlib/std/io/stdout.zrk")),
+        ("stderr", include_str!("../../../stdlib/std/io/stderr.zrk")),
+    ]
+    .into_iter()
+    .map(|(name, source)| {
+        let file = sources.add(SourceFile::new(format!("std.io/{name}.zrk"), source));
+        let tokens = tokenize(sources.file(file), sink);
+        let body = parse(sources.file(file), &tokens, sink);
+        ModuleDecl {
+            name: Ident::new(name, body.span),
+            shared: true,
+            span: body.span,
+            body: Box::new(body),
+        }
+    })
+    .collect()
+}
+
+/// Checks a full program expecting no errors.
+fn accepted(source_text: &str) {
+    let (_sources, sink) = parse_and_check(source_text);
 
     assert!(
         !sink.has_errors(),
@@ -27,13 +103,7 @@ fn accepted(source_text: &str) {
 
 /// Checks a full program expecting errors, returning them rendered.
 fn rejected(source_text: &str) -> String {
-    let mut sources = SourceMap::new();
-    sources.add(SourceFile::new("test.zrk", source_text));
-    let source = sources.entry();
-    let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(source, &mut sink);
-    let program = parse(source, &tokens, &mut sink);
-    check(&sources, &program, &mut sink);
+    let (_sources, sink) = parse_and_check(source_text);
 
     assert!(sink.has_errors(), "an error was expected and none occurred");
     sink.render(RenderStyle::Human)
@@ -51,13 +121,7 @@ fn accepted_body(body: &str) {
 /// Checks a full program expecting no errors, returning the rendered
 /// diagnostics so warnings can be asserted on.
 fn accepted_with_warnings(source_text: &str) -> String {
-    let mut sources = SourceMap::new();
-    sources.add(SourceFile::new("test.zrk", source_text));
-    let source = sources.entry();
-    let mut sink = DiagnosticSink::new();
-    let tokens = tokenize(source, &mut sink);
-    let program = parse(source, &tokens, &mut sink);
-    check(&sources, &program, &mut sink);
+    let (_sources, sink) = parse_and_check(source_text);
 
     let rendered = sink.render(RenderStyle::Human);
     assert!(!sink.has_errors(), "no errors were expected:\n{rendered}");
