@@ -11,3 +11,4 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
 fi
 ./scripts/check-browser-package-size.sh "$package"
 node ./scripts/verify-browser-package.mjs "$package" "$(git rev-parse HEAD)"
+node ./scripts/verify-browser-package-behavior.mjs "$package" >/dev/null

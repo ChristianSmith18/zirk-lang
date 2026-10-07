@@ -75,6 +75,7 @@ const manifest = {
     node: process.version,
     rustc: commandVersion("rustc", ["--version"]),
     wasmBindgen: commandVersion("wasm-bindgen", ["--version"]),
+    wasmOpt: commandVersion("wasm-opt", ["--version"]),
   },
   files,
 };

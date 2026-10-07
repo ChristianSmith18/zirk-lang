@@ -16,6 +16,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
 fi
 readonly revision="$(git rev-parse HEAD)"
 ./scripts/ensure-wasm-bindgen.sh
+./scripts/ensure-wasm-opt.sh
 rustup target add "$target"
 cargo build --locked --release -p zirk-browser --target "$target"
 
@@ -25,6 +26,24 @@ if [[ -e "$output" ]]; then
 fi
 mkdir -p "$output"
 wasm-bindgen --target web --typescript --out-dir "$output" --out-name zirk_browser "$wasm"
+
+# Size optimization must not change behavior. Capture the observable behavior
+# of the unoptimized binary, optimize in place, and require an identical digest
+# over every conformance fixture and valid corpus program.
+unoptimized="$(mktemp)"
+trap 'rm -f "$unoptimized"' EXIT
+cp "$output/zirk_browser_bg.wasm" "$unoptimized"
+before="$(node ./scripts/verify-browser-package-behavior.mjs "$output" "$unoptimized")"
+wasm-opt -Oz \
+    --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+    --enable-mutable-globals --enable-reference-types --enable-multivalue \
+    "$unoptimized" -o "$output/zirk_browser_bg.wasm"
+after="$(node ./scripts/verify-browser-package-behavior.mjs "$output")"
+if [[ "$before" != "$after" ]]; then
+    printf 'wasm-opt changed observable behavior\nbefore: %s\nafter:  %s\n' "$before" "$after" >&2
+    exit 1
+fi
+
 cp LICENSE "$output/LICENSE"
 cp crates/zirk-browser/browser-api.d.ts "$output/browser-api.d.ts"
 node ./scripts/write-browser-manifest.mjs "$output" "$revision"

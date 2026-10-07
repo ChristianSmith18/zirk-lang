@@ -146,13 +146,18 @@ LLVM. Install the pinned binding tool and build only from a clean revision:
 
 ```sh
 ./scripts/ensure-wasm-bindgen.sh
+./scripts/ensure-wasm-opt.sh   # binaryen version_133 (brew install binaryen)
 ./scripts/audit-browser-dependencies.sh
 ./scripts/build-browser-package.sh /absolute/empty/output/zirk-browser
 ./scripts/check-browser-package-size.sh /absolute/empty/output/zirk-browser
 node ./scripts/smoke-browser-package.mjs /absolute/empty/output/zirk-browser
 ```
 
-The handoff procedure and provenance requirements are in
+The build runs `wasm-opt -Oz` (binaryen `version_133`) and refuses to continue
+unless the optimized binary is observably identical to the unoptimized one over
+every conformance fixture and valid corpus program
+(`scripts/verify-browser-package-behavior.mjs`). The handoff procedure and
+provenance requirements are in
 [`browser-package-handoff.md`](./browser-package-handoff.md). The generated
 artifact is for a module worker and has no filesystem, network, storage, DOM,
 clock, random, shell, or process authority.

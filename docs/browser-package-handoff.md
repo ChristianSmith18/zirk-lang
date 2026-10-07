@@ -39,3 +39,8 @@ and the native corpus (see `docs/browser-oop-coverage.md`).
 The manifest also carries `trace`, which describes the opt-in execution trace
 (event kinds, bounds, `effect: "observation"`). Wire a consumer to it only
 through the `run` request's `trace` option; see ADR-022.
+
+The build optimizes the WASM with `wasm-opt -Oz` and proves the result is
+observably identical to the unoptimized binary; `verify-browser-package.sh`
+reruns the same behavioral suite against the delivered package. The manifest
+records the `wasm-opt` version under `tools`.
