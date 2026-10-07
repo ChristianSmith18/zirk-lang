@@ -751,7 +751,6 @@ fn excluded_feature(kind: &InstKind) -> (String, String) {
         .unwrap_or_default()
         .to_string();
     let feature = match variant.as_str() {
-        "Clone" => "deep `clone()`",
         "ScopeEnter" | "ScopeExit" | "BranchStart" => {
             "structured concurrency (`concurrent`, `spawn`)"
         }
@@ -2096,6 +2095,12 @@ impl<'module> Interpreter<'module> {
                     .allocate(entry, std::mem::size_of::<HeapEntry>() + bytes, self.limits)
                     .map(|id| Some(Value::Heap(id)))
                     .map_err(ExecutionFault::Limit)
+            }
+            InstKind::Clone(operand) => {
+                let value = self
+                    .value(frame_index, *operand)
+                    .map_err(ExecutionFault::Internal)?;
+                self.deep_clone(value).map(Some)
             }
             InstKind::MapNew { .. } => self
                 .heap
@@ -4285,6 +4290,154 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    /// Deep `clone()` over the interpreter heap (`zirk-memory-safety`, "Deep
+    /// clone graph semantics").
+    ///
+    /// Every reference object reachable from `root` receives a new identity;
+    /// a child referenced twice is cloned once, so sharing inside the graph is
+    /// preserved, and a field that reaches back to an ancestor already being
+    /// cloned resolves through the same map, so cycles terminate and mirror
+    /// the source. Strings, chars, regexes, ranges and runtime errors are
+    /// immutable and have no reference fields, so they are shared exactly as
+    /// the native runtime shares string handles. The traversal is an explicit
+    /// worklist rather than recursion, so a long chain cannot overflow the
+    /// host stack inside a worker.
+    ///
+    /// Work is charged before each allocation: every cloned node costs one
+    /// step plus one per field against the instruction budget, and each
+    /// allocation goes through the weighted heap accounting. Either limit ends
+    /// execution with the usual limit failure; the source graph is never
+    /// written, and an abandoned partial clone is unreachable.
+    fn deep_clone(&mut self, root: Value) -> Result<Value, ExecutionFault> {
+        let mut cloned: HashMap<HeapId, HeapId> = HashMap::new();
+        let mut pending: Vec<HeapId> = Vec::new();
+        let result = self.clone_value(root, &mut cloned, &mut pending)?;
+        while let Some(destination) = pending.pop() {
+            let patched = match self.heap.get(destination).cloned() {
+                Some(HeapEntry::Object { layout, fields }) => HeapEntry::Object {
+                    layout,
+                    fields: self.clone_values(fields, &mut cloned, &mut pending)?,
+                },
+                Some(HeapEntry::Record { layout, fields }) => HeapEntry::Record {
+                    layout,
+                    fields: self.clone_values(fields, &mut cloned, &mut pending)?,
+                },
+                Some(HeapEntry::Enum {
+                    layout,
+                    variant,
+                    fields,
+                }) => HeapEntry::Enum {
+                    layout,
+                    variant,
+                    fields: self.clone_values(fields, &mut cloned, &mut pending)?,
+                },
+                Some(HeapEntry::Closure { target, captures }) => HeapEntry::Closure {
+                    target,
+                    captures: self.clone_values(captures, &mut cloned, &mut pending)?,
+                },
+                Some(HeapEntry::Array(values)) => {
+                    HeapEntry::Array(self.clone_values(values, &mut cloned, &mut pending)?)
+                }
+                Some(HeapEntry::List(values)) => {
+                    HeapEntry::List(self.clone_values(values, &mut cloned, &mut pending)?)
+                }
+                Some(HeapEntry::Set(values)) => {
+                    HeapEntry::Set(self.clone_values(values, &mut cloned, &mut pending)?)
+                }
+                Some(HeapEntry::Map(entries)) => {
+                    let mut patched = Vec::with_capacity(entries.len());
+                    for (key, value) in entries {
+                        let key = self.clone_value(key, &mut cloned, &mut pending)?;
+                        let value = self.clone_value(value, &mut cloned, &mut pending)?;
+                        patched.push((key, value));
+                    }
+                    HeapEntry::Map(patched)
+                }
+                _ => {
+                    return Err(ExecutionFault::Internal(
+                        "clone worklist holds a non-cloneable entry".into(),
+                    ));
+                }
+            };
+            *self
+                .heap
+                .get_mut(destination)
+                .ok_or_else(|| ExecutionFault::Internal("clone destination vanished".into()))? =
+                patched;
+        }
+        Ok(result)
+    }
+
+    fn clone_values(
+        &mut self,
+        values: Vec<Value>,
+        cloned: &mut HashMap<HeapId, HeapId>,
+        pending: &mut Vec<HeapId>,
+    ) -> Result<Vec<Value>, ExecutionFault> {
+        values
+            .into_iter()
+            .map(|value| self.clone_value(value, cloned, pending))
+            .collect()
+    }
+
+    /// Maps one value into the clone: scalars copy, shared immutable heap
+    /// values keep their identity, and every other heap value is allocated
+    /// once (a shallow copy whose references the worklist rewrites later).
+    fn clone_value(
+        &mut self,
+        value: Value,
+        cloned: &mut HashMap<HeapId, HeapId>,
+        pending: &mut Vec<HeapId>,
+    ) -> Result<Value, ExecutionFault> {
+        match value {
+            Value::Nullable(Some(inner)) => Ok(Value::Nullable(Some(Box::new(
+                self.clone_value(*inner, cloned, pending)?,
+            )))),
+            Value::Heap(source) => {
+                if let Some(existing) = cloned.get(&source) {
+                    return Ok(Value::Heap(*existing));
+                }
+                let Some(entry) = self.heap.get(source) else {
+                    return Err(ExecutionFault::Internal(
+                        "clone source is not a live heap value".into(),
+                    ));
+                };
+                let (shallow, fields) = match entry {
+                    HeapEntry::String(_)
+                    | HeapEntry::Char(_)
+                    | HeapEntry::Regex(_)
+                    | HeapEntry::Range(_)
+                    | HeapEntry::RuntimeError { .. } => return Ok(Value::Heap(source)),
+                    HeapEntry::Object { fields, .. }
+                    | HeapEntry::Record { fields, .. }
+                    | HeapEntry::Enum { fields, .. } => (entry.clone(), fields.len()),
+                    HeapEntry::Closure { captures, .. } => (entry.clone(), captures.len()),
+                    HeapEntry::Array(values) | HeapEntry::List(values) | HeapEntry::Set(values) => {
+                        (entry.clone(), values.len())
+                    }
+                    HeapEntry::Map(entries) => (entry.clone(), entries.len().saturating_mul(2)),
+                };
+                // Charge the node's work before it is allocated.
+                let cost = 1_u64.saturating_add(fields as u64);
+                self.executed_steps = self.executed_steps.saturating_add(cost);
+                if self.executed_steps > self.limits.instructions {
+                    return Err(ExecutionFault::Limit(LimitFailure::Instructions));
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(fields.saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                let destination = self
+                    .heap
+                    .allocate(shallow, bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                cloned.insert(source, destination);
+                pending.push(destination);
+                Ok(Value::Heap(destination))
+            }
+            other => Ok(other),
+        }
+    }
+
     fn heap_operand(
         &self,
         frame_index: usize,
@@ -5227,7 +5380,8 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::SetAdd { .. }
         | InstKind::SetContains { .. }
         | InstKind::SetRemove { .. }
-        | InstKind::ArraySlice { .. } => BrowserSupport::RuntimeCore,
+        | InstKind::ArraySlice { .. }
+        | InstKind::Clone(_) => BrowserSupport::RuntimeCore,
         InstKind::Print(_)
         | InstKind::Println(_)
         | InstKind::PrintStderr(_)
@@ -5271,7 +5425,6 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::WeakFrom(_)
         | InstKind::WeakUpgrade(_)
         | InstKind::WeakIsAlive(_)
-        | InstKind::Clone(_)
         | InstKind::JournalBegin
         | InstKind::JournalRecordSlot { .. }
         | InstKind::JournalRecordField { .. }

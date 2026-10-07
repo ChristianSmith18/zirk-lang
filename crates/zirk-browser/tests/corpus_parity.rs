@@ -15,8 +15,6 @@ use zirk_browser::contract::{Completion, FailureKind, Request};
 /// Programs the browser deliberately cannot run, with the feature label the
 /// capability diagnostic must name.
 const EXCLUDED: &[(&str, &str)] = &[
-    ("callable_clone", "deep `clone()`"),
-    ("clone_record", "deep `clone()`"),
     ("concurrent_dataflow", "job handles"),
     ("concurrent_fanout", "job handles"),
     ("concurrent_sibling_failure", "timers"),
