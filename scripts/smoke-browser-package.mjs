@@ -16,7 +16,7 @@ const formatted = JSON.parse(api.format(JSON.stringify({
   source: 'import { stdout } from std.io; fn main(): Void {  stdout.println(  1 ); }',
   virtualName: 'format.zrk',
 })));
-if (formatted.failure || formatted.formattedSource !== 'import { stdout } from std.io;\n\nfn main(): Void { stdout.println(1); }\n') {
+if (formatted.failure || formatted.formattedSource !== 'import { stdout } from std.io; fn main(): Void { stdout.println(1); }') {
   throw new Error(`unexpected format response: ${JSON.stringify(formatted)}`);
 }
 const fixtures = [
