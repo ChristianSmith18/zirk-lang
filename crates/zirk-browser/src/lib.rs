@@ -1299,6 +1299,48 @@ mod tests {
     }
 
     #[test]
+    fn deep_clone_of_a_wide_graph_ends_in_a_heap_limit_without_touching_the_source() {
+        let source = "import { stdout } from std.io;\nclass Node { v: Int32; a: Node?; b: Node?; construct(v: Int32) { this.v = v; this.a = null; this.b = null; } }\nfn main(): Void {\n    mut root = Node(0);\n    mut i = 1;\n    while i < 400 { mut n = Node(i); n.a = root.a; n.b = root; root.a = n; i = i + 1; }\n    mut copy = root.clone();\n    stdout.println(\"cloned\");\n}\n";
+        let run_with_heap = |heap_bytes: usize| {
+            run(Request {
+                api_version: API_VERSION,
+                trace: None,
+                source: source.into(),
+                virtual_name: "clone-heap.zrk".into(),
+                limits: Some(crate::contract::Limits {
+                    heap_bytes,
+                    ..crate::contract::Limits::DEFAULT
+                }),
+            })
+        };
+        let roomy = run_with_heap(16 * 1024 * 1024);
+        assert_eq!(
+            roomy.completion,
+            Some(crate::contract::Completion::Completed),
+            "{roomy:?}"
+        );
+        // Smallest heap in which the graph is built but the clone does not fit.
+        let (mut low, mut high) = (1_usize, 16 * 1024 * 1024);
+        while low < high {
+            let mid = (low + high) / 2;
+            if run_with_heap(mid).completion.is_some() {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        let tight = run_with_heap(low - 1);
+        assert!(
+            matches!(
+                tight.failure,
+                Some(crate::contract::Failure { kind: FailureKind::Limit, ref limit, .. }) if limit.as_deref() == Some("heap")
+            ),
+            "{tight:?}"
+        );
+        assert!(tight.output.is_empty());
+    }
+
+    #[test]
     fn host_interpreter_fixture_runner_compares_observable_results() {
         let fixture: crate::fixtures::Fixture =
             serde_json::from_str(include_str!("../fixtures/hello-world.json"))
