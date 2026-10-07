@@ -1,0 +1,24 @@
+import { stdout } from std.io;
+
+// A subclass that declares a method the base class does not have: the new
+// method must keep its own signature even though its declaration index
+// equals that of an inherited method (here both are index 0).
+class Account {
+    private mut balance: Int32 = 0;
+    construct() { }
+    deposit(n: Int32): Void { this.balance = this.balance + n; }
+    get_balance(): Int32 { return this.balance; }
+}
+
+class Savings extends Account {
+    construct() { super(); }
+    label(): String { return "savings"; }
+}
+
+fn main(): Void {
+    mut s = Savings();
+    s.deposit(5);
+    s.deposit(7);
+    stdout.println(s.get_balance());
+    stdout.println(s.label());
+}

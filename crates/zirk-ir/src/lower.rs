@@ -2287,7 +2287,7 @@ fn lower_class_body<'a>(
 
     // A method is the same shape as a constructor: a function whose first
     // parameter is the receiver.
-    for (index, method) in class.methods.iter().enumerate() {
+    for method in &class.methods {
         let Some(body) = &method.body else { continue };
         let lowering = FunctionLowering::new(
             module,
@@ -2296,7 +2296,7 @@ fn lower_class_body<'a>(
             instance_base,
             enum_instance_base,
         );
-        let (lowered, lifted) = lowering.run_method(class, method, body, id, index);
+        let (lowered, lifted) = lowering.run_method(class, method, body, id);
         module.functions.push(lowered);
         module.functions.extend(lifted);
     }
@@ -4683,7 +4683,6 @@ impl<'a> FunctionLowering<'a> {
         method: &ast::MethodDecl,
         body: &ast::Block,
         id: u32,
-        index: usize,
     ) -> (Function, Vec<Function>) {
         // Read from the checked class rather than the written annotation: a
         // specialized copy's method returns `Int32` where the AST still says
@@ -4694,7 +4693,19 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .classes
             .get(id as usize)
-            .and_then(|c| c.methods.iter().find(|m| m.index == index))
+            .and_then(|c| {
+                // `index` is the declaration position inside this class's own
+                // body, while `MethodInfo::index` counts inherited methods
+                // too, so the two only agree for a class without a base. A
+                // subclass's first own method would otherwise match the
+                // base's first method. A class has no overloading, so the
+                // name identifies the entry; prefer the one this class
+                // declares over an inherited entry of the same name.
+                c.methods
+                    .iter()
+                    .find(|m| m.name == method.name.name && m.owner == id)
+                    .or_else(|| c.methods.iter().find(|m| m.name == method.name.name))
+            })
             .expect("the checker records every method");
         self.return_type = self.ir_type(found.returns);
         let resolved: Vec<IrType> = found.params.iter().map(|p| self.ir_type(p.ty)).collect();
