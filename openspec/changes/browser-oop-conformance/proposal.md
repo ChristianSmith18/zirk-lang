@@ -8,7 +8,9 @@ The browser interpreter already executes the object model at the IR level (objec
 - Add browser conformance fixtures (run through both the interpreter and the native `zirk run` runner) for: constructors and `construct` sugar, fields and properties, `this`, visibility, single inheritance with `super`, `#override`, abstract classes and abstract dispatch, interfaces, traits and default implementations, static members, object identity (`is`) versus structural equality, static nested / `inner` / local classes, generic classes and generic methods, records and enums with payloads inside class hierarchies, polymorphic dispatch through `List<T>`/`Map<K,V>` of supertypes, and uncaught/typed exceptions thrown from methods.
 - Fix every divergence the audit finds in lowering, the verifier, or the interpreter, each with a regression test. Divergences that require language-level decisions are recorded and escalated instead of patched silently.
 - Replace the stale object-model wording in `docs/browser-interpreter-support-matrix.md` with reviewed, fixture-backed claims, and update Feature Status, the browser handoff document, and the fixtures README accordingly.
-- Extend the browser compatibility discovery data so a consumer can learn which OOP constructs are covered, without inferring it from source presence.
+- Publish a checked-in object-model catalog (`crates/zirk-browser/oop-catalog.json`) and republish its verdicts in the browser package manifest, so a consumer can learn which OOP constructs are covered without inferring it from source presence.
+- Run the entire native end-to-end corpus through the browser `run` operation as a standing differential test, with an explicit, exhaustive exclusion list.
+- Report excluded instructions by Zirk feature name (for example deep `clone()`) instead of an IR debug dump.
 - No change to the source language and no change to `apiVersion: 1`.
 
 ## Capabilities

@@ -4,7 +4,8 @@
 // existing module-worker smoke runner.
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const [packageDir, sourceRevision] = process.argv.slice(2);
@@ -33,6 +34,12 @@ const commandVersion = (command, args) => {
     return "unavailable";
   }
 };
+// The object-model catalog is checked in beside the crate and verified against
+// fixtures and the native corpus by `cargo test -p zirk-browser`; the manifest
+// only republishes its verdicts so consumers need not infer them.
+const catalogPath = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "zirk-browser", "oop-catalog.json");
+const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
+const verdicts = (verdict) => catalog.constructs.filter((construct) => construct.verdict === verdict).map((construct) => construct.id);
 const wasm = files.find((file) => file.path === "zirk_browser_bg.wasm");
 if (!wasm) throw new Error("package is missing zirk_browser_bg.wasm");
 
@@ -51,6 +58,11 @@ const manifest = {
     outputBytes: 262144,
     outputEvents: 2048,
     stackFrames: 64,
+  },
+  objectModel: {
+    catalogSchemaVersion: catalog.schemaVersion,
+    supported: verdicts("supported"),
+    excluded: verdicts("excluded"),
   },
   exclusions: ["extern", "pointer", "native-slice", "process", "shell", "filesystem", "environment", "secrets", "network", "clock", "random", "DOM"],
   tools: {

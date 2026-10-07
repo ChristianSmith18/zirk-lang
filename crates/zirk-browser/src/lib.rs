@@ -951,6 +951,46 @@ mod tests {
         }) if code == "ZB100"));
     }
 
+    /// Every conformance fixture, in one place. The integration test
+    /// `fixture_list_covers_every_fixture_file` fails when a file is added to
+    /// `fixtures/` without being listed here.
+    const FIXTURES: &[&str] = &[
+        include_str!("../fixtures/class-construction-sugar.json"),
+        include_str!("../fixtures/closure.json"),
+        include_str!("../fixtures/decimal-compare.json"),
+        include_str!("../fixtures/decimal-ops.json"),
+        include_str!("../fixtures/direct-call.json"),
+        include_str!("../fixtures/downcast.json"),
+        include_str!("../fixtures/fatal-error.json"),
+        include_str!("../fixtures/hello-world.json"),
+        include_str!("../fixtures/int-division.json"),
+        include_str!("../fixtures/length-loop.json"),
+        include_str!("../fixtures/list-add.json"),
+        include_str!("../fixtures/map-set.json"),
+        include_str!("../fixtures/oop-constructors.json"),
+        include_str!("../fixtures/oop-equality-contract.json"),
+        include_str!("../fixtures/oop-exceptions-in-methods.json"),
+        include_str!("../fixtures/oop-final-class.json"),
+        include_str!("../fixtures/oop-generics-two-params.json"),
+        include_str!("../fixtures/oop-identity-aliasing.json"),
+        include_str!("../fixtures/oop-inheritance-chain.json"),
+        include_str!("../fixtures/oop-interface-trait-default.json"),
+        include_str!("../fixtures/oop-nested-inner-local.json"),
+        include_str!("../fixtures/oop-polymorphic-collection.json"),
+        include_str!("../fixtures/oop-records-enums-in-classes.json"),
+        include_str!("../fixtures/oop-static-mutable.json"),
+        include_str!("../fixtures/oop-subclass-adds-method.json"),
+        include_str!("../fixtures/oop-visibility-inheritance.json"),
+        include_str!("../fixtures/regex.json"),
+        include_str!("../fixtures/scalar-widths.json"),
+        include_str!("../fixtures/set-add.json"),
+        include_str!("../fixtures/temporal-range.json"),
+        include_str!("../fixtures/typed-catch.json"),
+        include_str!("../fixtures/uncaught-throwable-message.json"),
+        include_str!("../fixtures/void-call.json"),
+        include_str!("../fixtures/void-method-call.json"),
+    ];
+
     #[test]
     fn host_interpreter_fixture_runner_compares_observable_results() {
         let fixture: crate::fixtures::Fixture =
@@ -987,28 +1027,7 @@ mod tests {
 
     #[test]
     fn fixture_contract_runner_reports_the_same_observables_as_the_fixture_metadata() {
-        for fixture_json in [
-            include_str!("../fixtures/hello-world.json"),
-            include_str!("../fixtures/direct-call.json"),
-            include_str!("../fixtures/fatal-error.json"),
-            include_str!("../fixtures/scalar-widths.json"),
-            include_str!("../fixtures/temporal-range.json"),
-            include_str!("../fixtures/closure.json"),
-            include_str!("../fixtures/regex.json"),
-            include_str!("../fixtures/class-construction-sugar.json"),
-            include_str!("../fixtures/void-call.json"),
-            include_str!("../fixtures/void-method-call.json"),
-            include_str!("../fixtures/list-add.json"),
-            include_str!("../fixtures/map-set.json"),
-            include_str!("../fixtures/set-add.json"),
-            include_str!("../fixtures/typed-catch.json"),
-            include_str!("../fixtures/downcast.json"),
-            include_str!("../fixtures/decimal-ops.json"),
-            include_str!("../fixtures/decimal-compare.json"),
-            include_str!("../fixtures/int-division.json"),
-            include_str!("../fixtures/length-loop.json"),
-            include_str!("../fixtures/uncaught-throwable-message.json"),
-        ] {
+        for fixture_json in FIXTURES.iter().copied() {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let response = run(Request {
                 api_version: API_VERSION,
@@ -1049,28 +1068,7 @@ mod tests {
 
     #[test]
     fn differential_fixture_runner_compares_host_interpreter_and_browser_contract() {
-        for fixture_json in [
-            include_str!("../fixtures/hello-world.json"),
-            include_str!("../fixtures/direct-call.json"),
-            include_str!("../fixtures/fatal-error.json"),
-            include_str!("../fixtures/scalar-widths.json"),
-            include_str!("../fixtures/temporal-range.json"),
-            include_str!("../fixtures/closure.json"),
-            include_str!("../fixtures/regex.json"),
-            include_str!("../fixtures/class-construction-sugar.json"),
-            include_str!("../fixtures/void-call.json"),
-            include_str!("../fixtures/void-method-call.json"),
-            include_str!("../fixtures/list-add.json"),
-            include_str!("../fixtures/map-set.json"),
-            include_str!("../fixtures/set-add.json"),
-            include_str!("../fixtures/typed-catch.json"),
-            include_str!("../fixtures/downcast.json"),
-            include_str!("../fixtures/decimal-ops.json"),
-            include_str!("../fixtures/decimal-compare.json"),
-            include_str!("../fixtures/int-division.json"),
-            include_str!("../fixtures/length-loop.json"),
-            include_str!("../fixtures/uncaught-throwable-message.json"),
-        ] {
+        for fixture_json in FIXTURES.iter().copied() {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let (frontend, diagnostics) = check_source(&fixture.source, &fixture.virtual_name);
             assert!(!diagnostics.has_errors(), "{}", fixture.name);

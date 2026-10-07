@@ -1,0 +1,13 @@
+{
+  "name": "oop-exceptions-in-methods",
+  "source": "import { stdout } from std.io;\nclass Oops implements Throwable {\n    inmut reason: String;\n    construct(reason: String) { this.reason = reason; }\n    message(): String { return this.reason; }\n    code(): String { return \"OOPS\"; }\n    cause(): Error? { return null; }\n    stack_trace(): StackTrace { return StackTrace(); }\n}\nfn check(n: Int32): Int32 throws Oops {\n    if n < 0 { throw Oops(\"negative\"); }\n    return n;\n}\nclass Svc {\n    construct() { }\n    run(n: Int32): Void {\n        try {\n            inmut v = check(n);\n            stdout.println(\"ok \" + v.to_string());\n        } catch Oops(e) {\n            stdout.println(\"failed \" + e.message());\n        } finally {\n            stdout.println(\"cleanup \" + n.to_string());\n        }\n    }\n}\nfn main(): Void {\n    inmut s = Svc();\n    s.run(2);\n    s.run(-1);\n}\n",
+  "virtualName": "fixtures/oop-exceptions-in-methods.zrk",
+  "expectedOutput": [
+    "ok 2\n",
+    "cleanup 2\n",
+    "failed negative\n",
+    "cleanup -1\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

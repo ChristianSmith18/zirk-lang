@@ -1,0 +1,14 @@
+{
+  "name": "oop-constructors",
+  "source": "import { stdout } from std.io;\nclass Box {\n    width: Int32 = 10;\n    height: Int32 = 20;\n    construct() { }\n    construct(w: Int32) { this.width = w; }\n    area(): Int32 { return this.width * this.height; }\n}\nclass User {\n    construct(public name: String, private inmut id: UInt64) { }\n    ident(): UInt64 { return this.id; }\n}\nfn main(): Void {\n    mut a = Box();\n    mut b = Box(3);\n    mut c = Box(w: 5);\n    stdout.println(a.area());\n    stdout.println(b.area());\n    stdout.println(c.area());\n    mut u = User(\"Ana\", 7);\n    stdout.println(u.name);\n    stdout.println(u.ident());\n}\n",
+  "virtualName": "fixtures/oop-constructors.zrk",
+  "expectedOutput": [
+    "200\n",
+    "60\n",
+    "100\n",
+    "Ana\n",
+    "7\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

@@ -6,14 +6,27 @@ interpreter owns the operation. "Runtime-core" means it is executable after
 the platform-neutral semantic helper exists. "Excluded" means browser
 preflight must issue a capability diagnostic.
 
-The first public baseline is deliberately smaller than the eventual matrix:
-integers, binary floats, exact decimal `Float`, booleans, nullable values,
-strings and chars; variables, branches, loops, direct calls; arithmetic,
-comparisons, conversions, `to_string`, and `stdout.print` / `stdout.println`.
-`print(x)` is executable: lowering already inserts `ToString` for non-strings.
-Objects, callables, records, enums, regexes, ranges and collections are
-planned runtime-core coverage and do not become public browser claims until
-differential fixtures pass.
+The browser interpreter executes the delivered scalar, text, collection and
+object-model surface: integers, binary floats, exact decimal `Float`, booleans,
+nullable values, strings and chars; variables, branches, loops, direct and
+indirect calls, closures; classes with constructors, inheritance, `#override`,
+abstract classes, interfaces, traits with default implementations, static
+members, nested/`inner`/local classes, generic classes, records, enums and typed
+exceptions; `List`, `Map`, `Set`, `Array`, ranges, regexes and temporal values;
+arithmetic, comparisons, conversions, `to_string`, and `stdout.print` /
+`stdout.println`. `print(x)` is executable: lowering already inserts `ToString`
+for non-strings.
+
+A construct is a public browser claim only when a shared fixture or a program
+of the native end-to-end corpus runs through both engines and agrees. The
+object-model evidence is catalogued in
+[`browser-oop-coverage.md`](browser-oop-coverage.md) and enforced by
+`crates/zirk-browser/tests/corpus_parity.rs`, which runs every valid native
+corpus program through the browser `run` operation and requires either the
+recorded native output or a listed capability exclusion. Deep `clone()`,
+structured concurrency, timers, channels, `parallel`, `Weak<T>`, pointers,
+native slices, `unsafe` journals and resource transfer are excluded and are
+reported as capability diagnostics that name the feature.
 
 ## Types
 

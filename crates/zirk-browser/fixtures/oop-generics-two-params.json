@@ -1,0 +1,14 @@
+{
+  "name": "oop-generics-two-params",
+  "source": "import { stdout } from std.io;\nclass Pair<A, B> {\n    a: A;\n    b: B;\n    construct(a: A, b: B) { this.a = a; this.b = b; }\n    first(): A { return this.a; }\n    second(): B { return this.b; }\n}\nclass Box<T> {\n    item: T;\n    construct(item: T) { this.item = item; }\n    get(): T { return this.item; }\n}\nfn main(): Void {\n    mut p: Pair<String, Int32> = Pair(\"k\", 2);\n    stdout.println(p.first());\n    stdout.println(p.second());\n    mut q: Pair<Int32, Int32> = Pair(1, 2);\n    stdout.println(q.first() + q.second());\n    mut bi: Box<Int32> = Box(5);\n    mut bs: Box<String> = Box(\"s\");\n    stdout.println(bi.get());\n    stdout.println(bs.get());\n}\n",
+  "virtualName": "fixtures/oop-generics-two-params.zrk",
+  "expectedOutput": [
+    "k\n",
+    "2\n",
+    "3\n",
+    "5\n",
+    "s\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

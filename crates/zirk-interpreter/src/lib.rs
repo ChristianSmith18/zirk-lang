@@ -671,11 +671,11 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
                     instruction_support(&instruction.kind),
                     BrowserSupport::Excluded
                 ) {
+                    let (feature, variant) = excluded_feature(&instruction.kind);
                     failures.push(CapabilityFailure {
                         code: "ZB002".into(),
                         message: format!(
-                            "instruction {:?} is unavailable in the browser",
-                            instruction.kind
+                            "{feature} is unavailable in the browser (instruction {variant})"
                         ),
                         span: Some(instruction.span),
                     });
@@ -736,6 +736,40 @@ fn is_browser_intrinsic(name: &str) -> bool {
         name,
         "zirk_rt_array_from_list" | "zirk_rt_map_sorted_keys" | "zirk_rt_set_sorted_elements"
     )
+}
+
+/// Names the Zirk feature behind a browser-excluded instruction so a learner
+/// reads "deep `clone()` is unavailable" instead of an IR debug dump. Returns
+/// the feature label and the IR variant name; unknown variants fall back to
+/// the variant name alone, so a new excluded instruction never loses its
+/// diagnostic.
+fn excluded_feature(kind: &InstKind) -> (String, String) {
+    let debug = format!("{kind:?}");
+    let variant = debug
+        .split(['(', ' ', '{'])
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let feature = match variant.as_str() {
+        "Clone" => "deep `clone()`",
+        "ScopeEnter" | "ScopeExit" | "BranchStart" => {
+            "structured concurrency (`concurrent`, `spawn`)"
+        }
+        "ParallelForStart" => "`parallel` regions",
+        "JobWait" | "JobDone" | "JobCancel" => "job handles",
+        "TimerSleep" => "timers",
+        "ResourceTransfer" => "resource transfer",
+        "DependentFrom" => "dependent references",
+        "PinObject" | "UnpinObject" => "pinning",
+        name if name.starts_with("Channel") => "channels",
+        name if name.starts_with("Pointer") => "`Pointer<T>` operations",
+        name if name.starts_with("Weak") => "`Weak<T>`",
+        name if name.starts_with("Journal") => "`unsafe` journal blocks",
+        name if name.starts_with("NativeSlice") => "native slices",
+        name if name.starts_with("Stdin") => "standard input",
+        other => return (format!("instruction {other}"), variant),
+    };
+    (feature.to_string(), variant)
 }
 
 fn preflight_type(ty: IrType, span: Option<Span>, failures: &mut Vec<CapabilityFailure>) {

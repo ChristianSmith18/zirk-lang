@@ -20,6 +20,12 @@ if (!Array.isArray(manifest.operations)
     || !["check", "run", "format"].every((operation) => manifest.operations.includes(operation))) {
   throw new Error("manifest must advertise the check, run, and format operations");
 }
+if (!manifest.objectModel
+    || !Array.isArray(manifest.objectModel.supported)
+    || manifest.objectModel.supported.length === 0
+    || !Array.isArray(manifest.objectModel.excluded)) {
+  throw new Error("manifest must publish the object-model coverage verdicts");
+}
 if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
   throw new Error("manifest has no artifact records");
 }

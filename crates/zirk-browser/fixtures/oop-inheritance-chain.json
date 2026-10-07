@@ -1,0 +1,12 @@
+{
+  "name": "oop-inheritance-chain",
+  "source": "import { stdout } from std.io;\nclass User {\n    name: String;\n    construct(name: String) { this.name = name; }\n    label(): String { return this.name; }\n    hello(): String { return \"hi \" + this.label(); }\n}\nclass Admin extends User {\n    construct(name: String) { super(name); }\n    #override\n    label(): String { return \"Admin: \" + super.label(); }\n}\nclass Root extends Admin {\n    construct() { super(\"root\"); }\n    #override\n    label(): String { return \"Root/\" + super.label(); }\n}\nfn main(): Void {\n    inmut u: User = Admin(\"Cris\");\n    stdout.println(u.label());\n    stdout.println(u.hello());\n    inmut r: User = Root();\n    stdout.println(r.hello());\n}\n",
+  "virtualName": "fixtures/oop-inheritance-chain.zrk",
+  "expectedOutput": [
+    "Admin: Cris\n",
+    "hi Admin: Cris\n",
+    "hi Root/Admin: root\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

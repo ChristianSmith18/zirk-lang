@@ -1,0 +1,11 @@
+{
+  "name": "oop-visibility-inheritance",
+  "source": "import { stdout } from std.io;\nclass Account {\n    private mut balance: Int32 = 0;\n    protected mut tag: String = \"acct\";\n    public inmut owner: String;\n    construct(owner: String) { this.owner = owner; }\n    deposit(n: Int32): Void { this.balance = this.balance + n; }\n    get_balance(): Int32 { return this.balance; }\n}\nclass Savings extends Account {\n    construct(owner: String) { super(owner); }\n    label(): String { return this.tag + \":\" + this.owner; }\n}\nfn main(): Void {\n    mut s = Savings(\"Zed\");\n    s.deposit(5);\n    s.deposit(7);\n    stdout.println(s.get_balance());\n    stdout.println(s.label());\n}\n",
+  "virtualName": "fixtures/oop-visibility-inheritance.zrk",
+  "expectedOutput": [
+    "12\n",
+    "acct:Zed\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

@@ -24,19 +24,23 @@ Last updated with `inferred-return-types`, **2026-09-15**.
 ## Browser-hosted interpreter tooling
 
 `add-browser-ir-interpreter` adds an optional, versioned WASM tooling package,
-not a Zirk target. Its audited baseline executes verified IR for bounded scalar
-control flow, finite binary floats, exact Decimal through `zirk-runtime-core`,
-strings/Char construction and bounded output, nullable values, direct calls,
-and fatal runtime failures. The package contract has deterministic compiler,
-capability, runtime, and resource-limit responses; its tests cover completion,
-fatal failure, excluded native effects, and instruction exhaustion.
+not a Zirk target. It executes verified IR for scalar and text values, exact
+Decimal through `zirk-runtime-core`, closures, collections, regex, temporal
+values, the object model (classes, inheritance, abstract classes, interfaces,
+traits, static and nested classes, generic classes, records, enums, typed
+exceptions) and bounded output. The package contract has deterministic compiler,
+capability, runtime, and resource-limit responses.
 
-Objects, closures, collection execution, regex, temporal operations, complete
-exception cleanup, native effects, and multi-file/package execution remain
-outside the delivered browser execution baseline. The exhaustive policy and
-evidence are [`browser-interpreter-support-matrix.md`](../browser-interpreter-support-matrix.md)
-and the matching OpenSpec change; no native feature becomes browser-available
-merely because its frontend or native backend is delivered.
+The conformance evidence is the native end-to-end corpus: 184 of its 218 programs
+reproduce their native output in the browser, and the remaining 34 are the
+listed capability exclusions (concurrency, timers, `parallel`, channels,
+pointers, native slices, `unsafe` journals, resource transfer, and deep
+`clone()`). Object-model coverage is catalogued in
+[`browser-oop-coverage.md`](../browser-oop-coverage.md). Native effects and
+multi-file/package execution remain outside the browser baseline. The exhaustive
+policy is [`browser-interpreter-support-matrix.md`](../browser-interpreter-support-matrix.md);
+no native feature becomes browser-available merely because its frontend or
+native backend is delivered.
 
 ---
 

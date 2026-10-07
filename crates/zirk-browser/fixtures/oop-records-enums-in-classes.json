@@ -1,0 +1,13 @@
+{
+  "name": "oop-records-enums-in-classes",
+  "source": "import { stdout } from std.io;\nrecord Point { x: Int32; y: Int32; }\nenum Shape {\n    Circle(r: Int32),\n    Square(s: Int32)\n}\nclass Holder {\n    p: Point;\n    construct(p: Point) { this.p = p; }\n}\nfn area(s: Shape): Int32 {\n    return match s {\n        Shape.Circle(r) => r * r * 3,\n        Shape.Square(w) => w * w\n    };\n}\nfn main(): Void {\n    inmut h = Holder(Point(x: 1, y: 2));\n    stdout.println(h.p.x + h.p.y);\n    stdout.println(area(Shape.Circle(2)));\n    stdout.println(area(Shape.Square(3)));\n    stdout.println(Point(x: 1, y: 2) == Point(x: 1, y: 2));\n}\n",
+  "virtualName": "fixtures/oop-records-enums-in-classes.zrk",
+  "expectedOutput": [
+    "3\n",
+    "12\n",
+    "9\n",
+    "true\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

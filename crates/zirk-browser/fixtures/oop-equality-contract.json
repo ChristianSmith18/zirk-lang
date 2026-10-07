@@ -1,0 +1,13 @@
+{
+  "name": "oop-equality-contract",
+  "source": "import { stdout } from std.io;\nclass P {\n    n: Int32;\n    construct(n: Int32) { this.n = n; }\n    _equals(other: P): Boolean { return this.n == other.n; }\n}\nfn main(): Void {\n    mut a = P(3);\n    mut b = P(3);\n    mut c = a;\n    stdout.println(a == b);\n    stdout.println(a is b);\n    stdout.println(a is c);\n    stdout.println(a != P(4));\n}\n",
+  "virtualName": "fixtures/oop-equality-contract.zrk",
+  "expectedOutput": [
+    "true\n",
+    "false\n",
+    "true\n",
+    "true\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

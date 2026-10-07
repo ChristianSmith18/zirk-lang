@@ -29,3 +29,9 @@ on success or ordered diagnostics on invalid input. Wire the playground's
 Format control to that operation only after recording the new committed source
 revision and verifying this package. Before initialization, the facade returns
 the deterministic `ZB103` request failure.
+
+The package `manifest.json` also carries `objectModel`, the supported and
+excluded object-model construct ids from
+`crates/zirk-browser/oop-catalog.json`. The verification script requires it, and
+`cargo test -p zirk-browser` keeps it honest against the conformance fixtures
+and the native corpus (see `docs/browser-oop-coverage.md`).
