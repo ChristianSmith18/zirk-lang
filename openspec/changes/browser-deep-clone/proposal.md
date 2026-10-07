@@ -8,7 +8,7 @@ Deep `clone()` is a core part of the object model: it is how Zirk code produces 
 - Reclassify `Clone` from excluded to browser-supported in the support matrix once fixtures pass, and keep `WeakFrom`, `WeakUpgrade`, `WeakIsAlive`, pointers, native slices and journals excluded.
 - Charge clone work against the existing instruction budget and heap limit so a large or adversarial graph ends in a deterministic `limit-exceeded` result instead of unbounded work.
 - Cover `Callable` clones (the native runtime exposes `zirk_rt_clone_callable`) and `record` values, which the lowering already rebuilds structurally.
-- Add differential fixtures for tree, shared-child, cyclic, subclass-polymorphic, collection-holding and callable graphs.
+- Add differential fixtures for tree, shared-child, cyclic, subclass-polymorphic and callable graphs.
 - No source-language change, no new host effect, no `apiVersion` change.
 
 ## Capabilities

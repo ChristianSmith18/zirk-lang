@@ -1,0 +1,15 @@
+{
+  "name": "clone-tree",
+  "source": "import { stdout } from std.io;\nclass Leaf {\n    v: Int32;\n    construct(v: Int32) { this.v = v; }\n}\nclass Tree {\n    name: String;\n    leaf: Leaf;\n    construct(name: String, leaf: Leaf) { this.name = name; this.leaf = leaf; }\n}\nfn main(): Void {\n    mut a = Tree(\"t\", Leaf(1));\n    mut b = a.clone();\n    b.leaf.v = 9;\n    b.name = \"copy\";\n    stdout.println(a.leaf.v);\n    stdout.println(b.leaf.v);\n    stdout.println(a.name);\n    stdout.println(b.name);\n    stdout.println(a is b);\n    stdout.println(a.leaf is b.leaf);\n}\n",
+  "virtualName": "fixtures/clone-tree.zrk",
+  "expectedOutput": [
+    "1\n",
+    "9\n",
+    "t\n",
+    "copy\n",
+    "false\n",
+    "false\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

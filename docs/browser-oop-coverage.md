@@ -16,12 +16,13 @@ republishes the verdicts under `objectModel`.
 
 1. Every valid native end-to-end program (`crates/zirk-cli/tests/corpus/valid`,
    218 programs with a recorded `.out`) runs through the browser `run`
-   operation. 184 reproduce the native output exactly; the other 34 fail
+   operation. 184 reproduced the native output exactly at audit time and the other 34 failed
    preflight with a capability diagnostic and are listed in
    `EXCLUDED` in `corpus_parity.rs`: concurrency and timers, `parallel`,
    channels, pointers and native slices, `unsafe` journals, `Pin`/`Dependent`,
    resource transfer, and deep `clone()` of records and callables. None of the
-   34 is an interpreter defect.
+   34 was an interpreter defect; the two `clone()` programs now run (see
+   `browser-deep-clone`), leaving 32 exclusions.
 2. The handbook chapters on classes, interfaces and traits were turned into
    probe programs for the constructs the corpus does not exercise. The ones that
    compile natively became the 14 `oop-*` fixtures under
@@ -59,8 +60,9 @@ republishes the verdicts under `objectModel`.
 ## Result for the interpreter
 
 No divergence between the interpreter and the native pipeline was found in the
-supported constructs. The only object-model gap is deep `clone()`, which is
-excluded as `InstKind::Clone` and tracked by the `browser-deep-clone` change.
+supported constructs. The only object-model gap was deep `clone()` (`InstKind::Clone`), which the
+`browser-deep-clone` change now runs on the interpreter heap with five
+native-derived `clone-*` fixtures.
 Excluded features now report the Zirk feature name, for example
 ``deep `clone()` is unavailable in the browser (instruction Clone)``, instead
 of an IR debug dump.

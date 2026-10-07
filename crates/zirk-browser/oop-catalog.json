@@ -128,7 +128,13 @@
       "id": "deep-clone",
       "handbook": "08-classes-and-objects/11-cloning",
       "verdict": "supported",
-      "fixtures": [],
+      "fixtures": [
+        "clone-tree",
+        "clone-shared-child",
+        "clone-cycle",
+        "clone-polymorphic",
+        "clone-callable"
+      ],
       "corpus": [
         "clone_record",
         "callable_clone"

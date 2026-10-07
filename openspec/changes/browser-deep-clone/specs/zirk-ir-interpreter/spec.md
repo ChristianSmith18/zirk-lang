@@ -20,9 +20,9 @@ The interpreter SHALL execute deep `clone()` with the graph semantics of the lan
 - **WHEN** a program clones a subclass instance through a variable declared with its superclass type
 - **THEN** the clone has the subclass's runtime type and fields
 
-#### Scenario: Collections and callables inside the graph
-- **WHEN** the cloned graph holds a `List`, `Map`, `Set`, or closure that references other cloned objects
-- **THEN** the cloned containers and closure environments reference the new objects
+#### Scenario: Callables inside the graph
+- **WHEN** a closure that captured an object is cloned and the original object is then mutated
+- **THEN** the cloned closure observes the captured value as it was at clone time, matching native execution
 
 ### Requirement: Deep clone work is bounded
 

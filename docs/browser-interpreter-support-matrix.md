@@ -23,8 +23,7 @@ object-model evidence is catalogued in
 [`browser-oop-coverage.md`](browser-oop-coverage.md) and enforced by
 `crates/zirk-browser/tests/corpus_parity.rs`, which runs every valid native
 corpus program through the browser `run` operation and requires either the
-recorded native output or a listed capability exclusion. Deep `clone()`,
-structured concurrency, timers, channels, `parallel`, `Weak<T>`, pointers,
+recorded native output or a listed capability exclusion. Structured concurrency, timers, channels, `parallel`, `Weak<T>`, pointers,
 native slices, `unsafe` journals and resource transfer are excluded and are
 reported as capability diagnostics that name the feature.
 
@@ -43,10 +42,10 @@ reported as capability diagnostics that name the feature.
 | Policy | `InstKind` variants |
 | --- | --- |
 | Direct | `ConstInt`, `ConstBool`, `Load`, `Store`, `BuildValue`, `BuildEnum`, `Discriminant`, `Undefined`, `Retype`, `IntCast`, `WordCast`, `ConstFloat`, `FloatCast`, `IntToFloat`, `FloatToInt`, `ConstDecimal`, `IntToDecimal`, `DecimalToInt`, `DecimalToFloat`, `FloatToDecimal`, `Unary`, `Binary`, `CheckedArithmetic`, `Call`, `NullValue`, `Wrap`, `IsNull`, `Unwrap`. |
-| Runtime-core | `ConstString`, `ConstChar`, `StringGraphemeOffset`, `GraphemeLenAt`, `GraphemeSlice`, `Alloc`, `CheckedCast`, `IsInstance`, `Concat`, `Repeat`, `CallContract`, `CallVirtual`, `LoadField`, `StoreField`, `ToString`, `MakeClosure`, `CallClosure`, `MakeCallable`, `CallCallable`, `ArrayLength`, `ListLength`, `ArrayNew`, `ListNew`, `MapNew`, `SetNew`, `ArrayListLoad`, `ArrayListStore`, `ListAdd`, `ListInsert`, `ListRemove`, `ListRemoveValue`, `ArrayClone`, `ListClone`, `MapLength`, `MapIsEmpty`, `MapSet`, `MapContainsKey`, `MapGet`, `MapRemove`, `SetLength`, `SetIsEmpty`, `SetAdd`, `SetContains`, `SetRemove`, `ArraySlice`. |
+| Runtime-core | `ConstString`, `ConstChar`, `StringGraphemeOffset`, `GraphemeLenAt`, `GraphemeSlice`, `Alloc`, `CheckedCast`, `IsInstance`, `Concat`, `Repeat`, `CallContract`, `CallVirtual`, `LoadField`, `StoreField`, `ToString`, `MakeClosure`, `CallClosure`, `MakeCallable`, `CallCallable`, `ArrayLength`, `ListLength`, `ArrayNew`, `ListNew`, `MapNew`, `SetNew`, `ArrayListLoad`, `ArrayListStore`, `ListAdd`, `ListInsert`, `ListRemove`, `ListRemoveValue`, `ArrayClone`, `ListClone`, `MapLength`, `MapIsEmpty`, `MapSet`, `MapContainsKey`, `MapGet`, `MapRemove`, `SetLength`, `SetIsEmpty`, `SetAdd`, `SetContains`, `SetRemove`, `ArraySlice`, `Clone`. |
 | Bounded host | `Print`, `Println`, `IsCancelled`. Output is the only public language effect; cancellation is host-controlled. |
 | Structured runtime failure | `FatalError`, `Throw`, `SetSuppressed`, `StackTrace`, `Suppressed`, `HasPendingException`, `TakePendingException`. |
-| Excluded | `ScopeEnter`, `ScopeExit`, `BranchStart`, `ParallelForStart`, `JobWait`, `JobDone`, `JobCancel`, `TimerSleep`, `ChannelNew`, `ChannelSend`, `ChannelRecv`, `ChannelTrySend`, `ChannelTryRecv`, `ChannelClose`, `ChannelLength`, `ChannelIsClosed`, `ChannelCapacity`, `ChannelDrain`, `PointerFromSlot`, `PointerFromField`, `PointerRead`, `PointerWrite`, `PointerOffset`, `PointerOffsetBytes`, `PointerCast`, `PointerIsNull`, `WeakFrom`, `WeakUpgrade`, `WeakIsAlive`, `Clone`, `JournalBegin`, `JournalRecordSlot`, `JournalRecordField`, `JournalCommit`, `JournalRollback`, `NativeSliceValidate`, `NativeSliceValue`, `NativeSliceLength`, `NativeSliceLoad`, `NativeSliceStore`, `ResourceTransfer`, `DependentFrom`, `PinObject`, `UnpinObject`. |
+| Excluded | `ScopeEnter`, `ScopeExit`, `BranchStart`, `ParallelForStart`, `JobWait`, `JobDone`, `JobCancel`, `TimerSleep`, `ChannelNew`, `ChannelSend`, `ChannelRecv`, `ChannelTrySend`, `ChannelTryRecv`, `ChannelClose`, `ChannelLength`, `ChannelIsClosed`, `ChannelCapacity`, `ChannelDrain`, `PointerFromSlot`, `PointerFromField`, `PointerRead`, `PointerWrite`, `PointerOffset`, `PointerOffsetBytes`, `PointerCast`, `PointerIsNull`, `WeakFrom`, `WeakUpgrade`, `WeakIsAlive`, `JournalBegin`, `JournalRecordSlot`, `JournalRecordField`, `JournalCommit`, `JournalRollback`, `NativeSliceValidate`, `NativeSliceValue`, `NativeSliceLength`, `NativeSliceLoad`, `NativeSliceStore`, `ResourceTransfer`, `DependentFrom`, `PinObject`, `UnpinObject`. |
 
 ## Terminators, externs and host effects
 

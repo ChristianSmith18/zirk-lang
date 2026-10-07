@@ -957,6 +957,11 @@ mod tests {
     const FIXTURES: &[&str] = &[
         include_str!("../fixtures/class-construction-sugar.json"),
         include_str!("../fixtures/closure.json"),
+        include_str!("../fixtures/clone-tree.json"),
+        include_str!("../fixtures/clone-shared-child.json"),
+        include_str!("../fixtures/clone-cycle.json"),
+        include_str!("../fixtures/clone-polymorphic.json"),
+        include_str!("../fixtures/clone-callable.json"),
         include_str!("../fixtures/decimal-compare.json"),
         include_str!("../fixtures/decimal-ops.json"),
         include_str!("../fixtures/direct-call.json"),
@@ -990,6 +995,51 @@ mod tests {
         include_str!("../fixtures/void-call.json"),
         include_str!("../fixtures/void-method-call.json"),
     ];
+
+    #[test]
+    fn deep_clone_work_is_charged_against_the_instruction_budget() {
+        let program = |clone: bool| {
+            format!(
+                "import {{ stdout }} from std.io;\nclass Node {{ v: Int32; next: Node?; construct(v: Int32) {{ this.v = v; this.next = null; }} }}\nfn main(): Void {{\n    mut head = Node(0);\n    mut i = 1;\n    while i < 200 {{ mut n = Node(i); n.next = head; head = n; i = i + 1; }}\n    {}\n    stdout.println(\"done\");\n}}\n",
+                if clone {
+                    "mut copy = head.clone();"
+                } else {
+                    ""
+                }
+            )
+        };
+        let run_with = |source: String, instructions: u64| {
+            run(Request {
+                api_version: API_VERSION,
+                source,
+                virtual_name: "clone-budget.zrk".into(),
+                limits: Some(crate::contract::Limits {
+                    instructions,
+                    ..crate::contract::Limits::DEFAULT
+                }),
+            })
+        };
+        // Smallest budget at which the program without a clone completes.
+        let (mut low, mut high) = (1_u64, 2_000_000_u64);
+        while low < high {
+            let mid = (low + high) / 2;
+            if run_with(program(false), mid).completion.is_some() {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        let with_clone = run_with(program(true), low);
+        assert!(with_clone.completion.is_none(), "{with_clone:?}");
+        assert!(matches!(
+            with_clone.failure,
+            Some(crate::contract::Failure {
+                kind: FailureKind::Limit,
+                ..
+            })
+        ));
+        assert!(run_with(program(true), 2_000_000).completion.is_some());
+    }
 
     #[test]
     fn host_interpreter_fixture_runner_compares_observable_results() {
