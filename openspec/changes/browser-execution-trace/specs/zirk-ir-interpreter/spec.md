@@ -2,7 +2,7 @@
 
 ### Requirement: Execution trace is an opt-in, bounded, read-only observation channel
 
-When tracing is enabled, the interpreter SHALL emit an ordered trace of object allocation, field write, method call, method return, and throw events, each stamped with a sequence number that also orders output events. Allocation events SHALL carry the class name and a per-run object id assigned in allocation order. Field-write events SHALL carry the object id, field name, declared type, and a rendered value bounded in length. The trace SHALL be bounded by configured event and byte limits, SHALL NOT be readable by the interpreted program, and SHALL NOT change the program's output, completion, failure category, or instruction-limit behavior.
+When tracing is enabled, the interpreter SHALL emit an ordered trace of object allocation, field write, method call, method return, and throw events, each stamped with a sequence number, plus output markers that record where each accepted output event falls in that order. Allocation events SHALL carry the class name and a per-run object id assigned in allocation order. Field-write events SHALL carry the object id, field name, declared type, and a rendered value bounded in length. The trace SHALL be bounded by configured event and byte limits, SHALL NOT be readable by the interpreted program, and SHALL NOT change the program's output, completion, failure category, or instruction-limit behavior.
 
 #### Scenario: Object lifecycle is traced
 - **WHEN** a traced program constructs an object and assigns one of its fields
@@ -11,7 +11,7 @@ When tracing is enabled, the interpreter SHALL emit an ordered trace of object a
 
 #### Scenario: Trace interleaves with output
 - **WHEN** a traced program prints between two field writes
-- **THEN** the output event's sequence number falls between the two field-write sequence numbers
+- **THEN** the output marker's sequence number falls between the two field-write sequence numbers and names the output event index
 
 #### Scenario: Object-valued field renders as a reference
 - **WHEN** a traced program assigns an object to a field of another object

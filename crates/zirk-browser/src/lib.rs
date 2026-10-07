@@ -146,6 +146,7 @@ fn request_failure(code: &str, message: &str) -> contract::Response {
             limit: None,
         }),
         formatted_source: None,
+        trace: None,
     }
 }
 
@@ -274,6 +275,7 @@ pub fn check(request: contract::Request) -> contract::Response {
         completion: None,
         failure: None,
         formatted_source: None,
+        trace: None,
     };
     if request.api_version != API_VERSION {
         response.failure = Some(Failure {
@@ -392,6 +394,18 @@ pub fn run(request: contract::Request) -> contract::Response {
 
     let source = request.source.clone();
     let virtual_name = request.virtual_name.clone();
+    let trace_options = request.trace.clone();
+    if let Some(kinds) = trace_options
+        .as_ref()
+        .and_then(|options| options.kinds.as_ref())
+        && kinds
+            .iter()
+            .any(|kind| !contract::TRACE_KINDS.contains(&kind.as_str()))
+    {
+        let mut failure = request_failure("ZB105", "unknown execution trace event kind");
+        failure.operation = "run".into();
+        return failure;
+    }
     let mut response = check(request);
     response.operation = "run".into();
     if response.failure.is_some() || response.completion.is_none() {
@@ -450,8 +464,23 @@ pub fn run(request: contract::Request) -> contract::Response {
         response.completion = None;
         return response;
     };
+    let trace_limits = trace_options.as_ref().map(|options| {
+        let defaults = zirk_interpreter::TraceLimits::DEFAULT;
+        zirk_interpreter::TraceLimits {
+            max_events: options.events.unwrap_or(defaults.max_events),
+            max_bytes: options.bytes.unwrap_or(defaults.max_bytes),
+            max_value_bytes: options.value_bytes.unwrap_or(defaults.max_value_bytes),
+        }
+        .clamped()
+    });
+    if let Some(limits) = trace_limits {
+        interpreter.enable_trace(limits);
+    }
     let mut host = zirk_interpreter::CapturedHost::default();
     let result = interpreter.run_main_with_host(&mut host);
+    if let (Some(limits), Some(options)) = (trace_limits, trace_options.as_ref()) {
+        response.trace = Some(convert_trace(interpreter.take_trace(), limits, options));
+    }
     response.output = host
         .events()
         .iter()
@@ -467,6 +496,79 @@ pub fn run(request: contract::Request) -> contract::Response {
     response.completion = None;
     response.failure = execution_failure(result, &mut response.completion);
     response
+}
+
+fn convert_trace(
+    trace: zirk_interpreter::Trace,
+    limits: zirk_interpreter::TraceLimits,
+    options: &contract::TraceOptions,
+) -> contract::Trace {
+    use zirk_interpreter::TraceEventKind as Kind;
+    let wanted = |name: &str| {
+        options
+            .kinds
+            .as_ref()
+            .is_none_or(|kinds| kinds.iter().any(|kind| kind == name))
+    };
+    let events = trace
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            let mut dto = contract::TraceEvent {
+                seq: event.seq,
+                ..Default::default()
+            };
+            let name = match event.kind {
+                Kind::Alloc { object, class } => {
+                    dto.object = Some(object);
+                    dto.class = Some(class);
+                    "alloc"
+                }
+                Kind::FieldWrite {
+                    object,
+                    field,
+                    ty,
+                    value,
+                    truncated,
+                } => {
+                    dto.object = Some(object);
+                    dto.field = Some(field);
+                    dto.ty = Some(ty);
+                    dto.value = Some(value);
+                    dto.value_truncated = truncated.then_some(true);
+                    "fieldWrite"
+                }
+                Kind::Call { callee, receiver } => {
+                    dto.callee = Some(callee);
+                    dto.receiver = receiver;
+                    "call"
+                }
+                Kind::Return { callee } => {
+                    dto.callee = Some(callee);
+                    "return"
+                }
+                Kind::Throw { object } => {
+                    dto.object = object;
+                    "throw"
+                }
+                Kind::Output { index } => {
+                    dto.output_index = Some(index);
+                    "output"
+                }
+            };
+            dto.kind = name.into();
+            wanted(name).then_some(dto)
+        })
+        .collect();
+    contract::Trace {
+        events,
+        truncated: trace.truncated,
+        limits: contract::TraceLimits {
+            events: limits.max_events,
+            bytes: limits.max_bytes,
+            value_bytes: limits.max_value_bytes,
+        },
+    }
 }
 
 fn execution_failure(
@@ -544,6 +646,7 @@ mod tests {
     fn format_is_additive_v1_and_returns_source_or_diagnostics() {
         let valid = format(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "fn main(): Void { }\n".into(),
             virtual_name: "editor.zrk".into(),
             limits: None,
@@ -557,6 +660,7 @@ mod tests {
 
         let invalid = format(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "fn main(: Void {".into(),
             virtual_name: "editor.zrk".into(),
             limits: None,
@@ -644,6 +748,7 @@ mod tests {
     fn rejects_oversized_source_before_the_lexer_runs() {
         let response = check(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "x".repeat(5),
             virtual_name: "editor.zrk".into(),
             limits: Some(Limits {
@@ -663,6 +768,7 @@ mod tests {
     fn check_keeps_compiler_errors_out_of_execution() {
         let response = check(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "fn main(): Void { unknown; }".into(),
             virtual_name: "editor.zrk".into(),
             limits: None,
@@ -679,6 +785,7 @@ mod tests {
     fn run_lowers_verifies_and_interprets_a_compatible_program() {
         let response = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source:
                 "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"hello\"); }"
                     .into(),
@@ -694,6 +801,7 @@ mod tests {
     fn bundled_standard_package_sources_run_without_browser_filesystem_access() {
         let response = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "import { stdout } from std.io;\nfn main(): Void { println(\"package\"); }"
                 .into(),
             virtual_name: "package-editor.zrk".into(),
@@ -711,6 +819,7 @@ mod tests {
     fn browser_captures_standard_error_with_its_destination() {
         let response = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source:
                 "import { stderr } from std.io;\nfn main(): Void { stderr.println(\"warning\"); }"
                     .into(),
@@ -726,6 +835,7 @@ mod tests {
     fn browser_rejects_reachable_standard_input_before_execution() {
         let response = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "import { stdin } from std.io;\nfn main(): Void { stdin.read_line(); }".into(),
             virtual_name: "stdin-editor.zrk".into(),
             limits: None,
@@ -747,6 +857,7 @@ mod tests {
     fn run_contract_covers_completion_runtime_capability_and_execution_limits() {
         let normal = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"done\"); }"
                 .into(),
             virtual_name: "normal.zrk".into(),
@@ -759,6 +870,7 @@ mod tests {
 
         let fatal = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "fn main(): Void { fatalError(\"stop\"); }".into(),
             virtual_name: "fatal.zrk".into(),
             limits: None,
@@ -772,6 +884,7 @@ mod tests {
 
         let capability = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source: "extern \"C\" fn abs(n: Int32): Int32; fn main(): Void { unsafe { commit { abs(1); } } }".into(),
             virtual_name: "extern.zrk".into(),
             limits: None,
@@ -785,6 +898,7 @@ mod tests {
 
         let limited = run(Request {
             api_version: API_VERSION,
+            trace: None,
             source:
                 "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"limit\"); }"
                     .into(),
@@ -823,6 +937,7 @@ mod tests {
     fn check_and_run_return_the_same_compiler_errors_without_output() {
         let request = Request {
             api_version: API_VERSION,
+            trace: None,
             source: "fn main(): Void { unknown; }".into(),
             virtual_name: "editor.zrk".into(),
             limits: None,
@@ -898,6 +1013,7 @@ mod tests {
         for (expected, limits) in cases {
             let response = check(Request {
                 api_version: API_VERSION,
+                trace: None,
                 source: "fn main(): Void { unknown; }".into(),
                 virtual_name: "editor.zrk".into(),
                 limits: Some(*limits),
@@ -1011,6 +1127,7 @@ mod tests {
         let run_with = |source: String, instructions: u64| {
             run(Request {
                 api_version: API_VERSION,
+                trace: None,
                 source,
                 virtual_name: "clone-budget.zrk".into(),
                 limits: Some(crate::contract::Limits {
@@ -1039,6 +1156,146 @@ mod tests {
             })
         ));
         assert!(run_with(program(true), 2_000_000).completion.is_some());
+    }
+
+    const TRACE_SOURCE: &str = "import { stdout } from std.io;\nclass Leaf { v: Int32; construct(v: Int32) { this.v = v; } }\nclass Tree { name: String; leaf: Leaf; construct(name: String, leaf: Leaf) { this.name = name; this.leaf = leaf; } }\nfn main(): Void {\n    mut t = Tree(\"oak\", Leaf(1));\n    stdout.println(\"built\");\n    t.leaf.v = 2;\n}\n";
+
+    fn traced(
+        source: &str,
+        trace: Option<crate::contract::TraceOptions>,
+    ) -> crate::contract::Response {
+        run(Request {
+            api_version: API_VERSION,
+            trace,
+            source: source.into(),
+            virtual_name: "trace.zrk".into(),
+            limits: None,
+        })
+    }
+
+    #[test]
+    fn trace_is_absent_unless_requested() {
+        let response = traced(TRACE_SOURCE, None);
+        assert!(response.trace.is_none());
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("\"trace\"")
+        );
+    }
+
+    #[test]
+    fn trace_records_object_lifecycle_and_interleaves_output() {
+        let response = traced(TRACE_SOURCE, Some(Default::default()));
+        let trace = response.trace.expect("trace");
+        assert!(!trace.truncated);
+        let kinds: Vec<&str> = trace.events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"alloc") && kinds.contains(&"fieldWrite"));
+        assert!(
+            trace
+                .events
+                .windows(2)
+                .all(|pair| pair[0].seq < pair[1].seq)
+        );
+        let alloc_tree = trace
+            .events
+            .iter()
+            .position(|e| e.class.as_deref() == Some("Tree"))
+            .expect("Tree alloc");
+        let output = trace
+            .events
+            .iter()
+            .position(|e| e.kind == "output")
+            .expect("output marker");
+        let last_write = trace
+            .events
+            .iter()
+            .rposition(|e| e.field.as_deref() == Some("v"))
+            .expect("write");
+        assert!(alloc_tree < output && output < last_write);
+        // An object-valued field renders as a reference, never as contents.
+        let leaf_write = trace
+            .events
+            .iter()
+            .find(|e| e.field.as_deref() == Some("leaf"))
+            .expect("leaf write");
+        assert!(leaf_write.value.as_deref().unwrap().starts_with('#'));
+        let name_write = trace
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.field.as_deref() == Some("name"))
+            .expect("name write");
+        assert_eq!(name_write.value.as_deref(), Some("\"oak\""));
+    }
+
+    #[test]
+    fn trace_is_deterministic_and_does_not_change_behavior() {
+        let first = traced(TRACE_SOURCE, Some(Default::default())).trace;
+        assert_eq!(first, traced(TRACE_SOURCE, Some(Default::default())).trace);
+        for fixture_json in FIXTURES.iter().copied() {
+            let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
+            let plain = traced(&fixture.source, None);
+            let mut with_trace = traced(&fixture.source, Some(Default::default()));
+            assert!(with_trace.trace.is_some(), "{}", fixture.name);
+            with_trace.trace = None;
+            assert_eq!(plain, with_trace, "{}", fixture.name);
+        }
+    }
+
+    #[test]
+    fn trace_budget_truncates_without_failing_the_program() {
+        let options = crate::contract::TraceOptions {
+            events: Some(2),
+            ..Default::default()
+        };
+        let response = traced(TRACE_SOURCE, Some(options));
+        let trace = response.trace.expect("trace");
+        assert_eq!(trace.events.len(), 2);
+        assert!(trace.truncated);
+        assert_eq!(
+            response.completion,
+            Some(crate::contract::Completion::Completed)
+        );
+    }
+
+    #[test]
+    fn long_loops_keep_the_trace_bounded() {
+        let source = "class C { v: Int32; construct() { this.v = 0; } }\nfn main(): Void {\n    mut c = C();\n    mut i = 0;\n    while i < 20000 { c.v = i; i = i + 1; }\n}\n";
+        let response = traced(source, Some(Default::default()));
+        let trace = response.trace.expect("trace");
+        assert!(trace.truncated);
+        assert!(trace.events.len() <= trace.limits.events);
+        assert_eq!(
+            response.completion,
+            Some(crate::contract::Completion::Completed)
+        );
+    }
+
+    #[test]
+    fn trace_selects_event_kinds_and_rejects_unknown_ones() {
+        let only_alloc = crate::contract::TraceOptions {
+            kinds: Some(vec!["alloc".into()]),
+            ..Default::default()
+        };
+        let trace = traced(TRACE_SOURCE, Some(only_alloc)).trace.expect("trace");
+        assert!(!trace.events.is_empty() && trace.events.iter().all(|e| e.kind == "alloc"));
+        let unknown = crate::contract::TraceOptions {
+            kinds: Some(vec!["nope".into()]),
+            ..Default::default()
+        };
+        let response = traced(TRACE_SOURCE, Some(unknown));
+        assert!(response.output.is_empty());
+        assert!(matches!(
+            response.failure,
+            Some(crate::contract::Failure { kind: FailureKind::Request, ref code, .. }) if code == "ZB105"
+        ));
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"apiVersion":1,"source":"","virtualName":"a.zrk","trace":{"bogus":1}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1081,6 +1338,7 @@ mod tests {
             let fixture: crate::fixtures::Fixture = serde_json::from_str(fixture_json).unwrap();
             let response = run(Request {
                 api_version: API_VERSION,
+                trace: None,
                 source: fixture.source,
                 virtual_name: fixture.virtual_name,
                 limits: None,
@@ -1133,6 +1391,7 @@ mod tests {
             let host_result = interpreter.run_main_with_host(&mut host);
             let browser = run(Request {
                 api_version: API_VERSION,
+                trace: None,
                 source: fixture.source,
                 virtual_name: fixture.virtual_name,
                 limits: None,
@@ -1166,6 +1425,7 @@ mod tests {
     fn repeated_browser_runs_do_not_leak_output_or_execution_state() {
         let request = Request {
             api_version: API_VERSION,
+            trace: None,
             source:
                 "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"fresh\"); }"
                     .into(),

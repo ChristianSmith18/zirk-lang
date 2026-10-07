@@ -64,6 +64,12 @@ const manifest = {
     supported: verdicts("supported"),
     excluded: verdicts("excluded"),
   },
+  trace: {
+    kinds: ["alloc", "fieldWrite", "call", "return", "throw", "output"],
+    limits: { events: 16384, bytes: 1048576, valueBytes: 256 },
+    defaults: { events: 2048, bytes: 131072, valueBytes: 64 },
+    effect: "observation",
+  },
   exclusions: ["extern", "pointer", "native-slice", "process", "shell", "filesystem", "environment", "secrets", "network", "clock", "random", "DOM"],
   tools: {
     node: process.version,

@@ -101,6 +101,7 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
         let source = fs::read_to_string(&path).expect("corpus source");
         let response = zirk_browser::run(Request {
             api_version: zirk_browser::API_VERSION,
+            trace: None,
             source,
             virtual_name: format!("corpus/{name}.zrk"),
             limits: None,

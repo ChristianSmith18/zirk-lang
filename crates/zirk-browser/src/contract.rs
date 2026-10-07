@@ -74,6 +74,69 @@ pub struct Request {
     pub virtual_name: String,
     #[serde(default)]
     pub limits: Option<Limits>,
+    /// Opt-in execution trace for `run`. Absent by default.
+    #[serde(default)]
+    pub trace: Option<TraceOptions>,
+}
+
+/// Event kinds a caller may select, in contract spelling.
+pub const TRACE_KINDS: [&str; 6] = ["alloc", "fieldWrite", "call", "return", "throw", "output"];
+
+/// Enables the read-only execution trace. Bounds can only be tightened below
+/// the package maxima.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TraceOptions {
+    #[serde(default)]
+    pub events: Option<usize>,
+    #[serde(default)]
+    pub bytes: Option<usize>,
+    #[serde(default)]
+    pub value_bytes: Option<usize>,
+    /// Event kinds to record; every kind when absent.
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceLimits {
+    pub events: usize,
+    pub bytes: usize,
+    pub value_bytes: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceEvent {
+    pub seq: u64,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ty: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trace {
+    pub events: Vec<TraceEvent>,
+    pub truncated: bool,
+    pub limits: TraceLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +201,9 @@ pub struct Response {
     /// Canonical source returned by the additive `format` operation only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatted_source: Option<String>,
+    /// Execution trace; present only when the request enabled it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
 }
 
 #[cfg(test)]

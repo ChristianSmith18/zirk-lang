@@ -74,6 +74,17 @@ Callers may only lower these limits. The site additionally enforces a
 wall-clock deadline by terminating and recreating its worker; that deadline is
 containment, not a language semantic.
 
+## Execution trace (observation, not a host effect)
+
+`run` accepts an opt-in `trace` option and then returns ordered, read-only
+events: object allocation, field write, call, return, throw, and `output`
+markers that interleave accepted output events with object events. Object ids
+are per-run and never derive from heap identifiers; object-valued fields render
+as references. The trace has its own bounds (defaults 2,048 events, 128 KiB, 64
+bytes per rendered value; maxima 16,384 events, 1 MiB, 256 bytes), callers can
+only tighten them, and exhausting them truncates the trace without failing the
+program. Interpreted code cannot read or influence it. See ADR-022.
+
 ## Pinned boundary dependencies
 
 The browser boundary will use `wasm-bindgen 0.2.128`, `serde 1.0.229` with

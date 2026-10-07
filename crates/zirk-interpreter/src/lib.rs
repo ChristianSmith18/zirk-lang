@@ -338,6 +338,100 @@ pub enum HeapEntry {
     },
 }
 
+/// Bounds for the opt-in execution trace. Exhausting any of them stops
+/// recording and marks the trace truncated; it never fails the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceLimits {
+    pub max_events: usize,
+    pub max_bytes: usize,
+    pub max_value_bytes: usize,
+}
+
+impl TraceLimits {
+    pub const MAX_EVENTS: usize = 16_384;
+    pub const MAX_BYTES: usize = 1024 * 1024;
+    pub const MAX_VALUE_BYTES: usize = 256;
+    pub const DEFAULT: Self = Self {
+        max_events: 2_048,
+        max_bytes: 128 * 1024,
+        max_value_bytes: 64,
+    };
+
+    /// Clamps every bound to the package maxima.
+    pub const fn clamped(self) -> Self {
+        Self {
+            max_events: if self.max_events < Self::MAX_EVENTS {
+                self.max_events
+            } else {
+                Self::MAX_EVENTS
+            },
+            max_bytes: if self.max_bytes < Self::MAX_BYTES {
+                self.max_bytes
+            } else {
+                Self::MAX_BYTES
+            },
+            max_value_bytes: if self.max_value_bytes < Self::MAX_VALUE_BYTES {
+                self.max_value_bytes
+            } else {
+                Self::MAX_VALUE_BYTES
+            },
+        }
+    }
+}
+
+/// One read-only observation of interpreter behavior. Object ids are assigned
+/// per run in first-seen order and never derive from heap identifiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceEventKind {
+    Alloc {
+        object: u32,
+        class: String,
+    },
+    FieldWrite {
+        object: u32,
+        field: String,
+        ty: String,
+        value: String,
+        truncated: bool,
+    },
+    Call {
+        callee: String,
+        receiver: Option<u32>,
+    },
+    Return {
+        callee: String,
+    },
+    Throw {
+        object: Option<u32>,
+    },
+    /// Marks where the output event with this index was accepted, so
+    /// consumers can interleave output with object events.
+    Output {
+        index: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceEvent {
+    pub seq: u64,
+    pub kind: TraceEventKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trace {
+    pub events: Vec<TraceEvent>,
+    pub truncated: bool,
+}
+
+#[derive(Debug)]
+struct TraceState {
+    limits: TraceLimits,
+    trace: Trace,
+    bytes: usize,
+    next_seq: u64,
+    object_ids: HashMap<HeapId, u32>,
+}
+
 /// Bounded arena used for the lifetime of a single execution.
 #[derive(Debug, Default)]
 pub struct Heap {
@@ -817,6 +911,7 @@ pub struct Interpreter<'module> {
     output_truncated: bool,
     pending_exception: Option<HeapId>,
     throwables: HashMap<HeapId, ThrowableInfo>,
+    trace: Option<TraceState>,
 }
 
 impl<'module> Interpreter<'module> {
@@ -843,7 +938,28 @@ impl<'module> Interpreter<'module> {
             output_truncated: false,
             pending_exception: None,
             throwables: HashMap::new(),
+            trace: None,
         })
+    }
+
+    /// Enables the read-only execution trace. Tracing has no effect on
+    /// program behavior and is not charged to the instruction budget.
+    pub fn enable_trace(&mut self, limits: TraceLimits) {
+        self.trace = Some(TraceState {
+            limits: limits.clamped(),
+            trace: Trace::default(),
+            bytes: 0,
+            next_seq: 1,
+            object_ids: HashMap::new(),
+        });
+    }
+
+    /// Takes the recorded trace, leaving tracing enabled and empty.
+    pub fn take_trace(&mut self) -> Trace {
+        self.trace
+            .as_mut()
+            .map(|state| std::mem::take(&mut state.trace))
+            .unwrap_or_default()
     }
 
     pub fn heap_bytes(&self) -> usize {
@@ -961,6 +1077,10 @@ impl<'module> Interpreter<'module> {
                         self.frames[frame_index].values.get(&operand.0).cloned()
                     });
                     let returned = self.frames.pop().expect("active frame exists");
+                    if self.trace.is_some() {
+                        let callee = self.module.functions[returned.function].name.clone();
+                        self.trace_record(TraceEventKind::Return { callee });
+                    }
                     match returned.return_to {
                         None => return ExecutionResult::Completed { value },
                         Some(destination) => {
@@ -1044,6 +1164,19 @@ impl<'module> Interpreter<'module> {
             // compiler fault rather than user-triggerable runtime behavior.
             return Err(LimitFailure::CallDepth);
         }
+        if self.trace.is_some() {
+            let callee = entry.name.clone();
+            let receiver = match arguments.first() {
+                Some(Value::Heap(id))
+                    if matches!(self.heap.get(*id), Some(HeapEntry::Object { .. })) =>
+                {
+                    self.trace_object_id(*id)
+                }
+                _ => None,
+            };
+            self.trace_record(TraceEventKind::Call { callee, receiver });
+        }
+        let entry = &self.module.functions[function];
         let mut slots = vec![None; entry.slots.len()];
         for (slot, value) in entry.params.iter().zip(arguments) {
             slots[slot.0 as usize] = Some(value);
@@ -1207,6 +1340,10 @@ impl<'module> Interpreter<'module> {
                 let value = self.value(frame_index, *exception)?;
                 let id = self.record_throwable(value, instruction.span)?;
                 self.pending_exception = Some(id);
+                if self.trace.is_some() {
+                    let object = self.trace_object_id(id);
+                    self.trace_record(TraceEventKind::Throw { object });
+                }
                 Ok(None)
             }
             InstKind::SetSuppressed {
@@ -2327,7 +2464,8 @@ impl<'module> Interpreter<'module> {
                 let bytes = std::mem::size_of::<HeapEntry>()
                     .checked_add(fields.saturating_mul(std::mem::size_of::<Value>()))
                     .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
-                self.heap
+                let id = self
+                    .heap
                     .allocate(
                         HeapEntry::Object {
                             layout: *layout,
@@ -2336,8 +2474,14 @@ impl<'module> Interpreter<'module> {
                         bytes,
                         self.limits,
                     )
-                    .map(|id| Some(Value::Heap(id)))
-                    .map_err(ExecutionFault::Limit)
+                    .map_err(ExecutionFault::Limit)?;
+                if self.trace.is_some() {
+                    let class = self.module.objects[*layout as usize].name.clone();
+                    if let Some(object) = self.trace_object_id(id) {
+                        self.trace_record(TraceEventKind::Alloc { object, class });
+                    }
+                }
+                Ok(Some(Value::Heap(id)))
             }
             InstKind::BuildValue { class, fields } => {
                 let fields = fields
@@ -2489,15 +2633,35 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::Object { fields, .. }) = self.heap.get_mut(id) else {
+                let Some(HeapEntry::Object { layout, fields }) = self.heap.get_mut(id) else {
                     return Err(ExecutionFault::Internal(
                         "StoreField writes a heap value that is not an object".into(),
                     ));
                 };
+                let layout = *layout;
                 let field = fields.get_mut(*index as usize).ok_or_else(|| {
                     ExecutionFault::Internal(format!("StoreField references missing field {index}"))
                 })?;
-                *field = value;
+                *field = value.clone();
+                if self.trace.is_some() {
+                    let described = self
+                        .module
+                        .objects
+                        .get(layout as usize)
+                        .and_then(|object| object.fields.get(*index as usize))
+                        .map(|field| (field.name.clone(), field.ty.as_str().to_string()));
+                    if let (Some((field, ty)), Some(object)) = (described, self.trace_object_id(id))
+                    {
+                        let (value, truncated) = self.trace_render(&value);
+                        self.trace_record(TraceEventKind::FieldWrite {
+                            object,
+                            field,
+                            ty,
+                            value,
+                            truncated,
+                        });
+                    }
+                }
                 Ok(None)
             }
             InstKind::IsInstance {
@@ -2664,6 +2828,9 @@ impl<'module> Interpreter<'module> {
         }
         self.output_bytes = next_bytes;
         self.output_events = next_events;
+        self.trace_record(TraceEventKind::Output {
+            index: next_events - 1,
+        });
         Ok(None)
     }
 
@@ -4436,6 +4603,88 @@ impl<'module> Interpreter<'module> {
             }
             other => Ok(other),
         }
+    }
+
+    fn trace_object_id(&mut self, id: HeapId) -> Option<u32> {
+        let state = self.trace.as_mut()?;
+        let next = state.object_ids.len() as u32 + 1;
+        Some(*state.object_ids.entry(id).or_insert(next))
+    }
+
+    fn trace_record(&mut self, kind: TraceEventKind) {
+        let Some(state) = self.trace.as_mut() else {
+            return;
+        };
+        if state.trace.truncated {
+            return;
+        }
+        let weight = 24
+            + match &kind {
+                TraceEventKind::Alloc { class, .. } => class.len(),
+                TraceEventKind::FieldWrite {
+                    field, ty, value, ..
+                } => field.len() + ty.len() + value.len(),
+                TraceEventKind::Call { callee, .. } | TraceEventKind::Return { callee } => {
+                    callee.len()
+                }
+                _ => 0,
+            };
+        if state.trace.events.len() >= state.limits.max_events
+            || state.bytes + weight > state.limits.max_bytes
+        {
+            state.trace.truncated = true;
+            return;
+        }
+        state.bytes += weight;
+        let seq = state.next_seq;
+        state.next_seq += 1;
+        state.trace.events.push(TraceEvent { seq, kind });
+    }
+
+    /// Renders a value for the trace: scalars verbatim, strings quoted,
+    /// objects as a reference to their trace id, never their contents.
+    fn trace_render(&mut self, value: &Value) -> (String, bool) {
+        let limit = self
+            .trace
+            .as_ref()
+            .map_or(0, |state| state.limits.max_value_bytes);
+        let text = match value {
+            Value::Int(int) => {
+                if int.width.signed() {
+                    int.signed().to_string()
+                } else {
+                    int.unsigned().to_string()
+                }
+            }
+            Value::Float { text, .. } | Value::Decimal(text) => text.clone(),
+            Value::Boolean(flag) => flag.to_string(),
+            Value::Nullable(None) => "null".into(),
+            Value::Nullable(Some(inner)) => return self.trace_render(inner),
+            Value::Void | Value::Never | Value::Undefined => "undefined".into(),
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::String(text)) | Some(HeapEntry::Char(text)) => format!("{text:?}"),
+                Some(HeapEntry::Object { .. }) => match self.trace_object_id(*id) {
+                    Some(object) => format!("#{object}"),
+                    None => String::new(),
+                },
+                Some(HeapEntry::Record { .. }) => "<record>".into(),
+                Some(HeapEntry::Enum { .. }) => "<enum>".into(),
+                Some(HeapEntry::List(_)) => "<list>".into(),
+                Some(HeapEntry::Array(_)) => "<array>".into(),
+                Some(HeapEntry::Map(_)) => "<map>".into(),
+                Some(HeapEntry::Set(_)) => "<set>".into(),
+                Some(HeapEntry::Closure { .. }) => "<closure>".into(),
+                _ => "<value>".into(),
+            },
+        };
+        if text.len() <= limit {
+            return (text, false);
+        }
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        (text[..end].to_string(), true)
     }
 
     fn heap_operand(

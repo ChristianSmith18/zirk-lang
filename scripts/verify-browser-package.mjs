@@ -26,6 +26,9 @@ if (!manifest.objectModel
     || !Array.isArray(manifest.objectModel.excluded)) {
   throw new Error("manifest must publish the object-model coverage verdicts");
 }
+if (!manifest.trace || manifest.trace.effect !== "observation" || !Array.isArray(manifest.trace.kinds)) {
+  throw new Error("manifest must describe the execution trace as an observation feature");
+}
 if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
   throw new Error("manifest has no artifact records");
 }

@@ -36,8 +36,9 @@ reproduce their native output in the browser, and the remaining 34 are the
 listed capability exclusions (concurrency, timers, `parallel`, channels,
 pointers, native slices, `unsafe` journals, `Pin`/`Dependent` and resource
 transfer); deep `clone()` runs on the interpreter heap. Object-model coverage is catalogued in
-[`browser-oop-coverage.md`](../browser-oop-coverage.md). Native effects and
-multi-file/package execution remain outside the browser baseline. The exhaustive
+[`browser-oop-coverage.md`](../browser-oop-coverage.md). `run` can also return an opt-in, bounded, read-only execution trace of object
+events (ADR-022). Native effects and multi-file/package execution remain
+outside the browser baseline. The exhaustive
 policy is [`browser-interpreter-support-matrix.md`](../browser-interpreter-support-matrix.md);
 no native feature becomes browser-available merely because its frontend or
 native backend is delivered.

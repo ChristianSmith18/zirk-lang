@@ -12,11 +12,43 @@ export interface Limits {
   stackFrames: number;
 }
 
+export type TraceEventKind = "alloc" | "fieldWrite" | "call" | "return" | "throw" | "output";
+
+/** Opt-in, read-only execution trace for `run`. Bounds can only be tightened. */
+export interface TraceOptions {
+  events?: number;
+  bytes?: number;
+  valueBytes?: number;
+  kinds?: TraceEventKind[];
+}
+
 export interface Request {
   apiVersion: 1;
   source: string;
   virtualName: string;
   limits?: Limits;
+  trace?: TraceOptions;
+}
+
+export interface TraceEvent {
+  seq: number;
+  kind: TraceEventKind;
+  object?: number;
+  class?: string;
+  field?: string;
+  ty?: string;
+  value?: string;
+  valueTruncated?: boolean;
+  callee?: string;
+  receiver?: number;
+  /** For `output` markers: index into `Response.output`. */
+  outputIndex?: number;
+}
+
+export interface Trace {
+  events: TraceEvent[];
+  truncated: boolean;
+  limits: { events: number; bytes: number; valueBytes: number };
 }
 
 export interface Response {
@@ -31,6 +63,8 @@ export interface Response {
   completion: "completed" | null;
   failure: { kind: FailureKind; code: string; message: string; limit: string | null } | null;
   formattedSource?: string;
+  /** Present only when the request enabled tracing. */
+  trace?: Trace;
 }
 
 export interface BrowserApi {

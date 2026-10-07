@@ -5,6 +5,7 @@ fn main() {
         let source = std::fs::read_to_string(&path).unwrap();
         let response = zirk_browser::run(contract::Request {
             api_version: 1,
+            trace: None,
             source,
             virtual_name: path.clone(),
             limits: None,

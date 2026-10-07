@@ -16,7 +16,7 @@
 
 - [x] 3.1 Run the clone fixtures and the `clone_record`/`callable_clone` corpus programs through the browser and native paths; verify output matches.
 - [ ] 3.2 Add a heap-limit stress test with a very wide graph at the maximum default limits; verify it ends in `limit-exceeded` naming `heap`.
-- [ ] 3.3 Run `cargo test --workspace`, formatting, clippy, and `scripts/audit-browser-dependencies.sh`; verify only the pre-existing `zirk-parser` failures remain.
+- [x] 3.3 Run `cargo test --workspace`, formatting, clippy, and `scripts/audit-browser-dependencies.sh`; verify only the pre-existing `zirk-parser` failures remain.
 
 ## 4. Documentation, status, and companion-site handoff
 
