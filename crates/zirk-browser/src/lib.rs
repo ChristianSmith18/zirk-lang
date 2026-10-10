@@ -1342,6 +1342,32 @@ mod tests {
     }
 
     #[test]
+    fn pieces_of_one_line_are_one_event_and_streams_stay_separate() {
+        let source = "import { stdout, stderr } from std.io;\nfn main(): Void {\n    stdout.println(\"a\", 2);\n    stdout.print(\"x\");\n    stderr.print(\"E\");\n    stdout.println(\"y\");\n}\n";
+        let response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: source.into(),
+            virtual_name: "lines.zrk".into(),
+            limits: None,
+        });
+        let events: Vec<(String, String)> = response
+            .output
+            .iter()
+            .map(|event| (event.destination.clone(), event.text.clone()))
+            .collect();
+        assert_eq!(
+            events,
+            [
+                ("stdout".to_string(), "a 2\n".to_string()),
+                ("stdout".to_string(), "x".to_string()),
+                ("stderr".to_string(), "E".to_string()),
+                ("stdout".to_string(), "y\n".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn host_interpreter_fixture_runner_compares_observable_results() {
         let fixture: crate::fixtures::Fixture =
             serde_json::from_str(include_str!("../fixtures/hello-world.json"))
