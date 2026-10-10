@@ -1,0 +1,11 @@
+{
+  "name": "std-io-mixed-values",
+  "source": "import { stdout } from std.io;\n\nclass Label {\n    text: String;\n\n    construct(text: String) {\n        this.text = text;\n    }\n\n    #override\n    to_string(): String {\n        return this.text;\n    }\n}\n\nfn main(): Void {\n    inmut label = Label(\"items\");\n    stdout.println(\"count\", 2, true, label);\n    println(\"done\", 3.5, null);\n}\n",
+  "virtualName": "fixtures/std-io-mixed-values.zrk",
+  "expectedOutput": [
+    "count 2 true items\n",
+    "done 3.5 <Null>\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

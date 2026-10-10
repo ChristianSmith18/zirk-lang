@@ -1073,6 +1073,7 @@ mod tests {
     const FIXTURES: &[&str] = &[
         include_str!("../fixtures/class-construction-sugar.json"),
         include_str!("../fixtures/closure.json"),
+        include_str!("../fixtures/std-io-mixed-values.json"),
         include_str!("../fixtures/clone-tree.json"),
         include_str!("../fixtures/clone-shared-child.json"),
         include_str!("../fixtures/clone-cycle.json"),
@@ -1300,7 +1301,7 @@ mod tests {
 
     #[test]
     fn deep_clone_of_a_wide_graph_ends_in_a_heap_limit_without_touching_the_source() {
-        let source = "import { stdout } from std.io;\nclass Node { v: Int32; a: Node?; b: Node?; construct(v: Int32) { this.v = v; this.a = null; this.b = null; } }\nfn main(): Void {\n    mut root = Node(0);\n    mut i = 1;\n    while i < 400 { mut n = Node(i); n.a = root.a; n.b = root; root.a = n; i = i + 1; }\n    mut copy = root.clone();\n    stdout.println(\"cloned\");\n}\n";
+        let source = "class Node { v: Int32; a: Node?; b: Node?; construct(v: Int32) { this.v = v; this.a = null; this.b = null; } }\nfn main(): Void {\n    mut root = Node(0);\n    mut i = 1;\n    while i < 400 { mut n = Node(i); n.a = root.a; n.b = root; root.a = n; i = i + 1; }\n    mut copy = root.clone();\n}\n";
         let run_with_heap = |heap_bytes: usize| {
             run(Request {
                 api_version: API_VERSION,

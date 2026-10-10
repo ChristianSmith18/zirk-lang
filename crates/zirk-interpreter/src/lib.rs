@@ -610,6 +610,18 @@ impl CapturedHost {
 
 impl InterpreterHost for CapturedHost {
     fn emit(&mut self, event: OutputEvent) -> Result<(), HostOutputError> {
+        // Pieces of one line (`println("a", 2)` writes `a`, ` `, `2`, then the
+        // line break) are delivered as a single event, so consumers see one
+        // event per line regardless of how the standard library composes it.
+        if let Some(last) = self.events.last_mut()
+            && !event.truncated
+            && !last.truncated
+            && last.destination == event.destination
+            && !last.text.ends_with('\n')
+        {
+            last.text.push_str(&event.text);
+            return Ok(());
+        }
         self.events.push(event);
         Ok(())
     }
@@ -908,6 +920,9 @@ pub struct Interpreter<'module> {
     executed_steps: u64,
     output_bytes: usize,
     output_events: u32,
+    /// Stream of an output line that has been started but not ended by a
+    /// newline. Pieces written to it continue the same logical event.
+    open_output_line: Option<OutputDestination>,
     output_truncated: bool,
     pending_exception: Option<HeapId>,
     throwables: HashMap<HeapId, ThrowableInfo>,
@@ -935,6 +950,7 @@ impl<'module> Interpreter<'module> {
             executed_steps: 0,
             output_bytes: 0,
             output_events: 0,
+            open_output_line: None,
             output_truncated: false,
             pending_exception: None,
             throwables: HashMap::new(),
@@ -2808,13 +2824,22 @@ impl<'module> Interpreter<'module> {
             Some(bytes) => bytes,
             None => return Err(self.truncate_output(host)),
         };
-        let next_events = match self
-            .output_events
-            .checked_add(1)
-            .filter(|events| *events <= self.limits.output_events)
-        {
-            Some(events) => events,
-            None => return Err(self.truncate_output(host)),
+        // `println("a", 2)` is several writes to one line. The output-event
+        // allowance counts logical lines, so a write that continues an open
+        // line on the same stream costs no extra event.
+        let continues_line = self.open_output_line == Some(destination);
+        let ends_line = text.ends_with('\n');
+        let next_events = if continues_line {
+            self.output_events
+        } else {
+            match self
+                .output_events
+                .checked_add(1)
+                .filter(|events| *events <= self.limits.output_events)
+            {
+                Some(events) => events,
+                None => return Err(self.truncate_output(host)),
+            }
         };
         if host
             .emit(OutputEvent {
@@ -2828,6 +2853,7 @@ impl<'module> Interpreter<'module> {
         }
         self.output_bytes = next_bytes;
         self.output_events = next_events;
+        self.open_output_line = if ends_line { None } else { Some(destination) };
         self.trace_record(TraceEventKind::Output {
             index: next_events - 1,
         });
@@ -7862,11 +7888,8 @@ mod tests {
         assert_eq!(
             host.events(),
             &[
-                OutputEvent {
-                    text: "".into(),
-                    destination: OutputDestination::Stdout,
-                    truncated: false
-                },
+                // The leading empty `print` continues the line that `println`
+                // ends, so the host receives one event per line.
                 OutputEvent {
                     text: "ñ\n".into(),
                     destination: OutputDestination::Stdout,
