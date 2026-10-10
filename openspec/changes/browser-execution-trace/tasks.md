@@ -19,7 +19,7 @@
 - [x] 3.1 Add the optional request field, response field, and trace limits to `crates/zirk-browser/src/contract.rs`, tighten-only like existing limits; verify contract tests cover default, tightened, and over-limit requests.
 - [x] 3.2 Reject unknown trace options deterministically before execution; verify a boundary test.
 - [x] 3.3 Regenerate `browser-api.d.ts` and verify the strict declaration test covers the new types and that responses without tracing are byte-identical to the previous contract.
-- [ ] 3.4 Surface tracing, its event kinds and limits in the package manifest and require it in the verification script; verify with a scratch manifest.
+- [x] 3.4 Surface tracing, its event kinds and limits in the package manifest and require it in the verification script; verify with a scratch manifest.
 
 ## 4. Behavior-preservation and stress verification
 
