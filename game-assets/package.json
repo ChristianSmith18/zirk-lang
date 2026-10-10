@@ -13,7 +13,9 @@
     "test": "node --test test/*.test.js",
     "preview": "node preview/serve.mjs",
     "shots": "node preview/shots.mjs preview/shots",
-    "export-check": "node preview/export-check.mjs"
+    "export-check": "node preview/export-check.mjs",
+    "curriculum:verify": "node curriculum/verify.mjs",
+    "curriculum:export": "node curriculum/export.mjs"
   },
   "peerDependencies": {
     "three": ">=0.170.0"

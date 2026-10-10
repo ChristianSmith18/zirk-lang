@@ -1,0 +1,1741 @@
+{
+  "schemaVersion": 1,
+  "levels": [
+    {
+      "id": "1.1",
+      "sector": 1,
+      "sectorName": "Cubierta de mando",
+      "title": "Hola, Zirk",
+      "type": "output",
+      "concept": "un programa Zirk empieza en `fn main()`; `stdout.println` escribe una línea.",
+      "story": "la terminal de la cubierta parpadea y espera un saludo para despertar.",
+      "goal": "que la terminal muestre `Hola, Zirk`.",
+      "assets": [
+        "terminal",
+        "bot-zirk"
+      ],
+      "artNotes": "`terminal`, `bot-zirk` (`think` mientras se escribe, `celebrate` al acertar).",
+      "hints": [
+        "¿Qué función de `stdout` escribe una línea?",
+        "Lo que va entre comillas es un texto: se imprime tal cual.",
+        "`stdout.println(\"...\");` dentro de `main`."
+      ],
+      "extra": "ninguno, es el primer paso.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    // Escribe aquí el mensaje que despierta la terminal\n}\n",
+      "expect": [
+        "Hola, Zirk"
+      ]
+    },
+    {
+      "id": "1.2",
+      "sector": 1,
+      "sectorName": "Cubierta de mando",
+      "title": "Una orden tras otra",
+      "type": "grid",
+      "concept": "las instrucciones se ejecutan **en orden**, de arriba abajo.",
+      "story": "el pasillo hasta el ascensor tiene dos giros. Zirk solo sabe seguir órdenes.",
+      "goal": "llegar a la meta `G`.",
+      "assets": [
+        "bot-zirk",
+        "start-pad",
+        "goal-portal",
+        "tile-circuit",
+        "wall"
+      ],
+      "artNotes": "`bot-zirk` (`walk`), `start-pad`, `goal-portal`, `tile-circuit`, `wall`.",
+      "hints": [
+        "Zirk mira al este al empezar: ¿hacia dónde tiene que girar en cada esquina?",
+        "`turn_right()` gira sin avanzar; hay que volver a llamar a `walk`.",
+        "Son cinco instrucciones: avanzar, girar, avanzar, girar, avanzar."
+      ],
+      "extra": "resolverlo con las cinco órdenes mínimas.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    walk(2);\n}\n",
+      "map": [
+        "S..#",
+        "##.#",
+        "G..#"
+      ],
+      "facing": "east",
+      "par": 5
+    },
+    {
+      "id": "1.3",
+      "sector": 1,
+      "sectorName": "Cubierta de mando",
+      "title": "print y println",
+      "type": "output",
+      "concept": "`println` escribe y salta de línea; `print` escribe **sin** saltar.",
+      "story": "la cuenta atrás de despegue debe verse en una sola línea.",
+      "goal": "imprimir `3-2-1` en una línea y `¡Despegue!` en la siguiente.",
+      "assets": [
+        "terminal",
+        "battery"
+      ],
+      "artNotes": null,
+      "hints": [
+        "¿Qué pasa con la línea cuando usas `println` en cada número?",
+        "`print` no añade el salto de línea.",
+        "Cambia las dos primeras llamadas."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(\"3-\");\n    stdout.println(\"2-\");\n    stdout.println(\"1\");\n    stdout.println(\"¡Despegue!\");\n}\n",
+      "expect": [
+        "3-2-1",
+        "¡Despegue!"
+      ]
+    },
+    {
+      "id": "1.4",
+      "sector": 1,
+      "sectorName": "Cubierta de mando",
+      "title": "Lee el error",
+      "type": "fix",
+      "concept": "el compilador te dice **qué** falla y **dónde**; leerlo es una habilidad.",
+      "story": "el panel de energía muestra un mensaje rojo. Zirk lo lee en voz alta.",
+      "goal": "arreglar el programa para que imprima `Energía: 100`.",
+      "assets": [
+        "terminal",
+        "bot-zirk"
+      ],
+      "artNotes": "`terminal`, `bot-zirk` (`sad` mientras haya error).",
+      "hints": [
+        "El mensaje habla de un `)`. ¿Dónde empieza la llamada?",
+        "Cada `(` necesita su `)`.",
+        "Cierra la llamada a `println`."
+      ],
+      "extra": "además, arreglarlo sin cambiar la línea más que lo necesario.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(\"Energía:\", 100;\n}\n",
+      "expect": [
+        "Energía: 100"
+      ]
+    },
+    {
+      "id": "1.5",
+      "sector": 1,
+      "sectorName": "Cubierta de mando",
+      "title": "Varios valores, una línea",
+      "type": "output",
+      "concept": "`println` acepta **varios valores** de cualquier tipo y los une con espacios.",
+      "story": "la ficha de la nave mezcla textos, números y verdadero/falso.",
+      "goal": "imprimir `Nave: Zirk-1 motores: 4 listos: true`.",
+      "assets": [
+        "terminal",
+        "chip"
+      ],
+      "artNotes": null,
+      "hints": [
+        "Los valores se separan con comas dentro de los paréntesis.",
+        "Los textos van entre comillas; los números y `true` no.",
+        "Seis valores: tres textos, un número, otro texto y un `Boolean`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(\"Nave:\");\n}\n",
+      "expect": [
+        "Nave: Zirk-1 motores: 4 listos: true"
+      ]
+    },
+    {
+      "id": "2.1",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Cajas con nombre",
+      "type": "output",
+      "concept": "una variable `mut` es una caja con nombre cuyo contenido puede cambiar.",
+      "story": "el invernadero lleva la cuenta de las semillas. El contador tiene que subir.",
+      "goal": "mostrar el contador en el panel de datos: primero `0`, luego `5`, luego `8`.",
+      "assets": [
+        "object-panel",
+        "chip",
+        "bot-zirk"
+      ],
+      "artNotes": "`object-panel` (la barra del contador sube), `chip`, `bot-zirk` (`think`).",
+      "hints": [
+        "Una caja `mut` se puede reasignar con `=`.",
+        "El nuevo valor puede usar el viejo: `seeds = seeds + 5`.",
+        "`seeds += 3` es la forma corta de `seeds = seeds + 3`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut seeds = 0;\n    inspect(\"seeds\", seeds);\n    // Suma 5 semillas y muéstralas; luego suma 3 más y muéstralas\n}\n",
+      "expect": [
+        "@inspect seeds 0",
+        "@inspect seeds 5",
+        "@inspect seeds 8"
+      ]
+    },
+    {
+      "id": "2.2",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Lo que nunca cambia",
+      "type": "fix",
+      "concept": "`inmut` crea una caja que **no** se puede reasignar; el compilador lo impide.",
+      "story": "el reactor tiene un límite de 100 que nadie debe tocar; la energía actual sí baja.",
+      "goal": "gastar 30 de energía sin alterar el límite, y mostrar ambos.",
+      "assets": [
+        "battery",
+        "object-panel"
+      ],
+      "artNotes": "`battery` (nivel), `object-panel`.",
+      "hints": [
+        "El error dice qué variable no se puede reasignar.",
+        "¿Cuál de las dos cajas *debería* cambiar?",
+        "La energía actual es la `mut`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    inmut max_energy = 100;\n    mut energy = max_energy;\n    max_energy = max_energy - 30;\n    inspect(\"energy\", energy);\n    inspect(\"limit\", max_energy);\n}\n",
+      "expect": [
+        "@inspect energy 70",
+        "@inspect limit 100"
+      ]
+    },
+    {
+      "id": "2.3",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "¿De qué tipo es?",
+      "type": "predict",
+      "concept": "todo valor tiene un **tipo**: `Int32` (entero), `String` (texto), `Decimal` (número con decimales exactos), `Boolean` (verdadero/falso), `Char` (una letra).",
+      "story": "el escáner del jardín clasifica cada objeto en una bandeja distinta.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "chip"
+      ],
+      "artNotes": "cinco `chip` de colores distintos, una bandeja por tipo.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(42.type, \"42\".type, 4.2.type, true.type, 'Z'.type);\n}\n",
+      "options": [
+        "Int32 Int32 Int32 Int32 Int32",
+        "Int32 String Decimal Boolean Char",
+        "Int String Float Bool Char"
+      ],
+      "answer": 1,
+      "explanation": "`42` es un entero; `\"42\"` entre comillas dobles es **texto**; `4.2` es un `Decimal`; `true` es `Boolean`; `'Z'` entre comillas simples es **un** carácter (`Char`). El compilador decide el tipo mirando cómo está escrito el valor."
+    },
+    {
+      "id": "2.4",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Un número y un texto no se suman igual",
+      "type": "predict",
+      "concept": "`+` suma números pero **une** textos: `40 + 2` y `\"40\" + \"2\"` son cosas distintas.",
+      "story": "la cerradura pide la clave `42`, pero hay dos maneras de armarla.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "chip",
+        "terminal"
+      ],
+      "artNotes": "`chip` (dos con el mismo 42: uno numérico y otro de texto, de distinto color), `terminal`.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(40 + 2);\n    stdout.println(\"40\" + \"2\");\n}\n",
+      "options": [
+        "42\n42",
+        "42\n402",
+        "402\n402"
+      ],
+      "answer": 1,
+      "explanation": "con números, `+` calcula (`42`). Con textos, `+` los pega (`\"402\"`)."
+    },
+    {
+      "id": "2.5",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "No mezcles tipos sin pedirlo",
+      "type": "fix",
+      "concept": "Zirk no convierte tipos a escondidas: sumar un `String` y un `Int32` es un error.",
+      "story": "el marcador de puntos intenta pegar un texto con un número.",
+      "goal": "que el marcador imprima `Puntos: 5`.",
+      "assets": [
+        "terminal",
+        "chip"
+      ],
+      "artNotes": null,
+      "hints": [
+        "El error dice qué dos tipos chocan.",
+        "`println` ya sabe mostrar varios valores de cualquier tipo.",
+        "Sepáralos con una coma en vez de sumarlos."
+      ],
+      "extra": "resolverlo también con `String(5)` para pegarlos: `\"Puntos: \" + String(5)`.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(\"Puntos: \" + 5);\n}\n",
+      "expect": [
+        "Puntos: 5"
+      ]
+    },
+    {
+      "id": "2.6",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "El cofre de 8 bits",
+      "type": "fix",
+      "concept": "los enteros tienen **tamaño**: `Int8` guarda de -128 a 127; `Int16`, `Int32` y `Int64` guardan más. Un valor que no cabe es un error.",
+      "story": "el cofre de carga solo tiene 8 bits, y hay que guardar 200 cajas.",
+      "goal": "escoger un tipo donde quepa el 200.",
+      "assets": [
+        "chest",
+        "battery"
+      ],
+      "artNotes": null,
+      "hints": [
+        "`Int8` llega a 127.",
+        "Hay tipos más grandes.",
+        "`Int16` guarda hasta 32 767."
+      ],
+      "extra": "usar `UInt8` (sin signo: de 0 a 255), que también cabe.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut cargo: Int8 = 200;\n    stdout.println(cargo);\n}\n",
+      "expect": [
+        "200"
+      ]
+    },
+    {
+      "id": "2.7",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Cuando un número se pasa",
+      "type": "predict",
+      "concept": "si una cuenta se sale del rango de su tipo, Zirk **detiene el programa** con `ArithmeticOverflowError` en lugar de dar una respuesta falsa.",
+      "story": "el cargador intenta subir un `Int8` que ya está en su máximo.",
+      "goal": "¿qué ocurre?",
+      "assets": [
+        "battery",
+        "bot-zirk"
+      ],
+      "artNotes": "`battery` (se sobrecarga), `bot-zirk` (`sad` al detenerse).",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut charge: Int8 = 127;\n    stdout.println(\"antes:\", charge);\n    charge = charge + 1;\n    stdout.println(\"después:\", charge);\n}\n",
+      "options": [
+        "-128",
+        "128",
+        "ArithmeticOverflowError"
+      ],
+      "answer": 2,
+      "explanation": "se imprime `antes: 127` y el programa se detiene con `ArithmeticOverflowError`; la segunda línea nunca se imprime. En otros lenguajes el valor \"daría la vuelta\" a -128 sin avisar; aquí el error es explícito."
+    },
+    {
+      "id": "2.8",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Dividir no siempre da un entero",
+      "type": "predict",
+      "concept": "`/` entre enteros da un **`Decimal` exacto**, `%` da el resto, y `Int32(...)` corta los decimales.",
+      "story": "hay que repartir 7 baterías entre 2 robots.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "battery",
+        "crate",
+        "bot-zirk"
+      ],
+      "artNotes": "`battery` (siete), `crate`, `bot-zirk`.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(7 / 2);\n    stdout.println(7 % 2);\n    stdout.println(Int32(7 / 2));\n}\n",
+      "options": [
+        "3\n1\n3",
+        "3.5\n1\n3",
+        "3.5\n3.5\n3.5"
+      ],
+      "answer": 1,
+      "explanation": "`7 / 2` es `3.5`; `7 % 2` es `1` (lo que sobra); `Int32(7 / 2)` convierte a entero **truncando** a `3`."
+    },
+    {
+      "id": "2.9",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Decimales exactos y decimales binarios",
+      "type": "predict",
+      "concept": "los decimales normales de Zirk (`Decimal`) son **exactos**; los de coma flotante binaria (con sufijo `f`, como `0.1f`) tienen el error de redondeo clásico.",
+      "story": "el balanza de la cúpula pesa dos semillas de `0.1` y `0.2` y las compara con `0.3`.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "crystal",
+        "chip"
+      ],
+      "artNotes": "`crystal` (las dos semillas), `chip`.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(0.1 + 0.2 == 0.3);\n    stdout.println(0.1f + 0.2f == 0.3f);\n}\n",
+      "options": [
+        "true\ntrue",
+        "true\nfalse",
+        "false\nfalse"
+      ],
+      "answer": 1,
+      "explanation": "con `Decimal`, `0.1 + 0.2` es exactamente `0.3`. Con `f` (binario), `0.1f + 0.2f` vale `0.30000000000000004`, que no es igual a `0.3f`. Zirk elige lo exacto por defecto; lo binario es opcional."
+    },
+    {
+      "id": "2.10",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Texto y letras",
+      "type": "output",
+      "concept": "un `String` se puede unir, medir (`length`) y leer letra a letra con `[ ]`; la",
+      "story": "la placa de la entrada debe mostrar el nombre del jardín con su tamaño.",
+      "goal": "imprimir `Jardín: Zirk (4 letras, empieza con Z)` usando la variable `name`.",
+      "assets": [
+        "sign",
+        "terminal"
+      ],
+      "artNotes": "`sign` (la placa de entrada), `terminal`.",
+      "hints": [
+        "Dentro de un texto, `{ ... }` evalúa lo que haya dentro.",
+        "`name.length` cuenta las letras.",
+        "`name[0]` es la primera letra."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    inmut name = \"Zirk\";\n    stdout.println(\"Jardín:\", name);\n}\n",
+      "expect": [
+        "Jardín: Zirk (4 letras, empieza con Z)"
+      ]
+    },
+    {
+      "id": "2.11",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Verdadero o falso",
+      "type": "output",
+      "concept": "las comparaciones (`>=`, `<`, `==`) dan `Boolean`; se combinan con `&&` (y), `||` (o), `!` (no).",
+      "story": "la compuerta solo abre si la energía está entre 50 y 89.",
+      "goal": "imprimir `true` si `50 <= energía < 90`, y `false` si no, para cualquier lectura del sensor.",
+      "assets": [
+        "door",
+        "plate"
+      ],
+      "artNotes": "`door` (se abre si imprime `true`), `plate`.",
+      "hints": [
+        "Hacen falta *dos* condiciones a la vez.",
+        "`&&` exige que ambas sean verdaderas.",
+        "La segunda condición es `energy < 90`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    inmut energy = energy_level();\n    stdout.println(energy >= 50);\n}\n",
+      "cases": [
+        {
+          "name": "energía 70",
+          "helpers": "fn energy_level(): Int32 { return 70; }",
+          "expect": [
+            "true"
+          ]
+        },
+        {
+          "name": "energía 20",
+          "helpers": "fn energy_level(): Int32 { return 20; }",
+          "expect": [
+            "false"
+          ]
+        },
+        {
+          "name": "energía 95",
+          "helpers": "fn energy_level(): Int32 { return 95; }",
+          "expect": [
+            "false"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "2.12",
+      "sector": 2,
+      "sectorName": "Jardín de datos",
+      "title": "Cuando no hay nada",
+      "type": "output",
+      "concept": "un tipo con `?` (como `String?`) puede ser `null` (ausencia); `??` da un valor de repuesto cuando no hay nada.",
+      "story": "el banco de semillas devuelve el nombre de la semilla, o nada si el cajón está vacío.",
+      "goal": "imprimir el nombre de las semillas 1, 2 y 3, o `sin semilla` donde no haya.",
+      "assets": [
+        "chest",
+        "crate"
+      ],
+      "artNotes": "`chest` (el cajón del banco de semillas), `crate`.",
+      "hints": [
+        "`find_seed` puede devolver `null`.",
+        "`a ?? b` significa «`a`, o `b` si `a` es `null`».",
+        "Repite la línea para las semillas 2 y 3."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(find_seed(1) ?? \"sin semilla\");\n}\n",
+      "expect": [
+        "rosa",
+        "sin semilla",
+        "sin semilla"
+      ],
+      "cases": [
+        {
+          "name": "banco",
+          "helpers": "fn find_seed(id: Int32): String? { if id == 1 { return \"rosa\"; } return null; }"
+        }
+      ]
+    },
+    {
+      "id": "3.1",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Si… o si no",
+      "type": "grid",
+      "concept": "`if` / `else` ejecuta un bloque u otro según una condición `Boolean`.",
+      "story": "un puente levadizo cruza el agua. A veces está bajado y a veces no.",
+      "goal": "llegar a la meta tanto si el puente está bajado como si no (en ese caso se salta con `hop()`).",
+      "assets": [
+        "tile-water",
+        "tile-bridge",
+        "bot-zirk",
+        "goal-portal"
+      ],
+      "artNotes": "`tile-water`, `tile-bridge`, `bot-zirk` (`jump` en `hop`), `goal-portal`.",
+      "hints": [
+        "`bridge_down()` devuelve `true` o `false`.",
+        "`if condición { ... } else { ... }`.",
+        "Con el puente levantado: avanza una casilla, salta y avanza otra."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    walk(4);\n}\n",
+      "cases": [
+        {
+          "name": "puente bajado",
+          "map": [
+            "S...G"
+          ],
+          "helpers": "fn bridge_down(): Boolean { return true; }"
+        },
+        {
+          "name": "puente levantado",
+          "map": [
+            "S.~.G"
+          ],
+          "helpers": "fn bridge_down(): Boolean { return false; }"
+        }
+      ],
+      "map": [
+        "S...G"
+      ],
+      "facing": "east",
+      "par": 4
+    },
+    {
+      "id": "3.2",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Varias posibilidades",
+      "type": "output",
+      "concept": "`else if` encadena condiciones; `if` también puede **devolver un valor**.",
+      "story": "el semáforo del laberinto tiene tres luces: 0 rojo, 1 amarillo, 2 verde.",
+      "goal": "imprimir `alto`, `cuidado` o `avanza` según `light()`.",
+      "assets": [
+        "lamp",
+        "plate"
+      ],
+      "artNotes": "`lamp` (rojo / amarillo / verde), `plate`.",
+      "hints": [
+        "Hay tres casos y solo uno está escrito.",
+        "Después de `if`, añade `else if` y por último `else`.",
+        "`==` compara; `=` asigna, y aquí no se puede usar."
+      ],
+      "extra": "guardar la palabra con un `if` que devuelve valor (`inmut word = if light() == 0 { \"alto\" } else if light() == 1 { \"cuidado\" } else { \"avanza\" };`) y llamar a `println` una sola vez.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    if light() == 0 {\n        stdout.println(\"alto\");\n    }\n}\n",
+      "cases": [
+        {
+          "name": "rojo",
+          "helpers": "fn light(): Int32 { return 0; }",
+          "expect": [
+            "alto"
+          ]
+        },
+        {
+          "name": "amarillo",
+          "helpers": "fn light(): Int32 { return 1; }",
+          "expect": [
+            "cuidado"
+          ]
+        },
+        {
+          "name": "verde",
+          "helpers": "fn light(): Int32 { return 2; }",
+          "expect": [
+            "avanza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.3",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Repetir con while",
+      "type": "grid",
+      "concept": "`while` repite un bloque **mientras** su condición sea verdadera; hay que cambiar algo dentro para que acabe.",
+      "story": "el pasillo mide una longitud distinta cada vez que lo recorres. El sensor la dice.",
+      "goal": "llegar a la meta en pasillos de 3, 5 y 7 casillas, avanzando de una en una.",
+      "assets": [
+        "tile-conveyor",
+        "bot-zirk"
+      ],
+      "artNotes": "`tile-conveyor`, `bot-zirk` (`walk`).",
+      "hints": [
+        "¿Cuántas veces hay que avanzar? Lo dice `corridor()`.",
+        "Guarda ese número en una variable `mut` y baja de uno en uno.",
+        "Si nada cambia dentro del bucle, **nunca termina**."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    walk(3);\n}\n",
+      "cases": [
+        {
+          "name": "3 casillas",
+          "map": [
+            "S..G"
+          ],
+          "helpers": "fn corridor(): Int32 { return 3; }"
+        },
+        {
+          "name": "5 casillas",
+          "map": [
+            "S....G"
+          ],
+          "helpers": "fn corridor(): Int32 { return 5; }"
+        },
+        {
+          "name": "7 casillas",
+          "map": [
+            "S......G"
+          ],
+          "helpers": "fn corridor(): Int32 { return 7; }"
+        }
+      ],
+      "map": [
+        "S..G"
+      ],
+      "facing": "east"
+    },
+    {
+      "id": "3.4",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Contar con for",
+      "type": "grid",
+      "concept": "`for i in 0..{n}` repite exactamente `n` veces; el rango `0..n` va de 0 hasta `n - 1`.",
+      "story": "una fila de monedas, y no sabes cuántas hay hasta que el sensor lo dice.",
+      "goal": "recoger todas las monedas de la fila y llegar a la meta.",
+      "assets": [
+        "coin",
+        "bot-zirk",
+        "goal-portal"
+      ],
+      "artNotes": "`coin` (con el logo de Zirk), `bot-zirk`, `goal-portal`. > Cuando el final del rango es una **variable** y no un número escrito, va entre llaves: > `0..{n}`. Así el compilador distingue el rango del `{` que abre el bloque.",
+      "hints": [
+        "Avanzar y recoger se repite `n` veces.",
+        "`for i in 0..{n} { ... }` repite el bloque `n` veces.",
+        "Después del bucle falta un último paso hasta la meta."
+      ],
+      "extra": "resolverlo también con el `for` clásico `for mut i = 0; i < n; i++ { ... }`.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    walk(1);\n    collect();\n    walk(1);\n    collect();\n    walk(1);\n}\n",
+      "cases": [
+        {
+          "name": "2 monedas",
+          "map": [
+            "SccG"
+          ],
+          "helpers": "fn coins_in_row(): Int32 { return 2; }"
+        },
+        {
+          "name": "3 monedas",
+          "map": [
+            "ScccG"
+          ],
+          "helpers": "fn coins_in_row(): Int32 { return 3; }"
+        },
+        {
+          "name": "5 monedas",
+          "map": [
+            "ScccccG"
+          ],
+          "helpers": "fn coins_in_row(): Int32 { return 5; }"
+        }
+      ],
+      "map": [
+        "SccG"
+      ],
+      "facing": "east"
+    },
+    {
+      "id": "3.5",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Saltar y parar",
+      "type": "output",
+      "concept": "`continue` salta a la siguiente vuelta del bucle; `break` sale del bucle del todo.",
+      "story": "el contador de la cinta solo debe mostrar los números impares, y apagarse tras el 7.",
+      "goal": "imprimir `1`, `3`, `5`, `7`, uno por línea, recorriendo los números del 1 al 10.",
+      "assets": [
+        "tile-conveyor",
+        "terminal"
+      ],
+      "artNotes": null,
+      "hints": [
+        "`n % 2 == 0` es verdadero para los pares.",
+        "Con `continue` no se llega al `println`.",
+        "Con `break` se sale del bucle: úsalo cuando `n` pase de 7."
+      ],
+      "extra": "mover la condición del `break` al principio del bucle y comprobar que la salida es la misma.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    for n in 1..=10 {\n        stdout.println(n);\n    }\n}\n",
+      "expect": [
+        "1",
+        "3",
+        "5",
+        "7"
+      ]
+    },
+    {
+      "id": "3.6",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Bucles dentro de bucles",
+      "type": "output",
+      "concept": "un bucle puede contener otro; el de dentro da todas sus vueltas por cada vuelta del de fuera.",
+      "story": "la escalera de la cubierta se dibuja con asteriscos, peldaño a peldaño.",
+      "goal": "imprimir una escalera de cuatro peldaños.",
+      "assets": [
+        "terminal",
+        "tile-plain"
+      ],
+      "artNotes": null,
+      "hints": [
+        "El peldaño `row` lleva `row` asteriscos.",
+        "Un segundo bucle, dentro del primero, imprime los asteriscos sin saltar de línea.",
+        "Al terminar cada peldaño, `stdout.println()` sin argumentos salta la línea."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    for row in 1..=4 {\n        stdout.println(\"*\");\n    }\n}\n",
+      "expect": [
+        "*",
+        "**",
+        "***",
+        "****"
+      ]
+    },
+    {
+      "id": "3.7",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Elegir con match",
+      "type": "output",
+      "concept": "`match` compara un valor con varios casos; `_` recoge todo lo demás.",
+      "story": "el escáner del suelo devuelve un código de casilla: 0 suelo, 1 agua, 2 muro.",
+      "goal": "imprimir `suelo`, `agua`, `muro` o `desconocido` según `tile()`.",
+      "assets": [
+        "tile-plain",
+        "tile-water",
+        "wall"
+      ],
+      "artNotes": null,
+      "hints": [
+        "Cada caso es `valor => acción;`.",
+        "Añade los casos 1 y 2.",
+        "`_` es el caso que atrapa cualquier otro valor: pon `desconocido` ahí."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    match tile() {\n        0 => stdout.println(\"suelo\");\n    }\n}\n",
+      "cases": [
+        {
+          "name": "0",
+          "helpers": "fn tile(): Int32 { return 0; }",
+          "expect": [
+            "suelo"
+          ]
+        },
+        {
+          "name": "1",
+          "helpers": "fn tile(): Int32 { return 1; }",
+          "expect": [
+            "agua"
+          ]
+        },
+        {
+          "name": "2",
+          "helpers": "fn tile(): Int32 { return 2; }",
+          "expect": [
+            "muro"
+          ]
+        },
+        {
+          "name": "9",
+          "helpers": "fn tile(): Int32 { return 9; }",
+          "expect": [
+            "desconocido"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "3.8",
+      "sector": 3,
+      "sectorName": "Laberinto de circuitos",
+      "title": "Jefe: el guardián de la cubierta",
+      "type": "output",
+      "concept": "repaso — bucle, condiciones y `%` trabajando juntos.",
+      "story": "un robot guardián bloquea la salida del sector y solo se aparta con una secuencia secreta del 1 al 15: los múltiplos de 3 se dicen `zi`, los de 5 `rk`, y los de ambos `zirk`.",
+      "goal": "imprimir la secuencia, una entrada por línea.",
+      "assets": [
+        "bot-guard",
+        "door",
+        "bot-zirk"
+      ],
+      "artNotes": "`bot-guard` (el jefe), `door`, `bot-zirk` (`celebrate` al abrirse).",
+      "hints": [
+        "Un número es múltiplo de 3 si `n % 3 == 0`.",
+        "¿Qué caso hay que comprobar **primero** para que 15 no se diga `zi`?",
+        "Los múltiplos de 3 **y** 5 son los múltiplos de 15."
+      ],
+      "extra": "resolverlo sin repetir `println` en cada rama (un `if` que devuelve valor). ---",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    for n in 1..=15 {\n        stdout.println(n);\n    }\n}\n",
+      "expect": [
+        "1",
+        "2",
+        "zi",
+        "4",
+        "rk",
+        "zi",
+        "7",
+        "8",
+        "zi",
+        "rk",
+        "11",
+        "zi",
+        "13",
+        "14",
+        "zirk"
+      ]
+    },
+    {
+      "id": "4.1",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Tu primera función",
+      "type": "grid",
+      "concept": "`fn nombre(): Void { ... }` agrupa instrucciones bajo un nombre; se usa **llamándola**.",
+      "story": "el robot del taller repite siempre el mismo movimiento: avanzar dos y girar a la derecha.",
+      "goal": "llegar a la meta definiendo una función `side` y llamándola tres veces.",
+      "assets": [
+        "bot-builder",
+        "goal-portal",
+        "tile-circuit"
+      ],
+      "artNotes": "`bot-builder` (con su llave inglesa), `goal-portal`, `tile-circuit`.",
+      "hints": [
+        "Dentro de `side` va lo que el robot hace en cada lado.",
+        "Para usar una función, escribe su nombre con paréntesis: `side();`.",
+        "El camino tiene tres lados."
+      ],
+      "extra": "compararlo con el nivel 1.2: el mismo recorrido con la mitad de líneas en `main`.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn side(): Void {\n    // avanza dos casillas y gira a la derecha\n}\n\nfn main(): Void {\n    // llama a side() las veces que haga falta\n}\n",
+      "map": [
+        "S..",
+        "##.",
+        "G.."
+      ],
+      "facing": "east"
+    },
+    {
+      "id": "4.2",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Funciones con parámetros",
+      "type": "grid",
+      "concept": "un **parámetro** es un dato que la función recibe: `fn nombre(pasos: Int32)`.",
+      "story": "el robot tiene que recoger monedas a distancias distintas; una función que avance siempre dos casillas no sirve.",
+      "goal": "recoger las dos monedas y llegar a la meta usando una función con un parámetro.",
+      "assets": [
+        "coin",
+        "bot-builder"
+      ],
+      "artNotes": null,
+      "hints": [
+        "La primera moneda está a 2 casillas y la segunda a 3 más.",
+        "Añade un parámetro `steps: Int32` y úsalo dentro de la función.",
+        "Al llamar, pasa el valor: `walk_and_collect(3)`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn walk_and_collect(): Void {\n    walk(2);\n    collect();\n}\n\nfn main(): Void {\n    walk_and_collect();\n}\n",
+      "map": [
+        "S.c..c.G"
+      ],
+      "facing": "east"
+    },
+    {
+      "id": "4.3",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Devolver un valor",
+      "type": "output",
+      "concept": "una función puede **devolver** un resultado con `return`; su tipo va tras los dos puntos: `fn double(n: Int32): Int32`.",
+      "story": "la máquina de duplicar del taller recibe un número y devuelve el doble.",
+      "goal": "que la máquina duplique 1, 4 y 10.",
+      "assets": [
+        "lever",
+        "chip",
+        "bot-builder"
+      ],
+      "artNotes": "`lever`, `chip` (la máquina de duplicar), `bot-builder`.",
+      "hints": [
+        "Ahora mismo la función devuelve el mismo número que recibe.",
+        "`return` entrega el valor y termina la función.",
+        "El doble es `n * 2`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn double(n: Int32): Int32 {\n    return n;\n}\n\nfn main(): Void {\n    stdout.println(double(1), double(4), double(10));\n}\n",
+      "expect": [
+        "2 8 20"
+      ]
+    },
+    {
+      "id": "4.4",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Argumentos con nombre y valores por defecto",
+      "type": "output",
+      "concept": "un parámetro puede tener un valor por defecto (`times: Int32 = 2`) y se puede llamar a una función **por nombre**, en cualquier orden.",
+      "story": "el altavoz del taller saluda a quien entra; normalmente dos veces, pero a veces una.",
+      "goal": "saludar a Ana con el valor por defecto y a Zirk una sola vez.",
+      "assets": [
+        "terminal",
+        "lamp",
+        "bot-builder"
+      ],
+      "artNotes": "`terminal`, `lamp` (el altavoz), `bot-builder`.",
+      "hints": [
+        "Sin indicar `times`, se usa el valor por defecto.",
+        "Para elegirlo, escribe el nombre del parámetro: `times: 1`.",
+        "Con nombres, el orden no importa."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn greet(name: String, times: Int32 = 2): Void {\n    for i in 0..{times} {\n        stdout.println(\"hola\", name);\n    }\n}\n\nfn main(): Void {\n    greet(\"Ana\");\n}\n",
+      "expect": [
+        "hola Ana",
+        "hola Ana",
+        "hola Zirk"
+      ]
+    },
+    {
+      "id": "4.5",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Una función que se llama a sí misma",
+      "type": "fix",
+      "concept": "la **recursión**: una función que se llama a sí misma necesita un **caso base** que la detenga.",
+      "story": "la cuenta atrás de lanzamiento debe contar solo hasta cero.",
+      "goal": "imprimir `3`, `2`, `1` y `¡Despegue!`, y detenerse.",
+      "assets": [
+        "battery",
+        "terminal"
+      ],
+      "artNotes": "`battery` (se descarga), `terminal`.",
+      "hints": [
+        "¿Cuándo debería dejar de llamarse la función?",
+        "Un `if` al principio puede terminar la función con `return;`.",
+        "El caso base es `n == 0`: imprime `¡Despegue!` y vuelve."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn countdown(n: Int32): Void {\n    stdout.println(n);\n    countdown(n - 1);\n}\n\nfn main(): Void {\n    countdown(3);\n}\n",
+      "expect": [
+        "3",
+        "2",
+        "1",
+        "¡Despegue!"
+      ]
+    },
+    {
+      "id": "4.6",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Funciones guardadas en variables",
+      "type": "output",
+      "concept": "una **lambda** es una función sin nombre que se guarda en una variable: `inmut triple = (n: Int32): Int32 => n * 3;` y se llama como cualquier otra.",
+      "story": "el taller tiene una pieza pequeña que triplica; no merece una función con nombre propio.",
+      "goal": "que la pieza triplique 5 y 2.",
+      "assets": [
+        "chip",
+        "bot-builder"
+      ],
+      "artNotes": "`chip` (la pieza que triplica), `bot-builder`.",
+      "hints": [
+        "Lo que va después de `=>` es lo que la lambda devuelve.",
+        "Ahora devuelve `n` sin cambiarlo.",
+        "Triplicar es multiplicar por 3."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    inmut triple = (n: Int32): Int32 => n;\n    stdout.println(triple(5));\n    stdout.println(triple(2));\n}\n",
+      "expect": [
+        "15",
+        "6"
+      ]
+    },
+    {
+      "id": "4.7",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Lo que una lambda recuerda",
+      "type": "predict",
+      "concept": "una lambda **captura** los valores de las variables de su alrededor **en el momento de crearse**; cambiar la variable después no cambia lo que la lambda recuerda.",
+      "story": "la pieza se programa con un bono de 10 y luego el taller sube el bono a 20.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "battery",
+        "chip"
+      ],
+      "artNotes": null,
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut bonus = 10;\n    inmut add_bonus = (n: Int32): Int32 => n + bonus;\n    bonus = 20;\n    stdout.println(add_bonus(1));\n}\n",
+      "options": [
+        "11",
+        "21",
+        "20"
+      ],
+      "answer": 0,
+      "explanation": "la lambda guardó el valor `10` cuando se creó; luego `bonus` pasó a `20`, pero la lambda sigue usando `10`, así que `add_bonus(1)` es `11`. Es el mismo comportamiento de copia que verás con los valores simples en el sector 5."
+    },
+    {
+      "id": "4.8",
+      "sector": 4,
+      "sectorName": "Taller",
+      "title": "Funciones que reciben funciones",
+      "type": "output",
+      "concept": "una función puede recibir **otra función** como parámetro; su tipo se escribe `Fn(Int32) => Int32` («recibe un `Int32` y devuelve un `Int32`»).",
+      "story": "el taller tiene una prensa que aplica dos veces cualquier pieza que se le acople: el mismo mecanismo, distintas herramientas.",
+      "goal": "que `apply_twice` aplique la función **dos** veces: la lambda `triple` a 2 da `18`, la función `inc` a 5 da `7` y una lambda que eleva al cuadrado, a 3, da `81`.",
+      "assets": [
+        "bot-builder",
+        "lever",
+        "cloner"
+      ],
+      "artNotes": "`bot-builder`, `lever` (acoplar la pieza), `cloner` como máquina de repetir.",
+      "hints": [
+        "Ahora `apply_twice` aplica `f` una sola vez.",
+        "El resultado de la primera aplicación se vuelve a pasar a `f`.",
+        "`f(f(x))`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn apply_twice(f: Fn(Int32) => Int32, x: Int32): Int32 {\n    return f(x);\n}\n\nfn inc(n: Int32): Int32 {\n    return n + 1;\n}\n\nfn main(): Void {\n    inmut triple = (n: Int32): Int32 => n * 3;\n    stdout.println(apply_twice(triple, 2));\n    stdout.println(apply_twice(inc, 5));\n    stdout.println(apply_twice((n: Int32): Int32 => n * n, 3));\n}\n",
+      "expect": [
+        "18",
+        "7",
+        "81"
+      ]
+    },
+    {
+      "id": "5.1",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Estantes fijos: Array",
+      "type": "output",
+      "concept": "un `Array<T>` guarda un número **fijo** de elementos del mismo tipo; se leen y se cambian por posición (`arr[0]` es el primero) y `arr.length` dice cuántos hay.",
+      "story": "el estante del almacén tiene exactamente tres huecos.",
+      "goal": "cambiar el segundo elemento (posición 1) a `99` e imprimir el estante y su tamaño.",
+      "assets": [
+        "crate",
+        "object-panel"
+      ],
+      "artNotes": "`crate` (uno por hueco), `object-panel`.",
+      "hints": [
+        "Las posiciones empiezan en 0: la segunda es la 1.",
+        "`arr[1] = 99;` cambia el elemento.",
+        "Hazlo antes del `println`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut arr: Array<Int32> = Array(10, 20, 30);\n    stdout.println(arr, arr.length);\n}\n",
+      "expect": [
+        "[10, 99, 30] 3"
+      ]
+    },
+    {
+      "id": "5.2",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "La lista que crece: List",
+      "type": "output",
+      "concept": "una `List<T>` crece y se encoge: `add` añade, `remove(valor)` quita el primer elemento igual.",
+      "story": "la mochila del robot cambia a lo largo de la misión.",
+      "goal": "empezar con `pala`, añadir `cuerda` y `linterna`, soltar la `pala`, e imprimir la lista y su tamaño.",
+      "assets": [
+        "chest",
+        "crate"
+      ],
+      "artNotes": null,
+      "hints": [
+        "`bag.add(\"...\")` añade al final.",
+        "`bag.remove(\"pala\")` quita ese elemento.",
+        "Imprime al final."
+      ],
+      "extra": "recorrer la lista con `for item in bag { ... }` y imprimir cada objeto en su propia línea.",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut bag: List<String> = List(\"pala\");\n    stdout.println(bag, bag.length);\n}\n",
+      "expect": [
+        "[cuerda, linterna] 2"
+      ]
+    },
+    {
+      "id": "5.3",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Buscar por clave: Map",
+      "type": "output",
+      "concept": "un `Map<K, V>` asocia **claves** con **valores**: `set` guarda, `get_or_null` busca (devuelve `null` si no existe, y `??` da un valor de repuesto).",
+      "story": "el panel de taquillas guarda el contenido de cada número de taquilla.",
+      "goal": "guardar la taquilla 1 («uno») y la 2 («dos»), y consultar la 2 y la 3.",
+      "assets": [
+        "chest",
+        "object-panel"
+      ],
+      "artNotes": "`chest` etiquetados, `object-panel`.",
+      "hints": [
+        "`lockers.set(clave, valor)` guarda.",
+        "`get_or_null(3)` devuelve `null` si no hay taquilla 3.",
+        "`a ?? b` usa `b` cuando `a` es `null`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut lockers: Map<Int32, String> = Map();\n    lockers.set(1, \"uno\");\n    stdout.println(lockers.length);\n}\n",
+      "expect": [
+        "dos no hay 2"
+      ]
+    },
+    {
+      "id": "5.4",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Sin repetidos: Set",
+      "type": "output",
+      "concept": "un `Set<T>` guarda **elementos únicos**: añadir uno que ya está no hace nada.",
+      "story": "el escáner de la puerta registra cada carné una sola vez, aunque pase varias veces.",
+      "goal": "registrar los carnés 3, 5, 3, 7 y 5, e imprimir cuántos distintos hay y si están el 5 y el 4.",
+      "assets": [
+        "plate",
+        "terminal"
+      ],
+      "artNotes": null,
+      "hints": [
+        "Añade los cinco carnés, repetidos incluidos.",
+        "El `Set` descarta los duplicados solo.",
+        "`contains(x)` pregunta si un elemento está."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut badges: Set<Int32> = Set();\n    badges.add(3);\n    stdout.println(badges.length);\n}\n",
+      "expect": [
+        "3 true false"
+      ]
+    },
+    {
+      "id": "5.5",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Varios valores juntos: tuplas",
+      "type": "output",
+      "concept": "una **tupla** `(3, 4)` junta valores de tipos distintos; se **desempaqueta** con `mut (x, y) = tupla;`.",
+      "story": "la posición del robot es un par de coordenadas.",
+      "goal": "desempaquetar la posición y imprimir `x: 3 y: 4 suma: 7`.",
+      "assets": [
+        "start-pad",
+        "object-panel"
+      ],
+      "artNotes": null,
+      "hints": [
+        "`mut (x, y) = position;` crea dos variables de una vez.",
+        "Después se usan como cualquier variable.",
+        "`x + y` es la suma."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    inmut position = (3, 4);\n    stdout.println(position);\n}\n",
+      "expect": [
+        "x: 3 y: 4 suma: 7"
+      ]
+    },
+    {
+      "id": "5.6",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Copiar un número",
+      "type": "predict",
+      "concept": "los valores simples (`Int32`, `Boolean`, `Char`, `Decimal`…) **se copian**: cada variable tiene su propia caja.",
+      "story": "el robot anota el voltaje, hace una copia y sube la copia.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "chip"
+      ],
+      "artNotes": "dos `chip` con la misma cifra; solo cambia el de la copia.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut x = 3;\n    mut y = x;\n    y += 1;\n    stdout.println(x, y);\n}\n",
+      "options": [
+        "4 4",
+        "3 4",
+        "3 3"
+      ],
+      "answer": 1,
+      "explanation": "`y = x` **copia** el valor; después, cambiar `y` no toca a `x`. Dos cajas, cada una con su `3`; una pasa a `4`."
+    },
+    {
+      "id": "5.7",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Dos nombres, una lista",
+      "type": "predict",
+      "concept": "una `List` es una **referencia**: asignarla a otra variable no copia la lista, crea **otro nombre para la misma lista**.",
+      "story": "dos robots comparten la misma caja de herramientas aunque la llamen distinto.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "reference-link",
+        "chest"
+      ],
+      "artNotes": "`reference-link` entre dos robots y un solo `chest`.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut a: List<Int32> = List(1, 2);\n    mut b = a;\n    b.add(3);\n    stdout.println(a, b);\n}\n",
+      "options": [
+        "[1, 2] [1, 2, 3]",
+        "[1, 2, 3] [1, 2, 3]",
+        "[1, 2] [1, 2]"
+      ],
+      "answer": 1,
+      "explanation": "`b = a` no copia la lista: `a` y `b` son **dos etiquetas de la misma caja**. Añadir con `b` cambia lo que ve `a`. Esto es la **referencia**."
+    },
+    {
+      "id": "5.8",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Una copia de verdad: clone()",
+      "type": "fix",
+      "concept": "`clone()` crea una **copia independiente**: cambiar la copia no afecta al original.",
+      "story": "antes de arriesgarse en la zona inestable, el robot guarda una copia de seguridad de su inventario. La copia de seguridad no debe cambiar cuando cambia el inventario.",
+      "goal": "que la copia siga con `[pala, cuerda]` mientras el inventario pasa a `[pala, cuerda, linterna]`.",
+      "assets": [
+        "cloner",
+        "bot-ghost",
+        "chest"
+      ],
+      "artNotes": "`cloner` (barra de progreso), `bot-ghost`, `chest`.",
+      "hints": [
+        "¿`backup` es de verdad otra lista?",
+        "Asignar una lista no la copia.",
+        "`inventory.clone()`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut inventory: List<String> = List(\"pala\", \"cuerda\");\n    mut backup = inventory;\n    inventory.add(\"linterna\");\n    stdout.println(backup, inventory);\n}\n",
+      "expect": [
+        "[pala, cuerda] [pala, cuerda, linterna]"
+      ]
+    },
+    {
+      "id": "5.9",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Los textos también se comparten",
+      "type": "predict",
+      "concept": "un `String` también es una referencia: dos variables que apuntan al mismo texto lo comparten, y cambiar una letra se ve en las dos; `clone()` lo separa.",
+      "story": "una etiqueta grabada se copia por error en dos taquillas.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "sign",
+        "reference-link"
+      ],
+      "artNotes": "`sign` (la etiqueta grabada), `reference-link`.",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut s1 = \"hello\";\n    mut s2 = s1;\n    s2[0] = 'H';\n    mut s3 = s1.clone();\n    s3[0] = 'J';\n    stdout.println(s1, s2, s3);\n}\n",
+      "options": [
+        "hello Hello Jello",
+        "Hello Hello Jello",
+        "hello hello Jello"
+      ],
+      "answer": 1,
+      "explanation": "`s2 = s1` comparte el texto: al cambiar la primera letra por `H`, `s1` también la ve. `s3` es una copia (`clone`) hecha **después**, ya con `Hello`, y su `J` solo cambia a `s3`."
+    },
+    {
+      "id": "5.10",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Igual no es lo mismo que idéntico",
+      "type": "predict",
+      "concept": "`==` pregunta si dos valores **tienen el mismo contenido**; `is` pregunta si son **el mismo objeto**.",
+      "story": "el inspector distingue dos etiquetas con el mismo texto de una etiqueta vista dos veces.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "reference-link"
+      ],
+      "artNotes": "`reference-link` (sale entre `a` y `c`, no entre `a` y `b`).",
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut a: String = \"hi\";\n    mut b = a.clone();\n    mut c = a;\n    stdout.println(a == b, a is b, a is c);\n}\n",
+      "options": [
+        "true true true",
+        "true false true",
+        "false false true"
+      ],
+      "answer": 1,
+      "explanation": "`a == b` es `true` (mismo contenido); `a is b` es `false` (la copia es otro objeto); `a is c` es `true` (`c` es otra etiqueta del mismo objeto). Los números no tienen identidad: `is` solo se usa con referencias."
+    },
+    {
+      "id": "5.11",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Qué recibe una función",
+      "type": "predict",
+      "concept": "una función recibe los **valores** simples **copiados**, pero una **lista compartida**; por eso puede modificar la lista, y un número que recibe no cambia el original.",
+      "story": "dos máquinas del taller reciben el mismo paquete: una lo fotocopia, la otra lo abre.",
+      "goal": "¿qué imprime el programa?",
+      "assets": [
+        "reference-link",
+        "chest"
+      ],
+      "artNotes": null,
+      "hints": [],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "program": "import { stdout } from std.io;\n\nfn grow(items: List<Int32>): Void {\n    items.add(9);\n}\n\nfn plus_one(n: Int32): Int32 {\n    return n + 1;\n}\n\nfn main(): Void {\n    mut list: List<Int32> = List(1);\n    mut n = 1;\n    grow(list);\n    mut m = plus_one(n);\n    stdout.println(list, n, m);\n}\n",
+      "options": [
+        "[1] 1 2",
+        "[1, 9] 1 2",
+        "[1, 9] 2 2"
+      ],
+      "answer": 1,
+      "explanation": "`grow` recibe la **misma** lista y le añade un 9: `list` ahora es `[1, 9]`. `plus_one` recibe una **copia** de `n` y devuelve otro valor: `n` sigue valiendo `1` y `m` vale `2`."
+    },
+    {
+      "id": "5.12",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Los parámetros son de solo lectura",
+      "type": "fix",
+      "concept": "dentro de una función no se puede **reasignar** un parámetro; para «cambiar» un número se devuelve el resultado.",
+      "story": "el cargador intenta sumar uno al número que recibió, pero ese número no es suyo.",
+      "goal": "que `add_one` devuelva el valor aumentado y el programa imprima `2`.",
+      "assets": [
+        "battery",
+        "lever"
+      ],
+      "artNotes": null,
+      "hints": [
+        "El error dice que `n` no se puede reasignar.",
+        "La función puede **devolver** el nuevo valor.",
+        "Quien llama guarda el resultado: `v = add_one(v);`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn add_one(n: Int32): Void {\n    n += 1;\n}\n\nfn main(): Void {\n    mut v = 1;\n    add_one(v);\n    stdout.println(v);\n}\n",
+      "expect": [
+        "2"
+      ]
+    },
+    {
+      "id": "5.13",
+      "sector": 5,
+      "sectorName": "Almacén",
+      "title": "Jefe: el inventario del almacén",
+      "type": "output",
+      "concept": "repaso — listas, bucles, condiciones y acumuladores trabajando juntos.",
+      "story": "el almacén recibe un lote de cajas con pesos distintos y el robot encargado tiene que informar del peso total, de la caja más pesada y de cuántas pasan de 10.",
+      "goal": "imprimir `total T max M pesadas P` para cualquier lote.",
+      "assets": [
+        "bot-courier",
+        "crate",
+        "object-panel"
+      ],
+      "artNotes": "`bot-courier` (el encargado), `crate` (con tamaños distintos), `object-panel`.",
+      "hints": [
+        "Necesitas tres acumuladores: total, máximo y cantidad de pesadas.",
+        "Dentro del bucle, cada condición actualiza el acumulador que corresponde.",
+        "Imprime tras el bucle."
+      ],
+      "extra": "resolverlo con una sola pasada por la lista (como arriba) y sin variables de más. ---",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    mut total = 0;\n    for w in weights() {\n        total += w;\n    }\n    stdout.println(\"total\", total);\n}\n",
+      "cases": [
+        {
+          "name": "lote grande",
+          "helpers": "fn weights(): List<Int32> { return List(4, 12, 7, 20, 3); }",
+          "expect": [
+            "total 46 max 20 pesadas 2"
+          ]
+        },
+        {
+          "name": "lote pequeño",
+          "helpers": "fn weights(): List<Int32> { return List(1, 2); }",
+          "expect": [
+            "total 3 max 2 pesadas 0"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.1",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Fichas con nombre: record",
+      "type": "output",
+      "concept": "un `record` agrupa campos con nombre en un solo tipo: `record Robot { name: String; energy: Int32; }`. Se crea con los campos por nombre y se compara con `==` por contenido.",
+      "story": "el archivo guarda la ficha de cada robot.",
+      "goal": "crear dos fichas con los mismos datos e imprimir el nombre, la energía y si son iguales.",
+      "assets": [
+        "object-panel",
+        "chip"
+      ],
+      "artNotes": "`object-panel` (una barra por campo), `chip`.",
+      "hints": [
+        "Crea otra ficha con los mismos datos.",
+        "Los campos de un `record` se dan **por nombre**.",
+        "`a == b` compara el contenido de las dos fichas."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nrecord Robot { name: String; energy: Int32; }\n\nfn main(): Void {\n    inmut a = Robot(name: \"Zirk\", energy: 90);\n    stdout.println(a.name, a.energy);\n}\n",
+      "expect": [
+        "Zirk 90 true"
+      ]
+    },
+    {
+      "id": "6.2",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Los records no se editan",
+      "type": "fix",
+      "concept": "un `record` es un **valor**: sus campos no se reasignan; para «cambiar» uno se crea otro record nuevo.",
+      "story": "el archivo nunca borra una ficha; si cambia una posición, archiva una nueva.",
+      "goal": "obtener `Point(x: 1, y: 2)` y `Point(x: 9, y: 2)`.",
+      "assets": [
+        "object-panel",
+        "chip"
+      ],
+      "artNotes": null,
+      "hints": [
+        "El error dice que no se puede asignar a `x`.",
+        "Crea un `Point` nuevo en vez de editar.",
+        "Reutiliza el campo que no cambia: `a.y`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nrecord Point { x: Int32; y: Int32; }\n\nfn main(): Void {\n    mut a = Point(x: 1, y: 2);\n    mut b = a;\n    b.x = 9;\n    stdout.println(a, b);\n}\n",
+      "expect": [
+        "Point(x: 1, y: 2) Point(x: 9, y: 2)"
+      ]
+    },
+    {
+      "id": "6.3",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Estados con nombre: enum",
+      "type": "output",
+      "concept": "un `enum` es un tipo con un **conjunto cerrado de valores**; `match` sobre un `enum` debe cubrir",
+      "story": "el semáforo de la estación como tipo propio, no como números sueltos.",
+      "goal": "imprimir `alto`, `cuidado` o `avanza` según `light_now()`.",
+      "assets": [
+        "lamp",
+        "plate"
+      ],
+      "artNotes": null,
+      "hints": [
+        "El compilador te dice qué variantes faltan.",
+        "Cada una necesita su rama.",
+        "También valdría `_` para «todo lo demás», pero aquí conviene nombrarlas."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nenum Light { Red, Yellow, Green }\n\nfn main(): Void {\n    match light_now() {\n        Light.Red => stdout.println(\"alto\");\n    }\n}\n",
+      "cases": [
+        {
+          "name": "rojo",
+          "helpers": "fn light_now(): Light { return Light.Red; }",
+          "expect": [
+            "alto"
+          ]
+        },
+        {
+          "name": "amarillo",
+          "helpers": "fn light_now(): Light { return Light.Yellow; }",
+          "expect": [
+            "cuidado"
+          ]
+        },
+        {
+          "name": "verde",
+          "helpers": "fn light_now(): Light { return Light.Green; }",
+          "expect": [
+            "avanza"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.4",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Enums con datos",
+      "type": "output",
+      "concept": "cada variante de un `enum` puede llevar **datos propios**; `match` los extrae: `Shape.Rect(w, h) => w * h`.",
+      "story": "el archivo guarda figuras de distinto tipo y necesita su área.",
+      "goal": "completar `area` para que imprima `10 12 0`.",
+      "assets": [
+        "blueprint"
+      ],
+      "artNotes": "`blueprint` (una figura distinta por variante).",
+      "hints": [
+        "Faltan las ramas `Rect` y `Dot`.",
+        "El `match` que devuelve un valor lleva comas entre ramas.",
+        "`Dot` no lleva datos: su área es `0`."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nenum Shape { Circle(r: Int32), Rect(w: Int32, h: Int32), Dot }\n\nfn area(s: Shape): Int32 {\n    return match s {\n        Shape.Circle(r) => r * r * 3\n    };\n}\n\nfn main(): Void {\n    stdout.println(area(Shape.Rect(w: 2, h: 5)), area(Shape.Circle(r: 2)), area(Shape.Dot));\n}\n",
+      "expect": [
+        "10 12 0"
+      ]
+    },
+    {
+      "id": "6.5",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Un resultado que puede fallar: Result",
+      "type": "output",
+      "concept": "`Int32.parse(texto)` no se estrella si el texto no es un número: devuelve un `Result` que es `Ok(valor)` o `Error(motivo)`; `match` decide qué hacer en cada caso.",
+      "story": "el lector de tarjetas recibe un código escrito a mano; algunos están dañados.",
+      "goal": "imprimir el código más uno si es válido, y `tarjeta dañada` si no.",
+      "assets": [
+        "terminal",
+        "bot-scout"
+      ],
+      "artNotes": null,
+      "hints": [
+        "`parse` devuelve `Ok(...)` o `Error(...)`.",
+        "Un `match` con una rama por cada uno.",
+        "En `Ok(v)`, `v` es el número ya convertido."
+      ],
+      "extra": null,
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    stdout.println(Int32.parse(card()));\n}\n",
+      "cases": [
+        {
+          "name": "42",
+          "helpers": "fn card(): String { return \"42\"; }",
+          "expect": [
+            "ok 43"
+          ]
+        },
+        {
+          "name": "x7",
+          "helpers": "fn card(): String { return \"x7\"; }",
+          "expect": [
+            "tarjeta dañada"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "6.6",
+      "sector": 6,
+      "sectorName": "Archivo",
+      "title": "Fallar sin estrellarse",
+      "type": "fix",
+      "concept": "una función puede **declarar que falla** devolviendo `Result<T, E>`: así quien la usa está obligado a decidir qué hacer ante el error.",
+      "story": "la calculadora del archivo se bloquea al dividir por cero y apaga la estación.",
+      "goal": "imprimir `2` y luego `no se puede dividir por cero`, sin que el programa se detenga.",
+      "assets": [
+        "terminal",
+        "bot-scout"
+      ],
+      "artNotes": null,
+      "hints": [
+        "¿Qué debería devolver `div` cuando `b` vale 0?",
+        "`Result<Int32, String>` es «un `Int32`, o un texto explicando el fallo».",
+        "Quien llama usa `match` para tratar los dos casos."
+      ],
+      "extra": "escribir `show` una sola vez y reutilizarla para las dos llamadas (como arriba). ---",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn div(a: Int32, b: Int32): Int32 {\n    return Int32(a / b);\n}\n\nfn main(): Void {\n    stdout.println(div(6, 3));\n    stdout.println(div(1, 0));\n}\n",
+      "expect": [
+        "2",
+        "no se puede dividir por cero"
+      ]
+    },
+    {
+      "id": "7.1",
+      "sector": 7,
+      "sectorName": "Nivel final — Bahía de lanzamiento",
+      "title": "Construye un intérprete",
+      "type": "grid",
+      "concept": "repaso de todo el curso — una `List` de textos, un bucle `for`, `match` sobre textos, funciones del juego y un caso de error.",
+      "story": "el ordenador de a bordo guarda la ruta de salida como una lista de comandos. Hay que leerla y ejecutarla paso a paso: `walk` avanza, `turn` gira, `grab` recoge, y cualquier otra cosa es una avería.",
+      "goal": "ejecutar el programa de la nave: recoger la moneda y llegar al portal.",
+      "assets": [
+        "bot-zirk",
+        "terminal",
+        "coin",
+        "goal-portal",
+        "start-pad"
+      ],
+      "artNotes": "`bot-zirk` (`celebrate` en la meta), `terminal`, `coin`, `goal-portal`, `start-pad`.",
+      "hints": [
+        "`program()` devuelve la lista de comandos; recórrela con `for`.",
+        "Un `match` sobre el texto del comando elige qué función llamar.",
+        "`_` recoge los comandos que no existen: imprime un aviso."
+      ],
+      "extra": "que un comando desconocido **no** detenga el resto del programa, y que el aviso diga cuál fue. ---",
+      "prelude": [
+        "core"
+      ],
+      "starter": "import { stdout } from std.io;\n\nfn main(): Void {\n    for command in program() {\n        stdout.println(command);\n    }\n}\n",
+      "cases": [
+        {
+          "name": "ruta de la nave",
+          "helpers": "fn program(): List<String> { return List(\"walk\", \"walk\", \"grab\", \"turn\", \"walk\", \"walk\", \"turn\", \"walk\", \"walk\"); }"
+        }
+      ],
+      "map": [
+        "S.c",
+        "##.",
+        "G.."
+      ],
+      "facing": "east"
+    }
+  ]
+}

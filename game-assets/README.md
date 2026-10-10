@@ -108,6 +108,27 @@ state shown here (the execution trace is a ready-made transcript), keyboard
 control, and a `prefers-reduced-motion` path: skip `update(dt)` for decorative
 motion (coins, portals) and leave only state changes.
 
+## Curriculum
+
+`../ZIRK_LEARNING_GAME_CURRICULUM.md` is the level script for the basics of Zirk
+(output, variables and types, values versus references, control flow,
+functions, collections, `record`/`enum`/`Result`; no OOP): 7 sectors and 53
+levels. The document is **executable**:
+
+```sh
+npm run curriculum:verify   # runs every solution in the browser interpreter, with a grid simulator
+npm run curriculum:export   # regenerates curriculum/levels.json, the data the game loads
+```
+
+The verifier requires the interpreter example (`cargo build -p zirk-browser
+--example interp_repro`). It checks that each reference solution solves its level
+for every test case, that no starter already passes, that every documented
+"common mistake" really produces the diagnostic the text promises, that the
+glossary of diagnostics is exactly the set the levels exercise, and that the
+language limits the script relies on still hold. The exporter refuses a level
+without three hints, a concept, a story and a goal, or one that names an asset
+not in `src/catalog.js`, and it never ships reference solutions.
+
 ## Layout
 
 ```
@@ -119,6 +140,7 @@ src/
   environment.js                        lights, sky dome, stars
   catalog.js  index.js                  the catalog and the public API
 preview/                                browser preview, screenshots, GLB export check
+curriculum/                             verifier and exporter of the level script, levels.json
 test/                                   node:test suite
 ```
 
