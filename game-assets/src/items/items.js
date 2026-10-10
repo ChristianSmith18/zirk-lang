@@ -1,29 +1,41 @@
 import * as THREE from 'three';
 import { PALETTE } from '../palette.js';
-import { solid, glow, ghost } from '../materials.js';
+import { solid, glow, ghost, vertexColor } from '../materials.js';
+import { createZirkMarkGeometries } from '../logo.js';
 import { Asset, box, cylinder, octa, icosa, torus, roundBox, sphere, mesh } from '../shapes.js';
 
-/** A spinning gold coin with a "Z" stamped on both faces. Collect = +1. */
+/**
+ * A spinning gold coin. Both faces carry the real Zirk mark (the Z crossed by
+ * its diagonal slash, see `logo.js`) in the brand gradients, inlaid on a deep
+ * violet face inside a gold rim. Collect = +1.
+ */
 export function createCoin({ color = PALETTE.gold } = {}) {
   const coin = new Asset('coin');
-  const body = new THREE.Group();
-  body.rotation.x = Math.PI / 2;
-  body.add(mesh(cylinder(0.24, 0.24, 0.06, 20), solid(color, { metalness: 0.7, roughness: 0.3, emissive: color, emissiveIntensity: 0.25 })));
-  body.add(mesh(torus(0.235, 0.025, 24), solid(color, { metalness: 0.8, roughness: 0.25 }), [0, 0, 0], { rotation: [Math.PI / 2, 0, 0] }));
-  const stamp = glow(PALETTE.deepViolet, 0.2);
+  const spin = new THREE.Group();
+  const gold = solid(color, { metalness: 0.7, roughness: 0.3, emissive: color, emissiveIntensity: 0.25 });
+  const rim = solid(color, { metalness: 0.8, roughness: 0.25 });
+  // The coin stands on its edge: its axis is Z, so a face looks toward +Z.
+  spin.add(mesh(cylinder(0.25, 0.25, 0.07, 28), gold, [0, 0, 0], { rotation: [Math.PI / 2, 0, 0] }));
+  spin.add(mesh(torus(0.235, 0.028, 28), rim, [0, 0, 0.035]));
+  spin.add(mesh(torus(0.235, 0.028, 28), rim, [0, 0, -0.035]));
+  const { z, slash } = createZirkMarkGeometries({ size: 0.33, depth: 0.012 });
   for (const side of [1, -1]) {
-    const z = new THREE.Group();
-    z.position.set(0, side * 0.034, 0);
-    z.rotation.x = side * Math.PI / 2;
-    z.add(mesh(box(0.2, 0.035, 0.012), stamp, [0, 0.07, 0], { shadow: false }));
-    z.add(mesh(box(0.2, 0.035, 0.012), stamp, [0, -0.07, 0], { shadow: false }));
-    z.add(mesh(box(0.24, 0.035, 0.012), stamp, [0, 0, 0], { rotation: [0, 0, 0.9], shadow: false }));
-    body.add(z);
+    const face = new THREE.Group();
+    face.position.z = side * 0.036;
+    // The back face is the front turned half a revolution, so the mark reads
+    // correctly (not mirrored) from either side.
+    if (side < 0) face.rotation.y = Math.PI;
+    face.add(mesh(cylinder(0.205, 0.205, 0.006, 28), solid(0x2b2050, { roughness: 0.5, metalness: 0.2, emissive: 0x2b2050, emissiveIntensity: 0.9 }), [0, 0, 0], { rotation: [Math.PI / 2, 0, 0], shadow: false }));
+    const zMark = mesh(z, vertexColor(), [0, 0, 0.007], { shadow: false });
+    // The slash crosses over the Z, as in the logo.
+    const slashMark = mesh(slash, vertexColor(), [0, 0, 0.011], { shadow: false });
+    face.add(zMark, slashMark);
+    spin.add(face);
   }
-  coin.add(body);
+  coin.add(spin);
   coin.position.y = 0.5;
   coin.animate = (dt, t) => {
-    body.rotation.z = t * 2.4;
+    spin.rotation.y = t * 2.4;
     coin.position.y = 0.5 + Math.sin(t * 2.2) * 0.05;
   };
   return coin;

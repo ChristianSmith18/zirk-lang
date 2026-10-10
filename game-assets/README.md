@@ -60,7 +60,7 @@ builds one by id.
 | Category | Assets |
 | --- | --- |
 | **characters** | `bot-zirk` (mascot), `bot-scout`, `bot-builder`, `bot-guard`, `bot-courier`, `bot-ghost` (clone) |
-| **items** | `coin`, `gem`, `key`, `battery`, `chest`, `chip`, `orb` |
+| **items** | `coin` (stamped with the real Zirk mark, see `src/logo.js`), `gem`, `key`, `battery`, `chest`, `chip`, `orb` |
 | **goals** | `goal-portal`, `flag`, `start-pad`, `checkpoint`, `door`, `plate`, `lever`, `terminal` |
 | **world** | tiles `plain`, `circuit`, `grass`, `sand`, `ice`, `water`, `lava`, `hole`, `ramp`, `bridge`, `conveyor`, `teleporter`, `spikes`, plus `wall`, `pillar` |
 | **props** | `crate`, `tree`, `pine`, `rock`, `crystal`, `lamp`, `sign`, `fence`, `bush`, `banner` |

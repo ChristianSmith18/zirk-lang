@@ -51,6 +51,17 @@ export function wire(color, opacity = 0.9) {
   return material;
 }
 
+/** Unlit material that shows per-vertex colours (the brand gradient). */
+export function vertexColor() {
+  const key = 'v';
+  let material = cache.get(key);
+  if (!material) {
+    material = new THREE.MeshBasicMaterial({ vertexColors: true });
+    cache.set(key, material);
+  }
+  return material;
+}
+
 export function disposeMaterialCache() {
   for (const material of cache.values()) material.dispose();
   cache.clear();

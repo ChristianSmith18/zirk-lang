@@ -1,5 +1,6 @@
 export { PALETTE } from './palette.js';
-export { solid, glow, ghost, wire, disposeMaterialCache } from './materials.js';
+export { solid, glow, ghost, wire, vertexColor, disposeMaterialCache } from './materials.js';
+export { ZIRK_MARK, createZirkMarkGeometries, disposeLogoGeometry } from './logo.js';
 export { disposeGeometryCache, Asset } from './shapes.js';
 export { Bot, BOT_KINDS, createBot, createBotGhost } from './characters/bot.js';
 export * from './items/items.js';

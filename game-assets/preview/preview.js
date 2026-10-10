@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { CATALOG, CATEGORIES, byCategory, createLights, createSky, createStars, createTile, createShadowBlob, PALETTE } from 'zirk-assets';
+import { CATALOG, CATEGORIES, byCategory, byId, createLights, createSky, createStars, createTile, createShadowBlob, PALETTE } from 'zirk-assets';
 
 const params = new URLSearchParams(location.search);
 const shot = params.has('shot');
@@ -56,8 +56,10 @@ function build(category) {
   scene.add(stage);
   animated.length = 0;
 
-  const items = byCategory(category);
-  const columns = Math.ceil(Math.sqrt(items.length * 1.7));
+  // `?asset=<id>` shows one asset large, for close inspection.
+  const single = params.get('asset');
+  const items = single ? [byId(single)] : byCategory(category);
+  const columns = single ? 1 : Math.ceil(Math.sqrt(items.length * 1.7));
   const rows = Math.ceil(items.length / columns);
   const spacing = category === 'teaching' ? 3.1 : 1.8;
   items.forEach((item, index) => {
@@ -85,6 +87,13 @@ function build(category) {
     asset.unroll?.(1);
     asset.setProgress?.(0.5);
   });
+
+  if (single) {
+    camera.position.set(0.55, 1.05, 1.45);
+    controls.target.set(0, 0.5, 0);
+    controls.update();
+    return;
+  }
 
   // Fit the camera to the laid-out stage.
   const bounds = new THREE.Box3().setFromObject(stage);

@@ -198,3 +198,30 @@ test('assets can be exported with GLTFExporter-compatible scene graphs', () => {
     });
   }
 });
+
+test('the coin carries the real Zirk mark on both faces, with the logo proportions', async () => {
+  const { createZirkMarkGeometries, ZIRK_MARK } = await import('../src/logo.js');
+  const { z, slash } = createZirkMarkGeometries({ size: 0.33, depth: 0.012 });
+  for (const geometry of [z, slash]) {
+    assert.ok(geometry.attributes.color, 'the mark is coloured per vertex (brand gradients)');
+    geometry.computeBoundingBox();
+  }
+  // Compare with the SVG: strokes extended by half the stroke width at both ends.
+  const half = ZIRK_MARK.stroke / 2;
+  const xs = [...ZIRK_MARK.z, ...ZIRK_MARK.slash].map((p) => p[0]);
+  const ys = [...ZIRK_MARK.z, ...ZIRK_MARK.slash].map((p) => p[1]);
+  const expectedAspect = (Math.max(...xs) - Math.min(...xs) + 2 * half) / (Math.max(...ys) - Math.min(...ys) + 2 * half);
+  const union = z.boundingBox.clone().union(slash.boundingBox);
+  const size = union.getSize(new THREE.Vector3());
+  assert.ok(Math.abs(size.x / size.y - expectedAspect) < 0.03, `aspect ${(size.x / size.y).toFixed(3)} vs ${expectedAspect.toFixed(3)}`);
+  // The slash is drawn over the Z, and the Z's top-left stop is violet while its end is blue.
+  const first = new THREE.Color().fromBufferAttribute(z.attributes.color, 0);
+  assert.ok(first.b > first.g, 'the Z starts in the violet/blue range');
+
+  const coin = createCoin();
+  let marks = 0;
+  coin.traverse((o) => o.isMesh && o.material.vertexColors && marks++);
+  assert.equal(marks, 4, 'two strokes on each of the two faces');
+  const box = bounds(coin);
+  assert.ok(box.max.y - box.min.y < 0.6, 'the mark must fit inside the coin');
+});
