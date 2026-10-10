@@ -21,5 +21,5 @@
 ## 4. Documentation, status, and companion-site handoff
 
 - [x] 4.1 Update the support matrix, Feature Status, and the object-model coverage document; verify they cite the clone fixtures.
-- [ ] 4.2 Rebuild and verify the browser package from the committed revision, run `./scripts/sync-website-content.sh`, and obtain human review with an explicit `--audit-date YYYY-MM-DD` if status evidence changed.
-- [ ] 4.3 In `../zirk-lang-site`, adopt the rebuilt package, review the diff, and commit it separately with both revisions recorded.
+- [x] 4.2 Rebuild and verify the browser package from the committed revision, run `./scripts/sync-website-content.sh`, and obtain human review with an explicit `--audit-date YYYY-MM-DD` if status evidence changed.
+- [x] 4.3 In `../zirk-lang-site`, adopt the rebuilt package, review the diff, and commit it separately with both revisions recorded.

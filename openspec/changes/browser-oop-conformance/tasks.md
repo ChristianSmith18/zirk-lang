@@ -30,6 +30,6 @@
 
 - [x] 5.1 Update `docs/browser-interpreter-support-matrix.md` so object, callable, record and enum wording matches the catalog; verify no claim lacks a fixture or corpus program.
 - [x] 5.2 Update `docs/init/ZIRK_FEATURE_STATUS.md`, `docs/browser-package-handoff.md`, and `crates/zirk-browser/fixtures/README.md`; verify the documents agree with the catalog.
-- [ ] 5.3 Commit the `zirk-lang` changes, then build and verify the browser package from that clean revision; verify `scripts/verify-browser-package.sh` passes.
-- [ ] 5.4 Run `./scripts/sync-website-content.sh`; if project-status evidence changed, obtain human review of the `zirk-lang-site` status catalog and pass an explicit `--audit-date YYYY-MM-DD`.
-- [ ] 5.5 In `../zirk-lang-site`, adopt the rebuilt package and review the diff for contradictory availability or target claims; commit it separately and record both revisions.
+- [x] 5.3 Commit the `zirk-lang` changes, then build and verify the browser package from that clean revision; verify `scripts/verify-browser-package.sh` passes.
+- [x] 5.4 Run `./scripts/sync-website-content.sh`; if project-status evidence changed, obtain human review of the `zirk-lang-site` status catalog and pass an explicit `--audit-date YYYY-MM-DD`.
+- [x] 5.5 In `../zirk-lang-site`, adopt the rebuilt package and review the diff for contradictory availability or target claims; commit it separately and record both revisions.

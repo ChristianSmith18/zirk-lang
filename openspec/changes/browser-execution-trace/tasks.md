@@ -31,5 +31,5 @@
 ## 5. Documentation, status, and companion-site handoff
 
 - [x] 5.1 Update `docs/browser-interpreter-support-matrix.md`, `docs/browser-package-handoff.md`, and `docs/init/ZIRK_FEATURE_STATUS.md` for the trace feature and its limits; verify each states that tracing is observation, not a host effect.
-- [ ] 5.2 Commit the `zirk-lang` changes, rebuild and verify the browser package from that clean revision, and run `./scripts/sync-website-content.sh`; if project-status evidence changed, obtain human review and pass an explicit `--audit-date YYYY-MM-DD`.
-- [ ] 5.3 In `../zirk-lang-site`, update the worker and TypeScript contract for the new field, review the diff for contradictory claims, and commit it separately with both revisions recorded.
+- [x] 5.2 Commit the `zirk-lang` changes, rebuild and verify the browser package from that clean revision, and run `./scripts/sync-website-content.sh`; if project-status evidence changed, obtain human review and pass an explicit `--audit-date YYYY-MM-DD`.
+- [x] 5.3 In `../zirk-lang-site`, update the worker and TypeScript contract for the new field, review the diff for contradictory claims, and commit it separately with both revisions recorded.

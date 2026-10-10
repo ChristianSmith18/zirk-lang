@@ -17,5 +17,5 @@
 ## 4. Documentation and companion-site handoff
 
 - [x] 4.1 Update `ZIRK_LANGUAGE_SPEC.md`, `ZIRK_STDLIB_SPEC.md` and the `std.io` handbook chapter; verify the examples match `examples/std_io_mixed_values.zrk`.
-- [ ] 4.2 Run `./scripts/sync-website-content.sh`, obtain human review of the `zirk-lang-site` status catalog, and pass an explicit `--audit-date YYYY-MM-DD`.
-- [ ] 4.3 In `../zirk-lang-site`, adopt the synced content and the rebuilt package, review the diff, and commit it separately with both revisions recorded.
+- [x] 4.2 Run `./scripts/sync-website-content.sh`, obtain human review of the `zirk-lang-site` status catalog, and pass an explicit `--audit-date YYYY-MM-DD`.
+- [x] 4.3 In `../zirk-lang-site`, adopt the synced content and the rebuilt package, review the diff, and commit it separately with both revisions recorded.
