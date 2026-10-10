@@ -48,6 +48,7 @@ Raíz de trabajo: `/Users/cristian/Projects/PROPIOS/Zirk Lang/`
 | Carpeta | Qué es | Rama | Notas |
 | --- | --- | --- | --- |
 | `zirk-lang/` | **Compilador, intérprete, docs, juego** (este documento vive aquí) | `develop` | ≈ 60 commits por delante de `origin/develop`, sin publicar (ver 7.2) |
+| `zirk-lang-game-site/` | **El sitio del juego.** Angular 22.1 + SSR, recién generado: aún sin código del juego. Su `docs/` tiene una copia de este traspaso con una sección extra (10) sobre ese repo | `main` | 1 commit (`aadf256`) |
 | `zirk-lang-site/` | Sitio web (Angular 21). Ya ejecuta código Zirk en su *playground* con el paquete WASM | `develop` | 13 commits por delante de `origin`, sin publicar |
 | `zirk-lang-browser-interpreter/` | **Worktree huérfano** (su `.git` apunta a una ruta que ya no existe). Su trabajo ya está archivado en `develop` | — | No lo uses; `git worktree prune` lo limpia desde `zirk-lang/` |
 | `zirk-lang-collection-sequence-pipeline/`, `zirk-lang-promos/` | Otros worktrees, ajenos a este trabajo | — | No tocar |
@@ -294,7 +295,7 @@ Ordenado por prioridad. Cada punto lleva su criterio de aceptación.
 
 | # | Decisión | Mi recomendación | Por qué importa |
 | --- | --- | --- | --- |
-| D1 | ¿Dónde vive el juego: ruta `/learn/` en `zirk-lang-site` o repo aparte? | En el sitio (`/learn/`), cargando Three.js y los assets en un *chunk* perezoso | Reutiliza el worker, el diseño y el despliegue; el coste es respetar el presupuesto de bundle y la accesibilidad del sitio |
+| D1 | ¿Dónde vive el juego? | **RESUELTA (2026-10-10): repo propio `zirk-lang-game-site`** (Angular 22.1 con SSR, ya creado; su documentación está en `zirk-lang-game-site/docs/`) | El trabajo del slice se hace allí; `zirk-lang-site` solo aporta código para reutilizar |
 | D2 | ¿Se reescribe el historial para quitar trailers y mensajes en español de commits sin publicar? | Sí, antes de publicar | `AGENTS.md` del repo pide mensajes en inglés **sin** `Co-Authored-By`. 16 de los 58 commits sin publicar los llevan (ver sección 7.2) |
 | D3 | ¿Se hace `push` de `zirk-lang` (≈ 60 commits) y del sitio (13)? | Tras D2 y revisar | Nada de este trabajo está publicado |
 | D4 | Origen de los assets finales: procedural (lo actual), packs CC0 (Kenney/Quaternius) o un artista | Mantener lo procedural para el vertical slice y decidir con el feedback | Los robots no tienen rig esqueletal real, solo articulaciones animadas por código |
@@ -303,6 +304,8 @@ Ordenado por prioridad. Cada punto lleva su criterio de aceptación.
 | D7 | ¿Entra la concurrencia en el alcance? | No por ahora | Está excluida del navegador (ADR-020); requeriría revisar ese ADR |
 
 ### 5.2 El vertical slice jugable (prioridad máxima)
+
+**Dónde:** en `zirk-lang-game-site` (D1, resuelta).
 
 **Meta:** una página con el **Sector 1** (niveles 1.1–1.5) jugable de principio a fin, con el
 robot animado en 3D, el editor de código y la validación real. Después, ampliar a los sectores
@@ -511,8 +514,8 @@ el vertical slice (5.2) es ahora el trabajo grande.
 ## 8. Cómo trabajar sobre esto, en orden
 
 1. Lee 0, 2, 6 y 7. Ejecuta los comandos de 2.3 y confirma que todo está verde (si no, para y avisa).
-2. Pide al usuario las decisiones **D1–D3** (5.1). Sin D1 no sabes dónde construir; D2/D3 solo
-   importan al publicar, pero conviene saberlas antes de commitear más.
+2. D1 ya está resuelta (`zirk-lang-game-site`). Pregunta por **D2/D3** antes de publicar; las decisiones nuevas sobre ese
+   repo (D8–D12) están en `zirk-lang-game-site/docs/HANDOFF.md` §10.5.
 3. Construye el slice (5.2) con TDD y en un *worktree* aparte. Empieza por el ensamblado del programa,
    el simulador compartido y el reproductor de órdenes; deja el 3D para el final.
 4. Cada cambio que toque el compilador o el paquete sigue el flujo de 3.2.
