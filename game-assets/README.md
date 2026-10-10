@@ -118,7 +118,22 @@ levels. The document is **executable**:
 ```sh
 npm run curriculum:verify   # runs every solution in the browser interpreter, with a grid simulator
 npm run curriculum:export   # regenerates curriculum/levels.json, the data the game loads
+npm run level -- 3.1        # play a level from the terminal (see below)
 ```
+
+### Playing a level in the terminal
+
+```sh
+npm run level -- --list           # every level
+npm run level -- 3.1              # writes the starter to ~/.zirk-play/3.1.zrk, runs it, gives a verdict
+npm run level -- 3.1 --watch      # re-runs every time you save the file
+npm run level -- 3.1 --hint 2     # hints are 1..3
+npm run level -- 2.8 --answer 1   # prediction levels: bet, then see the real output
+```
+
+The player adds the game's hidden helpers (`walk`, `inspect`, …) around your file
+exactly as the real game will, and judges it with the same grid simulator and
+output checks the verifier uses.
 
 The verifier requires the interpreter example (`cargo build -p zirk-browser
 --example interp_repro`). It checks that each reference solution solves its level

@@ -1,5 +1,8 @@
 {
   "schemaVersion": 1,
+  "preludes": {
+    "core": "fn walk(steps: Int32): Void { stdout.println(\"@walk\", steps); }\nfn turn_left(): Void { stdout.println(\"@turn\", \"left\"); }\nfn turn_right(): Void { stdout.println(\"@turn\", \"right\"); }\nfn collect(): Void { stdout.println(\"@collect\"); }\nfn hop(): Void { stdout.println(\"@hop\"); }\nfn inspect(label: String, value: Stringifiable): Void { stdout.println(\"@inspect\", label, value); }\n"
+  },
   "levels": [
     {
       "id": "1.1",
