@@ -2,7 +2,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const types = { '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json', '.css': 'text/css' };
@@ -31,7 +31,9 @@ export function serve(port = 5173) {
   return new Promise((done) => server.listen(port, () => done(server)));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `pathToFileURL` percent-encodes like `import.meta.url` does, so this also
+// works when the checkout path contains spaces.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = await serve(Number(process.argv[2] ?? 5173));
   console.log(`Zirk asset preview: http://localhost:${server.address().port}/`);
 }
