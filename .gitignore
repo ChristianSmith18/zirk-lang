@@ -32,3 +32,6 @@
 
 # Local variants directory
 /variants/
+
+# Game assets (Three.js) dependencies
+game-assets/node_modules/
