@@ -64,9 +64,14 @@ stderr.println("diagnostic");
 match stdin.read_line_result() { ReadResult.End => {}, _ => {} }
 ```
 
-- `print(...args: String)` and `println(...args: String)` are the delivered
-  output APIs. They join rendered arguments with one space; `println` adds one
-  platform line break and `print` adds none.
+- `print(...args: Stringifiable)` and `println(...args: Stringifiable)` are
+  the delivered output APIs. `Stringifiable` is the standard trait for a
+  value with `to_string(): String`, supplied automatically by every
+  value-producing type. Its default body is a concrete implementation, so a
+  class that declares `to_string()` must mark it `#override`.
+  This allows heterogeneous calls such as `stdout.println("count", 2, true)`.
+  They join rendered arguments with one space; `println` adds one platform
+  line break and `print` adds none.
 - `println()` writes just a line break.
 - `print()` writes nothing.
 - `stdout` and `stderr` share the same formatting operations but different

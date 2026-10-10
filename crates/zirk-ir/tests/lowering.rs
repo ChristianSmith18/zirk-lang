@@ -826,6 +826,38 @@ fn println_calls_its_zirk_standard_library_body() {
 }
 
 #[test]
+fn opened_println_calls_the_same_zirk_standard_library_body() {
+    let module = compile("fn main(): Void { stdout.println(\"trigger\"); println(\"hola\"); }");
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main).iter().any(
+            |i| matches!(i, InstKind::Call { callee, .. } if callee == "std.io.stdout.println")
+        ),
+        "the opened convenience form must not bypass the std.io source body"
+    );
+}
+
+#[test]
+fn print_calls_its_zirk_standard_library_body() {
+    let module = compile("fn main(): Void { stdout.print(\"hola\", 2); }");
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|i| matches!(i, InstKind::Call { callee, .. } if callee == "std.io.stdout.print"))
+    );
+
+    let print = module
+        .function("std.io.stdout.print")
+        .expect("the bundled Zirk print body exists");
+    assert!(
+        instructions(print)
+            .iter()
+            .any(|i| matches!(i, InstKind::Print(_)))
+    );
+}
+
+#[test]
 fn a_discarded_println_produces_no_value() {
     let f = main_body("stdout.println(\"hola\");");
 
@@ -878,8 +910,8 @@ fn println_over_a_boolean_converts_first() {
 }
 
 #[test]
-fn println_always_receives_a_string() {
-    // The invariant that keeps the runtime from reading a value as a pointer.
+fn println_always_receives_a_real_stringifiable_value() {
+    // The public stream body consumes a trait object, never an erased String.
     for body in [
         "stdout.println(\"a\");",
         "stdout.println(1);",
@@ -912,10 +944,17 @@ fn println_always_receives_a_string() {
             .map(|(_, _, ty)| *ty)
             .unwrap_or_else(|| panic!("the rendered argument is undefined in `{body}`"));
 
-        assert_eq!(
-            operand_type,
-            IrType::String,
-            "println must receive a String in `{body}`"
+        assert!(
+            matches!(operand_type, IrType::Contract(_)),
+            "println must receive a Stringifiable trait value in `{body}`; got {operand_type:?}"
+        );
+
+        assert!(
+            f.blocks
+                .iter()
+                .flat_map(|b| &b.instructions)
+                .any(|i| { matches!(i.kind, InstKind::Retype(_)) && i.result == Some(printed.0) }),
+            "the argument must be upcast to its trait representation in `{body}`"
         );
     }
 }
@@ -980,7 +1019,28 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
 
 #[test]
 fn a_conversion_requires_allocation() {
-    let f = main_body("stdout.println(42);");
+    let module = compile("fn main(): Void { stdout.println(42); }");
+    let box_id = module
+        .objects
+        .iter()
+        .position(|layout| layout.name == "std.io.Stringifiable$box")
+        .expect("the standard trait has its object layout") as u32;
+    let f = module.function("main").expect("main exists");
+
+    assert!(
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| { matches!(i.kind, InstKind::Alloc(id) if id == box_id) }),
+        "a scalar is materialized as a Stringifiable object"
+    );
+    assert!(
+        module.objects[box_id as usize]
+            .contracts
+            .iter()
+            .any(|table| { !table.methods.is_empty() }),
+        "the adapter exposes a real contract table"
+    );
 
     let allocating: Vec<_> = f
         .blocks
@@ -989,7 +1049,11 @@ fn a_conversion_requires_allocation() {
         .filter(|i| i.allocates())
         .collect();
 
-    assert_eq!(allocating.len(), 1, "the conversion produces a new String");
+    assert_eq!(
+        allocating.len(),
+        2,
+        "rendering and trait boxing allocate separately"
+    );
 }
 
 // --- Traceability -----------------------------------------------------------
@@ -2887,7 +2951,6 @@ fn a_value_to_contract_conversion_boxes_then_retypes() {
         .iter()
         .position(|o| o.name == "Point")
         .expect("Point has a box layout") as u32;
-
     assert!(
         kinds
             .iter()
@@ -2985,6 +3048,11 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
         .iter()
         .position(|o| o.name == "Point")
         .expect("Point has a box layout") as u32;
+    let stringifiable_box_id = module
+        .objects
+        .iter()
+        .position(|o| o.name == "std.io.Stringifiable$box")
+        .expect("Stringifiable has a box layout") as u32;
 
     // Every `StoreField` in `main` targets an operand this function itself
     // just produced with `Alloc(point_id)` — i.e. one of the two boxing
@@ -2994,7 +3062,7 @@ fn nothing_ever_writes_to_a_box_again_after_its_construction() {
         let mut boxed: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
         for inst in &block.instructions {
             match &inst.kind {
-                InstKind::Alloc(id) if *id == point_id => {
+                InstKind::Alloc(id) if *id == point_id || *id == stringifiable_box_id => {
                     boxed.insert(inst.result.expect("Alloc produces a value"));
                 }
                 InstKind::StoreField { object, .. } => {

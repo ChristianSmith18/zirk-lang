@@ -90,7 +90,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // (`Base::Class` doc comment: the two tables index the same id space).
     // A value type that never implements a contract keeps the empty
     // placeholder, the same way a still-generic template's is.
-    let objects = checked
+    let mut objects: Vec<ObjectLayout> = checked
         .classes
         .iter()
         .enumerate()
@@ -222,6 +222,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         })
         .collect();
 
+    // `Stringifiable` is a real trait even for inline values. A scalar,
+    // collection or enum is converted to its text once, then held in this
+    // ordinary heap object whose contract table answers `to_string()`. This
+    // gives a `Stringifiable`-typed value the same pointer/vtable shape as
+    // every other contract value instead of treating the trait as syntax.
+    let stringifiable_box = checked.native_stringifiable.map(|contract| {
+        let id = objects.len() as u32;
+        let method = &checked.contracts[contract as usize].methods[0];
+        objects.push(ObjectLayout {
+            name: "std.io.Stringifiable$box".into(),
+            fields: vec![ObjectField {
+                name: "text".into(),
+                ty: IrType::String,
+            }],
+            methods: Vec::new(),
+            contracts: vec![ContractTable {
+                contract,
+                methods: vec![stringifiable_box_to_string_symbol()],
+            }],
+            ancestors: vec![id],
+        });
+        debug_assert_eq!(method.name, "to_string");
+        id
+    });
+
     // A record's own layout — indexed the same way `objects`
     // is, sharing `checked.classes`' id space (roadmap task 11.5); an
     // ordinary class's or a still-generic template's entry here is the
@@ -329,6 +354,9 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+    if let Some(id) = stringifiable_box {
+        module.functions.push(build_stringifiable_box_to_string(id));
+    }
 
     // `checked.pointer_types` is pushed first, in the same order, so
     // `Base::Pointer(id)`/`IrType::Pointer(id)` always name the same
@@ -607,11 +635,12 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: IrType::String,
         },
         // `s.split(sep)` (roadmap Phase 7, `String` split): a `List<String>`
-        // of parts; the `List` id is element-agnostic for the runtime call.
+        // of parts, using the checked `String` list id rather than assuming
+        // that it is the first interned list type.
         ExternFn {
             name: "zirk_str_split".to_string(),
             params: vec![IrType::String, IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_string_id.unwrap_or(0)),
         },
         // `d.abs()`/`d.sign()` on a `Duration` (`native-type-member-surface`):
         // nanoseconds in, nanoseconds or an `i32` sign out.
@@ -2668,6 +2697,54 @@ pub fn contract_method_symbol(contract: &str, method: &str) -> String {
     format!("{contract}$default${method}")
 }
 
+fn stringifiable_box_to_string_symbol() -> String {
+    "std.io.Stringifiable$box$to_string".into()
+}
+
+/// The single vtable body used by compiler-generated boxes that turn any
+/// value into a real `Stringifiable` object. Conversion happens before
+/// allocation; a contract call simply reads this immutable text field.
+fn build_stringifiable_box_to_string(id: u32) -> Function {
+    let span = Span::empty(0);
+    let this = SlotId(0);
+    let receiver = Operand(ValueId(0));
+    let text = Operand(ValueId(1));
+    Function {
+        name: stringifiable_box_to_string_symbol(),
+        params: vec![this],
+        return_type: IrType::String,
+        slots: vec![Slot {
+            name: "this".into(),
+            ty: IrType::Object(id),
+            span,
+        }],
+        blocks: vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::Load(this),
+                    ty: IrType::Object(id),
+                    span,
+                },
+                Instruction {
+                    result: Some(ValueId(1)),
+                    kind: InstKind::LoadField {
+                        object: receiver,
+                        index: 0,
+                    },
+                    ty: IrType::String,
+                    span,
+                },
+            ],
+            terminator: Some(Terminator::Return(Some(text))),
+        }],
+        entry: BlockId(0),
+        span,
+        gc_roots: vec![this],
+    }
+}
+
 /// The name a boxed value's contract-table entry for one of its own methods
 /// is emitted under (`fase-3-value-type-contract-dispatch`, design D1/D2).
 ///
@@ -3994,6 +4071,40 @@ impl<'a> FunctionLowering<'a> {
     /// the IR performs implicitly: this is where the widening becomes an
     /// instruction.
     fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
+        // `std.io::Stringifiable` is a compiler-provided trait, not an
+        // erased `String` parameter.  Values that do not already have the
+        // trait's object representation are put in a small ordinary object
+        // with a real contract table.  Its vtable's `to_string()` returns the
+        // text produced by the value's normal implementation (including a
+        // class's `#override`).  Consequently the bundled Zirk body still
+        // performs an ordinary virtual `arg.to_string()` call.
+        if let IrType::Contract(contract) = expected
+            && self.checked.native_stringifiable == Some(contract)
+        {
+            let value = self.lower_render_operand(expr, expr.span());
+            if self.type_of_operand(value) == expected {
+                return value;
+            }
+            let text = self.lower_to_string_expr(expr, value, expr.span());
+            let box_id = self
+                .module
+                .objects
+                .iter()
+                .position(|layout| layout.name == "std.io.Stringifiable$box")
+                .expect("Stringifiable boxing layout is present when its trait is declared")
+                as u32;
+            let object = self.emit(InstKind::Alloc(box_id), IrType::Object(box_id), expr.span());
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: 0,
+                    value: text,
+                },
+                expr.span(),
+            );
+            return self.emit(InstKind::Retype(object), expected, expr.span());
+        }
+
         // A diverging source (`fatalError(...)`, roadmap Phase 4a) never
         // actually produces a value of `expected` — the checker's
         // `Type::accepts`/`Type::unify` already let `Never` fit anywhere, so
@@ -23264,61 +23375,13 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
-    /// Lowers the arguments of `print`/`println`, converting each via
-    /// `to_string()` when it is not already a `String`.
-    ///
-    /// `ZIRK_STDLIB_SPEC.md` section 3: every printable value goes through
-    /// `to_string()`. Without this the runtime would read an `Int32` as if it
-    /// were a pointer. Converted pieces are held across arguments that open
-    /// blocks; values do not cross blocks in this IR (ADR-007).
+    /// Lowers the opened `print`/`println` convenience syntax into the same
+    /// ordinary `std.io` function call as `stdout.print(...)`. The parser
+    /// preserves this historical shorthand as a separate node, but it is not
+    /// a second output implementation: it builds `List<Stringifiable>` and
+    /// calls the bundled Zirk body, whose private `write*` leaf reaches the
+    /// host only at the final boundary.
     fn lower_print_expr(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
-        let mut pieces = Vec::with_capacity(expr.args.len());
-        for (position, arg) in expr.args.iter().enumerate() {
-            let operand = self.lower_render_operand(arg, span);
-            let text = self.lower_to_string_expr(arg, operand, span);
-            let branches_later = expr.args[position + 1..]
-                .iter()
-                .any(|later| self.to_string_opens_blocks(later));
-            pieces.push(if branches_later {
-                let slot = self.declare_slot("<print>", IrType::String, arg.span());
-                self.emit_effect(InstKind::Store(slot, text), arg.span());
-                Held::Spilled(slot, IrType::String)
-            } else {
-                Held::Value(text)
-            });
-        }
-
-        let mut rendered = None;
-        for piece in pieces {
-            let text = self.reload(piece, span);
-            rendered = Some(match rendered {
-                None => text,
-                Some(prefix) => {
-                    let separator = self.const_string(" ", span);
-                    let with_separator = self.emit(
-                        InstKind::Concat {
-                            left: prefix,
-                            right: separator,
-                        },
-                        IrType::String,
-                        span,
-                    );
-                    self.emit(
-                        InstKind::Concat {
-                            left: with_separator,
-                            right: text,
-                        },
-                        IrType::String,
-                        span,
-                    )
-                }
-            });
-        }
-
-        // `println()` is a newline-only operation. An empty String gives the
-        // existing runtime newline intrinsic a valid handle; `print()` writes
-        // that same empty string and therefore nothing.
-        let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
         let name = if expr.newline { "println" } else { "print" };
         let stream = self
             .checked
@@ -23331,17 +23394,54 @@ impl<'a> FunctionLowering<'a> {
             "std.io",
             stream,
             name,
-            &format!("fn {name}(...args: String): Void"),
+            &format!("fn {name}(...args: Stringifiable): Void"),
         )
         .expect("the compiler-owned std.io output declaration has a binding");
-        match binding {
-            "std.io.stdout.println" => self.emit_effect(InstKind::Println(rendered), span),
-            "std.io.stdout.print" => self.emit_effect(InstKind::Print(rendered), span),
-            "std.io.stderr.println" => self.emit_effect(InstKind::PrintlnStderr(rendered), span),
-            "std.io.stderr.print" => self.emit_effect(InstKind::PrintStderr(rendered), span),
-            _ => unreachable!("the output lowering only requests stream print bindings"),
+        let signature = self
+            .checked
+            .functions
+            .get(binding)
+            .or_else(|| {
+                binding
+                    .rsplit_once('.')
+                    .and_then(|(_, member)| self.checked.functions.get(member))
+            })
+            .expect("the checked standard output declaration has a signature");
+        let element_ty = self.ir_type(signature.params[0].ty);
+        let list_id = self
+            .checked
+            .list_types
+            .iter()
+            .position(|&ty| self.ir_type(ty) == element_ty)
+            .expect("the checker interns the output variadic list") as u32;
+        let list_ty = IrType::List(list_id);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            list_ty,
+            span,
+        );
+        let list_slot = self.spill(list, list_ty, span);
+
+        for (position, arg) in expr.args.iter().enumerate() {
+            let branches_later = expr.args[position + 1..]
+                .iter()
+                .any(|later| self.to_string_opens_blocks(later));
+            let held = self.lower_and_hold_as(arg, element_ty, branches_later);
+            let receiver = self.emit(InstKind::Load(list_slot), list_ty, span);
+            let value = self.reload(held, span);
+            self.emit_effect(InstKind::ListAdd { receiver, value }, span);
         }
-        self.emit(InstKind::Undefined, IrType::Void, span)
+        let args = vec![self.emit(InstKind::Load(list_slot), list_ty, span)];
+        self.emit(
+            InstKind::Call {
+                callee: binding.into(),
+                args,
+            },
+            IrType::Void,
+            span,
+        )
     }
 
     /// Intercepts a semantically proven `std.io` call before it would
@@ -23361,32 +23461,33 @@ impl<'a> FunctionLowering<'a> {
         let name = binding.rsplit_once('.').map(|(_, name)| name)?;
         let returns = self.signature_return(name);
         Some(match binding {
-            "std.io.stdout.print" | "std.io.stderr.print" => {
-                let rendered = ast::PrintlnExpr {
-                    args: e.args.iter().map(|arg| arg.value.clone()).collect(),
-                    newline: false,
-                    requires_import: false,
-                    stream: binding.strip_prefix("std.io.").and_then(|name| {
-                        name.split_once('.').map(|(stream, _)| stream.to_string())
-                    }),
-                    span,
-                };
-                self.lower_print_expr(&rendered, span)
-            }
-            "std.io.stdout.write_line" | "std.io.stderr.write_line" => {
+            "std.io.stdout.write" | "std.io.stderr.write" => {
                 let text = self.lower_expr_as(&e.args[0].value, IrType::String);
                 match binding {
-                    "std.io.stdout.write_line" => self.emit_effect(InstKind::Println(text), span),
+                    "std.io.stdout.write" => self.emit_effect(InstKind::Print(text), span),
+                    "std.io.stderr.write" => self.emit_effect(InstKind::PrintStderr(text), span),
+                    _ => unreachable!(),
+                }
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            "std.io.stdout.write_line" | "std.io.stderr.write_line" => {
+                let empty = self.const_string("", span);
+                match binding {
+                    "std.io.stdout.write_line" => self.emit_effect(InstKind::Println(empty), span),
                     "std.io.stderr.write_line" => {
-                        self.emit_effect(InstKind::PrintlnStderr(text), span)
+                        self.emit_effect(InstKind::PrintlnStderr(empty), span)
                     }
                     _ => unreachable!(),
                 }
                 self.emit(InstKind::Undefined, IrType::Void, span)
             }
-            // `println` is Zirk source. Its body renders the list supplied by
-            // `lower_print_call_args` through the private `print` leaf.
-            "std.io.stdout.println" | "std.io.stderr.println" => return None,
+            // Both public operations are Zirk source. Their arguments are
+            // rendered at the compiler-owned universal `Stringifiable`
+            // boundary and the source loops only perform joining and writes.
+            "std.io.stdout.print"
+            | "std.io.stderr.print"
+            | "std.io.stdout.println"
+            | "std.io.stderr.println" => return None,
             // `read_line` is ordinary Zirk source: its body projects the
             // leaf `read_line_result()` outcome into `String?`. Only that
             // leaf reaches the host runtime.
@@ -23505,16 +23606,6 @@ impl<'a> FunctionLowering<'a> {
     /// sees the declared arity.
     fn lower_args(&mut self, call: &ast::CallExpr) -> Vec<Operand> {
         let name = self.callee_name(call);
-
-        if matches!(
-            self.checked
-                .standard_stream_calls
-                .get(&call.span)
-                .map(String::as_str),
-            Some("std.io.stdout.println" | "std.io.stderr.println")
-        ) {
-            return vec![self.lower_print_call_args(call)];
-        }
 
         // `extern "C" fn` (roadmap Phase 4e, `ADR-015`): a single-item
         // declaration with no optional/default/variadic/named parameters —
@@ -23663,48 +23754,6 @@ impl<'a> FunctionLowering<'a> {
             args.push(self.emit(InstKind::Load(list_slot), list_ty, call.span));
         }
         args
-    }
-
-    /// Materializes the rendered argument list consumed by the Zirk-level
-    /// `stdout.println`/`stderr.println` bodies. The public calls accept all
-    /// printable values; the library implementation deliberately works only
-    /// with `String`, keeping host rendering at this private compiler seam.
-    fn lower_print_call_args(&mut self, call: &ast::CallExpr) -> Operand {
-        let element = Type::of(Base::String);
-        let list_id =
-            self.checked
-                .list_types
-                .iter()
-                .position(|&candidate| candidate == element)
-                .expect("the checker interns the standard stream String list") as u32;
-        let list_ty = IrType::List(list_id);
-        let list = self.emit(
-            InstKind::ListNew {
-                element_id: list_id,
-            },
-            list_ty,
-            call.span,
-        );
-        let list_slot = self.spill(list, list_ty, call.span);
-
-        for arg in &call.args {
-            // Semantic checking rejects spreads for now, so lowering can keep
-            // the rendering boundary explicit rather than silently rendering
-            // the iterable container itself.
-            debug_assert!(!arg.is_spread);
-            let value = self.lower_render_operand(&arg.value, call.span);
-            let text = self.lower_to_string_expr(&arg.value, value, call.span);
-            let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
-            self.emit_effect(
-                InstKind::ListAdd {
-                    receiver,
-                    value: text,
-                },
-                call.span,
-            );
-        }
-
-        self.emit(InstKind::Load(list_slot), list_ty, call.span)
     }
 
     /// Lowers a checked argument list against an already-resolved parameter

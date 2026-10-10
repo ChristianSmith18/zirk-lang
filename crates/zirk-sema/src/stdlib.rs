@@ -50,11 +50,19 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
 
 pub fn registry() -> Vec<StandardLibraryEntry> {
     [
-        ("stdout", "print", "fn print(...args: String): Void"),
-        ("stdout", "println", "fn println(...args: String): Void"),
+        ("stdout", "print", "fn print(...args: Stringifiable): Void"),
+        (
+            "stdout",
+            "println",
+            "fn println(...args: Stringifiable): Void",
+        ),
         ("stdout", "flush", "fn flush(): Result<Void, IoError>"),
-        ("stderr", "print", "fn print(...args: String): Void"),
-        ("stderr", "println", "fn println(...args: String): Void"),
+        ("stderr", "print", "fn print(...args: Stringifiable): Void"),
+        (
+            "stderr",
+            "println",
+            "fn println(...args: Stringifiable): Void",
+        ),
         ("stderr", "flush", "fn flush(): Result<Void, IoError>"),
         ("stdin", "read_line", "fn read_line(): String?"),
         (
@@ -131,8 +139,14 @@ pub fn compiler_binding_for_member(module: &str, name: &str) -> Option<&'static 
     if let ("stdout", "write_line") = (module, name) {
         return Some("std.io.stdout.write_line");
     }
+    if let ("stdout", "write") = (module, name) {
+        return Some("std.io.stdout.write");
+    }
     if let ("stderr", "write_line") = (module, name) {
         return Some("std.io.stderr.write_line");
+    }
+    if let ("stderr", "write") = (module, name) {
+        return Some("std.io.stderr.write");
     }
     registry()
         .into_iter()
@@ -162,7 +176,7 @@ mod tests {
                 "std.io",
                 "stdout",
                 "println",
-                "fn println(...args: String): Void"
+                "fn println(...args: Stringifiable): Void"
             )
             .is_some()
         );

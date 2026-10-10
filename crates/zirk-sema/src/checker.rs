@@ -28,6 +28,9 @@ pub struct CheckedProgram {
     /// functions collision-free internal symbols and to select their private
     /// host leaves; it is never a language-level capability.
     pub standard_stream_source_modules: HashMap<zirk_diagnostics::FileId, String>,
+    /// The compiler-bundled `std.io::Stringifiable` trait. Every
+    /// value-producing type satisfies it automatically.
+    pub native_stringifiable: Option<u32>,
     /// Declared enums, indexed by the id their [`Base::Enum`] carries.
     pub enums: Vec<EnumType>,
     /// Declared classes, indexed by the id their [`Base::Class`] carries.
@@ -597,6 +600,7 @@ struct Checker<'a> {
     /// made *inside* those files may reach the private host leaf operations
     /// without requiring those implementation details to become Zirk syntax.
     standard_stream_source_modules: HashMap<zirk_diagnostics::FileId, String>,
+    native_stringifiable: Option<u32>,
     /// Provenance selected for each checked stream call.
     standard_stream_calls: HashMap<Span, String>,
     /// Bare names opened by more than one imported module. They deliberately
@@ -1023,6 +1027,7 @@ impl<'a> Checker<'a> {
             standard_output_imports: HashMap::new(),
             standard_stream_imports: HashMap::new(),
             standard_stream_source_modules: HashMap::new(),
+            native_stringifiable: None,
             standard_stream_calls: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
@@ -1369,6 +1374,7 @@ impl<'a> Checker<'a> {
         CheckedProgram {
             functions: self.functions,
             standard_stream_source_modules: self.standard_stream_source_modules,
+            native_stringifiable: self.native_stringifiable,
             enums: self.enums,
             classes: self.classes,
             contracts: self.contracts,
@@ -3013,6 +3019,7 @@ impl<'a> Checker<'a> {
 
         self.leave_type_params();
 
+        let id = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: decl.name.name.clone(),
             kind: decl.kind,
@@ -3022,6 +3029,13 @@ impl<'a> Checker<'a> {
             shared: decl.shared,
             span: decl.name.span,
         });
+        if decl.name.name == "Stringifiable" && {
+            let source_name = self.sources.file(decl.name.span.file).name();
+            source_name.ends_with("/stdlib/std/io/package.zrk")
+                || source_name.ends_with("std.io/package.zrk")
+        } {
+            self.native_stringifiable = Some(id);
+        }
     }
 
     /// Resolves `interface/trait X implements Y` after every contract name
@@ -3612,13 +3626,18 @@ impl<'a> Checker<'a> {
                 if method.is_override {
                     continue;
                 }
-                let replaces_default =
-                    self.classes[id as usize].contracts.iter().any(|&contract| {
+                let replaces_default = self.classes[id as usize].contracts.iter().any(|&contract| {
                         self.contracts[contract as usize]
                             .methods
                             .iter()
                             .any(|m| m.name == method.name.name && m.has_default)
-                    });
+                    })
+                    // Every value automatically adopts the bundled trait's
+                    // default `to_string()`. A class method with that name
+                    // replaces that concrete behavior just as surely as an
+                    // explicit trait implementation does.
+                    || (self.native_stringifiable.is_some()
+                        && method.name.name == "to_string");
                 if replaces_default {
                     self.error(
                         codes::MISSING_OVERRIDE,
@@ -3633,7 +3652,7 @@ impl<'a> Checker<'a> {
 
         let pending = std::mem::take(&mut self.override_pending);
         for (class, name, span) in pending {
-            let mut claimed = false;
+            let mut claimed = self.native_stringifiable.is_some() && name == "to_string";
             // A trait default has a body, so replacing it is a genuine
             // override; an interface requirement or a bodyless trait method
             // is signature-only, and the marker is unnecessary there.
@@ -5048,7 +5067,12 @@ impl<'a> Checker<'a> {
                     // every class has registered its own methods
                     // (`Self::require_abstract_conformance`) — this pass runs
                     // too early to know, in either declaration order.
-                    if method.is_override && decl.implements.is_empty() {
+                    let overrides_standard_to_string =
+                        self.native_stringifiable.is_some() && method.name.name == "to_string";
+                    if method.is_override
+                        && decl.implements.is_empty()
+                        && !overrides_standard_to_string
+                    {
                         self.error(
                             codes::MISSING_OVERRIDE,
                             method.name.span,
@@ -5183,6 +5207,12 @@ impl<'a> Checker<'a> {
     /// Nullability follows the same rule as everywhere: `T` fits `T?`, and the
     /// other way needs `??`.
     fn is_subclass_of(&self, actual: Type, expected: Type) -> bool {
+        // `Stringifiable` deliberately accepts nullable values too: their
+        // absent form has the universal `<Null>` rendering.
+        if matches!(expected.base, Base::Contract(id) if self.native_stringifiable == Some(id)) {
+            return self.is_printable(actual);
+        }
+
         if actual.nullable && !expected.nullable {
             return false;
         }
@@ -18207,10 +18237,10 @@ impl<'a> Checker<'a> {
             self.standard_stream_calls.insert(expr.span, binding.into());
         }
 
-        // `stdout` and `stderr` accept every printable value, while their
-        // Zirk implementation receives the compiler-rendered `String` list.
-        // Keep that ergonomic public contract here instead of requiring a
-        // lossy implicit conversion in ordinary function-argument checking.
+        // Output functions are variadic `Stringifiable` functions. Their
+        // import provenance needs this small early branch, but each argument
+        // is checked against the actual standard trait rather than a
+        // printable-value shortcut.
         if matches!(
             self.standard_stream_calls
                 .get(&expr.span)
@@ -18225,10 +18255,8 @@ impl<'a> Checker<'a> {
             if let Expr::Field(field) = &*expr.callee
                 && let Some(binding) = self.standard_stream_calls.get(&expr.span).cloned()
             {
-                // Output calls return early to apply their printable-value
-                // rule, before ordinary module-member redirection would
-                // record an alias. Preserve the resolved target for IR
-                // lowering nonetheless.
+                // Preserve the resolved target for ordinary module-member
+                // redirection and for IR lowering.
                 self.aliases.insert(field.name.span, binding);
             }
             self.reject_in_parallel_region(expr.span, "standard stream output");
@@ -18242,8 +18270,15 @@ impl<'a> Checker<'a> {
                         Some("pass the values explicitly".into()),
                     );
                 } else {
-                    let ty = self.check_expr(&arg.value);
-                    self.require_printable(ty, arg.value.span());
+                    let actual = self.check_expr(&arg.value);
+                    if let Some(contract) = self.native_stringifiable {
+                        self.expect_assignable(
+                            Type::of(Base::Contract(contract)),
+                            actual,
+                            arg.value.span(),
+                            "the output argument",
+                        );
+                    }
                 }
             }
             return Type::VOID;

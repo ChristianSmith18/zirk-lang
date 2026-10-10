@@ -22,8 +22,11 @@ Importing a module opens its unique shared members. Explicit calls always use
 Both `stdout` and `stderr` provide:
 
 ```zirk
-fn print(...args: String): Void;
-fn println(...args: String): Void;
+trait Stringifiable {
+    to_string(): String { return "<Value>"; }
+}
+fn print(...args: Stringifiable): Void;
+fn println(...args: Stringifiable): Void;
 fn flush(): Result<Void, IoError>;
 ```
 
@@ -32,11 +35,26 @@ ending. Arguments are rendered left-to-right, joined by one space, and preserve
 call order. `stdout` and `stderr` have separate destinations. `print()` emits
 nothing; `println()` emits only a line ending.
 
-`println` is implemented in the bundled Zirk source: it composes the rendered
-arguments into one line and delegates only the final stream write to the
-compiler runtime. `read_line()` likewise is Zirk code that maps
+`Stringifiable` is a real standard trait: every value-producing type satisfies
+it automatically and receives a base `to_string()` implementation. A class may
+replace that implementation, but must declare `#override`, just as when it
+replaces any trait method with a body.
+
+`print` and `println` are implemented in the bundled Zirk source: each one
+calls `arg.to_string()` through the trait while it composes the stream output
+and delegates only the final single-text writes to the compiler runtime.
+`read_line()` likewise is Zirk code that maps
 `read_line_result()` into `String?`. Those runtime boundaries have no keyword
 or callable name available to application packages.
+
+```zirk
+class Label {
+    text: String;
+
+    #override
+    to_string(): String { return this.text; }
+}
+```
 
 ```zirk
 stdout.print("count", 2);  // count 2

@@ -725,7 +725,7 @@ fn valid_statements_without_semicolons() {
 fn valid_println_with_string() {
     assert_eq!(
         shape(&expression("stdout.println(\"Hola\")")),
-        "println(\"Hola\")"
+        "stdout.println(\"Hola\")"
     );
 }
 
@@ -733,7 +733,7 @@ fn valid_println_with_string() {
 fn valid_println_with_expression() {
     assert_eq!(
         shape(&expression("stdout.println(a + b)")),
-        "println((a + b))"
+        "stdout.println((a + b))"
     );
 }
 
@@ -741,10 +741,10 @@ fn valid_println_with_expression() {
 fn valid_print_and_println_accept_multiple_or_zero_arguments() {
     assert_eq!(
         shape(&expression("stdout.print(\"sum\", 1 + 2, true)")),
-        "print(\"sum\", (1 + 2), true)"
+        "stdout.print(\"sum\", (1 + 2), true)"
     );
-    assert_eq!(shape(&expression("stdout.print()")), "print()");
-    assert_eq!(shape(&expression("stdout.println()")), "println()");
+    assert_eq!(shape(&expression("stdout.print()")), "stdout.print()");
+    assert_eq!(shape(&expression("stdout.println()")), "stdout.println()");
 }
 
 // --- Constructs from later phases ------------------------------------
@@ -1738,14 +1738,13 @@ fn valid_module_type_is_retained() {
 }
 
 #[test]
-fn valid_qualified_stdout_call_keeps_the_compatibility_lowering() {
+fn valid_qualified_stdout_call_is_an_ordinary_call() {
+    // `stdout.println(...)` is a call through the `stdout` module; only the
+    // lowering knows the bundled standard-library body.
     let p = program("fn main(): Void { stdout.println(\"ready\"); }");
     assert!(matches!(
-        p.functions[0].body.statements[0],
-        Stmt::Expr(ExprStmt {
-            expr: Expr::Println(_),
-            ..
-        })
+        &p.functions[0].body.statements[0],
+        Stmt::Expr(ExprStmt { expr, .. }) if !matches!(expr, Expr::Println(_))
     ));
 }
 
@@ -2479,6 +2478,14 @@ fn standard_io_sources_are_ordinary_package_and_module_declarations() {
     assert_eq!(root.module_reexports.len(), 3);
 
     let stdout = program(include_str!("../../../stdlib/std/io/stdout.zrk"));
-    assert!(stdout.functions.iter().all(|function| function.shared));
+    // The public surface is shared; `write` and `write_line` are the private
+    // leaves the lowering reaches the host through.
+    let shared: Vec<&str> = stdout
+        .functions
+        .iter()
+        .filter(|function| function.shared)
+        .map(|function| function.name.name.as_str())
+        .collect();
+    assert_eq!(shared, ["print", "println", "flush"]);
     assert_eq!(stdout.functions[1].name.name, "println");
 }

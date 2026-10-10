@@ -163,8 +163,10 @@ result. It never propagates `T` into nested operands: `Int32(3 / 4)` converts
 the completed `Decimal` quotient, while `String("value=" + 42)` remains invalid
 because the mixed concatenation itself is invalid.
 
-Every value-producing type answers `to_string(): String`; `print`, `println`
-and string interpolation invoke it. `Void` and `Never` have no text form.
+Every value-producing type automatically satisfies the standard
+`Stringifiable` trait and answers `to_string(): String`; `print`, `println`
+and string interpolation invoke it. The trait supplies a default body, so a
+class replacement uses `#override`. `Void` and `Never` have no text form.
 Absent nullable values render `<Null>`, collections render recursively, ranges
 mirror their literals, and opaque handles render `<TypeName>`.
 

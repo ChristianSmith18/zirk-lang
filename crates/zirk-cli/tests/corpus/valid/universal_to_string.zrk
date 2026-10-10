@@ -25,7 +25,7 @@ interface Printable {
 class Doc implements Printable {
     body: String;
     construct(body: String) { this.body = body; }
-    to_string(): String { return "Doc<{this.body}>"; }
+    #override to_string(): String { return "Doc<{this.body}>"; }
 }
 
 class Person {

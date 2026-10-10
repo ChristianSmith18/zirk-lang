@@ -4,6 +4,14 @@ share enum IoError { Io, Decoding, Limit, EndOfStream }
 
 share enum ReadResult<T> { Value(value: T), End, Error(error: IoError) }
 
+// Every value that can be rendered as ordinary text. The compiler provides
+// this trait for built-in value families and derives it for user types.
+share trait Stringifiable {
+    to_string(): String {
+        return "<Value>";
+    }
+}
+
 share mod stdin from "./stdin";
 share mod stdout from "./stdout";
 share mod stderr from "./stderr";

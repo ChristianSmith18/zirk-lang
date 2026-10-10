@@ -15,7 +15,7 @@ class Point {
         this.y = y;
     }
 
-    to_string(): String {
+    #override to_string(): String {
         return "({this.x}, {this.y})";
     }
 }

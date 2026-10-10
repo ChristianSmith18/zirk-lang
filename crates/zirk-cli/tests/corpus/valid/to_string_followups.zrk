@@ -15,7 +15,7 @@ class Widget implements Printable {
     construct(label: String) {
         this.label = label;
     }
-    to_string(): String {
+    #override to_string(): String {
         return "Widget({this.label})";
     }
 }

@@ -1434,7 +1434,7 @@ fn valid_printing_of_float128() {
 #[test]
 fn valid_printing_of_a_class_with_to_string() {
     accepted(
-        "class Point { x: Int32; construct(x: Int32) { this.x = x; }  to_string(): String { return \"{this.x}\"; } }
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; }  #override to_string(): String { return \"{this.x}\"; } }
          fn main(): Void { mut p = Point(1); stdout.println(p); }",
     );
 }
@@ -1467,7 +1467,7 @@ fn invalid_explicit_to_string_with_arguments() {
 fn valid_to_string_through_a_contract_reference() {
     accepted(
         "interface Printable {  to_string(): String; }
-         class Widget implements Printable { construct() { }  to_string(): String { return \"w\"; } }
+         class Widget implements Printable { construct() { }  #override to_string(): String { return \"w\"; } }
          fn describe(p: Printable): Void { stdout.println(p); }
          fn main(): Void { mut w = Widget(); describe(w); }",
     );
@@ -2645,6 +2645,37 @@ fn invalid_override_without_the_keyword() {
         "{output}"
     );
     assert!(output.contains("#override` above `value"), "{output}");
+}
+
+#[test]
+fn a_class_to_string_replaces_the_standard_trait_default() {
+    accepted(
+        "import { Stringifiable } from std.io;
+         class Label {
+             text: String;
+             construct() { this.text = \"label\"; }
+             #override
+             to_string(): String { return this.text; }
+         }
+         fn render(value: Stringifiable): String { return value.to_string(); }
+         fn main(): Void { stdout.println(render(Label())); }",
+    );
+}
+
+#[test]
+fn a_class_to_string_requires_override_for_the_standard_trait_default() {
+    let output = rejected(
+        "class Label {
+             construct() { }
+             to_string(): String { return \"label\"; }
+         }
+         fn main(): Void { stdout.println(Label()); }",
+    );
+    assert!(
+        output.contains(codes::MISSING_OVERRIDE.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("trait's default method"), "{output}");
 }
 
 #[test]

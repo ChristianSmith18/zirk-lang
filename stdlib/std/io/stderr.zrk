@@ -1,18 +1,28 @@
-share fn print(...args: String): Void { }
-
-share fn println(...args: String): Void {
-    mut output: String = "";
+share fn print(...args: Stringifiable): Void {
     mut first: Boolean = true;
     for arg in args {
         if !first {
-            output = output + " ";
+            write(" ");
         }
-        output = output + arg;
+        write(arg.to_string());
         first = false;
     }
-    write_line(output);
 }
 
-fn write_line(text: String): Void { }
+share fn println(...args: Stringifiable): Void {
+    mut first: Boolean = true;
+    for arg in args {
+        if !first {
+            write(" ");
+        }
+        write(arg.to_string());
+        first = false;
+    }
+    write_line();
+}
+
+fn write(text: String): Void { }
+
+fn write_line(): Void { }
 
 share fn flush(): Result<Void, IoError> { return Error(IoError.Io); }
